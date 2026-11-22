@@ -308,6 +308,7 @@ fn error_label(error: BrokerRequestError) -> &'static str {
         BrokerRequestError::InvalidRequest => "invalid_request",
         BrokerRequestError::Denied => "denied",
         BrokerRequestError::AuthorityUnavailable => "authority_unavailable",
+        BrokerRequestError::RefreshRateLimited { .. } => "refresh_rate_limited",
         BrokerRequestError::UpstreamFailed => "upstream_failed",
         BrokerRequestError::ResponseTooLarge => "response_too_large",
         BrokerRequestError::ReconnectRequired(_) => "reconnect_required",

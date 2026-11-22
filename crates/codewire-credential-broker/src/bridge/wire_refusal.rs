@@ -1,6 +1,27 @@
 use codewire_access::Refusal;
 use codewire_daemon_proto::codewire::bridge::v1;
 
+use crate::BrokerRequestError;
+
+/// The closed failure reason every guest decodes; a guest that knows the
+/// frame's `refusal` answers from that instead.
+pub(super) fn failure_reason(error: BrokerRequestError) -> v1::CredentialBridgeFailureReason {
+    match error {
+        BrokerRequestError::InvalidRequest
+        | BrokerRequestError::Denied
+        | BrokerRequestError::ReconnectRequired(_)
+        | BrokerRequestError::NotSelected
+        | BrokerRequestError::NameNotAllowed
+        | BrokerRequestError::SelectedCredentialOnly => v1::CredentialBridgeFailureReason::Denied,
+        BrokerRequestError::AuthorityUnavailable
+        | BrokerRequestError::RefreshRateLimited { .. } => {
+            v1::CredentialBridgeFailureReason::Unavailable
+        }
+        BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
+        BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,
+    }
+}
+
 /// A refusal as the bridge protocol carries it. `denied` is left unspecified:
 /// the frame's reason already says it, as every guest reads it.
 pub(super) fn wire_refusal(refusal: Refusal) -> v1::CredentialBridgeRefusal {

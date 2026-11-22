@@ -73,9 +73,13 @@ mod entry;
 mod forced_refresh;
 mod github_front_door;
 mod refresh_outcome;
+mod token_exchange;
 use forced_refresh::{
     RefreshCredentialGeneration, RetryFailure, after_failed_refresh, forced_refresh_due,
     hold_rejection, refresh_generation,
+};
+pub(crate) use token_exchange::{
+    exchange_claude_oauth_refresh, exchange_codex_oauth_refresh, exchange_github_app_refresh,
 };
 mod request_binding;
 use request_binding::validate_request_binding;
@@ -275,6 +279,20 @@ pub trait BrokerLeaseProvider: Send + Sync {
         permit: Self::StartedRefresh,
     ) -> Result<(), BrokerRefreshError>;
 
+    /// Close the exact started attempt as rate-limited, its provider having
+    /// answered 429 in full, so the sign-in waits `wait_seconds` instead of
+    /// needing Reconnect (#4975). A placement without the record fails the
+    /// attempt, as before: closed, never retried.
+    async fn rate_limit_credential_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        _wait_seconds: u64,
+    ) -> Result<RateLimitClose, BrokerRefreshError> {
+        self.fail_credential_refresh(permit)
+            .await
+            .map(|()| RateLimitClose::Failed)
+    }
+
     /// Wait until every non-cancellable placement operation started by a
     /// broker request has finished. The bridge calls this only after it has
     /// stopped admitting requests and aborted the remaining request futures,
@@ -303,6 +321,15 @@ pub enum BrokerLeaseError {
     NotSelected,
 }
 
+/// How a rate-limited attempt was closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitClose {
+    /// Recorded: the sign-in waits, and its next refresh is the one retry.
+    Waiting,
+    /// Failed instead (the retry itself, or a placement without the record).
+    Failed,
+}
+
 /// Stable refresh failures that never retain provider or protected-store
 /// diagnostics.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -319,6 +346,9 @@ pub enum BrokerRefreshError {
     InProgress,
     #[error("credential refresh generation changed")]
     Stale,
+    /// The sign-in waits after its provider rate-limited a refresh (#4975).
+    #[error("credential refresh waits for the provider's rate limit")]
+    RateLimited { wait_seconds: u64 },
 }
 
 /// Stable upstream failures safe to map back to the guest.
@@ -971,6 +1001,10 @@ pub enum BrokerRequestError {
     /// An untouched forward from a hosted broker, which never sends one.
     #[error("credential broker request does not carry the selected credential")]
     SelectedCredentialOnly,
+    /// The sign-in waits for its provider's rate limit and its access token
+    /// has expired (#4975). Never Reconnect: the material is kept.
+    #[error("credential broker refresh waits for the provider's rate limit")]
+    RefreshRateLimited { wait_seconds: u64 },
 }
 
 impl BrokerRequestError {
@@ -992,6 +1026,8 @@ impl BrokerRequestError {
             Self::NotSelected => Refusal::NoCredentialSelected,
             Self::NameNotAllowed => Refusal::NameNotAllowed,
             Self::SelectedCredentialOnly => Refusal::SelectedCredentialOnly,
+            // Its own 429 and Retry-After follow (#4975 part C3).
+            Self::RefreshRateLimited { .. } => Refusal::CredentialUnavailable,
         }
     }
 }
@@ -1170,6 +1206,7 @@ trait RefreshingOAuth: Sized {
     const AUTHENTICATION_KIND: CredentialAuthKind;
     const REFRESH_KIND: BrokerCredentialRefreshKind;
     fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool;
+    fn has_expired(&self, now_unix: u64) -> bool;
     fn into_refresh(self) -> OAuthRefreshMaterial;
 }
 
@@ -1179,6 +1216,10 @@ impl RefreshingOAuth for CodexOAuthCredential {
 
     fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool {
         CodexOAuthCredential::should_refresh_within(self, now_unix, minimum_validity_seconds)
+    }
+
+    fn has_expired(&self, now_unix: u64) -> bool {
+        CodexOAuthCredential::has_expired(self, now_unix)
     }
 
     fn into_refresh(self) -> OAuthRefreshMaterial {
@@ -1192,6 +1233,10 @@ impl RefreshingOAuth for ClaudeOAuthCredential {
 
     fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool {
         ClaudeOAuthCredential::should_refresh_within(self, now_unix, minimum_validity_seconds)
+    }
+
+    fn has_expired(&self, now_unix: u64) -> bool {
+        ClaudeOAuthCredential::has_expired(self, now_unix)
     }
 
     fn into_refresh(self) -> OAuthRefreshMaterial {
@@ -1745,6 +1790,7 @@ where
     ) -> Result<(C, RefreshCredentialGeneration), RetryFailure> {
         let _refresh_guard = self.oauth_refresh.lock().await;
         let permission = purpose.permission();
+        let mut rate_limited = None;
         for refresh_waits in 0..=OAUTH_REFRESH_WAIT_ATTEMPTS {
             let lease = self.lease_oauth(request_id, purpose).await?;
             validate_request_binding(lease.grant(), admitted_grant)?;
@@ -1763,18 +1809,35 @@ where
             };
             let credential = parse(lease)?;
             let force_refresh = force_refresh_of == Some(&generation);
-            if !force_refresh
-                && !credential.should_refresh_within(current_unix_time()?, minimum_validity_seconds)
-            {
+            let now = current_unix_time()?;
+            if !force_refresh && !credential.should_refresh_within(now, minimum_validity_seconds) {
                 return Ok((credential, generation));
+            }
+            // While the sign-in waits for its provider's rate limit, a token
+            // that has not expired is still used; an expired one waits too.
+            if let Some(error) = rate_limited {
+                return if force_refresh || credential.has_expired(now) {
+                    Err(RetryFailure::Refresh(error))
+                } else {
+                    Ok((credential, generation))
+                };
             }
             match timing::timed(
                 Phase::Refresh,
                 self.refresh_oauth_credential(credential.into_refresh(), refresh_request),
             )
-            .await?
+            .await
             {
-                Some(()) => {
+                Err(
+                    RetryFailure::Refresh(error @ BrokerRequestError::RefreshRateLimited { .. })
+                    | RetryFailure::Request(error @ BrokerRequestError::RefreshRateLimited { .. }),
+                ) => rate_limited = Some(error),
+                Err(failure) => return Err(failure),
+                Ok(None) if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
+                    tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
+                }
+                Ok(None) => return Err(BrokerRequestError::AuthorityUnavailable.into()),
+                Ok(Some(())) => {
                     // Persisting a rotated token does not authorize using it.
                     // Refresh can outlive the original grant or binding; ask
                     // the placement authority again after durable commit.
@@ -1784,10 +1847,6 @@ where
                     let credential = parse(lease)?;
                     return Ok((credential, generation));
                 }
-                None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
-                    tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
-                }
-                None => return Err(BrokerRequestError::AuthorityUnavailable.into()),
             }
         }
         Err(BrokerRequestError::AuthorityUnavailable.into())
@@ -2049,238 +2108,6 @@ where
     }
 }
 
-/// One bounded Codex refresh-token exchange plus rotated-material validation.
-///
-/// The caller owns a durable Started attempt. Every `Err` is terminal for that
-/// attempt: the previous refresh token is never replayed. The closed failure
-/// class is for operator diagnostics only. Shared by on-demand broker refresh
-/// and the platform keep-alive so both send and validate exactly the same way.
-pub(crate) async fn exchange_codex_oauth_refresh<U>(
-    upstream: &U,
-    credential: CodexOAuthCredential,
-    refreshed_at_unix: u64,
-) -> Result<CanonicalCodexOAuthBundle, (RefreshFailure, BrokerRequestError)>
-where
-    U: BrokerUpstreamTransport + ?Sized,
-{
-    let exchange = tokio::time::timeout(
-        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
-        request_oauth_refresh(upstream, credential.refresh_token()),
-    )
-    .await;
-    match exchange {
-        Ok(Ok(tokens)) => credential
-            .refreshed(
-                tokens.id_token,
-                tokens.access_token,
-                tokens.refresh_token,
-                refreshed_at_unix,
-            )
-            .and_then(|refreshed| refreshed.to_bundle())
-            .map_err(|_| (RefreshFailure::Material, BrokerRequestError::Denied)),
-        Ok(Err(OAuthRefreshError::Uncertain(error, failure))) => Err((failure, error)),
-        Ok(Err(OAuthRefreshError::Permanent(failure))) => {
-            Err((failure, BrokerRequestError::Denied))
-        }
-        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
-    }
-}
-
-/// One bounded GitHub App user-token rotation through the private App owner.
-/// Like the Codex exchange, every `Err` is terminal for the started attempt.
-pub(crate) async fn exchange_github_app_refresh(
-    owner: &GitHubAppAuthorizationOwner,
-    bundle: GitHubAppUserOAuthBundle,
-) -> Result<GitHubAppUserOAuthBundle, (RefreshFailure, BrokerRequestError)> {
-    let exchange = tokio::time::timeout(
-        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
-        owner.refresh(bundle),
-    )
-    .await;
-    match exchange {
-        Ok(Ok(bundle)) => Ok(bundle),
-        Ok(Err(GitHubAppRefreshError::Permanent)) => {
-            Err((RefreshFailure::ProviderRejected, BrokerRequestError::Denied))
-        }
-        Ok(Err(GitHubAppRefreshError::Uncertain)) => Err((
-            RefreshFailure::ProviderUncertain,
-            BrokerRequestError::UpstreamFailed,
-        )),
-        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
-    }
-}
-
-async fn request_oauth_refresh<U>(
-    upstream: &U,
-    refresh_token: &str,
-) -> Result<OAuthRefreshResponse, OAuthRefreshError>
-where
-    U: BrokerUpstreamTransport + ?Sized,
-{
-    // Request construction is local and fixed; failing it sends nothing.
-    let local = OAuthRefreshError::Permanent(RefreshFailure::RequestBuild);
-    let body = Zeroizing::new(
-        serde_json::to_vec(&OAuthRefreshRequest {
-            client_id: CODEX_OAUTH_CLIENT_ID,
-            grant_type: "refresh_token",
-            refresh_token,
-        })
-        .map_err(|_| local)?,
-    );
-    let target = Url::parse(OPENAI_TOKEN_URL).map_err(|_| local)?;
-    let response = post_token_refresh(upstream, target, body).await?;
-    let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
-        .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))?;
-    drop(response);
-    if parsed.access_token.is_none() {
-        return Err(OAuthRefreshError::Permanent(RefreshFailure::ResponseParse));
-    }
-    Ok(parsed)
-}
-
-/// One refresh request to a provider's fixed token endpoint: the JSON `body`
-/// is sent once, and only a success's bounded, identity-encoded body returns.
-/// A non-success answer is classified from allowlisted identifiers only; its
-/// body, including any provider description, is zeroized on drop.
-async fn post_token_refresh<U>(
-    upstream: &U,
-    target: Url,
-    mut body: Zeroizing<Vec<u8>>,
-) -> Result<Zeroizing<Vec<u8>>, OAuthRefreshError>
-where
-    U: BrokerUpstreamTransport + ?Sized,
-{
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::ACCEPT,
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    let upstream = upstream
-        .execute(BrokerUpstreamRequest {
-            method: Method::POST,
-            target,
-            headers,
-            body: std::mem::take(&mut *body),
-            body_stream: None,
-            pinned: None,
-        })
-        .await
-        .map_err(|error| {
-            OAuthRefreshError::Uncertain(
-                crate::refresh_failure::transport_request_error(error),
-                RefreshFailure::Transport(error),
-            )
-        })?;
-    let (status, headers, mut response_body) = upstream.into_parts();
-    // Refresh bypasses the guest response redactor, but every transport
-    // must still deliver identity bytes before internal token parsing.
-    crate::openai::validate_response_encoding(&headers).map_err(|_| {
-        OAuthRefreshError::Uncertain(
-            BrokerRequestError::UpstreamFailed,
-            RefreshFailure::ResponseEncoding,
-        )
-    })?;
-    let body_failure = |error: BrokerRequestError| {
-        if status.is_success() {
-            OAuthRefreshError::Permanent(RefreshFailure::ResponseBody)
-        } else {
-            OAuthRefreshError::Uncertain(error, RefreshFailure::ResponseBody)
-        }
-    };
-    let mut response = Zeroizing::new(Vec::new());
-    while let Some(chunk) = response_body.next().await {
-        let chunk = chunk.map_err(|error| body_failure(map_upstream_error(error)))?;
-        let next_len = response
-            .len()
-            .checked_add(chunk.len())
-            .filter(|length| *length <= MAX_OAUTH_REFRESH_RESPONSE_BYTES)
-            .ok_or_else(|| body_failure(BrokerRequestError::ResponseTooLarge))?;
-        let additional = next_len.saturating_sub(response.len());
-        response
-            .try_reserve(additional)
-            .map_err(|_| body_failure(BrokerRequestError::ResponseTooLarge))?;
-        response.extend_from_slice(&chunk);
-    }
-    if !status.is_success() {
-        let rejection = ProviderRejection::classify(status, &response);
-        return Err(if rejection.permanent {
-            OAuthRefreshError::Permanent(RefreshFailure::Rejected(rejection))
-        } else {
-            OAuthRefreshError::Uncertain(
-                BrokerRequestError::UpstreamFailed,
-                RefreshFailure::Rejected(rejection),
-            )
-        });
-    }
-    Ok(response)
-}
-
-/// One bounded Claude sign-in refresh-token exchange plus rotated-material
-/// validation: a non-empty access token, a lifetime in range and the required
-/// scopes kept. Like the Codex exchange, every `Err` is terminal for the
-/// started attempt and the previous refresh token is never replayed. Shared by
-/// on-demand broker refresh and the platform keep-alive.
-pub(crate) async fn exchange_claude_oauth_refresh<U>(
-    upstream: &U,
-    credential: ClaudeOAuthCredential,
-    refreshed_at_unix: u64,
-) -> Result<CanonicalClaudeOAuthBundle, (RefreshFailure, BrokerRequestError)>
-where
-    U: BrokerUpstreamTransport + ?Sized,
-{
-    let exchange = tokio::time::timeout(
-        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
-        async {
-            let (target, body) = crate::provider_oauth::claude::refresh_request(
-                credential.refresh_token(),
-                credential.scopes(),
-            )
-            .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::RequestBuild))?;
-            let response = post_token_refresh(upstream, target, body).await?;
-            crate::provider_oauth::claude::parse_refresh_response(&response)
-                .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))
-        },
-    )
-    .await;
-    match exchange {
-        Ok(Ok(tokens)) => credential
-            .refreshed(tokens, refreshed_at_unix)
-            .and_then(|refreshed| refreshed.to_bundle())
-            .map_err(|_| (RefreshFailure::Material, BrokerRequestError::Denied)),
-        Ok(Err(OAuthRefreshError::Uncertain(error, failure))) => Err((failure, error)),
-        Ok(Err(OAuthRefreshError::Permanent(failure))) => {
-            Err((failure, BrokerRequestError::Denied))
-        }
-        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
-    }
-}
-
-/// Terminal refresh exchange outcomes. Both are recorded as an unknown
-/// attempt; the closed failure class exists only for operator diagnostics.
-#[derive(Clone, Copy)]
-enum OAuthRefreshError {
-    Permanent(RefreshFailure),
-    Uncertain(BrokerRequestError, RefreshFailure),
-}
-
-#[derive(Serialize)]
-struct OAuthRefreshRequest<'a> {
-    client_id: &'static str,
-    grant_type: &'static str,
-    refresh_token: &'a str,
-}
-
-#[derive(Deserialize)]
-struct OAuthRefreshResponse {
-    id_token: Option<Zeroizing<String>>,
-    access_token: Option<Zeroizing<String>>,
-    refresh_token: Option<Zeroizing<String>>,
-}
-
 struct ValidatedGuestRequest {
     request_id: Uuid,
     slot: CapabilitySlot,
@@ -2487,6 +2314,9 @@ fn map_refresh_error(error: BrokerRefreshError) -> BrokerRequestError {
         | BrokerRefreshError::InvalidResponse
         | BrokerRefreshError::InProgress
         | BrokerRefreshError::Stale => BrokerRequestError::AuthorityUnavailable,
+        BrokerRefreshError::RateLimited { wait_seconds } => {
+            BrokerRequestError::RefreshRateLimited { wait_seconds }
+        }
     }
 }
 
@@ -2800,6 +2630,9 @@ mod tests {
         failure_count: Arc<AtomicUsize>,
         lease_count: Arc<AtomicUsize>,
         commit_return_gate: Arc<CommitReturnGate>,
+        /// `None` models a placement without the rate-limit record; `Some`
+        /// records each close's wait, and its last refuses the next begin.
+        rate_limit_waits: Arc<std::sync::Mutex<Option<Vec<u64>>>>,
         begin_control: Option<Arc<BlockingRefreshControl>>,
         deny_login: Arc<AtomicBool>,
         /// The authority refuses the commit and keeps its owner, as a local
@@ -2861,6 +2694,15 @@ mod tests {
             request: BrokerCredentialRefreshRequest,
         ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
             self.begin_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(&wait_seconds) = self
+                .rate_limit_waits
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|waits| waits.last())
+            {
+                return Err(BrokerRefreshError::RateLimited { wait_seconds });
+            }
             if let Some(material) = self.recovered_material.lock().unwrap().take() {
                 let observed = self
                     .authority
@@ -3050,6 +2892,28 @@ mod tests {
             Ok(())
         }
 
+        async fn rate_limit_credential_refresh(
+            &self,
+            permit: Self::StartedRefresh,
+            wait_seconds: u64,
+        ) -> Result<RateLimitClose, BrokerRefreshError> {
+            if self.rate_limit_waits.lock().unwrap().is_none() {
+                return self
+                    .fail_credential_refresh(permit)
+                    .await
+                    .map(|()| RateLimitClose::Failed);
+            }
+            if permit.credential_id != self.credential_id
+                || !self.refresh_active.swap(false, Ordering::AcqRel)
+            {
+                return Err(BrokerRefreshError::Denied);
+            }
+            if let Some(waits) = self.rate_limit_waits.lock().unwrap().as_mut() {
+                waits.push(wait_seconds);
+            }
+            Ok(RateLimitClose::Waiting)
+        }
+
         async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
             Ok(())
         }
@@ -3106,6 +2970,7 @@ mod tests {
         refresh_count: Arc<AtomicUsize>,
         response_count: Arc<AtomicUsize>,
         response_headers: HeaderMap,
+        response_status: StatusCode,
         response_body_started: Arc<AtomicUsize>,
         reflect_authorization: bool,
     }
@@ -3224,7 +3089,7 @@ mod tests {
                     };
                     let body_started = Arc::clone(&self.response_body_started);
                     Ok(BrokerUpstreamResponse::new(
-                        StatusCode::OK,
+                        self.response_status,
                         response_headers,
                         Box::pin(stream::once(async move {
                             body_started.fetch_add(1, Ordering::Relaxed);
@@ -3238,6 +3103,7 @@ mod tests {
     }
 
     struct OAuthTestState {
+        rate_limit_waits: Arc<std::sync::Mutex<Option<Vec<u64>>>>,
         authority: Arc<LocalCredentialAuthority<OAuthTestProtectedStore>>,
         protected_store: OAuthTestProtectedStore,
         metadata_path: PathBuf,
@@ -3490,7 +3356,9 @@ mod tests {
         let response_count = Arc::new(AtomicUsize::new(0));
         let lease_count = Arc::new(AtomicUsize::new(0));
         let commit_return_gate = Arc::new(CommitReturnGate::default());
+        let rate_limit_waits = Arc::new(std::sync::Mutex::new(None));
         let state = OAuthTestState {
+            rate_limit_waits: Arc::clone(&rate_limit_waits),
             authority: Arc::clone(&authority),
             protected_store,
             metadata_path: root.join(codewire_local_credentials::DATABASE_FILE),
@@ -3527,6 +3395,7 @@ mod tests {
                 failure_count,
                 lease_count,
                 commit_return_gate,
+                rate_limit_waits,
                 begin_control: None,
                 deny_login: Arc::new(AtomicBool::new(false)),
                 refuse_commit: false,
@@ -3549,6 +3418,7 @@ mod tests {
                 refresh_count,
                 response_count,
                 response_headers: HeaderMap::new(),
+                response_status: StatusCode::OK,
                 response_body_started: Arc::new(AtomicUsize::new(0)),
                 reflect_authorization: false,
             },
@@ -4763,6 +4633,137 @@ mod tests {
         {
             assert!(!text.contains(value), "log exposed {value}");
         }
+    }
+
+    fn rate_limit_answer() -> Vec<u8> {
+        br#"{"error":{"type":"rate_limit_error","message":"synthetic"}}"#.to_vec()
+    }
+
+    fn retry_after(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::RETRY_AFTER,
+            HeaderValue::from_str(value).unwrap(),
+        );
+        headers
+    }
+
+    /// A refresh the provider answered 429 in full closes its attempt as
+    /// waiting, with the provider's wait clamped: the sign-in is kept, and
+    /// the next request during the wait sends nothing to the provider
+    /// (#4975).
+    #[tokio::test]
+    async fn a_refresh_the_provider_rate_limited_waits_instead_of_reconnecting() {
+        let (mut broker, state) = oauth_broker(
+            StatusCode::TOO_MANY_REQUESTS,
+            rate_limit_answer(),
+            "unused".into(),
+            Duration::ZERO,
+        );
+        *state.rate_limit_waits.lock().unwrap() = Some(Vec::new());
+        Arc::get_mut(&mut broker.upstream).unwrap().refresh_headers = retry_after("120");
+        assert_eq!(
+            broker.execute(request()).await.err(),
+            Some(BrokerRequestError::RefreshRateLimited { wait_seconds: 120 })
+        );
+        assert_eq!(*state.rate_limit_waits.lock().unwrap(), Some(vec![120]));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state
+                .authority
+                .get_credential(&state.credential_id)
+                .unwrap()
+                .metadata
+                .status,
+            codewire_access::CredentialStatus::Active,
+            "the sign-in is kept"
+        );
+        // The expired token waits too: the begin is refused before any send.
+        assert_eq!(
+            broker.execute(request()).await.err(),
+            Some(BrokerRequestError::RefreshRateLimited { wait_seconds: 120 })
+        );
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        // Never Reconnect: it reads as the credential being unavailable.
+        assert_eq!(
+            BrokerRequestError::RefreshRateLimited { wait_seconds: 120 }.refusal(),
+            Refusal::CredentialUnavailable
+        );
+    }
+
+    /// A placement without the rate-limit record fails the attempt, as a 429
+    /// did before: closed, never retried (#4975).
+    #[tokio::test]
+    async fn a_placement_without_the_rate_limit_record_fails_a_rate_limited_refresh() {
+        let (broker, state) = oauth_broker(
+            StatusCode::TOO_MANY_REQUESTS,
+            rate_limit_answer(),
+            "unused".into(),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            broker.execute(request()).await.err(),
+            Some(BrokerRequestError::UpstreamFailed)
+        );
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// During the wait a token that has not expired is still sent, though
+    /// it is due for refresh; the provider sees no second refresh (#4975).
+    #[tokio::test]
+    async fn during_a_rate_limit_wait_an_unexpired_token_is_still_used() {
+        let now = current_unix_time().expect("current time");
+        let due = jwt(json!({ "exp": now + ACCESS_TOKEN_REFRESH_WINDOW_SECONDS / 2 }));
+        let (mut broker, state) = oauth_broker_with_initial_token(
+            due.clone(),
+            BTreeSet::new(),
+            StatusCode::TOO_MANY_REQUESTS,
+            rate_limit_answer(),
+            due,
+            Duration::ZERO,
+        );
+        *state.rate_limit_waits.lock().unwrap() = Some(Vec::new());
+        Arc::get_mut(&mut broker.upstream).unwrap().refresh_headers = retry_after("garbage");
+        broker
+            .execute(request())
+            .await
+            .expect("served with the unexpired token");
+        assert_eq!(
+            *state.rate_limit_waits.lock().unwrap(),
+            Some(vec![60]),
+            "a bad value is the minimum"
+        );
+        broker
+            .execute(request())
+            .await
+            .expect("still served during the wait");
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// A model call the provider answers 429 is the provider's answer to the
+    /// guest: it closes no refresh and touches no credential (#4975).
+    #[tokio::test]
+    async fn a_model_call_answered_429_touches_no_credential() {
+        let now = current_unix_time().expect("current time");
+        let fresh = jwt(json!({ "exp": now + 3_600 }));
+        let (mut broker, state) = oauth_broker_with_initial_token(
+            fresh.clone(),
+            BTreeSet::new(),
+            StatusCode::OK,
+            Vec::new(),
+            fresh,
+            Duration::ZERO,
+        );
+        *state.rate_limit_waits.lock().unwrap() = Some(Vec::new());
+        let upstream = Arc::get_mut(&mut broker.upstream).unwrap();
+        upstream.response_status = StatusCode::TOO_MANY_REQUESTS;
+        upstream.response_headers = retry_after("120");
+        let response = broker.execute(request()).await.expect("passed through");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(*state.rate_limit_waits.lock().unwrap(), Some(Vec::new()));
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
     }
 
     /// One capture subscriber for every scenario keeps scoped dispatcher

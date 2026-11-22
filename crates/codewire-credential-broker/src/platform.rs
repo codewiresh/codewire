@@ -18,6 +18,9 @@ pub mod bridge;
 mod decision;
 pub mod keepalive;
 mod placeholders;
+mod refresh_errors;
+use crate::RateLimitClose;
+use refresh_errors::{refresh_lease_error, refresh_store_error};
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 
@@ -1370,6 +1373,17 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
             .map_err(refresh_store_error)
     }
 
+    async fn rate_limit_credential_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        wait_seconds: u64,
+    ) -> Result<RateLimitClose, BrokerRefreshError> {
+        if permit.instance_id != self.instance_id {
+            return Err(BrokerRefreshError::Denied);
+        }
+        refresh_errors::rate_limit(&self.credentials, permit.started, wait_seconds).await
+    }
+
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
         if let Some(ssh) = &self.ssh {
@@ -1684,30 +1698,6 @@ fn profile_error(error: PlatformProfileError) -> BrokerLeaseError {
         }
         PlatformProfileError::CorruptRecord => BrokerLeaseError::InvalidResponse,
         _ => BrokerLeaseError::Denied,
-    }
-}
-
-fn refresh_lease_error(error: BrokerLeaseError) -> BrokerRefreshError {
-    match error {
-        BrokerLeaseError::InvalidRequest => BrokerRefreshError::InvalidRequest,
-        // A credential needing Reconnect is never refreshed again automatically.
-        BrokerLeaseError::Denied
-        | BrokerLeaseError::ReconnectRequired(_)
-        | BrokerLeaseError::NotSelected => BrokerRefreshError::Denied,
-        BrokerLeaseError::Unavailable => BrokerRefreshError::Unavailable,
-        BrokerLeaseError::InvalidResponse => BrokerRefreshError::InvalidResponse,
-    }
-}
-
-fn refresh_store_error(error: PlatformCredentialError) -> BrokerRefreshError {
-    match error {
-        PlatformCredentialError::RefreshInProgress => BrokerRefreshError::InProgress,
-        PlatformCredentialError::StaleVersion | PlatformCredentialError::StaleRefresh => {
-            BrokerRefreshError::Stale
-        }
-        // Never a denial: the sign-in is kept while the provider's wait runs.
-        PlatformCredentialError::RefreshRateLimited { .. } => BrokerRefreshError::Unavailable,
-        other => refresh_lease_error(credential_error(other)),
     }
 }
 

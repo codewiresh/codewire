@@ -243,6 +243,11 @@ impl ClaudeOAuthCredential {
     /// capped at half its lifetime (from when Codewire obtained it) and never
     /// below the proxied request's five-minute window. The cap keeps a
     /// short-lived token from refreshing on every check.
+    /// Whether the access token's own expiry has passed.
+    pub(crate) fn has_expired(&self, now_unix: u64) -> bool {
+        self.expires_at_unix <= now_unix
+    }
+
     pub(crate) fn should_refresh_within(
         &self,
         now_unix: u64,

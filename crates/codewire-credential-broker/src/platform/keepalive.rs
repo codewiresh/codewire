@@ -571,6 +571,20 @@ impl OAuthKeepAlive {
             }
             Err((failure, _)) => {
                 failure.warn(provider);
+                // A provider rate limit closes the attempt as waiting; the
+                // sweep skips the sign-in until its wait ends (#4975).
+                if let RefreshFailure::RateLimited { wait_seconds } = failure {
+                    return match super::refresh_errors::rate_limit(
+                        &self.store,
+                        started,
+                        wait_seconds,
+                    )
+                    .await
+                    {
+                        Ok(crate::RateLimitClose::Waiting) => Outcome::Skipped,
+                        Ok(crate::RateLimitClose::Failed) | Err(_) => Outcome::Failed,
+                    };
+                }
                 if self.store.fail_oauth_refresh(started).await.is_err() {
                     tracing::warn!(
                         provider,

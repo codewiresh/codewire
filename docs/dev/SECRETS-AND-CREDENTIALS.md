@@ -3143,12 +3143,15 @@ placements.
   the wait; that record on Dev and Production is how it is observed (owner,
   2026-11-18, #4975).
 
-**Not yet built** (#4975). Today a 429 is terminal like any other failure
-after the refresh started. Both stores can already record the wait: the
-platform's closes a started refresh as `rate_limited`, and the local
-authority's refresh journal keeps it, refusing a refresh during it as
-rate-limited with the seconds left. That local behaviour has its own
-authority protocol step. No broker asks either store for it yet.
+**Built in part** (#4975). In a hosted Sandbox, a Codex or Claude sign-in's
+refresh, on demand and in the keep-alive, is closed as rate-limited and waits
+as above, and during the wait a request whose access token has expired is
+answered `credential_unavailable` (503), never Reconnect needed. Not yet: a
+local VM, where a 429 is still terminal (the local authority's refresh journal
+keeps the wait, refusing a refresh during it as rate-limited with the seconds
+left, under its own authority protocol step, but no broker asks it yet); a
+GitHub App login, whose 429 is still terminal; and the request's own 429 with
+`Retry-After` and its refusal reason.
 
 ### Idle OAuth keep-alive
 

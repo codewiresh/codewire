@@ -481,9 +481,9 @@ fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
         BrokerRequestError::InvalidRequest
         | BrokerRequestError::NameNotAllowed
         | BrokerRequestError::SelectedCredentialOnly => Ok(invalid_request()),
-        BrokerRequestError::UpstreamFailed | BrokerRequestError::ResponseTooLarge => {
-            Ok(temporarily_unavailable())
-        }
+        BrokerRequestError::UpstreamFailed
+        | BrokerRequestError::ResponseTooLarge
+        | BrokerRequestError::RefreshRateLimited { .. } => Ok(temporarily_unavailable()),
         BrokerRequestError::AuthorityUnavailable => Err(error),
     }
 }
@@ -506,7 +506,8 @@ fn forward_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
         }
         BrokerRequestError::ReconnectRequired(_)
         | BrokerRequestError::UpstreamFailed
-        | BrokerRequestError::ResponseTooLarge => Ok(temporarily_unavailable()),
+        | BrokerRequestError::ResponseTooLarge
+        | BrokerRequestError::RefreshRateLimited { .. } => Ok(temporarily_unavailable()),
         BrokerRequestError::AuthorityUnavailable => Err(error),
     }
 }

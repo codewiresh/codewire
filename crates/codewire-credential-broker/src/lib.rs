@@ -67,7 +67,7 @@ pub use runtime::{
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
     BrokerRequestBodyStream, BrokerRequestError, BrokerResponseBody, BrokerUpgradedIo,
     BrokerUpgradedStream, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
-    BrokerUpstreamTransport, BrokerUpstreamUpgrade, OpenAiBroker,
+    BrokerUpstreamTransport, BrokerUpstreamUpgrade, OpenAiBroker, RateLimitClose,
 };
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};

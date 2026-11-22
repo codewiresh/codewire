@@ -1006,6 +1006,7 @@ async fn send_login_response<S: CredentialBridgeResponseSink>(
         ) => Err(v1::CredentialBridgeFailureReason::Denied as i32),
         Err(
             BrokerRequestError::AuthorityUnavailable
+            | BrokerRequestError::RefreshRateLimited { .. }
             | BrokerRequestError::UpstreamFailed
             | BrokerRequestError::ResponseTooLarge,
         ) => Err(v1::CredentialBridgeFailureReason::Unavailable as i32),
@@ -1286,19 +1287,7 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
     request_id: String,
     error: BrokerRequestError,
 ) -> Result<(), ()> {
-    // The reason stays the closed one every guest decodes; a guest that
-    // knows `refusal` answers from it instead.
-    let reason = match error {
-        BrokerRequestError::InvalidRequest
-        | BrokerRequestError::Denied
-        | BrokerRequestError::ReconnectRequired(_)
-        | BrokerRequestError::NotSelected
-        | BrokerRequestError::NameNotAllowed
-        | BrokerRequestError::SelectedCredentialOnly => v1::CredentialBridgeFailureReason::Denied,
-        BrokerRequestError::AuthorityUnavailable => v1::CredentialBridgeFailureReason::Unavailable,
-        BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
-        BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,
-    };
+    let reason = wire_refusal::failure_reason(error);
     sender
         .send(
             v1::credential_bridge_host_message::Payload::ResponseFailure(

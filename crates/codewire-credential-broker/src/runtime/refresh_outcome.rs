@@ -41,6 +41,8 @@ where
 
     /// Record one terminal failure for an exact started attempt after logging
     /// its closed class. The caller never retries the previous refresh token.
+    /// A rate-limited attempt is closed as waiting instead, where the
+    /// placement records it (#4975); a refused close leaves it failed.
     pub(super) async fn fail_started_refresh(
         leases: &P,
         permit: P::StartedRefresh,
@@ -49,6 +51,25 @@ where
         error: BrokerRequestError,
     ) -> Result<(), BrokerRequestError> {
         failure.warn(provider);
+        if let RefreshFailure::RateLimited { wait_seconds } = failure {
+            return match leases
+                .rate_limit_credential_refresh(permit, wait_seconds)
+                .await
+            {
+                Ok(RateLimitClose::Waiting) => {
+                    Err(BrokerRequestError::RefreshRateLimited { wait_seconds })
+                }
+                Ok(RateLimitClose::Failed) => Err(error),
+                Err(_) => {
+                    tracing::warn!(
+                        provider,
+                        failure = failure.class(),
+                        "provider credential refresh failure could not be recorded"
+                    );
+                    Err(BrokerRequestError::AuthorityUnavailable)
+                }
+            };
+        }
         match leases.fail_credential_refresh(permit).await {
             Ok(()) => Err(error),
             Err(_) => {

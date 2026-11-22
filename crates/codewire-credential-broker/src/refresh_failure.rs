@@ -52,6 +52,40 @@ pub(crate) enum RefreshFailure {
     /// result stays recoverable; an unstaged one is abandoned after the
     /// storage execution deadline.
     Publication(BrokerRefreshError),
+    /// The token endpoint answered 429 and its whole response was read: the
+    /// provider did not process it, so the attempt is closed as rate-limited
+    /// with this wait rather than failed (#4975; SECRETS-AND-CREDENTIALS.md,
+    /// "A refresh the provider rate-limited").
+    RateLimited { wait_seconds: u64 },
+}
+
+/// The wait a rate-limited refresh is closed with, as the stores clamp it.
+pub(crate) const RATE_LIMIT_WAIT_SECONDS: std::ops::RangeInclusive<u64> = 60..=600;
+
+/// The wait for a token endpoint's 429, from its `Retry-After`: delta-seconds
+/// or an HTTP date, clamped to [`RATE_LIMIT_WAIT_SECONDS`]. A missing,
+/// malformed or past value is the minimum, never no wait.
+pub(crate) fn rate_limit_wait(headers: &http::HeaderMap, now: std::time::SystemTime) -> u64 {
+    let (min, max) = (
+        *RATE_LIMIT_WAIT_SECONDS.start(),
+        *RATE_LIMIT_WAIT_SECONDS.end(),
+    );
+    let Some(value) = headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    else {
+        return min;
+    };
+    let seconds = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse::<u64>().unwrap_or(max)
+    } else {
+        match httpdate::parse_http_date(value) {
+            Ok(at) => at.duration_since(now).map_or(0, |wait| wait.as_secs()),
+            Err(_) => 0,
+        }
+    };
+    seconds.clamp(min, max)
 }
 
 /// A provider's non-success refresh response, reduced to allowlisted values.
@@ -225,6 +259,7 @@ impl RefreshFailure {
                 BrokerRefreshError::InProgress => "start_in_progress",
                 BrokerRefreshError::InvalidRequest => "start_invalid_request",
                 BrokerRefreshError::InvalidResponse => "start_invalid_response",
+                BrokerRefreshError::RateLimited { .. } => "start_rate_limited",
             },
             Self::RequestBuild => "request_build",
             Self::Transport(error) => match error {
@@ -248,7 +283,9 @@ impl RefreshFailure {
                 BrokerRefreshError::InProgress => "publication_in_progress",
                 BrokerRefreshError::InvalidRequest => "publication_invalid_request",
                 BrokerRefreshError::InvalidResponse => "publication_invalid_response",
+                BrokerRefreshError::RateLimited { .. } => "publication_rate_limited",
             },
+            Self::RateLimited { .. } => "rate_limited",
         }
     }
 
@@ -263,6 +300,15 @@ impl RefreshFailure {
                 provider_error_type = rejection.error_type.as_str(),
                 permanent = rejection.permanent,
                 "{FAILURE_MESSAGE}"
+            ),
+            // Value-blind: the provider, the status and the wait, nothing of
+            // the response (#4975).
+            Self::RateLimited { wait_seconds } => tracing::warn!(
+                provider,
+                failure = self.class(),
+                http_status = 429,
+                wait_seconds,
+                "refresh_rate_limited"
             ),
             _ => tracing::warn!(provider, failure = self.class(), "{FAILURE_MESSAGE}"),
         }
@@ -339,6 +385,49 @@ pub(crate) fn transport_request_error(error: BrokerUpstreamError) -> BrokerReque
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for(value: Option<&str>, now: std::time::SystemTime) -> u64 {
+        let mut headers = http::HeaderMap::new();
+        if let Some(value) = value {
+            headers.insert(
+                http::header::RETRY_AFTER,
+                http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        rate_limit_wait(&headers, now)
+    }
+
+    /// Delta-seconds or an HTTP date, clamped to 60–600; a missing,
+    /// malformed or past value is the minimum, never no wait (#4975).
+    #[test]
+    fn a_rate_limit_wait_reads_retry_after_strictly_and_never_waits_less_than_a_minute() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let date = |offset: i64| {
+            let at = if offset >= 0 {
+                now + std::time::Duration::from_secs(offset.unsigned_abs())
+            } else {
+                now - std::time::Duration::from_secs(offset.unsigned_abs())
+            };
+            httpdate::fmt_http_date(at)
+        };
+        assert_eq!(wait_for(None, now), 60);
+        assert_eq!(wait_for(Some("120"), now), 120);
+        assert_eq!(wait_for(Some(" 300 "), now), 300);
+        assert_eq!(wait_for(Some("0"), now), 60);
+        assert_eq!(wait_for(Some("5"), now), 60);
+        assert_eq!(wait_for(Some("3600"), now), 600);
+        assert_eq!(wait_for(Some("99999999999999999999999"), now), 600);
+        assert_eq!(wait_for(Some("-5"), now), 60);
+        assert_eq!(wait_for(Some("1.5"), now), 60);
+        assert_eq!(wait_for(Some("soon"), now), 60);
+        assert_eq!(wait_for(Some(&date(240)), now), 240);
+        assert_eq!(wait_for(Some(&date(7200)), now), 600);
+        assert_eq!(
+            wait_for(Some(&date(-120)), now),
+            60,
+            "a past date is the minimum"
+        );
+    }
 
     fn classify(status: u16, body: &str) -> ProviderRejection {
         ProviderRejection::classify(StatusCode::from_u16(status).unwrap(), body.as_bytes())

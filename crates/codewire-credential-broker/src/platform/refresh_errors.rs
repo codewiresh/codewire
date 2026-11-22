@@ -1,0 +1,55 @@
+//! How the platform store's refresh answers read to the broker, and its close
+//! of a rate-limited attempt (#4975).
+
+use super::*;
+use crate::RateLimitClose;
+
+pub(super) fn refresh_lease_error(error: BrokerLeaseError) -> BrokerRefreshError {
+    match error {
+        BrokerLeaseError::InvalidRequest => BrokerRefreshError::InvalidRequest,
+        // A credential needing Reconnect is never refreshed again automatically.
+        BrokerLeaseError::Denied
+        | BrokerLeaseError::ReconnectRequired(_)
+        | BrokerLeaseError::NotSelected => BrokerRefreshError::Denied,
+        BrokerLeaseError::Unavailable => BrokerRefreshError::Unavailable,
+        BrokerLeaseError::InvalidResponse => BrokerRefreshError::InvalidResponse,
+    }
+}
+
+pub(super) fn refresh_store_error(error: PlatformCredentialError) -> BrokerRefreshError {
+    match error {
+        PlatformCredentialError::RefreshInProgress => BrokerRefreshError::InProgress,
+        PlatformCredentialError::StaleVersion | PlatformCredentialError::StaleRefresh => {
+            BrokerRefreshError::Stale
+        }
+        // Never a denial: the sign-in is kept while the provider's wait runs.
+        PlatformCredentialError::RefreshRateLimited {
+            retry_after_seconds,
+        } => BrokerRefreshError::RateLimited {
+            wait_seconds: retry_after_seconds,
+        },
+        other => refresh_lease_error(credential_error(other)),
+    }
+}
+
+/// Close a started attempt as rate-limited. The store refuses one begun after
+/// a wait, or no longer started, as stale: that attempt is then failed, so a
+/// second rate limit is terminal, as the rule says.
+pub(super) async fn rate_limit(
+    credentials: &PlatformCredentialStore,
+    started: StartedOAuthRefresh,
+    wait_seconds: u64,
+) -> Result<RateLimitClose, BrokerRefreshError> {
+    match credentials
+        .rate_limit_oauth_refresh(&started, wait_seconds)
+        .await
+    {
+        Ok(()) => Ok(RateLimitClose::Waiting),
+        Err(PlatformCredentialError::StaleRefresh) => credentials
+            .fail_oauth_refresh(started)
+            .await
+            .map(|()| RateLimitClose::Failed)
+            .map_err(refresh_store_error),
+        Err(error) => Err(refresh_store_error(error)),
+    }
+}

@@ -173,6 +173,15 @@ impl CodexOAuthCredential {
     /// The lifetime runs from the token's `iat`, or else from when Codewire
     /// last obtained it. Without an `exp`, only the fixed fallback interval
     /// applies, whatever the minimum.
+    /// Whether the access token's own expiry has passed; one whose expiry
+    /// can't be read counts as expired.
+    pub(crate) fn has_expired(&self, now_unix: u64) -> bool {
+        jwt_validity(&self.access_token)
+            .ok()
+            .and_then(|validity| validity.expires_at)
+            .is_none_or(|expires_at| expires_at <= now_unix)
+    }
+
     pub(crate) fn should_refresh_within(
         &self,
         now_unix: u64,

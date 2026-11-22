@@ -37,6 +37,7 @@ codewire-protected-store = { workspace = true, optional = true }
 codewire-workload-secrets = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+httpdate = { workspace = true }
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, optional = true }
