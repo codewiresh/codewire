@@ -2,9 +2,10 @@
 """Read the permissions GitHub lists for Codewire's GitHub App and compare them.
 
 The credential broker's GitHub route is written for an App that holds exactly
-`contents: write`, `pull_requests: write` and `metadata: read`
-(`REQUIRED_PERMISSIONS` in crates/codewire-credential-broker/src/github_app.rs).
-A wider App, with `administration` for example, would let a sandbox do more
+`contents: write`, `pull_requests: write` and `metadata: read`, which every
+installation needs (`REQUIRED_PERMISSIONS` in
+crates/codewire-credential-broker/src/github_app.rs), and `actions: read`,
+which it requests for Actions reads but doesn't need (#5737). A wider App, with `administration` for example, would let a sandbox do more
 through the managed credential than the route was reviewed for (#4926). The
 App's settings live at GitHub, outside this repository, so a scheduled run
 reads its public record once a day, with no credential.
@@ -37,7 +38,12 @@ from typing import Callable, TextIO
 
 APP_SLUG = "codewire-sh"
 APP_URL = f"https://api.github.com/apps/{APP_SLUG}"
-EXPECTED = {"contents": "write", "metadata": "read", "pull_requests": "write"}
+# What every installation needs: the broker's REQUIRED_PERMISSIONS.
+REQUIRED = {"contents": "write", "metadata": "read", "pull_requests": "write"}
+# Requested, not needed: an installation without it keeps everything else and
+# gets GitHub's own 403 for Actions reads (#5737).
+REQUESTED = {"actions": "read"}
+EXPECTED = {**REQUIRED, **REQUESTED}
 LEVELS = {"read": 1, "write": 2, "admin": 3}
 ATTEMPTS = 4
 RETRY_WAIT_SECONDS = 150

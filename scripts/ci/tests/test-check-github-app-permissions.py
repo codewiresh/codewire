@@ -29,7 +29,8 @@ sys.dont_write_bytecode = True
 SPEC.loader.exec_module(check)
 
 # GitHub's answer to GET /apps/codewire-sh on 2026-11-16, without the fields
-# the check does not read (ids, owner, description, URLs, dates).
+# the check does not read (ids, owner, description, URLs, dates), and with the
+# `actions: read` the App requests from #5737.
 RECORDED_HEADERS = {
     "content-type": "application/json; charset=utf-8",
     "x-ratelimit-limit": "60",
@@ -39,7 +40,12 @@ RECORDED_HEADERS = {
 }
 RECORDED_RECORD = {
     "slug": "codewire-sh",
-    "permissions": {"contents": "write", "metadata": "read", "pull_requests": "write"},
+    "permissions": {
+        "actions": "read",
+        "contents": "write",
+        "metadata": "read",
+        "pull_requests": "write",
+    },
     "events": [],
 }
 # GitHub's answer to an unauthenticated request past the hourly limit.
@@ -95,7 +101,10 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(run.code, 0, run.output)
         self.assertEqual(run.fetches, 1)
         self.assertIn("rate limit: 59 of 60 requests remain", run.output)
-        self.assertIn("codewire-sh holds contents: write, metadata: read, pull_requests: write", run.output)
+        self.assertIn(
+            "codewire-sh holds actions: read, contents: write, metadata: read, pull_requests: write",
+            run.output,
+        )
         self.assertIn("app-permissions: read\n", run.output)
         self.assertIn("`app-permissions: read`", run.summary)
         self.assertNotIn("::error::", run.output)
@@ -130,6 +139,16 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(run.code, 1, run.output)
         self.assertIn("narrower: the App holds contents: read, expected contents: write", run.output)
         self.assertIn("narrower: the App no longer holds pull_requests: write", run.output)
+
+    def test_the_app_before_actions_read_fails_as_narrower(self) -> None:
+        run = Run([recorded(actions=None)])
+        self.assertEqual(run.code, 1, run.output)
+        self.assertIn("narrower: the App no longer holds actions: read", run.output)
+
+    def test_actions_write_fails_as_wider(self) -> None:
+        run = Run([recorded(actions="write")])
+        self.assertEqual(run.code, 1, run.output)
+        self.assertIn("wider: the App holds actions: write, expected actions: read", run.output)
 
     def test_an_answer_the_check_cannot_interpret_fails(self) -> None:
         answers = {
@@ -213,7 +232,8 @@ class ContractTests(unittest.TestCase):
         )
         self.assertIsNotNone(block, "REQUIRED_PERMISSIONS not found in the credential broker")
         pairs = re.findall(r'\("([a-z_]+)", PermissionLevel::([A-Za-z]+)\)', block.group(1))
-        self.assertEqual({name: level.lower() for name, level in pairs}, check.EXPECTED)
+        self.assertEqual({name: level.lower() for name, level in pairs}, check.REQUIRED)
+        self.assertEqual(check.EXPECTED, {**check.REQUIRED, "actions": "read"})
 
     def test_the_request_names_one_fixed_url(self) -> None:
         self.assertEqual(check.APP_URL, "https://api.github.com/apps/codewire-sh")
