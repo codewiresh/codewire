@@ -2547,7 +2547,7 @@ mod tests {
         let mut wrong_token = api_headers.clone();
         wrong_token.insert(
             http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+            HeaderValue::from_static("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXY"),
         );
         assert!(provider.github_app_user(&wrong_token, &[]).is_err());
     }

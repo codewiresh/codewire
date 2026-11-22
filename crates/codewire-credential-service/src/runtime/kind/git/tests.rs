@@ -114,7 +114,7 @@ fn fixed_routes_require_exact_authority_identity_and_fetch_semantics() {
     }
     for value in [
         None,
-        Some("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        Some("Bearer gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXY"),
         Some("Basic wrong"),
     ] {
         let mut bad = good.clone();

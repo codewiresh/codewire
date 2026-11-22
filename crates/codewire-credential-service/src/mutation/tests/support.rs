@@ -26,7 +26,9 @@ pub const ACCESS: &str = "private-mutation-access-canary";
 pub const REFRESH: &str = "private-mutation-refresh-canary";
 pub const SESSION: &str = "private-mutation-session-canary";
 pub const API_KEY_MATERIAL: &str = "private-api-key-material-canary";
-pub const GITHUB_TOKEN: &str = "ghu_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/// One character short of a real `ghu_` token, so no secret scanner takes the
+/// fixture for one (#5793).
+pub const GITHUB_TOKEN: &str = "ghu_0123456789ABCDEFGHIJKLMNOPQRSTUVWXY";
 pub const USER_CODE: &str = "ABCD-EFGH";
 /// The one code the synthetic Claude token endpoint redeems.
 pub const CLAUDE_CODE: &str = "synthetic-claude-code";
