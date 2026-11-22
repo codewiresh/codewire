@@ -10,8 +10,10 @@ readonly REQUIRED_CH_SHA256='4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895
 readonly REQUIRED_CH_SIZE='7365360'
 readonly REQUIRED_KERNEL_RELEASE='6.18.48-codewire3'
 readonly REQUIRED_KERNEL_PATH="vmlinuz-$REQUIRED_KERNEL_RELEASE"
-readonly REQUIRED_KERNEL_SHA256='0087597973d655701cc01c313d08a534cd27134eec70061d2ae1e45165053eb5'
-readonly REQUIRED_KERNEL_SIZE='9450496'
+# The x86_64 kernel the release publishes for this kernel release, from the
+# pinned kernel builder, as the released runtime's artifacts.lock records it.
+readonly REQUIRED_KERNEL_SHA256='21046ffbe97698e3d627e9653f11e640a06f8a3c5aee852981aef57f523ecb38'
+readonly REQUIRED_KERNEL_SIZE='9462784'
 readonly REQUIRED_ARCH='x86_64'
 readonly REQUIRED_CH_VERSION='v54.0'
 readonly LINUX_SUN_PATH_BYTES=108
