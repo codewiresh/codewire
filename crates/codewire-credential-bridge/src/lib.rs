@@ -616,8 +616,12 @@ impl CredentialBridge {
                 Ok(())
             }
             Some(Payload::ResponseFailure(response)) => {
-                let refusal = refusal::from_failure(response.reason, response.refusal)
-                    .ok_or_else(invalid_host_frame)?;
+                let refusal = refusal::from_failure(
+                    response.reason,
+                    response.refusal,
+                    response.retry_after_seconds,
+                )
+                .ok_or_else(invalid_host_frame)?;
                 let pending = {
                     let mut state = self.inner.lock().await;
                     require_live_epoch(&state, epoch)?;

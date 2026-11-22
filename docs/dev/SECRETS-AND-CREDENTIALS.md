@@ -1979,6 +1979,7 @@ with #4971.
 | `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on. In a local VM that includes a provider whose name did not resolve when the VM's credential broker started (#5286) | "Codewire: PROVIDER couldn't be reached; try again." |
 | `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." Fix: to send it, select a network policy with a rule that allows HOST on port 443; for a Codex workspace host one label under `chatgpt.com`, the rule it names is `*.chatgpt.com`, since a rule for one such name doesn't count until #4931's signed decision. The owner's `cw policy log` will show it once #5058 lands |
 | `selected_credential_only` | 403 | in a hosted Sandbox, a request on an intercepted host that carries none of the Sandbox's placeholders: the user's own key, another environment's placeholder, or no credential. It is never sent, whatever the network policy, until such a request can leave through the Sandbox's own egress (#5555) | "Codewire: in a hosted Sandbox, requests to HOST must carry the Sandbox's Codewire credential." No fix line |
+| `credential_refresh_rate_limited` | 429 | a sign-in that waits out its provider's rate limit on a refresh, for a request whose access token has expired; it carries `Retry-After` with the wait left, 60 to 600 seconds, and is never Reconnect needed (#4975) | "Codewire: the provider is rate-limiting the refresh of the PROVIDER credential; try again in N seconds." No fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 
 A response that has already started when its stream fails can't change its
@@ -3244,14 +3245,15 @@ placements.
   the wait; that record on Dev and Production is how it is observed (owner,
   2026-11-18, #4975).
 
-**Built in part** (#4975). In a hosted Sandbox and a local VM, a Codex or
-Claude sign-in's refresh, on demand and (hosted) in the keep-alive, is closed
-as rate-limited and waits as above, and so is a GitHub App login's, in the
+**Built** (#4975). In a hosted Sandbox and a local VM, a Codex or Claude
+sign-in's refresh, on demand and (hosted) in the keep-alive, is closed as
+rate-limited and waits as above, and so is a GitHub App login's, in the
 broker and in the credential service's repository access, where only its
 token exchange's own 429 counts, never the user or installation reads after
 it. During the wait a request whose access token has expired is answered
-`credential_unavailable` (503), never Reconnect needed. Not yet: the
-request's own 429 with `Retry-After` and its refusal reason.
+`credential_refresh_rate_limited` (429, with `Retry-After`). A guest older
+than that answer, or a wait outside the bounds, reads it as
+`credential_unavailable` (503).
 
 ### Idle OAuth keep-alive
 

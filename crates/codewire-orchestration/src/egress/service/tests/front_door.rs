@@ -595,6 +595,7 @@ async fn an_upstream_that_fails_answers_its_requests_and_the_session_goes_on() {
                     request_id: "r1".into(),
                     reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             ),
         ),
@@ -764,6 +765,7 @@ async fn a_request_for_an_upstream_that_has_gone_is_answered_and_finished() {
                     request_id: "r1".into(),
                     reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             ),
         ),
@@ -819,6 +821,7 @@ async fn a_live_requests_frame_outside_the_pin_is_answered_once_and_cancelled_up
                     request_id: "r1".into(),
                     reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             ),
         ),
@@ -920,6 +923,7 @@ async fn a_cancel_for_an_upstream_that_has_gone_answers_its_other_requests() {
                         request_id: id.into(),
                         reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
                         refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                        ..Default::default()
                     },
                 ),
             ),

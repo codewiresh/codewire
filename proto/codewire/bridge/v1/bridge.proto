@@ -97,6 +97,10 @@ enum CredentialBridgeRefusal {
   // A hosted Sandbox's request on an intercepted host that carries none of
   // its placeholders (#5555). An older guest reads it as unavailable.
   CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY = 16;
+  // The sign-in waits for its provider's rate limit and the request's access
+  // token has expired (#4975). Sent with `retry_after_seconds`; an older
+  // guest reads it as unavailable.
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REFRESH_RATE_LIMITED = 17;
 }
 
 message CredentialBridgeResponseFailure {
@@ -104,6 +108,9 @@ message CredentialBridgeResponseFailure {
   CredentialBridgeFailureReason reason = 2;
   // Set by a broker that knows why; an older guest ignores it.
   CredentialBridgeRefusal refusal = 3;
+  // With CREDENTIAL_REFRESH_RATE_LIMITED only: the wait left, 60 to 600.
+  // A guest reads any other value, or none, as unavailable.
+  uint32 retry_after_seconds = 4;
 }
 
 // Frames for a front-door session: a TLS front door outside the environment

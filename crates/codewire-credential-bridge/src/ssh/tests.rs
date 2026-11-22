@@ -579,6 +579,7 @@ async fn ssh_wrong_kind_or_wrong_family_response_detaches_instead_of_completing(
                     request_id: request.request_id.clone(),
                     reason: v1::CredentialBridgeFailureReason::Denied as i32,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             )
         } else {

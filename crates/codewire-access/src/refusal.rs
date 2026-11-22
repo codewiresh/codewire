@@ -31,6 +31,12 @@ pub enum Refusal {
     /// A hosted Sandbox's request that carries none of its placeholders,
     /// refused whatever the network policy (#5555).
     SelectedCredentialOnly,
+    /// The sign-in waits out its provider's rate limit on a refresh and the
+    /// request's access token has expired (#4975): answered 429 with the
+    /// wait left as `Retry-After`, 60 to 600 seconds.
+    CredentialRefreshRateLimited {
+        retry_after_seconds: u16,
+    },
     Unavailable,
     /// An older broker's refusal that carries no reason. It keeps a
     /// denial's 403, so an agent doesn't retry it.
@@ -118,6 +124,7 @@ impl Refusal {
             Self::UpstreamFailed(_) => "upstream_failed",
             Self::NameNotAllowed => "name_not_allowed",
             Self::SelectedCredentialOnly => "selected_credential_only",
+            Self::CredentialRefreshRateLimited { .. } => "credential_refresh_rate_limited",
             Self::Unavailable => "unavailable",
             Self::Denied => "denied",
         }
@@ -130,6 +137,16 @@ impl Refusal {
             ("cache-control", "no-store"),
             (REFUSAL_HEADER, self.reason()),
         ]
+    }
+
+    /// The `Retry-After` seconds a refusal carries beside [`Self::headers`].
+    pub const fn retry_after_seconds(self) -> Option<u16> {
+        match self {
+            Self::CredentialRefreshRateLimited {
+                retry_after_seconds,
+            } => Some(retry_after_seconds),
+            _ => None,
+        }
     }
 
     /// Never 401: an agent answers a 401 with its own token refresh.
@@ -151,6 +168,7 @@ impl Refusal {
             Self::RequestNotForwarded(Unforwarded::ClientStalled) => 408,
             Self::RequestNotForwarded(Unforwarded::Misdirected) => 421,
             Self::BodyTooLarge => 413,
+            Self::CredentialRefreshRateLimited { .. } => 429,
             Self::UpstreamFailed(UpstreamFailure::Failed) => 502,
             Self::UpstreamFailed(UpstreamFailure::TimedOut) => 504,
         }
@@ -192,6 +210,14 @@ impl Refusal {
             Self::CredentialUnavailable => {
                 (format!("{credential} can't be used right now; try again."), None)
             }
+            Self::CredentialRefreshRateLimited {
+                retry_after_seconds,
+            } => (
+                format!(
+                    "the provider is rate-limiting the refresh of {credential}; try again in {retry_after_seconds} seconds."
+                ),
+                None,
+            ),
             Self::CredentialConflict => (
                 "this request carries the Codewire placeholder and another credential; send only one."
                     .to_owned(),

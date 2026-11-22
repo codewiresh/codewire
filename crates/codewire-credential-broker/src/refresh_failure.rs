@@ -62,6 +62,18 @@ pub(crate) enum RefreshFailure {
 /// The wait a rate-limited refresh is closed with, as the stores clamp it.
 pub(crate) const RATE_LIMIT_WAIT_SECONDS: std::ops::RangeInclusive<u64> = 60..=600;
 
+/// The guest's answer while a sign-in waits, its wait clamped to
+/// [`RATE_LIMIT_WAIT_SECONDS`] before it leaves the broker (#4975).
+pub(crate) fn rate_limited_refusal(wait_seconds: u64) -> codewire_access::Refusal {
+    let (min, max) = (
+        *RATE_LIMIT_WAIT_SECONDS.start(),
+        *RATE_LIMIT_WAIT_SECONDS.end(),
+    );
+    codewire_access::Refusal::CredentialRefreshRateLimited {
+        retry_after_seconds: u16::try_from(wait_seconds.clamp(min, max)).unwrap_or(u16::MAX),
+    }
+}
+
 /// The wait for a token endpoint's 429, from its `Retry-After`: delta-seconds
 /// or an HTTP date, clamped to [`RATE_LIMIT_WAIT_SECONDS`]. A missing,
 /// malformed or past value is the minimum, never no wait.

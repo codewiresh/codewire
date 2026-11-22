@@ -34,6 +34,7 @@ class CredentialBridgeRefusal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper)
     CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: _ClassVar[CredentialBridgeRefusal]
     CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: _ClassVar[CredentialBridgeRefusal]
     CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REFRESH_RATE_LIMITED: _ClassVar[CredentialBridgeRefusal]
 
 class CredentialBridgeStreamCloseKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -69,6 +70,7 @@ CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REFRESH_RATE_LIMITED: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_HALF_CLOSE: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_RESET: CredentialBridgeStreamCloseKind
@@ -132,14 +134,16 @@ class CredentialBridgeResponseEnd(_message.Message):
     def __init__(self, request_id: _Optional[str] = ...) -> None: ...
 
 class CredentialBridgeResponseFailure(_message.Message):
-    __slots__ = ("request_id", "reason", "refusal")
+    __slots__ = ("request_id", "reason", "refusal", "retry_after_seconds")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     REFUSAL_FIELD_NUMBER: _ClassVar[int]
+    RETRY_AFTER_SECONDS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     reason: CredentialBridgeFailureReason
     refusal: CredentialBridgeRefusal
-    def __init__(self, request_id: _Optional[str] = ..., reason: _Optional[_Union[CredentialBridgeFailureReason, str]] = ..., refusal: _Optional[_Union[CredentialBridgeRefusal, str]] = ...) -> None: ...
+    retry_after_seconds: int
+    def __init__(self, request_id: _Optional[str] = ..., reason: _Optional[_Union[CredentialBridgeFailureReason, str]] = ..., refusal: _Optional[_Union[CredentialBridgeRefusal, str]] = ..., retry_after_seconds: _Optional[int] = ...) -> None: ...
 
 class CredentialBridgeUpgradeAccepted(_message.Message):
     __slots__ = ("request_id", "headers")

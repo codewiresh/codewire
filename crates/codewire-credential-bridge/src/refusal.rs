@@ -21,6 +21,9 @@ pub fn refusal_response(
     for (name, value) in refusal.headers() {
         response = response.header(name, value);
     }
+    if let Some(seconds) = refusal.retry_after_seconds() {
+        response = response.header("retry-after", seconds.to_string());
+    }
     response
         .body(Body::from(refusal.body(provider, host)))
         .expect("a refusal response is valid")
@@ -29,8 +32,10 @@ pub fn refusal_response(
 /// The refusal a host's failure frame stands for, or `None` for a frame
 /// with no valid failure reason. A frame without a refusal comes from an
 /// older broker and is answered from its reason alone; a refusal this guest
-/// doesn't know comes from a newer one and reads as `unavailable`.
-pub(crate) fn from_failure(reason: i32, refusal: i32) -> Option<Refusal> {
+/// doesn't know comes from a newer one and reads as `unavailable`. A rate
+/// limit's wait outside 60 to 600 seconds, or none, reads as `unavailable`
+/// too (#4975).
+pub(crate) fn from_failure(reason: i32, refusal: i32, retry_after_seconds: u32) -> Option<Refusal> {
     use v1::CredentialBridgeFailureReason as Reason;
     use v1::CredentialBridgeRefusal as Wire;
 
@@ -52,6 +57,12 @@ pub(crate) fn from_failure(reason: i32, refusal: i32) -> Option<Refusal> {
         Ok(Wire::CredentialNeedsReconnect) => Refusal::CredentialNeedsReconnect,
         Ok(Wire::NoCredentialSelected) => Refusal::NoCredentialSelected,
         Ok(Wire::CredentialUnavailable) => Refusal::CredentialUnavailable,
+        Ok(Wire::CredentialRefreshRateLimited) => match u16::try_from(retry_after_seconds) {
+            Ok(seconds @ 60..=600) => Refusal::CredentialRefreshRateLimited {
+                retry_after_seconds: seconds,
+            },
+            _ => Refusal::CredentialUnavailable,
+        },
         Ok(Wire::CredentialConflict) => Refusal::CredentialConflict,
         Ok(Wire::PathNotServed) => Refusal::PathNotServed,
         Ok(Wire::WebsocketNotServed) => Refusal::WebsocketNotServed,

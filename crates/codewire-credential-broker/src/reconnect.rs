@@ -21,6 +21,9 @@ pub(crate) fn refusal_response(refusal: Refusal, slot: &CapabilitySlot) -> Broke
             HeaderValue::from_static(value),
         );
     }
+    if let Some(seconds) = refusal.retry_after_seconds() {
+        headers.insert(http::header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
     let body = Bytes::from(refusal.body(RefusalProvider::for_slot(slot.as_str()), None));
     BrokerHttpResponse::new(
         StatusCode::from_u16(refusal.status()).expect("every refusal status is a valid status"),

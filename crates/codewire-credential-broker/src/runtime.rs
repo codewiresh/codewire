@@ -46,7 +46,7 @@ use crate::github_app::{
 use crate::network::RouteHost;
 use crate::openai::OpenAiChatGptOAuthAdapter;
 use crate::provider_oauth::{CODEX_OAUTH_CLIENT_ID, OPENAI_TOKEN_URL};
-use crate::refresh_failure::{ProviderRejection, RefreshFailure};
+use crate::refresh_failure::{ProviderRejection, RefreshFailure, rate_limited_refusal};
 use crate::timing::{self, Phase};
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
@@ -1026,8 +1026,7 @@ impl BrokerRequestError {
             Self::NotSelected => Refusal::NoCredentialSelected,
             Self::NameNotAllowed => Refusal::NameNotAllowed,
             Self::SelectedCredentialOnly => Refusal::SelectedCredentialOnly,
-            // Its own 429 and Retry-After follow (#4975 part C3).
-            Self::RefreshRateLimited { .. } => Refusal::CredentialUnavailable,
+            Self::RefreshRateLimited { wait_seconds } => rate_limited_refusal(*wait_seconds),
         }
     }
 }
@@ -4684,10 +4683,22 @@ mod tests {
             Some(BrokerRequestError::RefreshRateLimited { wait_seconds: 120 })
         );
         assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
-        // Never Reconnect: it reads as the credential being unavailable.
+        // Never Reconnect: its own 429, with the wait.
         assert_eq!(
             BrokerRequestError::RefreshRateLimited { wait_seconds: 120 }.refusal(),
-            Refusal::CredentialUnavailable
+            Refusal::CredentialRefreshRateLimited {
+                retry_after_seconds: 120
+            }
+        );
+        // A wait outside the bounds is clamped before it reaches the guest.
+        assert_eq!(
+            BrokerRequestError::RefreshRateLimited {
+                wait_seconds: 5_000
+            }
+            .refusal(),
+            Refusal::CredentialRefreshRateLimited {
+                retry_after_seconds: 600
+            }
         );
     }
 

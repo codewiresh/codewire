@@ -367,6 +367,7 @@ async fn out_of_order_or_unknown_host_frames_fail_closed() {
                     request_id: id.clone(),
                     reason: 0,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             )),
             7 => Some(HostPayload::ResponseStart(
@@ -474,6 +475,7 @@ async fn cancelled_guest_request_tolerates_late_host_frames_without_detaching_br
                     request_id: request.request_id,
                     reason: v1::CredentialBridgeFailureReason::Denied as i32,
                     refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    ..Default::default()
                 },
             ))
             .await;
@@ -525,6 +527,7 @@ async fn a_hosts_refusal_reaches_the_agent_readable_and_echoes_nothing() {
                     request_id: request.request_id,
                     reason: v1::CredentialBridgeFailureReason::Denied as i32,
                     refusal: wire as i32,
+                    ..Default::default()
                 },
             ))
             .await;
@@ -589,6 +592,7 @@ async fn gits_route_keeps_its_statuses_and_a_short_body() {
                     request_id: request.request_id,
                     reason: reason as i32,
                     refusal: refusal as i32,
+                    ..Default::default()
                 },
             ))
             .await;
@@ -620,6 +624,7 @@ async fn a_failure_after_the_response_started_adds_no_refusal_body() {
                 request_id: request.request_id.clone(),
                 reason: v1::CredentialBridgeFailureReason::Denied as i32,
                 refusal: v1::CredentialBridgeRefusal::CredentialNeedsReconnect as i32,
+                ..Default::default()
             },
         ))
         .await;
@@ -824,6 +829,7 @@ async fn pending_request_limit_includes_cancelled_requests_until_terminal_frame(
                 request_id: cancelled.request_id,
                 reason: v1::CredentialBridgeFailureReason::Denied as i32,
                 refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                ..Default::default()
             },
         ))
         .await;
@@ -1228,6 +1234,7 @@ async fn draining_tombstones_hold_the_shared_budget_until_answered_or_lost() {
                 request_id: answered.request_id,
                 reason: v1::CredentialBridgeFailureReason::Denied as i32,
                 refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                ..Default::default()
             },
         ))
         .await;
@@ -1320,6 +1327,7 @@ async fn a_frame_for_the_other_epochs_request_ends_only_its_sender() {
             request_id: id.to_owned(),
             reason: v1::CredentialBridgeFailureReason::Denied as i32,
             refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+            ..Default::default()
         })
     };
     for frame in ["start", "end", "failure"] {

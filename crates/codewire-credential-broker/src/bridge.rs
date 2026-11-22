@@ -35,8 +35,6 @@ mod ssh;
 mod websocket;
 mod wire_refusal;
 
-use wire_refusal::wire_refusal;
-
 #[cfg(test)]
 pub(crate) use front_door::FrontDoorExecutor;
 pub use front_door::{
@@ -1287,15 +1285,10 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
     request_id: String,
     error: BrokerRequestError,
 ) -> Result<(), ()> {
-    let reason = wire_refusal::failure_reason(error);
     sender
         .send(
             v1::credential_bridge_host_message::Payload::ResponseFailure(
-                v1::CredentialBridgeResponseFailure {
-                    request_id,
-                    reason: reason as i32,
-                    refusal: wire_refusal(error.refusal()) as i32,
-                },
+                wire_refusal::failure_frame(request_id, error),
             ),
         )
         .await
@@ -1431,6 +1424,7 @@ pub(crate) mod tests {
                             request_id: "request".into(),
                             reason: reason as i32,
                             refusal: refusal as i32,
+                            ..Default::default()
                         }
                     )
                 ),
