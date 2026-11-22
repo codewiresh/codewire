@@ -80,9 +80,15 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     }
     // Only a cloud sandbox stops itself for being idle (#3384).
     if environment.environment_type == "sandbox" {
+        let unenforced = super::idle_stop::unenforced_note(environment).is_some();
         output.push_str(&format!(
-            "IdleStop:      {}\n",
-            codewire_project::format_idle_stop(environment.idle_stop_seconds)
+            "IdleStop:      {}{}\n",
+            codewire_project::format_idle_stop(environment.idle_stop_seconds),
+            if unenforced {
+                " (not enforced on this server)"
+            } else {
+                ""
+            }
         ));
     }
     if let Some(shutdown_at) = environment.shutdown_at.as_deref().and_then(trimmed_str) {

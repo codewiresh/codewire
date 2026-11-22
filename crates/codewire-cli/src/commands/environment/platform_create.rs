@@ -152,6 +152,7 @@ pub(super) async fn handle_platform_env_create(
             );
         }
     }
+    super::idle_stop::note_after_create(&environment, args.output);
     Ok(Some(environment))
 }
 

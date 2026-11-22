@@ -110,6 +110,8 @@ export interface EnvironmentData {
   id: string;
   /** Seconds with no activity after which it stops itself; 0 is off (#3384). */
   idle_stop_seconds?: number | null;
+  /** Whether the server stops idle environments; when false the timeout is kept, not enforced. */
+  idle_stop_enforced?: boolean;
   isolation_tier: IsolationTier;
   memory_mb: number;
   name?: string | null;

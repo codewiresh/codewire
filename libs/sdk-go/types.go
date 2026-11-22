@@ -135,6 +135,10 @@ type EnvironmentData struct {
 	// IdleStopSeconds is how long it may have no activity before it is
 	// stopped, keeping its disk; 0 never.
 	IdleStopSeconds int64 `json:"idle_stop_seconds"`
+	// IdleStopEnforced is whether the server stops idle environments; when
+	// false the timeout is kept but not enforced.
+	// Nil from a server older than the field.
+	IdleStopEnforced *bool `json:"idle_stop_enforced,omitempty"`
 	// StopReason says why a stopped environment was stopped: user, credit or idle.
 	StopReason          *string                     `json:"stop_reason,omitempty"`
 	SourceSelection     *EnvironmentSourceSelection `json:"source_selection,omitempty"`

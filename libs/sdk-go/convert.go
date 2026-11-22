@@ -733,8 +733,8 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		CreatedBy: environment.GetCreatedBy(), DeletionGraceUntil: deletionGraceUntil,
 		DeletionRequestedAt: deletionRequestedAt, DesiredState: environmentDesiredState(environment.GetDesiredState()),
 		DestroyedAt: destroyedAt, DiskGb: int64(environment.GetDiskGb()), ErrorCode: stringPointer(environment.GetErrorCode()), ErrorReason: stringPointer(environment.GetErrorReason()), StopReason: stringPointer(environment.GetStopReason()),
-		IdleStopSeconds: int64(environment.GetIdleStopSeconds()),
-		Id:              environment.GetId(), IsolationTier: isolation,
+		IdleStopSeconds: int64(environment.GetIdleStopSeconds()), IdleStopEnforced: environment.IdleStopEnforced,
+		Id: environment.GetId(), IsolationTier: isolation,
 		MemoryMb: int64(environment.GetMemoryMb()), Name: stringPointer(environment.GetName()),
 		Network: stringPointer(environment.GetNetwork()), OrgId: environment.GetOrgId(), Ports: ports,
 		NetworkState:        networkAttachmentState(environment.GetNetworkState()),
@@ -1195,7 +1195,7 @@ func ensureEnvironmentConverterCoverage() error {
 		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
 		environmentCoverageErr = ensureDescriptorCoverage("environment", messages.ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
-			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code", 38: "network_policy", 39: "stop_reason", 40: "idle_stop_seconds",
+			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code", 38: "network_policy", 39: "stop_reason", 40: "idle_stop_seconds", 41: "idle_stop_enforced",
 		})
 		if environmentCoverageErr != nil {
 			return

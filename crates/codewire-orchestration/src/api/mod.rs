@@ -72,6 +72,8 @@ use kube::Client as KubeClient;
 pub struct ApiState {
     /// Whether creates and starts are refused without compute credit.
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    /// Whether idle Sandboxes are stopped, which environments report (#3384).
+    pub idle_stop: crate::worker::idle_stop::IdleStop,
     pub pool: PgPool,
     /// PREVIEW_BASE_DOMAIN, for port preview URLs (Go:
     /// cfg.PreviewBaseDomain).

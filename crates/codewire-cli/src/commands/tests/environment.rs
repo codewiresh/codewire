@@ -16,7 +16,10 @@ fn removing_the_selected_local_vm_clears_the_selection_and_selects_nothing_else(
     };
     config::selection::save(data.path(), &selected).unwrap();
     assert!(!super::environment::clear_removed_local_selection(data.path(), "other-vm").unwrap());
-    assert_eq!(config::selection::load(data.path()).unwrap(), Some(selected));
+    assert_eq!(
+        config::selection::load(data.path()).unwrap(),
+        Some(selected)
+    );
     assert!(super::environment::clear_removed_local_selection(data.path(), "deleted-vm").unwrap());
     assert_eq!(config::selection::load(data.path()).unwrap(), None);
     assert_eq!(
@@ -101,8 +104,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         "json",
     ])
     .unwrap();
-    let (local, platform, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let (local, platform, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected local env create command");
     };
     assert!(local);
@@ -149,7 +151,10 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
     // The one global placement pair, before or after the command.
     for argv in [["cw", "--cloud", "ls"], ["cw", "ls", "--cloud"]] {
         let cli = Cli::try_parse_from(argv).unwrap();
-        assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Platform));
+        assert_eq!(
+            cli.placement().unwrap(),
+            Some(EnvironmentPlacement::Platform)
+        );
         assert!(matches!(cli.command, Command::Ls(_)));
     }
     for argv in [
@@ -190,8 +195,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         "--yes",
     ])
     .unwrap();
-    let (local, platform, EnvCommand::Resize(args)) = env_operation(cli)
-    else {
+    let (local, platform, EnvCommand::Resize(args)) = env_operation(cli) else {
         panic!("expected local env resize command");
     };
     assert!(local);
@@ -227,7 +231,10 @@ fn resize_quantity_and_automation_validation_is_human_safe() {
     assert!(parse_resize_cpu("1.2345").is_err());
     assert_eq!(parse_resize_cpu("256").unwrap(), 256_000);
     let error = parse_resize_cpu("2000").unwrap_err().to_string();
-    assert!(error.contains("CPU is in cores") && error.contains("use 2,"), "{error}");
+    assert!(
+        error.contains("CPU is in cores") && error.contains("use 2,"),
+        "{error}"
+    );
     let error = parse_resize_cpu("1500").unwrap_err().to_string();
     assert!(error.contains("use 1500m"), "{error}");
     assert_eq!(parse_resize_memory("512Mi").unwrap(), 512);
@@ -506,17 +513,27 @@ fn a_selected_policy_says_what_its_enforcement_means() {
     };
     assert_eq!(
         policy_selection_notice("web", "app", Some(&policy("not_enforced"))).as_deref(),
-        Some("Network policy web is not enforced yet: this environment's outbound connections are not restricted.")
+        Some(
+            "Network policy web is not enforced yet: this environment's outbound connections are not restricted."
+        )
     );
     assert_eq!(
         policy_selection_notice("platform:web", "app", Some(&policy("enforcing"))).as_deref(),
-        Some("Network policy web is being applied: until it is, the environment's previous policy applies.")
+        Some(
+            "Network policy web is being applied: until it is, the environment's previous policy applies."
+        )
     );
     assert_eq!(
-        policy_selection_notice("platform:id:6f1c", "app", Some(&policy("failed_closed"))).as_deref(),
-        Some("Network policy web couldn't be confirmed as enforced: this environment's outbound connections are refused until it is.")
+        policy_selection_notice("platform:id:6f1c", "app", Some(&policy("failed_closed")))
+            .as_deref(),
+        Some(
+            "Network policy web couldn't be confirmed as enforced: this environment's outbound connections are refused until it is."
+        )
     );
-    assert_eq!(policy_selection_notice("web", "app", Some(&policy("enforced"))), None);
+    assert_eq!(
+        policy_selection_notice("web", "app", Some(&policy("enforced"))),
+        None
+    );
 }
 
 #[test]
@@ -534,15 +551,16 @@ fn a_policy_the_server_did_not_record_is_said_plainly() {
         enforcement: "not_enforced".into(),
         ..Default::default()
     };
-    assert_eq!(policy_selection_notice("web", "app", Some(&other)), not_recorded);
+    assert_eq!(
+        policy_selection_notice("web", "app", Some(&other)),
+        not_recorded
+    );
 }
 
 #[test]
 fn platform_create_rejects_native_only_options() {
-    let cli =
-        Cli::try_parse_from(["cw", "--cloud", "create", "--backend", "native"]).unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let cli = Cli::try_parse_from(["cw", "--cloud", "create", "--backend", "native"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected platform environment create");
     };
     assert_eq!(
@@ -560,24 +578,15 @@ fn platform_create_rejects_native_only_options() {
         "user/work",
     ])
     .unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected native local environment create");
     };
     assert_eq!(args.profile.as_deref(), Some("user/work"));
     #[cfg(target_os = "linux")]
     assert!(native_create_selected(&args).unwrap());
 
-    let cli = Cli::try_parse_from([
-        "cw",
-        "--cloud",
-        "create",
-        "--profile",
-        "user/work",
-    ])
-    .unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let cli = Cli::try_parse_from(["cw", "--cloud", "create", "--profile", "user/work"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected platform environment create");
     };
     reject_local_create_options(&args).unwrap();
@@ -592,9 +601,7 @@ fn platform_create_rejects_native_only_options() {
     );
     assert!(Cli::try_parse_from(["cw", "create", "--access-profile", "work"]).is_err());
 
-    assert!(
-        Cli::try_parse_from(["cw", "create", "--local", "--path-mode", "direct",]).is_err()
-    );
+    assert!(Cli::try_parse_from(["cw", "create", "--local", "--path-mode", "direct",]).is_err());
 }
 
 /// #2537: an empty `--policy` is refused at parsing, so the create review
@@ -635,7 +642,11 @@ fn use_parser_accepts_explicit_environment_placement() {
     let cli = Cli::try_parse_from(["cw", "--cloud", "use", "--local", "workbench"]).unwrap();
     assert!(cli.placement().is_err());
     // Without ENV, `cw use` opens the picker; placement filters it.
-    for argv in [vec!["cw", "use"], vec!["cw", "--cloud", "use"], vec!["cw", "use", "--local"]] {
+    for argv in [
+        vec!["cw", "use"],
+        vec!["cw", "--cloud", "use"],
+        vec!["cw", "use", "--local"],
+    ] {
         let cli = Cli::try_parse_from(argv).unwrap();
         let Command::Use(UseTargetArgs { target }) = cli.command else {
             panic!("expected use command");
@@ -825,10 +836,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
         "https://github.com/codewiresh/codewire"
     );
     assert_eq!(spec.repositories[0].branch, "main");
-    assert_eq!(
-        spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert_eq!(spec.install_command, "go mod download");
     assert_eq!(spec.startup_script, "go test ./...");
     assert_eq!(spec.environment["FOO"], "bar");
@@ -883,8 +891,7 @@ credentials: {profile: platform:user/work}
         "--env=LOG_LEVEL=debug",
     ])
     .unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("create");
     };
     reject_local_create_options(&args).unwrap();
@@ -923,8 +930,7 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
         "--user-secrets=local",
     ] {
         let cli = Cli::try_parse_from(["cw", "create", selection]).unwrap();
-        let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-        else {
+        let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
             panic!("create");
         };
         assert!(
@@ -941,10 +947,8 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
         "credentials: {profile: local:work}\n",
     ] {
         fs::write(&file, yaml).unwrap();
-        let cli =
-            Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
-        let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-        else {
+        let cli = Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
+        let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
             panic!("create");
         };
         assert!(
@@ -957,15 +961,16 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
         " ".repeat(codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1),
     )
     .unwrap();
-    let cli =
-        Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
-    else {
+    let cli = Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("create");
     };
     assert!(
-        format!("{:#}", prepare_platform_env_create_request(&args).unwrap_err())
-            .contains("maximum")
+        format!(
+            "{:#}",
+            prepare_platform_env_create_request(&args).unwrap_err()
+        )
+        .contains("maximum")
     );
 }
 
@@ -989,10 +994,7 @@ fn env_create_preset_authoring_flags_do_not_block_request_resolution() {
 
     assert!(args.write_preset);
     assert_eq!(args.save_preset.as_deref(), Some("Fullstack Dev"));
-    assert_eq!(
-        request.project_spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(request.project_spec.image, CANONICAL_WORKSPACE_IMAGE);
 }
 
 #[test]
@@ -1004,10 +1006,7 @@ fn env_create_bare_defaults_to_workspace_image() {
 
     let request = prepare_platform_env_create_request(&args).unwrap();
 
-    assert_eq!(
-        request.project_spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(request.project_spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert!(request.preset_id.is_none());
     assert!(request.project_spec.preset.is_empty());
     assert!(request.project_spec.repositories.is_empty());
@@ -1089,12 +1088,8 @@ fn env_create_explicit_sources_do_not_add_the_default_image() {
     assert_eq!(request.preset_id.as_deref(), Some("preset_123"));
     assert!(request.project_spec.image.is_empty());
 
-    let cli = Cli::try_parse_from([
-        "cw",
-        "create",
-        "https://github.com/codewiresh/codewire",
-    ])
-    .unwrap();
+    let cli =
+        Cli::try_parse_from(["cw", "create", "https://github.com/codewiresh/codewire"]).unwrap();
     let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
@@ -1184,10 +1179,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
     let yaml = fs::read_to_string(&path).unwrap();
     let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
     let spec = parsed.spec;
-    assert_eq!(
-        spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert_eq!(spec.install_command, "pnpm install");
     assert_eq!(spec.startup_script, "pnpm dev");
     assert_eq!(spec.environment["FOO"], "bar");
@@ -1412,7 +1404,7 @@ fn normalize_git_url_matches_go_helper() {
 #[test]
 fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
     let project_spec = codewire_project::parse_project_yaml(
-                &r#"
+        &r#"
     version: 1
     image: CANONICAL_WORKSPACE_IMAGE
     repositories:
@@ -1436,10 +1428,11 @@ fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
     disk: "40Gi"
     secrets: {project: prod, organization: true, user: platform}
     credentials: {profile: platform:user/work}
-    "#.replace("CANONICAL_WORKSPACE_IMAGE", CANONICAL_WORKSPACE_IMAGE),
-            )
-            .unwrap()
-            .spec;
+    "#
+        .replace("CANONICAL_WORKSPACE_IMAGE", CANONICAL_WORKSPACE_IMAGE),
+    )
+    .unwrap()
+    .spec;
     let request = CreateEnvironmentRequest {
         name: Some("must-not-enter-codewire-yaml".to_string()),
         ttl_seconds: Some(7_200),
@@ -1465,21 +1458,18 @@ fn write_resolved_codewire_yaml_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested/codewire.yaml");
     let request = CreateEnvironmentRequest {
-                project_spec: codewire_project::ProjectSpec {
-                    image: CANONICAL_WORKSPACE_IMAGE.to_string(),
-                    install_command: "go mod download".to_string(),
-                    ..Default::default()
-                },
-                ..CreateEnvironmentRequest::default()
-            };
+        project_spec: codewire_project::ProjectSpec {
+            image: CANONICAL_WORKSPACE_IMAGE.to_string(),
+            install_command: "go mod download".to_string(),
+            ..Default::default()
+        },
+        ..CreateEnvironmentRequest::default()
+    };
 
     write_resolved_codewire_yaml(&path, &request).unwrap();
 
     let parsed = config::load_project_document(&path).unwrap();
-    assert_eq!(
-        parsed.spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(parsed.spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert_eq!(parsed.spec.install_command, "go mod download");
     assert!(!parsed.spec.secrets.organization);
     assert!(parsed.spec.secrets.user.is_none());
@@ -1488,36 +1478,36 @@ fn write_resolved_codewire_yaml_creates_parent_dirs() {
 #[test]
 fn create_preset_request_from_environment_copies_one_canonical_spec() {
     let request = CreateEnvironmentRequest {
-                ttl_seconds: Some(3600),
-                project_spec: codewire_project::ProjectSpec {
-                    preset: "base".to_string(),
-                    image: CANONICAL_WORKSPACE_IMAGE.to_string(),
-                    install_command: "bun install".to_string(),
-                    startup_script: "bun dev".to_string(),
-                    environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
-                    agents: codewire_project::AgentsSpec {
-                        install: Some(true),
-                        tools: vec!["claude-code".to_string()],
-                    },
-                    application_ports: vec![codewire_project::ApplicationPort {
-                        port: 8080,
-                        label: "web".to_string(),
-                        access: "public".to_string(),
-                    }],
-                    resources: codewire_project::ResourceSpec {
-                        cpu_millicores: Some(2000),
-                        memory_mib: Some(4096),
-                        disk_gib: Some(40),
-                    },
-                    secrets: codewire_project::SecretBindings {
-                        project: "prod".to_string(),
-                        user: Some(codewire_project::StoragePlacement::Platform),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                ..CreateEnvironmentRequest::default()
-            };
+        ttl_seconds: Some(3600),
+        project_spec: codewire_project::ProjectSpec {
+            preset: "base".to_string(),
+            image: CANONICAL_WORKSPACE_IMAGE.to_string(),
+            install_command: "bun install".to_string(),
+            startup_script: "bun dev".to_string(),
+            environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
+            agents: codewire_project::AgentsSpec {
+                install: Some(true),
+                tools: vec!["claude-code".to_string()],
+            },
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 8080,
+                label: "web".to_string(),
+                access: "public".to_string(),
+            }],
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2000),
+                memory_mib: Some(4096),
+                disk_gib: Some(40),
+            },
+            secrets: codewire_project::SecretBindings {
+                project: "prod".to_string(),
+                user: Some(codewire_project::StoragePlacement::Platform),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..CreateEnvironmentRequest::default()
+    };
 
     let preset = create_preset_request_from_environment("Fullstack Dev!", &request).unwrap();
 
@@ -1526,10 +1516,7 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
     assert_eq!(preset.default_ttl_seconds, Some(3600));
     assert!(preset.project_spec.preset.is_empty());
     assert_eq!(preset.project_spec.resources.cpu_millicores, Some(2000));
-    assert_eq!(
-        preset.project_spec.image,
-        CANONICAL_WORKSPACE_IMAGE
-    );
+    assert_eq!(preset.project_spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert_eq!(preset.project_spec.environment["FOO"], "bar");
     assert_eq!(preset.project_spec.agents.tools, ["claude-code"]);
     assert_eq!(preset.project_spec.application_ports[0].port, 8080);
@@ -1704,17 +1691,34 @@ fn env_create_sends_the_idle_stop_from_the_file_or_the_flag() {
     let from_file = request(&[]).unwrap();
     assert_eq!(from_file.idle_stop_seconds, Some(7200));
     assert_eq!(from_file.project_spec.image, "workspace");
-    assert_eq!(request(&["--idle-stop", "30m"]).unwrap().idle_stop_seconds, Some(1800));
-    assert_eq!(request(&["--idle-stop", "off"]).unwrap().idle_stop_seconds, Some(0));
-    assert_eq!(request(&["--idle-stop", "on"]).unwrap().idle_stop_seconds, Some(6 * 3600));
+    assert_eq!(
+        request(&["--idle-stop", "30m"]).unwrap().idle_stop_seconds,
+        Some(1800)
+    );
+    assert_eq!(
+        request(&["--idle-stop", "off"]).unwrap().idle_stop_seconds,
+        Some(0)
+    );
+    assert_eq!(
+        request(&["--idle-stop", "on"]).unwrap().idle_stop_seconds,
+        Some(6 * 3600)
+    );
     let error = format!("{:#}", request(&["--idle-stop", "1m"]).unwrap_err());
-    assert!(error.contains("invalid --idle-stop") && error.contains("from 5m to 7d"), "{error}");
+    assert!(
+        error.contains("invalid --idle-stop") && error.contains("from 5m to 7d"),
+        "{error}"
+    );
 
     let cli = Cli::try_parse_from(["cw", "create", "--image", "workspace"]).unwrap();
     let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
-    assert_eq!(env_create_request_from_args(&args).unwrap().idle_stop_seconds, None);
+    assert_eq!(
+        env_create_request_from_args(&args)
+            .unwrap()
+            .idle_stop_seconds,
+        None
+    );
 }
 
 #[test]
@@ -1748,8 +1752,7 @@ fn platform_project_boundary_rejects_all_reserved_runtime_environment_keys() {
         assert_eq!(spec.validate().unwrap_err().to_string(), expected);
 
         let value = format!("{key}=synthetic");
-        let cli =
-            Cli::try_parse_from(["cw", "create", "--no-network", "--env", &value]).unwrap();
+        let cli = Cli::try_parse_from(["cw", "create", "--no-network", "--env", &value]).unwrap();
         let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
             panic!("expected env create command");
         };
@@ -1815,10 +1818,19 @@ fn a_cloud_create_refuses_a_local_network_and_conflicting_flags() {
     )
     .unwrap_err()
     .to_string();
-    assert!(local.contains("cannot join the local Mesh service"), "{local}");
+    assert!(
+        local.contains("cannot join the local Mesh service"),
+        "{local}"
+    );
     assert!(
         resolve_env_create_mesh_bootstrap(
-            &paths, &env, &platform, "org-alpha", true, Some("dev"), true,
+            &paths,
+            &env,
+            &platform,
+            "org-alpha",
+            true,
+            Some("dev"),
+            true,
         )
         .is_err()
     );
@@ -1827,7 +1839,10 @@ fn a_cloud_create_refuses_a_local_network_and_conflicting_flags() {
     let early = refuse_requested_cloud_mesh(Some("local:dev"), false)
         .unwrap_err()
         .to_string();
-    assert!(early.contains("cannot join the local Mesh service"), "{early}");
+    assert!(
+        early.contains("cannot join the local Mesh service"),
+        "{early}"
+    );
     assert!(refuse_requested_cloud_mesh(Some("cloud:work"), false).is_ok());
     assert!(refuse_requested_cloud_mesh(Some("work"), false).is_ok());
     assert!(refuse_requested_cloud_mesh(Some("cloud:work"), true).is_err());
@@ -1969,9 +1984,8 @@ fn env_create_text_is_the_lifecycle_summary() {
         )
     );
     // Without --wait, readiness is not observed: the result is pending.
-    let pending =
-        lifecycle::cloud_summary(&environment, crate::output::Outcome::Creating, &names)
-            .render(plain);
+    let pending = lifecycle::cloud_summary(&environment, crate::output::Outcome::Creating, &names)
+        .render(plain);
     assert!(pending.starts_with("! Environment builder is being created · cloud VM\n"));
     assert!(pending.ends_with("→ cw --cloud info builder\n"));
 }
@@ -1987,8 +2001,14 @@ fn env_lifecycle_parsers_accept_targets_and_output() {
 
     // Without --session, stop and restart name a whole environment.
     for (argv, expected) in [
-        (vec!["cw", "restart", "--local", "builder", "--output", "json"], "restart"),
-        (vec!["cw", "--local", "stop", "--in", "builder", "-o", "json"], "stop"),
+        (
+            vec!["cw", "restart", "--local", "builder", "--output", "json"],
+            "restart",
+        ),
+        (
+            vec!["cw", "--local", "stop", "--in", "builder", "-o", "json"],
+            "stop",
+        ),
     ] {
         let cli = Cli::try_parse_from(argv).unwrap();
         assert!(cli.local);
@@ -2001,7 +2021,10 @@ fn env_lifecycle_parsers_accept_targets_and_output() {
             other => panic!("expected {expected}, got {other:?}"),
         };
         assert_eq!(
-            scope.environment.as_deref().or(scope.in_environment.as_deref()),
+            scope
+                .environment
+                .as_deref()
+                .or(scope.in_environment.as_deref()),
             Some("builder")
         );
         assert_eq!(scope.session, None);
@@ -2053,12 +2076,9 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
         "the self-contained binary must retain only its private hosted daemon entrypoint"
     );
 
-    let cli = Cli::try_parse_from([
-        "cw", "daemon", "status", "builder", "--output", "json",
-    ])
-    .unwrap();
-    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
-    else {
+    let cli =
+        Cli::try_parse_from(["cw", "daemon", "status", "builder", "--output", "json"]).unwrap();
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli) else {
         panic!("expected env daemon command");
     };
     let EnvDaemonCommand::Status(args) = args.command else {
@@ -2068,8 +2088,7 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
     assert!(matches!(args.output, OutputFormat::Json));
 
     let cli = Cli::try_parse_from(["cw", "daemon", "logs", "builder"]).unwrap();
-    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
-    else {
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli) else {
         panic!("expected env daemon command");
     };
     let EnvDaemonCommand::Logs(args) = args.command else {
@@ -2078,15 +2097,13 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
     assert_eq!(args.environment.as_deref(), Some("builder"));
 
     let cli = Cli::try_parse_from(["cw", "daemon", "repair", "builder"]).unwrap();
-    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
-    else {
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli) else {
         panic!("expected env daemon command");
     };
     assert!(matches!(args.command, EnvDaemonCommand::Repair(_)));
 
     let cli = Cli::try_parse_from(["cw", "--local", "daemon", "status"]).unwrap();
-    let (local, _, EnvCommand::Daemon(args)) = env_operation(cli)
-    else {
+    let (local, _, EnvCommand::Daemon(args)) = env_operation(cli) else {
         panic!("expected selected local daemon command");
     };
     assert!(local);
@@ -2201,10 +2218,8 @@ fn env_protection_parsers_accept_targets_and_hours() {
 
 #[test]
 fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
-    let cli = Cli::try_parse_from([
-        "cw", "--local", "access", "builder", "--output", "json",
-    ])
-    .unwrap();
+    let cli =
+        Cli::try_parse_from(["cw", "--local", "access", "builder", "--output", "json"]).unwrap();
     let (_, _, EnvCommand::Access(args)) = env_operation(cli) else {
         panic!("expected env access command");
     };
@@ -2248,13 +2263,7 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     }
 
     let cli = Cli::try_parse_from([
-        "cw",
-        "--cloud",
-        "share",
-        "list",
-        "builder",
-        "--output",
-        "json",
+        "cw", "--cloud", "share", "list", "builder", "--output", "json",
     ])
     .unwrap();
     let (local, platform, EnvCommand::Share(args)) = env_operation(cli) else {
@@ -2289,10 +2298,8 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert_eq!(args.user, "user-2");
     assert_eq!(args.permission, "operator");
 
-    let cli = Cli::try_parse_from([
-        "cw", "share", "revoke", "builder", "--user", "user-2",
-    ])
-    .unwrap();
+    let cli =
+        Cli::try_parse_from(["cw", "share", "revoke", "builder", "--user", "user-2"]).unwrap();
     let (_, _, EnvCommand::Share(args)) = env_operation(cli) else {
         panic!("expected env share command");
     };
@@ -2329,8 +2336,17 @@ async fn env_share_rejects_local_before_platform_resolution() {
 #[test]
 fn ports_parser_lists_publishes_and_unpublishes_one_port() {
     let cli = Cli::try_parse_from([
-        "cw", "ports", "builder", "--publish", "3000", "--label", "web", "--access", "public",
-        "--output", "json",
+        "cw",
+        "ports",
+        "builder",
+        "--publish",
+        "3000",
+        "--label",
+        "web",
+        "--access",
+        "public",
+        "--output",
+        "json",
     ])
     .unwrap();
     let Command::Ports(args) = cli.command else {
@@ -2344,8 +2360,27 @@ fn ports_parser_lists_publishes_and_unpublishes_one_port() {
     assert!(matches!(args.output, OutputFormat::Json));
 
     for argv in [
-        vec!["cw", "--local", "ports", "web", "--publish", "47321", "--host-port", "18080"],
-        vec!["cw", "ports", "--in", "web", "--publish", "47321", "--host-port", "18080", "--local"],
+        vec![
+            "cw",
+            "--local",
+            "ports",
+            "web",
+            "--publish",
+            "47321",
+            "--host-port",
+            "18080",
+        ],
+        vec![
+            "cw",
+            "ports",
+            "--in",
+            "web",
+            "--publish",
+            "47321",
+            "--host-port",
+            "18080",
+            "--local",
+        ],
     ] {
         let cli = Cli::try_parse_from(argv).unwrap();
         assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Local));
@@ -2353,19 +2388,45 @@ fn ports_parser_lists_publishes_and_unpublishes_one_port() {
             panic!("expected ports command");
         };
         assert_eq!(
-            args.environment.as_deref().or(args.in_environment.as_deref()),
+            args.environment
+                .as_deref()
+                .or(args.in_environment.as_deref()),
             Some("web")
         );
         assert_eq!(args.publish, Some(47_321));
         assert_eq!(args.host_port, Some(18_080));
     }
     for invalid in [
-        vec!["cw", "ports", "web", "--publish", "47321", "--host-port", "0"],
+        vec![
+            "cw",
+            "ports",
+            "web",
+            "--publish",
+            "47321",
+            "--host-port",
+            "0",
+        ],
         vec!["cw", "ports", "web", "--publish", "0"],
-        vec!["cw", "ports", "web", "--publish", "3000", "--unpublish", "3000"],
+        vec![
+            "cw",
+            "ports",
+            "web",
+            "--publish",
+            "3000",
+            "--unpublish",
+            "3000",
+        ],
         vec!["cw", "ports", "web", "--publish", "web"],
         vec!["cw", "ports", "web", "--env", "web"],
-        vec!["cw", "ports", "web", "--unpublish", "3000", "--unpublish", "3001"],
+        vec![
+            "cw",
+            "ports",
+            "web",
+            "--unpublish",
+            "3000",
+            "--unpublish",
+            "3001",
+        ],
     ] {
         assert!(Cli::try_parse_from(invalid.clone()).is_err(), "{invalid:?}");
     }
@@ -2396,7 +2457,15 @@ async fn ports_refuses_combinations_and_ignored_options_before_any_lookup() {
             "--host-port, --label and --access apply to --publish PORT or --unpublish PORT",
         ),
         (
-            vec!["cw", "ports", "web", "--unpublish", "3000", "--access", "public"],
+            vec![
+                "cw",
+                "ports",
+                "web",
+                "--unpublish",
+                "3000",
+                "--access",
+                "public",
+            ],
             "--access applies to --publish; an unpublished port has no access level",
         ),
         (
@@ -2438,7 +2507,9 @@ fn setup_logs_and_session_logs_are_explicit_sources() {
     assert_eq!(args.session.as_deref(), Some("coding"));
     assert!(args.follow && !args.setup);
 
-    assert!(Cli::try_parse_from(["cw", "logs", "builder", "--setup", "--session", "coding"]).is_err());
+    assert!(
+        Cli::try_parse_from(["cw", "logs", "builder", "--setup", "--session", "coding"]).is_err()
+    );
     assert!(Cli::try_parse_from(["cw", "logs", "builder", "--follow=false"]).is_err());
 }
 
@@ -2611,7 +2682,10 @@ fn cloud_unpublish_selects_one_preview_by_guest_port_and_label() {
         preview("port-2", 8080, "api"),
         preview("port-3", 8080, "admin"),
     ];
-    assert_eq!(select_unpublished_preview(&ports, 3000, None).unwrap().id, "port-1");
+    assert_eq!(
+        select_unpublished_preview(&ports, 3000, None).unwrap().id,
+        "port-1"
+    );
     assert_eq!(
         select_unpublished_preview(&ports, 8080, Some("admin"))
             .unwrap()
@@ -2676,15 +2750,33 @@ fn filter_environments_honors_type_state_and_destroyed_default() {
     let environments = vec![running.clone(), stopped, destroyed.clone()];
 
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("running"), false, false),
+        filter_environments(
+            &environments,
+            Some("sandbox"),
+            Some("running"),
+            false,
+            false
+        ),
         vec![running]
     );
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("destroyed"), false, false),
+        filter_environments(
+            &environments,
+            Some("sandbox"),
+            Some("destroyed"),
+            false,
+            false
+        ),
         Vec::<Environment>::new()
     );
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("destroyed"), true, false),
+        filter_environments(
+            &environments,
+            Some("sandbox"),
+            Some("destroyed"),
+            true,
+            false
+        ),
         vec![destroyed]
     );
 }
@@ -2741,7 +2833,10 @@ fn a_failed_create_is_kept_only_for_a_caller_that_asks() {
     assert!(old.failed_create_at(now - chrono::Duration::days(5)));
     let mut erroring = failed.clone();
     erroring.state = "error".into();
-    assert!(!erroring.failed_create(), "not until the platform removed it");
+    assert!(
+        !erroring.failed_create(),
+        "not until the platform removed it"
+    );
 
     let environments = vec![running.clone(), removed, failed.clone()];
     assert_eq!(
@@ -2785,7 +2880,18 @@ fn format_env_info_text_uses_go_style_labels() {
     assert!(text.contains("Protected:     yes\n"));
     assert!(text.contains("IdleStop:      off\n"));
     environment.idle_stop_seconds = 5400;
+    environment.idle_stop_enforced = Some(true);
     assert!(format_env_info_text(&environment).contains("IdleStop:      1h30m\n"));
+    // A server that doesn't stop idle Sandboxes says so (#3384).
+    environment.idle_stop_enforced = Some(false);
+    assert!(
+        format_env_info_text(&environment)
+            .contains("IdleStop:      1h30m (not enforced on this server)\n")
+    );
+    environment.idle_stop_seconds = 0;
+    assert!(format_env_info_text(&environment).contains("IdleStop:      off\n"));
+    environment.idle_stop_seconds = 5400;
+    environment.idle_stop_enforced = Some(true);
     // A local VM is never stopped for being idle, so says nothing of it.
     environment.environment_type = "vm".to_string();
     assert!(!format_env_info_text(&environment).contains("IdleStop"));
@@ -2871,8 +2977,7 @@ fn prepare_platform_env_create_request(
 fn cloud_create_args(argv: &[&str]) -> Box<EnvCreateArgs> {
     let mut full = vec!["cw", "--cloud", "create"];
     full.extend_from_slice(argv);
-    let (_, _, EnvCommand::Create(args)) = env_operation(Cli::try_parse_from(full).unwrap())
-    else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(Cli::try_parse_from(full).unwrap()) else {
         panic!("expected env create command");
     };
     args
@@ -2890,9 +2995,8 @@ fn checkout_with_file(yaml: &str) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn cloud_create_never_reads_the_local_file_and_merges_repeated_files() {
-    let (_temp, root) = checkout_with_file(
-        "version: 1\nimage: workspace\ninstall_command: npm ci\ncpu: \"2\"\n",
-    );
+    let (_temp, root) =
+        checkout_with_file("version: 1\nimage: workspace\ninstall_command: npm ci\ncpu: \"2\"\n");
     fs::write(
         root.join("codewire.local.yaml"),
         "install_command: make local\ncredentials: {profile: \"local:work\"}\n",
@@ -2917,7 +3021,11 @@ fn cloud_create_never_reads_the_local_file_and_merges_repeated_files() {
     let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     assert_eq!(provenance.skipped_local_file, None);
 
-    fs::write(root.join("codewire.ci.yaml"), "install_command: make ci\ncpu: null\n").unwrap();
+    fs::write(
+        root.join("codewire.ci.yaml"),
+        "install_command: make ci\ncpu: null\n",
+    )
+    .unwrap();
     let args = cloud_create_args(&["--file", "codewire.yaml", "--file", "codewire.ci.yaml"]);
     let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
@@ -2931,14 +3039,23 @@ fn cloud_create_never_reads_the_local_file_and_merges_repeated_files() {
             root.join("codewire.ci.yaml").to_string_lossy(),
         ])
     );
-    assert!(Cli::try_parse_from(["cw", "--cloud", "create", "--file", "a.yaml", "--no-local-file"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "cw",
+            "--cloud",
+            "create",
+            "--file",
+            "a.yaml",
+            "--no-local-file"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
 fn cloud_create_ignores_and_names_the_local_path_mode() {
-    let (_temp, root) = checkout_with_file(
-        "version: 1\nimage: workspace\nworkspace:\n  path_mode: mount\n",
-    );
+    let (_temp, root) =
+        checkout_with_file("version: 1\nimage: workspace\nworkspace:\n  path_mode: mount\n");
     let args = cloud_create_args(&["--name", "app-cloud"]);
     let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
     let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
@@ -2958,7 +3075,8 @@ fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
         "version: 1\nimage: ghcr.io/example/workspace:1\ninstall_command: npm ci\nrepositories:\n  - source: https://example.test/org/web.git\n    destination: /workspace/web\n  - source: https://example.test/org/api.git\n    destination: /workspace/api\nworking_directory: /workspace/web\n",
     );
     let args = cloud_create_args(&["--name", "app-cloud"]);
-    let source = project_file::select_from(&root.join("web/src"), &args.file, args.no_file).unwrap();
+    let source =
+        project_file::select_from(&root.join("web/src"), &args.file, args.no_file).unwrap();
     assert_eq!(
         source,
         project_file::ConfigSource::Discovered(root.join("codewire.yaml"))
@@ -2981,7 +3099,11 @@ fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
     assert_eq!(provenance.json()["source"], "discovered");
 
     // --file overrides the search; a missing explicit file is an error.
-    fs::write(root.join("ci.yaml"), "version: 1\ninstall_command: make ci\n").unwrap();
+    fs::write(
+        root.join("ci.yaml"),
+        "version: 1\ninstall_command: make ci\n",
+    )
+    .unwrap();
     let args = cloud_create_args(&["--file", "ci.yaml"]);
     let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
@@ -2996,8 +3118,7 @@ fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
 fn cloud_create_no_file_uses_only_the_flags() {
     let (_temp, root) = checkout_with_file("version: 1\ncpu: \"8\"\nagents: {tools: [codex]}\n");
     let args = cloud_create_args(&["--no-file", "--preset", "rust"]);
-    let source =
-        project_file::select_from(&root.join("web"), &args.file, args.no_file).unwrap();
+    let source = project_file::select_from(&root.join("web"), &args.file, args.no_file).unwrap();
     assert_eq!(source, project_file::ConfigSource::NoFile);
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     // No size flag sends no size, so the platform default applies: 2 vCPU,
@@ -3088,9 +3209,8 @@ fn cloud_create_first_repository_defaults_never_fill_a_selected_file() {
 
 #[test]
 fn cloud_create_accepts_vm_only_and_refuses_other_local_settings_naming_the_file() {
-    let (_temp, root) = checkout_with_file(
-        "version: 1\nimage: workspace\nworkspace:\n  vm_only:\n    - target\n",
-    );
+    let (_temp, root) =
+        checkout_with_file("version: 1\nimage: workspace\nworkspace:\n  vm_only:\n    - target\n");
     let args = cloud_create_args(&[]);
     let source = project_file::select_from(&root.join("web"), &[], false).unwrap();
     let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
@@ -3108,7 +3228,10 @@ fn cloud_create_accepts_vm_only_and_refuses_other_local_settings_naming_the_file
     .unwrap();
     let error = prepare_platform_env_create(&args, &source).unwrap_err();
     let text = format!("{error:#}");
-    assert!(text.contains(&root.join("codewire.yaml").display().to_string()), "{text}");
+    assert!(
+        text.contains(&root.join("codewire.yaml").display().to_string()),
+        "{text}"
+    );
     assert!(text.contains("--file"), "{text}");
 }
 
@@ -3356,10 +3479,17 @@ async fn a_cloud_create_lists_only_when_an_older_server_refuses_the_empty_organi
     );
 
     let server = wiremock::MockServer::start().await;
-    mock_create(&server, create_refused(429, "resource_exhausted", "RATE_LIMITED")).await;
+    mock_create(
+        &server,
+        create_refused(429, "resource_exhausted", "RATE_LIMITED"),
+    )
+    .await;
     let platform = create_org_platform(&server, false, None);
     let error = run_create(&platform).await.unwrap_err();
-    assert!(format!("{error:#}").starts_with("create environment"), "{error:#}");
+    assert!(
+        format!("{error:#}").starts_with("create environment"),
+        "{error:#}"
+    );
     assert_eq!(create_calls(&server).await.1, 0);
 }
 
@@ -3409,13 +3539,19 @@ async fn cloud_create_sends_the_discovered_spec_to_the_platform() {
     ))
     .unwrap();
     // The faked platform refuses; only the request it received matters.
-    assert!(client.create_environment("org_test", &request).await.is_err());
+    assert!(
+        client
+            .create_environment("org_test", &request)
+            .await
+            .is_err()
+    );
     let received = server.received_requests().await.unwrap();
     assert_eq!(received.len(), 1);
     let mut body = received[0].body.as_slice();
     let sent = codewire_client::CreateEnvironmentRequest::decode(&mut body).unwrap();
     assert_eq!(sent.name.as_deref(), Some("app-cloud"));
-    let spec = codewire_project_proto::from_proto(sent.project_spec.into_option().unwrap()).unwrap();
+    let spec =
+        codewire_project_proto::from_proto(sent.project_spec.into_option().unwrap()).unwrap();
     let expected = codewire_project::parse_project_yaml(
         &fs::read_to_string(root.join("codewire.yaml")).unwrap(),
     )

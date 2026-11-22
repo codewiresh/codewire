@@ -180,6 +180,10 @@ message Environment {
   // Seconds with no activity after which the environment stops itself,
   // keeping its disk (#3384). 0 is off; otherwise 300 to 604800.
   int32 idle_stop_seconds = 40;
+  // Whether this server stops idle environments. When false, the timeout in
+  // idle_stop_seconds is kept but nothing is stopped for being idle. Unset
+  // from a server older than this field, which says nothing either way.
+  optional bool idle_stop_enforced = 41;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network

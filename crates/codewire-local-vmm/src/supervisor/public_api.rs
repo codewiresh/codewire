@@ -236,9 +236,8 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(32, "isolation_tier", FIXED),
     field(33, "operation_generation", LOCAL),
     field(34, "source_selection", LOCAL),
-    // A local VM's Mesh attachment is reported by its supervisor's own
-    // control API, never through this public view: like `network`, the hosted
-    // attachment state stays absent (#3350).
+    // A local VM's Mesh attachment is reported by its supervisor's own control API, never
+    // through this public view: like `network`, the hosted attachment state stays absent (#3350).
     field(35, "network_state", ZERO),
     field(36, "network_failure", ZERO),
     field(37, "error_code", ZERO),
@@ -248,8 +247,9 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(38, "network_policy", ZERO),
     // A local VM is stopped only by its user; there is no reason to report.
     field(39, "stop_reason", ZERO),
-    // A local VM never stops itself for being idle (#3384).
+    // A local VM never stops itself for being idle, so says nothing of it (#3384).
     field(40, "idle_stop_seconds", ZERO),
+    field(41, "idle_stop_enforced", ZERO),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[

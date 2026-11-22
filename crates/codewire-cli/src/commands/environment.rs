@@ -6,6 +6,7 @@ use crate::commands::progress::terminal_text;
 mod cp;
 pub(crate) mod cpu;
 mod host_placement;
+mod idle_stop;
 mod info;
 pub(crate) mod lifecycle;
 mod platform_create;
@@ -16,6 +17,9 @@ mod stop_start;
 mod transfer;
 use cp::handle_unified_environment_cp;
 pub(crate) use cpu::{local_vm_vcpus, local_vm_vcpus_from_millicores, parse_resize_cpu};
+#[cfg(test)]
+pub(crate) use idle_stop::format_env_idle_stop_text;
+pub(crate) use idle_stop::print_env_idle_stop_status;
 pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
 use platform_create::handle_platform_env_create;
 
@@ -662,6 +666,8 @@ async fn handle_platform_env_command_with_created(
                     .await
                     .context("set idle stop")?;
                 print_env_idle_stop_status(&environment, &response, idle_stop_seconds, output)?;
+                idle_stop::note_after_update(&environment_client, &org_id, &environment_id, output)
+                    .await;
             }
         }
         EnvCommand::Info(args) => {
@@ -3381,34 +3387,6 @@ pub(crate) fn format_env_status_text(environment_ref: &str, response: &StatusRes
         environment_ref,
         trimmed_str(&response.status).unwrap_or("unknown")
     )
-}
-
-pub(crate) fn print_env_idle_stop_status(
-    environment_ref: &str,
-    response: &StatusResponse,
-    idle_stop_seconds: i32,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(response)?),
-        OutputFormat::Text => print!(
-            "{}",
-            format_env_idle_stop_text(environment_ref, idle_stop_seconds)
-        ),
-    }
-    Ok(())
-}
-
-/// The confirmation of `cw update ENV --idle-stop`.
-pub(crate) fn format_env_idle_stop_text(environment_ref: &str, idle_stop_seconds: i32) -> String {
-    if idle_stop_seconds == 0 {
-        format!("Environment {environment_ref}: idle stop off; it runs until stopped.\n")
-    } else {
-        format!(
-            "Environment {environment_ref}: stops, keeping its disk, after {} with no activity.\n",
-            codewire_project::format_idle_stop(idle_stop_seconds)
-        )
-    }
 }
 
 pub(crate) fn print_env_extend_status(

@@ -29,6 +29,11 @@ pub struct Environment {
     /// Seconds with no activity before a cloud sandbox stops; 0 never does.
     #[serde(default)]
     pub idle_stop_seconds: i32,
+    /// Whether the server stops idle environments; when false the timeout
+    /// is kept but nothing stops for being idle. `None` from a server older
+    /// than the field, which says nothing either way (#3384).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_stop_enforced: Option<bool>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,

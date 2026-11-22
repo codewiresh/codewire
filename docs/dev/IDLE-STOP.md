@@ -136,6 +136,12 @@ also stops Sandboxes that run out of credit.
 
 The server switch `CODEWIRE_IDLE_STOP` turns the check on (`on`) or off
 (`off`, the default), so a deployment enforces nothing until it opts in.
+With it off, a server still accepts and keeps a Sandbox's timeout, and says
+it doesn't enforce it: an environment's `idle_stop_enforced` is false,
+`cw info` prints `IdleStop: 30m (not enforced on this server)`, and `cw
+create` and `cw update` with a timeout add "This server doesn't stop idle
+Sandboxes: the timeout is kept, but not enforced." A timeout is never
+refused for it, since `idle_stop` in `codewire.yaml` rides on every create.
 
 ## What a person sees
 

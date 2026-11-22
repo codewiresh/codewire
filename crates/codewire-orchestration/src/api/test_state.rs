@@ -14,6 +14,7 @@ pub(crate) async fn offline(pool: PgPool) -> ApiState {
     let session_secret = "synthetic-no-store-session-secret".to_string();
     ApiState {
         credit_enforcement: Default::default(),
+        idle_stop: Default::default(),
         pool: pool.clone(),
         preview_base_domain: "preview.test".to_string(),
         frontend_url: "https://dashboard.example.test".to_string(),

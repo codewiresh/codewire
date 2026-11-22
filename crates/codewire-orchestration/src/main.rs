@@ -715,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
     )?);
     let credit_enforcement =
         codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
+    let idle_stop = worker::idle_stop::IdleStop::from_env()?;
     // Read once: the relay and EgressService share one front-door registry,
     // which exists only while hosted interception is on (#4001).
     let egress_settings = hosted_egress.settings;
@@ -734,7 +735,7 @@ async fn main() -> anyhow::Result<()> {
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
         credit_enforcement,
-        idle_stop: worker::idle_stop::IdleStop::from_env()?,
+        idle_stop,
         unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge::from_env()?,
         front_doors: front_doors.clone(),
     });
@@ -828,6 +829,7 @@ async fn main() -> anyhow::Result<()> {
     revocation.spawn_listener(pool.clone());
     let api_state = codewire_orchestration::api::ApiState {
         credit_enforcement,
+        idle_stop,
         pool: pool.clone(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         frontend_url: std::env::var("FRONTEND_URL")

@@ -75,7 +75,12 @@ fn source_metadata_and_restart_outcomes_never_collapse_into_successful_start() {
         .unwrap()
         .secrets
         .organization = true;
-    let wire = proto_environment(environment, NetworkPolicyFlags::default()).unwrap();
+    let wire = proto_environment(
+        environment,
+        NetworkPolicyFlags::default(),
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(wire.operation_generation, 7);
     assert!(
         wire.source_selection
@@ -89,10 +94,14 @@ fn source_metadata_and_restart_outcomes_never_collapse_into_successful_start() {
     let mut unavailable = test_environment("destroyed", true);
     unavailable.source_selection = None;
     assert!(
-        proto_environment(unavailable, NetworkPolicyFlags::default())
-            .unwrap()
-            .source_selection
-            .is_unset()
+        proto_environment(
+            unavailable,
+            NetworkPolicyFlags::default(),
+            Default::default()
+        )
+        .unwrap()
+        .source_selection
+        .is_unset()
     );
     for (outcome, expected) in [
         (
@@ -526,7 +535,12 @@ fn shutdown_deadline_round_trips_source_precision_through_environment_mapping() 
             .naive_utc();
         let mut environment = test_environment("running", true);
         environment.shutdown_at = crate::api::environments::shutdown_deadline_string(Some(source));
-        let mapped = proto_environment(environment, NetworkPolicyFlags::default()).unwrap();
+        let mapped = proto_environment(
+            environment,
+            NetworkPolicyFlags::default(),
+            Default::default(),
+        )
+        .unwrap();
         let timestamp = mapped.shutdown_at.as_option().unwrap();
         assert_eq!(timestamp.seconds, source.and_utc().timestamp());
         assert_eq!(timestamp.nanos, expected_nanos);
@@ -536,9 +550,27 @@ fn shutdown_deadline_round_trips_source_precision_through_environment_mapping() 
     let absent = proto_environment(
         test_environment("running", true),
         NetworkPolicyFlags::default(),
+        Default::default(),
     )
     .unwrap();
     assert!(absent.shutdown_at.as_option().is_none());
+}
+
+/// An environment says whether this server stops idle Sandboxes, so a
+/// timeout a server with the switch off keeps is never read as enforced
+/// (#3384).
+#[test]
+fn an_environment_says_whether_idle_stop_is_enforced() {
+    use crate::worker::idle_stop::IdleStop;
+    for (switch, enforced) in [(IdleStop::Off, false), (IdleStop::On, true)] {
+        let wire = proto_environment(
+            test_environment("running", true),
+            NetworkPolicyFlags::default(),
+            switch,
+        )
+        .unwrap();
+        assert_eq!(wire.idle_stop_enforced, Some(enforced));
+    }
 }
 
 #[test]
@@ -551,9 +583,19 @@ fn the_network_policy_shows_only_while_platform_policies_are_on() {
         digest: codewire_egress_policy::HOSTED_DEFAULT_DIGEST.into(),
         enforcement: crate::api::network_policies::EnforcementView::NotEnforced,
     });
-    let off = proto_environment(environment.clone(), NetworkPolicyFlags::default()).unwrap();
+    let off = proto_environment(
+        environment.clone(),
+        NetworkPolicyFlags::default(),
+        Default::default(),
+    )
+    .unwrap();
     assert!(off.network_policy.as_option().is_none());
-    let on = proto_environment(environment, NetworkPolicyFlags { enabled: true }).unwrap();
+    let on = proto_environment(
+        environment,
+        NetworkPolicyFlags { enabled: true },
+        Default::default(),
+    )
+    .unwrap();
     let policy = on.network_policy.as_option().unwrap();
     assert_eq!(policy.reference, "hosted-default");
     assert_eq!(
