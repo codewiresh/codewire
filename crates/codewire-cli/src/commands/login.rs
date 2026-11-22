@@ -103,25 +103,33 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
     }
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
     report_pin(&server_url, previous_pin.as_ref(), pin.as_ref());
-    eprintln!("{}", login_outcome(&org_resolution)?);
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprintln!("{}", login_outcome(&org_resolution, &orgs, style));
     Ok(())
 }
 
-/// What `cw login` says once the sign-in is saved. An account in no
-/// organization yet is a new invitee's normal state (#4530): the login
-/// succeeds and names where to go next.
-pub(super) fn login_outcome(resolution: &LoginOrgResolution) -> anyhow::Result<String> {
+/// What `cw login` says once the sign-in is saved. The sign-in has
+/// succeeded by then, so nothing here is an error: an account in no
+/// organization yet is a new invitee's normal state (#4530), and one in
+/// several with no terminal to ask at gets the command that picks one
+/// (#5873; journey `login-default-org`).
+pub(super) fn login_outcome(
+    resolution: &LoginOrgResolution,
+    orgs: &[OrgWithRole],
+    style: crate::output::Style,
+) -> String {
     match resolution {
-        LoginOrgResolution::Selected(org) => {
-            Ok(format!("Default org: {} ({}).", org.name, org.slug))
-        }
+        LoginOrgResolution::Selected(org) => format!("Default org: {} ({}).", org.name, org.slug),
         // The same words as `cw ls`, `cw org list` and a cloud create (#4592).
-        LoginOrgResolution::NoOrganizations => Ok(format!(
-            "{}.",
-            super::sentence(&super::NoOrganization.to_string())
-        )),
-        LoginOrgResolution::SelectionRequired => anyhow::bail!(
-            "logged in, but no default organization is selected; run 'cw org set <id-or-slug>' or rerun 'cw login --org <id-or-slug>'"
+        LoginOrgResolution::NoOrganizations => {
+            format!("{}.", super::sentence(&super::NoOrganization.to_string()))
+        }
+        LoginOrgResolution::SelectionRequired => format!(
+            "You're in {} organizations and none is your default yet.\n{} cw org set {}",
+            orgs.len(),
+            style.status(crate::output::Status::Next),
+            orgs.first().map_or("SLUG", |org| org.slug.as_str()),
         ),
     }
 }

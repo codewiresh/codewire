@@ -266,23 +266,29 @@ fn login_org_resolution_honors_explicit_selection_and_empty_membership() {
 
 #[test]
 fn login_succeeds_without_an_organization_and_names_where_to_go_next() {
-    let org = test_org("org_1", "Noel Labs", "noel-labs", "owner");
+    let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+    let orgs = vec![
+        test_org("org_1", "Noel Labs", "noel-labs", "owner"),
+        test_org("org_2", "Side Project", "side-project", "owner"),
+    ];
     assert_eq!(
-        super::login::login_outcome(&LoginOrgResolution::Selected(org)).unwrap(),
+        super::login::login_outcome(&LoginOrgResolution::Selected(orgs[0].clone()), &orgs, plain),
         "Default org: Noel Labs (noel-labs)."
     );
 
     // The same words as `cw ls`, `cw org list` and a cloud create (#4592).
     assert_eq!(
-        super::login::login_outcome(&LoginOrgResolution::NoOrganizations).unwrap(),
+        super::login::login_outcome(&LoginOrgResolution::NoOrganizations, &[], plain),
         "You're not in an organization yet; create one with `cw org create NAME`, or accept an \
          invitation with `cw org invitations`."
     );
 
-    let error = super::login::login_outcome(&LoginOrgResolution::SelectionRequired)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("no default organization is selected"));
+    // Several, with no terminal to ask at: the sign-in stands, and the next
+    // step names the command that picks one (#5873).
+    assert_eq!(
+        super::login::login_outcome(&LoginOrgResolution::SelectionRequired, &orgs, plain),
+        "You're in 2 organizations and none is your default yet.\n→ cw org set noel-labs"
+    );
 }
 
 #[test]

@@ -11,7 +11,7 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21.
+Updated 2026-11-22.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -25,6 +25,7 @@ Updated 2026-11-21.
 | `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed; an account with 2FA can't finish deleting until #5767 ships |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | Stripe's receipt for a real €5 purchase observed 2026-11-21 (#4816) |
+| `login-default-org` | observed on Kind 2026-11-22, a build of 167dda50a0 (#5873); not on Dev | not yet observed |
 | `account-fresh-sign-in` | observed on Kind 2026-11-18 (server side, main 4199fd0f6) and 2026-11-20 (redirect delivery, main 6557aa7e83); not on Dev | not yet observed |
 
 ## Before the walk
@@ -399,6 +400,52 @@ session; until it merges, leave that state out.
     signed out (#4528). Walk this step with a password account;
   - each request sends an email; the throttle on account mail is #3297's.
 - **Observed:** not yet observed.
+
+## `login-default-org`: `cw login` saves the default organization, or says how to choose one
+
+Issue: #5873. The output rules are the `codewire-cli-design` skill's "Empty
+and first-run states" and "Prompts and pickers".
+
+- **Entry points:** `cw login`, `cw login --org ID_OR_SLUG`.
+- **States to exercise:**
+  - an account in one organization;
+  - an account in two, at a terminal;
+  - an account in two, with no terminal and no default saved;
+  - an account in two, with `--org`;
+  - an account in none (a new invitee).
+- **Driving it:** a throwaway `HOME`, an account in two organizations (on
+  Kind, the seeded `e2e-owner`), and `cw login` approved in a browser; for
+  the no-terminal case, `cw login < /dev/null`.
+- **Proof:**
+  - one organization: `Default org: NAME (SLUG).`, exit 0;
+  - two, at a terminal: `cw login` asks which, and saves the one chosen;
+  - two, no terminal, no default: after `Logged in as NAME.`, one line
+    saying the account is in 2 organizations and none is its default yet,
+    then `→ cw org set SLUG` naming the first of them, and exit 0. The
+    sign-in is saved: `cw whoami` shows it;
+  - `--org SLUG`: that organization is saved, with no question;
+  - none: "You're not in an organization yet", naming `cw org create NAME`
+    and `cw org invitations`, exit 0.
+- **Gotchas:** a login is the step that saves the sign-in, so it never exits
+  non-zero after the sign-in is saved; what's missing is the next step.
+- **Observed:** on the retained Kind cluster, 2026-11-22, `cw` built from
+  167dda50a0 beside released v0.4.26, as two scratch accounts in scratch
+  organizations (removed afterwards), each `cw login` approved in headless
+  Chromium:
+  - v0.4.26, two organizations, no default, `< /dev/null`: `Logged in as CW
+    Login A.` then `✗ Logged in, but no default organization is selected; …`,
+    exit 1, with the sign-in saved;
+  - the build, the same case: `Logged in as CW Login A.`, `You're in 2
+    organizations and none is your default yet.`, `→ cw org set
+    cwcli-login-one`, exit 0; `cw whoami` showed the account, and `cw org
+    current` said none is selected;
+  - at a terminal: the organization question, and the one chosen saved
+    (`Default org: CW Login Two (cwcli-login-two).`), exit 0;
+  - `--org cwcli-login-two`, with and without a terminal: saved with no
+    question, exit 0;
+  - one organization: `Default org: CW Login One (cwcli-login-one).`; none:
+    `You're not in an organization yet; create one with …`; both exit 0.
+  - Not on Dev: no agent can approve a Dev sign-in in a browser.
 
 ## `account-fresh-sign-in`: a client asks for a fresh sign-in
 
