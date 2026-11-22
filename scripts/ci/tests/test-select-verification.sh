@@ -1544,6 +1544,10 @@ run_paths_case rust_tailnet pull_request refs/pull/9/head false \
 run_paths_case stock_gh_pin pull_request refs/pull/9/head false \
   'policy rust rust_pkg_codewire_daemon security security_js' \
   scripts/ci/setup/fetch-pinned-gh.sh
+# Its parse of the image's pin, also run by any image change (policy).
+run_paths_case stock_gh_pin_parse pull_request refs/pull/9/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-fetch-pinned-gh.sh
 run_paths_case public_netns_runner pull_request refs/pull/9/head false \
   'policy rust rust_pkg_codewire_cli_bin security security_js' \
   scripts/ci/verify/run-in-public-netns.sh
