@@ -30,6 +30,7 @@ Updated 2026-11-22.
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-row-menu` | cw-web | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-21 (CLI, all but the 2-minute note; the dashboard waits on #5065) | not yet observed |
+| `sandbox-unplanned-restart` | cw-hosted-runtime | not yet observed | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
@@ -932,6 +933,54 @@ Issues: #4767, and #5050 for the clone's reason.
     - Both Sandboxes were removed by name, and `cw ls --cloud` then listed neither.
   - Not yet observed: `cw retry`'s 2-minute note, "The retry hasn't started yet; it runs after the Sandbox's current operation"; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
   - Production: not yet; v0.4.21 lacks Retry setup.
+
+## `sandbox-unplanned-restart`: a restart nobody asked for is shown, and the owners are emailed
+
+Issues: #5997, from a customer whose app stayed down after a restart they
+never saw (#5950). Builds on #3772's restart notice
+([`reboot-restart-notice`](node-reboot.md)).
+
+- **Entry points:** `cw ls` and `cw info SANDBOX`, their `--output json`, the
+  SDKs' environment fields, and the email to the organization's owners.
+- **States to exercise:**
+  - each cause: `pod_failed`, `runtime_replaced`, `node_lost` and
+    `configuration_changed`;
+  - a requested start, stop, restart, resize, update or daemon repair, which
+    records nothing and sends nothing;
+  - the next start or stop, an idle stop included, which clears what `cw`
+    shows;
+  - three Sandboxes in one organization restarting within 10 minutes, which
+    send one email.
+- **Driving it:** on Dev, as the smoke identity, with a long-running session
+  open in the Sandbox, delete its Pod (`runtime_replaced`), or kill its VM with
+  `scripts/runtime/dev/prove-dev-vm-death-recovery.sh` (`pod_failed`). Once
+  it's running again:
+
+  ```sh
+  cw ls
+  cw info SANDBOX
+  cw info SANDBOX --output json
+  ```
+
+  and read the email that reaches the smoke organization's owner.
+- **Proof** (the wording waits for the owner's land-it; #5997):
+  - `cw ls` shows the Sandbox `running` with a note under the table that it
+    restarted on its own, how long ago, why, and that running processes were
+    lost, then `→ cw info SANDBOX`.
+  - `cw info` shows a `Restarted:` line with the local time, how long ago,
+    the cause in words, and that files are safe and running processes were
+    lost.
+  - The JSON has `restarted_at` (RFC 3339) and `restart_cause`, and so do the
+    SDKs.
+  - Every owner gets one email naming the Sandbox, the organization, the time
+    in UTC, the cause, what was lost and kept, and a link to the Sandbox.
+  - A requested restart shows none of this and sends nothing.
+- **Gotchas:**
+  - The email goes to owners only, not to the member who created the
+    Sandbox, unless they are an owner.
+  - A deleted Pod stands in for a node drain on Dev; a lost node is walked on
+    Kind or in a planned drill, never by taking a Production node away.
+- **Observed:** not yet observed.
 
 ## `sandbox-attach-repaint`: a full-screen program is left clean after a reconnect
 

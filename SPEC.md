@@ -434,6 +434,26 @@ detail; this section states the contract.
   through Temporal. Every Start re-pins the Sandbox's daemon to the configured
   support image, except for confidential Sandboxes, whose attested Pod policy
   admits exactly the containers they were rendered with.
+- **Unplanned restarts** (#5997, target, not shipped). When a running
+  Sandbox's runtime is restarted or replaced without a member asking, the
+  Sandbox says when and why, and its organization's owners are told. Four
+  causes count:
+  - `pod_failed`: its Pod failed on a node that is still there;
+  - `runtime_replaced`: its Pod was deleted or replaced, as in a node drain or
+    reboot;
+  - `node_lost`: its node was lost and the Sandbox came back on another;
+  - `configuration_changed`: the bootstrap check restarted it because its
+    credential selection, managed clients or generation changed.
+
+  A start, stop, restart, resize, update or daemon repair that a member asked
+  for is not unplanned. Orchestration records `restarted_at` (when the Sandbox
+  was running again) and `restart_cause` with #3772's `sandbox_restarted` code,
+  and keeps them until the next start or stop, an idle stop included.
+  `cw info`, `cw ls`, their JSON, the API and the SDKs carry both. Every owner of the
+  organization gets an email through the identity service's outbox, as
+  invitations do; unplanned restarts in one organization within 10 minutes
+  share one email. The journey is
+  [`sandbox-unplanned-restart`](docs/journeys/cloud-sandbox.md#sandbox-unplanned-restart-a-restart-nobody-asked-for-is-shown-and-the-owners-are-emailed).
 - **Docker** inside a sandbox is a daemon inside the same VM
   (`DOCKER_HOST=unix:///var/run/docker/docker.sock`), never the node's.
 - **Previews** are HTTPS URLs that orchestration forwards to one application
