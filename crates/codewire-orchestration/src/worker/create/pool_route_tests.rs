@@ -56,6 +56,8 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
         desired_state: "started".into(),
         isolation_tier: "standard".into(),
         dedicated_cpu: false,
+        systemd_workspace: false,
+        systemd_environments_enabled: false,
         never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: cpu,

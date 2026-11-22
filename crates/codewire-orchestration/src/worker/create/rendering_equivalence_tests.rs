@@ -183,6 +183,8 @@ fn before_shape_template_opts(
         measured_binding_roots,
         image: image_ref.to_string(),
         image_command,
+        // A pool renders the canonical workspace, never a systemd one.
+        systemd_workspace: false,
         support_image: cfg.daemon_image.clone(),
         dind_image: cfg.dind_image.clone(),
         // Hosted egress (#4000): rendered once the setting and the two
@@ -473,6 +475,8 @@ fn environment() -> EnvironmentRow {
         desired_state: "started".into(),
         isolation_tier: "standard".into(),
         dedicated_cpu: false,
+        systemd_workspace: false,
+        systemd_environments_enabled: false,
         never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: 2000,

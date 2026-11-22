@@ -33,12 +33,15 @@ and arm64.
 | `SANDBOX_DAEMON_IMAGE` | Required by orchestration | The support image every workspace runs its daemon from. Pin it by digest: a Start then re-pins an existing Sandbox's daemon to it, but only from an image in the same repository. | `registry.example.com/codewire/daemon@sha256:<digest>` |
 | `SANDBOX_STANDARD_RUNTIME_IMAGE` | With `SANDBOX_RUNTIME_PROFILE=standard` | The runtime image every `standard` workspace container runs (#5602, not yet observed working), pinned by digest. Its entrypoint, `cw __pod-runtime`, boots the workspace's VM; the template sets no command. | `registry.example.com/codewire/pod-runtime@sha256:<digest>` |
 | `SANDBOX_STANDARD_IMAGE_DISK` | With `SANDBOX_RUNTIME_PROFILE=standard` | The workspace image's published disk, as the one line its publish step prints: the disk image by digest, its 64-hex image disk id, its 32-hex build id and the workspace image it was built from by digest, separated by spaces. A `standard` workspace mounts the disk read-only and boots that workspace image from it. Set both or neither. Either one malformed, or the profile `standard` without both or without hosted egress on (`CODEWIRE_HOSTED_EGRESS_ENABLED`), stops orchestration at startup. | `registry.example.com/codewire/workspace-disk@sha256:<digest> <disk id> <build id> registry.example.com/codewire/workspace@sha256:<digest>` |
+| `CODEWIRE_SYSTEMD_WORKSPACE_IMAGE_REPOSITORY` | Optional | The repository of the workspace-systemd image, with no tag or digest. Unset, which is the default, no image boots systemd. Set, an environment that an opted-in organization creates with a digest-pinned image from it is recorded as a systemd workspace and runs systemd as its first process ([SYSTEMD-WORKSPACE.md](dev/SYSTEMD-WORKSPACE.md)); unset again, such an environment's start is refused. The cluster must admit that workspace container's one added capability first. | `registry.example.com/codewire/workspace-systemd` |
 
 ### Where the manifests set them
 
 - `CODEWIRE_WORKSPACE_IMAGE_REPOSITORY` and `SANDBOX_DAEMON_IMAGE` are keys of
   the `codewire-config` ConfigMap. Base `config.env` leaves the repository
   empty, so every overlay must set it.
+- `CODEWIRE_SYSTEMD_WORKSPACE_IMAGE_REPOSITORY` is a key of the same
+  ConfigMap where a deployment sets it. No manifest in this repository does.
 - `CODEWIRE_APPROVED_IMAGE_REGISTRIES` is the only key of the
   `codewire-image-registries` ConfigMap in orchestration's namespace
   (`deployments/k8s/orchestration/image-registries.yaml`). Orchestration reads

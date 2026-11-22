@@ -161,6 +161,23 @@ impl KubernetesRenderConfig {
             "confidential workspace storage has no StorageClass: set {}",
             crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV
         );
+        // A systemd workspace renders from its record, and only while the
+        // deployment still offers it: otherwise its Pod is refused, never
+        // rendered as a plain custom image (docs/dev/SYSTEMD-WORKSPACE.md,
+        // "Where it is checked" and "Only inside a VM").
+        if intent.systemd_workspace
+            && let Some(refusal) = crate::sandbox::systemd_workspace::deployment_refusal(
+                crate::sandbox::runtime_images::configured(),
+                &intent.image,
+                match intent.isolation {
+                    Isolation::Standard => "standard",
+                    Isolation::Confidential => "confidential",
+                },
+                &runtime_spec.profile,
+            )
+        {
+            anyhow::bail!(refusal.detail);
+        }
         let template_base = if is_canonical_workspace_runtime_image(&intent.image) {
             CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
         } else {
@@ -187,6 +204,7 @@ impl KubernetesRenderConfig {
                 .source_snapshot_id
                 .as_deref()
                 .map(crate::sandbox::snapshots::kept_snapshot_name),
+            systemd_workspace: intent.systemd_workspace,
             ..self.shape(&intent.image, &runtime_spec, intent.shape)
         };
         let opts = if intent.dedicated_cpu {
@@ -368,6 +386,8 @@ impl KubernetesRenderConfig {
             },
             image: image_ref.to_string(),
             image_command,
+            // Only an environment's own rendering is one, from its record.
+            systemd_workspace: false,
             support_image: self.daemon_image.clone(),
             dind_image: self.dind_image.clone(),
             // Hosted egress (#4000): with the switch on, every template on a

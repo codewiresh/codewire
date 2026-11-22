@@ -2971,6 +2971,7 @@ mod tests {
             template_base: "workspace".into(),
             isolation: crate::runtime::Isolation::Standard,
             dedicated_cpu: false,
+            systemd_workspace: false,
             shape: crate::runtime::WorkspaceShape {
                 cpu_millicores: 1000,
                 memory_mib: 2048,

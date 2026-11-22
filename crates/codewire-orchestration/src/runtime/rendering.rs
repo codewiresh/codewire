@@ -54,6 +54,9 @@ pub struct RenderingIntent {
     pub isolation: Isolation,
     /// The environment's CPU is its own, never shared.
     pub dedicated_cpu: bool,
+    /// A systemd workspace, as its create recorded it
+    /// (docs/dev/SYSTEMD-WORKSPACE.md).
+    pub systemd_workspace: bool,
     pub shape: WorkspaceShape,
     pub identity: RenderingIdentity,
 }

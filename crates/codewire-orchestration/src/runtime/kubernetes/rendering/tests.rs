@@ -34,6 +34,7 @@ fn intent(isolation: Isolation) -> RenderingIntent {
         template_base: "workspace".into(),
         isolation,
         dedicated_cpu: true,
+        systemd_workspace: false,
         shape: WorkspaceShape {
             cpu_millicores: 2000,
             memory_mib: 8192,
@@ -383,5 +384,24 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
             ..intent(Isolation::Standard)
         })
         .is_err()
+    );
+}
+
+#[test]
+fn a_systemd_workspace_renders_from_its_record_and_only_while_it_is_offered() {
+    // An image from any repository renders as a plain custom image unless the
+    // environment's create recorded it as a systemd workspace.
+    let plain = config().environment(&intent(Isolation::Standard)).unwrap();
+    assert!(!plain.systemd_workspace);
+    // Recorded as one, on a deployment that does not offer it (no repository
+    // set, as here): refused, never rendered as a plain custom image.
+    let recorded = RenderingIntent {
+        systemd_workspace: true,
+        ..intent(Isolation::Standard)
+    };
+    let error = config().environment(&recorded).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "this deployment does not offer systemd workspaces"
     );
 }

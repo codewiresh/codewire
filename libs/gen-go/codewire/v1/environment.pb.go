@@ -785,7 +785,9 @@ type Environment struct {
 	NetworkPolicy *EnvironmentNetworkPolicy `protobuf:"bytes,38,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
 	// Why a stopped environment was stopped: user when a person stopped it,
 	// credit when its organization ran out of credit, idle when it had no
-	// activity for its idle timeout. Empty unless it is stopping or stopped.
+	// activity for its idle timeout, systemd_refused when it is a systemd
+	// workspace whose start its checks refused. Empty unless it is stopping or
+	// stopped.
 	StopReason string `protobuf:"bytes,39,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
 	// Seconds with no activity after which the environment stops itself,
 	// keeping its disk (#3384). 0 is off; otherwise 300 to 604800.

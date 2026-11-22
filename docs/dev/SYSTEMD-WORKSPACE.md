@@ -1,8 +1,10 @@
 # A workspace that boots systemd
 
-Target, not shipped (#5638). This page is written before the code, as the
-contract the code must make true; nothing here exists on `main`. The
-acceptance journey is
+Target, not yet observed working (#5638). This page was written before the
+code, as the contract the code must make true. The image and its
+publication, the organization opt-in, and orchestration's rendering and
+checks are on `main`; none of it has run on Dev yet. The acceptance journey
+is
 [../journeys/systemd-workspace.md](../journeys/systemd-workspace.md).
 
 A default workspace has no init system: its first process is a small
@@ -78,6 +80,12 @@ never turns an existing custom-image environment into a systemd workspace,
 and unsetting it never renders a systemd workspace as an ordinary custom
 image: that start is refused instead.
 
+The record is written once, by the create's insert, and nothing changes it
+afterwards. A fork from a snapshot takes its source environment's record
+instead of deciding from the image it names: a fork never turns a plain
+workspace into a systemd one, and a systemd fork passes every check below
+afresh, for the caller and organization that fork it.
+
 ### Where it is checked
 
 No operation brings up a Pod with the added capability unless all of these
@@ -89,26 +97,33 @@ hold at that moment:
 - the image names the repository with a well-formed digest;
 - the environment is not confidential.
 
+These checks are product policy. The privilege boundary is the cluster's
+admission rule for the systemd Pod shape ("What is loosened"), which refuses
+that shape on its own, whatever orchestration renders.
+
 The operations that bring up a Pod, and so check them first, are create, a
 fork from a snapshot, start, resize, a setup retry, `cw daemon repair`, and
 orchestration's restart of a failed Pod. A refused create or fork leaves no
 environment. A refused start, resize, retry or repair fails with the reason,
 and the environment stays as it was. A refused restart leaves the
-environment stopped, with the refusal as its reason.
+environment stopped, with `systemd_refused` as its stop reason:
+orchestration does not render the Pod, and its reconciler stops a systemd
+workspace whose bring-up the checks refuse.
 
 A replacement Pod that orchestration did not ask for, such as one the
 cluster brings up after a node is lost, cannot be checked before it starts:
 it comes from the template orchestration wrote when it last brought the
 environment up under these checks. Orchestration checks it when it first
-sees it. If a check fails then, it stops the environment, with the refusal
-as its reason.
+sees it: its liveness check marks the environment as starting again, and if a
+check fails then, the reconciler stops it, with the same stop reason.
 
 Stop, delete and reconciliation's removal never consult these checks, so
 turning the opt-in off never strands an environment: it can always be
 stopped and removed. A systemd workspace that is running when its
 organization's flag goes off keeps running and stays reachable until it
-stops. Its next start is refused, and it stays stopped until the organization
-is opted in again.
+stops. Its next bring-up (a start, a resize, a repair, or a restart or
+replacement of its Pod) is refused, and it stays stopped until the
+organization is opted in again.
 
 The refusal that names the opt-in goes only to a caller already allowed to
 create or start in that organization, after the ordinary checks. Anyone else

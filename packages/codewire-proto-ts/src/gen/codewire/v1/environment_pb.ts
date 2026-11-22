@@ -236,7 +236,9 @@ export type Environment = Message<"codewire.v1.Environment"> & {
   /**
    * Why a stopped environment was stopped: user when a person stopped it,
    * credit when its organization ran out of credit, idle when it had no
-   * activity for its idle timeout. Empty unless it is stopping or stopped.
+   * activity for its idle timeout, systemd_refused when it is a systemd
+   * workspace whose start its checks refused. Empty unless it is stopping or
+   * stopped.
    *
    * @generated from field: string stop_reason = 39;
    */

@@ -8,7 +8,8 @@ example. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21. Written first; nothing here is built yet.
+Updated 2026-11-22. The image, the opt-in and orchestration's rendering and
+checks are on `main`; nothing here has been walked yet.
 
 | ID | Dev | Production |
 | --- | --- | --- |

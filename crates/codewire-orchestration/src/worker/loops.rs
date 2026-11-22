@@ -295,6 +295,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     evict_expired_environments(ctx).await;
     stop_credit_exhausted_environments(ctx).await;
     stop_suspended_environments(ctx).await;
+    super::systemd_stop::stop_refused_systemd_workspaces(ctx).await;
     super::idle_stop::stop_idle_environments(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;

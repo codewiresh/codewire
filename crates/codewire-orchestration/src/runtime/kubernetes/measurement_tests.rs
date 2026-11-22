@@ -55,6 +55,7 @@ fn intent(isolation: Isolation) -> RenderingIntent {
         template_base: "workspace".into(),
         isolation,
         dedicated_cpu: false,
+        systemd_workspace: false,
         shape: WorkspaceShape {
             cpu_millicores: 2000,
             memory_mib: 8192,

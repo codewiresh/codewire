@@ -28,6 +28,12 @@ pub struct EnvironmentRow {
     /// The organization's sandboxes reserve a CPU per vCPU instead of sharing,
     /// read each time a Sandbox is rendered (#3635).
     pub dedicated_cpu: bool,
+    /// A systemd workspace, as its create recorded it
+    /// (docs/dev/SYSTEMD-WORKSPACE.md). Never rewritten after the insert.
+    pub systemd_workspace: bool,
+    /// The organization's systemd opt-in, read each time a Sandbox is
+    /// rendered, so a Pod brought up after the flag goes off is refused.
+    pub systemd_environments_enabled: bool,
     /// This is its first attempt and it has never been running or stopped, so
     /// it can hold nothing of the user's. `started_at` alone doesn't prove it:
     /// a failed write leaves that unset on a sandbox that ran.
@@ -112,6 +118,10 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         isolation_tier: row.try_get("isolation_tier")?,
         dedicated_cpu: row
             .try_get::<Option<bool>, _>("dedicated_cpu")?
+            .unwrap_or(false),
+        systemd_workspace: row.try_get("systemd_workspace")?,
+        systemd_environments_enabled: row
+            .try_get::<Option<bool>, _>("systemd_environments_enabled")?
             .unwrap_or(false),
         never_ran: row.try_get("never_ran")?,
         ttl_seconds: row.try_get("ttl_seconds")?,

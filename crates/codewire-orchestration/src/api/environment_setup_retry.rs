@@ -20,7 +20,6 @@ use super::ApiState;
 use super::environments::{
     fetch_env_summary, require_environment_access, require_org_member, trigger_environment,
 };
-use crate::confidential_storage::require_confidential_access;
 use crate::repository_mount::validate_repository_mounts;
 
 /// The setup checkpoint at or before which a run clones the repositories
@@ -121,14 +120,7 @@ pub(crate) async fn retry_environment_setup_core(
     )
     .await?;
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
-    require_confidential_access(
-        &state.pool,
-        state.confidential_storage_flags,
-        user,
-        org_id,
-        &env.isolation_tier,
-    )
-    .await?;
+    super::environments::require_bring_up_access(state, user, org_id, &env).await?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
     let owned_state = state.clone();

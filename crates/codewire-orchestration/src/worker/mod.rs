@@ -51,6 +51,7 @@ mod stop_reason_database_tests;
 #[cfg(test)]
 mod stuck_environments_database_tests;
 pub mod suspension_stop;
+pub mod systemd_stop;
 pub mod tenant_secret_teardown;
 pub mod unverified_purge;
 pub mod warm_pool;

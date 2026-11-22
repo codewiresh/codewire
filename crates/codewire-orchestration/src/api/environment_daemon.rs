@@ -652,6 +652,9 @@ pub async fn repair_environment_daemon_core(
     let target = resolve_running_sandbox_target_for_repair(state, user, org_id, environment_id)
         .await
         .map_err(|(status, message)| huma_error(status, message))?;
+    // A repair replaces the Pod, so it is a bring-up like a start.
+    let env = super::environments::fetch_env_summary(&state.pool, org_id, environment_id).await?;
+    super::environments::require_systemd_bring_up(state, user, org_id, &env).await?;
     let runtime = state
         .runtime
         .clone()

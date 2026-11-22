@@ -661,27 +661,8 @@ impl<S: LifecycleStore> Service<S> {
     }
 }
 
-/// Why a sandbox was stopped, as `environments.stop_reason` (#3384). A stop
-/// records it with desired state `stopped`; a start clears it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopReason {
-    /// A person stopped it.
-    User,
-    /// Its organization ran out of credit.
-    Credit,
-    /// It had no activity for its idle timeout.
-    Idle,
-}
-
-impl StopReason {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Credit => "credit",
-            Self::Idle => "idle",
-        }
-    }
-}
+mod stop_reason;
+pub use stop_reason::StopReason;
 
 /// `environments.error_code` of a running sandbox whose Pod failed, until it runs
 /// again (#3772). Says nothing of why: that isn't known here.

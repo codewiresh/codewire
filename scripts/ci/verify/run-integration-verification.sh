@@ -1097,6 +1097,11 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::stop_reason_database_tests::' \
       -- --ignored --nocapture --test-threads=1
+  counted_suite "systemd workspace opt-in matrix" systemd-workspace-opt-in \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'sandbox::systemd_workspace::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
 
   counted_suite "idle stop setting" idle-stop-setting \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \

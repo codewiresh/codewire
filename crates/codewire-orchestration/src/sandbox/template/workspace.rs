@@ -77,7 +77,13 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     const WAIT_DAEMON_CMD: &str = "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done;";
     const HOSTED_DAEMON_CMD: &str = "/codewire/bin/cw __hosted-daemon";
 
-    let ws_command: Vec<Value> = if !opts.image_command.is_empty() {
+    let ws_command: Vec<Value> = if opts.systemd_workspace {
+        vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            systemd_bootstrap_command().into(),
+        ]
+    } else if !opts.image_command.is_empty() {
         let entrypoint = opts
             .image_command
             .iter()
@@ -140,9 +146,60 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         ],
     });
 
+    if opts.systemd_workspace {
+        // systemd runs as root, and the bootstrap's capability is gone from
+        // the bounding set before it starts.
+        ws_container["securityContext"] = json!({
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "capabilities": { "add": ["SYS_ADMIN"] },
+        });
+    }
+
     let pod_spec = build_pod_spec(opts, &mut ws_container, support_image);
     build_template_spec(opts, pod_spec)
 }
+
+/// A systemd workspace's first process (docs/dev/SYSTEMD-WORKSPACE.md, "The
+/// first process"): [`SYSTEMD_BOOTSTRAP_START`], then
+/// [`SYSTEMD_BOOTSTRAP_SUPERVISE`].
+pub(crate) fn systemd_bootstrap_command() -> String {
+    format!("{SYSTEMD_BOOTSTRAP_START}\n{SYSTEMD_BOOTSTRAP_SUPERVISE}")
+}
+
+/// Makes the container's cgroup tree writable, creates the child cgroup
+/// `workspace`, and starts systemd there as PID 1 of a new PID and mount
+/// namespace with its own `/proc`, without `CAP_SYS_ADMIN` in its bounding
+/// set. The first process itself stays in the container's own cgroup. The
+/// child is not named `system`: systemd strips that name from its own cgroup
+/// path. Kubernetes expands `$(NAME)` and `$$` in a container command, so
+/// neither appears here; a plain `$name` passes through.
+pub(crate) const SYSTEMD_BOOTSTRAP_START: &str = r#"mount -o remount,rw /sys/fs/cgroup || exit 1
+mkdir -p /sys/fs/cgroup/workspace || exit 1
+unshare --pid --fork --mount --propagation private /bin/sh -c 'echo 0 > /sys/fs/cgroup/workspace/cgroup.procs && mount -t proc proc /proc && exec setpriv --bounding-set=-sys_admin /sbin/init' &
+u=$!"#;
+
+/// Waits for systemd (the child of `$u`), using shell builtins only, since
+/// root in the container can replace any program on its filesystem. A stop
+/// signal is sent on to systemd as `SIGRTMIN+3`. After a stop signal it exits
+/// with systemd's status; when systemd ends without one, it exits 1, so the
+/// Pod fails and is restarted rather than reading as a clean end.
+pub(crate) const SYSTEMD_BOOTSTRAP_SUPERVISE: &str = r#"asked=0
+stop() {
+  asked=1
+  for f in /proc/[0-9]*/stat; do
+    read -r p c s pp rest < "$f" 2>/dev/null && [ "$pp" = "$u" ] && kill -s RTMIN+3 "$p"
+  done
+}
+trap stop TERM RTMIN+3
+while kill -0 "$u" 2>/dev/null; do wait "$u"; done
+wait "$u"
+rc=$?
+[ "$asked" = 1 ] || exit 1
+exit "$rc""#;
+const SYSTEMD_RUN_VOLUME: &str = "systemd-run";
+const SYSTEMD_LOCK_VOLUME: &str = "systemd-lock";
+const SYSTEMD_TMP_VOLUME: &str = "systemd-tmp";
 
 /// Keep an intentional PID-1 owner around the daemon. The launch helper must
 /// authenticate its actual daemon parent, not accept PID 1 as a substitute.
@@ -363,6 +420,37 @@ pub(super) fn build_template_spec(opts: &TemplateOpts, pod_spec: Value) -> Value
     Value::Object(spec)
 }
 
+/// `volumes`, and for a systemd workspace its memory volumes, mounted in `ws`.
+/// systemd mounts its own tmpfs over a `/run` that is not a mount point,
+/// which would hide the binding token below it, and without CAP_SYS_ADMIN it
+/// cannot mount `/run/lock` at all. A Block workspace already has a memory
+/// `/tmp`.
+fn with_systemd_volumes(
+    opts: &TemplateOpts,
+    ws: &mut Value,
+    block: bool,
+    mut volumes: Vec<Value>,
+) -> Vec<Value> {
+    if !opts.systemd_workspace {
+        return volumes;
+    }
+    let mut mounts = vec![
+        (SYSTEMD_RUN_VOLUME, "/run"),
+        (SYSTEMD_LOCK_VOLUME, "/run/lock"),
+    ];
+    if !block {
+        mounts.push((SYSTEMD_TMP_VOLUME, "/tmp"));
+    }
+    for (name, path) in mounts {
+        volumes.push(json!({ "name": name, "emptyDir": { "medium": "Memory" } }));
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("workspace mounts")
+            .push(json!({ "name": name, "mountPath": path }));
+    }
+    volumes
+}
+
 fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> Value {
     let runtime_spec = opts.runtime_profile_spec();
     let confidential_block = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL
@@ -393,7 +481,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     } else {
         json!({ "name": "codewire-run", "emptyDir": {} })
     };
-    let mut volumes = vec![daemon_volume, run_volume];
+    let mut volumes = with_systemd_volumes(opts, ws, block, vec![daemon_volume, run_volume]);
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }

@@ -241,6 +241,10 @@ pub struct TemplateOpts {
     pub name: String,
     pub image: String,
     pub image_command: Vec<String>,
+    /// The image boots systemd as its first process, with the daemon as one
+    /// of its units (docs/dev/SYSTEMD-WORKSPACE.md). Only an image from the
+    /// deployment's configured systemd workspace repository sets it.
+    pub systemd_workspace: bool,
     pub support_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
@@ -382,6 +386,7 @@ impl fmt::Debug for TemplateOpts {
             .field("name", &self.name)
             .field("image", &self.image)
             .field("image_command", &self.image_command)
+            .field("systemd_workspace", &self.systemd_workspace)
             .field("support_image", &self.support_image)
             .field("dind_image", &self.dind_image)
             .field("runtime_profile", &self.runtime_profile)
@@ -646,3 +651,5 @@ mod hosted_egress_tests;
 mod mount_workspace_tests;
 #[cfg(test)]
 mod standard_tests;
+#[cfg(test)]
+mod systemd_workspace_tests;

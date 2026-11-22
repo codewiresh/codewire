@@ -18,6 +18,10 @@ pub const WORKSPACE_IMAGE_REPOSITORY_ENV: &str = "CODEWIRE_WORKSPACE_IMAGE_REPOS
 pub const APPROVED_IMAGE_REGISTRIES_ENV: &str = "CODEWIRE_APPROVED_IMAGE_REGISTRIES";
 /// The support image every workspace runs its daemon from.
 pub const DAEMON_IMAGE_ENV: &str = "SANDBOX_DAEMON_IMAGE";
+/// Repository whose digest-pinned images boot systemd as their first process
+/// (docs/dev/SYSTEMD-WORKSPACE.md). Unset, no image does.
+pub const SYSTEMD_WORKSPACE_IMAGE_REPOSITORY_ENV: &str =
+    "CODEWIRE_SYSTEMD_WORKSPACE_IMAGE_REPOSITORY";
 /// Where every configuration error points.
 pub const CONFIGURATION_REFERENCE: &str = "docs/CONFIGURATION.md";
 
@@ -33,6 +37,7 @@ pub struct RuntimeImages {
     workspace_repository: String,
     workspace_image: String,
     approved_registries: Vec<String>,
+    systemd_workspace_repository: Option<String>,
 }
 
 impl RuntimeImages {
@@ -72,7 +77,29 @@ impl RuntimeImages {
             workspace_image: workspace_image::image_at(workspace_repository),
             workspace_repository: workspace_repository.to_owned(),
             approved_registries,
+            systemd_workspace_repository: None,
         })
+    }
+
+    /// Names the systemd workspace repository; empty leaves it unset. It is
+    /// a repository without a tag or digest, and never the workspace's own.
+    pub fn with_systemd_workspace_repository(mut self, repository: &str) -> Result<Self, String> {
+        let repository = repository.trim();
+        if repository.is_empty() {
+            return Ok(self);
+        }
+        if !repository.contains('/')
+            || !valid_registry_prefix(&format!("{repository}/"))
+            || repository == self.workspace_repository
+        {
+            return Err(format!(
+                "{SYSTEMD_WORKSPACE_IMAGE_REPOSITORY_ENV}={repository:?} must name an image \
+                 repository without a tag or digest, other than \
+                 {WORKSPACE_IMAGE_REPOSITORY_ENV}; see {CONFIGURATION_REFERENCE}"
+            ));
+        }
+        self.systemd_workspace_repository = Some(repository.to_owned());
+        Ok(self)
     }
 
     pub fn from_env() -> Result<Self, String> {
@@ -80,7 +107,8 @@ impl RuntimeImages {
         Self::new(
             &read(WORKSPACE_IMAGE_REPOSITORY_ENV),
             &read(APPROVED_IMAGE_REGISTRIES_ENV),
-        )
+        )?
+        .with_systemd_workspace_repository(&read(SYSTEMD_WORKSPACE_IMAGE_REPOSITORY_ENV))
     }
 
     /// The configuration `docs/CONFIGURATION.md` shows, at a reserved
@@ -108,12 +136,47 @@ impl RuntimeImages {
         &self.approved_registries
     }
 
+    /// How `image_ref` relates to the systemd workspace repository.
+    pub fn systemd_workspace(&self, image_ref: &str) -> SystemdWorkspaceImage {
+        let Some(rest) = self
+            .systemd_workspace_repository
+            .as_deref()
+            .and_then(|repository| image_ref.strip_prefix(repository))
+        else {
+            return SystemdWorkspaceImage::No;
+        };
+        match rest.strip_prefix("@sha256:") {
+            Some(digest)
+                if digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+            {
+                SystemdWorkspaceImage::Pinned
+            }
+            Some(_) => SystemdWorkspaceImage::Unpinned,
+            None if rest.is_empty() || rest.starts_with(':') => SystemdWorkspaceImage::Unpinned,
+            None => SystemdWorkspaceImage::No,
+        }
+    }
+
     /// Whether `image_ref` names the canonical workspace: the current digest,
     /// or one older clients and stored presets still send, at this
     /// deployment's repository or at the public mirror.
     pub fn is_canonical_workspace(&self, image_ref: &str) -> bool {
         workspace_image::is_canonical(image_ref, &self.workspace_repository)
     }
+}
+
+/// An image reference, as the systemd workspace repository sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemdWorkspaceImage {
+    /// Another repository, or none is configured.
+    No,
+    /// The repository at one digest: a systemd workspace.
+    Pinned,
+    /// The repository by tag, bare, or with a malformed digest: refused.
+    Unpinned,
 }
 
 static CONFIGURED: OnceLock<RuntimeImages> = OnceLock::new();
@@ -235,6 +298,70 @@ mod tests {
         ] {
             let error = RuntimeImages::new(refused, "registry.example.invalid/").unwrap_err();
             assert!(error.starts_with(WORKSPACE_IMAGE_REPOSITORY_ENV), "{error}");
+            assert!(error.ends_with(CONFIGURATION_REFERENCE), "{error}");
+        }
+    }
+
+    #[test]
+    fn only_a_digest_pinned_image_of_the_configured_repository_is_a_systemd_workspace() {
+        let digest = "0123456789abcdef".repeat(4);
+        let repository = "registry.example.invalid/codewire/workspace-systemd";
+        let images = RuntimeImages::example()
+            .with_systemd_workspace_repository(repository)
+            .unwrap();
+        let cases = [
+            (
+                format!("{repository}@sha256:{digest}"),
+                SystemdWorkspaceImage::Pinned,
+            ),
+            (repository.to_owned(), SystemdWorkspaceImage::Unpinned),
+            (
+                format!("{repository}:latest"),
+                SystemdWorkspaceImage::Unpinned,
+            ),
+            (
+                format!("{repository}@sha256:abc"),
+                SystemdWorkspaceImage::Unpinned,
+            ),
+            (
+                format!("{repository}@sha256:{}", digest.to_uppercase()),
+                SystemdWorkspaceImage::Unpinned,
+            ),
+            (
+                format!("{repository}-other@sha256:{digest}"),
+                SystemdWorkspaceImage::No,
+            ),
+            (
+                format!("{repository}/nested@sha256:{digest}"),
+                SystemdWorkspaceImage::No,
+            ),
+            ("python:3.12".to_owned(), SystemdWorkspaceImage::No),
+        ];
+        for (image, expected) in cases {
+            assert_eq!(images.systemd_workspace(&image), expected, "{image}");
+        }
+        // Unset, which is the default, no image is one.
+        let unset = RuntimeImages::example();
+        assert_eq!(
+            unset.systemd_workspace(&format!("{repository}@sha256:{digest}")),
+            SystemdWorkspaceImage::No
+        );
+        assert_eq!(
+            RuntimeImages::example().with_systemd_workspace_repository("  "),
+            Ok(RuntimeImages::example())
+        );
+        for refused in [
+            "workspace-systemd",
+            "registry.example.invalid/codewire/workspace-systemd:latest",
+            "registry.example.invalid/codewire/workspace",
+        ] {
+            let error = RuntimeImages::example()
+                .with_systemd_workspace_repository(refused)
+                .unwrap_err();
+            assert!(
+                error.starts_with(SYSTEMD_WORKSPACE_IMAGE_REPOSITORY_ENV),
+                "{error}"
+            );
             assert!(error.ends_with(CONFIGURATION_REFERENCE), "{error}");
         }
     }

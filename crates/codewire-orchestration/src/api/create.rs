@@ -454,6 +454,38 @@ fn validate_confidential_storage_size(isolation_tier: &str, disk_gib: u64) -> Ap
     Ok(())
 }
 
+/// The isolation tier a create names, standard when it names none.
+fn create_isolation_tier(body: &CreateEnvironmentBody) -> AppResult<&'static str> {
+    match body.isolation_tier.trim() {
+        "" | "standard" => Ok("standard"),
+        "confidential" => Ok("confidential"),
+        _ => Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_isolation_tier",
+            "isolation_tier must be standard or confidential",
+        )),
+    }
+}
+
+/// Whether this create makes a systemd workspace, admitted
+/// ([`crate::sandbox::systemd_workspace::admit_create`]).
+async fn admit_systemd_create(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    body: &CreateEnvironmentBody,
+    isolation_tier: &str,
+) -> AppResult<bool> {
+    let create = crate::sandbox::systemd_workspace::CreateKind {
+        image: &body.project_spec.image,
+        isolation_tier,
+        runtime_profile: &state.sandbox_cfg.runtime_profile,
+        source_snapshot_id: body.source_snapshot_id.as_deref(),
+        placed_on_host: body.placement_host.is_some(),
+    };
+    crate::sandbox::systemd_workspace::admit_create(&state.pool, user, org_id, create).await
+}
+
 /// Mirrors `worker.ValidAgentType` via the shared agent registry.
 fn valid_agent_type(agent: &str) -> bool {
     crate::worker::agents::is_supported_agent(agent)
@@ -672,6 +704,8 @@ struct InsertEnvironmentParams<'a> {
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     body: &'a CreateEnvironmentBody,
+    /// Recorded once here; every later Pod renders from it.
+    systemd_workspace: bool,
     /// The organization's limits, read before the transaction; usage is
     /// counted inside it.
     quota: OrgQuota,
@@ -788,10 +822,11 @@ async fn insert_environment(
                 (org_id, created_by, preset_id, type, name,
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
-                 runtime_backend, host_id, create_request_id, idle_stop_seconds)
+                 runtime_backend, host_id, create_request_id, idle_stop_seconds,
+                 systemd_workspace)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13, $14, $15, $16, $17)
+                 $12, $13, $14, $15, $16, $17, $18)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -857,6 +892,7 @@ async fn insert_environment(
         .bind(host_id.as_deref())
         .bind(p.body.request_id.as_deref())
         .bind(idle_stop_seconds)
+        .bind(p.systemd_workspace)
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;
@@ -903,98 +939,6 @@ async fn insert_environment(
     let environment = scan_environment(&row)?;
     transaction.commit().await?;
     Ok(environment)
-}
-
-/// What a create from a snapshot can't be, checked before anything is written.
-/// Confidential environments never have snapshots (owner, 2026-10-29). A
-/// repository would be cloned over the restored checkout, which fails.
-fn validate_source_snapshot_request(
-    body: &CreateEnvironmentBody,
-    isolation_tier: &str,
-    volume_snapshot_class: &str,
-) -> AppResult<()> {
-    let Some(snapshot_id) = body.source_snapshot_id.as_deref() else {
-        return Ok(());
-    };
-    if snapshot_id.trim().is_empty() {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "invalid_source_snapshot",
-            "source_snapshot_id must name a snapshot",
-        ));
-    }
-    if volume_snapshot_class.is_empty() {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "snapshots_unavailable",
-            "this deployment does not offer hosted snapshots",
-        ));
-    }
-    if isolation_tier == "confidential" {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "snapshot_source_confidential",
-            "a confidential environment cannot start from a snapshot",
-        ));
-    }
-    if !body.project_spec.repositories.is_empty() {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "snapshot_source_repository",
-            "an environment started from a snapshot takes its files from the snapshot, not a repository",
-        ));
-    }
-    Ok(())
-}
-
-/// A snapshot is private to its creator, so another member's reads as absent.
-/// The share lock holds off a delete until this create commits, and a use of a
-/// snapshot counts toward its expiry in the transaction that authorizes it.
-/// Admitted, it answers the idle stop its source had when it was captured,
-/// which a fork takes unless its create names one (#3384).
-pub(crate) async fn admit_source_snapshot(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    org_id: &str,
-    user_id: &str,
-    snapshot_id: &str,
-    disk_gib: i32,
-) -> AppResult<Option<i32>> {
-    let row: Option<(String, Option<i64>, Option<i32>)> = sqlx::query_as(
-        "SELECT state, size_bytes, idle_stop_seconds FROM hosted_snapshots
-          WHERE id = $1 AND org_id = $2 AND created_by = $3
-          FOR SHARE",
-    )
-    .bind(snapshot_id)
-    .bind(org_id)
-    .bind(user_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    let Some((snapshot_state, size_bytes, idle_stop_seconds)) = row else {
-        return Err(coded(
-            StatusCode::NOT_FOUND,
-            "snapshot_not_found",
-            "no such snapshot",
-        ));
-    };
-    if snapshot_state != "ready" {
-        return Err(coded(
-            StatusCode::CONFLICT,
-            "snapshot_not_ready",
-            "this snapshot is not ready",
-        ));
-    }
-    if size_bytes.unwrap_or(0) > i64::from(disk_gib) * (1 << 30) {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "snapshot_disk_too_small",
-            "the disk must be at least as large as the snapshot",
-        ));
-    }
-    sqlx::query("UPDATE hosted_snapshots SET last_used_at = now() WHERE id = $1")
-        .bind(snapshot_id)
-        .execute(&mut **transaction)
-        .await?;
-    Ok(idle_stop_seconds)
 }
 
 /// A network on create must be a hosted Mesh network name, and this platform
@@ -1280,17 +1224,7 @@ pub(crate) async fn create_environment_core(
         body.name.as_deref(),
         &state.sandbox_cfg,
     )?;
-    let isolation_tier = match body.isolation_tier.trim() {
-        "" | "standard" => "standard",
-        "confidential" => "confidential",
-        _ => {
-            return Err(coded(
-                StatusCode::BAD_REQUEST,
-                "invalid_isolation_tier",
-                "isolation_tier must be standard or confidential",
-            ));
-        }
-    };
+    let isolation_tier = create_isolation_tier(&body)?;
     require_confidential_access(
         pool,
         state.confidential_storage_flags,
@@ -1303,6 +1237,8 @@ pub(crate) async fn create_environment_core(
     if !body.project_spec.image.is_empty() {
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);
     }
+    let systemd_workspace =
+        admit_systemd_create(state, user, org_id, &body, isolation_tier).await?;
 
     take_create_limits(pool, &user.user_id).await?;
 
@@ -1449,6 +1385,7 @@ pub(crate) async fn create_environment_core(
                     isolation_tier,
                     ttl_seconds: ttl,
                     body: &body,
+                    systemd_workspace,
                     quota,
                 },
             )
@@ -1477,6 +1414,11 @@ pub(crate) async fn create_environment_core(
     })
     .await
 }
+
+mod source_snapshot;
+
+pub(crate) use source_snapshot::admit_source_snapshot;
+use source_snapshot::validate_source_snapshot_request;
 
 #[cfg(test)]
 mod limit_database_tests;
@@ -2894,6 +2836,7 @@ credentials: {profile: user/work}
                     isolation_tier: "standard",
                     ttl_seconds: None,
                     body,
+                    systemd_workspace: false,
                     quota,
                 },
             )

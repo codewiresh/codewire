@@ -704,14 +704,7 @@ async fn resize_environment_core_inner(
     .await?;
     let environment =
         fetch_env_summary(&state.pool, &params.org_id, &params.environment_id).await?;
-    require_confidential_access(
-        &state.pool,
-        state.confidential_storage_flags,
-        user,
-        &params.org_id,
-        &environment.isolation_tier,
-    )
-    .await?;
+    super::environments::require_bring_up_access(state, user, &params.org_id, &environment).await?;
 
     if let Some(operation) = find_existing_operation(state, &params).await? {
         if operation.desired_resources != params.desired_resources
