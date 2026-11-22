@@ -3091,6 +3091,15 @@ mod tests {
         organization: &OrganizationContext,
         environment: crate::view::EnvironmentRow,
     ) -> String {
+        render_terminal_with(organization, environment, String::new())
+    }
+
+    /// The page as the terminal route renders it after a Retry setup.
+    fn render_terminal_with(
+        organization: &OrganizationContext,
+        environment: crate::view::EnvironmentRow,
+        setup_retry_since: String,
+    ) -> String {
         let view = crate::view::DashboardView {
             account_id: "synthetic-account".to_owned(),
             user_name: "Resize".into(),
@@ -3130,9 +3139,12 @@ mod tests {
             message: String::new(),
             error: String::new(),
         };
-        crate::templates::TerminalTemplate::for_test(&view, organization, &terminal_page)
-            .render()
-            .unwrap()
+        crate::templates::TerminalTemplate {
+            setup_retry_since,
+            ..crate::templates::TerminalTemplate::for_test(&view, organization, &terminal_page)
+        }
+        .render()
+        .unwrap()
     }
 
     fn resize_ids(html: &str) -> Vec<&str> {

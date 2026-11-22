@@ -457,6 +457,9 @@ pub(crate) struct TerminalTemplate<'a> {
     /// A Retry setup was refused until its reclone is confirmed, so the page
     /// opens that confirmation (#4767).
     pub(crate) confirm_reclone: bool,
+    /// When a Retry setup that started was asked for, so the step list
+    /// follows it (#4767); empty otherwise.
+    pub(crate) setup_retry_since: String,
 }
 
 impl<'a> TerminalTemplate<'a> {
@@ -474,6 +477,7 @@ impl<'a> TerminalTemplate<'a> {
             csrf_token,
             style_nonce,
             confirm_reclone: false,
+            setup_retry_since: String::new(),
         }
     }
 

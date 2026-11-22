@@ -448,6 +448,87 @@ async fn a_run_that_ended_before_the_page_rendered_is_skipped_and_this_one_follo
 }
 
 #[test]
+fn a_retrys_page_first_gets_the_run_that_ended_before_the_retry() {
+    let failed = [
+        row_at(1, "health_check", "completed", "2026-10-06T09:58:00Z"),
+        row_at(2, "install", "started", "2026-10-06T09:58:01Z"),
+        row_at(3, "install", "failed", "2026-10-06T09:58:02Z"),
+    ];
+    let retry = [
+        row_at(4, "install", "started", "2026-10-06T10:00:01Z"),
+        row_at(5, "complete", "completed", "2026-10-06T10:00:02Z"),
+    ];
+    let before = Run::Before {
+        since: at("2026-10-06T10:00:00Z"),
+    };
+    let earlier = [row_at(0, "complete", "completed", "2026-10-06T09:00:00Z")];
+    let history: Vec<_> = earlier
+        .iter()
+        .chain(&failed)
+        .chain(&retry)
+        .cloned()
+        .collect();
+    // Whether the Retry's run is still going or has ended.
+    assert_eq!(current_run(&history, before), &failed);
+    assert_eq!(current_run(&history[..5], before), &failed);
+    assert_eq!(current_run(&history[..4], before), &failed);
+    assert!(current_run(&retry, before).is_empty());
+}
+
+#[tokio::test]
+async fn a_retrys_page_gets_the_failed_run_and_its_end_and_follows_nothing() {
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![vec![
+        Ok(response(&row_at(
+            1,
+            "install",
+            "started",
+            "2026-10-06T09:58:01Z",
+        ))),
+        Ok(response(&row_at(
+            2,
+            "install",
+            "failed",
+            "2026-10-06T09:58:02Z",
+        ))),
+        Ok(response(&row_at(
+            3,
+            "install",
+            "started",
+            "2026-10-06T10:00:01Z",
+        ))),
+    ]];
+    let before = Run::Before {
+        since: at("2026-10-06T10:00:00Z"),
+    };
+    let frames = relayed_run(&script, None, before).await;
+    assert_eq!(*script.opens.lock().unwrap(), vec![(String::new(), false)]);
+    assert_eq!(ids(&frames), vec![id(1), id(2)]);
+    assert_eq!(
+        frames.last().unwrap(),
+        "event: end\ndata: {\"outcome\":\"failed\"}\n\n"
+    );
+}
+
+#[tokio::test]
+async fn a_retrys_page_with_no_run_before_it_gets_an_end_and_follows_nothing() {
+    // The failed run's end has left the backlog; only the retry's rows remain.
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![vec![Ok(response(&row_at(
+        3,
+        "install",
+        "started",
+        "2026-10-06T10:00:01Z",
+    )))]];
+    let before = Run::Before {
+        since: at("2026-10-06T10:00:00Z"),
+    };
+    let frames = relayed_run(&script, None, before).await;
+    assert_eq!(*script.opens.lock().unwrap(), vec![(String::new(), false)]);
+    assert_eq!(frames, vec!["event: end\ndata: {\"outcome\":\"none\"}\n\n"]);
+}
+
+#[test]
 fn the_query_asks_for_the_current_run_unless_it_names_the_next() {
     let query = |run: Option<&str>, since: Option<&str>| EventsQuery {
         run: run.map(str::to_owned),
@@ -466,6 +547,15 @@ fn the_query_asks_for_the_current_run_unless_it_names_the_next() {
         query(Some("next"), Some("yesterday")).run(),
         Run::Next { since: None }
     );
+    assert_eq!(
+        query(Some("before"), Some("2026-10-06T10:00:00.000Z")).run(),
+        Run::Before {
+            since: at("2026-10-06T10:00:00Z")
+        }
+    );
+    // Before a time it can't read, a Retry's page gets the current run.
+    assert_eq!(query(Some("before"), Some("yesterday")).run(), Run::Current);
+    assert_eq!(query(Some("before"), None).run(), Run::Current);
 }
 
 /// The page lists, as steps, exactly the phases orchestration's setup worker

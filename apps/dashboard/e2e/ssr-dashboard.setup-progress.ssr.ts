@@ -190,8 +190,50 @@ test("a failed setup's list follows a Retry from the failed step (#4767)", async
   await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
   await expect(stages.nth(0)).toHaveAttribute("data-instant", "");
   expect(urls).toHaveLength(2);
-  expect(urls[0]).not.toContain("run=");
+  // The failed run is the one that ended before the page's time; the
+  // Retry's is the next.
+  expect(urls[0]).toContain("run=before&since=2026-10-06T10%3A00%3A00.000Z");
   expect(urls[1]).toContain("run=next&since=2026-10-06T10%3A00%3A00.000Z");
+});
+
+test("a page returning from a Retry that already completed shows it after the failed run (#4767)", async ({ page }) => {
+  // The status says the Retry completed before the failed run's rows are in:
+  // the list waits for them, then follows the Retry's run.
+  let releaseFailedRun = () => {};
+  const failedRunHeld = new Promise<void>((resolve) => { releaseFailedRun = resolve; });
+  const answers = [
+    frame(1, { phase: "health_check", status: "completed", label: "Checking sidecar readiness", durationMs: 1200 })
+      + frame(2, { phase: "install", status: "started", label: "Running install command" })
+      + frame(3, { phase: "install", status: "failed", label: "workspace exec exited 1" })
+      + end("failed"),
+    frame(4, { phase: "install", status: "started", label: "Running install command" })
+      + frame(5, { phase: "install", status: "completed", label: "Running install command", durationMs: 900 })
+      + frame(6, { phase: "complete", status: "completed", label: "" })
+      + end("completed"),
+  ];
+  const urls: string[] = [];
+  await page.route(eventsPath, async (route) => {
+    urls.push(route.request().url());
+    const body = answers.shift();
+    if (body === undefined) return route.fulfill({ status: 204 });
+    if (urls.length === 1) await failedRunHeld;
+    await fulfill(route, body);
+  });
+  await page.goto(`${fixtureUrl("setup-retry")}?list_state=running&setup_retry=2026-10-06T10%3A00%3A00.000Z`);
+  // A reload is an ordinary page: the Retry's time leaves the address.
+  await expect(page).toHaveURL(/setup-retry\.html\?list_state=running$/);
+  const setup = page.locator("[data-setup-progress]");
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect.poll(() => urls.length).toBe(1);
+  await status(page, { available: true, running: true, setupComplete: true, setupFailed: false, setupRunning: false });
+  await expect(setup.locator("h2")).toHaveText("Starting your Sandbox");
+  releaseFailedRun();
+  await expect(setup.locator("h2")).toHaveText("Retrying setup");
+  await expect(stages).toHaveCount(2);
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "completed");
+  await expect(stages.nth(0)).toHaveAttribute("data-instant", "");
+  expect(urls[0]).toContain("run=before&since=");
+  expect(urls[1]).toContain("run=next&since=");
 });
 
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {

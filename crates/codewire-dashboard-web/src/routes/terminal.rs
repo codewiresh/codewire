@@ -29,6 +29,9 @@ pub(super) struct TerminalQuery {
     /// `reclone` after a Retry setup that must confirm its reclone (#4767).
     #[serde(default)]
     confirm: String,
+    /// When a Retry setup that started was asked for (#4767).
+    #[serde(default)]
+    setup_retry: String,
 }
 
 pub(super) async fn page(
@@ -98,6 +101,7 @@ pub(super) async fn page(
             TerminalTemplate {
                 confirm_reclone: query.confirm == "reclone"
                     && !view.environment.setup_failure.is_empty(),
+                setup_retry_since: query.setup_retry_since(&view.environment),
                 ..TerminalTemplate::new(
                     &dashboard,
                     &organization,
@@ -111,6 +115,31 @@ pub(super) async fn page(
         ),
         csrf_cookie(&state.public_origin, &token),
     )
+}
+
+impl TerminalQuery {
+    /// A page returning from a Retry setup follows it in the step list, as
+    /// a page with the failure on it does, from when it was asked for. A
+    /// retry that failed again, or a Sandbox no longer running, renders as
+    /// it is.
+    pub(super) fn setup_retry_since(&self, environment: &crate::view::EnvironmentRow) -> String {
+        retry_since(&self.setup_retry, environment)
+    }
+}
+
+fn retry_since(asked_at: &str, environment: &crate::view::EnvironmentRow) -> String {
+    match chrono::DateTime::parse_from_rfc3339(asked_at) {
+        Ok(asked_at)
+            if environment.state == "running"
+                && environment.setup_failure.is_empty()
+                && !environment.deletion_started() =>
+        {
+            asked_at
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        }
+        _ => String::new(),
+    }
 }
 
 pub(super) fn canonical_environment_id(value: &str) -> bool {

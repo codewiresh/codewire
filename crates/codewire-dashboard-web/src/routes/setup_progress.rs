@@ -26,6 +26,12 @@
 //! time>` (#3772): a run that ended before the page was rendered belongs to an
 //! earlier start, so it is not replayed and the connection waits for this
 //! start's rows. A run that ended since is this start's, and is shown.
+//!
+//! A page following a Retry setup (#4767) first asks for
+//! `?run=before&since=<when the Retry was asked for>`: the run that ended
+//! last before then, which is the failed run the Retry resumes. Its steps
+//! before the failed one are done, and the Retry's own run follows as
+//! `?run=next` with the same time.
 
 use std::{convert::Infallible, time::Duration};
 
@@ -209,6 +215,9 @@ pub(super) enum Run {
     /// A starting Sandbox's run: a run that ended before `since` (the page's
     /// render time) is an earlier start's. Without `since`, any ended run is.
     Next { since: Option<DateTime<Utc>> },
+    /// A Retry's page: the run that ended last before `since`, and nothing
+    /// after it.
+    Before { since: DateTime<Utc> },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -219,16 +228,18 @@ pub(super) struct EventsQuery {
 
 impl EventsQuery {
     /// An unknown run asks for the current one, as a page that sends nothing
-    /// does; a malformed `since` is no bound.
+    /// does; a malformed `since` is no bound, and `before` without one is
+    /// the current run.
     pub(super) fn run(&self) -> Run {
+        let since = || {
+            self.since
+                .as_deref()
+                .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
+                .map(|since| since.with_timezone(&Utc))
+        };
         match self.run.as_deref() {
-            Some("next") => Run::Next {
-                since: self
-                    .since
-                    .as_deref()
-                    .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
-                    .map(|since| since.with_timezone(&Utc)),
-            },
+            Some("next") => Run::Next { since: since() },
+            Some("before") => since().map_or(Run::Current, |since| Run::Before { since }),
             _ => Run::Current,
         }
     }
@@ -238,12 +249,16 @@ impl Run {
     /// Whether a run that ended on `last` belongs to an earlier start.
     fn earlier(self, last: &LogRow) -> bool {
         match self {
-            Self::Current => false,
+            Self::Current | Self::Before { .. } => false,
             Self::Next { since: None } => true,
-            Self::Next { since: Some(since) } => DateTime::parse_from_rfc3339(&last.created_at)
-                .map_or(true, |ended| ended.with_timezone(&Utc) < since),
+            Self::Next { since: Some(since) } => ended_before(last, since),
         }
     }
+}
+
+fn ended_before(row: &LogRow, since: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&row.created_at)
+        .map_or(true, |ended| ended.with_timezone(&Utc) < since)
 }
 
 /// The rows of the current run in a full history: everything after the last
@@ -251,6 +266,19 @@ impl Run {
 /// case the run that row ended, or nothing when that run is an earlier
 /// start's ([`Run::Next`]).
 pub(super) fn current_run(rows: &[LogRow], run: Run) -> &[LogRow] {
+    if let Run::Before { since } = run {
+        let Some(end) = rows
+            .iter()
+            .rposition(|row| row.terminal() && ended_before(row, since))
+        else {
+            return &rows[..0];
+        };
+        let start = rows[..end]
+            .iter()
+            .rposition(LogRow::terminal)
+            .map_or(0, |index| index + 1);
+        return &rows[start..=end];
+    }
     let ends_terminal = rows.last().is_some_and(LogRow::terminal);
     if ends_terminal && rows.last().is_some_and(|last| run.earlier(last)) {
         return &rows[rows.len()..];
@@ -288,6 +316,8 @@ fn end_frame(row: &LogRow) -> Bytes {
 }
 
 const HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
+/// A Retry's page asked for the run before its time, and none ended then.
+const NO_RUN_FRAME: &str = "event: end\ndata: {\"outcome\":\"none\"}\n\n";
 /// The account already holds orchestration's limit of live log follows. The
 /// page stops retrying and says so.
 const BUSY_FRAME: &str = "event: busy\ndata: {}\n\n";
@@ -363,10 +393,22 @@ pub(super) async fn relay(
                 }
             }
             let history = Vec::from(history);
-            for row in current_run(&history, run) {
+            let shown = current_run(&history, run);
+            for row in shown {
                 if !send_row(&frames, row).await {
                     return;
                 }
+            }
+            // An ended run is all a Retry's page asks for first. With none in
+            // the backlog, the end says so, and the page goes on to the
+            // retry's run instead of reconnecting.
+            if matches!(run, Run::Before { .. }) {
+                if shown.is_empty() {
+                    let _ = frames
+                        .send(Bytes::from_static(NO_RUN_FRAME.as_bytes()))
+                        .await;
+                }
+                return;
             }
             match history.last() {
                 // The last run already ended; there is nothing to follow,

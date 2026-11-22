@@ -40,3 +40,53 @@ fn a_running_sandbox_in_setup_is_not_marked_starting() {
     assert!(page.contains("data-setup-progress data-setup-environment-id"));
     assert!(!page.contains("data-setup-starting"));
 }
+
+/// A Retry setup that started (#4767), as its route returns it and the page
+/// then renders: the step list follows it from when it was asked for, as a
+/// page with the failure on it does. A retry that failed again shows that
+/// failure, and the time means nothing once the Sandbox stops.
+#[test]
+fn a_page_returning_from_a_retry_follows_it_from_when_it_was_asked_for() {
+    let organization = test_organization();
+    let asked_at = chrono::DateTime::parse_from_rfc3339("2026-10-06T10:00:00.25Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let location = crate::routes::setup_retry::retried_path(
+        &format!("/{}/{STARTING}/?list_state=running", organization.slug),
+        asked_at,
+    );
+    let axum::extract::Query(query) =
+        axum::extract::Query::<crate::routes::terminal::TerminalQuery>::try_from_uri(
+            &location.parse().unwrap(),
+        )
+        .unwrap();
+    let render = |row: crate::view::EnvironmentRow| {
+        let since = query.setup_retry_since(&row);
+        render_terminal_with(&organization, row, since)
+    };
+    // Still running, or already done before the page rendered.
+    for setup_running in [true, false] {
+        let page = render(crate::view::EnvironmentRow {
+            setup_running,
+            ..resize_test_row(STARTING, 1_000, 2_048)
+        });
+        assert!(
+            page.contains(
+                " data-setup-progress data-setup-retry data-setup-since=\"2026-10-06T10:00:00.250Z\""
+            ),
+            "{setup_running}"
+        );
+        assert!(page.contains("<h2 id=\"setup-progress-title\">Starting your Sandbox</h2>"));
+    }
+    let failed_again = render(crate::view::EnvironmentRow {
+        setup_failure: "Setup failed at Running install command: workspace exec exited 1".into(),
+        ..resize_test_row(STARTING, 1_000, 2_048)
+    });
+    assert!(failed_again.contains(" data-setup-progress data-setup-retry data-setup-since=\""));
+    assert!(!failed_again.contains("data-setup-since=\"2026-10-06T10:00:00.250Z\""));
+    let stopped = render(crate::view::EnvironmentRow {
+        state: "stopped",
+        ..resize_test_row(STARTING, 1_000, 2_048)
+    });
+    assert!(!stopped.contains("data-setup-retry"));
+}

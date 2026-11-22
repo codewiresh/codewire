@@ -67,7 +67,18 @@
   let startRow = null;
   const starting = section.hasAttribute("data-setup-starting");
   const retrying = section.hasAttribute("data-setup-retry");
+  // The time a Retry returned with is for this page alone: a reload shows the
+  // Sandbox as it is then.
+  const address = new URL(window.location.href);
+  if (address.searchParams.has("setup_retry")) {
+    address.searchParams.delete("setup_retry");
+    window.history.replaceState(window.history.state, "", `${address.pathname}${address.search}${address.hash}`);
+  }
   let resumed = false;
+  // A Retry's page shows the failed run first, then follows the Retry once
+  // both its rows are in and the Sandbox reports the Retry (#4767).
+  let failedRunIn = false;
+  let retryReported = false;
   // The running step is announced to screen readers only: the list shows it.
   // Failures and stream trouble stay in the visible status line.
   const say = (text) => { if (announce instanceof HTMLElement) announce.textContent = text; };
@@ -332,9 +343,12 @@
   function followStream() {
     if (source || ended) return;
     // A starting page, and a Retry, ask only for the run after the page
-    // rendered, never one that ended before it.
+    // rendered (or the Retry was asked for), never one that ended before it.
+    // A Retry's page first asks for the failed run, the one that ended
+    // before.
     const since = section.dataset.setupSince || "";
-    const run = starting || resumed ? `?run=next${since ? `&since=${encodeURIComponent(since)}` : ""}` : "";
+    const bound = since ? `&since=${encodeURIComponent(since)}` : "";
+    const run = starting || resumed ? `?run=next${bound}` : retrying && since ? `?run=before${bound}` : "";
     source = new EventSource(`/${encodeURIComponent(slug)}/${environmentId}/_events/setup-progress${run}`);
     source.addEventListener("stage", (message) => {
       let event;
@@ -344,7 +358,11 @@
     source.addEventListener("end", () => {
       source?.close();
       // The failed run's steps are in; a Retry follows the next run.
-      if (retrying && !resumed) source = null;
+      if (retrying && !resumed) {
+        source = null;
+        failedRunIn = true;
+        if (retryReported) resume();
+      }
     });
     // This account already follows as many live logs as orchestration allows.
     source.addEventListener("busy", () => {
@@ -358,6 +376,22 @@
         status.textContent = "Live setup progress is unavailable. Sandbox status below still updates.";
       }
     });
+  }
+
+  function resume() {
+    resumed = true;
+    const heading = section.querySelector("h2");
+    if (heading) heading.textContent = "Retrying setup";
+    if (failure instanceof HTMLElement) failure.hidden = true;
+    status.textContent = "";
+    for (const stage of stages.values()) {
+      if (stage.item.dataset.state === "completed") stage.item.dataset.instant = "";
+    }
+    source?.close();
+    source = null;
+    firstSeen = Date.now();
+    startClock();
+    followStream();
   }
 
   firstSeen = Date.now();
@@ -374,21 +408,11 @@
   document.addEventListener("codewire:sandbox-status", (message) => {
     const detail = message.detail;
     if (detail?.environmentId !== environmentId || ended) return;
-    // A Retry's setup owns the Sandbox: follow its run under a new heading.
-    if (retrying && !resumed && detail.setupRunning === true) {
-      resumed = true;
-      const heading = section.querySelector("h2");
-      if (heading) heading.textContent = "Retrying setup";
-      if (failure instanceof HTMLElement) failure.hidden = true;
-      status.textContent = "";
-      for (const stage of stages.values()) {
-        if (stage.item.dataset.state === "completed") stage.item.dataset.instant = "";
-      }
-      source?.close();
-      source = null;
-      firstSeen = Date.now();
-      startClock();
-      followStream();
+    // A Retry's setup owns the Sandbox, or already completed: follow its run
+    // under a new heading.
+    if (retrying && !resumed && (detail.setupRunning === true || detail.setupComplete === true)) {
+      retryReported = true;
+      if (failedRunIn) resume();
       return;
     }
     // A start whose setup already completed or failed on an earlier run is a
