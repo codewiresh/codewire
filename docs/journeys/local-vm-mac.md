@@ -83,6 +83,8 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   `after-restart` and an uptime under a minute. After a lost egress broker,
   `cw --local info` reads `Error: egress_broker_exit` with the broker's exit
   status and its name, such as `exited 72: egress_broker_protocol` (#4953).
+  `cw --local daemon logs` shows the same in its `# exit` part (not yet
+  observed).
 - **Gotchas:**
   - A first create with the default workspace image pulls about a minute of
     layers; a slow pull is not a failure.

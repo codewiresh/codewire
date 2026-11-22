@@ -236,6 +236,11 @@ same (#5238).
     environment is not in the required state`, and `cw ls --output json`
     has `"error": null`; the smoke logs what `cw exec` says and checks none
     of this until #5359 lands.
+  - **How it ended** (not yet observed, #4953): after the kill,
+    `cw --local info NAME --output json` has `"runner_exit": {"status":
+    null, "signal": 9}`, `cw --local info NAME` says the broker was ended by
+    signal 9, and `cw --local daemon logs NAME` shows the same in its
+    `# exit` part.
   - **No provider call while it is down:** with synthetic providers, Part B
     (#5220).
 - **Observed:** `main` at 1250f23ed, 2026-11-18, by hand on a Linux host,

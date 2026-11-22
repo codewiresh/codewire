@@ -507,7 +507,10 @@ reset. Both processes run under Landlock and seccomp on Linux and under
 Seatbelt on macOS; losing either fails the environment closed (`error`), and a
 stop and start restores egress. The state keeps which process ended and how:
 `cw info` names its exit status and what that status means, as the process's
-own exit codes define it (#4953). An answer from the broker that misses the
+own exit codes define it, or the signal that ended it. `--output json` carries
+them as `runner_exit.status`, `reason` and `signal`, and `cw --local daemon
+logs` shows the same in an `# exit` part (#4953, the signal and the `# exit`
+part not yet built). An answer from the broker that misses the
 worker's deadline refuses only its own lookup or connection: the worker keeps
 the session until the late answer arrives and checks it, so a slow resolver or
 a stalled broker never ends the broker or fails the environment (#4948). While
