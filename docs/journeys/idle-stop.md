@@ -8,15 +8,15 @@ before the code. The format is in [README.md](README.md).
 ## Where it stands
 
 Updated 2026-11-22. Walked on Dev on 2026-11-21. Not yet observed: the
-agent, a gone daemon, the dashboard, `ssh`, the browser terminal and
-previews.
+agent, a gone daemon, the dashboard, the browser terminal and a signed-in
+preview request.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `idle-stop-setting` | observed 2026-11-21, but the dashboard | not yet observed |
 | `idle-stop-stops` | observed 2026-11-21, but the dashboard and billing | not yet observed |
-| `idle-stop-busy` | observed 2026-11-21; Docker stopped 22 s late | not yet observed |
-| `idle-stop-input` | steps 1 and 2 over `cw shell`, 2026-11-21 | not yet observed |
+| `idle-stop-busy` | observed 2026-11-21 | not yet observed |
+| `idle-stop-input` | observed 2026-11-21, but the browser terminal and a signed-in preview | not yet observed |
 | `idle-stop-agent` | not yet observed | not yet observed |
 | `idle-stop-daemon-gone` | not yet observed | not yet observed |
 | `idle-stop-off` | observed 2026-11-21 (Kind half not yet) | not yet observed |
@@ -111,14 +111,17 @@ previews.
   2. Check `cw ls` at 6 minutes: `running`.
   3. Repeat with the loop inside `docker run --rm alpine sh -c '…'`.
 - **Proof:** the Sandbox is running at 6 minutes, and stops (`stopped
-  (idle)`) between 5 and 5.5 minutes after the loop ends, in both runs.
+  (idle)`) between 5 and 6.5 minutes after the loop ends, in both runs. CPU
+  is sampled once a minute and a busy minute counts from the sample that
+  ends it, so the last use can read up to a minute after the loop's last
+  work, and the stop comes at the next 30-second check after the timeout.
 - **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity. Both busy loops kept their Sandbox
   `running` for their 8 minutes. A second run timed the stop: the plain
   loop ended at 23:32:31Z and `StoppedAt` was 23:37:56Z (5 min 25 s); the
   loop in `docker run --rm alpine` ended at 23:32:34Z and `StoppedAt` was
-  23:38:26Z (5 min 52 s), 22 s past this proof's 5.5 minutes, on the late
-  side. Docker removing the container after the loop may be what counted
-  in the next minute; that is not confirmed.
+  23:38:26Z (5 min 52 s). Both are inside the proof. It said 5.5 minutes
+  at first, and the Docker stop was past that; the cause is the
+  once-a-minute sample above, not Docker (#5851).
 
 ## `idle-stop-input`: typing and previews count; an idle shell does not
 
@@ -150,8 +153,34 @@ previews.
   left at its prompt (opened 23:24:32Z) stopped with `StoppedAt` 23:29:49Z
   (5 min 17 s), and the shell then ended. Typing `date` every 2 minutes
   kept the Sandbox `running` for 8 minutes; the last key was at 23:32:32Z
-  and `StoppedAt` was 23:37:59Z (5 min 27 s). Not yet observed: `ssh` and
-  the browser terminal, steps 3 to 6.
+  and `StoppedAt` was 23:37:59Z (5 min 27 s).
+
+  Then, the same build: over `ssh` through `cw setup ssh`'s section,
+  typing `date` every 2 minutes from 23:50:18Z to 23:56:18Z kept the
+  Sandbox `running`, and `StoppedAt` was 00:01:31Z (5 min 13 s after the
+  last key). Step 3: output every 2 minutes, last at 23:51:24Z, kept it
+  up, and it stopped at 23:58:58Z, 5 min 34 s after the shell printed its
+  prompt when the loop ended (23:53:24Z). Step 4: a published preview
+  nobody requested stopped at 23:49:57Z, 5 min 16 s after its create (the
+  detached `cw run -d` and the publish don't count); a public one curled
+  anonymously every 2 minutes (each 200) stayed up and stopped at
+  23:58:27Z, 5 min 14 s after the last request. Step 5: an `ssh`
+  connection with keepalives every 30 seconds and no input or output,
+  connected by 23:48:38Z, stopped at 23:53:27Z, and the connection then
+  closed. Step 6: polling `https://example.com` every minute from a
+  detached command didn't keep it up; it stopped at 23:50:28Z, 5 min 16 s
+  after its create.
+
+  Over `ssh`, the stop ended the connection with `cw shell --stdio`'s raw
+  error, "daemon session stream failed: … h2 protocol error: error reading
+  a body from connection … BrokenPipe", then "Connection to
+  cw-cloud-idle-keep2 closed." `cw shell` in the same case says "Stopped
+  itself after 5 minutes idle (CPU under 10%, no traffic or input). Files
+  are kept." and `→ cw --cloud start NAME`; the `ssh` path should say the
+  same.
+
+  Not yet observed: the browser terminal, and a signed-in preview
+  request.
 
 ## `idle-stop-agent`: an agent turn keeps its Sandbox up
 

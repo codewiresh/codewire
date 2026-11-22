@@ -48,7 +48,10 @@ The Sandbox is active in any minute in which one of these happens:
   the workspace container's own cgroup. Under `runc`, used only for
   diagnostics such as Kind, the kernel is the host's, so only the workspace
   container's own cgroup counts (`cpu.stat`, `usage_usec`), without Docker.
-  An idle guest uses under 2 seconds a minute (Dev, 2026-11-21).
+  An idle guest uses under 2 seconds a minute (Dev, 2026-11-21). A busy
+  minute counts from the sample that ends it, so when CPU was the last
+  use, the recorded time can be up to a minute after the work stopped, and
+  the stop comes up to a minute later than the timeout alone says (#5851).
 - **Terminal input or output:** data passes, either way, through a `cw`
   session or shell, the browser terminal, or an SSH connection's channels:
   keystrokes in, or a command's output on the way out. SSH keepalives, window
