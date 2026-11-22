@@ -492,6 +492,18 @@ pub trait RuntimeLifecycle: Send + Sync {
         support_image: &str,
     ) -> anyhow::Result<()>;
 
+    /// Refuses, before a start changes anything, an environment whose bound
+    /// Sandbox was made before hosted egress was turned on: its next Pod
+    /// would run direct (#4000, [`crate::egress::pre_switch`]). A driver
+    /// without hosted egress has nothing to refuse.
+    async fn refuse_made_before_hosted_egress(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Replace exactly this incarnation, re-pinned to `support_image`. It never
     /// touches a newer one.
     async fn replace_member(

@@ -900,6 +900,42 @@ async fn interception_is_sent_only_for_a_broker_mode_sandbox_with_it_on() {
     assert!(!direct.bind(20).await.unwrap().interception);
 }
 
+// With hosted egress on (#4000), a Pod on a VM runtime without broker mode
+// was built from a Sandbox made before the switch: its bind is refused, so it
+// never serves with its egress direct. A runc Pod is never broker-mode, and
+// with the switch off nothing changes.
+#[tokio::test]
+async fn with_hosted_egress_on_a_direct_vm_pod_is_refused_its_bind() {
+    let pod = |class: &str, broker: bool| {
+        let mut pod = workspace_pod();
+        pod.spec.as_mut().unwrap().runtime_class_name = Some(class.into());
+        if broker {
+            pod.metadata.labels.as_mut().unwrap().insert(
+                crate::egress::admission::EGRESS_MODE_LABEL.into(),
+                crate::egress::admission::EGRESS_MODE_BROKER.into(),
+            );
+        }
+        pod
+    };
+    let bind = |pod, hosted_egress: bool| async move {
+        fixture_with(
+            FakeCluster::new(valid_review(), vec![Some(pod)], vec![Some(sandbox())]),
+            FakeStore::bound(WorkspaceCredentialScope::Pod),
+            |state| state.with_hosted_egress(hosted_egress),
+        )
+        .bind(20)
+        .await
+        .map(|_| ())
+    };
+    assert_eq!(
+        bind(pod("commodity", false), true).await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert_eq!(bind(pod("commodity", true), true).await, Ok(()));
+    assert_eq!(bind(pod("commodity", false), false).await, Ok(()));
+    assert_eq!(bind(pod("runc", false), true).await, Ok(()));
+}
+
 /// The Pod's first bind decides and stores its interception; a rebind after
 /// the switch changes keeps what was stored, either way, so the switch takes
 /// effect only at the Pod's next start (#4001, cw-security 2026-11-19).

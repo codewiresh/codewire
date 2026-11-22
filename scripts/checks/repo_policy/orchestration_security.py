@@ -326,13 +326,51 @@ SANDBOX_KEEPS_BROKER_MODE = (
     "has(object.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in object.spec.podTemplate.metadata.labels && "
     "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'"
 )
+# codewire#4000: with hosted egress on, orchestration never starts or changes a
+# VM Sandbox made before it, only stops it. Every class but runc and none is a
+# VM, an unknown one included, so the rule fails closed; on every target.
+SANDBOX_DIRECT_RUNTIME_CLASSES = ("runc", "")
+SANDBOX_PRE_SWITCH = [
+    "paramKind: apiVersion: v1 kind: ConfigMap",
+    "- expression: has(params.data) && "
+    f"'{HOSTED_EGRESS_SWITCH}' in params.data && params.data['{HOSTED_EGRESS_SWITCH}'] == 'true' name: hostedEgress",
+    "- expression: has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) && "
+    "has(object.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in object.spec.podTemplate.metadata.labels && "
+    "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker' name: broker",
+    "request.operation != 'UPDATE' || !variables.hostedEgress || variables.broker || "
+    "has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' || "
+    "![object, oldObject].exists(s, has(s.spec.podTemplate) && has(s.spec.podTemplate.spec) && "
+    "has(s.spec.podTemplate.spec.runtimeClassName) && "
+    "!(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))",
+    # Nor is broker mode ever added to an existing Sandbox, a stop included.
+    "- expression: has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) && "
+    "has(oldObject.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels && "
+    "oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker' name: wasBroker",
+    "request.operation != 'UPDATE' || !variables.hostedEgress || !variables.broker || variables.wasBroker message:",
+]
+# A snapshot's clearing template, exactly as rendered, is excepted from the
+# broker arm's shape (codewire#4000): the arm itself, the workspace addresses,
+# the resolver, the privilege rule and the TUN init's and its volume's presence.
+SNAPSHOT_CLEARING = (
+    "- expression: request.name.matches('^cw-snap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-clear$') && "
+    "has(object.metadata.labels) && 'codewire.sh/type' in object.metadata.labels && "
+    "object.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' && "
+    "has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) && "
+    "'codewire.sh/type' in object.spec.podTemplate.metadata.labels && "
+    "object.spec.podTemplate.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' && "
+    "!variables.egressLabelled && variables.containers.all(c, c.name != 'hosted-egress-tun') && "
+    "has(object.spec.networkPolicy) && dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) && "
+    "has(object.spec.networkPolicy.ingress) && size(object.spec.networkPolicy.ingress) == 0 && "
+    "has(object.spec.networkPolicy.egress) && size(object.spec.networkPolicy.egress) == 0 name: clearing"
+)
+SNAPSHOT_CLEARING_USES = 6
 HOSTED_EGRESS_FRAGMENTS = [
     "paramKind: apiVersion: v1 kind: ConfigMap",
     f"'{HOSTED_EGRESS_SWITCH}' in params.data && params.data['{HOSTED_EGRESS_SWITCH}'] == 'true'",
     "'codewire.sh/egress' in object.spec.podTemplate.metadata.labels",
     "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'",
     # The switch, not the template, picks the arm.
-    "variables.hostedEgress ? variables.broker : !variables.egressLabelled",
+    "variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled",
     "variables.hostedEgress || has(object.spec.networkPolicy) && dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress'])",
     # The broker variables and audience, only with the switch on.
     "variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment && "
@@ -380,7 +418,7 @@ HOSTED_EGRESS_FRAGMENTS = [
     "variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' || "
     "(c.name == 'workspace' || c.name == 'hosted-egress-tun') && "
     "dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) && "
-    "(!variables.hostedEgress || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))",
+    "(!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))",
     # The broker arm's privilege: root only for the TUN init, mount-workspace
     # ordered before it, and dind from the official DinD image; no added
     # capability or escalation anywhere.
@@ -389,7 +427,7 @@ HOSTED_EGRESS_FRAGMENTS = [
     "size(c.securityContext.capabilities.add) == 0",
     # Neither root init container is a sidecar, and a broker template has the TUN init.
     "c.name == 'hosted-egress-tun' && !has(c.restartPolicy) || c.name == 'mount-workspace' && !has(c.restartPolicy) &&",
-    "(!variables.hostedEgress || variables.standardEnvironment || has(variables.pod.initContainers) && "
+    "(!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) && "
     "variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))",
     # codewire#5602: only a per-environment `standard` template goes without
     # the TUN init and its device; the TUN rule's VM classes still refuse a
@@ -525,6 +563,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "'10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'",
             *HOSTED_EGRESS_FRAGMENTS,
             *ENVIRONMENT_KBS_FRAGMENTS,
+            SNAPSHOT_CLEARING,
         ],
         WARM_POOL_MEMBER_POLICY: [
             "apiGroups: - agents.x-k8s.io apiVersions: - v1beta1 operations: - CREATE - UPDATE resources: - sandboxes",
@@ -533,6 +572,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "request.operation != 'UPDATE' || (!(has(oldObject.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels)",
             "!(has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
             SANDBOX_KEEPS_BROKER_MODE,
+            *SANDBOX_PRE_SWITCH,
         ],
     }
     for policy_name, required in required_by_policy.items():
@@ -578,19 +618,31 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                                       f"{found.group(1) if found else None}")
                 if not prune_protected(policy):
                     output.append(f"{label}: {policy_name} must never be pruned")
+                # The clearing exception reaches only the broker arm's shape.
+                uses = normalized.count("variables.clearing")
+                if uses != SNAPSHOT_CLEARING_USES:
+                    output.append(f"{label}: {policy_name} excepts the clearing template in exactly "
+                                  f"{SNAPSHOT_CLEARING_USES} broker-arm rules, not {uses}")
                 # Only the Kind e2e overlay adds its test knob's variable (#3852).
                 environment = [*WARM_POOL_ENVIRONMENT, *WARM_POOL_EXTRA_ENVIRONMENT.get(target["path"], [])]
                 found = re.search(r"- expression: '?(\[[^\]]*\])'? name: environment ", normalized)
                 if not found or found.group(1) != cel_list(environment):
                     output.append(f"{label}: {policy_name} workspace environment must be exactly {cel_list(environment)}: "
                                   f"{found.group(1) if found else None}")
+            if policy_name == WARM_POOL_MEMBER_POLICY:
+                found = re.search(r"- expression: '?(\[[^\]]*\])'? name: directRuntimeClasses(?: |$)", normalized)
+                if not found or found.group(1) != cel_list(SANDBOX_DIRECT_RUNTIME_CLASSES):
+                    output.append(f"{label}: {policy_name} directRuntimeClasses must be exactly "
+                                  f"{cel_list(SANDBOX_DIRECT_RUNTIME_CLASSES)}: {found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
-            if policy_name == WARM_POOL_TEMPLATE_POLICY:
+            if policy_name in (WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY):
+                # A missing switch denies, never admits (codewire#4000).
                 expected = compact(
                     f"spec: paramRef: name: {HOSTED_EGRESS_CONFIGMAP} namespace: {target['subject_namespace']} "
                     f"parameterNotFoundAction: Deny policyName: {policy_name} validationActions: - Deny"
                 )
+            if policy_name == WARM_POOL_TEMPLATE_POLICY:
                 if not prune_protected(binding):
                     output.append(f"{label}: {policy_name} binding must never be pruned")
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
@@ -1667,10 +1719,27 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                                                    "    parameterNotFoundAction: Deny\n", "")),
             ("a binding that admits without the param", edited("ValidatingAdmissionPolicyBinding", WARM_POOL_TEMPLATE_POLICY,
                                                                 "parameterNotFoundAction: Deny", "parameterNotFoundAction: Allow")),
+            ("a member binding without the param", edited("ValidatingAdmissionPolicyBinding", WARM_POOL_MEMBER_POLICY,
+                                                          f"  paramRef:\n    name: {HOSTED_EGRESS_CONFIGMAP}\n    namespace: prod\n"
+                                                          "    parameterNotFoundAction: Deny\n", "")),
+            ("a member binding that admits without the param", edited("ValidatingAdmissionPolicyBinding", WARM_POOL_MEMBER_POLICY,
+                                                                       "parameterNotFoundAction: Deny", "parameterNotFoundAction: Allow")),
             ("a pruneable policy", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                           "kustomize.toolkit.fluxcd.io/prune: disabled", "codewire.sh/x: y")),
             ("the template picking its own arm", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
-                                                        "variables.hostedEgress ? variables.broker : !variables.egressLabelled", "true")),
+                                                        "variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled", "true")),
+            # codewire#4000: the clearing exception stays exactly the rendered clearing template.
+            ("any cw-snap- template as clearing", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                         "-clear$') &&", "-clear') &&")),
+            ("a clearing template with egress", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                       "size(object.spec.networkPolicy.egress) == 0", "true")),
+            ("a clearing template with the egress label", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                 "!variables.egressLabelled && variables.containers.all(", "variables.containers.all(")),
+            ("a clearing template of another type", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                           "object.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' &&", "")),
+            ("the clearing exception in the broker egress", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                   "!variables.hostedEgress || has(object.spec.networkPolicy)",
+                                                                   "!variables.hostedEgress || variables.clearing || has(object.spec.networkPolicy)")),
             ("the TUN init as a regular container", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                                            "variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&", "")),
             ("a broker peer with any labels", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
@@ -1849,6 +1918,21 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
              "|| variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init'"),
             (WARM_POOL_MEMBER_POLICY, "== 'broker') || has(object.spec.podTemplate)", "== 'broker') || true || has(object.spec.podTemplate)"),
             (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'\n", "true\n"),
+            # codewire#4000: with the switch on, a pre-switch VM Sandbox only stops.
+            (WARM_POOL_MEMBER_POLICY, "|| !variables.hostedEgress ||", "|| true ||"),
+            (WARM_POOL_MEMBER_POLICY, "|| variables.broker ||", "|| true ||"),
+            (WARM_POOL_MEMBER_POLICY, "object.spec.operatingMode == 'Suspended'", "object.spec.operatingMode != ''"),
+            (WARM_POOL_MEMBER_POLICY, "[object, oldObject].exists(s,", "[object].exists(s,"),
+            (WARM_POOL_MEMBER_POLICY, "|| !variables.broker || variables.wasBroker", "|| true"),
+            (WARM_POOL_MEMBER_POLICY, "!variables.hostedEgress || !variables.broker ||", "!variables.hostedEgress || true ||"),
+            # The VM test stays an exclusion: back to an allow-list, or a
+            # VM class counted as direct, is refused.
+            (WARM_POOL_MEMBER_POLICY, "!(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))",
+             "s.spec.podTemplate.spec.runtimeClassName in ['commodity', 'commodity-32g', 'confidential', 'standard'])"),
+            (WARM_POOL_MEMBER_POLICY, "!(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))",
+             "!(s.spec.podTemplate.spec.runtimeClassName in ['runc', '', 'another-vm']))"),
+            (WARM_POOL_MEMBER_POLICY, "['runc', '']", "['runc', '', 'commodity']"),
+            (WARM_POOL_MEMBER_POLICY, "params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'", "true"),
         ]:
             image_cache_rejected(f"warm pool {before}", "ValidatingAdmissionPolicy", before, after, policy_name)
         image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",

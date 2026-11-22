@@ -19,6 +19,7 @@ pub mod assignment;
 pub mod gateway_check;
 pub mod interception_ca;
 pub mod lockdown;
+pub mod pre_switch;
 pub mod reports;
 pub mod service;
 pub mod settings;

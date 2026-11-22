@@ -1145,6 +1145,27 @@ template's made before hosted egress was turned on, refuses the guest as
 NetworkPolicies only: a Cilium policy can allow traffic too and is not seen,
 and only infra's reviewed GitOps creates those (infra#1822).
 
+Target, not shipped (#4000): an environment made while hosted egress was off
+keeps its direct Sandbox, because a start, a repair or a Pod replacement
+builds the next Pod from the Sandbox's own pod template. So with hosted
+egress on, orchestration refuses to start, repair or replace a Sandbox on a
+VM runtime whose pod template lacks broker mode (`codewire.sh/egress:
+broker`), before it changes anything, and the start fails with a reason
+that says the environment was made before hosted egress and must be
+recreated. A stop still works, so such an environment can be stopped and
+removed. Admission is the backstop: with the switch on it denies an
+orchestration update that would start or change such a Sandbox, or add
+broker mode to one, since only create renders it. With the switch on,
+every template orchestration writes is broker-mode except one: a
+snapshot's clearing template, which runs one container on the restored
+disk, is never a workspace, and has a network policy with no ingress and
+no egress. The binding
+service refuses a bind from a Pod on a VM runtime without broker mode, so a
+Pod the controller rebuilt on its own never serves. A restore makes a new
+environment through create, so it is broker-mode. Production will instead
+migrate such a Sandbox to create's broker-mode render at its next start;
+that is designed, not built.
+
 Target, not shipped (#4000): with hosted egress on, a Sandbox Pod's own
 egress is only to named peers inside the cluster, each by selector and port,
 with no address range and no DNS: the egress process on its node, the

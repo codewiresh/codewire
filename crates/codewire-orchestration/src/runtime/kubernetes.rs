@@ -23,7 +23,7 @@ use codewire_server_core::pod_identity::{
 };
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, DynamicObject, LogParams};
+use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, ExecTarget,
@@ -46,7 +46,7 @@ use crate::sandbox::template::{
     TemplateOpts, confidential_init_data,
 };
 use crate::sandbox::warm_pool::{pod_spec_pool_revision, pool_revision, sandbox_matches_rendering};
-use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
+use crate::sandbox::{CRD_VERSION, ClaimOpts, SANDBOX_GROUP, shadow_warm_pool_name};
 use rendering::KubernetesRenderConfig;
 use sha2::{Digest as _, Sha256};
 
@@ -101,6 +101,41 @@ impl KubernetesDriver {
     /// The options `intent` renders from here.
     fn render(&self, intent: &RenderingIntent) -> anyhow::Result<TemplateOpts> {
         self.rendering.environment(intent)
+    }
+
+    /// Refuses, before anything is patched, a start, repair or replacement
+    /// whose next Pod hosted egress would leave direct: the bound Sandbox was
+    /// made before the switch ([`crate::egress::pre_switch`], #4000).
+    async fn check_made_before_hosted_egress(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()> {
+        if self.rendering.hosted_egress.is_none() {
+            return Ok(());
+        }
+        let name = self
+            .sandbox_client(placement)
+            .bound_sandbox_name(environment_id)
+            .await?;
+        let gvk = GroupVersionKind::gvk(SANDBOX_GROUP, CRD_VERSION, "Sandbox");
+        let sandboxes: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            &placement.namespace,
+            &ApiResource::from_gvk_with_plural(&gvk, "sandboxes"),
+        );
+        let sandbox = sandboxes
+            .get(&name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get Sandbox {name}: {error}"))?;
+        crate::egress::pre_switch::check_sandbox(true, &name, &sandbox.data).inspect_err(|_| {
+            tracing::warn!(
+                environment_id,
+                sandbox = name,
+                "refused a Sandbox made before hosted egress"
+            );
+        })?;
+        Ok(())
     }
 }
 
@@ -573,6 +608,8 @@ impl RuntimeObservations for KubernetesDriver {
         environment_id: &str,
         support_image: &str,
     ) -> anyhow::Result<()> {
+        self.check_made_before_hosted_egress(placement, environment_id)
+            .await?;
         self.sandbox_client(placement)
             .repin_daemon_image(environment_id, support_image)
             .await
@@ -685,6 +722,8 @@ impl RuntimeLifecycle for KubernetesDriver {
         suspended: &SuspendedRuntime,
         support_image: &str,
     ) -> anyhow::Result<()> {
+        self.check_made_before_hosted_egress(&claim.placement, &claim.environment_id)
+            .await?;
         self.sandbox_client(&claim.placement)
             .set_replicas_for_identity(
                 &suspension::claim_opts(claim),
@@ -770,12 +809,23 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
+    async fn refuse_made_before_hosted_egress(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()> {
+        self.check_made_before_hosted_egress(placement, environment_id)
+            .await
+    }
+
     async fn resume_current(
         &self,
         placement: &Placement,
         environment_id: &str,
         support_image: &str,
     ) -> anyhow::Result<()> {
+        self.check_made_before_hosted_egress(placement, environment_id)
+            .await?;
         self.sandbox_client(placement)
             .set_replicas(environment_id, 1, support_image)
             .await
@@ -789,6 +839,8 @@ impl RuntimeLifecycle for KubernetesDriver {
         member: &Incarnation,
         support_image: &str,
     ) -> anyhow::Result<MemberReplacement> {
+        self.check_made_before_hosted_egress(placement, environment_id)
+            .await?;
         self.sandbox_client(placement)
             .replace_workspace_pod_if_uid(environment_id, &member.name, &member.uid, support_image)
             .await
@@ -1314,6 +1366,160 @@ mod tests {
             KubernetesDriver::shared(client, Default::default()),
             requests,
         )
+    }
+
+    const ENV: &str = "8f0c3a52-6b1e-4f0e-9d3b-2a7c41e5d901";
+    const SANDBOX: &str = "cw-pool-1000m-4096mi-80gi-1e21d64e-bhlxf";
+
+    /// A Sandbox as a create renders it: with hosted egress on it carries
+    /// broker mode; one made while it was off does not.
+    fn rendered_sandbox(broker: bool) -> serde_json::Value {
+        let mut labels =
+            json!({"codewire.sh/type": "workspace", "codewire.sh/environment-id": ENV});
+        if broker {
+            labels["codewire.sh/egress"] = json!("broker");
+        }
+        json!({
+            "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {"name": SANDBOX, "namespace": "dev-sandboxes", "uid": "4f7a", "resourceVersion": "7"},
+            "spec": {"operatingMode": "Suspended", "podTemplate": {"metadata": {"labels": labels},
+                "spec": {"runtimeClassName": "commodity", "containers": []}}},
+        })
+    }
+
+    /// A driver over a cluster holding the environment's Claim, bound to
+    /// `sandbox`, and the requests it saw. Any write is refused.
+    fn driver_over(
+        sandbox: serde_json::Value,
+        hosted_egress: bool,
+    ) -> (Arc<dyn RuntimeDriver>, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let claim = json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+            "metadata": {"name": crate::sandbox::claim_name(ENV), "namespace": "dev-sandboxes"},
+            "status": {"sandbox": {"name": SANDBOX}},
+        });
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let (seen, claim, sandbox) = (seen.clone(), claim.clone(), sandbox.clone());
+            async move {
+                let path = request.uri().path().to_string();
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{} {path}", request.method()));
+                let (status, body) = match request.method().as_str() {
+                    "GET"
+                        if path.ends_with(&format!(
+                            "/sandboxclaims/{}",
+                            crate::sandbox::claim_name(ENV)
+                        )) =>
+                    {
+                        (StatusCode::OK, claim)
+                    }
+                    "GET" if path.ends_with(&format!("/sandboxes/{SANDBOX}")) => {
+                        (StatusCode::OK, sandbox)
+                    }
+                    _ => (
+                        StatusCode::FORBIDDEN,
+                        json!({"apiVersion": "v1", "kind": "Status",
+                        "status": "Failure", "reason": "Forbidden", "code": 403}),
+                    ),
+                };
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let client = kube::Client::new(service, "the-default-namespace");
+        let rendering = KubernetesRenderConfig {
+            hosted_egress: hosted_egress.then(|| crate::sandbox::template::HostedEgressTemplate {
+                stream_addr: "10.44.0.89:8089".into(),
+                binding_addr: "10.44.0.87:8087".into(),
+                fence_revision: "4".into(),
+                gateway: crate::sandbox::template::GatewayPeer {
+                    namespace: "gateway-proxies".into(),
+                    gateway_name: "public".into(),
+                    gateway_namespace: "gateway".into(),
+                    port: 10443,
+                },
+                derp_tls_port: 8443,
+                gateway_addr: "10.44.0.43:443".into(),
+                derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+                cluster_dns_ip: "10.44.0.10".into(),
+            }),
+            ..Default::default()
+        };
+        (KubernetesDriver::shared(client, rendering), requests)
+    }
+
+    fn patched(requests: &Mutex<Vec<String>>) -> bool {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.starts_with("PATCH "))
+    }
+
+    /// #4000: an environment made while hosted egress was off, then stopped,
+    /// is started with the switch on. Its Sandbox would build a direct Pod,
+    /// so the start, a repair and a re-pin are each refused with the reason,
+    /// before anything is patched. On main the start patched the Sandbox and
+    /// its Pod came up direct (Dev, 2026-11-21).
+    #[tokio::test]
+    async fn a_sandbox_made_before_hosted_egress_is_refused_its_start_before_any_patch() {
+        let placement = Placement::new("dev-sandboxes");
+        let member = Incarnation {
+            name: SANDBOX.into(),
+            uid: "pod-1".into(),
+        };
+        let (driver, requests) = driver_over(rendered_sandbox(false), true);
+        let refusals = [
+            driver
+                .resume_current(&placement, ENV, "img")
+                .await
+                .unwrap_err(),
+            driver
+                .repin_daemon_image(&placement, ENV, "img")
+                .await
+                .unwrap_err(),
+            driver
+                .replace_member(&placement, ENV, &member, "img")
+                .await
+                .unwrap_err(),
+        ];
+        for refusal in refusals {
+            assert!(
+                refusal
+                    .downcast_ref::<crate::egress::pre_switch::MadeBeforeHostedEgress>()
+                    .is_some(),
+                "{refusal:#}"
+            );
+            assert!(format!("{refusal}").contains("recreate the environment"));
+        }
+        assert!(!patched(&requests), "{:?}", requests.lock().unwrap());
+    }
+
+    /// The refusal reads only what decides it: a broker-mode Sandbox, or any
+    /// Sandbox with the switch off, goes on to the start's own patch.
+    #[tokio::test]
+    async fn a_broker_mode_sandbox_or_the_switch_off_starts_as_before() {
+        let placement = Placement::new("dev-sandboxes");
+        for (broker, on) in [(true, true), (false, false)] {
+            let (driver, requests) = driver_over(rendered_sandbox(broker), on);
+            let error = driver
+                .resume_current(&placement, ENV, "img")
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::egress::pre_switch::MadeBeforeHostedEgress>()
+                    .is_none(),
+                "broker {broker}, on {on}: {error:#}"
+            );
+            assert!(patched(&requests), "broker {broker}, on {on}");
+        }
     }
 
     /// #3628 PR 8a: the start marks' volume read goes through the driver with

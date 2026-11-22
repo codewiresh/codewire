@@ -917,6 +917,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         )
         .with_interception(egress_settings.interception)
+        .with_hosted_egress(egress_settings.enabled)
         .with_server_url(&api_state.frontend_url),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the

@@ -29,7 +29,12 @@
 #   overlay also admits its one side-loaded daemon image, which has no
 #   registry digest, and names its own ingress controller;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
-#   the agent-sandbox controller writes those.
+#   the agent-sandbox controller writes those;
+# - a Sandbox's broker mode never comes off; with hosted egress on it is
+#   never added either, and orchestration never starts or changes a VM
+#   Sandbox made before it, only stops it;
+# - with hosted egress on, a snapshot's clearing template, exactly as
+#   rendered, is the one template excepted from the broker shape.
 #
 # The Rust renderer (crates/codewire-orchestration/src/sandbox/warm_pool.rs)
 # and its goldens produce exactly these shapes;
@@ -393,6 +398,28 @@ spec:
     # per-environment template can't drop broker mode either.
     - name: environmentTemplate
       expression: "!request.name.startsWith('cw-pool-')"
+    # A snapshot's clearing template (sandbox/snapshots.rs,
+    # render_clearing_template): one container that clears a restored volume
+    # and exits, with a network policy that admits nothing either way. It is
+    # never a workspace, so with hosted egress on it is excepted from the
+    # broker arm's shape (the label, the workspace addresses, the resolver,
+    # the workspace user and the TUN init and its volume being present), and
+    # only when all of this holds: its exact name, cw-snap-<snapshot UUID>-clear;
+    # the snapshot-clearing type on the template and its Pod; no egress label
+    # and no hosted-egress-tun; and exactly no ingress and no egress.
+    - name: clearing
+      expression: >-
+        request.name.matches('^cw-snap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-clear$') &&
+        has(object.metadata.labels) && 'codewire.sh/type' in object.metadata.labels &&
+        object.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' &&
+        has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/type' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' &&
+        !variables.egressLabelled &&
+        variables.containers.all(c, c.name != 'hosted-egress-tun') &&
+        has(object.spec.networkPolicy) && dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
+        has(object.spec.networkPolicy.ingress) && size(object.spec.networkPolicy.ingress) == 0 &&
+        has(object.spec.networkPolicy.egress) && size(object.spec.networkPolicy.egress) == 0
     # codewire#5602: a `standard` workspace's VM is its runtime's, inside the
     # one container, and its netstack is the VM's own, so it has neither the
     # TUN init nor its device. Only per-environment templates; a pool
@@ -584,15 +611,15 @@ spec:
         '|' + p.protocol + '/' + string(p.port)) in variables.egressPeers)))))
       message: warm-pool egress is Codewire's allowlist only, the world outside every private range plus the named in-cluster peers and ports
     # Hosted egress (codewire#4000): the switch, not the template, picks the
-    # arm. On, every template is broker-mode; off, none carries the egress
-    # label.
+    # arm. On, every template is broker-mode, except a snapshot's clearing
+    # template (see clearing); off, none carries the egress label.
     - expression: >-
-        variables.hostedEgress ? variables.broker : !variables.egressLabelled
+        variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled
       message: with hosted egress on, every template orchestration writes is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
     # A broker-mode workspace always has its stream and binding addresses,
     # so its daemon gates serving on the self-check.
     - expression: >-
-        !variables.hostedEgress ||
+        !variables.hostedEgress || variables.clearing ||
         variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0)))
       message: with hosted egress on, the workspace container sets the egress stream and workspace binding addresses
@@ -601,7 +628,7 @@ spec:
     # or options. The fence and the lockdown also refuse cluster DNS, so this
     # keeps a broker Pod from even trying it.
     - expression: >-
-        !variables.hostedEgress ||
+        !variables.hostedEgress || variables.clearing ||
         has(variables.pod.dnsPolicy) && variables.pod.dnsPolicy == 'None' &&
         has(variables.pod.dnsConfig) && dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) &&
         has(variables.pod.dnsConfig.nameservers) && variables.pod.dnsConfig.nameservers == ['192.0.2.1'] &&
@@ -656,7 +683,7 @@ spec:
     # traffic reaches the broker, not the boundary; the lockdown outside the
     # guest is, and the daemon's self-check verifies the routing each time.
     - expression: >-
-        !variables.hostedEgress ||
+        !variables.hostedEgress || variables.clearing ||
         has(variables.pod.securityContext) &&
         has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser == 1000 &&
         has(variables.pod.securityContext.runAsGroup) && variables.pod.securityContext.runAsGroup == 1000 &&
@@ -707,7 +734,7 @@ spec:
         has(v.image.reference) && v.image.reference == c.image) ||
         variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
         variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
-        (!variables.hostedEgress || variables.standardEnvironment || has(variables.pod.initContainers) &&
+        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
       message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template but a standard one has it
     # The TUN device's volume (#4000): a Kata container has no /dev/net/tun,
@@ -725,7 +752,7 @@ spec:
         variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
         (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
-        (!variables.hostedEgress || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
+        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
       message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -761,6 +788,11 @@ metadata:
     app.kubernetes.io/part-of: codewire
 spec:
   failurePolicy: Fail
+  # The hosted-egress switch (codewire-hosted-egress, hosted-egress.yaml), as
+  # the template policy reads it.
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
   matchConstraints:
     matchPolicy: Equivalent
     resourceRules:
@@ -774,6 +806,29 @@ spec:
   # The reconciler deletes stale members by UID and resourceVersion; DELETE is
   # not matched. Bootstrap and resize patch only Sandboxes a claim adopted,
   # which carry neither the pool label nor a pool owner.
+  variables:
+    - name: hostedEgress
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_ENABLED' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'
+    - name: broker
+      expression: >-
+        has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) &&
+        has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: wasBroker
+      expression: >-
+        has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) &&
+        has(oldObject.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels &&
+        oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    # The runtime classes that are not a VM: runc, and none at all ('' as a
+    # class name). Any other class counts as a VM, one this policy does not
+    # know included, so the rule fails closed (egress/pre_switch.rs decides
+    # the same way).
+    - name: directRuntimeClasses
+      expression: "['runc', '']"
   validations:
     - expression: >-
         !(has(object.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels) &&
@@ -788,8 +843,8 @@ spec:
       message: orchestration never strips an unclaimed warm-pool member's pool label or owner
     # codewire#5002: a Sandbox whose pod template is broker-mode stays so. A
     # Pod without the label escapes the fence, cw-egress and the self-check,
-    # so no update by orchestration may take it off; a Sandbox made before
-    # hosted egress, without it, may be updated as before.
+    # so no update by orchestration may take it off. A Sandbox made before
+    # hosted egress, without it, is held by the next rule.
     - expression: >-
         request.operation != 'UPDATE' ||
         !(has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) &&
@@ -801,6 +856,28 @@ spec:
         'codewire.sh/egress' in object.spec.podTemplate.metadata.labels &&
         object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
       message: orchestration never takes broker mode (codewire.sh/egress=broker) off a Sandbox's pod template
+    # codewire#4000: nor puts it on. The label alone, without the TUN init and
+    # the rest of the broker shape, would pass a direct template off as
+    # broker-mode, and the next rule would then start it. With the switch on,
+    # no update adds it, a stop included; only create renders it.
+    - expression: >-
+        request.operation != 'UPDATE' || !variables.hostedEgress || !variables.broker || variables.wasBroker
+      message: orchestration never adds broker mode to an existing Sandbox; only create renders it
+    # codewire#4000 (private-docs designs/hosted-egress.md, "A Sandbox made
+    # before the switch"): a start builds the Pod from the Sandbox's own pod
+    # template, so a VM Sandbox made while the switch was off would come back
+    # with direct egress. With the switch on, orchestration may only stop it
+    # (Suspended), so the environment can still be stopped and removed; it is
+    # recreated, never started. Either side of the update under a VM class
+    # counts, so a runtime class change cannot slip past; a Pod with no
+    # runtime class is not a VM. Off, nothing changes.
+    - expression: >-
+        request.operation != 'UPDATE' || !variables.hostedEgress || variables.broker ||
+        has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' ||
+        ![object, oldObject].exists(s, has(s.spec.podTemplate) && has(s.spec.podTemplate.spec) &&
+        has(s.spec.podTemplate.spec.runtimeClassName) &&
+        !(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))
+      message: with hosted egress on, orchestration never starts or changes a Sandbox made before it; the environment must be recreated
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -813,6 +890,13 @@ metadata:
 spec:
   policyName: codewire-orchestration-warm-pool-member
   validationActions: [Deny]
+  # The hosted-egress switch, from the namespace orchestration runs in.
+  # Kustomize writes that namespace (kustomizeconfig.yaml); a missing
+  # ConfigMap denies every orchestration Sandbox write.
+  paramRef:
+    name: codewire-hosted-egress
+    namespace: {{ $.Release.Namespace }}
+    parameterNotFoundAction: Deny
   # No mutable namespace selector: orchestration can update namespace labels.
   # The identity match bounds the policy; it follows the writer everywhere.
 {{- end }}

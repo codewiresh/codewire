@@ -6,8 +6,10 @@ rendered policy, its binding and its param to a scratch Kind cluster and has a
 real API server admit or deny each case, as orchestration's service account.
 It matches every SandboxTemplate orchestration writes: the pool's allowlist
 holds cw-pool- templates, and the broker arm holds every template while hosted
-egress is on, so per-environment templates are proved here too. The member
-policy's broker-mode rule is proved on Sandboxes.
+egress is on, so per-environment templates are proved here too, and so is
+the one template excepted from it, a snapshot's clearing template. The member
+policy's broker-mode rules, and its hold on a VM Sandbox made before hosted
+egress, are proved on Sandboxes.
 Each case names the outcome it expects and, for a denial, the rule whose
 message must be the one reported: validations run in order and the first that
 fails is reported, so a case denied by another rule first does not count.
@@ -59,6 +61,8 @@ TUN = "hosted-egress-tun runs only as an init container"
 DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memory"
 RUNTIME = "warm-pool members run under the commodity runtime"
 KEEPS_BROKER = "orchestration never takes broker mode"
+ADDS_BROKER = "orchestration never adds broker mode to an existing Sandbox"
+PRE_SWITCH = "with hosted egress on, orchestration never starts or changes a Sandbox made before it"
 NO_PARAM = "failed to configure binding: no params found"
 
 OFF: dict[str, str] = {}
@@ -256,6 +260,35 @@ def environment_cases(env_today: dict, env_broker: dict, conf_today: dict, conf_
     ]
 
 
+def sandbox(labels: dict[str, str], runtime_class: str | None = None, mode: str | None = None) -> dict:
+    spec: dict = {"containers": [{"name": "workspace", "image": "busybox"}]}
+    if runtime_class is not None:
+        spec["runtimeClassName"] = runtime_class
+    document = {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                "metadata": {"name": "broker-mode-proof", "namespace": SANDBOXES},
+                "spec": {"podTemplate": {"metadata": {"labels": labels}, "spec": spec}}}
+    if mode is not None:
+        document["spec"]["operatingMode"] = mode
+    return document
+
+
+def sandbox_change(cluster: "Cluster", before: dict, change: Callable[[dict], object],
+                   param: dict[str, str] | None = None) -> str | None:
+    """With the switch at `param`, create `before` as orchestration (CREATE
+    holds none of the update rules), apply `change` to the stored Sandbox and
+    update it as orchestration, then delete it. A missing param denies the
+    create too, so that case creates with the switch on and then removes it."""
+    cluster.param(ON if param is None else param)
+    stored = cluster.kubectl("create", f"--as={AS}", "-f", "-", stdin=json.dumps(before))
+    if stored.returncode != 0:
+        return "create failed: " + stored.stderr.strip()
+    if param is None:
+        cluster.param(None)
+    live = json.loads(cluster.kubectl("get", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "-o", "json").stdout)
+    change(live)
+    denial = cluster.admit("replace", live)
+    cluster.kubectl("delete", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "--wait=true")
+    return denial
 
 def without_tun(t: dict) -> None:
     # mount-workspace goes too, as in "on: no TUN init": without the TUN init
@@ -281,24 +314,133 @@ def standard_cases(standard: dict, env_broker: dict,
          mutate(broker, setting(pod, "runtimeClassName", "standard"), without_tun), RUNTIME),
     ]
 
-def sandbox(labels: dict[str, str]) -> dict:
-    return {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
-            "metadata": {"name": "broker-mode-proof", "namespace": SANDBOXES},
-            "spec": {"podTemplate": {"metadata": {"labels": labels},
-                                     "spec": {"containers": [{"name": "workspace", "image": "busybox"}]}}}}
-
 
 def sandbox_update(cluster: "Cluster", before: dict[str, str], after: dict[str, str]) -> str | None:
     """Create a Sandbox with `before` as its pod labels, update it to `after`
-    as orchestration, then delete it."""
-    stored = cluster.kubectl("create", f"--as={AS}", "-f", "-", stdin=json.dumps(sandbox(before)))
-    if stored.returncode != 0:
-        return "create failed: " + stored.stderr.strip()
-    live = json.loads(cluster.kubectl("get", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "-o", "json").stdout)
-    live["spec"]["podTemplate"]["metadata"]["labels"] = after
-    denial = cluster.admit("replace", live)
-    cluster.kubectl("delete", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "--wait=true")
-    return denial
+    as orchestration with hosted egress on, then delete it."""
+    return sandbox_change(cluster, sandbox(before),
+                          lambda s: s["spec"]["podTemplate"]["metadata"].__setitem__("labels", after), ON)
+
+
+def labels(s: dict) -> dict:
+    return s["spec"]["podTemplate"]["metadata"]["labels"]
+
+
+def mode(value: str) -> Callable[[dict], object]:
+    return lambda s: s["spec"].__setitem__("operatingMode", value)
+
+
+def pre_switch_cases(cluster: "Cluster") -> list[bool]:
+    """codewire#4000: with the switch on, a VM Sandbox made before it is
+    only stopped, never started or changed, and broker mode is never added
+    to an existing Sandbox; only create renders it."""
+    plain = {"codewire.sh/type": "workspace"}
+    broker_label = plain | {"codewire.sh/egress": "broker"}
+    def repin(s: dict) -> None:
+        s["spec"]["podTemplate"]["spec"]["containers"][0]["image"] = "busybox:1.37"
+    def add_broker(s: dict) -> None:
+        labels(s)["codewire.sh/egress"] = "broker"
+    results = []
+    for name, before, change, param, expected in [
+        ("on, Sandbox: a pre-switch commodity one started", sandbox(plain, "commodity", "Suspended"),
+         mode("Running"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch commodity one changed while running", sandbox(plain, "commodity", "Running"),
+         lambda s: labels(s).__setitem__("x", "y"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch standard one started", sandbox(plain, "standard", "Suspended"),
+         mode("Running"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch confidential one started", sandbox(plain, "confidential", "Suspended"),
+         mode("Running"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch commodity one moved to runc and started", sandbox(plain, "commodity", "Suspended"),
+         lambda s: (mode("Running")(s), s["spec"]["podTemplate"]["spec"].__setitem__("runtimeClassName", "runc")),
+         ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch commodity one stopped", sandbox(plain, "commodity", "Running"),
+         mode("Suspended"), ON, None),
+        ("on, Sandbox: a broker commodity one re-pinned", sandbox(broker_label, "commodity", "Running"),
+         repin, ON, None),
+        ("off, Sandbox: a pre-switch commodity one started", sandbox(plain, "commodity", "Suspended"),
+         mode("Running"), OFF, None),
+        ("on, Sandbox: a pre-switch runc one started", sandbox(plain, "runc", "Suspended"),
+         mode("Running"), ON, None),
+        # Any class but runc or none is a VM, one admission does not know
+        # included, so the rule fails closed.
+        ("on, Sandbox: a pre-switch one under an unknown class started", sandbox(plain, "another-vm", "Suspended"),
+         mode("Running"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch one with no runtime class started", sandbox(plain, None, "Suspended"),
+         mode("Running"), ON, None),
+        ("on, Sandbox: only the broker label added to a running commodity one",
+         sandbox(plain, "commodity", "Running"), add_broker, ON, ADDS_BROKER),
+        ("on, Sandbox: only the broker label added to a stopped commodity one",
+         sandbox(plain, "commodity", "Suspended"), add_broker, ON, ADDS_BROKER),
+        ("missing param: a Sandbox update", sandbox(plain, "commodity", "Suspended"),
+         mode("Running"), None, NO_PARAM),
+    ]:
+        results.append(check(name, sandbox_change(cluster, before, change, param), expected))
+    return results
+
+
+SNAPSHOT_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def clearing_template(block: bool) -> dict:
+    """A snapshot's clearing template exactly as render_clearing_template
+    (crates/codewire-orchestration/src/sandbox/snapshots.rs) renders it."""
+    container: dict = {
+        "name": "clear", "image": REPOSITORY + "@sha256:" + "2" * 64,
+        "command": (["/usr/local/bin/cw", "__snapshot-clear", "--block", "/dev/codewire-clearing",
+                     "--report", "/dev/termination-log"] if block
+                    else ["/usr/local/bin/cw", "__snapshot-clear", "/workspace"]),
+        "resources": {"requests": {"cpu": "250m", "memory": "256Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}},
+        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                            "capabilities": {"drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER"]},
+                            "seccompProfile": {"type": "RuntimeDefault"}},
+    }
+    if block:
+        container["volumeDevices"] = [{"name": "workspace", "devicePath": "/dev/codewire-clearing"}]
+        container["terminationMessagePath"] = "/dev/termination-log"
+    else:
+        container["volumeMounts"] = [{"name": "workspace", "mountPath": "/workspace"}]
+    claim: dict = {"accessModes": ["ReadWriteOnce"], "storageClassName": "linstor-local",
+                   "resources": {"requests": {"storage": "80Gi"}},
+                   "dataSource": {"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot",
+                                  "name": f"cw-snap-{SNAPSHOT_ID}-raw"}}
+    if block:
+        claim["volumeMode"] = "Block"
+    identity = {"codewire.sh/type": "snapshot-clearing", "codewire.sh/snapshot-id": SNAPSHOT_ID}
+    return {"apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxTemplate",
+            "metadata": {"name": f"cw-snap-{SNAPSHOT_ID}-clear", "namespace": SANDBOXES, "labels": dict(identity)},
+            "spec": {"podTemplate": {"metadata": {"labels": dict(identity)},
+                                     "spec": {"restartPolicy": "Never", "serviceAccountName": "codewire-sandbox",
+                                              "automountServiceAccountToken": False, "enableServiceLinks": False,
+                                              "securityContext": {"runAsUser": 0, "runAsGroup": 0},
+                                              "containers": [container], "runtimeClassName": "commodity"}},
+                     "volumeClaimTemplates": [{"metadata": {"name": "workspace"}, "spec": claim}],
+                     "networkPolicy": {"ingress": [], "egress": []}}}
+
+
+def clearing_cases() -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """codewire#4000: with hosted egress on, a snapshot's clearing template,
+    exactly as rendered, is excepted from the broker arm's shape."""
+    filesystem, block = clearing_template(False), clearing_template(True)
+    dns = {"ports": [{"port": 53, "protocol": "UDP"}], "to": [
+        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}]}
+    return [
+        ("on, clearing: Filesystem", ON, "create", filesystem, None),
+        ("on, clearing: Block", ON, "create", block, None),
+        ("on, clearing: an egress rule added", ON, "create",
+         mutate(filesystem, lambda t: egress(t).append(dns)), GATE),
+        ("on, clearing: an ingress rule added", ON, "create", mutate(block, lambda t: t["spec"]["networkPolicy"][
+            "ingress"].append({"from": [{"namespaceSelector": {}}]})), GATE),
+        ("on, clearing: the template's type changed", ON, "create",
+         mutate(filesystem, lambda t: t["metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
+        ("on, clearing: the Pod's type changed", ON, "create", mutate(block, lambda t: t["spec"]["podTemplate"][
+            "metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
+        ("on, clearing: another name", ON, "create",
+         mutate(filesystem, lambda t: t["metadata"].__setitem__("name", "cw-snap-x-clear")), GATE),
+        ("on, clearing: with the egress label", ON, "create", mutate(filesystem, lambda t: t["spec"]["podTemplate"][
+            "metadata"]["labels"].__setitem__("codewire.sh/egress", "broker")), ADDRESSES),
+        ("off, clearing: Filesystem", OFF, "create", filesystem, None),
+        ("off, clearing: Block", OFF, "create", block, None),
+    ]
 
 
 def cases(today: dict, broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
@@ -489,7 +631,7 @@ def main() -> int:
                              .__setitem__("codewire.sh/egress", "broker")), GATE)
     results = []
     current: object = "unset"
-    for name, param, verb, template, expected in cases(today, broker) + environment:
+    for name, param, verb, template, expected in cases(today, broker) + environment + clearing_cases():
         if param != current:
             cluster.param(param)
             current = param
@@ -509,8 +651,8 @@ def main() -> int:
         cluster.kubectl("delete", "sandboxtemplate", broker["metadata"]["name"], "-n",
                         broker["metadata"]["namespace"])
 
-    # Broker mode never comes off a Sandbox (#5002); a Sandbox made before
-    # hosted egress, without it, updates as before.
+    # Broker mode never comes off a Sandbox (#5002); a Sandbox without it and
+    # without a VM runtime class updates as before.
     broker_label = {"codewire.sh/type": "workspace", "codewire.sh/egress": "broker"}
     plain = {"codewire.sh/type": "workspace"}
     for name, before, after, expected in [
@@ -520,6 +662,8 @@ def main() -> int:
         ("Sandbox: one without it, updated", plain, plain | {"x": "y"}, None),
     ]:
         results.append(check(name, sandbox_update(cluster, before, after), expected))
+    results.extend(pre_switch_cases(cluster))
+    cluster.param(ON)
 
     # Kind overlays widen runtimeClasses with diagnostic runtimes; the TUN
     # rule's own VM check must still refuse them.

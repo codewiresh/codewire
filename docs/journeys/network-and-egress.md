@@ -1710,7 +1710,10 @@ Issue: #4000.
   - a new `cw-egress` version that never becomes ready;
   - a Sandbox whose daemon speaks a version of the egress stream that its
     node's `cw-egress` does not accept, as when a release reaches the
-    daemon before `cw-egress`.
+    daemon before `cw-egress`;
+  - an environment made while hosted egress was off, then stopped and
+    started, repaired, and stopped and removed after the switch went on;
+    and its running Pod deleted, so the controller rebuilds it.
 - **Driving it:** no command yet (#4000).
 - **Proof:**
   - the status reads `NOT_ENFORCED` for the first state, `ENFORCED` with the
@@ -1749,6 +1752,11 @@ Issue: #4000.
     absent. It still reads so after its stream has ended. Applying the
     lockdown and starting the Sandbox again clears it (#5068; not yet
     observed);
+  - an environment made before hosted egress, with the switch on: its start
+    and its repair fail with the reason that it was made before hosted
+    egress and must be recreated. Its Sandbox is unchanged, no Pod starts
+    from it, and its stop and removal work. A Pod the controller rebuilt from
+    it is refused its bind, so its daemon never serves (not yet observed);
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;

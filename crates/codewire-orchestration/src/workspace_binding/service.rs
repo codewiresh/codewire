@@ -124,6 +124,8 @@ pub struct WorkspaceBindingState {
     requery_interval: Duration,
     /// The deployment's hosted interception setting (#4001).
     interception: bool,
+    /// The deployment's hosted egress switch (#4000).
+    hosted_egress: bool,
 }
 
 /// A caller authenticated as a live workspace Pod, calling from that Pod's
@@ -162,6 +164,7 @@ impl WorkspaceBindingState {
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
             interception: false,
+            hosted_egress: false,
         }
     }
 
@@ -169,6 +172,14 @@ impl WorkspaceBindingState {
     /// deployment's `CODEWIRE_HOSTED_INTERCEPTION_ENABLED`.
     pub fn with_interception(mut self, interception: bool) -> Self {
         self.interception = interception;
+        self
+    }
+
+    /// With hosted egress on, a Pod on a VM runtime without broker mode is
+    /// refused its bind (#4000): it was built from a Sandbox made before the
+    /// switch, and would serve with its egress direct.
+    pub fn with_hosted_egress(mut self, hosted_egress: bool) -> Self {
+        self.hosted_egress = hosted_egress;
         self
     }
 
@@ -373,6 +384,22 @@ impl WorkspaceBindingState {
             .attested_member(&caller.identity)
             .await?
             .ok_or(BindError::NotFound)?;
+        // A Pod read without its spec can't show its runtime: refused too.
+        if self.hosted_egress
+            && (!member.has_spec
+                || crate::egress::pre_switch::pod_made_before(
+                    true,
+                    &member.labels,
+                    &member.spec_json,
+                ))
+        {
+            tracing::warn!(
+                environment_id = %binding.environment_id,
+                pod_uid = caller.identity.pod_uid(),
+                "refused the bind of a Pod made before hosted egress"
+            );
+            return Err(BindError::FailedPrecondition);
+        }
         self.confirm(&caller, &member, &binding).await?;
         let access = self.access_grant(&member, &binding).await?;
 
