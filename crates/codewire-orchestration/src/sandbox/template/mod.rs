@@ -58,7 +58,9 @@ pub use runtime_policy::{
 };
 pub(crate) use runtime_policy::{dind_image, docker_data_size_gib};
 pub(crate) use standard::vm_state_existing;
-pub use standard::{STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime};
+pub use standard::{
+    STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime, runtime_profile_of,
+};
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 #[cfg(test)]

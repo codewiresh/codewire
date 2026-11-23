@@ -20,6 +20,7 @@ fn environment() -> EnvironmentRow {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_environments_enabled: false,
+        systemd_runtime_profile: None,
         never_ran: false,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),
@@ -182,7 +183,10 @@ fn administrator_runtime_configuration_does_not_select_a_stock_client() {
 }
 
 #[test]
-fn a_systemd_workspace_renders_only_while_its_organization_is_opted_in() {
+fn a_systemd_workspace_intent_carries_its_organizations_opt_in() {
+    // The driver checks the opt-in with the profile the Pod renders on
+    // (`systemd_workspace::bring_up_refusal`): `commodity` needs it,
+    // `standard` does not.
     let image = "registry.example.invalid/codewire/workspace-systemd@sha256:synthetic";
     let render = |systemd_workspace, systemd_environments_enabled| {
         environment_rendering_intent(
@@ -195,15 +199,10 @@ fn a_systemd_workspace_renders_only_while_its_organization_is_opted_in() {
             },
             7,
         )
-        .map(|intent| intent.systemd_workspace)
+        .map(|intent| (intent.systemd_workspace, intent.systemd_opted_in))
         .map_err(|error| error.to_string())
     };
-    assert_eq!(render(true, true), Ok(true));
-    assert_eq!(render(false, false), Ok(false));
-    // The flag went off after its create: every later Pod is refused,
-    // a restart and a replacement included.
-    assert_eq!(
-        render(true, false),
-        Err("systemd environments are not enabled for this organization".into())
-    );
+    assert_eq!(render(true, true), Ok((true, true)));
+    assert_eq!(render(true, false), Ok((true, false)));
+    assert_eq!(render(false, false), Ok((false, false)));
 }

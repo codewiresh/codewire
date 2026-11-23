@@ -38,13 +38,6 @@ pub fn environment_rendering_intent(
             }),
         "managed credential clients require an exact selected profile"
     );
-    // Every Pod of a systemd workspace is rendered here, so its organization
-    // must still be opted in (docs/dev/SYSTEMD-WORKSPACE.md, "Where it is
-    // checked"). The driver makes the deployment's checks.
-    anyhow::ensure!(
-        !env.systemd_workspace || env.systemd_environments_enabled,
-        crate::sandbox::systemd_workspace::NOT_ENABLED.detail
-    );
     Ok(RenderingIntent {
         image: image_ref.to_owned(),
         template_base: template_base.to_owned(),
@@ -52,6 +45,9 @@ pub fn environment_rendering_intent(
             .expect("environment isolation tier is validated at creation"),
         dedicated_cpu: env.dedicated_cpu,
         systemd_workspace: env.systemd_workspace,
+        systemd_runtime_profile: env.systemd_runtime_profile.clone(),
+        // The driver checks it with the profile it renders on.
+        systemd_opted_in: env.systemd_environments_enabled,
         shape: WorkspaceShape {
             cpu_millicores: i64::from(env.cpu_millicores),
             memory_mib: i64::from(env.memory_mb),

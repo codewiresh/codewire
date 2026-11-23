@@ -74,7 +74,9 @@ environments:
 ### When an environment is a systemd workspace
 
 It is decided once, at create, and recorded on the environment
-(`environments.systemd_workspace`). An environment is a systemd workspace
+(`environments.systemd_workspace`), with the runtime profile its Pod renders
+on (`environments.systemd_runtime_profile`, `commodity` or `standard`). An
+environment is a systemd workspace
 when its create named an image from the configured repository, pinned by
 digest, and passed every check below. Every later Pod is rendered from that
 record, not from the image and the setting. So setting the repository later
@@ -83,7 +85,9 @@ and unsetting it never renders a systemd workspace as an ordinary custom
 image: that start is refused instead.
 
 The record is written once, by the create's insert, and nothing changes it
-afterwards. A fork from a snapshot takes its source environment's record
+afterwards: the database refuses an update to either column. A systemd
+workspace created before the profile was recorded has none, and is read as
+`commodity`. A fork from a snapshot takes its source environment's record
 instead of deciding from the image it names: a fork never turns a plain
 workspace into a systemd one, and a systemd fork passes every check below
 afresh, for the caller and organization that fork it.
@@ -94,10 +98,13 @@ No operation brings up a Pod with the added capability unless all of these
 hold at that moment:
 
 - the deployment sets the repository;
-- the environment's organization is opted in;
-- the deployment's standard runtime profile is `commodity`, or `standard`
-  with a systemd workspace disk built from this image ("On the `standard`
-  profile");
+- the profile its Pod renders on is `commodity` or `standard`. At create
+  that is `standard` only for the image the deployment's disk was built
+  from, and `commodity` for any other image on a `standard` deployment. An
+  existing environment renders on its recorded profile on a `standard`
+  deployment ("On the `standard` profile"), and on the deployment's own
+  profile on any other;
+- on `commodity` only, the environment's organization is opted in;
 - the image names the repository with a well-formed digest;
 - the environment is not confidential.
 
@@ -166,8 +173,9 @@ A systemd workspace's container differs from the default one in four ways:
 3. **`/run` and `/run/lock` are memory volumes.** systemd would otherwise
    mount its own over `/run` and hide the binding token below it, and after
    the drop it cannot mount `/run/lock` itself.
-4. **It is never a warm-pool member.** A pool holds default workspaces only,
-   and the pool member's isolation check refuses a root workspace container.
+4. **It is never a warm-pool member.** A `commodity` pool holds default
+   workspaces only, and the pool member's isolation check refuses a root
+   workspace container.
 
 Everything else is the default sandbox's. With hosted egress on, a systemd
 workspace is a broker-mode Sandbox like any other: the same label, TUN init
@@ -272,6 +280,25 @@ workspace container itself. So none of the above is rendered there:
   `standard` Pod is not loosened. A deployment switches only once its runtime
   boots systemd; until then its disk is built from the workspace image and
   renders `image`.
+- **The record and the checks are the same as on `commodity`.** A create of
+  the disk's image records the environment as a systemd workspace
+  ("When an environment is a systemd workspace"), and every bring-up checks
+  it on the profile its Pod renders on ("Where it is checked"), without the
+  opt-in. A warm-pool member renders the same Pod, so a `standard` pool
+  holds systemd members when its disk does.
+- **A republished disk moves nothing.** An existing `standard` Sandbox keeps
+  its own disk, by digest, and is never re-rendered on start. A systemd
+  workspace's checks read its recorded profile, never the current disk, so
+  after a republish one created on `standard` still starts without the
+  opt-in. If one is ever rendered afresh after a republish, it is rendered
+  as a `standard` Pod on the current disk, which the runtime refuses because
+  the image differs: it fails closed, and never becomes a `commodity` Pod
+  without the opt-in. One created on `commodity` always renders there and
+  always needs the opt-in.
+- **Open.** Restore and fork on `standard` are not built (#5602). They need
+  their own disk rule, either keeping the source's disk digest or moving
+  deliberately. Keeping it needs the registry to retain every workspace disk
+  digest an environment still boots (#5602).
 - **In the guest,** guest init stays the VM's PID 1 and keeps what only it
   holds: the vsock control channel, the hosted ingress, the daemon's listener
   on 127.0.0.1:17777 and the per-boot bind check. systemd becomes PID 1 of
@@ -434,8 +461,9 @@ Production is not offered.
 - **Local VMs.** A local VM's workspace starts from Codewire's own guest
   init, with the daemon outside the workspace container. Nothing here
   applies to it.
-- **Pools, confidential environments and custom images.** A systemd
-  workspace is always a cold create from the one configured repository.
+- **Confidential environments and custom images.** A systemd workspace is
+  always a create from the one configured repository. On `commodity` it is
+  always a cold create; on `standard` it may be a warm-pool member.
 - **`cw daemon logs`.** The daemon's log is in the journal
   (`journalctl -u codewire-daemon`), not in the container's output, so
   `cw daemon logs` shows nothing until it reads the journal.

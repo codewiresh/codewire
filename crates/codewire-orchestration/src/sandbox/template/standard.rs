@@ -156,6 +156,24 @@ impl StandardRuntime {
     }
 }
 
+/// The runtime profile a Pod of `image` renders on, on a deployment of
+/// `deployment_profile`. A `standard` VM boots only the image its disk was
+/// built from, so an environment that names any other image, a user's own or
+/// a workspace image the disk was not republished for, renders on
+/// `commodity` (`SPEC.md` section 4), which is a VM too.
+pub fn runtime_profile_of<'a>(
+    deployment_profile: &'a str,
+    runtime: Option<&StandardRuntime>,
+    image: &str,
+) -> &'a str {
+    if deployment_profile.trim() == super::RUNTIME_PROFILE_STANDARD
+        && !runtime.is_some_and(|runtime| runtime.boots(image))
+    {
+        return super::RUNTIME_PROFILE_COMMODITY;
+    }
+    deployment_profile
+}
+
 fn image_disk_error() -> String {
     format!(
         "{STANDARD_IMAGE_DISK_ENV} must be the published disk's line: \

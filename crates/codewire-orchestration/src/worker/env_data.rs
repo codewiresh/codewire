@@ -31,6 +31,8 @@ pub struct EnvironmentRow {
     /// A systemd workspace, as its create recorded it
     /// (docs/dev/SYSTEMD-WORKSPACE.md). Never rewritten after the insert.
     pub systemd_workspace: bool,
+    /// The profile a systemd workspace was created on, recorded with it.
+    pub systemd_runtime_profile: Option<String>,
     /// The organization's systemd opt-in, read each time a Sandbox is
     /// rendered, so a Pod brought up after the flag goes off is refused.
     pub systemd_environments_enabled: bool,
@@ -120,6 +122,7 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
             .try_get::<Option<bool>, _>("dedicated_cpu")?
             .unwrap_or(false),
         systemd_workspace: row.try_get("systemd_workspace")?,
+        systemd_runtime_profile: row.try_get("systemd_runtime_profile")?,
         systemd_environments_enabled: row
             .try_get::<Option<bool>, _>("systemd_environments_enabled")?
             .unwrap_or(false),

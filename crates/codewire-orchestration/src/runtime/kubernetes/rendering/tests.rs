@@ -35,6 +35,8 @@ fn intent(isolation: Isolation) -> RenderingIntent {
         isolation,
         dedicated_cpu: true,
         systemd_workspace: false,
+        systemd_opted_in: false,
+        systemd_runtime_profile: None,
         shape: WorkspaceShape {
             cpu_millicores: 2000,
             memory_mib: 8192,
@@ -384,6 +386,52 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
             ..intent(Isolation::Standard)
         })
         .is_err()
+    );
+}
+
+#[test]
+fn a_systemd_workspace_renders_on_its_recorded_profile_whatever_disk_the_deployment_boots() {
+    // The deployment's disk holds another image, as after a republish.
+    let standard = KubernetesRenderConfig {
+        runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        hosted_egress: Some(broker("2")),
+        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+             3333333333333333333333333333333333333333333333333333333333333333 \
+             44444444444444444444444444444444 \
+             registry.example.invalid/codewire/workspace-systemd@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        )
+        .unwrap(),
+        ..config()
+    };
+    let profile = |config: &KubernetesRenderConfig, systemd_workspace, recorded: Option<&str>| {
+        config
+            .environment_spec(&RenderingIntent {
+                image: "registry.example.invalid/codewire/workspace-systemd@sha256:7777777777777777777777777777777777777777777777777777777777777777".into(),
+                systemd_workspace,
+                systemd_runtime_profile: recorded.map(Into::into),
+                ..intent(Isolation::Standard)
+            })
+            .profile
+    };
+    // Created on `standard`: it stays there, and needs no opt-in.
+    assert_eq!(
+        profile(&standard, true, Some("standard")),
+        RUNTIME_PROFILE_STANDARD
+    );
+    // Created on `commodity`, or before the record: `commodity`, opt-in and all.
+    assert_eq!(
+        profile(&standard, true, Some("commodity")),
+        RUNTIME_PROFILE_COMMODITY
+    );
+    assert_eq!(profile(&standard, true, None), RUNTIME_PROFILE_COMMODITY);
+    // A plain environment of that image still follows the disk.
+    assert_eq!(profile(&standard, false, None), RUNTIME_PROFILE_COMMODITY);
+    // On any other deployment, the deployment's own profile.
+    assert_eq!(
+        profile(&config(), true, Some("standard")),
+        RUNTIME_PROFILE_COMMODITY
     );
 }
 

@@ -50,10 +50,22 @@ async fn environment(
     systemd_workspace: bool,
     image: &str,
 ) -> Result<()> {
+    recorded_environment(pool, id, state, systemd_workspace, image, None).await
+}
+
+async fn recorded_environment(
+    pool: &PgPool,
+    id: &str,
+    state: &str,
+    systemd_workspace: bool,
+    image: &str,
+    profile: Option<&str>,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO environments (id, org_id, created_by, type, preset_id, state, desired_state, \
-         project_spec, systemd_workspace) \
-         VALUES ($1, $2, $3, 'sandbox', $2, $4, 'started', jsonb_build_object('image', $5::text), $6)",
+         project_spec, systemd_workspace, systemd_runtime_profile) \
+         VALUES ($1, $2, $3, 'sandbox', $2, $4, 'started', jsonb_build_object('image', $5::text), \
+         $6, $7)",
     )
     .bind(id)
     .bind(ORGANIZATION)
@@ -61,12 +73,22 @@ async fn environment(
     .bind(state)
     .bind(image)
     .bind(systemd_workspace)
+    .bind(profile)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 async fn bring_up(pool: &PgPool, images: &RuntimeImages, user: &str) -> Result<(), &'static str> {
+    bring_up_on(pool, images, user, "commodity").await
+}
+
+async fn bring_up_on(
+    pool: &PgPool,
+    images: &RuntimeImages,
+    user: &str,
+    runtime_profile: &str,
+) -> Result<(), &'static str> {
     require_bring_up_with(
         pool,
         images,
@@ -76,7 +98,7 @@ async fn bring_up(pool: &PgPool, images: &RuntimeImages, user: &str) -> Result<(
             systemd_workspace: true,
             image: &pinned(),
             isolation_tier: "standard",
-            runtime_profile: "commodity",
+            runtime_profile,
         },
     )
     .await
@@ -98,6 +120,8 @@ async fn db_a_bring_up_needs_the_opt_in_and_only_a_member_learns_of_it() -> Resu
 
         // Off by default: a member is told why.
         ensure!(bring_up(pool, &images, MEMBER).await == Err("systemd_workspace_not_enabled"));
+        // On `standard` none is needed: its Pod is not loosened.
+        ensure!(bring_up_on(pool, &images, MEMBER, "standard").await == Ok(()));
         // Anyone else gets the refusal for an organization they are not in.
         ensure!(bring_up(pool, &images, OUTSIDER).await == Err("org_not_found"));
 
@@ -152,6 +176,55 @@ async fn db_after_the_opt_in_goes_off_only_a_bring_up_is_stopped() -> Result<()>
             refused == ["systemd-creating", "systemd-starting"],
             "{refused:?}"
         );
+
+        // A `standard` deployment reads each one's recorded profile, never
+        // its current disk: one created on `standard` is not stopped with the
+        // flag off, whatever disk the deployment boots now (a republish); one
+        // created on `commodity`, or before the record (read as `commodity`),
+        // is.
+        recorded_environment(
+            pool,
+            "standard-starting",
+            "starting",
+            true,
+            &pinned(),
+            Some("standard"),
+        )
+        .await?;
+        recorded_environment(
+            pool,
+            "commodity-starting",
+            "starting",
+            true,
+            &pinned(),
+            Some("commodity"),
+        )
+        .await?;
+        let refused =
+            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "standard").await?;
+        ensure!(
+            refused == ["commodity-starting", "systemd-creating", "systemd-starting"],
+            "{refused:?}"
+        );
+        // A `commodity` deployment renders every one on `commodity`.
+        let refused =
+            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "commodity")
+                .await?;
+        ensure!(
+            refused
+                == [
+                    "commodity-starting",
+                    "standard-starting",
+                    "systemd-creating",
+                    "systemd-starting"
+                ],
+            "{refused:?}"
+        );
+        sqlx::query(
+            "DELETE FROM environments WHERE id IN ('standard-starting', 'commodity-starting')",
+        )
+        .execute(pool)
+        .await?;
 
         // The deployment stops offering it, the flag on: the same.
         opt_in(pool, true).await?;
@@ -221,7 +294,7 @@ async fn db_a_fork_takes_its_source_record() -> Result<()> {
             },
         )
         .await;
-        ensure!(matches!(plain, Ok(false)), "{plain:?}");
+        ensure!(matches!(plain, Ok(None)), "{plain:?}");
         // A systemd source forks systemd, so it passes the bring-up checks
         // afresh: this test deployment does not offer systemd workspaces.
         let systemd = admit_create(

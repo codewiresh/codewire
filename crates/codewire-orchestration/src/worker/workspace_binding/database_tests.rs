@@ -2799,6 +2799,8 @@ fn pool_intent() -> crate::runtime::RenderingIntent {
         isolation: crate::runtime::Isolation::Standard,
         dedicated_cpu: false,
         systemd_workspace: false,
+        systemd_opted_in: false,
+        systemd_runtime_profile: None,
         shape: wanted_pool().configured.shape,
         identity: crate::runtime::RenderingIdentity {
             environment_id: ENV_A.into(),

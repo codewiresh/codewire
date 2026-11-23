@@ -2982,6 +2982,8 @@ mod tests {
             isolation: crate::runtime::Isolation::Standard,
             dedicated_cpu: false,
             systemd_workspace: false,
+            systemd_opted_in: false,
+            systemd_runtime_profile: None,
             shape: crate::runtime::WorkspaceShape {
                 cpu_millicores: 1000,
                 memory_mib: 2048,

@@ -478,23 +478,29 @@ fn create_isolation_tier(
     }
 }
 
-/// Whether this create makes a systemd workspace, admitted
-/// ([`crate::sandbox::systemd_workspace::admit_create`]).
+/// The profile a systemd workspace's create records, admitted, or `None` for
+/// a plain environment ([`crate::sandbox::systemd_workspace::admit_create`]).
 async fn admit_systemd_create(
     state: &ApiState,
     user: &AuthUser,
     org_id: &str,
     body: &CreateEnvironmentBody,
     isolation_tier: &str,
-) -> AppResult<bool> {
+) -> AppResult<Option<String>> {
     let create = crate::sandbox::systemd_workspace::CreateKind {
         image: &body.project_spec.image,
         isolation_tier,
-        runtime_profile: &state.sandbox_cfg.runtime_profile,
+        runtime_profile: crate::sandbox::template::runtime_profile_of(
+            &state.sandbox_cfg.runtime_profile,
+            state.sandbox_cfg.standard_runtime.as_ref(),
+            &body.project_spec.image,
+        ),
         source_snapshot_id: body.source_snapshot_id.as_deref(),
         placed_on_host: body.placement_host.is_some(),
     };
-    crate::sandbox::systemd_workspace::admit_create(&state.pool, user, org_id, create).await
+    let profile =
+        crate::sandbox::systemd_workspace::admit_create(&state.pool, user, org_id, create);
+    Ok(profile.await?.map(str::to_owned))
 }
 
 /// Mirrors `worker.ValidAgentType` via the shared agent registry.
@@ -715,8 +721,9 @@ struct InsertEnvironmentParams<'a> {
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     body: &'a CreateEnvironmentBody,
-    /// Recorded once here; every later Pod renders from it.
-    systemd_workspace: bool,
+    /// A systemd workspace's profile, recorded once here with its kind;
+    /// every later Pod renders from them.
+    systemd_runtime_profile: Option<String>,
     /// The organization's limits, read before the transaction; usage is
     /// counted inside it.
     quota: OrgQuota,
@@ -834,10 +841,10 @@ async fn insert_environment(
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
                  runtime_backend, host_id, create_request_id, idle_stop_seconds,
-                 systemd_workspace)
+                 systemd_workspace, systemd_runtime_profile)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13, $14, $15, $16, $17, $18)
+                 $12, $13, $14, $15, $16, $17, $18, $19)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -903,7 +910,8 @@ async fn insert_environment(
         .bind(host_id.as_deref())
         .bind(p.body.request_id.as_deref())
         .bind(idle_stop_seconds)
-        .bind(p.systemd_workspace)
+        .bind(p.systemd_runtime_profile.is_some())
+        .bind(p.systemd_runtime_profile.as_deref())
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;
@@ -1248,7 +1256,7 @@ pub(crate) async fn create_environment_core(
     if !body.project_spec.image.is_empty() {
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);
     }
-    let systemd_workspace =
+    let systemd_runtime_profile =
         admit_systemd_create(state, user, org_id, &body, isolation_tier).await?;
 
     take_create_limits(pool, &user.user_id).await?;
@@ -1396,7 +1404,7 @@ pub(crate) async fn create_environment_core(
                     isolation_tier,
                     ttl_seconds: ttl,
                     body: &body,
-                    systemd_workspace,
+                    systemd_runtime_profile,
                     quota,
                 },
             )
@@ -2883,7 +2891,7 @@ credentials: {profile: user/work}
                     isolation_tier: "standard",
                     ttl_seconds: None,
                     body,
-                    systemd_workspace: false,
+                    systemd_runtime_profile: None,
                     quota,
                 },
             )

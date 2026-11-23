@@ -116,30 +116,42 @@ impl KubernetesRenderConfig {
     fn environment_spec(&self, intent: &RenderingIntent) -> RuntimeProfileSpec {
         self.shape(
             &intent.image,
-            &self.image_runtime_spec(intent.isolation, &intent.image),
+            &self.intent_runtime_spec(intent),
             intent.shape,
         )
         .runtime_profile_spec()
     }
 
-    /// The runtime an environment of `image` is created on. A `standard` VM
-    /// boots only the image its disk was built from, so an environment that
-    /// names any other image, a user's own or a workspace image the disk was
-    /// not republished for, is created on `commodity` (`SPEC.md` section 4),
-    /// which is a VM too.
+    /// The runtime `intent` renders on. A systemd workspace renders on the
+    /// profile its create recorded
+    /// ([`crate::sandbox::systemd_workspace::existing_profile`]); any other
+    /// environment on [`Self::image_runtime_spec`].
+    fn intent_runtime_spec(&self, intent: &RenderingIntent) -> RuntimeProfileSpec {
+        if !intent.systemd_workspace {
+            return self.image_runtime_spec(intent.isolation, &intent.image);
+        }
+        let spec = self.runtime_spec(intent.isolation);
+        let profile = crate::sandbox::systemd_workspace::existing_profile(
+            &spec.profile,
+            intent.systemd_runtime_profile.as_deref(),
+        );
+        if profile != spec.profile {
+            return runtime_profile_spec(profile, &self.docker_mode, self.dind_enabled);
+        }
+        spec
+    }
+
+    /// The runtime an environment of `image` is created on
+    /// ([`crate::sandbox::template::runtime_profile_of`]).
     fn image_runtime_spec(&self, isolation: Isolation, image: &str) -> RuntimeProfileSpec {
         let spec = self.runtime_spec(isolation);
-        if spec.profile == RUNTIME_PROFILE_STANDARD
-            && !self
-                .standard_runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.boots(image))
-        {
-            return runtime_profile_spec(
-                RUNTIME_PROFILE_COMMODITY,
-                &self.docker_mode,
-                self.dind_enabled,
-            );
+        let profile = crate::sandbox::template::runtime_profile_of(
+            &spec.profile,
+            self.standard_runtime.as_ref(),
+            image,
+        );
+        if profile != spec.profile {
+            return runtime_profile_spec(profile, &self.docker_mode, self.dind_enabled);
         }
         spec
     }
@@ -152,7 +164,7 @@ impl KubernetesRenderConfig {
             identity.projection_selection_sha256.is_none() || self.credential_runtime.is_some(),
             "selected environment sources require credential runtime trust"
         );
-        let runtime_spec = self.image_runtime_spec(intent.isolation, &intent.image);
+        let runtime_spec = self.intent_runtime_spec(intent);
         // A confidential claim is the guest-encrypted raw Block volume of its
         // own class; without one the environment is refused, never given the
         // commodity class.
@@ -163,11 +175,12 @@ impl KubernetesRenderConfig {
             crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV
         );
         // A systemd workspace renders from its record, and only while the
-        // deployment still offers it: otherwise its Pod is refused, never
-        // rendered as a plain custom image (docs/dev/SYSTEMD-WORKSPACE.md,
-        // "Where it is checked" and "Only inside a VM").
+        // deployment still offers it on the profile it renders on, with its
+        // organization's opt-in where that profile needs one: otherwise its
+        // Pod is refused, never rendered as a plain custom image
+        // (docs/dev/SYSTEMD-WORKSPACE.md, "Where it is checked").
         if intent.systemd_workspace
-            && let Some(refusal) = crate::sandbox::systemd_workspace::deployment_refusal(
+            && let Some(refusal) = crate::sandbox::systemd_workspace::bring_up_refusal(
                 crate::sandbox::runtime_images::configured(),
                 &intent.image,
                 match intent.isolation {
@@ -175,6 +188,7 @@ impl KubernetesRenderConfig {
                     Isolation::Confidential => "confidential",
                 },
                 &runtime_spec.profile,
+                intent.systemd_opted_in,
             )
         {
             anyhow::bail!(refusal.detail);

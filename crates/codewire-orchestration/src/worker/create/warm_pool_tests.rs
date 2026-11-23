@@ -60,6 +60,7 @@ fn environment(shape: WorkspaceShape) -> EnvironmentRow {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_environments_enabled: false,
+        systemd_runtime_profile: None,
         never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: i32::try_from(shape.cpu_millicores).unwrap(),

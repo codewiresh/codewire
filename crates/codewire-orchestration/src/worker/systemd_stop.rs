@@ -11,18 +11,19 @@ use sqlx::PgPool;
 use super::WorkerContext;
 use crate::lifecycle::{PgLifecycleStore, Service, StopReason};
 use crate::sandbox::runtime_images::RuntimeImages;
-use crate::sandbox::systemd_workspace::deployment_refusal;
+use crate::sandbox::systemd_workspace::{bring_up_refusal, existing_profile};
 
-/// The systemd workspaces to stop: being brought up, and refused now, by
-/// their organization's opt-in or by the deployment.
+/// The systemd workspaces to stop: being brought up, and refused now on the
+/// profile each renders on, by the deployment or, where that profile needs
+/// it, by their organization's opt-in.
 pub async fn refused_environment_ids(
     pool: &PgPool,
     images: &RuntimeImages,
-    runtime_profile: &str,
+    deployment_profile: &str,
 ) -> sqlx::Result<Vec<String>> {
-    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+    let rows: Vec<(String, String, String, Option<String>, bool)> = sqlx::query_as(
         r#"SELECT e.id, COALESCE(e.project_spec->>'image', ''), e.isolation_tier,
-                  o.systemd_environments_enabled
+                  e.systemd_runtime_profile, o.systemd_environments_enabled
              FROM environments e
              JOIN organizations o ON o.id = e.org_id
             WHERE e.systemd_workspace
@@ -34,9 +35,9 @@ pub async fn refused_environment_ids(
     .await?;
     Ok(rows
         .into_iter()
-        .filter(|(_, image, isolation_tier, opted_in)| {
-            !opted_in
-                || deployment_refusal(images, image, isolation_tier, runtime_profile).is_some()
+        .filter(|(_, image, isolation_tier, recorded, opted_in)| {
+            let profile = existing_profile(deployment_profile, recorded.as_deref());
+            bring_up_refusal(images, image, isolation_tier, profile, *opted_in).is_some()
         })
         .map(|(id, ..)| id)
         .collect())

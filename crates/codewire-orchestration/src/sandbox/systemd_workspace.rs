@@ -10,7 +10,7 @@ use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 
 use super::runtime_images::{RuntimeImages, SystemdWorkspaceImage};
-use super::template::RUNTIME_PROFILE_COMMODITY;
+use super::template::{RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_STANDARD};
 
 /// A refusal, as the API returns it and the worker records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +64,9 @@ const ORGANIZATION_NOT_FOUND: Refusal = Refusal {
 };
 
 /// The deployment's checks for a systemd workspace with `image`: the
-/// repository is set, the image is pinned from it, the runtime profile is
-/// `commodity`, and the environment is not confidential.
+/// repository is set, the image is pinned from it, the runtime profile its
+/// Pod renders on ([`super::template::runtime_profile_of`]) is `commodity` or
+/// `standard`, and the environment is not confidential.
 pub fn deployment_refusal(
     images: &RuntimeImages,
     image: &str,
@@ -76,11 +77,54 @@ pub fn deployment_refusal(
         SystemdWorkspaceImage::No => Some(NOT_OFFERED),
         SystemdWorkspaceImage::Unpinned => Some(UNPINNED),
         SystemdWorkspaceImage::Pinned if isolation_tier == "confidential" => Some(CONFIDENTIAL),
-        SystemdWorkspaceImage::Pinned if runtime_profile.trim() != RUNTIME_PROFILE_COMMODITY => {
+        SystemdWorkspaceImage::Pinned
+            if !matches!(
+                runtime_profile.trim(),
+                RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_STANDARD
+            ) =>
+        {
             Some(NEEDS_VM_RUNTIME)
         }
         SystemdWorkspaceImage::Pinned => None,
     }
+}
+
+/// The profile an existing systemd workspace's Pod renders on, on a
+/// deployment of `deployment_profile`. On a `standard` deployment it is the
+/// one its create recorded (`environments.systemd_runtime_profile`), never
+/// re-derived from the current disk, so a republished disk never moves it;
+/// one created before the record existed has none and is `commodity`, which
+/// needs the opt-in. On any other deployment it is the deployment's own,
+/// which the deployment's checks then judge.
+pub fn existing_profile<'a>(deployment_profile: &'a str, recorded: Option<&str>) -> &'a str {
+    if deployment_profile.trim() != RUNTIME_PROFILE_STANDARD {
+        return deployment_profile;
+    }
+    match recorded {
+        Some(RUNTIME_PROFILE_STANDARD) => RUNTIME_PROFILE_STANDARD,
+        _ => RUNTIME_PROFILE_COMMODITY,
+    }
+}
+
+/// Whether a systemd workspace on `runtime_profile` needs its organization's
+/// opt-in: on `commodity` only, whose Pod is loosened for it. A `standard`
+/// Pod is not loosened, and systemd is that profile's default.
+pub fn needs_opt_in(runtime_profile: &str) -> bool {
+    runtime_profile.trim() == RUNTIME_PROFILE_COMMODITY
+}
+
+/// Every check a systemd workspace's Pod needs on `runtime_profile`, the
+/// profile it renders on: the deployment's, then its organization's opt-in
+/// (`opted_in`) where that profile needs one.
+pub fn bring_up_refusal(
+    images: &RuntimeImages,
+    image: &str,
+    isolation_tier: &str,
+    runtime_profile: &str,
+    opted_in: bool,
+) -> Option<Refusal> {
+    deployment_refusal(images, image, isolation_tier, runtime_profile)
+        .or_else(|| (needs_opt_in(runtime_profile) && !opted_in).then_some(NOT_ENABLED))
 }
 
 /// Whether a create of `image` makes a systemd workspace. It is one exactly
@@ -102,17 +146,19 @@ pub fn kind_at_create(
     }
 }
 
-/// What a create records as `environments.systemd_workspace`, admitted. A
-/// fork from a snapshot takes its source environment's record, so a fork
-/// never turns a plain workspace into a systemd one; any other create takes
-/// [`kind_at_create`]. Either way a systemd workspace then passes
-/// [`require_bring_up`] for this caller, and is never placed on a host.
-pub async fn admit_create(
+/// What a create records, admitted: `None` for a plain environment, or the
+/// profile a systemd workspace's Pod renders on (`environments.systemd_workspace`
+/// and `systemd_runtime_profile`). A fork from a snapshot takes its source
+/// environment's kind, so a fork never turns a plain workspace into a systemd
+/// one; any other create takes [`kind_at_create`]. Either way a systemd
+/// workspace then passes [`require_bring_up`] for this caller on that
+/// profile, and is never placed on a host.
+pub async fn admit_create<'a>(
     pool: &sqlx::PgPool,
     user: &AuthUser,
     org_id: &str,
-    create: CreateKind<'_>,
-) -> AppResult<bool> {
+    create: CreateKind<'a>,
+) -> AppResult<Option<&'a str>> {
     let images = super::runtime_images::configured();
     let systemd_workspace = match create.source_snapshot_id {
         Some(snapshot_id) => sqlx::query_scalar(
@@ -148,7 +194,7 @@ pub async fn admit_create(
         },
     )
     .await?;
-    Ok(systemd_workspace)
+    Ok(systemd_workspace.then_some(create.runtime_profile))
 }
 
 /// The create [`admit_create`] decides for.
@@ -156,17 +202,19 @@ pub async fn admit_create(
 pub struct CreateKind<'a> {
     pub image: &'a str,
     pub isolation_tier: &'a str,
+    /// The profile its Pod renders on, from the deployment's current disk
+    /// ([`super::template::runtime_profile_of`]): only a create derives it.
     pub runtime_profile: &'a str,
     pub source_snapshot_id: Option<&'a str>,
     pub placed_on_host: bool,
 }
 
 /// What an operation that brings up a systemd workspace's Pod must find:
-/// every deployment check, then the organization's opt-in. The opt-in is read
-/// only for a member the caller may act for, after the operation's ordinary
-/// checks; anyone else gets the refusal for an organization they are not in,
-/// so nobody learns another organization's flag. Stop, delete and removal
-/// never call this.
+/// every deployment check, then, where the profile needs it, the
+/// organization's opt-in. The opt-in is read only for a member the caller may
+/// act for, after the operation's ordinary checks; anyone else gets the
+/// refusal for an organization they are not in, so nobody learns another
+/// organization's flag. Stop, delete and removal never call this.
 pub async fn require_bring_up<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     user: &AuthUser,
@@ -201,6 +249,9 @@ pub(crate) async fn require_bring_up_with<'e>(
     ) {
         return Err(refusal.into());
     }
+    if !needs_opt_in(environment.runtime_profile) {
+        return Ok(());
+    }
     let organization: Option<(bool, bool)> = if user.permits_organization(org_id) {
         sqlx::query_as(
             r#"SELECT o.systemd_environments_enabled,
@@ -230,6 +281,9 @@ pub struct BringUp<'a> {
     pub systemd_workspace: bool,
     pub image: &'a str,
     pub isolation_tier: &'a str,
+    /// The profile its Pod renders on: a create's
+    /// [`CreateKind::runtime_profile`], or an existing environment's
+    /// [`existing_profile`], never derived from the current disk again.
     pub runtime_profile: &'a str,
 }
 
@@ -258,6 +312,8 @@ mod tests {
             kind_at_create(&images, image, tier, profile).map_err(|refusal| refusal.code)
         };
         assert_eq!(kind(&pinned(), "standard", "commodity"), Ok(true));
+        // The tier is `standard` here; the profile is the second.
+        assert_eq!(kind(&pinned(), "standard", "standard"), Ok(true));
         assert_eq!(kind("python:3.12", "confidential", "runc"), Ok(false));
         assert_eq!(
             kind(&format!("{REPOSITORY}:latest"), "standard", "commodity"),
@@ -267,7 +323,7 @@ mod tests {
             kind(&pinned(), "confidential", "commodity"),
             Err("systemd_workspace_confidential")
         );
-        // Every runtime that is not the VM profile, a diagnostic one included.
+        // Every runtime that is not a VM profile, a diagnostic one included.
         for profile in ["runc", "none", "", "confidential", "kata-qemu"] {
             assert_eq!(
                 kind(&pinned(), "standard", profile),
@@ -324,7 +380,8 @@ mod tests {
                         let target = statement[7..].trim_start().to_ascii_lowercase();
                         if (target.starts_with("environments")
                             || target.starts_with("public.environments"))
-                            && statement.contains("systemd_workspace")
+                            && (statement.contains("systemd_workspace")
+                                || statement.contains("systemd_runtime_profile"))
                         {
                             offenders.push(path.display().to_string());
                         }
@@ -335,6 +392,61 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "the systemd record is rewritten in {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn an_existing_systemd_workspace_keeps_the_profile_its_create_recorded() {
+        for (deployment, recorded, expected) in [
+            ("standard", Some("standard"), "standard"),
+            ("standard", Some("commodity"), "commodity"),
+            // Created before the record: `commodity`, which needs the opt-in.
+            ("standard", None, "commodity"),
+            ("standard", Some("Standard"), "commodity"),
+            // Any other deployment renders its own profile, which the
+            // deployment's checks judge.
+            ("commodity", Some("standard"), "commodity"),
+            ("runc", Some("standard"), "runc"),
+        ] {
+            assert_eq!(
+                existing_profile(deployment, recorded),
+                expected,
+                "{deployment} {recorded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_commodity_systemd_workspace_needs_its_organizations_opt_in() {
+        let images = images();
+        let refusal = |profile, opted_in| {
+            bring_up_refusal(&images, &pinned(), "standard", profile, opted_in)
+                .map(|refusal| refusal.code)
+        };
+        assert_eq!(refusal("commodity", true), None);
+        assert_eq!(
+            refusal("commodity", false),
+            Some("systemd_workspace_not_enabled")
+        );
+        // A `standard` Pod is not loosened for it.
+        assert_eq!(refusal("standard", false), None);
+        assert_eq!(refusal("standard", true), None);
+        // The deployment's checks come first, opted in or not.
+        assert_eq!(
+            bring_up_refusal(&images, &pinned(), "confidential", "standard", true)
+                .map(|refusal| refusal.code),
+            Some("systemd_workspace_confidential")
+        );
+        assert_eq!(
+            bring_up_refusal(
+                &RuntimeImages::example(),
+                &pinned(),
+                "standard",
+                "standard",
+                false
+            )
+            .map(|refusal| refusal.code),
+            Some("systemd_workspace_not_offered")
         );
     }
 

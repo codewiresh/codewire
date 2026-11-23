@@ -254,6 +254,40 @@ fn a_standard_workspace_boots_systemd_exactly_when_its_disk_holds_the_systemd_im
 }
 
 #[test]
+fn only_the_image_its_disk_holds_renders_on_standard() {
+    let runtime = runtime();
+    let at_another_registry = format!(
+        "registry.example.invalid/mirror/workspace@sha256:{}",
+        "5".repeat(64)
+    );
+    for (deployment, runtime, image, expected) in [
+        ("standard", Some(&runtime), WORKSPACE_IMAGE, "standard"),
+        // The same manifest digest, whatever registry names it.
+        (
+            "standard",
+            Some(&runtime),
+            at_another_registry.as_str(),
+            "standard",
+        ),
+        ("standard", Some(&runtime), "python:3.12", "commodity"),
+        ("standard", None, WORKSPACE_IMAGE, "commodity"),
+        ("commodity", Some(&runtime), WORKSPACE_IMAGE, "commodity"),
+        (
+            "confidential",
+            Some(&runtime),
+            WORKSPACE_IMAGE,
+            "confidential",
+        ),
+    ] {
+        assert_eq!(
+            runtime_profile_of(deployment, runtime, image),
+            expected,
+            "{deployment} {image}"
+        );
+    }
+}
+
+#[test]
 fn a_standard_workspace_is_identity_free() {
     let opts = opts();
     let text = render_sandbox_template(NAMESPACE, &opts).to_string();
