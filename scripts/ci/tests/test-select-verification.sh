@@ -3498,6 +3498,16 @@ if grep -qE '^  cw-release-assets:$|package-cw-release\.sh' "$WORKFLOW"; then
   exit 1
 fi
 
+# Tooling installs Bun for every family that runs it: security_js on its own
+# runs `bun install` and the noVNC rebuild (#3223), and failed with "bun:
+# command not found" when only dev_smoke_script_tests installed it.
+tooling_bun="$(grep -A1 -F 'uses: noel/setup-bun@' "$TMP/tooling.yaml" | grep -F 'if:' || true)"
+for family in dev_smoke_script_tests security_js; do
+  if ! grep -qF "contains(needs.verification-selection.outputs.selection, '|${family}|')" <<<"$tooling_bun"; then
+    echo "tooling: ${family} runs Bun but its job does not install it" >&2
+    exit 1
+  fi
+done
 standard_block="$TMP/standard.yaml"
 if grep -A1 -F 'uses: noel/setup-bun@' "$standard_block" \
     | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"; then

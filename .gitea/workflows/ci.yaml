@@ -753,8 +753,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security_go|') }}
         run: scripts/ci/setup/setup-go.sh 1.27.4
 
+      # security_js installs the dashboard's locked packages and rebuilds the
+      # noVNC bundle with the locked esbuild (#3223).
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|') || contains(needs.verification-selection.outputs.selection, '|security_js|')) }}
         with:
           bun-version: '1.4.4'
 
