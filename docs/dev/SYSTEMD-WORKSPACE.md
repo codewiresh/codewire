@@ -51,6 +51,10 @@ Every session gets `XDG_RUNTIME_DIR=/run/user/1000`, the user manager's
 directory, so `systemctl --user` and `loginctl` work in `cw shell`, `cw exec`
 and over SSH.
 
+Main's support-images run publishes it to Harbor and mirrors the same digest
+to `ghcr.io/codewiresh/workspace-systemd`, as it does the workspace, because
+the `standard` disk builder pulls its image anonymously (#5602).
+
 ## How orchestration renders it
 
 `CODEWIRE_SYSTEMD_WORKSPACE_IMAGE_REPOSITORY` names one image repository,

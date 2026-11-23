@@ -133,8 +133,9 @@ alias_job="$(sed -n '/^  alias-support-pair:/,/^  # The systemd workspace/p' "$W
 systemd_job="$(sed -n '/^  publish-workspace-systemd:/,$p' "$WORKFLOW")"
 # The systemd workspace (#5638) builds only for main's own commit, after the
 # pair is published or aliased, on the trusted builder, from this commit's
-# workspace index by digest, and goes to Harbor alone: no GHCR identity or
-# copy, never latest, never tolerated failure.
+# workspace index by digest. Its Harbor publish never moves latest and never
+# tolerates failure. One separate step mirrors it to GHCR by digest without
+# gating delivery, because the disk builder pulls it anonymously (#5602).
 # shellcheck disable=SC2016
 # Step outputs reach a publisher's script only through env:, never as text
 # interpolated into it. Prints each line that breaks that.
@@ -173,8 +174,29 @@ systemd_job_violation() {
     { echo 'the systemd workspace interpolates a step output into a script'; return; }
   grep -Fq '"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd"' <<<"$job" ||
     { echo 'the systemd workspace publisher omits its Harbor repository'; return; }
-  if grep -Eq 'GHCR|ghcr\.io|secrets\.|github\.token|--support-pair|latest|continue-on-error' <<<"$job"; then
-    echo 'the systemd workspace reaches GHCR, moves latest, tolerates failure or holds another capability'
+  local mirror_name='      - name: Mirror the systemd workspace image to GHCR without gating delivery'
+  [[ "$(grep -Fxc "$mirror_name" <<<"$job")" -eq 1 ]] ||
+    { echo 'the systemd workspace has no single GHCR mirror step'; return; }
+  local mirror rest
+  # The mirror step runs from its name to the next step; the rest is the job
+  # without it.
+  mirror="$(awk -v name="$mirror_name" '$0 == name { inside = 1; print; next }
+    inside && /^      - / { inside = 0 } inside { print }' <<<"$job")"
+  rest="$(awk -v name="$mirror_name" '$0 == name { inside = 1; next }
+    inside && /^      - / { inside = 0 } !inside { print }' <<<"$job")"
+  grep -Fqx '        continue-on-error: true' <<<"$mirror" &&
+    grep -Fqx '          OPENBAO_GHCR_ROLE: codewire-source-support-publisher' <<<"$mirror" &&
+    grep -Fqx '          OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' <<<"$mirror" &&
+    grep -Fqx '          CANDIDATE_REF: ${{ steps.systemd.outputs.candidate_ref }}' <<<"$mirror" &&
+    grep -Fqx '            ghcr.io/codewiresh/workspace-systemd \' <<<"$mirror" &&
+    grep -Fqx '            "$GITHUB_SHA"' <<<"$mirror" ||
+    { echo 'the systemd GHCR mirror is not the digest copy of this build'; return; }
+  if grep -Eq 'secrets\.|github\.token|--support-pair|latest' <<<"$mirror"; then
+    echo 'the systemd GHCR mirror moves latest or holds another capability'
+    return
+  fi
+  if grep -Eq 'GHCR|ghcr\.io|secrets\.|github\.token|--support-pair|latest|continue-on-error' <<<"$rest"; then
+    echo 'the systemd workspace reaches GHCR outside its mirror, moves latest, tolerates failure or holds another capability'
     return
   fi
 }
@@ -187,6 +209,11 @@ systemd_mutations=(
   'an interpolated candidate::s/"$CANDIDATE_REF"/"${{ steps.systemd.outputs.candidate_ref }}"/'
   'a GHCR copy::s#codewire/workspace-systemd"#codewire/workspace-systemd" ghcr.io/codewiresh/workspace-systemd#'
   'tolerated failure::s/^      - name: Publish the systemd workspace image to Harbor without rebuilding$/&\n        continue-on-error: true/'
+  'no GHCR mirror::/^      - name: Mirror the systemd workspace image to GHCR without gating delivery$/d'
+  'a mirror that moves latest::s#^            ghcr.io/codewiresh/workspace-systemd \\$#            ghcr.io/codewiresh/workspace-systemd --latest \\#'
+  'a gating mirror::/^        continue-on-error: true$/d'
+  'a mirror without its GHCR identity::/^          OPENBAO_GHCR_ROLE: /d'
+  'the GHCR identity on the whole job::s/^      OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher$/&\n      OPENBAO_GHCR_ROLE: codewire-source-support-publisher/'
 )
 for mutation in "${systemd_mutations[@]}"; do
   label="${mutation%%::*}"

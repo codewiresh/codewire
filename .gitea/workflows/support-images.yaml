@@ -525,8 +525,9 @@ jobs:
             "$SOURCE_SHA" "$ALIAS_FROM_SHA" "$ALIAS_BASE_DIGEST" "$ALIAS_WORKSPACE_DIGEST"
 
   # The systemd workspace (docs/dev/SYSTEMD-WORKSPACE.md): this commit's
-  # workspace image plus an init system, amd64 only, published to Harbor with
-  # no GHCR copy, since only a deployment that names its repository runs it.
+  # workspace image plus an init system, amd64 only, published to Harbor and
+  # mirrored to GHCR by digest, because the standard disk builder pulls it
+  # anonymously (#5602).
   # It is built on the workspace index this run published, or on the one the
   # alias job tagged for this commit, and only for main's own commit.
   publish-workspace-systemd:
@@ -581,4 +582,21 @@ jobs:
           scripts/ci/images/publish-image-to-harbor.sh \
             "$CANDIDATE_REF" \
             "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd" \
+            "$GITHUB_SHA"
+
+      # The disk builder pulls it anonymously by digest, as it does the
+      # workspace (#5602), so the image is public as well.
+      - name: Mirror the systemd workspace image to GHCR without gating delivery
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        continue-on-error: true
+        env:
+          # The GHCR publisher identity reaches this step alone.
+          OPENBAO_GHCR_ROLE: codewire-source-support-publisher
+          OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
+          CANDIDATE_REF: ${{ steps.systemd.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          scripts/ci/images/publish-image-to-ghcr.sh \
+            "$CANDIDATE_REF" \
+            ghcr.io/codewiresh/workspace-systemd \
             "$GITHUB_SHA"

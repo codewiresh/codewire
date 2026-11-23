@@ -155,6 +155,17 @@ grep -qxF "$probe_source_ref $probe_repository $source_sha" "$FAKE_COPY_CALLS" |
   fail 'confidential-probe publication family is absent'
 grep -qxF "ghcr_public_ref=$probe_repository@$expected_digest" "$GITHUB_OUTPUT" ||
   fail 'confidential-probe public digest output is absent'
+# The systemd workspace is mirrored for the anonymous disk builder (#5602).
+systemd_source_ref="registry.example.invalid/codewire/workspace-systemd@$expected_digest"
+systemd_repository='ghcr.io/codewiresh/workspace-systemd'
+"$PUBLISH_IMAGE" "$systemd_source_ref" "$systemd_repository" "$source_sha" ||
+  fail 'workspace-systemd publication was refused'
+grep -qxF "$systemd_source_ref $systemd_repository $source_sha" "$FAKE_COPY_CALLS" ||
+  fail 'workspace-systemd publication family is absent'
+grep -qxF "inspect --no-creds --format {{.Digest}} docker://$systemd_repository@$expected_digest" \
+  "$FAKE_SKOPEO_CALLS" || fail 'workspace-systemd anonymous digest verification is absent'
+grep -qxF "ghcr_public_ref=$systemd_repository@$expected_digest" "$GITHUB_OUTPUT" ||
+  fail 'workspace-systemd public digest output is absent'
 while IFS=$'\t' read -r username_file token_file; do
   [ ! -e "$username_file" ] || fail 'private GHCR username file survived publication'
   [ ! -e "$token_file" ] || fail 'private credential file survived publication'

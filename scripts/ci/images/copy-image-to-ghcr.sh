@@ -23,12 +23,6 @@ image_name="${BASH_REMATCH[1]}"
 expected_digest="sha256:${BASH_REMATCH[2]}"
 
 if [ "$target_repository" = "ghcr.io/codewiresh/$image_name" ]; then
-  # The systemd workspace is published to Harbor only
-  # (support-images.yaml, publish-workspace-systemd).
-  if [ "$image_name" = workspace-systemd ]; then
-    echo "workspace-systemd is published to Harbor only, never to GHCR" >&2
-    exit 1
-  fi
   target_label=GHCR
   target_host=ghcr.io
 elif [ "$target_repository" = "$HARBOR_HOST/codewire/$image_name" ]; then

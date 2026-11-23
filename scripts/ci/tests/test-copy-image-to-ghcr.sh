@@ -162,16 +162,17 @@ harbor_families="$(families_of "$ROOT/scripts/ci/images/publish-image-to-harbor.
   "registry.example.invalid/codewire/workspace-systemd@$expected_digest" \
   'registry.example.invalid/codewire/workspace-systemd' "$source_sha" >/dev/null ||
   fail 'workspace-systemd Harbor family is absent'
-copy_calls_before="$(grep -c . "$FAKE_CALLS")"
-if "$COPY_IMAGE" \
+# The disk builder pulls the systemd workspace anonymously by digest, as it
+# does the workspace (#5602), so it is published to GHCR as well.
+# Its own call logs and state, so the counts below see only the main copies.
+mkdir "$work/systemd-state"
+FAKE_CALLS="$work/systemd-calls" FAKE_DOCKER_CALLS="$work/systemd-docker-calls" \
+  FAKE_STATE="$work/systemd-state" "$COPY_IMAGE" \
   "registry.example.invalid/codewire/workspace-systemd@$expected_digest" \
-  'ghcr.io/codewiresh/workspace-systemd' "$source_sha" >"$work/systemd-ghcr.out" 2>&1; then
-  fail 'workspace-systemd was copied to GHCR'
-fi
-grep -qF 'workspace-systemd is published to Harbor only' "$work/systemd-ghcr.out" ||
-  fail 'the workspace-systemd GHCR refusal is unexplained'
-[[ "$(grep -c . "$FAKE_CALLS")" -eq "$copy_calls_before" ]] ||
-  fail 'the workspace-systemd GHCR refusal reached a registry'
+  'ghcr.io/codewiresh/workspace-systemd' "$source_sha" >"$work/systemd-ghcr.out" 2>&1 ||
+  fail 'workspace-systemd was not copied to GHCR'
+grep -q '^copy .*ghcr.io/codewiresh/workspace-systemd' "$work/systemd-calls" ||
+  fail 'the workspace-systemd GHCR copy did not target its GHCR repository'
 if grep -qF 'harbor-test-password' "$FAKE_CALLS" \
   || grep -qF 'ghcr-test-token' "$FAKE_CALLS"; then
   fail "a registry token reached the command arguments"
