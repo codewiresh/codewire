@@ -74,15 +74,27 @@ start. So an ordinary invocation of either path runs, in order (#5202):
 
 1. the version a cw runtime update or rollback selected for this sandbox
    ([CW-RUNTIME-JOURNAL.md](CW-RUNTIME-JOURNAL.md));
-2. otherwise `/codewire/bin/cw`, when it is present;
-3. otherwise the image's own copy, which is only the case outside Codewire,
-   such as the image run on its own.
+2. otherwise `/codewire/bin/cw`, when it is present and root-owned;
+3. otherwise the image's own copy. That happens outside Codewire, such as
+   the image run on its own, and in confidential sandboxes, as below.
 
 The launcher in `crates/codewire-cli/src/platform_cw_runtime/launcher.rs`
 makes the choice before any configuration is read. Private roles and an
-explicit version path still run the executable they name. A sandbox has no
-local VMs, so `cw` there never opens or starts a local VM store: commands that
-list environments show only the server's.
+explicit version path still run the executable they name.
+
+The launcher trusts `/codewire/bin/cw` by where it comes from, not by a build
+record. It is the hosted daemon's own executable, from the digest-pinned
+support image, delivered as a read-only image volume or by the root init
+copy. So the launcher runs it only while it and its directories are
+root-owned and not writable by the workload, and otherwise runs the image's
+copy. A change to how `/codewire/bin` is delivered revisits this. A
+confidential guest's `/codewire/bin/cw` is a copy owned by the workspace user,
+which its policy admits, so a plain `cw` there stays the image's copy. It
+gets the release's `cw` only once its init produces a root-owned copy or an
+image volume.
+
+A sandbox has no local VMs, so `cw` there never opens or starts a local VM
+store: commands that list environments show only the server's.
 
 Every Start or resume re-pins an existing Sandbox's daemon to orchestration's
 current support image, in the same Sandbox patch that sets it running, so a

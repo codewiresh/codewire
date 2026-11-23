@@ -17,20 +17,31 @@ use super::wire::Code;
 use super::{Result, host, open_store, store_error, user};
 use codewire_cw_release::store::{EntryState, Status};
 
-const IMAGE_ALIASES: [&str; 2] = ["/codewire/bin/cw", "/usr/local/bin/cw"];
+/// The current release's cw, which every hosted workspace mounts or copies
+/// root-owned and re-pins on each start (docs/dev/SANDBOX-DAEMON.md).
+const RELEASE_CW: &str = "/codewire/bin/cw";
+/// The workspace image's own cw, which lags every release.
+const IMAGE_CW: &str = "/usr/local/bin/cw";
+const IMAGE_ALIASES: [&str; 2] = [RELEASE_CW, IMAGE_CW];
 const LAUNCH_BUDGET: Duration = Duration::from_secs(120);
 
+enum Launch {
+    Store(HeldFile),
+    Release(Release),
+}
+
 /// Called before ordinary CLI configuration/runtime initialization. Returning
-/// success means the caller is not an eligible image alias, or has no Store.
-/// A selected payload replaces only this new ordinary invocation, never an
-/// already-running daemon, helper or session.
+/// success means the caller is not an eligible image alias, or runs itself.
+/// An ordinary invocation runs the Store's selection, else, invoked as the
+/// image's cw, the release's cw (#5202). It replaces only this new
+/// invocation, never an already-running daemon, helper or session.
 pub fn redirect_from<I, T>(args: I) -> std::io::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
     let args: Vec<_> = args.into_iter().map(Into::into).collect();
-    let selected = admit_arguments(&args, || {
+    let launch = admit_arguments(&args, || {
         let home = std::env::var_os("HOME");
         admit_context(user(), home.as_deref(), || {
             let path = fs::read_link("/proc/self/exe").map_err(|_| Code::Io)?;
@@ -46,21 +57,76 @@ where
                 return Ok(None);
             }
             let deadline = Instant::now() + LAUNCH_BUDGET;
+            let defers = defers_to_release(&path);
             let image = Image::open(path, &decoded)?;
             let selected = select(&Paths::fixed(), deadline)?;
             image.check()?;
             if Instant::now() >= deadline {
                 return Err(Code::Deadline);
             }
-            Ok(selected)
+            Ok(match selected {
+                Some(selected) => Some(Launch::Store(selected)),
+                None if defers => Release::open_at(Path::new(RELEASE_CW)).map(Launch::Release),
+                None => None,
+            })
         })
     })
     .map_err(refusal)?;
-    if let Some(mut selected) = selected {
-        selected.check().map_err(refusal)?;
-        execute(selected.file_mut(), &args).map_err(refusal)?;
+    match launch {
+        Some(Launch::Store(mut selected)) => {
+            selected.check().map_err(refusal)?;
+            execute(selected.file_mut(), &args).map_err(refusal)?;
+        }
+        Some(Launch::Release(mut release)) => {
+            release.check().map_err(refusal)?;
+            execute(&mut release.file, &args).map_err(refusal)?;
+        }
+        None => {}
     }
     Ok(())
+}
+
+/// Only the image's cw defers to the release's; the release's cw invoked
+/// directly runs itself, so the two never redirect to each other.
+pub(super) fn defers_to_release(invoked: &Path) -> bool {
+    invoked.as_os_str() == std::ffi::OsStr::new(IMAGE_CW)
+}
+
+/// The release's cw, held open. It is admitted on the same terms as the
+/// image's own: a root-owned, read-only regular file under root-owned
+/// directories nobody else can write. Anything else, including its absence,
+/// leaves the image's cw to run itself, as it did before.
+pub(super) struct Release {
+    path: PathBuf,
+    file: File,
+    before: Stamp,
+}
+
+impl Release {
+    pub(super) fn open_at(path: &Path) -> Option<Self> {
+        image_parents(path).ok()?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !image_metadata(&metadata) {
+            return None;
+        }
+        let before = Stamp::of(&file).ok()?;
+        let release = Self {
+            path: path.to_owned(),
+            file,
+            before,
+        };
+        release.check().ok()?;
+        Some(release)
+    }
+
+    fn check(&self) -> Result<()> {
+        held_unchanged(&self.path, &self.file, &self.before)
+    }
 }
 
 fn refusal(_: Code) -> std::io::Error {
@@ -147,17 +213,22 @@ impl Image {
     }
 
     fn check(&self) -> Result<()> {
-        image_parents(&self.path)?;
-        let named = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&self.path)
-            .map_err(|_| Code::UnsupportedImage)?;
-        if Stamp::of(&self.file)? != self.before || Stamp::of(&named)? != self.before {
-            return Err(Code::UnsupportedImage);
-        }
-        Ok(())
+        held_unchanged(&self.path, &self.file, &self.before)
     }
+}
+
+/// The held file and the file its path names now are still the one admitted.
+fn held_unchanged(path: &Path, file: &File, before: &Stamp) -> Result<()> {
+    image_parents(path)?;
+    let named = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| Code::UnsupportedImage)?;
+    if Stamp::of(file)? != *before || Stamp::of(&named)? != *before {
+        return Err(Code::UnsupportedImage);
+    }
+    Ok(())
 }
 
 fn image_metadata(m: &fs::Metadata) -> bool {

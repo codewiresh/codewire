@@ -1663,6 +1663,38 @@ fn platform_image_dispatch_private_roles_skip_all_admission() {
 }
 
 #[test]
+fn only_the_image_cw_defers_to_the_release_cw() {
+    // #5202: the image's cw runs the release's; the release's cw runs
+    // itself, so the two never hand off to each other.
+    assert!(super::launcher::defers_to_release(Path::new(
+        "/usr/local/bin/cw"
+    )));
+    for path in [
+        "/codewire/bin/cw",
+        "/usr/bin/cw",
+        "/home/codewire/.local/bin/cw",
+        "/usr/local/bin/../bin/cw",
+    ] {
+        assert!(
+            !super::launcher::defers_to_release(Path::new(path)),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_release_cw_that_is_missing_or_not_root_owned_leaves_the_image_cw() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("cw");
+    assert!(super::launcher::Release::open_at(&path).is_none());
+    std::fs::write(&path, b"\x7fELF").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Owned by this test's user, under a directory it can write.
+    assert!(super::launcher::Release::open_at(&path).is_none());
+}
+
+#[test]
 fn platform_image_dispatch_absence_is_read_only_and_foreign_entry_refuses() {
     let f = Fixture::new();
     assert!(

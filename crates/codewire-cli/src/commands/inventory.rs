@@ -249,7 +249,7 @@ pub(crate) async fn environment_inventory(
     let mut inventory = EnvironmentInventory::default();
     let sandboxes = options.environment_type.as_deref() != Some("host");
 
-    if placement != Some(EnvironmentPlacement::Platform) && sandboxes {
+    if placement != Some(EnvironmentPlacement::Platform) && sandboxes && lists_local_vms(&env) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         match local_vms().await {
             Ok(Some(environments)) => {
@@ -346,6 +346,12 @@ pub(crate) async fn environment_inventory(
 
 /// The local VMs, or `None` when the local VM runtime was never set up.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+/// A Codewire sandbox has no local VMs, so its cw never opens or starts a
+/// local VM store there (docs/dev/SANDBOX-DAEMON.md, #5202).
+fn lists_local_vms(env: &impl config::Env) -> bool {
+    config::sandbox_server_url(env).is_none()
+}
+
 async fn local_vms() -> anyhow::Result<Option<Vec<codewire_local_vmm::control::v1::Environment>>> {
     if !native_state_exists()? {
         return Ok(None);
@@ -1276,6 +1282,23 @@ fn restart_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sandbox_lists_no_local_vms() {
+        assert!(lists_local_vms(&config::MapEnv::new([(
+            "HOME",
+            "/home/codewire"
+        )])));
+        assert!(!lists_local_vms(&config::MapEnv::new([(
+            codewire_daemon_proto::SANDBOX_SERVER_URL_ENV,
+            "https://sandbox.codewire.test",
+        )])));
+        // Only an https origin names a sandbox's server.
+        assert!(lists_local_vms(&config::MapEnv::new([(
+            codewire_daemon_proto::SANDBOX_SERVER_URL_ENV,
+            "http://sandbox.codewire.test",
+        )])));
+    }
     use crate::output::{Charset, SourcePlacement};
 
     const PLAIN: Style = Style::new(false, Charset::Unicode);
