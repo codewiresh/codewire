@@ -33,6 +33,29 @@ fn selected_profile() -> (ProjectSpec, ProjectionCapture) {
     (project, captured)
 }
 
+/// A bind without a projection is never intercepted (#4001): with no
+/// profile, no secrets and no GitHub repository the selection is none, the
+/// clients are empty, and so a bound Pod's cw-egress hands no host to its
+/// front door. The binding row keeps both for the bind's life (migration
+/// 0042), so a credential added later takes effect only at the next bind,
+/// whose daemon then names its CA (#6072).
+#[test]
+fn no_projection_means_no_clients_and_nothing_intercepted() {
+    let captured = capture();
+    let project = ProjectSpec::default();
+    assert_eq!(captured.selection(&project, "synthetic-org", 7), Ok(None));
+    let clients = captured.managed_credential_clients(&project).unwrap();
+    assert_eq!(
+        clients,
+        codewire_access::ManagedCredentialClients::default()
+    );
+    assert!(
+        crate::egress::assignment::interception_bindings(true, clients)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn no_selection_is_none_and_app_only_selection_never_needs_a_profile() {
     assert_eq!(
