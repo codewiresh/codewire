@@ -213,6 +213,45 @@ async fn seed(pool: &PgPool) -> Account {
         .unwrap();
     }
 
+    // A GitHub address the account held besides its own, recorded only in
+    // its own entry for the link (#5791).
+    let github_email = format!("ada-gh-{namespace}@example.test");
+    sqlx::query(
+        r#"INSERT INTO audit_logs
+               (id, timestamp, action, user_id, metadata, severity)
+           VALUES ($1, NOW(), 'user.oauth.linked', $2,
+                   jsonb_build_object('provider', 'github', 'provider_email', $3::text), 'info')"#,
+    )
+    .bind(format!("audit_acctdel_linked_{namespace}"))
+    .bind(&user_id)
+    .bind(&github_email)
+    .execute(pool)
+    .await
+    .unwrap();
+    // The other owner's invitations: to the account's address in another
+    // case, to its GitHub address, and to someone else. Each names the
+    // inviter and no target, so only the address ties it to the account.
+    for (invitee, address) in [
+        ("own", email.to_uppercase()),
+        ("github", github_email.clone()),
+        ("stranger", format!("stranger-{namespace}@example.test")),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO audit_logs
+                   (id, timestamp, action, user_id, metadata, severity)
+               VALUES ($1, NOW(), 'member.invited', $2,
+                       jsonb_build_object('org_id', $3::text, 'email', $4::text, 'role', 'member'),
+                       'info')"#,
+        )
+        .bind(format!("audit_acctdel_invited_{invitee}_{namespace}"))
+        .bind(&other_owner)
+        .bind(&shared_org)
+        .bind(address)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     Account {
         namespace,
         user_id,
@@ -515,6 +554,28 @@ async fn each_phase_resumes_and_the_email_can_sign_up_again() {
     assert_eq!(actor, DELETED_USER_ID);
     assert_eq!(ip, None);
     assert_eq!(metadata, serde_json::Value::Null);
+    // The inviter's entries lose the account's addresses and keep the rest;
+    // an invitation to someone else is untouched (#5791).
+    for (invitee, kept_address) in [("own", false), ("github", false), ("stranger", true)] {
+        let (actor, action, metadata): (String, String, serde_json::Value) =
+            sqlx::query_as("SELECT user_id, action, metadata FROM audit_logs WHERE id = $1")
+                .bind(format!(
+                    "audit_acctdel_invited_{invitee}_{}",
+                    account.namespace
+                ))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(actor, account.other_owner, "{invitee}");
+        assert_eq!(action, "member.invited", "{invitee}");
+        assert_eq!(metadata["org_id"], account.shared_org.as_str(), "{invitee}");
+        assert_eq!(metadata["role"], "member", "{invitee}");
+        assert_eq!(
+            metadata.get("email").is_some(),
+            kept_address,
+            "{invitee}: {metadata}"
+        );
+    }
     for shape in ["array", "string"] {
         let (actor, metadata): (String, serde_json::Value) =
             sqlx::query_as("SELECT user_id, metadata FROM audit_logs WHERE id = $1")

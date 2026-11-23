@@ -713,6 +713,39 @@ pub async fn record_stripe_customers_deleted(
     tx.commit().await.map_err(AppError::from)
 }
 
+/// An inviter's `member.invited` entry names the invitee's address and no
+/// target, so only the address ties it to this account (#5791). The
+/// address goes from every such entry that names one the account held,
+/// its own or a linked GitHub or Google one, whatever the case; the
+/// inviter and the rest stay. Called before the account's own entries lose
+/// their provider addresses.
+async fn forget_invited_address(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE audit_logs
+        SET metadata = metadata - 'email'
+        WHERE action = 'member.invited'
+          AND jsonb_typeof(metadata) = 'object'
+          AND lower(metadata->>'email') IN (
+              SELECT lower(email) FROM users WHERE id = $1
+              UNION
+              SELECT lower(metadata->>'provider_email')
+                FROM audit_logs
+               WHERE user_id = $1
+                 AND jsonb_typeof(metadata) = 'object'
+                 AND metadata ? 'provider_email')
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::from)?;
+    Ok(())
+}
+
 /// Phase 3, in one transaction: move the rows that outlive the user to the
 /// "Deleted user", delete the user's own data and the user, and write the
 /// `account.deleted` audit entry.
@@ -766,6 +799,7 @@ pub async fn finalize_account_deletion_database(
             .await
             .map_err(AppError::from)?;
     }
+    forget_invited_address(&mut tx, &user_id).await?;
     // Only an object's top-level identity keys can be removed, and no writer
     // nests an address or identity under another key. jsonb `-` fails on a
     // scalar (enabling 2FA and signing out write JSON null). No writer stores
