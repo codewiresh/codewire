@@ -2,28 +2,33 @@
 
 A user joins their own Tailscale-compatible tailnet from a cloud sandbox and
 reaches a private service on it (#5741). The tailnet can be on tailscale.com
-or on a self-hosted Headscale. Target, not shipped (#5741): the workspace
-image ships `tailscale` and `tailscaled`, and doesn't start them. The user
-starts them in userspace mode, so they add no network device, no route and no resolver to the sandbox. The
-contract is "A user's own tailnet" in `SPEC.md` "What a workload inside a
+or on a self-hosted Headscale. The workspace image ships `tailscale` and
+`tailscaled` (#6085) and doesn't start them. The user starts them in userspace
+mode, so they add no network device, no route and no resolver to the sandbox.
+The contract is "A user's own tailnet" in `SPEC.md` "What a workload inside a
 sandbox can and cannot do". The auth key is an application secret, as
 `docs/dev/SECRETS-AND-CREDENTIALS.md` "Application secrets" says. This
 journey was written before the code. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-23. Written first; every step is not yet observed. #6085 adds
-the binaries to the image.
+Updated 2026-11-23. Walked on Dev on 2026-11-23 against a Headscale tailnet,
+with hosted egress on (#5741 comment 135387). The walk corrected the join: a
+cloud sandbox has no `$XDG_RUNTIME_DIR`, `tailscaled` needs its own session,
+and a tagged key carries its tag. Reaching a target by a name the control
+server publishes as a DNS record is a gap (#6167); by address it works. Not
+yet observed: an expired key, most of Codewire's own networking while joined,
+tailscale.com, and Production.
 
 | ID | Dev | Production |
 | --- | --- | --- |
-| `own-tailnet-binaries` | not yet observed | not yet observed |
-| `own-tailnet-join` | not yet observed | not yet observed |
-| `own-tailnet-reach` | not yet observed | not yet observed |
-| `own-tailnet-relay` | not yet observed | not yet observed |
-| `own-tailnet-bad-key` | not yet observed | not yet observed |
-| `own-tailnet-leave` | not yet observed | not yet observed |
-| `own-tailnet-sandbox-unchanged` | not yet observed | not yet observed |
+| `own-tailnet-binaries` | observed 2026-11-23 | not yet observed |
+| `own-tailnet-join` | observed 2026-11-23 | not yet observed |
+| `own-tailnet-reach` | gap (#6167): by address observed 2026-11-23, by the control server's DNS name not | not yet observed |
+| `own-tailnet-relay` | observed 2026-11-23, under hosted egress | not yet observed |
+| `own-tailnet-bad-key` | observed 2026-11-23, but an expired key | not yet observed |
+| `own-tailnet-leave` | observed 2026-11-23 | not yet observed |
+| `own-tailnet-sandbox-unchanged` | observed 2026-11-23 for `cw exec` and `cw run` only | not yet observed |
 
 ## Before the walk
 
@@ -59,33 +64,49 @@ the binaries to the image.
   - The version is the one the image pins.
   - No `tailscaled` is running.
   - `ip link` shows no `tailscale0`.
+- **Gotchas:**
+  - Outside a terminal, `create` asks for `--yes` ("Source selection requires
+    --yes for noninteractive or JSON commands") and creates nothing.
+- **Observed:** 2026-11-23 on Dev, services from source 5221bbc23e, `cw`
+  v0.4.26, as the Dev smoke identity (#5741 comment 135387). `tailscale
+  version` and `tailscaled --version` gave 1.104.7 (go1.27.4), `pgrep`
+  exited 1, and the links were `lo`, `eth0`, `cwegress0` and `docker0`.
 
 ## `own-tailnet-join`: userspace mode, with the key from a file
 
-- **Driving it** (in `cw shell tailnet-walk`):
+- **Driving it:**
+  1. A private directory on tmpfs, in `cw shell tailnet-walk`:
+     `mkdir -m 700 /dev/shm/tailnet-walk`, then
+     `findmnt -n -o FSTYPE --target /dev/shm/tailnet-walk` (expect `tmpfs`).
+  2. `tailscaled` in its own session:
 
-  ```sh
-  umask 077
-  findmnt -n -o FSTYPE --target "$XDG_RUNTIME_DIR"   # expect tmpfs
-  tailscaled --tun=userspace-networking --state=mem: \
-    --socket="$XDG_RUNTIME_DIR/tailscaled.sock" \
-    --outbound-http-proxy-listen=127.0.0.1:1056 \
-    --socks5-server=127.0.0.1:1055 >"$XDG_RUNTIME_DIR/tailscaled.log" 2>&1 &
-  key="$XDG_RUNTIME_DIR/ts.key"
-  trap 'rm -f "$key"' EXIT
-  printf '%s' "$TS_AUTHKEY" >"$key"
-  tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" up \
-    --login-server=CONTROL_URL --auth-key="file:$key" \
-    --advertise-tags=SANDBOX_TAG --shields-up --accept-routes \
-    --hostname=tailnet-walk
-  rm -f "$key"
-  tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" status
-  tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" debug prefs
-  ```
+     ```sh
+     cw run --in tailnet-walk --name tailscaled --detach -- \
+       tailscaled --tun=userspace-networking --state=mem: \
+       --socket=/dev/shm/tailnet-walk/tailscaled.sock \
+       --outbound-http-proxy-listen=127.0.0.1:1056 \
+       --socks5-server=127.0.0.1:1055
+     ```
+
+  3. The join, in `cw shell tailnet-walk`:
+
+     ```sh
+     umask 077
+     R=/dev/shm/tailnet-walk
+     key="$R/ts.key"
+     trap 'rm -f "$key"' EXIT
+     printf '%s' "$TS_AUTHKEY" >"$key"
+     tailscale --socket="$R/tailscaled.sock" up \
+       --login-server=CONTROL_URL --auth-key="file:$key" \
+       --shields-up --accept-routes --hostname=tailnet-walk
+     rm -f "$key"
+     tailscale --socket="$R/tailscaled.sock" status
+     tailscale --socket="$R/tailscaled.sock" debug prefs
+     ```
 
 - **Proof:**
-  - `$XDG_RUNTIME_DIR` is a tmpfs, and the key file is gone after `up`,
-    whether `up` succeeded or not.
+  - The directory is a tmpfs, and the key file is gone after `up`, whether
+    `up` succeeded or not.
   - `status` lists this node with the sandbox tag, and the target or the
     subnet router that carries it.
   - The control server lists the node as ephemeral.
@@ -96,6 +117,16 @@ the binaries to the image.
   - The proxy ports listen on 127.0.0.1 only, and no preview publishes them.
   - `ip route` and `/etc/resolv.conf` are byte-for-byte what they were before.
 - **Gotchas:**
+  - A cloud sandbox has no `$XDG_RUNTIME_DIR`. A path built on it falls back
+    to `/`, where the key file and the socket can't be written. `/dev/shm` is
+    the sandbox's tmpfs; `/tmp` is on disk.
+  - A process started with `&` ends with its session (`cw run --help`), so
+    `tailscaled` runs in a session of its own.
+  - A tagged key applies its own tag. Don't pass `--advertise-tags`: Headscale
+    refuses a tag the key's user doesn't own ("requested tags [...] are invalid
+    or not permitted").
+  - After a failed `up`, the next `up` needs `--reset`, or it refuses until
+    every earlier flag is repeated.
   - `--state=mem:` keeps the node key in memory only, so a restart of the
     sandbox needs a new key. That is intended. Without it, `tailscaled` keeps
     the node key under `~/.local/share/tailscale`, in the persistent home,
@@ -107,7 +138,18 @@ the binaries to the image.
     router, such as a front door. The routes stay inside `tailscaled`; the
     sandbox's route table doesn't change.
   - Check every flag here against `--help` of the version the image pins, and
-    correct this file if one differs.
+    correct this file if one differs. Checked against 1.104.7.
+- **Observed:** 2026-11-23 on Dev, services from source 5221bbc23e, `cw`
+  v0.4.26, as the Dev smoke identity, against Headscale, with the commands
+  above (#5741 comment 135387). Earlier attempts in the same walk failed on
+  the `$XDG_RUNTIME_DIR`, tag and `--reset` gotchas, each with nothing
+  written. `up` exited 0. `status` listed the node
+  with the sandbox tag and the subnet router online. Headscale listed it with
+  the tag, from an ephemeral key now used. The prefs showed `ShieldsUp: true`,
+  `RunSSH: false`, `RouteAll: true` and nothing advertised; there was no serve
+  config. `tailscaled` ran as `codewire`, 1055 and 1056 listened on 127.0.0.1
+  only, and the hashes of `ip route` and `/etc/resolv.conf` matched those
+  from before the join. The key file was gone after every `up`.
 
 ## `own-tailnet-reach`: a tailnet service through the local proxy
 
@@ -119,9 +161,23 @@ the binaries to the image.
   3. `curl -sS -m 5 https://TARGET_NAME/TARGET_PATH` with no proxy.
 - **Proof:**
   - Steps 1 and 2 return the target's fixed answer. The proxy resolves the
-    MagicDNS name, so the sandbox's own resolver never sees it.
+    tailnet name, so the sandbox's own resolver never sees it.
   - Step 3 fails: nothing outside the proxy uses the tailnet, so the name
     doesn't resolve, or resolves to an address the sandbox can't reach.
+- **Gotchas:**
+  - Gap (#6167): `tailscaled` 1.104.7's proxies don't resolve a name the
+    control server publishes as a typed DNS record, which is every extra
+    record Headscale sends. The SOCKS5 lookup falls through to the sandbox's
+    resolver. `tailscale dns query TARGET_NAME A` still answers with the
+    address, and
+    `curl --proxy http://127.0.0.1:1056 --connect-to TARGET_NAME:443:ADDRESS:443 https://TARGET_NAME/TARGET_PATH`
+    reaches it with the name kept for TLS.
+- **Observed:** 2026-11-23 on Dev, as above (#5741 comment 135387). By the
+  front door's name, which Headscale publishes as an extra record, step 1
+  failed with "CONNECT tunnel failed, response 500" and step 2 with "Can't
+  complete SOCKS5 connection". By address, with the name kept for TLS, the HTTP
+  proxy (`--connect-to`) and SOCKS5 (`--resolve`) both returned the registry's
+  fixed `401` refusal. Step 3 failed with "Could not resolve host".
 
 ## `own-tailnet-relay`: no direct UDP, still connected
 
@@ -133,6 +189,11 @@ the binaries to the image.
     STUN and every direct UDP path. `netcheck` shows no UDP, `ping` answers
     "via DERP", and `own-tailnet-reach` still passes.
   - With hosted egress off, it may answer directly. Record which.
+- **Observed:** 2026-11-23 on Dev with hosted egress on, as above (#5741
+  comment 135387). `netcheck` reported `UDP: false` and the control server's
+  embedded DERP. `ping` to the subnet router answered "via DERP" three times
+  in about 55 ms, then "direct connection not established". The reach by
+  address above ran over that relay.
 
 ## `own-tailnet-bad-key`: a used, expired or wrong key
 
@@ -143,11 +204,19 @@ the binaries to the image.
     left registered.
   - With no key, `tailscale up` prints a sign-in URL and waits. Ctrl-C leaves
     nothing registered.
+- **Gotchas:**
+  - Run these on a second userspace `tailscaled` with its own socket, so the
+    joined node is untouched.
+- **Observed:** 2026-11-23 on Dev, as above, on a second `tailscaled` (#5741
+  comment 135387), except the expired key, which was not walked. The used key
+  was refused with "backend error: authkey already used". With no key, `up
+  --reset` printed a sign-in URL and waited until the timeout. Afterwards
+  Headscale listed no node from either attempt.
 
 ## `own-tailnet-leave`: stop and remove
 
 - **Driving it:**
-  1. `tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" logout`.
+  1. `tailscale --socket=/dev/shm/tailnet-walk/tailscaled.sock logout`.
   2. Kill `tailscaled` by its PID.
   3. `cw --cloud rm tailnet-walk --yes`.
   4. Delete `TS_AUTHKEY`, and any target started for the walk with its node.
@@ -157,6 +226,11 @@ the binaries to the image.
   - The control server lists no node with the sandbox tag from this walk at
     all, so a leaked key made no second node.
   - The secret project is empty.
+- **Observed:** 2026-11-23 on Dev, as above (#5741 comment 135387). `logout`
+  exited 0, and 3 seconds later Headscale listed no node with the sandbox
+  tag, the same node count as before the walk. Both `tailscaled` processes
+  were killed by PID, the sandbox was removed, `TS_AUTHKEY` was deleted
+  ("No secrets in project"), and then the project.
 
 ## `own-tailnet-sandbox-unchanged`: Codewire's own networking is untouched
 
@@ -172,3 +246,7 @@ the binaries to the image.
     protected addresses. `tailscaled`'s sends to peers' private endpoints
     appear there, refused. Nothing the environment's policy allows is refused,
     and nothing reaches a protected address.
+- **Observed:** 2026-11-23 on Dev, as above, for two of the five only (#5741
+  comment 135387): `cw exec --in tailnet-walk -- true` exited 0, and `cw run
+  --detach` started a session. `cw shell`, `cw attach`, a preview, `cw network
+  connect` and the refusal log are not yet observed.
