@@ -63,6 +63,20 @@ pub(crate) use organization_context::remember_organization;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .merge(public_routes())
+        .merge(account_routes())
+        .merge(admin_routes())
+        .merge(settings_routes())
+        .merge(credentials_routes())
+        .merge(organization_governance_routes())
+        .merge(organization_resource_routes())
+        .merge(sandbox_list_routes())
+        .merge(sandbox_routes())
+}
+
+/// Anyone's pages and actions, and the retired URLs that answer 404.
+fn public_routes() -> Router<AppState> {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/", get(public::home))
         .route("/pricing", get(public::pricing))
@@ -135,12 +149,34 @@ pub(crate) fn router() -> Router<AppState> {
             "/accept-invite/_actions/switch",
             post(invitations::switch_account).layer(DefaultBodyLimit::max(2048)),
         )
+        .route("/dashboard/settings", get(legacy_not_found))
+        .route("/dashboard/orgs/{*rest}", get(legacy_not_found))
+        .route("/terminal/{*rest}", get(legacy_not_found))
+}
+
+fn account_routes() -> Router<AppState> {
+    Router::new()
         .route("/dashboard", get(slash_redirect))
         .route(DASHBOARD_PATH, get(dashboard::dashboard))
         .route(
             ACCOUNT_OVERVIEW_FRAGMENT_PATH,
             get(dashboard::overview_fragment),
         )
+        .route(
+            ORGANIZATIONS_FRAGMENT_PATH,
+            get(organizations::organization_fragment),
+        )
+        .route("/organizations/new", get(slash_redirect))
+        .route(NEW_ORGANIZATION_PATH, get(organizations::new_organization))
+        .route(
+            CREATE_ORGANIZATION_ACTION_PATH,
+            post(organizations::create_organization),
+        )
+        .route("/_events/live", get(live_events::events))
+}
+
+fn admin_routes() -> Router<AppState> {
+    Router::new()
         .route("/admin", get(slash_redirect))
         .route("/admin/", get(admin::overview))
         .route("/admin/accounts", get(slash_redirect))
@@ -253,16 +289,191 @@ pub(crate) fn router() -> Router<AppState> {
             "/admin/billing/_actions/migrations/run",
             post(admin::run_migration),
         )
+}
+
+fn settings_routes() -> Router<AppState> {
+    Router::new()
+        .route("/settings/api-keys", get(slash_redirect))
+        .route("/settings/api-keys/", get(personal_api_keys::page))
         .route(
-            ORGANIZATIONS_FRAGMENT_PATH,
-            get(organizations::organization_fragment),
+            "/settings/api-keys/_actions/create",
+            post(personal_api_keys::create_action).layer(DefaultBodyLimit::max(8192)),
         )
-        .route("/organizations/new", get(slash_redirect))
-        .route(NEW_ORGANIZATION_PATH, get(organizations::new_organization))
         .route(
-            CREATE_ORGANIZATION_ACTION_PATH,
-            post(organizations::create_organization),
+            "/settings/api-keys/_actions/toggle",
+            post(personal_api_keys::toggle_action).layer(DefaultBodyLimit::max(8192)),
         )
+        .route(
+            "/settings/api-keys/_actions/delete",
+            post(personal_api_keys::delete_action).layer(DefaultBodyLimit::max(8192)),
+        )
+        .route("/settings", get(slash_redirect))
+        .route("/settings/", get(settings::settings))
+        .route("/settings/invitations", get(slash_redirect))
+        .route(my_invitations::PATH, get(my_invitations::page))
+        .route(
+            my_invitations::ACCEPT_PATH,
+            post(my_invitations::accept).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route("/settings/secrets", get(slash_redirect))
+        .route("/settings/secrets/", get(personal_secrets::page))
+        .route(
+            "/settings/secrets/_actions/set",
+            post(personal_secrets::set_action).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/secrets/_actions/rename",
+            post(personal_secrets::rename_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/secrets/_actions/delete",
+            post(personal_secrets::delete_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/_actions/organizations/leave",
+            post(settings::leave_organization_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sessions/revoke",
+            post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/replace/start",
+            post(settings::replace_authenticator_start_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/replace/confirm",
+            post(settings::replace_authenticator_confirm_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/two-factor/recovery-codes/regenerate",
+            post(settings::regenerate_recovery_codes_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/send-verification",
+            post(settings::send_verification_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sign-in-methods/connect",
+            post(sign_in_methods::connect_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sign-in-methods/disconnect",
+            post(sign_in_methods::disconnect_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sign-in-methods/add-password",
+            post(sign_in_methods::add_password_action).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/settings/_actions/sign-out",
+            post(authentication::sign_out_action),
+        )
+        .route("/settings/delete-account", get(slash_redirect))
+        .route(
+            "/settings/delete-account/",
+            get(settings::delete_account_page),
+        )
+        .route(
+            "/settings/_actions/delete-account",
+            post(settings::delete_account_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route("/settings/security", get(slash_redirect))
+        .route("/settings/security/", get(settings::security))
+        .route("/settings/sessions", get(slash_redirect))
+        .route("/settings/sessions/", get(settings::sessions))
+}
+
+fn credentials_routes() -> Router<AppState> {
+    Router::new()
+        .route("/settings/credentials", get(slash_redirect))
+        .route("/settings/credentials/", get(credentials::page))
+        .route(
+            "/settings/credentials/_fragments/github-permissions",
+            get(github_notice::fragment),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/api-key/add",
+            post(credentials::add_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/api-key/rotate",
+            post(credentials::rotate_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/claude-subscription-token/add",
+            post(credentials::add_claude_subscription_token_action)
+                .layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/claude-sign-in/start",
+            post(credentials::claude_sign_in::start_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/claude-sign-in/complete",
+            post(credentials::claude_sign_in::complete_action)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/ssh/generate",
+            post(credentials::generate_ssh_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/ssh/import",
+            post(credentials::import_ssh_action).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/rename",
+            post(credentials::rename_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/revoke",
+            post(credentials::revoke_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/delete",
+            post(credentials::delete_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/oauth/enroll",
+            post(credentials::enroll_oauth_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/github/authorize",
+            post(credentials::github_app_authorize_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            credentials::GITHUB_APP_CALLBACK_PATH,
+            get(credentials::github_app_callback),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/create",
+            post(credentials::create_profile_action),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/update",
+            post(credentials::update_profile_action),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/rename",
+            post(credentials::rename_profile_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/delete",
+            post(credentials::delete_profile_action),
+        )
+        .route(
+            "/settings/_actions/git-identity",
+            post(credentials::update_identity_action),
+        )
+        .route(
+            "/settings/credentials/_actions/git-identity",
+            post(credentials::update_identity_action),
+        )
+}
+
+fn organization_governance_routes() -> Router<AppState> {
+    Router::new()
         .route("/{slug}/members", get(slash_redirect))
         .route(
             "/{slug}/members/",
@@ -289,20 +500,6 @@ pub(crate) fn router() -> Router<AppState> {
             post(organization_governance::revoke_invitation),
         )
         .route("/{slug}/api-keys", get(slash_redirect))
-        .route("/settings/api-keys", get(slash_redirect))
-        .route("/settings/api-keys/", get(personal_api_keys::page))
-        .route(
-            "/settings/api-keys/_actions/create",
-            post(personal_api_keys::create_action).layer(DefaultBodyLimit::max(8192)),
-        )
-        .route(
-            "/settings/api-keys/_actions/toggle",
-            post(personal_api_keys::toggle_action).layer(DefaultBodyLimit::max(8192)),
-        )
-        .route(
-            "/settings/api-keys/_actions/delete",
-            post(personal_api_keys::delete_action).layer(DefaultBodyLimit::max(8192)),
-        )
         .route(
             "/{slug}/api-keys/",
             get(organization_governance::api_keys_page),
@@ -345,6 +542,15 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/billing/_actions/add-credit",
             post(billing::add_credit),
         )
+        .route("/{slug}/_fragments/billing", get(billing::stack_fragment))
+        .route(
+            "/{slug}/_fragments/billing-banner",
+            get(billing::banner_fragment),
+        )
+}
+
+fn organization_resource_routes() -> Router<AppState> {
+    Router::new()
         .route("/{slug}/secrets", get(slash_redirect))
         .route("/{slug}/secrets/", get(secrets_presets::secrets_page))
         // Legacy personal URLs keep no organization authority. Static user
@@ -426,6 +632,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/{slug}/hosts/", get(hosts::page))
         .route("/{slug}/snapshots", get(slash_redirect))
         .route("/{slug}/snapshots/", get(snapshots::page))
+}
+
+fn sandbox_list_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/{slug}/_fragments/sandboxes",
             get(environments::list_fragment),
@@ -437,11 +647,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/_fragments/sandbox-rail",
             get(environments::rail_fragment),
-        )
-        .route("/{slug}/_fragments/billing", get(billing::stack_fragment))
-        .route(
-            "/{slug}/_fragments/billing-banner",
-            get(billing::banner_fragment),
         )
         .route("/{slug}/new", get(organization_slash_redirect))
         .route("/{slug}/new/", get(environments::new_page))
@@ -500,168 +705,12 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/_actions/sandboxes/ports/delete",
             post(environments::delete_port),
         )
-        .route("/settings", get(slash_redirect))
-        .route("/settings/", get(settings::settings))
-        .route("/settings/credentials", get(slash_redirect))
-        .route("/settings/credentials/", get(credentials::page))
-        .route(
-            "/settings/credentials/_fragments/github-permissions",
-            get(github_notice::fragment),
-        )
-        .route("/settings/invitations", get(slash_redirect))
-        .route(my_invitations::PATH, get(my_invitations::page))
-        .route(
-            my_invitations::ACCEPT_PATH,
-            post(my_invitations::accept).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route("/settings/secrets", get(slash_redirect))
-        .route("/settings/secrets/", get(personal_secrets::page))
-        .route(
-            "/settings/secrets/_actions/set",
-            post(personal_secrets::set_action).layer(DefaultBodyLimit::max(256 * 1024)),
-        )
-        .route(
-            "/settings/secrets/_actions/rename",
-            post(personal_secrets::rename_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/secrets/_actions/delete",
-            post(personal_secrets::delete_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/api-key/add",
-            post(credentials::add_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/api-key/rotate",
-            post(credentials::rotate_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/claude-subscription-token/add",
-            post(credentials::add_claude_subscription_token_action)
-                .layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/claude-sign-in/start",
-            post(credentials::claude_sign_in::start_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/claude-sign-in/complete",
-            post(credentials::claude_sign_in::complete_action)
-                .layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/ssh/generate",
-            post(credentials::generate_ssh_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/ssh/import",
-            post(credentials::import_ssh_action).layer(DefaultBodyLimit::max(256 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/rename",
-            post(credentials::rename_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/revoke",
-            post(credentials::revoke_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/delete",
-            post(credentials::delete_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/credentials/oauth/enroll",
-            post(credentials::enroll_oauth_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/github/authorize",
-            post(credentials::github_app_authorize_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            credentials::GITHUB_APP_CALLBACK_PATH,
-            get(credentials::github_app_callback),
-        )
-        .route(
-            "/settings/credentials/_actions/profiles/create",
-            post(credentials::create_profile_action),
-        )
-        .route(
-            "/settings/credentials/_actions/profiles/update",
-            post(credentials::update_profile_action),
-        )
-        .route(
-            "/settings/credentials/_actions/profiles/rename",
-            post(credentials::rename_profile_action).layer(DefaultBodyLimit::max(8 * 1024)),
-        )
-        .route(
-            "/settings/credentials/_actions/profiles/delete",
-            post(credentials::delete_profile_action),
-        )
-        .route(
-            "/settings/_actions/git-identity",
-            post(credentials::update_identity_action),
-        )
-        .route(
-            "/settings/credentials/_actions/git-identity",
-            post(credentials::update_identity_action),
-        )
-        .route(
-            "/settings/_actions/organizations/leave",
-            post(settings::leave_organization_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/sessions/revoke",
-            post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/two-factor/replace/start",
-            post(settings::replace_authenticator_start_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/two-factor/replace/confirm",
-            post(settings::replace_authenticator_confirm_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/two-factor/recovery-codes/regenerate",
-            post(settings::regenerate_recovery_codes_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/send-verification",
-            post(settings::send_verification_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/sign-in-methods/connect",
-            post(sign_in_methods::connect_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/sign-in-methods/disconnect",
-            post(sign_in_methods::disconnect_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/settings/_actions/sign-in-methods/add-password",
-            post(sign_in_methods::add_password_action).layer(DefaultBodyLimit::max(4096)),
-        )
-        .route(
-            "/settings/_actions/sign-out",
-            post(authentication::sign_out_action),
-        )
-        .route("/settings/delete-account", get(slash_redirect))
-        .route(
-            "/settings/delete-account/",
-            get(settings::delete_account_page),
-        )
-        .route(
-            "/settings/_actions/delete-account",
-            post(settings::delete_account_action).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route("/settings/security", get(slash_redirect))
-        .route("/settings/security/", get(settings::security))
-        .route("/settings/sessions", get(slash_redirect))
-        .route("/settings/sessions/", get(settings::sessions))
-        .route("/dashboard/settings", get(legacy_not_found))
-        .route("/dashboard/orgs/{*rest}", get(legacy_not_found))
-        .route("/terminal/{*rest}", get(legacy_not_found))
+        .route("/{slug}", get(organization_slash_redirect))
+        .route("/{slug}/", get(environments::page))
+}
+
+fn sandbox_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/{slug}/{environment_id}",
             get(sandbox_detail_slash_redirect),
@@ -689,7 +738,6 @@ pub(crate) fn router() -> Router<AppState> {
         )
         // The page's one live stream, for every organization the viewer is in
         // (#4762); a static path, so no organization slug can shadow it.
-        .route("/_events/live", get(live_events::events))
         .route(
             "/{slug}/{environment_id}/_fragments/terminal-sessions",
             get(terminal_sessions::list),
@@ -718,8 +766,6 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/{environment_id}/ports/",
             get(environments::port_fragment),
         )
-        .route("/{slug}", get(organization_slash_redirect))
-        .route("/{slug}/", get(environments::page))
 }
 
 async fn slash_redirect(OriginalUri(uri): OriginalUri) -> Response {
