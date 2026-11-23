@@ -12,6 +12,19 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 #[path = "../../tests/support/proc_children.rs"]
 mod proc_children;
 
+/// Writes the session engine's warnings to the test's output: libtest shows
+/// it when the test fails, and an isolated fixture's child, which runs with
+/// `--nocapture`, always shows it. A stop whose cleanup is unknown names the
+/// step only in its log (#5929).
+fn stop_log() -> tracing::subscriber::DefaultGuard {
+    tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    )
+}
+
 #[cfg(target_os = "linux")]
 async fn completed_directory_command(engine: &SessionEngine, session: &str) -> v1::SessionRecord {
     tokio::time::timeout(HANG, async {
@@ -299,6 +312,7 @@ async fn member_managed_caller_drop_and_revoke_serialize_before_queue_effect_and
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn member_managed_generic_restart_refuses_before_launch_cancel_but_legacy_stop_remains() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let (owner, engine) = managed_test_owner(temp.path()).await;
     let sid = managed_test_session(&owner, &engine).await;
@@ -667,6 +681,7 @@ async fn host_control_issued_input_timeout_is_retained_ambiguous_without_replay(
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellation() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let (owner, engine) = control_fixture::owner(temp.path()).await;
     let launched = owner
@@ -985,6 +1000,7 @@ fn stop_interrupt_checks(engine: &SessionEngine) -> usize {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn explicit_stop_and_restart_check_for_a_run_to_interrupt_and_shutdown_never_does() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let (engine, environment) = environment_engine(temp.path());
     let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
@@ -1083,6 +1099,7 @@ fn prune_retire_checks(engine: &SessionEngine) -> usize {
 #[tokio::test]
 async fn shutdown_checks_each_running_conversation_for_a_run_to_pause_and_an_explicit_stop_never_does()
  {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let (engine, environment) = environment_engine(temp.path());
     let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
@@ -1122,6 +1139,7 @@ fn stopped_pause_checks(engine: &SessionEngine) -> usize {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_explicit_stop_of_a_stopped_conversation_checks_for_a_paused_message_to_end() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let (engine, environment) = environment_engine(temp.path());
     let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
@@ -1545,6 +1563,7 @@ impl FixtureDescendant {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn host_stop_settles_an_output_drain_slower_than_one_second() {
+    let _log = stop_log();
     if isolated_descendant_fixture("host_stop_settles_an_output_drain_slower_than_one_second").await
     {
         return;
@@ -1625,6 +1644,7 @@ fn a_stop_cleanup_fits_inside_the_time_a_stop_is_given() {
 
 #[tokio::test]
 async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_child() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_child",
@@ -1686,6 +1706,7 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
 /// owned session.
 #[tokio::test]
 async fn host_stop_reaches_job_control_groups_in_the_owned_session() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture("host_stop_reaches_job_control_groups_in_the_owned_session")
         .await
@@ -1731,6 +1752,7 @@ async fn host_stop_reaches_job_control_groups_in_the_owned_session() {
 
 #[tokio::test]
 async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "host_exit_cleans_remaining_descendants_before_reaping_group_leader",
@@ -1799,6 +1821,7 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
 
 #[tokio::test]
 async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "host_shutdown_cleans_owned_groups_and_records_confirmed_completion",
@@ -1843,6 +1866,7 @@ async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
 
 #[tokio::test]
 async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     engine.ensure_initialized().await.unwrap();
@@ -2143,6 +2167,7 @@ async fn acknowledged_host_input_reaches_owned_stdin_and_rejects_empty_oversized
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
+    let _log = stop_log();
     if isolated_descendant_fixture("host_pty_cleanup_includes_ordinary_terminal_job_control_groups")
         .await
     {
@@ -2186,6 +2211,7 @@ async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
 
 #[tokio::test]
 async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_acknowledgement() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "host_launch_cancellation_cleans_spawned_descendants_before_failed_acknowledgement",
@@ -2259,6 +2285,7 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
 
 #[tokio::test]
 async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or_wedged_stop() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or_wedged_stop",
@@ -2348,6 +2375,7 @@ async fn host_recovery_rejects_state_links_without_reading_home_records() {
 
 #[tokio::test]
 async fn restart_cannot_overwrite_cleanup_fence_published_by_its_dispatched_stop() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     engine.ensure_initialized().await.unwrap();
@@ -2488,6 +2516,7 @@ async fn guarded_restart_duplicate_callers_cannot_stop_an_admitted_replacement()
 
 #[tokio::test]
 async fn guarded_restart_cancelled_while_waiting_cannot_cancel_or_consume_an_incarnation() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     engine.ensure_initialized().await.unwrap();
@@ -2610,6 +2639,7 @@ async fn guarded_restart_lost_response_keeps_new_process_and_consumed_generation
 
 #[tokio::test]
 async fn guarded_restart_failed_launch_consumes_generation_across_recovery() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     let original = engine
@@ -2658,6 +2688,7 @@ async fn guarded_restart_failed_launch_consumes_generation_across_recovery() {
 
 #[tokio::test]
 async fn guarded_restart_rejects_unknown_cleanup_and_exhaustion_before_effects() {
+    let _log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     engine.ensure_initialized().await.unwrap();
@@ -2781,6 +2812,7 @@ fn unrelated_sleep() -> tokio::process::Child {
 /// child started with `nohup` alone is ended too.
 #[tokio::test]
 async fn a_guest_session_ends_when_its_command_exits_and_ends_what_it_left() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "a_guest_session_ends_when_its_command_exits_and_ends_what_it_left",
@@ -2862,6 +2894,7 @@ async fn a_guest_session_leaves_a_process_started_with_setsid() {
 /// session keeps running, and the daemon is untouched.
 #[tokio::test]
 async fn a_guest_stop_ends_only_its_own_session() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture("a_guest_stop_ends_only_its_own_session").await {
         return;
@@ -2910,6 +2943,7 @@ async fn a_guest_stop_ends_only_its_own_session() {
 /// by name after the start (#5471).
 #[tokio::test]
 async fn a_guest_shutdown_records_its_sessions_stopped_with_the_environment() {
+    let _log = stop_log();
     #[cfg(target_os = "linux")]
     if isolated_descendant_fixture(
         "a_guest_shutdown_records_its_sessions_stopped_with_the_environment",
@@ -2959,6 +2993,7 @@ async fn a_guest_shutdown_records_its_sessions_stopped_with_the_environment() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_session_live_under_another_boot_ended_with_its_machine() {
+    let _log = stop_log();
     let current = current_boot_id().expect("this Linux kernel has a boot ID");
     let other = "00000000-0000-4000-8000-000000000001";
     assert_ne!(current, other);
@@ -3035,6 +3070,7 @@ fn only_two_readable_and_different_boot_ids_are_another_boot() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_server_that_traps_term_gets_one_term_and_kill_only_after_the_grace() {
+    let _log = stop_log();
     for ((owner, engine_for), pty) in OWNERS
         .into_iter()
         .flat_map(|owner| [(owner, false), (owner, true)])
@@ -3162,14 +3198,7 @@ async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output
     {
         return;
     }
-    // A stop whose cleanup is unknown names the step only in its log, which
-    // this prints with a failure (#5929).
-    let _log = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(tracing::Level::WARN)
-            .finish(),
-    );
+    let _log = stop_log();
     let mut unsettled = Vec::new();
     for ((owner, engine_for), pty) in OWNERS
         .into_iter()
@@ -3232,6 +3261,7 @@ async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_exit_settles_when_only_a_process_outside_the_session_holds_its_output() {
+    let _log = stop_log();
     if isolated_descendant_fixture(
         "an_exit_settles_when_only_a_process_outside_the_session_holds_its_output",
     )
