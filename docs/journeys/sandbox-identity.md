@@ -26,7 +26,7 @@ yet.
 | `identity-changes-apply` | #4663, #4664 | not yet built | not yet built |
 | `identity-limits` | #4664 | not yet built | not yet built |
 | `identity-discovery` | #4662 | observed (2026-11-23) | not yet observed |
-| `identity-custody` | #4662 | partly observed (2026-11-22) | not yet observed |
+| `identity-custody` | #4662 | observed except a drifted key (2026-11-23) | not yet observed |
 | `identity-own-openbao` | #4666 | not yet built | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
 | `identity-audit` | #4663, #4664 | not yet built | not yet built |
@@ -220,13 +220,16 @@ yet.
   - the rotator setting `exportable`;
   - a policy without the deny rules;
   - a key whose pinned configuration has drifted.
-- **Driving it:** no command yet. Walking it needs an infrastructure helper
-  that waits for the owner's approval of the plan (#4662):
-  - It logs in as each role from a token of that role's own service account.
-  - It makes each refused call and reports the status.
-  - It runs the policy check against a fixture policy that lacks the deny
+- **Driving it:** the infrastructure repository's custody walk helper, run
+  under the owner's approval (#4662), in a window announced first because
+  its alerts page:
+  - One Job per role, each running as that role's own service account, logs
+    in from a Pod-bound token that never leaves the cluster.
+  - Each Job makes its role's refused calls and reports their status.
+  - Each role reads the key's config before and after its calls.
+  - The policy check runs against a fixture policy that lacks the deny
     rules.
-  - It names where each alert lands.
+  - It names each alert and where it lands.
 - **Proof:**
   - each call above is refused with 403;
   - the policy check fails the fixture;
@@ -236,9 +239,9 @@ yet.
 - **Gotchas:** walk drift only with a setting that can be undone, such as
   `auto_rotate_period`, and set it back at once. Never set `exportable` or
   `allow_plaintext_backup` on a real key: neither can be turned off again.
-- **Next pass:** a live check from each role's own service-account token that
-  the signer's and the rotator's refused calls above answer 403 on Dev's
-  OpenBao. It needs the helper first.
+- **Next pass:** a drifted key. It needs a reversible drift, such as
+  `auto_rotate_period`, set back at once, and `identity rotate` run against
+  it.
 - **Observed:** partly, on Dev on 2026-11-22 (#4662). No helper exists yet, so
   OpenBao's own engine is the evidence, not live refused calls:
   - the key's custody pins read back exact (`exportable=false`,
@@ -247,8 +250,21 @@ yet.
     either role's policy across 119 policies;
   - the deny-rule read-back found the block on all 117 other policies.
 
-  Not yet observed: the refused calls against the live server, and their
-  alerts.
+  Then, live, on Dev on 2026-11-23 at 16:15Z with the custody walk:
+  - The signer's export, backup, rotate and config write, and the rotator's
+    sign, export, backup and two config writes, each answered 403
+    `permission denied`: 4 of 4 and 5 of 5.
+  - Both roles read the key's config before and after, and all four reads
+    were identical, with the custody pins exact.
+  - The policy check failed the fixture without the deny rules and passed
+    the control.
+  - All 13 expected alert series fired at 16:15:55Z:
+    `SandboxIdentityKeyExfiltrationAttempt` and
+    `SandboxIdentityKeyConfigDenied` (critical), and
+    `SandboxIdentityKeyUnexpectedCaller` (warning). Three pages reached the
+    on-call channel within 30 seconds, matched to the alerts by time.
+
+  Not yet observed: `identity rotate` on a drifted key.
 
 ## 10. `identity-rotation`: rotating the key fails no request
 
