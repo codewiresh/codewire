@@ -60,8 +60,7 @@ async function useEnvironment(env: Environment): Promise<void> {
 }
 
 async function runAgent(): Promise<void> {
-  const baseUrl = process.env.CODEWIRE_API_URL?.trim();
-  const codewire = new Codewire({ ...(baseUrl ? { baseUrl } : {}), timeout: 300_000 });
+  const codewire = new Codewire({ timeout: 300_000 });
   const env = await codewire.environments.create(
     {
       name: "typescript-sdk-run-agent",

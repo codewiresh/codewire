@@ -8,6 +8,7 @@ import { NetworkPolicies } from "./network-policies.js";
 import { SandboxIdentity } from "./sandbox-identity.js";
 import { Credentials } from "./credentials.js";
 import { createCodewireClients } from "./transport.js";
+import { reportOnce, resolveSettings } from "./settings.js";
 import type { ClientOptions } from "./types.js";
 
 export class Codewire {
@@ -21,15 +22,20 @@ export class Codewire {
   readonly sandboxIdentity: SandboxIdentity;
   readonly credentials: Credentials;
 
+  /**
+   * Each setting comes from `opts`, then the process environment, then
+   * `.env.local` and `.env` in the working directory, then its default; the
+   * server is never read from a `.env` file. Throws before any request when
+   * there is neither `CODEWIRE_API_KEY` nor `CODEWIRE_JWT_TOKEN`, or a user
+   * token has no organization.
+   */
   constructor(opts: ClientOptions = {}) {
-    // Missing credentials fail only when a generated Connect service sends a
-    // request, so constructing the client does not access the platform.
-    const apiKey = opts.apiKey ?? process.env.CODEWIRE_API_KEY ?? "";
-    const baseUrl = opts.baseUrl ?? "https://codewire.sh";
-    const orgId = opts.orgId ?? process.env.CODEWIRE_ORG_ID ?? "";
+    const settings = resolveSettings(opts, { env: process.env, cwd: process.cwd() });
+    reportOnce(settings.warnings);
+    const orgId = settings.organizationId;
     const clients = createCodewireClients({
-      apiKey,
-      baseUrl,
+      bearer: settings.bearer,
+      baseUrl: settings.apiUrl,
       fetch: opts.fetch,
       timeout: opts.timeout,
     });

@@ -643,7 +643,8 @@ test-sdk-python:
 	  test -d .venv || python3 -m venv .venv && \
 	  .venv/bin/pip install --require-hashes -r requirements.lock -q && \
 	  .venv/bin/pip install --no-deps . -q && \
-	  env -u CODEWIRE_API_KEY -u CODEWIRE_ORG_ID -u CODEWIRE_BASE_URL \
+	  env -u CODEWIRE_API_KEY -u CODEWIRE_JWT_TOKEN -u CODEWIRE_ORGANIZATION_ID -u CODEWIRE_ORG_ID \
+	    -u CODEWIRE_API_URL -u CODEWIRE_SERVER_URL -u CODEWIRE_BASE_URL \
 	    PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" .venv/bin/python -m unittest test_sdk test_transport test_cw_runtime test_platform_agents test_desktop -v && \
 	  (cd /tmp && $(CURDIR)/libs/sdk-python/.venv/bin/python -c 'from codewire._transport import ConnectTransport; from codewire.errors import CodewireError; from codewire.v1.api_key_connect import ApiKeyServiceClientSync; from google.rpc.error_details_pb2 import BadRequest; assert CodewireError and BadRequest and isinstance(ConnectTransport("https://codewire.example", "").client(ApiKeyServiceClientSync), ApiKeyServiceClientSync)')
 	scripts/runtime/tests/test-run-sdk-python-e2e.sh

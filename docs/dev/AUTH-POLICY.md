@@ -715,12 +715,15 @@ so only unsuspension brings it back.
   `codewire-client` OAuth implementation and `TokenProvider`. The CLI uses the
   OAuth device grant; clients with a system browser use PKCE.
 - Public SDKs and non-interactive agents use an organization-scoped `cw_` API
-  key through their generated Connect client wrapper for organization APIs.
-  Personal access profiles instead require the existing user OAuth bearer;
+  key, or a person's user token with the organization named, through their
+  generated Connect client wrapper. Each client finds them in code, the
+  environment or a `.env` file, as
+  [Signing in from the environment](#signing-in-from-the-environment)
+  specifies. Personal access profiles require the person's own bearer;
   supplying an organization API key cannot act as its owning user.
   [API key permissions and expiry](#api-key-permissions-and-expiry-approved-not-yet-shipped)
-  and [Signing in from the environment](#signing-in-from-the-environment-approved-not-yet-shipped)
-  are the approved changes to both rules.
+  and [User tokens and the CLI](#user-tokens-and-the-cli-approved-not-yet-shipped)
+  are the approved changes to these rules.
 - Workspace binding uses an exact-audience, Pod-bound Kubernetes token.
   Coordinator and daemon calls use distinct environment-scoped HMAC
   capabilities; the retired environment bearer is unsupported.
@@ -752,7 +755,7 @@ keys in its organization.
 **What changes:**
 - **One organization, as today.** A key never binds a personal credential
   profile. A person's own profiles are reached with a user token
-  ([Signing in from the environment](#signing-in-from-the-environment-approved-not-yet-shipped)).
+  ([User tokens and the CLI](#user-tokens-and-the-cli-approved-not-yet-shipped)).
   Organization-owned credentials for keys are #5685.
 - **Permissions.** Each key carries a set of permissions, chosen when it is
   made, and they are enforced. A key acts with the smaller of its
@@ -817,22 +820,24 @@ minute per key and method.
 - an organization's owner or admin can disable or delete any key in the
   organization.
 
-## Signing in from the environment (approved, not yet shipped)
+## Signing in from the environment
 
-The owner decided this on 2026-11-21 (#5687, #5688). Until it ships, an SDK
-signs in only with the key passed to it or `CODEWIRE_API_KEY`. The change
-that ships it rewrites "Client use" above. The journey is
+The owner decided this on 2026-11-21 (#5687, #5688). The TypeScript, Python
+and Go SDKs ship the configuration below; issuing a user token, binding a
+profile with one and the CLI's part are in
+[User tokens and the CLI](#user-tokens-and-the-cli-approved-not-yet-shipped),
+approved and not yet shipped. The journey is
 [`docs/journeys/sdk-sign-in.md`](../journeys/sdk-sign-in.md).
 
 An SDK program, or a script, authenticates in one of two ways:
 - **an API key**, belonging to one organization;
 - **a user token**, acting as a person, with the organization named.
 
-**Configuration**, per field, in this order:
+**The sources**, highest first:
 1. code (the client's options);
 2. the process environment;
 3. `.env.local`, then `.env`, in the working directory (Python and
-   TypeScript only);
+   TypeScript only; Go reads no file);
 4. the defaults.
 
 | Field | Variable | Option |
@@ -843,18 +848,62 @@ An SDK program, or a script, authenticates in one of two ways:
 | server | `CODEWIRE_API_URL`, or `CODEWIRE_SERVER_URL`; default `https://codewire.sh` | `api_url` |
 
 The options take each language's own case (`apiKey`, `jwtToken`,
-`organizationId`, `apiUrl`).
+`organizationId`, `apiUrl`); in Go they are `New`'s key argument or
+`WithAPIKey`, `WithJWTToken`, `WithOrganizationID` and `WithAPIURL`. The
+older option names still work: `orgId` and `baseUrl` in TypeScript,
+`org_id` and `base_url` in Python, `WithOrgID` and `WithBaseURL` in Go. An
+empty value counts as unset.
 - **The server is never read from a `.env` file.** One there is ignored and
-  reported, so a file in a checkout can't send a key or a token to another
-  server. The Python SDK keeps `CODEWIRE_BASE_URL` as an alias for one
-  release.
-- **When a key and a user token are both set,** the key is used.
-- **With neither,** the client refuses and names both variables.
+  reported once, as a Node process warning or a Python `UserWarning`, so a
+  file in a checkout can't send a key or a token to another server. The
+  Python SDK keeps `CODEWIRE_BASE_URL` as an alias for one release.
+- **The `.env` files** are read with a small parser in each SDK, which takes
+  `KEY=VALUE` lines, `#` comments, an optional `export ` and single or double
+  quotes, and only the variables above. It never changes the process
+  environment. A missing file is fine; one that can't be read is an error
+  naming its path.
+- **The credential comes as a unit** from the highest source that sets a
+  key or a user token; within that source, the key wins. A key or token in
+  a lower source is ignored and reported once, by its variable and its
+  source, never its value: as a Node process warning (code
+  `CODEWIRE_SETTINGS`), a Python `UserWarning`, or in Go one line through
+  the standard `log` package, which writes to stderr by default. So a
+  `CODEWIRE_API_KEY` in a cloned repository's `.env` can't replace a token
+  the program passed in code and act in an organization someone else
+  controls.
+- **The organization** (`CODEWIRE_ORGANIZATION_ID` or `CODEWIRE_ORG_ID`,
+  or the option in code) comes from the highest source that sets one among
+  the credential's own source and every source above it. Only when none of
+  those sets one does it come from the highest source below the
+  credential's, and that is reported once, by its variable and its source,
+  never its value, through the same channel as an ignored key. So an
+  organization in code always wins, the environment beats a `.env` file,
+  and a `.env` file supplies the organization only for a credential with
+  none, and only with a report.
+- **The server** comes from code, then the environment, then the default.
+- **With no key or token anywhere,** the client refuses and names both
+  variables.
 - **A user token with no organization** is refused, naming
   `CODEWIRE_ORGANIZATION_ID`.
+- **Each refusal comes before any request.** The TypeScript and Python
+  clients refuse when they are built. Go's `New` returns no error, so each
+  call of such a client returns `ErrNoCredentials` or
+  `ErrUserTokenWithoutOrganization` without sending anything.
 - **Each request names its organization** in its request fields, as the API
   already does. The SDK fills them from the organization setting; there is
-  no organization header.
+  no organization header. A call that needs an organization, made with a key
+  and none set, is refused naming `CODEWIRE_ORGANIZATION_ID`.
+- **The key and the token are bearer values only.** The SDKs never log
+  them, and they appear in no error message and in no printed form of a
+  client.
+
+## User tokens and the CLI (approved, not yet shipped)
+
+The owner decided this on 2026-11-21 (#5687, #5688). Until each part ships,
+nothing issues a user token for `CODEWIRE_JWT_TOKEN` (the SDKs send whatever
+token they are given as the bearer), an SDK binds no profile with one, and
+`cw` is unchanged. The change that ships a part moves it into
+[Signing in from the environment](#signing-in-from-the-environment).
 
 **The CLI.** With `CODEWIRE_API_KEY` set, and `CODEWIRE_API_URL` or
 `CODEWIRE_SERVER_URL` naming the server, `cw` uses them instead of the saved

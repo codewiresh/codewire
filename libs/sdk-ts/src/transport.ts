@@ -59,7 +59,8 @@ export interface CodewireClients {
 }
 
 interface ConnectClientOptions {
-  apiKey: string;
+  /** The API key or user token. */
+  bearer: string;
   baseUrl: string;
   fetch?: typeof globalThis.fetch;
   timeout?: number;
@@ -100,7 +101,7 @@ export function createCodewireClients(
   options: ConnectClientOptions,
 ): CodewireClients {
   const bearerInterceptor: Interceptor = (next) => async (request) => {
-    request.header.set("Authorization", `Bearer ${options.apiKey}`);
+    request.header.set("Authorization", `Bearer ${options.bearer}`);
     return next(request);
   };
 

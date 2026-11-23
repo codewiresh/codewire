@@ -99,7 +99,7 @@ await test("agent transport refuses excess bytes before buffering", async () => 
     start(controller) { controller.enqueue(new Uint8Array(5 * 1024 * 1024 + 32 * 1024 + 1)); },
     cancel() { cancelled = true; },
   }), { headers: { "Content-Type": "application/proto" } })) as typeof globalThis.fetch;
-  const clients = createCodewireClients({ apiKey: "synthetic", baseUrl: "http://in-memory.invalid", fetch: fetcher });
+  const clients = createCodewireClients({ bearer: "synthetic", baseUrl: "http://in-memory.invalid", fetch: fetcher });
   await assert.rejects(clients.environmentAgents.getEnvironmentAgentInfo({ orgId: "org", environmentId: "env" }));
   assert.equal(cancelled, true);
 });

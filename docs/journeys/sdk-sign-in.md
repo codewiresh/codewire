@@ -39,7 +39,17 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   - only `CODEWIRE_API_KEY` set: the client acts with the key;
   - only `CODEWIRE_JWT_TOKEN` and `CODEWIRE_ORGANIZATION_ID` set: the client
     acts as the person; `CODEWIRE_ORG_ID` instead works the same;
-  - both a key and a token set: the key is used;
+  - a key and a token set in the same source: the key is used;
+  - a token passed in code and `CODEWIRE_API_KEY` in the environment or a
+    `.env` file: the token is used, and the client reports the ignored key
+    by name, never its value;
+  - a token and organization in `.env` while the environment sets only
+    `CODEWIRE_ORGANIZATION_ID`: the environment's organization is used, with
+    `.env`'s token, and nothing is reported;
+  - a token passed in code with no organization in code, and
+    `CODEWIRE_ORGANIZATION_ID` in the environment (or, in Python and
+    TypeScript, only in `.env`): that organization is used, and the client
+    reports where it came from by name, never its value;
   - neither set: refused, naming both variables;
   - a token with no organization: refused, naming
     `CODEWIRE_ORGANIZATION_ID`;
@@ -47,7 +57,7 @@ Updated 2026-11-21. Written first; every step is not yet observed.
     directory: used; the same in `.env.local` beside a different `.env`:
     `.env.local` wins; the process environment beats both;
   - `CODEWIRE_API_URL` in a `.env` file: ignored, and the client reports it;
-  - an option set in code beats every other source, field by field.
+  - the server passed in code beats the environment.
 - **Driving it:** no command yet (#5687). Each SDK's example lists
   environments under each setting.
 - **Proof:** the identity the server records for each call (the key's id,

@@ -51,7 +51,7 @@ func newDesktop(client *Client, orgID, envID string) *Desktop {
 	httpClient := *client.httpClient
 	httpClient.Timeout = 0
 	return &Desktop{client: codewirev1connect.NewEnvironmentDesktopServiceClient(&httpClient, client.baseURL,
-		connect.WithInterceptors(bearerInterceptor{apiKey: client.apiKey})), orgID: orgID, envID: envID}
+		connect.WithInterceptors(client.auth)), orgID: orgID, envID: envID}
 }
 
 // Desktop returns the desktop of the environment envID.

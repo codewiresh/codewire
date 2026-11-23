@@ -1320,7 +1320,7 @@ signs in with one. A program signed in with an API key gets no managed
 credential.
 
 **Approved, not yet shipped** (owner, 2026-11-21; #5687, #5688). The rules
-are in [AUTH-POLICY.md](AUTH-POLICY.md#signing-in-from-the-environment-approved-not-yet-shipped):
+are in [AUTH-POLICY.md](AUTH-POLICY.md#user-tokens-and-the-cli-approved-not-yet-shipped):
 - **A program acting as a person** uses a user token from `cw auth token`.
   It binds that person's profiles as a `cw login` sign-in does, with the
   same confirmation. A binding it made gets none of the

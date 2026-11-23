@@ -1,7 +1,7 @@
 """Runs a coding agent in an environment on a small project, without a
 terminal, and prints the change it made. Reads CODEWIRE_API_KEY,
 CODEWIRE_ORG_ID and, for a server other than the hosted one,
-CODEWIRE_BASE_URL.
+CODEWIRE_API_URL.
 
     python run_agent.py
 

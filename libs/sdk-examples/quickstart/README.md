@@ -12,15 +12,14 @@ export CODEWIRE_API_KEY=cw_...
 export CODEWIRE_ORG_ID=...
 ```
 
-For a server other than the hosted one, set its URL. The SDKs don't read the
-same name yet (#1758):
+For a server other than the hosted one, set `CODEWIRE_API_URL` to its URL.
 
-| Language | URL variable | Run it |
-| --- | --- | --- |
-| Go | `CODEWIRE_API_URL` | `cd go && go run .` |
-| Python | `CODEWIRE_BASE_URL` | `python python/quickstart.py`, with the SDK installed |
-| TypeScript | `CODEWIRE_API_URL` | `cd typescript && npm ci --install-links && npm start`, after `npm run build` in `libs/sdk-ts` |
-| Rust | `CODEWIRE_API_URL` | `cargo run -p codewire --example quickstart` |
+| Language | Run it |
+| --- | --- |
+| Go | `cd go && go run .` |
+| Python | `python python/quickstart.py`, with the SDK installed |
+| TypeScript | `cd typescript && npm ci --install-links && npm start`, after `npm run build` in `libs/sdk-ts` |
+| Rust | `cargo run -p codewire --example quickstart` |
 
 The Go program's output against Dev on 2026-11-20. The other languages print
 the same lines, each with its own environment ID:

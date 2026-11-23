@@ -41,7 +41,7 @@ func newPlatformAgents(client *Client, orgID, envID string) *PlatformAgents {
 	httpClient := *client.httpClient
 	httpClient.Timeout = 0
 	return &PlatformAgents{client: codewirev1connect.NewEnvironmentAgentServiceClient(&httpClient, client.baseURL,
-		connect.WithInterceptors(bearerInterceptor{apiKey: client.apiKey}),
+		connect.WithInterceptors(client.auth),
 		connect.WithReadMaxBytes(platformAgentRecordBytes+32*1024), connect.WithSendMaxBytes(256*1024)), orgID: orgID, envID: envID}
 }
 

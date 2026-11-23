@@ -1,7 +1,7 @@
 ---
 title: SDKs
 description: Install the Go SDK with go get, then list your environments from a Go program.
-updated: 2026-11-16
+updated: 2026-11-23
 weight: 11
 ---
 
@@ -30,8 +30,9 @@ go: added google.golang.org/protobuf v1.36.11
 `codewire.New` takes an API key; pass `""` to read `CODEWIRE_API_KEY`. It
 calls `https://codewire.sh` unless `CODEWIRE_API_URL` names another server.
 Requests about environments also need your organization's ID: pass
-`codewire.WithOrgID(id)` to `codewire.New`, or set `CODEWIRE_ORG_ID`.
-`cw org list` shows the ID. This program lists your environments:
+`codewire.WithOrganizationID(id)` to `codewire.New`, or set
+`CODEWIRE_ORGANIZATION_ID`. `cw org list` shows the ID. This program lists
+your environments:
 
 ```go
 package main
@@ -63,8 +64,8 @@ func main() {
 ```
 
 ```sh
-export CODEWIRE_API_KEY=…   # an API key; see below
-export CODEWIRE_ORG_ID=…    # from cw org list
+export CODEWIRE_API_KEY=…           # an API key; see below
+export CODEWIRE_ORGANIZATION_ID=…   # from cw org list
 go build -o list-environments . && ./list-environments
 ```
 
@@ -74,7 +75,12 @@ go build -o list-environments . && ./list-environments
 ```
 
 Without an organization ID, `List` returns the error
-`codewire: orgID is required — use WithOrgID or set CODEWIRE_ORG_ID`.
+`codewire: organization ID is required — use WithOrganizationID or set CODEWIRE_ORGANIZATION_ID`.
+Without an API key, every call returns `codewire.ErrNoCredentials` before
+sending anything.
+
+`CODEWIRE_ORG_ID`, `WithOrgID` and `WithBaseURL` still work as older names.
+The Go SDK reads no `.env` file.
 
 Create an API key with `cw api-keys create`; see
 [API keys](@/organizations/api-keys.md).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -444,6 +445,7 @@ func TestNewUsesCodewireAPIURLEnv(t *testing.T) {
 		},
 	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
 
+	clearSettingsEnvironment(t)
 	t.Setenv("CODEWIRE_API_URL", srv.URL+"/")
 	t.Setenv("CODEWIRE_ORG_ID", "org_test")
 
@@ -1459,13 +1461,81 @@ func TestRawFileErrorFieldHandling(t *testing.T) {
 }
 
 func TestMissingOrgID(t *testing.T) {
+	clearSettingsEnvironment(t)
 	client := codewire.New("test-key")
 	_, err := client.Environments.List(context.Background(), nil)
 	if err == nil {
-		t.Fatal("expected error for missing orgID")
+		t.Fatal("expected error for missing organization")
 	}
-	if !strings.Contains(err.Error(), "orgID is required") {
-		t.Errorf("expected orgID error, got: %v", err)
+	if !strings.Contains(err.Error(), "organization ID is required") || !strings.Contains(err.Error(), "CODEWIRE_ORGANIZATION_ID") {
+		t.Errorf("expected organization error, got: %v", err)
+	}
+}
+
+// clearSettingsEnvironment gives the test an environment with none of the
+// settings variables, so nothing of the developer's is read.
+func clearSettingsEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"CODEWIRE_API_KEY", "CODEWIRE_JWT_TOKEN", "CODEWIRE_ORGANIZATION_ID", "CODEWIRE_ORG_ID",
+		"CODEWIRE_API_URL", "CODEWIRE_SERVER_URL",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+func TestNewWithUserTokenSendsItAndTheOrganization(t *testing.T) {
+	const token = "synthetic-user-token"
+	clearSettingsEnvironment(t)
+	_, srv := testRuntimeServer(t, environmentServiceHandler{
+		list: func(_ context.Context, req *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error) {
+			if req.Header().Get("Authorization") != "Bearer "+token || req.Msg.GetOrgId() != "org-code" {
+				t.Errorf("unexpected list request: org %q", req.Msg.GetOrgId())
+			}
+			return connect.NewResponse(&codewirev1.ListEnvironmentsResponse{}), nil
+		},
+	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
+	client := codewire.New("", codewire.WithJWTToken(token), codewire.WithOrganizationID("org-code"), codewire.WithAPIURL(srv.URL+"/"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := client.Environments.List(ctx, nil); err != nil {
+		t.Fatalf("list environments: %v", err)
+	}
+	shown := fmt.Sprintf("%v %+v %#v %v %+v %#v", client, client, client, *client, *client, *client)
+	if strings.Contains(shown, token) {
+		t.Fatal("printing the client shows its token")
+	}
+}
+
+func TestNewRefusesBeforeAnyRequest(t *testing.T) {
+	clearSettingsEnvironment(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	neither := codewire.New("", codewire.WithAPIURL(srv.URL), codewire.WithOrganizationID("org-one"))
+	if _, err := neither.Environments.List(ctx, nil); !errors.Is(err, codewire.ErrNoCredentials) {
+		t.Fatalf("list without credentials: %v", err)
+	}
+	if _, err := neither.AccessProfiles.List(ctx); !errors.Is(err, codewire.ErrNoCredentials) {
+		t.Fatalf("access profiles without credentials: %v", err)
+	}
+
+	noOrganization := codewire.New("", codewire.WithAPIURL(srv.URL), codewire.WithJWTToken("synthetic-user-token"))
+	if _, err := noOrganization.APIKeys.List(ctx); !errors.Is(err, codewire.ErrUserTokenWithoutOrganization) {
+		t.Fatalf("API keys with a token and no organization: %v", err)
+	}
+	_, err := noOrganization.AccessProfiles.List(ctx)
+	if !errors.Is(err, codewire.ErrUserTokenWithoutOrganization) || strings.Contains(err.Error(), "synthetic-user-token") {
+		t.Fatalf("access profiles with a token and no organization: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("a refused client sent %d requests", got)
 	}
 }
 

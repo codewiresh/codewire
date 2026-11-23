@@ -200,8 +200,7 @@ async function waitForFile(env: Environment, path: string, turn: ChildProcess, t
 }
 
 async function demo() {
-  const baseUrl = process.env.CODEWIRE_API_URL?.trim();
-  const codewire = new Codewire({ ...(baseUrl ? { baseUrl } : {}), timeout: 300_000 });
+  const codewire = new Codewire({ timeout: 300_000 });
   const name = `pi-durable-${randomUUID().slice(0, 8)}`;
   const env = await codewire.environments.create(
     { name, project_spec: { schema_version: 1, image: "python:3.12-slim", working_directory: "/workspace" } },

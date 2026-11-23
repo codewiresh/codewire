@@ -24,8 +24,8 @@ class ConnectContext:
     def resolve_org_id(self) -> str:
         if not self.org_id:
             raise ValueError(
-                "org_id is required — pass org_id to Codewire() "
-                "or set CODEWIRE_ORG_ID"
+                "organization_id is required — pass organization_id to "
+                "Codewire() or set CODEWIRE_ORGANIZATION_ID"
             )
         return self.org_id
 

@@ -13,6 +13,9 @@ func connectSDKError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if refusal := settingsError(err); refusal != nil {
+		return refusal
+	}
 
 	var connectError *connect.Error
 	if !errors.As(err, &connectError) {

@@ -38,6 +38,7 @@ import { runAccessProfileTests } from "./access-profiles.test.js";
 import { runNetworkPolicyTests } from "./network-policies.test.js";
 import { runSandboxIdentityTests } from "./sandbox-identity.test.js";
 import { runCredentialTests } from "./credentials.test.js";
+import { runSettingsTests } from "./settings.test.js";
 import {
   assertAPIKeyConverterCoverage,
   assertRuntimeConverterCoverage,
@@ -1495,16 +1496,17 @@ async function runTests() {
       assert((e as CodewireError).status === 401, "status is 401");
     }
 
-    // Test: Missing orgId
-    console.log("Test: Missing orgId");
+    // Test: Missing organizationId
+    console.log("Test: Missing organizationId");
     try {
       const cw3 = new Codewire({ apiKey: "test-key", baseUrl });
       await cw3.environments.list();
-      assert(false, "should have thrown for missing orgId");
+      assert(false, "should have thrown for missing organizationId");
     } catch (e) {
       assert(
-        (e as Error).message.includes("orgId is required"),
-        "error mentions orgId",
+        (e as Error).message.includes("organizationId is required") &&
+          (e as Error).message.includes("CODEWIRE_ORGANIZATION_ID"),
+        "error names organizationId and CODEWIRE_ORGANIZATION_ID",
       );
     }
 
@@ -1686,6 +1688,7 @@ async function runTests() {
   await runNetworkPolicyTests();
   await runSandboxIdentityTests();
   await runCredentialTests();
+  await runSettingsTests();
 }
 
 runTests().catch((e) => {

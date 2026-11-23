@@ -14,7 +14,7 @@ import type {
 function resolveOrgId(orgId: string): string {
   if (!orgId) {
     throw new Error(
-      "orgId is required — pass orgId in ClientOptions or set CODEWIRE_ORG_ID",
+      "organizationId is required — pass organizationId in ClientOptions or set CODEWIRE_ORGANIZATION_ID",
     );
   }
   return orgId;

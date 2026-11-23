@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -31,10 +30,17 @@ type Client struct {
 	SandboxIdentity *SandboxIdentityService
 	Credentials     *CredentialService
 
-	baseURL               string
-	apiKey                string
-	orgID                 string
-	httpClient            *http.Client
+	baseURL    string
+	orgID      string
+	httpClient *http.Client
+	// auth holds the bearer behind a pointer, so printing a Client never
+	// shows it.
+	auth bearerInterceptor
+	// pending collects the options while New runs; nil afterwards.
+	pending *codeSettings
+	// settingsErr is returned by every call, before any request, when New
+	// found no usable credential.
+	settingsErr           error
 	environments          codewirev1connect.EnvironmentServiceClient
 	exec                  codewirev1connect.ExecServiceClient
 	files                 codewirev1connect.FileServiceClient
@@ -54,43 +60,75 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL overrides DefaultBaseURL.
-func WithBaseURL(u string) Option {
-	return func(c *Client) {
-		c.baseURL = strings.TrimRight(u, "/")
-	}
+// WithAPIKey sets the API key. A key or token set in code replaces any in the
+// environment; given both, the key is used.
+func WithAPIKey(key string) Option { return func(c *Client) { c.pending.apiKey = key } }
+
+// WithJWTToken sets the user token. A key or token set in code replaces any
+// in the environment. A user token needs an organization.
+func WithJWTToken(token string) Option { return func(c *Client) { c.pending.jwtToken = token } }
+
+// WithOrganizationID sets the organization for organization-scoped requests,
+// instead of CODEWIRE_ORGANIZATION_ID or CODEWIRE_ORG_ID.
+func WithOrganizationID(id string) Option {
+	return func(c *Client) { c.pending.organizationID = id }
 }
+
+// WithAPIURL sets the server, instead of CODEWIRE_API_URL or
+// CODEWIRE_SERVER_URL; the default is DefaultBaseURL.
+func WithAPIURL(u string) Option { return func(c *Client) { c.pending.apiURL = u } }
+
+// WithBaseURL sets the server.
+//
+// Deprecated: use WithAPIURL.
+func WithBaseURL(u string) Option { return WithAPIURL(u) }
+
+// WithOrgID sets the organization.
+//
+// Deprecated: use WithOrganizationID.
+func WithOrgID(orgID string) Option { return WithOrganizationID(orgID) }
 
 // WithHTTPClient sets a custom HTTP client.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.httpClient = hc } }
-
-// WithOrgID sets the organization ID for org-scoped requests.
-func WithOrgID(orgID string) Option { return func(c *Client) { c.orgID = orgID } }
 
 // WithTimeout sets the HTTP client timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.httpClient = &http.Client{Timeout: d} }
 }
 
-// New creates a Codewire SDK client. apiKey falls back to CODEWIRE_API_KEY;
-// the base URL falls back to CODEWIRE_API_URL, then the production API; the
-// organization ID falls back to CODEWIRE_ORG_ID.
+// New creates a Codewire SDK client. Its settings come from New's arguments,
+// then the environment, then the default, as follows:
+//   - the API key: apiKey or WithAPIKey, then CODEWIRE_API_KEY;
+//   - the user token: WithJWTToken, then CODEWIRE_JWT_TOKEN;
+//   - the organization: WithOrganizationID, then CODEWIRE_ORGANIZATION_ID,
+//     then CODEWIRE_ORG_ID;
+//   - the server: WithAPIURL, then CODEWIRE_API_URL, then
+//     CODEWIRE_SERVER_URL, then DefaultBaseURL.
+//
+// The key or user token comes as a unit from code when code sets either,
+// otherwise from the environment; within that source the key wins. A key or
+// token in the environment under one in code is ignored and reported once
+// through the standard log package. The organization comes from code, then
+// from the environment; when the credential is in code and code sets no
+// organization, the environment's is used and that is logged once too. With no credential, every call returns ErrNoCredentials;
+// with a user token and no organization, ErrUserTokenWithoutOrganization.
+// Either comes before any request is sent.
 func New(apiKey string, opts ...Option) *Client {
-	if apiKey == "" {
-		apiKey = os.Getenv("CODEWIRE_API_KEY")
-	}
-	baseURL := DefaultBaseURL
-	if envBaseURL := os.Getenv("CODEWIRE_API_URL"); envBaseURL != "" {
-		baseURL = strings.TrimRight(envBaseURL, "/")
-	}
-	c := &Client{baseURL: baseURL, apiKey: apiKey, httpClient: http.DefaultClient}
+	c := &Client{httpClient: http.DefaultClient, pending: &codeSettings{apiKey: apiKey}}
 	for _, o := range opts {
 		o(c)
 	}
-	if c.orgID == "" {
-		c.orgID = os.Getenv("CODEWIRE_ORG_ID")
+	resolved, err := resolveSettings(*c.pending, os.Getenv)
+	reportOnce(resolved.warnings)
+	c.pending = nil
+	c.baseURL = resolved.apiURL
+	c.orgID = resolved.organizationID
+	c.auth = bearerInterceptor{bearer: &resolved.bearer}
+	if err != nil {
+		c.settingsErr = err
+		c.httpClient = &http.Client{Transport: refusingTransport{err: err}}
 	}
-	connectOptions := connect.WithInterceptors(bearerInterceptor{apiKey: c.apiKey})
+	connectOptions := connect.WithInterceptors(c.auth)
 	c.environments = codewirev1connect.NewEnvironmentServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.exec = codewirev1connect.NewExecServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.files = codewirev1connect.NewFileServiceClient(c.httpClient, c.baseURL, connectOptions)
@@ -123,10 +161,13 @@ func New(apiKey string, opts ...Option) *Client {
 }
 
 func (c *Client) resolveOrgID() (string, error) {
+	if c.settingsErr != nil {
+		return "", c.settingsErr
+	}
 	if c.orgID != "" {
 		return c.orgID, nil
 	}
-	return "", fmt.Errorf("codewire: orgID is required — use WithOrgID or set CODEWIRE_ORG_ID")
+	return "", fmt.Errorf("codewire: organization ID is required — use WithOrganizationID or set CODEWIRE_ORGANIZATION_ID")
 }
 
 // Error is the typed error returned for any 4xx/5xx response.
@@ -158,7 +199,9 @@ func (e *Error) Violations() []FieldViolation {
 	return append([]FieldViolation(nil), e.violations...)
 }
 
-type bearerInterceptor struct{ apiKey string }
+// bearerInterceptor sends the API key or user token. The pointer keeps the
+// value out of anything that prints a Client.
+type bearerInterceptor struct{ bearer *string }
 
 func (i bearerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -180,7 +223,7 @@ func (bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 }
 
 func (i bearerInterceptor) setAuthorization(header http.Header) {
-	if i.apiKey != "" {
-		header.Set("Authorization", "Bearer "+i.apiKey)
+	if i.bearer != nil && *i.bearer != "" {
+		header.Set("Authorization", "Bearer "+*i.bearer)
 	}
 }

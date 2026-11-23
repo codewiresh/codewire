@@ -1,6 +1,6 @@
 """Creates an environment, runs a command in it, writes and reads back a file,
 and deletes it. Reads CODEWIRE_API_KEY, CODEWIRE_ORG_ID and, for a server
-other than the hosted one, CODEWIRE_BASE_URL.
+other than the hosted one, CODEWIRE_API_URL.
 
     python quickstart.py
 """

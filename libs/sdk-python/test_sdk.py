@@ -12,6 +12,7 @@ from test_network_policies import NetworkPoliciesTestCase
 from test_sandbox_identity import SandboxIdentityTestCase
 from test_credentials import CredentialsTestCase
 from test_environment_sources import EnvironmentSourcesTestCase
+from test_settings import SettingsTestCase
 
 import httpx
 from connectrpc.code import Code
@@ -989,7 +990,8 @@ class SDKTestCase(unittest.TestCase):
         no_org = Codewire(api_key="test-key", base_url=self.base_url)
         with self.assertRaises(ValueError) as cm:
             no_org.environments.list()
-        self.assertIn("org_id is required", str(cm.exception))
+        self.assertIn("organization_id is required", str(cm.exception))
+        self.assertIn("CODEWIRE_ORGANIZATION_ID", str(cm.exception))
         no_org.close()
 
     def test_environment_repr(self):

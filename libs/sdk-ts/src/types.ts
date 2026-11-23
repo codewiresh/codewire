@@ -408,9 +408,18 @@ export interface StatusResponse {
 }
 
 export interface ClientOptions {
+  /** An API key; otherwise `CODEWIRE_API_KEY`. A key or token here replaces any elsewhere. */
   apiKey?: string;
-  baseUrl?: string;
+  /** A user token; otherwise `CODEWIRE_JWT_TOKEN`. Needs an organization. */
+  jwtToken?: string;
+  /** Otherwise `CODEWIRE_ORGANIZATION_ID`, or `CODEWIRE_ORG_ID`. */
+  organizationId?: string;
+  /** Otherwise `CODEWIRE_API_URL`, or `CODEWIRE_SERVER_URL`; default `https://codewire.sh`. */
+  apiUrl?: string;
+  /** @deprecated Use `organizationId`. */
   orgId?: string;
+  /** @deprecated Use `apiUrl`. */
+  baseUrl?: string;
   timeout?: number;
   /** Override the fetch implementation. Defaults to the global `fetch`.
    * Mirrors Go's `WithHTTPClient`; useful for custom proxies, tracing, or

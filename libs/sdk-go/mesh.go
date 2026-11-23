@@ -43,7 +43,7 @@ func NewMeshClient(meshURL, authToken string, opts ...MeshOption) *MeshClient {
 	for _, o := range opts {
 		o(c)
 	}
-	connectOptions := connect.WithInterceptors(bearerInterceptor{apiKey: authToken})
+	connectOptions := connect.WithInterceptors(bearerInterceptor{bearer: &authToken})
 	c.networkClient = codewirev1connect.NewMeshNetworkServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.nodeClient = codewirev1connect.NewMeshNodeServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.publicNodeClient = codewirev1connect.NewMeshNodeServiceClient(c.httpClient, c.baseURL)

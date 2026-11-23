@@ -42,7 +42,7 @@ func newCwRuntime(client *Client, orgID, envID string) *CwRuntime {
 	httpClient := *client.httpClient
 	httpClient.Timeout = 0
 	return &CwRuntime{client: codewirev1connect.NewEnvironmentCwRuntimeServiceClient(&httpClient, client.baseURL,
-		connect.WithInterceptors(bearerInterceptor{apiKey: client.apiKey}), connect.WithReadMaxBytes(32*1024), connect.WithSendMaxBytes(cwRuntimeChunkBytes+1024)), orgID: orgID, envID: envID}
+		connect.WithInterceptors(client.auth), connect.WithReadMaxBytes(32*1024), connect.WithSendMaxBytes(cwRuntimeChunkBytes+1024)), orgID: orgID, envID: envID}
 }
 
 func (s *EnvironmentService) Runtime(envID string) (*CwRuntime, error) {
