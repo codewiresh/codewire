@@ -17,7 +17,9 @@ fn row(n: u32, phase: &str, status: &str) -> LogRow {
         status: status.into(),
         message: format!("{phase} label"),
         metadata: None,
-        created_at: "2026-10-06T10:00:00Z".into(),
+        // Rows are written one after another; only rows written in one
+        // transaction share a time.
+        created_at: format!("2026-10-06T10:00:00.{n:03}Z"),
     }
 }
 
@@ -644,4 +646,86 @@ fn the_page_lists_every_setup_phase_orchestration_writes() {
         .collect();
     assert!(!steps.is_empty());
     assert_eq!(listed, steps);
+}
+
+/// #4767: orchestration writes a Sandbox's TTL checkpoint in the same instant
+/// as its `complete`, and rows of one instant are ordered by their random ids.
+/// A run whose `complete` comes second to last has still ended.
+#[test]
+fn a_run_ends_at_its_terminal_row_whatever_was_written_in_the_same_instant() {
+    let failed = vec![
+        row_at(1, "install", "started", "2026-10-06T10:00:01.000Z"),
+        row_at(2, "install", "failed", "2026-10-06T10:00:02.000Z"),
+    ];
+    let retry = vec![
+        row_at(3, "install", "started", "2026-10-06T10:01:00.100Z"),
+        row_at(4, "install", "completed", "2026-10-06T10:01:00.300Z"),
+        row_at(5, "complete", "completed", "2026-10-06T10:01:00.310Z"),
+    ];
+    let checkpoint = row_at(
+        6,
+        "lifecycle_checkpoint",
+        "completed",
+        "2026-10-06T10:01:00.310Z",
+    );
+    let history = [failed.clone(), retry.clone(), vec![checkpoint.clone()]].concat();
+    let next = Run::Next {
+        since: Some(at("2026-10-06T10:01:00.000Z")),
+    };
+    assert_eq!(current_run(&history, next), &retry);
+    assert_eq!(current_run(&history, Run::Current), &retry);
+    // A row at a later time does start a new run.
+    let later = row_at(
+        7,
+        "lifecycle_transition",
+        "completed",
+        "2026-10-06T10:02:00.000Z",
+    );
+    let restarted = [history.clone(), vec![later.clone()]].concat();
+    assert_eq!(current_run(&restarted, Run::Current), &[checkpoint, later]);
+}
+
+#[tokio::test]
+async fn a_quick_retrys_ended_run_is_shown_with_its_end_and_not_followed() {
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![vec![
+        Ok(response(&row_at(
+            1,
+            "install",
+            "failed",
+            "2026-10-06T10:00:02.000Z",
+        ))),
+        Ok(response(&row_at(
+            2,
+            "install",
+            "started",
+            "2026-10-06T10:01:00.100Z",
+        ))),
+        Ok(response(&row_at(
+            3,
+            "install",
+            "completed",
+            "2026-10-06T10:01:00.300Z",
+        ))),
+        Ok(response(&row_at(
+            4,
+            "complete",
+            "completed",
+            "2026-10-06T10:01:00.310Z",
+        ))),
+        Ok(response(&row_at(
+            5,
+            "lifecycle_checkpoint",
+            "completed",
+            "2026-10-06T10:01:00.310Z",
+        ))),
+    ]];
+    let since = Some(at("2026-10-06T10:01:00.000Z"));
+    let frames = relayed_run(&script, None, Run::Next { since }).await;
+    assert_eq!(*script.opens.lock().unwrap(), vec![(String::new(), false)]);
+    assert_eq!(ids(&frames), vec![id(2), id(3), id(4)]);
+    assert_eq!(
+        frames.last().unwrap(),
+        "event: end\ndata: {\"outcome\":\"complete\"}\n\n"
+    );
 }

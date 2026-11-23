@@ -263,10 +263,33 @@ fn ended_before(row: &LogRow, since: DateTime<Utc>) -> bool {
         .map_or(true, |ended| ended.with_timezone(&Utc) < since)
 }
 
+/// Where the history's last run stands: its last row, or a terminal row that
+/// only rows written in the same instant follow. Orchestration records a
+/// Sandbox's TTL with its `complete` row, at the same time, and rows of one
+/// time are ordered by their random ids, so the `complete` can come second to
+/// last (#4767). Those rows start no run.
+fn settled_end(rows: &[LogRow]) -> Option<usize> {
+    let last = rows.len().checked_sub(1)?;
+    let Some(terminal) = rows.iter().rposition(LogRow::terminal) else {
+        return Some(last);
+    };
+    let ended_with = &rows[terminal].created_at;
+    Some(
+        if rows[terminal + 1..]
+            .iter()
+            .all(|row| row.created_at == *ended_with)
+        {
+            terminal
+        } else {
+            last
+        },
+    )
+}
+
 /// The rows of the current run in a full history: everything after the last
-/// terminal row, unless the history itself ends on a terminal row, in which
-/// case the run that row ended, or nothing when that run is an earlier
-/// start's ([`Run::Next`]).
+/// terminal row, unless the history itself ends on a terminal row
+/// ([`settled_end`]), in which case the run that row ended, or nothing when
+/// that run is an earlier start's ([`Run::Next`]).
 pub(super) fn current_run(rows: &[LogRow], run: Run) -> &[LogRow] {
     if let Run::Before { since } = run {
         let Some(end) = rows
@@ -281,20 +304,25 @@ pub(super) fn current_run(rows: &[LogRow], run: Run) -> &[LogRow] {
             .map_or(0, |index| index + 1);
         return &rows[start..=end];
     }
-    let ends_terminal = rows.last().is_some_and(LogRow::terminal);
-    if ends_terminal && rows.last().is_some_and(|last| run.earlier(last)) {
+    let Some(end) = settled_end(rows) else {
+        return rows;
+    };
+    let ends_terminal = rows[end].terminal();
+    if ends_terminal && run.earlier(&rows[end]) {
         return &rows[rows.len()..];
     }
-    let scan = if ends_terminal {
-        &rows[..rows.len() - 1]
-    } else {
-        rows
-    };
+    let scan = if ends_terminal { &rows[..end] } else { rows };
     let start = scan
         .iter()
         .rposition(LogRow::terminal)
         .map_or(0, |index| index + 1);
-    &rows[start..]
+    // An ended run stops at the row that ended it, so its end is the last
+    // thing the page reads.
+    if ends_terminal {
+        &rows[start..=end]
+    } else {
+        &rows[start..]
+    }
 }
 
 fn stage_frame(row: &LogRow) -> Option<Bytes> {
@@ -412,14 +440,15 @@ pub(super) async fn relay(
                 }
                 return;
             }
-            match history.last() {
-                // The last run already ended; there is nothing to follow,
-                // unless it was an earlier start's and the page waits for this
-                // one.
-                Some(row) if row.terminal() && !run.earlier(row) => return,
-                Some(row) => row.id.clone(),
-                None => String::new(),
+            // The last run already ended; there is nothing to follow,
+            // unless it was an earlier start's and the page waits for this
+            // one.
+            if settled_end(&history)
+                .is_some_and(|end| history[end].terminal() && !run.earlier(&history[end]))
+            {
+                return;
             }
+            history.last().map(|row| row.id.clone()).unwrap_or_default()
         }
     };
     let mut events = source.open(&cursor, true);
