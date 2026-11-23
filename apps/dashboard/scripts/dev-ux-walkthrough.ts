@@ -814,6 +814,24 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
     if (Date.now() > ends) throw new DevUxError("desktop", "timeout");
   }];
   const viewers: Page[] = [];
+  // The walk routes terminal sockets, so Playwright gives this page its own
+  // WebSocket class for every socket, the desktop stream's too. noVNC accepts
+  // a socket only when its members are its own or its class's
+  // (core/websock.js), and this class keeps them on a base class, so they are
+  // copied down to WebSocket's own prototype before the viewer opens one, as
+  // the panel's fixture spec does. It only moves those members, so it undoes
+  // what the route's class swap did to noVNC's check and nothing more; a real
+  // browser's WebSocket already has them. The other viewer pages route nothing.
+  const ownSocketMembers = () => page.evaluate(() => {
+    const own = WebSocket.prototype;
+    for (const name of ["send", "close", "binaryType", "onerror", "onmessage", "onopen"]) {
+      if (Object.hasOwn(own, name)) continue;
+      for (let base = Object.getPrototypeOf(own); base; base = Object.getPrototypeOf(base)) {
+        const member = Object.getOwnPropertyDescriptor(base, name);
+        if (member) { Object.defineProperty(own, name, member); break; }
+      }
+    }
+  });
   const viewer = async () => {
     const other = await page.context().newPage();
     viewers.push(other);
@@ -827,6 +845,7 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
     if (!(await holds("desktop-start", [
       inTime,
       ["started", async () => {
+        await ownSocketMembers();
         await show(page, "Desktop");
         await reaches(page, "stopped");
         await button(panel, "Start desktop").click();
