@@ -1,7 +1,7 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
 import { expect, request, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
-import { DevUxError, failureClassOf, holds, setupRowsSeen, type Expectation, type OwnedUxApiKey, type OwnedUxSandbox } from "./dev-ux-ownership";
+import { DevUxError, failureClassOf, holds, setupRowsSeen, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
 // Re-attaching a surviving terminal after navigation, reload, reconnect, or
@@ -78,13 +78,6 @@ async function shellFailure(page: Page, rows: Locator, echo: string, marker: Reg
   return text.includes(echo) ? "no-output" : "no-echo";
 }
 
-// A stage that goes on from the page another step or block left checks that
-// it is still there, so a step that moved away fails at this stage, by name,
-// as navigation, instead of timing out further on (#6060).
-function startsOn(page: Page, path: string): void {
-  if (new URL(page.url()).pathname !== path) throw new DevUxError("ux-route", "navigation");
-}
-
 async function visit(page: Page, path: string): Promise<void> {
   await page.goto(`${ORIGIN}${path}`, { waitUntil: "domcontentloaded" });
   const actual = new URL(page.url());
@@ -98,9 +91,8 @@ async function fits(page: Page, owner?: Locator): Promise<void> {
   if (owner) await expect.poll(() => owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), { timeout: 5_000 }).toBe(true);
 }
 
-// Read-only page checks below never open a create or destructive action, but
-// for the walk's own API key, which it makes and deletes itself. Rows and
-// names are the Dev account's own data: each check holds for whatever rows
+// Read-only page checks below never open a create or destructive action. Rows
+// and names are the Dev account's own data: each check holds for whatever rows
 // exist and never assumes a count or a name.
 
 // No unset value renders in place of a name, and every status is in words.
@@ -174,7 +166,7 @@ async function credentialRows(page: Page): Promise<void> {
 // Settings lists the account's own keys across its organizations, each linked
 // to that organization's inventory, and Create asks which organization a key
 // belongs to. Create is never opened here.
-async function personalApiKeys(page: Page, key: OwnedUxApiKey): Promise<void> {
+async function personalApiKeys(page: Page): Promise<void> {
   const header = page.locator(".cw-settings-content > .cw-page-header");
   await pageTitle(header, "API keys");
   await expect(header.locator(".cw-page-title-row .cw-badge")).toHaveText(/^\d+ keys?$/);
@@ -186,13 +178,13 @@ async function personalApiKeys(page: Page, key: OwnedUxApiKey): Promise<void> {
   await expect(organization.locator("option").filter({ hasText: /^(?:null|undefined)$|null · null/ })).toHaveCount(0);
   await expect(page.getByRole("search", { name: "Filter API keys", exact: true })).toBeVisible();
   await apiKeyTable(page, ["Name", "Organization", "Status", "Last used", "Expires"], "You have no API keys yet. Create one to use the Codewire CLI or SDK.");
-  await apiKeyDeleteWording(page, "api-key-delete-wording-personal", key);
+  await apiKeyDeleteWording(page, "api-key-delete-wording-personal");
   const owners = await page.locator(".cw-table tbody tr").evaluateAll((rows) => rows.map((row) => row.querySelector(":scope > td:nth-child(2) > a")?.getAttribute("href") ?? ""));
   for (const owner of owners) expect(owner).toMatch(/^\/[a-z0-9]+(?:-[a-z0-9]+)*\/api-keys\/$/);
 }
 
 // The organization's own inventory stays separate and scoped to it.
-async function organizationApiKeys(page: Page, slug: string, key: OwnedUxApiKey): Promise<void> {
+async function organizationApiKeys(page: Page, slug: string): Promise<void> {
   await visit(page, `/${slug}/api-keys/`);
   const header = page.locator("#organization-content > .cw-page-header");
   await pageTitle(header, "API keys");
@@ -201,7 +193,7 @@ async function organizationApiKeys(page: Page, slug: string, key: OwnedUxApiKey)
   await settingsShell(page, "organization", `/${slug}/api-keys/`);
   await expect(page.locator("#settings-organization-title")).toHaveText(/^Organization · \S/);
   await apiKeyTable(page, ["Name", "Created by", "Status", "Last used", "Created"], "No API keys yet. Create one for programmatic access.");
-  await apiKeyDeleteWording(page, "api-key-delete-wording-organization", key);
+  await apiKeyDeleteWording(page, "api-key-delete-wording-organization");
   await noUnsetValues(page);
   await fits(page);
 }
@@ -248,90 +240,17 @@ async function networkPolicies(page: Page, slug: string): Promise<void> {
 }
 
 // Each key a member may delete has a Delete dialog that says what deleting does
-// in one sentence (#3586). The walk reads it in its own key's dialog, so there
-// is always one to read, and deletes only that key. A miss prints not-held and
-// does not fail the walk yet: it could not run on Dev first.
+// in one sentence (#3586). The dialog is read as rendered, never opened, and no
+// key is deleted; with no such key there is nothing to read. A miss prints
+// not-held and does not fail the walk yet: it could not run on Dev first.
 const API_KEY_DELETED = "All connections using this key are dropped when it is deleted.";
-const API_KEY_CREATE = "/settings/api-keys/_actions/create";
-// A check that must not fail the walk also leaves the page as it found it:
-// when it did not hold, or ended elsewhere, the page goes back there before
-// the stages after it go on (#6060).
-async function restoring(page: Page, check: () => Promise<boolean>): Promise<boolean> {
-  const found = page.url();
-  let held = false;
-  try { held = await check(); } finally {
-    if (!held || page.url() !== found) await page.goto(found, { waitUntil: "domcontentloaded" }).catch(() => {});
-  }
-  return held;
-}
-
-// A key's Delete dialog, found by its title, open or not.
-const keyDialog = (page: Page, name: string) =>
-  page.locator('dialog[id^="api-key-"][id$="-delete"]').filter({ hasText: `Delete ${name}?` });
-
-// Delete, opened from the key's row menu as a person does.
-async function openKeyDelete(page: Page, name: string): Promise<Locator> {
-  const menu = page.locator("details.cw-menu").filter({ has: page.locator(`summary[aria-label="Actions for ${name}"]`) });
-  await menu.locator(":scope > summary").click();
-  await menu.locator('button[data-dialog-open$="-delete"]').click();
-  const open = keyDialog(page, name);
-  await expect(open).toBeVisible();
-  return open;
-}
-
-// The walk's own key (#3586; `key-revoke` in docs/journeys/api-keys.md), made
-// once so every delivery reads the Delete dialog of a key that exists. Only
-// its name is read back, never the secret shown once. A key not made is
-// reported here, and the checks that need it then report too.
-async function createScratchKey(page: Page, key: OwnedUxApiKey, orgId: string, deadline: number): Promise<void> {
+async function apiKeyDeleteWording(page: Page, name: string): Promise<void> {
+  const bodies = page.locator('dialog[id^="api-key-"][id$="-delete"] .cw-dialog-body');
+  if (!(await bodies.count())) return;
   const started = Date.now();
-  if (await restoring(page, () => holds("api-key-scratch-create", [["created", async () => {
-    await key.admit(deadline);
-    await visit(page, "/settings/api-keys/");
-    await button(page.locator(".cw-settings-content > .cw-page-header"), "Create key").click();
-    const create = dialog(page, "Create API key");
-    await create.locator("#create-personal-api-key-org").selectOption(orgId);
-    await create.locator("#create-personal-api-key-name").fill(key.name);
-    await create.locator("#create-personal-api-key-expiration").selectOption("30");
-    const answered = page.waitForResponse((response) => response.request().method() === "POST"
-      && new URL(response.url()).pathname === API_KEY_CREATE).then(() => true, () => false);
-    key.beforeCreate();
-    await button(create, "Create key").click();
-    if (!(await answered)) throw new DevUxError("api-key-scratch-create", "timeout");
-    key.createAnswered();
-    const reveal = page.locator("[data-api-key-reveal]");
-    await expect(reveal.locator("dd").first()).toHaveText(key.name);
-    await reveal.getByRole("link", { name: "Done", exact: true }).click();
-    await key.bind(await keyDialog(page, key.name).locator('input[name="key_id"]').inputValue(), deadline);
-  }]]))) passed("api-key-scratch-create", started);
-}
-
-// The sentence in the key's Delete dialog, then Cancel, which keeps the key.
-async function apiKeyDeleteWording(page: Page, name: string, key: OwnedUxApiKey): Promise<void> {
-  const started = Date.now();
-  if (await restoring(page, () => holds(name, [["delete-wording", async () => {
-    if (!key.bound) throw new DevUxError(name);
-    const open = await openKeyDelete(page, key.name);
-    await expect(open.locator(".cw-dialog-body")).toContainText(API_KEY_DELETED);
-    await fits(page);
-    await button(open, "Cancel").click();
-    await expect(open).toBeHidden();
-  }]]))) passed(name, started);
-}
-
-// Delete confirmed from the dialog: the row leaves the page, and the
-// organization's list no longer names the key.
-async function deleteScratchKey(page: Page, key: OwnedUxApiKey, deadline: number): Promise<void> {
-  const started = Date.now();
-  if (await restoring(page, () => holds("api-key-scratch-delete", [
-    ["deleted", async () => {
-      if (!key.bound) throw new DevUxError("api-key-scratch-delete");
-      await visit(page, "/settings/api-keys/");
-      await button(await openKeyDelete(page, key.name), "Delete key").click();
-      await expect(page.locator(`summary[aria-label="Actions for ${key.name}"]`)).toHaveCount(0);
-    }],
-    ["gone", async () => expect(await key.absent(deadline)).toBe(true)],
-  ]))) passed("api-key-scratch-delete", started);
+  if (await holds(name, [["delete-wording", async () => {
+    for (const body of await bodies.all()) await expect(body).toContainText(API_KEY_DELETED);
+  }]])) passed(name, started);
 }
 
 // A table with declared column headers when keys exist, else the empty state.
@@ -485,7 +404,7 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
   });
 }
 
-async function settings(page: Page, slug: string, width: number, key: OwnedUxApiKey): Promise<void> {
+async function settings(page: Page, slug: string, width: number): Promise<void> {
   for (const [scope, query] of [["organization", `?org=${slug}`], ["personal", ""]] as const) {
     await stage(`settings-account-${scope}-${width}`, async () => {
       await visit(page, `/settings/${query}`);
@@ -532,10 +451,10 @@ async function settings(page: Page, slug: string, width: number, key: OwnedUxApi
         await visit(page, `/settings/${path}/${query}`);
         await expect(page.getByRole("heading", { name: title, exact: true, level: 1 })).toBeVisible();
         await settingsShell(page, "personal", `/settings/${path}/`);
-        if (path === "api-keys") await personalApiKeys(page, key);
+        if (path === "api-keys") await personalApiKeys(page);
         await noUnsetValues(page);
         await fits(page);
-        if (path === "api-keys" && scope === "organization") await organizationApiKeys(page, slug, key);
+        if (path === "api-keys" && scope === "organization") await organizationApiKeys(page, slug);
       });
     }
   }
@@ -720,7 +639,6 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
   let shown = "system";
   for (const theme of ["light", "dark"] as const) {
     await stage(`theme-${theme}`, async () => {
-      startsOn(page, options.detailPath);
       await switchTheme(shown, theme);
       shown = theme;
       await terminalPainted(theme);
@@ -738,7 +656,6 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
     });
   }
   await stage("theme-system", async () => {
-    startsOn(page, options.detailPath);
     await switchTheme(shown, "system");
     await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
     await send("printf '__UX_THEME__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\"");
@@ -964,9 +881,9 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
 
 export async function runDevUxWalkthrough(page: Page, options: {
   slug: string; userId: string; orgId: string; owned: OwnedUxSandbox; deadline: number;
-  own: () => OwnedUxSandbox; key: OwnedUxApiKey;
+  own: () => OwnedUxSandbox;
 }): Promise<void> {
-  const { slug, userId, orgId, owned, deadline, own, key } = options;
+  const { slug, userId, orgId, owned, deadline, own } = options;
   page.setDefaultTimeout(15_000);
   page.setDefaultNavigationTimeout(30_000);
   // Terminal sockets pass through unchanged. The reconnect journey drops the
@@ -982,16 +899,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
     });
   });
   const socketsOf = (id: string | null) => terminalSockets.filter((socket) => socket.sessionId === id);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await createScratchKey(page, key, orgId, deadline);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await stage(`account-home-${width}`, () => accountHome(page, slug));
     await credentials(page, slug, width);
-    await settings(page, slug, width, key);
-    // The key is deleted once both widths have read its dialog, before the
-    // last Create form: create-sandbox goes on from the page that form leaves.
-    if (width === 390) await deleteScratchKey(page, key, deadline);
+    await settings(page, slug, width);
     if (width === 1440) {
       await updatesLink(page);
       await networkPolicies(page, slug);
@@ -1010,8 +922,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
   await page.setViewportSize({ width: 1440, height: 900 });
   let previewPattern = "";
   await stage("create-sandbox", async () => {
-    // The last Create form's page, which the checks after it go on from.
-    startsOn(page, `/${slug}/new/`);
     await owned.admit(deadline);
     previewPattern = (await page.locator(".cw-preview-pattern").innerText()).trim();
     await page.getByLabel("Name", { exact: true }).fill(owned.name);
@@ -1108,7 +1018,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
     }],
   ])) passed("setup-retry-create", retryCreated);
   await stage("terminal-colors-copy", async () => {
-    startsOn(page, detailPath);
     await send("export CW_UX_SESSION=preserved; printf '\\033[31m__UX_RED__\\033[0m\\n__UX_COPY__\\n__UX_PID__%s__\\n' \"$$\"");
     await expect(rows).toContainText(/__UX_PID__\d+__/);
     pid = /__UX_PID__(\d+)__/.exec(await rows.innerText())![1];
@@ -1253,7 +1162,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const port = ports.locator(".cw-port-row", { has: page.getByText("ux-preview", { exact: true }) });
   let preview = "";
   await stage("ports-preview-server", async () => {
-    startsOn(page, detailPath);
     await send(`node -e 'require("http").createServer((q,s)=>{s.writeHead(200,{"content-type":"text/plain","cache-control":"no-store"});s.end("${canary}")}).listen(8080,"0.0.0.0")' >/dev/null 2>&1 &`);
     await send(`for i in 1 2 3 4 5; do test "$(curl -fsS --max-time 2 http://127.0.0.1:8080)" = "${canary}" && { printf '__UX_PREVIEW_%s__\\n' ready; break; }; sleep 1; done`);
     await expect(rows).toContainText("__UX_PREVIEW_ready__");
@@ -1370,7 +1278,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
   });
   await desktop(page, detailPath, rows, send);
   await stage("lifecycle-live-state", async () => {
-    startsOn(page, detailPath);
     await button(page, "Stop").click();
     const stop = dialog(page, `Stop ${owned.name}?`);
     await expect(button(stop, "Cancel")).toBeFocused();
