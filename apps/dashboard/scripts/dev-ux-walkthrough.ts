@@ -811,17 +811,6 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
         await keys("echo __UX_DESKTOP_TYPED__ > /tmp/ux-desktop-typed");
         await page.keyboard.press("Enter");
       }],
-      ["paste-note", async () => {
-        await page.evaluate(() => navigator.clipboard.writeText("__UX_DESKTOP_PASTED__"));
-        await button(panel, "Paste to desktop").click();
-        await expect(panel.locator("[data-desktop-note]")).toHaveText("Pasted to the desktop.");
-      }],
-      ["pasted", async () => {
-        await keys("echo ");
-        await page.keyboard.press("Control+Shift+V");
-        await keys(" > /tmp/ux-desktop-pasted");
-        await page.keyboard.press("Enter");
-      }],
       ["copy-enabled", async () => {
         await keys("clear; printf '__UX_DESKTOP_%s__\\n' COPIED");
         await page.keyboard.press("Enter");
@@ -829,11 +818,30 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
         await page.keyboard.press("Control+Shift+C");
         await expect(button(panel, "Copy from desktop")).toBeEnabled({ timeout: 10_000 });
       }],
-      // The desktop's clipboard reaches the page a moment after it changes.
+      // The keys arrive before the shell prints the marker, and the desktop's
+      // clipboard reaches the page a moment after it changes, so each try
+      // selects and copies the terminal's text again.
       ["copied", () => expect.poll(async () => {
+        await canvas.focus();
+        await page.keyboard.press("Control+Shift+A");
+        await page.keyboard.press("Control+Shift+C");
         await button(panel, "Copy from desktop").click();
         return page.evaluate(() => navigator.clipboard.readText());
       }, { timeout: 10_000 }).toContain("__UX_DESKTOP_COPIED__")],
+      ["paste-note", async () => {
+        await page.evaluate(() => navigator.clipboard.writeText("__UX_DESKTOP_PASTED__."));
+        await button(panel, "Paste to desktop").click();
+        await expect(panel.locator("[data-desktop-note]")).toHaveText("Pasted to the desktop.");
+      }],
+      // The viewer only announces a paste; the terminal fetches the text from
+      // the page when Ctrl+Shift+V asks for it, a round trip after the keys
+      // that follow. So a reader waits for it up to its final "." and nothing
+      // is typed after it.
+      ["pasted", async () => {
+        await keys("bash -c 'IFS= read -r -t 20 -d . line; printf \"%s\\n\" \"$line\" > /tmp/ux-desktop-pasted'");
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Control+Shift+V");
+      }],
     ])) passed("desktop-input", started);
     started = Date.now();
     if (await holds("desktop-viewers", [
