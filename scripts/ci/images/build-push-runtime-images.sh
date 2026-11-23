@@ -5,6 +5,10 @@
 #   build-push-runtime-images.sh daemon     # the static CW producer and daemon
 #   build-push-runtime-images.sh egress     # cw-egress, built and signed but never
 #                                           # delivered by Dev delivery
+#   build-push-runtime-images.sh pod-runtime
+#                                           # the standard pod-runtime image (#5602),
+#                                           # likewise; its context is the directory
+#                                           # CODEWIRE_POD_RUNTIME_CONTEXT names
 #
 # Each half runs in its own protected job, so the daemon's static CW
 # producer, the longest single build, runs beside the service Bake instead of
@@ -27,7 +31,7 @@ readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image regi
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 if [ "$#" -ne 1 ]; then
-  echo 'Usage: build-push-runtime-images.sh services|daemon|egress' >&2
+  echo 'Usage: build-push-runtime-images.sh services|daemon|egress|pod-runtime' >&2
   exit 2
 fi
 readonly runtime_group="$1"
@@ -35,8 +39,9 @@ case "$runtime_group" in
   services) image_families=(services mesh dashboard derp) ;;
   daemon) image_families=(daemon) ;;
   egress) image_families=(egress) ;;
+  pod-runtime) image_families=(pod-runtime) ;;
   *)
-    echo 'Runtime image group must be exactly services, daemon or egress' >&2
+    echo 'Runtime image group must be exactly services, daemon, egress or pod-runtime' >&2
     exit 2
     ;;
 esac
@@ -147,6 +152,7 @@ if [ "$carry_forward" = 1 ]; then
   fi
   for family in "${image_families[@]}"; do
     state_var="CODEWIRE_IMAGE_STATE_${family^^}"
+    state_var="${state_var//-/_}"
     state="${!state_var:-}"
     if [ "$state" = unaffected ]; then
       carried_families+=("$family")
@@ -258,6 +264,7 @@ run_protected_build() {
   local dockerfile="$2"
   local output="$3"
   local build_runtime_set="$4"
+  local context="${5:-.}"
 
   : >"$output"
   GITHUB_OUTPUT="$output" \
@@ -267,13 +274,14 @@ run_protected_build() {
     CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
     CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
     CODEWIRE_BUILD_RUNTIME_SET="$build_runtime_set" \
-    scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" .
+    scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" "$context"
 }
 
 build_one() {
   local image_name="$1"
   local dockerfile="$2"
   local build_runtime_set="${3:-0}"
+  local context="${4:-.}"
   local output candidate_ref
 
   if is_carried "$image_name"; then
@@ -281,7 +289,7 @@ build_one() {
   fi
 
   output="$work/$image_name.output"
-  run_protected_build "$image_name" "$dockerfile" "$output" "$build_runtime_set"
+  run_protected_build "$image_name" "$dockerfile" "$output" "$build_runtime_set" "$context"
 
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
   if [[ ! "$candidate_ref" =~ ^"$PUBLISH_REGISTRY_HOST/codewire/$image_name"@sha256:[0-9a-f]{64}$ ]]; then
@@ -337,8 +345,17 @@ if [ "$runtime_group" = services ]; then
   build_one derp deployments/docker/derp.Dockerfile
 elif [ "$runtime_group" = daemon ]; then
   build_one daemon deployments/docker/daemon.Dockerfile
-else
+elif [ "$runtime_group" = egress ]; then
   build_one egress deployments/docker/egress.Dockerfile
+else
+  # pod-runtime-context.py assembled the context inside this checkout, so the
+  # build's provenance names this commit as every runtime image's does.
+  pod_context="${CODEWIRE_POD_RUNTIME_CONTEXT:?set to the assembled pod-runtime context}"
+  [[ -d "$pod_context" && ! -L "$pod_context" && "$(cd "$pod_context" && pwd -P)" == "$(cd "$ROOT" && pwd -P)"/* ]] || {
+    echo 'The pod-runtime context must be a directory inside this checkout' >&2
+    exit 2
+  }
+  build_one pod-runtime images/pod-runtime/Dockerfile 0 "$pod_context"
 fi
 
 if [ "${#carried_families[@]}" -gt 0 ]; then

@@ -382,6 +382,16 @@ args='cpu_slice_docker_args; echo "args=${CPU_SLICE_DOCKER_ARGS[*]-}"'
   fail 'a builder started outside the slice was given its cgroup parent'
 [ "$(CI=true CPU_SLICE_CGROUP_FILE="$TMP/cgroup-inside" bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $args")" = 'args=' ] ||
   fail 'a CI builder was given the workstation cgroup parent'
+# LOCAL_RUNTIME_CPUS caps each builder container, in CI too (#5602); anything
+# but a whole number of cores is ignored.
+[ "$(CI=true LOCAL_RUNTIME_CPUS=2 bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $args")" = 'args=--cpus 2' ] ||
+  fail 'a CI builder was not capped by LOCAL_RUNTIME_CPUS'
+[ "$(LOCAL_RUNTIME_CPUS=4 slice_probe "$TMP/cgroup-inside" "$args")" = 'args=--cgroup-parent=cwvmtest.slice --cpus 4' ] ||
+  fail 'a builder inside the slice lost its slice or its cap'
+for bad in 0 1.5 four -2; do
+  [ "$(CI=true LOCAL_RUNTIME_CPUS="$bad" bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $args" 2>/dev/null)" = 'args=' ] ||
+    fail "a malformed LOCAL_RUNTIME_CPUS ($bad) reached docker"
+done
 for builder in build-runtime-cw.sh build-runtime-guest-root.sh; do
   grep -qF 'docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"}' \
     "$ROOT/scripts/ci/release/$builder" || fail "$builder starts its container outside the slice"

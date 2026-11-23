@@ -120,4 +120,24 @@ for arguments in \
 done
 [[ ! -s "$FAKE_DOCKER_LOG" ]] || fail 'malformed arguments reached the registry'
 
+# The pod-runtime image (#5602) keeps its own tags by the same rules, and its
+# wrapper takes only its own repository's references.
+readonly POD_SCRIPT="$ROOT/scripts/ci/images/pod-runtime-image-tag.sh"
+pod="registry.example.invalid/codewire/pod-runtime@sha256:$(printf 'c%.0s' {1..64})"
+[[ "$("$POD_SCRIPT" exists "$fingerprint")" == absent ]] ||
+  fail 'the pod-runtime tag was read from another repository'
+"$POD_SCRIPT" tag "$pod" "$fingerprint" | grep -Fq "Tagged $pod" || fail 'the pod-runtime image was not tagged'
+[[ "$(cat "$FAKE_REGISTRY/pod-runtime_fp-$fingerprint")" == "${pod##*@}" ]] ||
+  fail 'the pod-runtime tag does not name its image'
+[[ "$(cat "$FAKE_REGISTRY/egress_fp-$fingerprint")" == "${first##*@}" ]] ||
+  fail 'tagging the pod-runtime image moved the cw-egress tag'
+: >"$FAKE_DOCKER_LOG"
+if "$POD_SCRIPT" tag "$first" "$fingerprint" >/dev/null 2>&1; then
+  fail 'the pod-runtime wrapper tagged a cw-egress reference'
+fi
+if CODEWIRE_SIGNED_IMAGE_REPOSITORY=codewire/mesh "$SCRIPT" exists "$fingerprint" >/dev/null 2>&1; then
+  fail 'another repository was accepted'
+fi
+[[ ! -s "$FAKE_DOCKER_LOG" ]] || fail 'a refused repository or reference reached the registry'
+
 printf '[test-egress-image-tag] create-only fingerprint tags passed\n'

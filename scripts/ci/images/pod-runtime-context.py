@@ -12,7 +12,9 @@ fragment (scripts/ci/release/build-local-runtime.sh linux) or a release's
 merged runtime. Its linux-x86_64 target supplies every part, each checked
 against its digest. The `cw` must be a static x86_64 musl cw built from the
 same source revision as that runtime, read from its build record, so the
-host side and the guest's sealed cw are one source.
+host side and the guest's sealed cw are one source. Without --cw it is the
+sealed cw runtime's own cw, which is exactly that: Dev delivery's build has
+no other (.gitea/workflows/deploy-dev.yaml, build-pod-runtime-image).
 
 The output is a new directory holding the Dockerfile's context:
 
@@ -80,6 +82,15 @@ def check_cw(cw: Path, revision: str) -> None:
             "%s is built from %s, but the runtime from %s" % (cw, record["source_revision"], revision))
 
 
+def sealed_cw(runtime: Path, target: dict, revision: str) -> bytes:
+    """The cw of the target's sealed cw runtime, checked as a release checks it."""
+    sealed = target["cw_runtime"]
+    blobs = runtime / "blobs" / "sha256"
+    lock = release.read_regular(blobs / sealed["lock"]["sha256"], 64 * 1024)
+    pack = release.read_regular(blobs / sealed["pack"]["sha256"], release.CW_RUNTIME_MAX_BYTES + 64 * 1024)
+    return release.check_cw_runtime_pack(lock, pack, CW_TARGET, revision)
+
+
 def copy_blob(runtime: Path, reference: dict, destination: Path, mode: int) -> None:
     """Copy one pinned blob, which load_local_runtime_dir has checked, to a new file."""
     source = runtime / "blobs" / "sha256" / reference["sha256"]
@@ -93,15 +104,20 @@ def copy_blob(runtime: Path, reference: dict, destination: Path, mode: int) -> N
     release._verify_blob_file(destination, reference["sha256"], reference["size"])
 
 
-def assemble(runtime: Path, cw: Path, output: Path) -> str:
-    """Write the context into the new directory `output`; return the source revision."""
+def assemble(runtime: Path, cw: Path | None, output: Path) -> str:
+    """Write the context into the new directory `output`; return the source revision.
+
+    `cw` None takes the sealed cw runtime's own cw."""
     target, revision = runtime_target(runtime)
-    check_cw(cw, revision)
+    if cw is None:
+        cw_bytes = sealed_cw(runtime, target, revision)
+    else:
+        check_cw(cw, revision)
+        cw_bytes = release.read_regular(cw, MAX_CW)
     require(output.is_absolute(), "--output must be an absolute path: %s" % output)
     require(not os.path.lexists(output), "%s already exists; assemble into a new directory" % output)
     output.mkdir(mode=0o755)
-    shutil.copyfile(cw, output / "cw")
-    os.chmod(output / "cw", 0o755)
+    release.write_new(output / "cw", cw_bytes, 0o755)
     root = output / "runtime"
     artifacts = root / "artifacts"
     root.mkdir(mode=0o700)
@@ -123,8 +139,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--runtime", type=Path, required=True,
                         help="a local runtime directory with a linux-x86_64 target (local-runtime.json, blobs/)")
-    parser.add_argument("--cw", type=Path, required=True,
-                        help="a static x86_64 musl cw built from the runtime's source revision")
+    parser.add_argument("--cw", type=Path,
+                        help="a static x86_64 musl cw built from the runtime's source revision "
+                             "(default: the sealed cw runtime's own cw)")
     parser.add_argument("--output", type=Path, required=True, help="the new context directory")
     args = parser.parse_args(argv)
     try:

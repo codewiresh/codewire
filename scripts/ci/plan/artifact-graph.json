@@ -322,6 +322,39 @@
         "third_party/sqlx-sqlite-unused/**"
       ]
     },
+    "pod_runtime_image": {
+      "kind": "composite",
+      "dependencies": [
+        "workspace_cw_binary"
+      ],
+      "inputs": [
+        "scripts/dev/build-native-managed-agent.py",
+        "scripts/dev/cw-runtime-image.py",
+        "scripts/ci/release/cw_release.py",
+        "images/pod-runtime/**",
+        "scripts/ci/images/pod-runtime-context.py",
+        "scripts/ci/images/build-push-image.sh",
+        "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/compute-image-tags.sh",
+        "scripts/ci/images/pipeline-identity.sh",
+        "scripts/ci/setup/trusted-buildkit.sh",
+        "scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh",
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh",
+        "scripts/ci/release/build-local-runtime.sh",
+        "scripts/ci/release/build-runtime-cw.sh",
+        "scripts/ci/release/build-runtime-guest-root.sh",
+        "scripts/ci/release/build-runtime-kernel.sh",
+        "scripts/ci/release/runtime-container.sh",
+        "scripts/ci/release/fetch-pinned.sh",
+        "scripts/ci/release/local-runtime-sources.json",
+        "scripts/ci/release/local_runtime_parts.py",
+        "scripts/ci/release/local_runtime_sources.py",
+        "scripts/ci/release/cw_release_r2.py",
+        "scripts/ci/verify/build-local-vmm-initramfs.sh",
+        "scripts/dev/linux-local-runtime.py",
+        "scripts/dev/cpu-slice.sh"
+      ]
+    },
     "base_image": {
       "kind": "file-set",
       "inputs": ["images/base/**"]

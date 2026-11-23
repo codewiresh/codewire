@@ -244,4 +244,35 @@ for refused in "registry.example.invalid/codewire/mesh@$digest" "registry.exampl
   fi
 done
 
+# --pod-runtime verifies the standard pod-runtime image (#5602) the same way:
+# only a pod-runtime family signature with main CI's verdict counts, and an
+# egress-family signature on the same digest does not.
+pod_ref="registry.example.invalid/codewire/pod-runtime@$digest"
+verify_pod() {
+  PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    DOCKER_LOG="$docker_log" COSIGN_LOG="$cosign_log" FETCH_LOG="$fetch_log" \
+    SIGNATURES="$signatures" FAKE_COSIGN_BINARY="$work/fake-cosign" \
+    OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/fetcher" \
+    "$VERIFIER" --pod-runtime "$1" "$public_key"
+}
+: >"$signatures"
+printf '%s egress %s main-ci\n' "$pod_ref" "$source_sha" >>"$signatures"
+if verify_pod "$pod_ref" >"$work/pod-none.out" 2>"$work/pod-none.err"; then
+  fail 'a pod-runtime image signed only as another family was accepted'
+fi
+grep -Fq 'The pod-runtime image has no valid main-CI-verified signature' "$work/pod-none.err" ||
+  fail 'the unsigned pod-runtime refusal was not attributable'
+printf '%s pod-runtime %s main-ci\n' "$pod_ref" "$source_sha" >>"$signatures"
+verify_pod "$pod_ref" >"$work/pod.out" 2>"$work/pod.err" || {
+  cat "$work/pod.err" >&2
+  fail 'a signed pod-runtime image was refused'
+}
+[[ "$(cat "$work/pod.out")" == "$source_sha" ]] ||
+  fail 'the verifier did not print exactly the source of the verified pod-runtime signature'
+for refused in "registry.example.invalid/codewire/egress@$digest" "registry.example.invalid/codewire/pod-runtime:$source_sha"; do
+  if verify_pod "$refused" >/dev/null 2>&1; then
+    fail "the pod-runtime verifier accepted $refused"
+  fi
+done
+
 printf '[test-verify-runtime-image-signatures] Production signature reuse contract passed\n'

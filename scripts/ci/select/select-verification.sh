@@ -2444,7 +2444,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/deploy/rerun-dev-publish.py|\
       scripts/ci/tests/test-rerun-dev-publish.py|\
       scripts/ci/deploy/wait-for-dev-delivery-turn.py|\
-      scripts/ci/tests/test-wait-for-dev-delivery-turn.py)
+      scripts/ci/tests/test-wait-for-dev-delivery-turn.py|\
+      scripts/ci/deploy/pod-runtime-build-in-flight.py|\
+      scripts/ci/tests/test-pod-runtime-build-in-flight.py)
         select_token deploy
         select_token policy
         recognized=true
@@ -2481,6 +2483,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/sign-runtime-image-set.sh|\
       scripts/ci/tests/test-sign-runtime-image-set.sh|\
       scripts/ci/images/egress-image-tag.sh|\
+      scripts/ci/images/pod-runtime-image-tag.sh|\
       scripts/ci/tests/test-egress-image-tag.sh|\
       scripts/ci/images/verify-runtime-image-signatures.sh|\
       scripts/ci/tests/test-verify-runtime-image-signatures.sh|\
@@ -2623,6 +2626,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/egress-image-pin.py|\
       scripts/ci/tests/test-propose-egress-image-pin.sh|\
       scripts/ci/tests/test-egress-image-pin-verify.sh|\
+      scripts/ci/images/pod-runtime-image-pin.py|\
+      scripts/ci/tests/test-pod-runtime-image-pin.sh|\
       scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\

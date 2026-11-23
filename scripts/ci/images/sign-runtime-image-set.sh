@@ -14,20 +14,25 @@ set -euo pipefail
 # never delivers, so it is in no ImageBundle (private-docs
 # designs/hosted-egress.md, "The image and its deployment"). It takes the
 # Harbor reference by digest and signs it exactly as a runtime family.
+# --pod-runtime signs the standard pod-runtime image (#5602) the same way: Dev
+# delivery builds and signs it, and a deployment pins it by digest.
 sign_target=delivery
-egress_ref=''
+single_ref=''
+single_family=''
 if [[ "${1:-}" == --ghcr-mirror ]]; then
   sign_target=ghcr-mirror
   shift
-elif [[ "${1:-}" == --egress ]]; then
-  sign_target=egress
-  egress_ref="${2:-}"
+elif [[ "${1:-}" == --egress || "${1:-}" == --pod-runtime ]]; then
+  sign_target=single
+  single_family="${1#--}"
+  single_ref="${2:-}"
   shift 2 || true
-  set -- "$egress_ref" "$@"
+  set -- "$single_ref" "$@"
 fi
 if [[ $# -ne 2 ]]; then
   echo 'Usage: sign-runtime-image-set.sh [--ghcr-mirror] IMAGE_BUNDLE PUBLIC_KEY' >&2
   echo '       sign-runtime-image-set.sh --egress HARBOR_EGRESS_REF PUBLIC_KEY' >&2
+  echo '       sign-runtime-image-set.sh --pod-runtime HARBOR_POD_RUNTIME_REF PUBLIC_KEY' >&2
   exit 2
 fi
 
@@ -68,7 +73,7 @@ readonly MAIN_CI_RUN="${CODEWIRE_MAIN_CI_RUN:-}"
   exit 1
 }
 signing_inputs=("$PUBLIC_KEY_INPUT" "$SIGNING_CONFIG_SOURCE")
-[[ "$sign_target" == egress ]] || signing_inputs+=("$BUNDLE_INPUT")
+[[ "$sign_target" == single ]] || signing_inputs+=("$BUNDLE_INPUT")
 for input in "${signing_inputs[@]}"; do
   [[ -f "$input" && -r "$input" && ! -L "$input" ]] || {
     echo "Runtime signing input is missing, unreadable, or a symbolic link: $input" >&2
@@ -99,7 +104,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -m 0700 "$docker_config"
-[[ "$sign_target" == egress ]] || install -m 0400 "$BUNDLE_INPUT" "$bundle"
+[[ "$sign_target" == single ]] || install -m 0400 "$BUNDLE_INPUT" "$bundle"
 install -m 0400 "$PUBLIC_KEY_INPUT" "$public_key"
 install -m 0400 "$SIGNING_CONFIG_SOURCE" "$signing_config"
 openssl pkey -pubin -in "$public_key" -noout >/dev/null 2>&1 || {
@@ -115,9 +120,9 @@ jq -e '
   echo 'Private Cosign signing configuration is invalid' >&2
   exit 1
 }
-if [[ "$sign_target" == egress ]]; then
-  [[ "$egress_ref" =~ ^"$HARBOR_HOST"/codewire/egress@sha256:[0-9a-f]{64}$ ]] || {
-    echo 'The egress image to sign must be a codewire/egress digest reference in Harbor' >&2
+if [[ "$sign_target" == single ]]; then
+  [[ "$single_ref" =~ ^"$HARBOR_HOST"/codewire/"$single_family"@sha256:[0-9a-f]{64}$ ]] || {
+    echo "The $single_family image to sign must be a codewire/$single_family digest reference in Harbor" >&2
     exit 1
   }
 else
@@ -145,6 +150,8 @@ fi
 built_from_for() {
   local family="$1"
   local value_var="CODEWIRE_BUILT_FROM_${family^^}" value
+  # A family name may hold a hyphen (pod-runtime); a variable name may not.
+  value_var="${value_var//-/_}"
   value="${!value_var:-$GITHUB_SHA}"
   [[ "$value" =~ ^[0-9a-f]{40}$ \
     && "$value" != 0000000000000000000000000000000000000000 ]] || {
@@ -207,8 +214,8 @@ registry_login() {
 }
 
 refresh_openbao_token
-# Delivery and cw-egress sign in Harbor; the mirror signs in GHCR.
-if [[ "$sign_target" == delivery || "$sign_target" == egress ]]; then
+# Delivery, cw-egress and the pod-runtime image sign in Harbor; the mirror signs in GHCR.
+if [[ "$sign_target" == delivery || "$sign_target" == single ]]; then
   registry_login platform/data/ci/codewire/harbor-publisher "$HARBOR_HOST" password
 else
   registry_login platform/data/ci/codewire/ghcr-publisher "$GHCR_HOST" token
@@ -327,7 +334,7 @@ sign_family() {
   mkdir -m 0700 "$token_dir"
   digest="${harbor_ref##*@}"
   built_from="$(built_from_for "$family")"
-  if [[ "$sign_target" == delivery || "$sign_target" == egress ]]; then
+  if [[ "$sign_target" == delivery || "$sign_target" == single ]]; then
     reference="$harbor_ref"
   else
     reference="$GHCR_HOST/codewiresh/${family}@${digest}"
@@ -336,9 +343,11 @@ sign_family() {
   sign_reference "$family" "$reference" "$built_from"
 }
 
-if [[ "$sign_target" == egress ]]; then
-  sign_family egress "$egress_ref"
-  echo "Verified and signed the exact cw-egress image in Harbor, verified by ci.yaml run $MAIN_CI_RUN"
+if [[ "$sign_target" == single ]]; then
+  sign_family "$single_family" "$single_ref"
+  display="$single_family"
+  [[ "$single_family" != egress ]] || display=cw-egress
+  echo "Verified and signed the exact $display image in Harbor, verified by ci.yaml run $MAIN_CI_RUN"
   exit 0
 fi
 

@@ -157,7 +157,9 @@ for half in "$service_job" "$daemon_job"; do
 done
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  # cw-egress is built and signed here/p' "$WORKFLOW")"
 egress_build_job="$(sed -n '/^  build-egress-image:/,/^  sign-egress-image:/p' "$WORKFLOW")"
-egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
+egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  build-pod-runtime-image:/p' "$WORKFLOW")"
+pod_build_job="$(sed -n '/^  build-pod-runtime-image:/,/^  sign-pod-runtime-image:/p' "$WORKFLOW")"
+pod_sign_job="$(sed -n '/^  sign-pod-runtime-image:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
 
 assert_build_half() {
   local half="$1" job="$2"
@@ -649,10 +651,52 @@ tag_line="$(grep -n 'egress-image-tag.sh tag' <<<"$egress_sign_job" | cut -d: -f
 [[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
   ((source_check_line < sign_line && sign_line < tag_line)) ||
   fail 'the cw-egress sign job does not check the source tag, then sign, then tag, in that order'
-# Only the publish job and the cw-egress sign job sign, in every workflow.
+# The standard pod-runtime image (#5602) is built and signed the same way, and
+# also never delivered: its build waits for the publish job, takes the kernels
+# only from the parts cache, and nothing on the delivery path waits for it.
+[[ -n "$pod_build_job" && -n "$pod_sign_job" ]] || fail 'the pod-runtime build or sign job is missing'
+grep -Fxq '    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]' <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not wait for the delivery turn and the publish job'
+grep -Fq '    if: ${{ always() && ' <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not run once publish has finished or been skipped'
+grep -Fq "needs.dev-delivery-turn.outputs.turn == 'go'" <<<"$pod_build_job" ||
+  fail 'the pod-runtime build runs on a commit that does not hold the delivery turn'
+grep -Fq 'LOCAL_RUNTIME_CPUS=2 LOCAL_RUNTIME_JOBS=2 CARGO_BUILD_JOBS=2' <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not cap its builder containers and Rust build jobs'
+# One build at a time: its first step after the checkout skips the job while
+# another run's pod-runtime build is running, and every later step waits on it.
+first_steps="$(grep -E '^      - (uses|name):' <<<"$pod_build_job" | head -2)"
+[[ "$first_steps" == *'actions-checkout'*$'\n'*'- name: Skip while another pod-runtime build runs' ]] ||
+  fail "the in-flight skip is not the build job's first step after the checkout: $first_steps"
+grep -Fq 'run: python3 -I -B scripts/ci/deploy/pod-runtime-build-in-flight.py' <<<"$pod_build_job" ||
+  fail 'the in-flight step does not run the in-flight check'
+grep -Fq "if: \${{ steps.in-flight.outputs.in_flight == 'false' }}" <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not wait on the in-flight check'
+grep -Fq "scripts/ci/images/pod-runtime-image-tag.sh exists" <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not look for a signed image of its inputs first'
+grep -Fq 'LOCAL_RUNTIME_NO_BUILD=1' <<<"$pod_build_job" ||
+  fail 'the pod-runtime build may build a kernel instead of skipping on a cache miss'
+if grep -Eq 'sign-runtime-image-set|cosign|image-tag.sh tag|dispatch-deploy-dev' <<<"$pod_build_job"; then
+  fail 'the pod-runtime build signs, tags or dispatches'
+fi
+if grep -E '^    needs:' "$WORKFLOW" | grep -q 'sign-pod-runtime-image' \
+    || [[ "$(grep -cE '^    needs:.*build-pod-runtime-image' "$WORKFLOW")" -ne 1 ]]; then
+  fail 'a job other than the pod-runtime sign job waits for the pod-runtime jobs'
+fi
+grep -Fq "if: \${{ steps.verdict.outputs.verified == 'true' }}" <<<"$pod_sign_job" ||
+  fail 'the pod-runtime sign job signs without a verified verdict'
+grep -Fq 'CODEWIRE_POD_RUNTIME_CANDIDATE: ${{ needs.build-pod-runtime-image.outputs.candidate_ref }}' <<<"$pod_sign_job" ||
+  fail 'the pod-runtime sign job signs something other than the build'"'"'s digest'
+source_check_line="$(grep -n 'pod-runtime-image-tag.sh source-digest' <<<"$pod_sign_job" | cut -d: -f1)"
+sign_line="$(grep -n 'sign-runtime-image-set.sh --pod-runtime' <<<"$pod_sign_job" | cut -d: -f1)"
+tag_line="$(grep -n 'pod-runtime-image-tag.sh tag' <<<"$pod_sign_job" | cut -d: -f1)"
+[[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
+  ((source_check_line < sign_line && sign_line < tag_line)) ||
+  fail 'the pod-runtime sign job does not check the source tag, then sign, then tag, in that order'
+# Only the publish job and the two single-image sign jobs sign, in every workflow.
 signers="$(grep -l 'sign-runtime-image-set.sh' "$ROOT"/.gitea/workflows/*.yaml)"
 [[ "$signers" == "$WORKFLOW" ]] || fail "a workflow other than Deploy Dev signs runtime images: $signers"
-[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 3 ]] ||
-  fail 'a job other than the publish job and the cw-egress sign job signs runtime images'
+[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 4 ]] ||
+  fail 'a job other than the publish job and the cw-egress and pod-runtime sign jobs signs runtime images'
 
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'

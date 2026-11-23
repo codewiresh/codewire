@@ -43,10 +43,18 @@ cpu_slice_enter() {
 # cpu_slice_docker_args: set CPU_SLICE_DOCKER_ARGS to the docker run arguments
 # that keep a container in the slice when this shell runs there. Docker starts
 # containers in system.slice otherwise, outside the slice's ceiling.
+# LOCAL_RUNTIME_CPUS, a whole number of cores, also caps each builder container
+# with --cpus, in CI too: Dev delivery's pod-runtime build (#5602) sets it so
+# build scripts and linkers, which ignore Cargo's job count, stay within it.
 cpu_slice_docker_args() {
   CPU_SLICE_DOCKER_ARGS=()
   if ! cpu_slice_off && cpu_slice_inside; then
     CPU_SLICE_DOCKER_ARGS=(--cgroup-parent="$CPU_SLICE")
+  fi
+  if [[ "${LOCAL_RUNTIME_CPUS:-}" =~ ^[1-9][0-9]?$ ]]; then
+    CPU_SLICE_DOCKER_ARGS+=(--cpus "$LOCAL_RUNTIME_CPUS")
+  elif [ -n "${LOCAL_RUNTIME_CPUS:-}" ]; then
+    printf 'cpu-slice: LOCAL_RUNTIME_CPUS must be a whole number of cores from 1 to 99; ignored\n' >&2
   fi
 }
 

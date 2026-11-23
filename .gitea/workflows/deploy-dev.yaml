@@ -57,6 +57,7 @@ jobs:
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
       dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
       egress_image_fingerprint: ${{ steps.select.outputs.egress_image_fingerprint }}
+      pod_runtime_image_fingerprint: ${{ steps.select.outputs.pod_runtime_image_fingerprint }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -478,6 +479,149 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --egress "$CODEWIRE_EGRESS_CANDIDATE" \
             scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/egress-image-tag.sh tag "$CODEWIRE_EGRESS_CANDIDATE" "$CODEWIRE_EGRESS_FINGERPRINT"
+
+  # The standard pod-runtime image (#5602) is built and signed here and never
+  # delivered, exactly as cw-egress is: only a merged pin in
+  # deployments/k8s/orchestration/pod-runtime-image.digest decides what a
+  # deployment runs. It builds only on the run that holds the delivery turn,
+  # once its publish job has finished or been skipped, so a deferred or
+  # replaced commit never builds and nothing on the delivery path needs it.
+  # Its local runtime takes the kernels from the release parts cache and
+  # never builds one: a cache miss skips the image for this commit, and the
+  # pin stays where it was.
+  build-pod-runtime-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Build and push the pod-runtime image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    # The local runtime's Linux side took 23 to 33 minutes in the last three
+    # releases with the kernels cached and four cw build jobs; at two jobs a
+    # build it is estimated at 40 to 60, and the image adds a few minutes.
+    timeout-minutes: 90
+    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]
+    if: ${{ always() && needs.deploy-selection.result == 'success' && needs.dev-delivery-turn.result == 'success' && needs.dev-delivery-turn.outputs.turn == 'go' && needs.deploy-selection.outputs.pod_runtime_image_fingerprint != '' }}
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.pod-runtime_candidate_ref }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      CODEWIRE_POD_RUNTIME_FINGERPRINT: ${{ needs.deploy-selection.outputs.pod_runtime_image_fingerprint }}
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One pod-runtime build at a time: while another Deploy Dev run's build
+      # is running, this one builds nothing, and a later delivery builds the
+      # newest commit, so Dev's standard-VM daemon trails main by up to one
+      # build. It fails open to building when the API cannot be read.
+      - name: Skip while another pod-runtime build runs
+        id: in-flight
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/deploy/pod-runtime-build-in-flight.py
+
+      # A fp- tag exists only once a build of these inputs was signed
+      # (pod-runtime-image-tag.sh), so a present one means there is nothing to build.
+      - name: Look for a signed image of these inputs
+        id: existing
+        if: ${{ steps.in-flight.outputs.in_flight == 'false' }}
+        run: |
+          set -euo pipefail
+          state="$(scripts/ci/images/pod-runtime-image-tag.sh exists "$CODEWIRE_POD_RUNTIME_FINGERPRINT")"
+          echo "pod-runtime image for fingerprint $CODEWIRE_POD_RUNTIME_FINGERPRINT: $state"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+
+      # The release's own Linux side, from this commit: the guest root and the
+      # sealed cw runtime built here in their pinned Rust containers (never on
+      # the runner's toolchain), the kernels only from the parts cache
+      # (LOCAL_RUNTIME_NO_BUILD), whose miss exits 4 and skips the image.
+      # Each Rust builder container gets two cores (LOCAL_RUNTIME_CPUS, docker
+      # --cpus, which build scripts and linkers cannot exceed) and two Cargo
+      # jobs to match (LOCAL_RUNTIME_JOBS for the cw runtimes, CARGO_BUILD_JOBS
+      # for the guest roots). The two targets' chains run side by side, so the
+      # build takes about four cores beside the delivery's own builds.
+      - name: Build the local runtime's Linux side
+        id: runtime
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        run: |
+          set -euo pipefail
+          work="$GITHUB_WORKSPACE/.local-runtime"
+          mkdir -m 0700 "$work" "$work/tmp"
+          status=0
+          TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" LOCAL_RUNTIME_NO_BUILD=1 \
+            LOCAL_RUNTIME_CPUS=2 LOCAL_RUNTIME_JOBS=2 CARGO_BUILD_JOBS=2 \
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
+            --version "v0.0.0-main.${GITHUB_SHA:0:12}" --output "$work/linux" || status=$?
+          if [ "$status" -eq 4 ]; then
+            echo "::warning::a runtime kernel is not in the parts cache; no pod-runtime image for this commit"
+            echo 'built=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+          echo 'built=true' >>"$GITHUB_OUTPUT"
+
+      # The context sits inside this checkout, so the image's provenance names
+      # this commit as every runtime image's does.
+      - name: Assemble the image's context
+        if: ${{ steps.runtime.outputs.built == 'true' }}
+        run: |
+          python3 -I scripts/ci/images/pod-runtime-context.py \
+            --runtime "$GITHUB_WORKSPACE/.local-runtime/linux/linux-x86_64" \
+            --output "$GITHUB_WORKSPACE/.pod-runtime-context"
+
+      - name: Build and push the pod-runtime image
+        id: build
+        if: ${{ steps.runtime.outputs.built == 'true' }}
+        env:
+          CODEWIRE_POD_RUNTIME_CONTEXT: ${{ github.workspace }}/.pod-runtime-context
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+        run: scripts/ci/images/build-push-runtime-images.sh pod-runtime
+
+  # Signs only the digest this run's build reported, after main CI's verdict
+  # for this exact commit, as sign-egress-image does.
+  sign-pod-runtime-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Sign the pod-runtime image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [deploy-selection, build-pod-runtime-image]
+    if: ${{ always() && needs.build-pod-runtime-image.result == 'success' && needs.build-pod-runtime-image.outputs.candidate_ref != '' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Read main CI's verdict for this commit
+        id: verdict
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/plan/main-ci-verdict.py check \
+            --sha "$GITHUB_SHA" --tree "$(git rev-parse "$GITHUB_SHA^{tree}")" --github-output
+
+      # Signs nothing a tag points at: only the build's reported digest, and
+      # only while this commit's source tag still names it.
+      - name: Sign the exact pod-runtime image this run built
+        if: ${{ steps.verdict.outputs.verified == 'true' }}
+        env:
+          CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}
+          CODEWIRE_POD_RUNTIME_CANDIDATE: ${{ needs.build-pod-runtime-image.outputs.candidate_ref }}
+          CODEWIRE_POD_RUNTIME_FINGERPRINT: ${{ needs.deploy-selection.outputs.pod_runtime_image_fingerprint }}
+        run: |
+          set -euo pipefail
+          source_digest="$(scripts/ci/images/pod-runtime-image-tag.sh source-digest "$GITHUB_SHA")"
+          [[ "$source_digest" == "${CODEWIRE_POD_RUNTIME_CANDIDATE##*@}" ]] || {
+            echo "::error::the pod-runtime source tag names $source_digest, not the digest this run built" >&2
+            exit 1
+          }
+          scripts/ci/images/sign-runtime-image-set.sh --pod-runtime "$CODEWIRE_POD_RUNTIME_CANDIDATE" \
+            scripts/ci/trust/codewire-runtime-signing.pub
+          scripts/ci/images/pod-runtime-image-tag.sh tag "$CODEWIRE_POD_RUNTIME_CANDIDATE" "$CODEWIRE_POD_RUNTIME_FINGERPRINT"
 
   # A run that deferred builds nothing; this job's success is how the delivery
   # in flight knows to hand it the turn (wait-for-dev-delivery-turn.py).

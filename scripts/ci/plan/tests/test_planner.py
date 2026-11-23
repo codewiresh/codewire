@@ -351,6 +351,15 @@ class FixtureRepository:
                         "proto/**",
                     ],
                 },
+                "pod_runtime_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                        "proto/**",
+                    ],
+                },
                 "base_image": {
                     "kind": "file-set",
                     "inputs": ["images/base/**"],

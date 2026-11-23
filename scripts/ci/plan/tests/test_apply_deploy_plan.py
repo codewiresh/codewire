@@ -21,6 +21,7 @@ RUNTIME_ARTIFACTS = (
 )
 ARTIFACTS = ("dev_release_tree", "dev_acceptance_harness", *RUNTIME_ARTIFACTS)
 EGRESS_FINGERPRINT = "f" * 64
+POD_RUNTIME_FINGERPRINT = "a" * 64
 
 
 def plan_document(
@@ -28,6 +29,7 @@ def plan_document(
     *,
     baseline_valid: bool = True,
     egress: dict | None = None,
+    pod_runtime: dict | None = None,
 ) -> dict:
     effective_states = {name: "unaffected" for name in ARTIFACTS}
     effective_states.update(states or {})
@@ -57,6 +59,9 @@ def plan_document(
             "egress_image": egress
             if egress is not None
             else {"state": "unaffected", "head_fingerprint": EGRESS_FINGERPRINT},
+            "pod_runtime_image": pod_runtime
+            if pod_runtime is not None
+            else {"state": "unaffected", "head_fingerprint": POD_RUNTIME_FINGERPRINT},
         },
         "degraded_reasons": [],
     }
@@ -233,6 +238,28 @@ class DeployPlanAdapterTests(unittest.TestCase):
                 outputs, _ = self.apply(plan_document(egress=egress))
                 self.assertEqual(outputs["reason"], "plan_invalid")
                 self.assertEqual(outputs["egress_image_fingerprint"], "")
+
+    # The standard pod-runtime image (#5602) is keyed the same way.
+    def test_the_pod_runtime_fingerprint_is_passed_on_and_selects_nothing(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(pod_runtime={"state": "affected", "head_fingerprint": "b" * 64})
+        )
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["pod_runtime_image_fingerprint"], "b" * 64)
+        self.assertNotIn("pod_runtime_image", outputs["matched_categories"])
+
+    def test_no_pod_runtime_fingerprint_builds_no_pod_runtime_image(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(pod_runtime={"state": "unclassified", "head_fingerprint": None})
+        )
+        self.assertEqual(outputs["pod_runtime_image_fingerprint"], "")
+
+    def test_a_malformed_pod_runtime_fingerprint_fails_closed(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(pod_runtime={"state": "unaffected", "head_fingerprint": "B" * 64})
+        )
+        self.assertEqual(outputs["reason"], "plan_invalid")
+        self.assertEqual(outputs["pod_runtime_image_fingerprint"], "")
 
 
 if __name__ == "__main__":

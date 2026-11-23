@@ -15,6 +15,10 @@
 # it and the other is left as it is. A present tag lets a later build skip; it
 # never makes anything signed, and the pin proposal verifies the signature,
 # source and fingerprint itself before it proposes the digest.
+#
+# The standard pod-runtime image (#5602) is built, signed and keyed the same
+# way; pod-runtime-image-tag.sh runs this with CODEWIRE_SIGNED_IMAGE_REPOSITORY
+# naming its repository. Nothing else may be named.
 set -euo pipefail
 
 usage() {
@@ -23,7 +27,14 @@ usage() {
 }
 
 readonly REGISTRY="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
-readonly REPOSITORY="$REGISTRY/codewire/egress"
+case "${CODEWIRE_SIGNED_IMAGE_REPOSITORY:-codewire/egress}" in
+  codewire/egress|codewire/pod-runtime) ;;
+  *)
+    echo 'CODEWIRE_SIGNED_IMAGE_REPOSITORY must be codewire/egress or codewire/pod-runtime' >&2
+    exit 2
+    ;;
+esac
+readonly REPOSITORY="$REGISTRY/${CODEWIRE_SIGNED_IMAGE_REPOSITORY:-codewire/egress}"
 fetcher="${OPENBAO_HARBOR_CREDENTIAL_FETCHER:-scripts/ci/setup/fetch-openbao-harbor-credentials.sh}"
 docker_bin="${DOCKER_BIN:-docker}"
 
@@ -88,7 +99,7 @@ manifest_digest() {
 case "$command" in
   exists)
     # The digest goes to the job log: until Harbor's immutable rule for
-    # codewire/egress lands, a fp- tag nobody signed would stall builds of
+    # the repository lands, a fp- tag nobody signed would stall builds of
     # these inputs, and the log names what it points at.
     if digest="$(manifest_digest "$REPOSITORY:fp-$1")"; then
       echo "$REPOSITORY:fp-$1 names $digest" >&2

@@ -504,4 +504,38 @@ for refused in \
   [[ ! -s "$signature_state" ]] || fail "egress signing signed something for $refused"
 done
 
+# The standard pod-runtime image (#5602) is signed alone the same way
+# (--pod-runtime): one Harbor codewire/pod-runtime reference by digest, and
+# neither the egress repository nor any other accepted.
+pod_ref="registry.example.invalid/codewire/pod-runtime@$digest"
+: >"$signature_state"
+: >"$signature_annotations"
+: >"$curl_log"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" --pod-runtime "$pod_ref" "$public_key" >"$work/pod.out" 2>"$work/pod.err"; then
+  sed -n '1,40p' "$work/pod.err" >&2
+  fail 'pod-runtime signing fixture failed'
+fi
+[[ "$(wc -l <"$signature_state")" -eq 1 ]] && grep -Fxq "$pod_ref" "$signature_state" ||
+  fail 'pod-runtime signing did not sign exactly the pod-runtime reference'
+grep -Fq "$pod_ref dev.codewire.image-family=pod-runtime" "$signature_annotations" ||
+  fail 'pod-runtime signature did not name its family'
+grep -Fq 'Verified and signed the exact pod-runtime image in Harbor' "$work/pod.out" ||
+  fail 'pod-runtime signing omitted its result'
+[[ "$(grep -c '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log")" -eq 1 ]] ||
+  fail 'pod-runtime signing did not log in to Harbor exactly once'
+for refused in \
+    "registry.example.invalid/codewire/egress@$digest" \
+    "registry.example.invalid/codewire/pod-runtime:$source_sha" \
+    "ghcr.io/codewiresh/pod-runtime@$digest"; do
+  : >"$signature_state"
+  if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+      "$SIGNER" --pod-runtime "$refused" "$public_key" >/dev/null 2>"$work/pod-refused.err"; then
+    fail "pod-runtime signing accepted $refused"
+  fi
+  grep -Fq 'must be a codewire/pod-runtime digest reference in Harbor' "$work/pod-refused.err" ||
+    fail "pod-runtime refusal of $refused was not attributable"
+  [[ ! -s "$signature_state" ]] || fail "pod-runtime signing signed something for $refused"
+done
+
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'

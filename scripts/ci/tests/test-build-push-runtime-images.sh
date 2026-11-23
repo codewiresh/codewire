@@ -126,6 +126,7 @@ printf '%s|%s|%s|%s|%s|%s|%s\n' \
   "${CODEWIRE_CARGO_BUILD_JOBS:-default}" >>"$BUILD_LOG"
 printf 'candidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
+printf '%s %s %s\n' "$name" "$2" "${3:-.}" >>"${CONTEXT_LOG:-/dev/null}"
 # What a real build leaves in the shared cw image work.
 mkdir -p "$CODEWIRE_CW_IMAGE_WORK/cw-producer.fixture/build"
 printf 'built\n' >"$CODEWIRE_CW_IMAGE_WORK/cw-producer.fixture/build/$name.tar"
@@ -592,5 +593,32 @@ grep -Fq 'Runtime image mesh has no trusted planner state; building it from sour
   fail "missing planner state rebuilt more than the unclassified image"
 grep -qx "mesh_built_from=${head_sha}" "$stateless_output" ||
   fail "missing planner state did not rebuild mesh from the exact head"
+
+# The standard pod-runtime image (#5602) builds alone from the context
+# pod-runtime-context.py assembled, which must sit inside the checkout so the
+# build's provenance names this commit; anything else builds nothing.
+pod_output="$work/pod-output"
+pod_build_log="$work/pod-build.log"
+pod_context_log="$work/pod-context.log"
+mkdir "$fixture/.pod-runtime-context"
+run_group pod-runtime "$pod_output" "$work/pod-docker.log" "$pod_build_log" 53 \
+  CONTEXT_LOG="$pod_context_log" \
+  CODEWIRE_POD_RUNTIME_CONTEXT="$fixture/.pod-runtime-context" >/dev/null 2>"$work/pod.stderr" ||
+  fail "the pod-runtime group failed: $(cat "$work/pod.stderr")"
+[[ "$(cat "$pod_context_log")" == "pod-runtime images/pod-runtime/Dockerfile $fixture/.pod-runtime-context" ]] ||
+  fail "the pod-runtime image was not built alone from its Dockerfile and context: $(cat "$pod_context_log")"
+grep -Eq '^pod-runtime_candidate_ref=registry\.example\.invalid/codewire/pod-runtime@sha256:[0-9a-f]{64}$' "$pod_output" ||
+  fail 'the pod-runtime group omitted its exact candidate output'
+grep -qx "pod-runtime_built_from=$head_sha" "$pod_output" ||
+  fail 'the pod-runtime group omitted its built-from source'
+outside="$(mktemp -d "$work/outside.XXXXXX")"
+for context in '' "$outside" "$fixture/.missing-context"; do
+  : >"$work/pod-refused-build.log"
+  if run_group pod-runtime "$work/pod-refused-output" "$work/pod-refused-docker.log" "$work/pod-refused-build.log" 54 \
+      CODEWIRE_POD_RUNTIME_CONTEXT="$context" >/dev/null 2>&1; then
+    fail "the pod-runtime group built from context '$context'"
+  fi
+  [[ ! -s "$work/pod-refused-build.log" ]] || fail "a refused pod-runtime context reached the build: '$context'"
+done
 
 printf '[test-build-push-runtime-images] split protected runtime build contract passed\n'

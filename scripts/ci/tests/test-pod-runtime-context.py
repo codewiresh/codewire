@@ -67,6 +67,13 @@ class Context(unittest.TestCase):
         self.assertEqual((self.output / "runtime/runtime.pack").read_bytes(), self.files[sealed["pack"]["sha256"]])
         self.assertEqual((self.output / "cw").read_bytes(), self.cw.read_bytes())
 
+    def test_without_a_cw_the_context_takes_the_sealed_runtimes_own_cw(self):
+        context.assemble(self.runtime, None, self.output)
+        sealed = self.target["cw_runtime"]
+        _, payload = release.decode_pack(self.files[sealed["pack"]["sha256"]])
+        self.assertEqual((self.output / "cw").read_bytes(), payload)
+        self.assertEqual(stat.S_IMODE((self.output / "cw").lstat().st_mode), 0o755)
+
     def test_a_cw_from_another_source_than_the_runtime_is_refused(self):
         self.cw.write_bytes(fixture.executable("x86_64-unknown-linux-musl", revision="d" * 40))
         with self.assertRaisesRegex(context.ContextError, "built from d+, but the runtime from a+"):
