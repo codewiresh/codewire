@@ -174,6 +174,15 @@ async fn identity_in_mode(
                     (StatusCode::ACCEPTED, Json(serde_json::json!({ "sent": true })))
                         .into_response()
                 }
+                // An address SES suppressed (#4548).
+                "/api/auth/resend-verification" if json["token"] == "suppressed-address" => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "code": "email_undeliverable",
+                        "detail": "<script>upstream detail</script>",
+                    })),
+                )
+                    .into_response(),
                 "/api/auth/resend-verification" => StatusCode::BAD_REQUEST.into_response(),
                 "/api/auth/oauth/link/pending" => {
                     if json["token"] == HANDLE {
@@ -677,6 +686,10 @@ async fn one_click_sends_a_new_verification_link() {
             "used-or-expired",
             "That request expired. Sign in again to resend the verification email.",
         ),
+        (
+            "suppressed-address",
+            "Email to that address can&#39;t be delivered. Check it, or sign up with a different address.",
+        ),
     ] {
         let response = client()
             .post(format!(
@@ -693,6 +706,7 @@ async fn one_click_sends_a_new_verification_link() {
         let body = response.text().await.unwrap();
         assert!(body.contains(expected), "{token}: {body}");
         assert!(!body.contains("name=\"resend_token\""));
+        assert!(!body.contains("upstream detail"), "{token}: {body}");
     }
     let sent: Vec<_> = calls
         .lock()
@@ -701,7 +715,10 @@ async fn one_click_sends_a_new_verification_link() {
         .filter(|(path, _)| path == "/api/auth/resend-verification")
         .map(|(_, body)| body["token"].clone())
         .collect();
-    assert_eq!(sent, [RESEND_TOKEN, "used-or-expired"]);
+    assert_eq!(
+        sent,
+        [RESEND_TOKEN, "used-or-expired", "suppressed-address"]
+    );
 }
 
 async fn submit(server: &TestServer, reason: &str) -> reqwest::Response {

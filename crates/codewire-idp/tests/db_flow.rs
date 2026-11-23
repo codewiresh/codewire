@@ -7740,3 +7740,251 @@ async fn prompt_and_max_age(pool: PgPool) {
     let bounded = callback(bounded, FRESH).await;
     assert!(code(&bounded), "max_age after a sign-in: {bounded}");
 }
+
+/// An address SES suppressed gets no verification email (#4548): the admin
+/// list marks it, the admin's Resend says why and sends nothing, and an
+/// address SES didn't suppress is unmarked.
+#[tokio::test]
+async fn an_admin_sees_which_addresses_ses_suppressed() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp suppressed-address admin e2e");
+        return;
+    };
+    in_own_database(
+        &url,
+        "cw_idp_suppressed_admin",
+        an_admin_sees_which_addresses_ses_suppressed_in_its_database,
+    )
+    .await;
+}
+
+async fn an_admin_sees_which_addresses_ses_suppressed_in_its_database(pool: PgPool) {
+    let users = [
+        ("u_admin_suppress", "admin-suppress@example.com", true, true),
+        ("u_bounced", "bounced@example.com", false, false),
+        ("u_complained", "complained@example.com", false, false),
+        ("u_deliverable", "deliverable@example.com", false, false),
+    ];
+    for (id, email, verified, admin) in users {
+        sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ($1,$2,$1,$3,$4,$3)")
+            .bind(id)
+            .bind(email)
+            .bind(verified)
+            .bind(admin)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ('s_admin_suppress','u_admin_suppress',$1,NOW() + interval '1 hour')")
+        .bind(hash_session_token("sess_admin_suppress_token"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    outbox.suppress("bounced@example.com", codewire_email::Suppression::Bounced);
+    outbox.suppress(
+        "complained@example.com",
+        codewire_email::Suppression::Complained,
+    );
+    let app = codewire_idp::access_admin::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        mail,
+        AuthState { pool: pool.clone() },
+    );
+    let bounces = metric(r#"codewire_idp_mail_suppressed_total{reason="bounce"}"#).await;
+    let clear =
+        metric(r#"codewire_idp_mail_suppression_lookups_total{outcome="not_suppressed"}"#).await;
+
+    let (status, body, _) = sess_req(
+        &app,
+        "GET",
+        "/api/admin/accounts",
+        Some("sess_admin_suppress_token"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let mark = |id: &str| {
+        body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == id)
+            .map(|account| account.get("mailSuppressed").cloned())
+            .unwrap()
+    };
+    assert_eq!(mark("u_bounced"), Some(serde_json::json!("bounce")));
+    assert_eq!(mark("u_complained"), Some(serde_json::json!("complaint")));
+    assert_eq!(mark("u_deliverable"), None);
+    // Every lookup is counted by what it answered, never by address: the
+    // admin's and the deliverable account's at least.
+    assert!(
+        metric(r#"codewire_idp_mail_suppression_lookups_total{outcome="not_suppressed"}"#).await
+            >= clear + 2.0
+    );
+
+    for (user, code, detail) in [
+        (
+            "u_bounced",
+            "email_bounced",
+            "Email to that address bounced.",
+        ),
+        (
+            "u_complained",
+            "email_marked_as_spam",
+            "Email to that address was marked as spam.",
+        ),
+    ] {
+        let (status, body, _) = sess_req(
+            &app,
+            "POST",
+            &format!("/api/admin/accounts/{user}/resend-verification"),
+            Some("sess_admin_suppress_token"),
+            "{}",
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["code"], code, "{body}");
+        assert_eq!(body["detail"], detail, "{body}");
+    }
+    let issued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM verifications WHERE identifier IN ('bounced@example.com', 'complained@example.com')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((issued, outbox.sent().len()), (0, 0));
+    assert_eq!(
+        metric(r#"codewire_idp_mail_suppressed_total{reason="bounce"}"#).await,
+        bounces + 1.0
+    );
+    // An address SES delivers to is sent to as before.
+    let (status, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/admin/accounts/u_deliverable/resend-verification",
+        Some("sess_admin_suppress_token"),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(outbox.sent().len(), 1);
+}
+
+/// The account holder's own Resend to a suppressed address sends nothing,
+/// counts nothing against the address's verification emails, and says only
+/// that the address can't be delivered to, never why (#4548).
+#[tokio::test]
+async fn a_resend_to_a_suppressed_address_says_it_cannot_be_delivered() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp suppressed-address resend e2e");
+        return;
+    };
+    in_own_database(
+        &url,
+        "cw_idp_suppressed_resend",
+        a_resend_to_a_suppressed_address_says_it_cannot_be_delivered_in_its_database,
+    )
+    .await;
+}
+
+async fn a_resend_to_a_suppressed_address_says_it_cannot_be_delivered_in_its_database(
+    pool: PgPool,
+) {
+    let email = "complained-owner@example.com";
+    let password = "Compl4ined!Owner";
+    let invite_code = "synthetic-suppressed-invite";
+    forget_mail_counts(&pool, &[email]).await;
+    let invite_hash = format!("{:x}", Sha256::digest(invite_code.as_bytes()));
+    let (mail, _) = codewire_email::EmailClient::recording();
+    let app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::from_sha256_hashes(Some(&invite_hash))
+            .unwrap(),
+        "https://app.codewire.test".to_owned(),
+        mail,
+    );
+    let (resend_mail, resent) = codewire_email::EmailClient::recording();
+    resent.suppress(email, codewire_email::Suppression::Complained);
+    let links = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        resend_mail,
+        AuthState { pool: pool.clone() },
+        None,
+    );
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(
+            r#"{{"email":"{email}","password":"{password}","name":"Owner","invite_code":"{invite_code}"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(st, 202, "sign-up: {body}");
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{password}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        (st, &body["code"]),
+        (403, &serde_json::json!("email_unverified"))
+    );
+    let resend_token = body["resendToken"].as_str().unwrap().to_owned();
+    // Older than the five minutes that count as a resend.
+    sqlx::query(
+        "UPDATE verifications SET created_at = created_at - interval '10 minutes' \
+         WHERE identifier = $1 AND purpose = 'email_verification'",
+    )
+    .bind(email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let counted = || async {
+        sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT count FROM rate_limit WHERE key = 'mail_verification:' || \
+             encode(sha256(convert_to(lower(trim($1)), 'UTF8')), 'hex')",
+        )
+        .bind(email)
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .flatten()
+    };
+    let before = counted().await;
+    let complaints = metric(r#"codewire_idp_mail_suppressed_total{reason="complaint"}"#).await;
+
+    let (st, body, _) = sess_req(
+        &links,
+        "POST",
+        "/api/auth/resend-verification",
+        None,
+        &format!(r#"{{"token":"{resend_token}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 422, "{body}");
+    assert_eq!(body["code"], "email_undeliverable", "{body}");
+    assert_eq!(
+        body["detail"], "Email to that address can't be delivered.",
+        "{body}"
+    );
+    assert!(!body.to_string().contains("spam"), "{body}");
+    assert!(resent.sent().is_empty());
+    assert_eq!(
+        counted().await,
+        before,
+        "a skipped resend counted against the address"
+    );
+    assert_eq!(
+        metric(r#"codewire_idp_mail_suppressed_total{reason="complaint"}"#).await,
+        complaints + 1.0
+    );
+}

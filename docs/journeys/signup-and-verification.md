@@ -19,7 +19,7 @@ Updated 2026-11-23.
 | `signup-email-review` | not yet observed | the operator's notice for a GitHub access request observed 2026-11-21 at v0.4.26 (#5358); the email path not yet observed |
 | `signup-unverified-stranger` | observed 2026-11-16 at b183980df, stand-in (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
-| `signup-undeliverable` | not yet built (#4548) | not yet built (#4548) |
+| `signup-undeliverable` | not yet observed (#4548) | not yet observed (#4548) |
 | `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a GitHub sign-up through review, a second GitHub sign-in, and Disconnect and Connect Google observed 2026-11-21 at v0.4.26 (#5646) |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
@@ -227,9 +227,8 @@ Issue: #4481.
 
 ## `signup-undeliverable`: an address SES won't deliver to
 
-Issue: #4548. Not yet built: these steps are what the code must make true.
-The rules are in `docs/dev/AUTH-POLICY.md`, "An address SES won't deliver
-to".
+Issue: #4548. The rules are in `docs/dev/AUTH-POLICY.md`, "An address SES
+won't deliver to".
 
 - **Entry points:** the **Resend verification email** button on the sign-in
   page; Admin → Manage account access, its Email column and its **Resend
@@ -260,7 +259,7 @@ to".
   "Marked as spam" and "Email to that address was marked as spam." An SES
   answer that is late, throttled or refused shows no badge and blocks nothing:
   Resend then sends as before.
-- **Observed:** not yet built.
+- **Observed:** not yet observed.
 
 ## `signup-provider`: sign in with GitHub or Google
 

@@ -112,7 +112,7 @@ losing its email silently.
 | `CODEWIRE_SES_REGION` | Required when SES is enabled | The AWS region of that SES identity. | `eu-west-1` |
 
 The IdP's SES identity may also read the account-level suppression list,
-`ses:GetSuppressedDestination` (#4548, not yet built). It asks about one
+`ses:GetSuppressedDestination` (#4548). It asks about one
 address it holds before a verification resend and for the admin's account list
 (`docs/dev/AUTH-POLICY.md`, "An address SES won't deliver to"). Without the
 permission every answer is unknown, and the IdP sends as it would without the

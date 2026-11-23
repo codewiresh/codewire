@@ -85,6 +85,10 @@ struct AccountAccessResponse {
     /// An IdP that does not say is read as not suspended.
     #[serde(default)]
     suspended: bool,
+    /// `bounce` or `complaint` when SES suppressed the address (#4548);
+    /// absent when it didn't, or the IdP didn't reach it.
+    #[serde(default)]
+    mail_suppressed: Option<String>,
     access_reason: Option<String>,
     created_at: String,
     /// An IdP that does not list identities yet is read as none.
@@ -136,7 +140,12 @@ struct EmptyRequest {}
 
 #[derive(Debug, Deserialize)]
 struct ResendVerificationResponse {
+    #[serde(default)]
     sent: bool,
+    /// A refusal's code: `email_bounced` or `email_marked_as_spam` when SES
+    /// suppressed the address (#4548).
+    #[serde(default)]
+    code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,6 +407,15 @@ pub(super) async fn resend_account_verification(
         StatusCode::CONFLICT => account_redirect("", "already-verified", &headers),
         StatusCode::SERVICE_UNAVAILABLE => {
             account_redirect("", "verification-unavailable", &headers)
+        }
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            match identity.body.as_ref().map(|body| body.code.as_str()) {
+                Some("email_bounced") => account_redirect("", "email-bounced", &headers),
+                Some("email_marked_as_spam") => {
+                    account_redirect("", "email-marked-as-spam", &headers)
+                }
+                _ => account_redirect("", "unavailable", &headers),
+            }
         }
         _ => account_redirect("", "unavailable", &headers),
     }
@@ -1135,6 +1153,11 @@ fn account_access_view(account: &AccountAccessResponse, own_id: &str) -> Account
         email_verified: account.email_verified,
         enabled: account.enabled,
         suspended: account.suspended,
+        mail_suppressed: match account.mail_suppressed.as_deref() {
+            Some("bounce") => "Bounced",
+            Some("complaint") => "Marked as spam",
+            _ => "",
+        },
         own: account.id == own_id,
         reason,
         has_reason: account.access_reason.is_some(),
@@ -1405,6 +1428,8 @@ fn account_error(value: &str) -> &'static str {
         "verification-unavailable" => {
             "The verification email could not be sent. Try again shortly."
         }
+        "email-bounced" => "Email to that address bounced.",
+        "email-marked-as-spam" => "Email to that address was marked as spam.",
         "unavailable" => "Account access is temporarily unavailable.",
         _ => account_suspension::error(value),
     }

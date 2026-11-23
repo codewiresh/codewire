@@ -351,7 +351,7 @@ SES keeps an account-level suppression list, on for bounces and complaints on
 Codewire's servers: once an address hard-bounces or its owner marks our mail as
 spam, SES drops every later send to it. The IdP asks that list about an
 address before it would send nothing useful, and tells the person and the
-admin (#4548). Not yet built.
+admin (#4548).
 
 - **When it asks.** Only about an address the IdP already holds for its own
   account, never one a request names:
@@ -379,6 +379,10 @@ admin (#4548). Not yet built.
   that address bounced." or "Email to that address was marked as spam." and
   sends nothing. Clearing a suppression stays in SES; Codewire doesn't remove
   one.
+- **What a stranger learns.** Anyone can sign up with an address and press
+  Resend to learn that it can't be delivered to. That is accepted: it is
+  only "can't be delivered", what the sign-up's own verification email
+  bouncing would show, never why or when.
 - **What is recorded.** `codewire_idp_mail_suppressed_total{reason}`, with
   `bounce` or `complaint`, counts each skip. No log line or metric names the
   address.

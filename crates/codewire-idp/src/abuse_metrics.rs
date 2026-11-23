@@ -10,6 +10,8 @@ use std::sync::OnceLock;
 static SIGN_IN_FAILURES: OnceLock<IntCounterVec> = OnceLock::new();
 static SIGN_UPS_ADMITTED: OnceLock<IntCounter> = OnceLock::new();
 static SIGN_UP_REFUSALS: OnceLock<IntCounterVec> = OnceLock::new();
+static MAIL_SUPPRESSED: OnceLock<IntCounterVec> = OnceLock::new();
+static SUPPRESSION_LOOKUPS: OnceLock<IntCounterVec> = OnceLock::new();
 
 pub(crate) fn sign_in_failures() -> &'static IntCounterVec {
     SIGN_IN_FAILURES.get_or_init(|| {
@@ -42,6 +44,32 @@ pub(crate) fn sign_up_refusals() -> &'static IntCounterVec {
     })
 }
 
+/// Verification emails not sent because SES suppressed the address (#4548),
+/// by `bounce` or `complaint`. The address is never a label.
+pub(crate) fn mail_suppressed() -> &'static IntCounterVec {
+    MAIL_SUPPRESSED.get_or_init(|| {
+        counter_vec(
+            "codewire_idp_mail_suppressed_total",
+            "Verification emails not sent because SES suppressed the address, by reason.",
+            &["reason"],
+        )
+    })
+}
+
+/// Every SES suppression lookup (#4548), by what it answered: `bounced`,
+/// `complained`, `not_suppressed` or `unknown`. A run of `unknown` is a
+/// refused grant, a signing mismatch or SES throttling; no address is a
+/// label.
+pub(crate) fn suppression_lookups() -> &'static IntCounterVec {
+    SUPPRESSION_LOOKUPS.get_or_init(|| {
+        counter_vec(
+            "codewire_idp_mail_suppression_lookups_total",
+            "SES suppression-list lookups, by what they answered.",
+            &["outcome"],
+        )
+    })
+}
+
 /// Every reason [`sign_in_reason`] and [`sign_up_reason`] can give, so
 /// [`expose`] can show each series before its first count.
 const SIGN_IN_REASONS: [&str; 3] = ["credentials", "locked", "refused"];
@@ -57,6 +85,12 @@ pub fn expose() {
     sign_ups_admitted();
     for reason in SIGN_UP_REASONS {
         sign_up_refusals().with_label_values(&[reason]);
+    }
+    for reason in ["bounce", "complaint"] {
+        mail_suppressed().with_label_values(&[reason]);
+    }
+    for outcome in ["bounced", "complained", "not_suppressed", "unknown"] {
+        suppression_lookups().with_label_values(&[outcome]);
     }
     // Every limit the IdP takes: the unreadable-limit alert reads them all.
     use codewire_server_core::rate_limit::{

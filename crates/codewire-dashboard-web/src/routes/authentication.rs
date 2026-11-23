@@ -510,6 +510,13 @@ pub(super) async fn resend_verification_action(
             view.error =
                 "That request expired. Sign in again to resend the verification email.".to_owned();
         }
+        // SES suppressed the address, so nothing was sent (#4548). The same
+        // words for a bounce and a complaint: the fix is the same.
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            view.error = "Email to that address can't be delivered. Check it, or sign up with a \
+                          different address."
+                .to_owned();
+        }
         _ => {
             view.error = "We couldn't send the email. Sign in again shortly to retry.".to_owned();
         }

@@ -384,6 +384,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
         email_verified: true,
         enabled: false,
         suspended: false,
+        mail_suppressed: "",
         own: false,
         reason: "</td><script>alert('reason')</script>".into(),
         has_reason: true,
@@ -455,6 +456,7 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         email_verified,
         enabled: false,
         suspended: false,
+        mail_suppressed: "",
         own: false,
         reason: "Build agents".into(),
         has_reason: true,
@@ -462,9 +464,15 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         identities: Vec::new(),
         deletion: crate::view::AccountDeletionOffer::Offered,
     };
+    // An address SES suppressed is marked beside its verification (#4548).
+    let bounced = AccountAccessView {
+        mail_suppressed: "Bounced",
+        ..account("user-bounced", false)
+    };
     let accounts = vec![
         account("user-waiting", false),
         account("user-verified", true),
+        bounced,
     ];
     let body = AdminAccountsTemplate {
         view: &view,
@@ -479,8 +487,15 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
     assert_eq!(
         body.matches("action=\"/admin/accounts/_actions/resend-verification\"")
             .count(),
+        2
+    );
+    assert_eq!(
+        body.matches("data-tone=\"danger\">Bounced</span>").count(),
         1
     );
+    assert!(body.contains(
+        "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span> <span class=\"cw-badge\" data-tone=\"danger\">Bounced</span><form"
+    ));
     assert!(body.contains(
         "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span><form class=\"cw-access-resend\" method=\"post\" action=\"/admin/accounts/_actions/resend-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"csrf-marker\"><input type=\"hidden\" name=\"user_id\" value=\"user-waiting\"><button class=\"cw-button cw-button--outline cw-button--pill cw-button--small\" type=\"submit\">Resend verification email</button></form>"
     ));
@@ -527,6 +542,7 @@ fn account_access_offers_suspend_and_unsuspend_behind_a_confirmation() {
         email_verified: true,
         enabled: !suspended,
         suspended,
+        mail_suppressed: "",
         own,
         reason: "Build agents".into(),
         has_reason: true,

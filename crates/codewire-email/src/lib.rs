@@ -19,9 +19,11 @@ use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 
 mod layout;
 mod operator;
+mod suppression;
 
 pub use layout::{Block, Email, escape};
 pub use operator::{OPERATOR_EMAIL_ENV, parse_operator_email};
+pub use suppression::Suppression;
 
 /// Environment variable holding the exact SES From address approved for this
 /// workload: a single mailbox, bare or as `Name <address>` (#4553). The
@@ -96,15 +98,28 @@ pub struct SentEmail {
     pub text: String,
 }
 
-/// What a recording client has sent, in order.
+/// What a recording client has sent, in order, and the addresses a test put
+/// on its suppression list.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, Default)]
-pub struct Outbox(Arc<std::sync::Mutex<Vec<SentEmail>>>);
+pub struct Outbox {
+    sent: Arc<std::sync::Mutex<Vec<SentEmail>>>,
+    suppressed: Arc<std::sync::Mutex<std::collections::HashMap<String, Suppression>>>,
+}
 
 #[cfg(feature = "test-support")]
 impl Outbox {
     pub fn sent(&self) -> Vec<SentEmail> {
-        self.0.lock().expect("outbox lock").clone()
+        self.sent.lock().expect("outbox lock").clone()
+    }
+
+    /// What [`EmailClient::suppression`] answers for `address` from now on;
+    /// any other address is [`Suppression::NotSuppressed`].
+    pub fn suppress(&self, address: &str, suppression: Suppression) {
+        self.suppressed
+            .lock()
+            .expect("outbox lock")
+            .insert(address.to_owned(), suppression);
     }
 }
 
@@ -262,7 +277,7 @@ impl EmailClient {
                     validate_mailbox(reply_to, "reply-to")?;
                 }
                 validate_subject(subject)?;
-                outbox.0.lock().expect("outbox lock").push(SentEmail {
+                outbox.sent.lock().expect("outbox lock").push(SentEmail {
                     to: to.to_owned(),
                     reply_to: reply_to.map(str::to_owned),
                     subject: subject.to_owned(),
@@ -541,11 +556,22 @@ fn signed_ses_request(
     time: SystemTime,
 ) -> Result<reqwest::Request> {
     let endpoint = format!("https://email.{region}.amazonaws.com/v2/email/outbound-emails");
-    let mut request = client
+    let request = client
         .post(&endpoint)
         .header(CONTENT_TYPE, "application/json")
         .build()
         .context("build SES email request")?;
+    sign_ses_request(request, credentials, region, body, time)
+}
+
+/// Signs `request` for SES with SigV4 and sets `body` on it.
+fn sign_ses_request(
+    mut request: reqwest::Request,
+    credentials: &Credentials,
+    region: &str,
+    body: Vec<u8>,
+    time: SystemTime,
+) -> Result<reqwest::Request> {
     let headers = request
         .headers()
         .iter()
@@ -556,8 +582,9 @@ fn signed_ses_request(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    let method = request.method().as_str().to_owned();
     let signable_request = SignableRequest::new(
-        "POST",
+        &method,
         request.url().as_str(),
         headers.iter().copied(),
         SignableBody::Bytes(&body),

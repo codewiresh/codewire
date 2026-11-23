@@ -778,6 +778,33 @@ async fn resend_verification(
             Json(ResendVerificationResponse { sent: false }),
         ));
     };
+    // An address SES suppressed would get nothing: say so, send nothing, and
+    // count nothing against its verification emails (#4548). The claim is
+    // spent first, as a sent resend's is, so SES is asked with no
+    // transaction open; the account is read again under its lock after.
+    tx.commit().await.map_err(failed)?;
+    if let Some(refusal) =
+        crate::undeliverable::refusal(&state.email, &email, crate::undeliverable::Asker::Owner)
+            .await
+    {
+        return Err(refusal);
+    }
+    let mut tx = state.pool.begin().await.map_err(failed)?;
+    let still = sqlx::query_as::<_, (String, bool)>(
+        "SELECT email, COALESCE(email_verified, false) FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&claim.identifier)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(failed)?;
+    if still != Some((email.clone(), false)) {
+        // Deleted, or verified, while SES answered: there is nothing to send.
+        tx.commit().await.map_err(failed)?;
+        return Ok((
+            StatusCode::OK,
+            Json(ResendVerificationResponse { sent: false }),
+        ));
+    }
     let since = Utc::now().naive_utc() - Duration::seconds(RESEND_VERIFICATION_INTERVAL_SECS);
     let recent: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM verifications WHERE identifier = $1 AND purpose = $2 AND created_at > $3)",

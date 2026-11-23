@@ -53,6 +53,11 @@ struct AccountAccessRow {
     /// link to the wrong person sees it here and can disable the account.
     #[sqlx(skip)]
     joined_via: Option<JoinedViaRow>,
+    /// `bounce` or `complaint` when SES suppressed the address (#4548);
+    /// absent when it didn't, or when the list's lookups didn't reach it.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mail_suppressed: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -198,7 +203,42 @@ async fn list_accounts(
             account.joined_via = Some(joined_via);
         }
     }
+    mark_suppressed(&state.email, &mut accounts).await;
     Ok(Json(AccountAccessList { accounts }))
+}
+
+/// Lookups the account list runs at once, and the time it gives them all.
+const SUPPRESSION_LOOKUPS: usize = 4;
+const SUPPRESSION_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Asks SES about the listed accounts' addresses (#4548), four at a time in
+/// list order (accounts waiting for access first), until the page's 3-second
+/// budget runs out. An account it didn't reach, or an unknown answer, shows
+/// no mark.
+async fn mark_suppressed(email: &EmailClient, accounts: &mut [AccountAccessRow]) {
+    if !email.is_configured() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + SUPPRESSION_BUDGET;
+    let mut next = 0;
+    let mut running = tokio::task::JoinSet::new();
+    loop {
+        while running.len() < SUPPRESSION_LOOKUPS && next < accounts.len() {
+            let (client, address, index) = (email.clone(), accounts[next].email.clone(), next);
+            running.spawn(
+                async move { (index, crate::undeliverable::lookup(&client, &address).await) },
+            );
+            next += 1;
+        }
+        match tokio::time::timeout_at(deadline, running.join_next()).await {
+            Ok(Some(Ok((index, suppression)))) => {
+                accounts[index].mail_suppressed = suppression.reason();
+            }
+            Ok(Some(Err(_))) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    // Dropping the set aborts the lookups still running.
 }
 
 /// Why an account may not be enabled now. An account being deleted stays
@@ -397,6 +437,26 @@ async fn resend_account_verification(
         AppError::InternalMsg("Failed to resend verification".into())
     };
     let (ip, user_agent) = request_info(&headers);
+    // An address SES suppressed would get nothing: say why, send nothing
+    // (#4548). SES is asked before the transaction, never under the row
+    // lock; an account that is gone or verified is refused below as before.
+    let unverified: Option<String> = sqlx::query_scalar(
+        "SELECT email FROM users WHERE id = $1 AND NOT COALESCE(email_verified, false)",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(failed)?;
+    if let Some(address) = unverified
+        && let Some(refusal) = crate::undeliverable::refusal(
+            &state.email,
+            &address,
+            crate::undeliverable::Asker::Admin,
+        )
+        .await
+    {
+        return Err(refusal);
+    }
     let mut tx = state.pool.begin().await.map_err(failed)?;
     let (email, email_verified) = sqlx::query_as::<_, (String, bool)>(
         "SELECT email, COALESCE(email_verified, false) FROM users WHERE id = $1 FOR UPDATE",
