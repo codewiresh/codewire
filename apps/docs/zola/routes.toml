@@ -14,6 +14,12 @@ source = "content/access/_index.md"
 output = "access/index.html"
 
 [[routes]]
+canonical = "/docs/access/desktop"
+redirect_from = "/docs/access/desktop/"
+source = "content/access/desktop.md"
+output = "access/desktop/index.html"
+
+[[routes]]
 canonical = "/docs/access/files"
 redirect_from = "/docs/access/files/"
 source = "content/access/files.md"

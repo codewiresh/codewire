@@ -16,7 +16,7 @@ from xml.etree import ElementTree
 
 
 CANONICAL_ORIGIN = "https://codewire.sh"
-EXPECTED_ROUTE_COUNT = 72
+EXPECTED_ROUTE_COUNT = 73
 
 
 def fail(message: str) -> None:

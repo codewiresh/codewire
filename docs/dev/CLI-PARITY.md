@@ -671,7 +671,7 @@ once after a restart had ended them.
   says "end the sessions" (`--force`) and one says "restart the environment"
   (`--allow-restart`), with the same meaning in both placements.
 
-## Ports and previews (`ports`, `share`, `access`, `vscode`, `cp`)
+## Ports and previews (`ports`, `share`, `access`, `vscode`, `desktop`, `cp`)
 
 A local port is a binding on this computer's 127.0.0.1; a cloud port is a
 preview URL. `ports` picks the store from ENV; each store prints its own
@@ -689,6 +689,8 @@ results.
 | `share list`, `grant`, `revoke` | "Environment sharing is available only with --cloud" | Works: a list of user IDs, permission and time; grant and revoke refuse in plain words | intended: a local VM has one user |
 | `access ENV` | `Environment`, `Placement: local`, `Access profile: none`; JSON | "Environment credential-profile inspection is not yet available for platform environments" | **Gap W3** |
 | `vscode ENV` | "→ Opening VS Code for N · /workspace", exit 0, with no VS Code installed | Same | same (both claim to open it) |
+| `desktop ENV` | Starts the desktop through the supervisor and forwards it through `cw-local-ID` | Starts it through the control plane and forwards it through `cw-cloud-ID` | same: one command over one desktop service, walked from Linux in both on 2026-11-22 (#3223) |
+| `desktop ENV` with no desktop service | "your local VMs run on an older cw's supervisor, which has no desktop service; `cw upgrade --vms` moves them to this cw once they are idle" | "this Codewire server has no desktop service yet; it needs an update" | intended: each names the update its placement needs |
 | `cp` to and from `/workspace` | `Uploaded FILE -> N:/workspace/FILE`; `Downloaded … (10 bytes)`; makes missing folders | The same, naming the environment by ID (A2) | same |
 | `cp` a remote file that isn't there | "Download: not_found: local file was not found" | "Download: file not found" | **Gap W4** |
 | `cp` to `/tmp` or `/proc` | "Upload: invalid_argument: local file path is invalid or denied" | "Upload: file path is invalid or denied" | same rule; wording **W4** |

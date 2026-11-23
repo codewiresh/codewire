@@ -1,7 +1,7 @@
 ---
 title: Environments
-description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-22
+description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, desktop, setup ssh, setup rex, checkpoint and preset.
+updated: 2026-11-23
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -572,6 +572,26 @@ cw --local vscode [ENV] [--folder /workspace]
 
 Refreshes the SSH config, as `cw setup ssh` does, and opens VS Code with
 Remote-SSH on `cw-cloud-<id>`, or on `cw-local-<id>` for a local VM.
+
+## cw desktop
+
+```sh
+cw desktop [ENV] [--org ORG]
+cw desktop [ENV] --no-open
+cw desktop [ENV] --status
+cw desktop [ENV] --stop
+```
+
+Starts the environment's desktop if it is not running, refreshes the SSH
+config as `cw vscode` does, forwards the desktop over SSH to a free port on
+`127.0.0.1` and opens `vnc://127.0.0.1:PORT` in the system's VNC viewer. The
+forward lasts until Ctrl-C and leaves the desktop running. On macOS the viewer
+opens without asking for the password; elsewhere the password is printed
+under the address, only when the output is a terminal. `--no-open` prints the
+address and the password instead of opening a viewer. `--status` says whether
+the desktop is running and since when, never the password, and changes
+nothing. `--stop` stops the desktop and the programs on it. See
+[Desktop](@/access/desktop.md).
 
 ## cw setup ssh
 
