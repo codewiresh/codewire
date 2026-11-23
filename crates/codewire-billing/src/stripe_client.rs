@@ -904,8 +904,46 @@ fn setup_session_request(
         ])
 }
 
-fn stripe_err<E: std::fmt::Debug>(e: E) -> AppError {
-    AppError::Internal(anyhow::anyhow!("stripe request failed: {e:?}"))
+/// What a failed Stripe call may say about itself in an error or a log.
+trait StripeFailure {
+    fn kind(&self) -> String;
+}
+
+/// The HTTP status and Stripe's type, code, decline code and parameter name.
+/// Stripe's message and the objects its error carries, a payment method's
+/// billing details among them, can hold a customer's name, email or address,
+/// so neither reaches an error or a log (#6006). Every other variant is fixed
+/// text or the transport's own, which names no request.
+impl StripeFailure for stripe::StripeError {
+    fn kind(&self) -> String {
+        match self {
+            stripe::StripeError::Stripe(errors, status) => format!(
+                "HTTP {status}, type {}, code {:?}, decline code {:?}, param {:?}",
+                errors.type_.as_str(),
+                errors.code.as_ref().map(|code| code.as_str()),
+                errors.decline_code,
+                errors.param,
+            ),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// Empty or too long, with the length: never the key.
+impl StripeFailure for stripe::IdempotentKeyError {
+    fn kind(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl StripeFailure for std::convert::Infallible {
+    fn kind(&self) -> String {
+        match *self {}
+    }
+}
+
+fn stripe_err(error: impl StripeFailure) -> AppError {
+    AppError::Internal(anyhow::anyhow!("stripe request failed: {}", error.kind()))
 }
 
 fn stripe_not_found(error: &stripe::StripeError) -> bool {
@@ -1408,6 +1446,82 @@ mod top_up_tests {
             check_test_key_requirement(required, Some("sk_live_synthetic")).unwrap();
         }
         check_test_key_requirement(Some("yes"), Some("sk_test_synthetic")).unwrap_err();
+    }
+
+    const DECLINE: &str = r#"{
+        "type": "card_error", "code": "card_declined", "decline_code": "insufficient_funds",
+        "param": "payment_method",
+        "message": "Declined for Synthetic Person <synthetic.person@example.test>",
+        "request_log_url": "https://dashboard.stripe.com/test/logs/req_synthetic?t=1",
+        "payment_method": {
+            "id": "pm_synthetic", "object": "payment_method", "created": 1, "livemode": false,
+            "type": "card",
+            "billing_details": {
+                "name": "Synthetic Person", "email": "synthetic.person@example.test",
+                "phone": "+15550100",
+                "address": {"line1": "1 Synthetic Street", "city": "Testville",
+                            "country": "US", "postal_code": "00000"}
+            }
+        }
+    }"#;
+
+    #[tokio::test]
+    async fn a_stripe_error_reaches_logs_and_callers_as_its_kind_only() {
+        let errors: stripe_shared::ApiErrors = miniserde::json::from_str(DECLINE).unwrap();
+        assert!(
+            errors.payment_method.is_some(),
+            "the fixture carries billing details"
+        );
+        let kind = "stripe request failed: HTTP 402, type card_error, code Some(\"card_declined\"), \
+                    decline code Some(\"insufficient_funds\"), param Some(\"payment_method\")";
+        let failure = super::stripe_err(stripe::StripeError::Stripe(Box::new(errors), 402));
+        // What the delivery check reports, and what the response logs.
+        assert_eq!(failure.to_string(), kind);
+        let super::AppError::Internal(error) = &failure else {
+            panic!("a Stripe failure is an internal error");
+        };
+        assert_eq!(format!("{error:?}"), kind);
+        let response = axum::response::IntoResponse::into_response(failure);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("internal error"), "{body}");
+        for private in [
+            "Synthetic",
+            "example.test",
+            "+15550100",
+            "Testville",
+            "req_synthetic",
+        ] {
+            assert!(
+                !kind.contains(private) && !body.contains(private),
+                "{private}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_stripe_error_keeps_its_own_fixed_text() {
+        for (error, text) in [
+            (
+                stripe::StripeError::ClientError("client error (Connect)".into()),
+                "error communicating with stripe: client error (Connect)",
+            ),
+            (
+                stripe::StripeError::JSONDeserialize("error deserializing request data".into()),
+                "error deserializing a request: error deserializing request data",
+            ),
+            (
+                stripe::StripeError::Timeout,
+                "timeout communicating with stripe",
+            ),
+        ] {
+            assert_eq!(
+                super::stripe_err(error).to_string(),
+                format!("stripe request failed: {text}")
+            );
+        }
     }
 
     #[test]
