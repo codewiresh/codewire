@@ -2617,9 +2617,10 @@ credential service's CA ensure, leaf signing and sweep (#5170, #5071), the
 idle end (#5125), `cw-egress` asking for its front doors' leaves (#5669), and
 the Open's placeholders with the daemon's projection of them (#5530), one
 per-client host selection for local and hosted (#5463), and orchestration's
-egress service reading each binding's stored decision. Still open:
-orchestration signing those leaves through the Pod's relay epoch (it answers
-`UNAVAILABLE` until then). `cw-egress` keeps each front door's session open
+egress service reading each binding's stored decision, and orchestration
+asking for those leaves through the Pod's relay epoch. Still open: the
+Anthropic placeholder in `cw exec` and PTY sessions, which today get none
+(#6179), and the placeholder's form (#5159). `cw-egress` keeps each front door's session open
 and reopens it (**The client** above). The switch's gates are #4001's
 switch-on checklist. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.

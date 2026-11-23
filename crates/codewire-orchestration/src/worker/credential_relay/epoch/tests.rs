@@ -58,6 +58,18 @@ struct FrontDoorCall {
     ready: v1::CredentialBridgeReady,
     answer: oneshot::Sender<Result<Vec<&'static str>, Status>>,
 }
+
+/// One `SignInterceptionLeaves` the relay asked, with the metadata it sent.
+/// `answer` is the broker's reply.
+struct SignCall {
+    relay: String,
+    workspace: Vec<u8>,
+    handle: Option<Vec<u8>>,
+    leaf_public_key: Vec<u8>,
+    answer: oneshot::Sender<
+        Result<codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse, Status>,
+    >,
+}
 #[derive(Clone)]
 struct SyntheticDaemon {
     environment: Uuid,
@@ -78,6 +90,7 @@ struct SyntheticBroker {
     /// project.
     placeholders: Arc<std::sync::Mutex<Vec<String>>>,
     front_door_calls: mpsc::Sender<FrontDoorCall>,
+    sign_calls: mpsc::Sender<SignCall>,
 }
 
 macro_rules! daemon_service {
@@ -206,10 +219,36 @@ impl CredentialBrokerService for SyntheticBroker {
 
     async fn sign_interception_leaves(
         &self,
-        _request: Request<codewire_daemon_proto::broker::v1::SignInterceptionLeavesRequest>,
+        request: Request<codewire_daemon_proto::broker::v1::SignInterceptionLeavesRequest>,
     ) -> Result<Response<codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse>, Status>
     {
-        Err(Status::unimplemented("not used by these relay tests"))
+        let metadata = request.metadata();
+        let relay = metadata
+            .get("authorization")
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let workspace = metadata
+            .get_bin(codewire_daemon::client::HOSTED_WORKSPACE_AUTHORIZATION)
+            .map(|value| value.to_bytes().unwrap().to_vec())
+            .unwrap_or_default();
+        let handle = metadata
+            .get_bin(codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)
+            .map(|value| value.to_bytes().unwrap().to_vec());
+        let (answer, answered) = oneshot::channel();
+        self.sign_calls
+            .send(SignCall {
+                relay,
+                workspace,
+                handle,
+                leaf_public_key: request.into_inner().leaf_public_key,
+                answer,
+            })
+            .await
+            .map_err(|_| Status::cancelled("fixture closed"))?;
+        answered
+            .await
+            .map_err(|_| Status::cancelled("fixture rejected"))?
+            .map(Response::new)
     }
 
     async fn credential_bridge(
@@ -292,6 +331,7 @@ struct Fixture {
     broker_handle: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     broker_placeholders: Arc<std::sync::Mutex<Vec<String>>>,
     front_door_calls: mpsc::Receiver<FrontDoorCall>,
+    sign_calls: mpsc::Receiver<SignCall>,
     shutdown: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -320,6 +360,7 @@ impl Fixture {
         let broker_handle = Arc::new(std::sync::Mutex::new(None));
         let broker_placeholders = Arc::new(std::sync::Mutex::new(vec![String::new()]));
         let (front_door_tx, front_door_calls) = mpsc::channel(2);
+        let (sign_tx, sign_calls) = mpsc::channel(2);
         let synthetic_broker = SyntheticBroker {
             calls: broker_tx,
             capabilities: broker_capabilities.clone(),
@@ -327,6 +368,7 @@ impl Fixture {
             handle: broker_handle.clone(),
             placeholders: broker_placeholders.clone(),
             front_door_calls: front_door_tx,
+            sign_calls: sign_tx,
         };
         let synthetic_daemon = SyntheticDaemon {
             environment: environment_id,
@@ -384,6 +426,7 @@ impl Fixture {
             broker_handle,
             broker_placeholders,
             front_door_calls,
+            sign_calls,
             shutdown,
             tasks,
         }

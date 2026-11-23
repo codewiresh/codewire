@@ -2,12 +2,13 @@
 //!
 //! cw-egress's TLS front door reaches the credential broker only through the
 //! relay epoch already running for its Pod's binding. Each admitted epoch
-//! registers here a way to ask it to open one `FrontDoorBridge` stream; the
-//! relay token, the daemon's workspace authorization and the epoch's handle
-//! never leave the epoch. `EgressService.FrontDoorSession` finds the epoch by
-//! the Pod's live binding and asks. The newest admitted epoch of a binding is
-//! the current one, so a session opened during a renewal joins the successor
-//! and never the epoch that is draining.
+//! registers here a way to ask it to open one `FrontDoorBridge` stream, or to
+//! have the front door's leaves signed; the relay token, the daemon's
+//! workspace authorization and the epoch's handle never leave the epoch.
+//! `EgressService.FrontDoorSession` and `SignInterceptionLeaves` find the
+//! epoch by the Pod's live binding and ask. The newest admitted epoch of a
+//! binding is the current one, so a session opened during a renewal joins the
+//! successor and never the epoch that is draining.
 //!
 //! Frames cross unparsed, each exactly one front-door.v1 frame as on the
 //! local socket: a four-byte big-endian length, then that many protobuf
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse;
 use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -35,9 +37,24 @@ pub struct BindingKey {
     pub generation: u64,
 }
 
+/// What may be asked of an admitted epoch.
+pub enum EpochRequest {
+    Join(Join),
+    Sign(Sign),
+}
+
 /// A front-door session asking an epoch for one upstream stream.
 pub struct Join {
     pub reply: oneshot::Sender<Result<Joined, Status>>,
+}
+
+/// cw-egress asking an epoch to have its front door's key signed. The
+/// credential service signs for the epoch's own binding and hosts, found by
+/// the epoch's credentials and handle; the request names neither.
+pub struct Sign {
+    /// The front door's P-256 public key, a DER SubjectPublicKeyInfo.
+    pub leaf_public_key: Vec<u8>,
+    pub reply: oneshot::Sender<Result<SignInterceptionLeavesResponse, Status>>,
 }
 
 /// One upstream: an epoch's `FrontDoorBridge` stream, already opened with
@@ -100,7 +117,7 @@ impl Drop for SessionPlace {
 
 struct Slot {
     id: u64,
-    joins: mpsc::Sender<Join>,
+    joins: mpsc::Sender<EpochRequest>,
 }
 
 /// An epoch's place, removed on drop unless a successor has replaced it.
@@ -125,7 +142,11 @@ impl Drop for Registration {
 
 impl FrontDoorEpochs {
     /// Make `joins` the binding's current epoch, replacing any older one.
-    pub fn register(self: &Arc<Self>, key: BindingKey, joins: mpsc::Sender<Join>) -> Registration {
+    pub fn register(
+        self: &Arc<Self>,
+        key: BindingKey,
+        joins: mpsc::Sender<EpochRequest>,
+    ) -> Registration {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         self.slots
             .lock()
@@ -187,7 +208,7 @@ impl FrontDoorEpochs {
 
     /// The binding's current epoch, if one is admitted on this process, and
     /// its id: a newer epoch has a greater one.
-    pub fn current(&self, key: &BindingKey) -> Option<(u64, mpsc::Sender<Join>)> {
+    pub fn current(&self, key: &BindingKey) -> Option<(u64, mpsc::Sender<EpochRequest>)> {
         self.slots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -1656,7 +1656,16 @@ fn signing_app(
     bindings: Arc<dyn BindingStore>,
     intercepting: bool,
 ) -> axum::Router {
-    let mut state = state(cluster, bindings, None);
+    signing_app_with(cluster, bindings, intercepting, None)
+}
+
+fn signing_app_with(
+    cluster: &Arc<Cluster>,
+    bindings: Arc<dyn BindingStore>,
+    intercepting: bool,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+) -> axum::Router {
+    let mut state = state(cluster, bindings, front_doors);
     state.interception = intercepting;
     codewire_server_core::connect::connect_router(egress_router(Arc::new(state)))
 }
@@ -1665,20 +1674,155 @@ fn sign_body() -> Value {
     json!({"podUid": GUEST_UID, "podName": GUEST, "leafPublicKey": "AAEC"})
 }
 
-/// Signing goes through the Pod's relay epoch, which is not attached yet
-/// (#4001): an authenticated, bound, intercepting Pod is told UNAVAILABLE,
-/// and cw-egress retries with its hosts failing closed.
+/// The key of the relay epoch [`Decided`]'s binding runs.
+fn signing_key() -> crate::front_door::BindingKey {
+    crate::front_door::BindingKey {
+        environment_id: uuid::Uuid::parse_str(BOUND_ENVIRONMENT).unwrap(),
+        pod_uid: GUEST_UID.into(),
+        generation: u64::try_from(binding().operation_generation).unwrap(),
+    }
+}
+
+/// A registered epoch for `key` that answers one signing ask with `answer`,
+/// and returns the key it was asked to sign.
+fn signing_epoch(
+    front_doors: &Arc<crate::front_door::FrontDoorEpochs>,
+    key: crate::front_door::BindingKey,
+    answer: Result<
+        codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse,
+        tonic::Status,
+    >,
+) -> (
+    crate::front_door::Registration,
+    tokio::task::JoinHandle<Vec<u8>>,
+) {
+    let (asks, mut asked) = tokio::sync::mpsc::channel(1);
+    let registration = front_doors.register(key, asks);
+    let epoch = tokio::spawn(async move {
+        let Some(crate::front_door::EpochRequest::Sign(crate::front_door::Sign {
+            leaf_public_key,
+            reply,
+        })) = asked.recv().await
+        else {
+            panic!("the epoch was asked to sign");
+        };
+        let _ = reply.send(answer);
+        leaf_public_key
+    });
+    (registration, epoch)
+}
+
+/// A bound, intercepting Pod's front door gets exactly the leaves its
+/// binding's current epoch had the credential service sign, for the key it
+/// sent, and the service's renewal time (N3b).
 #[tokio::test]
-async fn interception_leaves_are_unavailable_to_a_bound_intercepting_pod() {
+async fn interception_leaves_are_signed_through_the_bindings_current_epoch() {
     let cluster = Cluster::healthy();
+    let front_doors = Arc::new(crate::front_door::FrontDoorEpochs::default());
+    let leaves = codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse {
+        leaves: vec![codewire_daemon_proto::broker::v1::InterceptionLeaf {
+            certificate_der: vec![1, 2, 3],
+            hosts: vec!["api.anthropic.com".into()],
+        }],
+        renew_at_unix: 1_900_000_000,
+    };
+    let (_registration, epoch) = signing_epoch(&front_doors, signing_key(), Ok(leaves));
     let (status, body) = call_app(
-        signing_app(&cluster, Arc::new(Decided(Some(true))), true),
+        signing_app_with(
+            &cluster,
+            Arc::new(Decided(Some(true))),
+            true,
+            Some(front_doors),
+        ),
         "SignInterceptionLeaves",
         sign_body(),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["code"], "unavailable", "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        epoch.await.unwrap(),
+        vec![0, 1, 2],
+        "the key cw-egress sent"
+    );
+    assert_eq!(
+        body["leaves"],
+        json!([{"certificateDer": "AQID"}]),
+        "{body}"
+    );
+    assert_eq!(
+        body["renewAtUnix"].to_string().trim_matches('"'),
+        "1900000000",
+        "{body}"
+    );
+}
+
+/// With no epoch admitted for the Pod's live binding on this process, or
+/// only one for another generation, cw-egress is told UNAVAILABLE and
+/// retries, its hosts failing closed meanwhile.
+#[tokio::test]
+async fn interception_leaves_are_unavailable_without_the_bindings_epoch() {
+    let cluster = Cluster::healthy();
+    let stale = crate::front_door::BindingKey {
+        generation: signing_key().generation + 1,
+        ..signing_key()
+    };
+    let other = Arc::new(crate::front_door::FrontDoorEpochs::default());
+    let (_registration, _epoch) =
+        signing_epoch(&other, stale, Err(tonic::Status::internal("never asked")));
+    for front_doors in [
+        None,
+        Some(Arc::new(crate::front_door::FrontDoorEpochs::default())),
+        Some(other),
+    ] {
+        let (status, body) = call_app(
+            signing_app_with(&cluster, Arc::new(Decided(Some(true))), true, front_doors),
+            "SignInterceptionLeaves",
+            sign_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "unavailable", "{body}");
+    }
+}
+
+/// The epoch's refusals reach cw-egress by code alone.
+#[tokio::test]
+async fn an_epochs_signing_refusal_reaches_cw_egress_by_code_alone() {
+    let cluster = Cluster::healthy();
+    for (refusal, status, code) in [
+        (
+            tonic::Status::permission_denied("relay detail"),
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+        ),
+        (
+            tonic::Status::invalid_argument("relay detail"),
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+        ),
+        (
+            tonic::Status::unavailable("relay detail"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+    ] {
+        let front_doors = Arc::new(crate::front_door::FrontDoorEpochs::default());
+        let (_registration, _epoch) = signing_epoch(&front_doors, signing_key(), Err(refusal));
+        let (answered, body) = call_app(
+            signing_app_with(
+                &cluster,
+                Arc::new(Decided(Some(true))),
+                true,
+                Some(front_doors),
+            ),
+            "SignInterceptionLeaves",
+            sign_body(),
+        )
+        .await;
+        assert_eq!(answered, status, "{body}");
+        assert_eq!(body["code"], code, "{body}");
+        assert!(!body.to_string().contains("relay detail"), "{body}");
+    }
 }
 
 /// Refused as every Pod-naming method refuses: a Pod on another node, one

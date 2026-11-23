@@ -81,6 +81,7 @@ pub struct EgressServiceState {
 }
 
 mod front_door;
+mod leaves;
 #[cfg(test)]
 mod tests;
 
@@ -849,11 +850,10 @@ impl EgressService for EgressConnectService {
         if !self.state.intercepts(Some(&binding))? {
             return Err(denied());
         }
-        // Signing goes through the Pod's live relay epoch, which a later
-        // change attaches (#4001); until then cw-egress retries, and the
-        // front door's hosts fail closed.
-        Err(ConnectError::unavailable(
-            "interception leaves are not signed yet",
-        ))
+        let signed = self
+            .state
+            .sign_leaves(&guest, &binding, request.leaf_public_key.to_vec())
+            .await?;
+        connectrpc::Response::ok(signed)
     }
 }

@@ -1,10 +1,13 @@
 //! Upstreams joined to an admitted epoch (#4001): the broker stream is opened
 //! with the epoch's own credentials, handle and binding Ready, none of which
 //! reach the daemon; messages cross unchanged; the newest admitted epoch
-//! takes new joins; and the broker's refusals are passed by code alone.
+//! takes new joins; and the broker's refusals are passed by code alone. A
+//! signing ask (N3b) is made with the same credentials and handle, and its
+//! refusals are passed by code alone too.
 use super::budgets::admitted;
 use super::*;
-use crate::front_door::{BindingKey, Join, Joined};
+use crate::front_door::{BindingKey, EpochRequest, Join, Joined, Sign};
+use codewire_daemon_proto::broker::v1::{InterceptionLeaf, SignInterceptionLeavesResponse};
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR, CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
     CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
@@ -77,7 +80,7 @@ async fn finish(fixture: Fixture, epochs: Vec<(CancellationToken, EpochTask)>) {
 }
 
 /// The binding's current epoch, once one has registered.
-async fn current(fixture: &Fixture) -> mpsc::Sender<Join> {
+async fn current(fixture: &Fixture) -> mpsc::Sender<EpochRequest> {
     let key = key(fixture);
     bounded(async {
         loop {
@@ -91,11 +94,11 @@ async fn current(fixture: &Fixture) -> mpsc::Sender<Join> {
 }
 
 /// Ask `epoch` for an upstream, as a session does.
-fn ask(epoch: mpsc::Sender<Join>) -> tokio::task::JoinHandle<Result<Joined, Status>> {
+fn ask(epoch: mpsc::Sender<EpochRequest>) -> tokio::task::JoinHandle<Result<Joined, Status>> {
     tokio::spawn(async move {
         let (reply, answer) = oneshot::channel();
         epoch
-            .send(Join { reply })
+            .send(EpochRequest::Join(Join { reply }))
             .await
             .map_err(|_| Status::unavailable("no epoch"))?;
         answer.await.map_err(|_| Status::unavailable("no epoch"))?
@@ -326,5 +329,79 @@ async fn a_broker_that_fails_mid_stream_ends_the_upstream_cleanly() {
     .await;
     assert!(!task.is_finished());
     drop((daemon, broker, joined));
+    finish(fixture, vec![(cancel, task)]).await;
+}
+
+/// Ask `epoch` to sign `key`, as `SignInterceptionLeaves` does.
+fn ask_to_sign(
+    epoch: mpsc::Sender<EpochRequest>,
+    key: &[u8],
+) -> tokio::task::JoinHandle<Result<SignInterceptionLeavesResponse, Status>> {
+    let leaf_public_key = key.to_vec();
+    tokio::spawn(async move {
+        let (reply, answer) = oneshot::channel();
+        epoch
+            .send(EpochRequest::Sign(Sign {
+                leaf_public_key,
+                reply,
+            }))
+            .await
+            .map_err(|_| Status::unavailable("no epoch"))?;
+        answer.await.map_err(|_| Status::unavailable("no epoch"))?
+    })
+}
+
+#[tokio::test]
+async fn leaves_are_signed_with_the_epochs_credentials_and_handle() {
+    let mut fixture = Fixture::new().await;
+    let (cancel, task, daemon, broker) = admitted_with(&mut fixture, HANDLE).await;
+    let asked = ask_to_sign(current(&fixture).await, b"front-door-key");
+    let call = bounded(fixture.sign_calls.recv()).await.unwrap();
+    assert_eq!(call.relay, "Bearer synthetic.relay.one");
+    assert_eq!(call.workspace, WORKSPACE_TOKEN.as_bytes());
+    assert_eq!(call.handle.as_deref(), Some(&HANDLE[..]));
+    assert_eq!(call.leaf_public_key, b"front-door-key");
+    let leaves = SignInterceptionLeavesResponse {
+        leaves: vec![InterceptionLeaf {
+            certificate_der: vec![1, 2, 3],
+            hosts: vec!["api.anthropic.com".into()],
+        }],
+        renew_at_unix: 1_900_000_000,
+    };
+    call.answer.send(Ok(leaves.clone())).unwrap();
+    assert_eq!(bounded(asked).await.unwrap().unwrap(), leaves);
+    drop((daemon, broker));
+    finish(fixture, vec![(cancel, task)]).await;
+}
+
+#[tokio::test]
+async fn a_signing_refusal_reaches_the_caller_by_code_alone() {
+    let mut fixture = Fixture::new().await;
+    let (cancel, task, daemon, broker) = admitted_with(&mut fixture, HANDLE).await;
+    for (answer, code) in [
+        (
+            Status::permission_denied("broker detail"),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            Status::invalid_argument("broker detail"),
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            Status::unavailable("broker detail"),
+            tonic::Code::Unavailable,
+        ),
+        (Status::internal("broker detail"), tonic::Code::Unavailable),
+    ] {
+        let asked = ask_to_sign(current(&fixture).await, b"front-door-key");
+        let call = bounded(fixture.sign_calls.recv()).await.unwrap();
+        call.answer.send(Err(answer)).unwrap();
+        let Err(status) = bounded(asked).await.unwrap() else {
+            panic!("refused");
+        };
+        assert_eq!(status.code(), code);
+        assert!(!status.message().contains("broker detail"));
+    }
+    drop((daemon, broker));
     finish(fixture, vec![(cancel, task)]).await;
 }

@@ -1,9 +1,11 @@
-//! An admitted epoch's front-door joins (#4001).
+//! An admitted epoch's front-door joins and leaf signing (#4001).
 //!
 //! The epoch keeps the relay token, the daemon's workspace authorization, the
 //! broker channel and the broker's epoch handle. A joining session gets only
 //! an upstream: a `FrontDoorBridge` stream opened with them and with the
-//! binding's Ready, which the broker reads before it answers. Messages cross
+//! binding's Ready, which the broker reads before it answers. A signing ask
+//! gets only the broker's answer to `SignInterceptionLeaves`, made with them:
+//! the broker signs for this binding's hosts, until this epoch's end. Messages cross
 //! as bytes through a codec that only copies them, so nothing here decodes a
 //! front-door message. The session that joins writes the front door's Open,
 //! checks its Ready and routes its requests between upstreams.
@@ -15,6 +17,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
+use codewire_daemon_proto::broker::v1::{
+    SignInterceptionLeavesRequest, SignInterceptionLeavesResponse,
+};
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR, CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
 };
@@ -31,7 +37,7 @@ use tonic::{Status, Streaming};
 use uuid::Uuid;
 
 use super::budget::{Charge, EnvironmentBudget, Oversized, StreamBudget};
-use crate::front_door::{self, BindingKey, FrontDoorEpochs, Join, Joined};
+use crate::front_door::{self, BindingKey, EpochRequest, FrontDoorEpochs, Join, Joined, Sign};
 
 const FRONT_DOOR_BRIDGE: &str = "/broker.v1.CredentialBrokerService/FrontDoorBridge";
 /// Messages queued each way on one upstream; their bytes are bounded
@@ -49,9 +55,10 @@ pub(super) struct EpochJoins {
     pub(super) admission_timeout: Duration,
 }
 
-/// Make this epoch its binding's current one and open an upstream for each
-/// session that asks, one at a time, until the epoch ends. Returns when it is
-/// replaced and no session can reach it any more.
+/// Make this epoch its binding's current one and answer each ask, one at a
+/// time, until the epoch ends: an upstream for each session that joins, and
+/// the broker's leaves for each signing ask. Returns when it is replaced and
+/// no caller can reach it any more.
 pub(super) async fn serve(
     epochs: &Arc<FrontDoorEpochs>,
     key: BindingKey,
@@ -61,21 +68,34 @@ pub(super) async fn serve(
     let (joins, mut requests) = mpsc::channel(1);
     let _registration = epochs.register(key, joins);
     loop {
-        let join = tokio::select! {
+        let request = tokio::select! {
             biased;
             () = cancellation.cancelled() => return,
-            join = requests.recv() => join,
+            request = requests.recv() => request,
         };
-        let Some(Join { reply }) = join else {
-            return;
-        };
-        let joined = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return,
-            joined = epoch.open(cancellation.child_token()) => joined,
-        };
-        // A session that gave up waiting has nothing to be told.
-        let _ = reply.send(joined);
+        match request {
+            None => return,
+            Some(EpochRequest::Join(Join { reply })) => {
+                let joined = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return,
+                    joined = epoch.open(cancellation.child_token()) => joined,
+                };
+                // A session that gave up waiting has nothing to be told.
+                let _ = reply.send(joined);
+            }
+            Some(EpochRequest::Sign(Sign {
+                leaf_public_key,
+                reply,
+            })) => {
+                let signed = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return,
+                    signed = epoch.sign(leaf_public_key) => signed,
+                };
+                let _ = reply.send(signed);
+            }
+        }
     }
 }
 
@@ -130,6 +150,44 @@ impl EpochJoins {
             session: ends,
         })
     }
+}
+
+impl EpochJoins {
+    /// The broker's leaves for the front door's key, asked with this epoch's
+    /// credentials and handle and bounded like an admission.
+    async fn sign(
+        &self,
+        leaf_public_key: Vec<u8>,
+    ) -> Result<SignInterceptionLeavesResponse, Status> {
+        let mut request = tonic::Request::new(SignInterceptionLeavesRequest { leaf_public_key });
+        *request.metadata_mut() = self.metadata.clone();
+        let mut broker = CredentialBrokerServiceClient::new(self.channel.clone());
+        tokio::time::timeout(
+            self.admission_timeout,
+            broker.sign_interception_leaves(request),
+        )
+        .await
+        .unwrap_or_else(|_| Err(not_signed()))
+        .map(tonic::Response::into_inner)
+        .map_err(|status| signing_refusal(&status))
+    }
+}
+
+/// The broker's signing refusal, by code only: a handle or binding it refuses
+/// is PERMISSION_DENIED, a key it cannot sign INVALID_ARGUMENT, and anything
+/// else UNAVAILABLE, which cw-egress retries.
+fn signing_refusal(status: &Status) -> Status {
+    match status.code() {
+        tonic::Code::PermissionDenied => Status::permission_denied("interception leaves denied"),
+        tonic::Code::InvalidArgument => {
+            Status::invalid_argument("the front door's key cannot be signed")
+        }
+        _ => not_signed(),
+    }
+}
+
+fn not_signed() -> Status {
+    Status::unavailable("the credential service did not sign the leaves")
 }
 
 /// The broker's refusal, as cw-egress may see it: its code for the refusals

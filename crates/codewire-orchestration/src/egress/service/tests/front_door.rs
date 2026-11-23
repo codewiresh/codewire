@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::front_door::{
-    self as registry, BindingKey, FrontDoorEpochs, Join, Joined, Registration,
+    self as registry, BindingKey, EpochRequest, FrontDoorEpochs, Join, Joined, Registration,
 };
 use crate::worker::environment_auth::WorkspaceCredentialScope;
 use codewire_daemon_proto::codewire::bridge::v1;
@@ -107,7 +107,7 @@ async fn session(app: axum::Router, frames: &[Value]) -> Vec<Value> {
 fn epoch(
     front_doors: &Arc<FrontDoorEpochs>,
     key: BindingKey,
-) -> (Registration, mpsc::Receiver<Join>) {
+) -> (Registration, mpsc::Receiver<EpochRequest>) {
     let (joins, asked) = mpsc::channel(1);
     (front_doors.register(key, joins), asked)
 }
@@ -198,7 +198,9 @@ async fn an_epochs_refusal_reaches_cw_egress_by_its_code_alone() {
         let front_doors = Arc::new(FrontDoorEpochs::default());
         let (_epoch, mut asked) = epoch(&front_doors, key());
         let epoch = tokio::spawn(async move {
-            let Join { reply, .. } = asked.recv().await.unwrap();
+            let EpochRequest::Join(Join { reply, .. }) = asked.recv().await.unwrap() else {
+                panic!("the epoch was asked to join");
+            };
             assert!(reply.send(Err(status)).is_ok());
         });
         let messages = session(
@@ -278,9 +280,11 @@ fn upstream() -> (Joined, Upstream) {
 }
 
 /// An epoch that answers its first join with `joined`.
-fn serving(mut asked: mpsc::Receiver<Join>, joined: Joined) {
+fn serving(mut asked: mpsc::Receiver<EpochRequest>, joined: Joined) {
     tokio::spawn(async move {
-        let Join { reply } = asked.recv().await.unwrap();
+        let EpochRequest::Join(Join { reply }) = asked.recv().await.unwrap() else {
+            panic!("the epoch was asked to join");
+        };
         assert!(reply.send(Ok(joined)).is_ok());
     });
 }
@@ -647,7 +651,9 @@ async fn a_successor_whose_join_fails_is_tried_again_after_a_backoff() {
     let (_new_epoch, mut new_asked) = epoch(&front_doors, key());
     let (new_joined, mut new) = upstream();
     live.send_message(&request("a")).await;
-    let Join { reply } = new_asked.recv().await.unwrap();
+    let EpochRequest::Join(Join { reply }) = new_asked.recv().await.unwrap() else {
+        panic!("the epoch was asked to join");
+    };
     assert!(reply.send(Err(Status::unavailable("busy"))).is_ok());
     assert_eq!(
         old.guests.recv().await.unwrap(),
@@ -661,7 +667,9 @@ async fn a_successor_whose_join_fails_is_tried_again_after_a_backoff() {
     // After it, the successor is joined and takes the next request.
     tokio::time::sleep(Duration::from_secs(2)).await;
     live.send_message(&request("c")).await;
-    let Join { reply } = new_asked.recv().await.unwrap();
+    let EpochRequest::Join(Join { reply }) = new_asked.recv().await.unwrap() else {
+        panic!("the epoch was asked to join");
+    };
     assert!(reply.send(Ok(new_joined)).is_ok());
     assert_eq!(new.guests.recv().await.unwrap(), request("c"));
     assert!(
@@ -870,7 +878,9 @@ async fn a_newer_session_for_the_same_pod_replaces_the_older() {
     let (second_joined, mut second) = upstream();
     tokio::spawn(async move {
         for joined in [first_joined, second_joined] {
-            let Join { reply } = asked.recv().await.unwrap();
+            let EpochRequest::Join(Join { reply }) = asked.recv().await.unwrap() else {
+                panic!("the epoch was asked to join");
+            };
             assert!(reply.send(Ok(joined)).is_ok());
         }
     });

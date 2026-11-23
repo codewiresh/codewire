@@ -1695,6 +1695,13 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a Sandbox destroyed after its first intercepted call.
 - **Driving it:** no command yet (#4001).
 - **Proof:**
+  - before the owner walks (#4001's switch-on gate): in a Sandbox whose
+    profile selects a credential that is not the owner's (a synthetic one on
+    Kind, or Dev's test identity, #6074), the front door has its leaves and
+    one agent request to an intercepted host is answered through it, under
+    the Sandbox's CA. A CA installed and named is not enough: the leaves come
+    from orchestration through the Pod's relay epoch, and without them every
+    intercepted handshake is dropped;
   - each row of the table above holds;
   - a Sandbox's front door delivers no real Claude or Codex login: an epoch
     that serves the front door delivers placeholder logins or none;

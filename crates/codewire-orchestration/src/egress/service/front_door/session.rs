@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::Status;
 
-use crate::front_door::{self, BindingKey, FrontDoorEpochs, Join, Joined};
+use crate::front_door::{self, BindingKey, EpochRequest, FrontDoorEpochs, Join, Joined};
 
 /// A cw-egress that takes no frame for this long, or a front door that
 /// sends no Ready for this long, ends its session.
@@ -61,7 +61,10 @@ pub(super) async fn join(
 ) -> Result<(u64, Joined), Status> {
     let (id, epoch) = front_doors.current(key).ok_or_else(no_epoch)?;
     let (reply, joined) = oneshot::channel();
-    epoch.send(Join { reply }).await.map_err(|_| no_epoch())?;
+    epoch
+        .send(EpochRequest::Join(Join { reply }))
+        .await
+        .map_err(|_| no_epoch())?;
     let joined = tokio::time::timeout(JOIN_TIMEOUT, joined)
         .await
         .map_err(|_| no_epoch())?
