@@ -77,7 +77,12 @@ async fn db_repair_settles_its_lease_after_the_caller_is_dropped() {
 
     // The caller leaves while the Pod replacement is talking to Kubernetes.
     drop_caller_after_operation_starts(
-        run_daemon_repair(&fixture.pool, &fixture.id, repair),
+        run_daemon_repair(
+            &fixture.pool,
+            &fixture.id,
+            &crate::lease_owner::LeaseOwner::none(),
+            repair,
+        ),
         entered_rx,
     )
     .await;
@@ -117,9 +122,14 @@ async fn db_repair_replaces_the_observed_member_then_waits_for_its_replacement()
     let image = repair.support_image.clone();
 
     // The fake's wait fails, so the repair ends there.
-    let error = run_daemon_repair(&fixture.pool, &fixture.id, repair)
-        .await
-        .expect_err("the replacement never came");
+    let error = run_daemon_repair(
+        &fixture.pool,
+        &fixture.id,
+        &crate::lease_owner::LeaseOwner::none(),
+        repair,
+    )
+    .await
+    .expect_err("the replacement never came");
 
     assert!(
         matches!(&error, AppError::Upstream(message) if message == "environment daemon repair did not converge"),
@@ -156,9 +166,14 @@ async fn db_repair_known_setup_rejection_releases_its_lease() {
     .await
     .unwrap();
 
-    let error = run_daemon_repair(&fixture.pool, &fixture.id, repair)
-        .await
-        .expect_err("busy setup rejects the repair");
+    let error = run_daemon_repair(
+        &fixture.pool,
+        &fixture.id,
+        &crate::lease_owner::LeaseOwner::none(),
+        repair,
+    )
+    .await
+    .expect_err("busy setup rejects the repair");
     assert!(
         matches!(&error, AppError::Conflict(message) if message == "environment setup or recovery is in progress"),
         "{error:?}"
@@ -167,6 +182,85 @@ async fn db_repair_known_setup_rejection_releases_its_lease() {
     assert!(
         requests.lock().unwrap().is_empty(),
         "a known rejection never reaches Kubernetes"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_fence_stops_a_repair_still_waiting_and_leaves_its_lease_ambiguous() {
+    let fixture = LeaseFixture::seed(NAMESPACE).await;
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let sandbox = failing_kubernetes(Some((entered_tx, finish_rx)), Arc::clone(&requests));
+    let repair = admitted_repair(&fixture, sandbox).await;
+    let (owner, switch) = crate::lease_owner::LeaseOwner::switchable();
+    let running = tokio::spawn({
+        let (pool, id, owner) = (fixture.pool.clone(), fixture.id.clone(), owner.clone());
+        async move { run_daemon_repair(&pool, &id, &owner, repair).await }
+    });
+    // The repair is talking to Kubernetes, and Kubernetes holds it there.
+    entered_rx.await.unwrap();
+    let lease_id = fixture.only_unresolved_lease("active").await;
+
+    switch.fence();
+    let error = tokio::time::timeout(Duration::from_secs(30), running)
+        .await
+        .expect("the repair kept waiting past the fence")
+        .unwrap()
+        .expect_err("a fenced repair succeeded");
+    assert!(
+        matches!(error, AppError::ServiceUnavailable(_)),
+        "{error:?}"
+    );
+    let settled = fixture.settled_lease(&lease_id).await;
+    assert_eq!(settled.state, "resolution_required");
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_daemon_repair_ambiguous")
+    );
+    let _ = finish_tx.send(());
+    assert!(owner.admit().is_err(), "a fenced process admits a repair");
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_fence_raised_while_the_repair_is_admitted_is_seen_before_it_starts() {
+    let fixture = LeaseFixture::seed(NAMESPACE).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let repair = admitted_repair(&fixture, failing_kubernetes(None, Arc::clone(&requests))).await;
+    let (owner, switch) = crate::lease_owner::LeaseOwner::switchable();
+    let held = fixture.hold_admission().await;
+    let running = tokio::spawn({
+        let (pool, id, owner) = (fixture.pool.clone(), fixture.id.clone(), owner.clone());
+        async move { run_daemon_repair(&pool, &id, &owner, repair).await }
+    });
+    // Past the admission check, waiting on the lease: now the process fences.
+    fixture.admission_waiting(&held).await;
+    switch.fence();
+    drop(held);
+    let error = tokio::time::timeout(Duration::from_secs(30), running)
+        .await
+        .expect("the repair waited past a fence raised during its admission")
+        .unwrap()
+        .expect_err("a repair fenced during admission succeeded");
+    assert!(
+        matches!(error, AppError::ServiceUnavailable(_)),
+        "{error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the repair reached Kubernetes after the fence"
+    );
+    let lease_id = fixture.only_unresolved_lease("resolution_required").await;
+    let settled = fixture.settled_lease(&lease_id).await;
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_daemon_repair_ambiguous")
     );
 
     fixture.cleanup().await;

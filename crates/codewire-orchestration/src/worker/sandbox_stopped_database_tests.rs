@@ -6,6 +6,7 @@ use serde_json::to_value;
 use sqlx::PgPool;
 
 use crate::api::environments::OrgQuota;
+use crate::lease_owner::INCARNATION_GRACE;
 use crate::lifecycle::{
     PgLifecycleStore, RestartCause, SANDBOX_REPLACING_ERROR_CODE, SANDBOX_REPLACING_MESSAGE,
     SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE, SANDBOX_STOPPED_MESSAGE, Service,
@@ -14,6 +15,7 @@ use crate::lifecycle::{
 use crate::runtime::RuntimeProbe;
 use crate::runtime::fake::FakeRuntimeDriver;
 use crate::test_database_support::TestDatabase;
+use crate::worker::abandoned_leases::{AbandonedLeases, OwnerlessLeases};
 use crate::worker::loops::{LivenessRow, observe_sandbox_liveness, sandbox_liveness_rows};
 
 const CREATOR: &str = "stopped-creator";
@@ -654,6 +656,58 @@ async fn db_liveness_reads_an_active_runtime_mutation() -> Result<()> {
         .execute(pool)
         .await?;
         ensure!(!held(pool).await?, "held by a released lease");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A runtime lease whose owner died holds its sandbox only until the
+/// ownerless-lease sweep settles it (#4523, #4458): liveness then reads the
+/// sandbox as free, and replacing its runtime is no longer refused.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_lease_the_sweep_settles_no_longer_holds_its_sandbox() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        sqlx::query("INSERT INTO sandbox_environment_backend(environment_id,namespace) VALUES ($1,'stopped-sandboxes')")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        // A daemon repair's lease, admitted ten minutes ago by an owner that
+        // died before its first heartbeat; its deadline has not passed.
+        sqlx::query(
+            "INSERT INTO organization_mutation_leases \
+               (id,organization_id,mutation_class,admitted_at,deadline_at,environment_id,owner_incarnation) \
+             VALUES ('orphaned-repair',$1,'environment_runtime_dispatch', \
+                     LOCALTIMESTAMP - interval '10 minutes',LOCALTIMESTAMP + interval '5 minutes',$2,$3)",
+        )
+        .bind(ORGANIZATION)
+        .bind(ENVIRONMENT)
+        .bind(0x4523_0458_i64)
+        .execute(pool)
+        .await?;
+        ensure!(held(pool).await?, "not held by the orphaned lease");
+        ensure!(
+            !svc.mark_sandbox_replacing(ENVIRONMENT).await?,
+            "replaced while the orphaned lease was active"
+        );
+        let (state, code, _) = row(pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+
+        let settled = OwnerlessLeases::new(pool.clone(), INCARNATION_GRACE)
+            .sweep(32)
+            .await?;
+        ensure!(settled == 1, "{settled} settled");
+        ensure!(!held(pool).await?, "held by a settled lease");
+        ensure!(
+            svc.mark_sandbox_replacing(ENVIRONMENT).await?,
+            "replacement refused after the sweep settled the lease"
+        );
+        replacing(pool).await?;
         Ok(())
     }
     .await;

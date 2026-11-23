@@ -48,5 +48,6 @@ pub(crate) async fn offline(pool: PgPool) -> ApiState {
         drain: Default::default(),
         cw_runtime_staging: super::cw_runtime::staging::Staging::removed(),
         revocation: codewire_server_core::revocation::Fence::new(),
+        lease_owner: crate::lease_owner::LeaseOwner::none(),
     }
 }

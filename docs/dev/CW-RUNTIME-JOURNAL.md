@@ -202,5 +202,58 @@ The database enforces this: a trigger lets an `unknown` row gain a
 resolution once and change nothing else, and the one-unresolved-request index
 counts only rows without one (migration `0028_cw_runtime_resolution.sql`).
 
-Daemon repair and managed platform agents hold the same lease from detached
-owners. They join the same loop as their own kinds (#4523).
+## Lease owners (#4523)
+
+Three other features hold an environment's runtime lease with no journal: the
+dashboard terminal, for its whole session, because the lease covers the
+terminal's child process; an SSH port-forward, until it opens; and a daemon
+repair, until its replacement Pod is up (120 s, or 30 minutes for a
+confidential sandbox). Their lease rows are alike, and a terminal's can be
+hours old, so a lease's age cannot tell whether its owner is still there.
+Instead the lease records which process took it, and that process says it is
+alive.
+
+- **Incarnations and heartbeats.** Each orchestration process picks a random
+  incarnation at start, and records it on every runtime lease it admits
+  (`owner_incarnation`). It writes a heartbeat for it, `last_seen`, into
+  `lease_owner_heartbeats` every `INCARNATION_CHECK` (5 s) on a connection of
+  its own (migration `0049_lease_owner_incarnation.sql`). Every time involved is
+  the database's own clock, as the leases' own times are.
+- **A failed heartbeat.** A write that fails, or takes longer than 5 s, is
+  tried again every `INCARNATION_RETRY` (2 s) on a new connection. Failures for
+  less than `INCARNATION_FENCE` (60 s) change nothing. That is long enough to
+  ride out a database failover or a network blip without ending anyone's
+  session.
+- **Fencing.** A process with no successful heartbeat for `INCARNATION_FENCE`
+  fences, up to about 77 s after its last successful heartbeat: one interval,
+  one write timed out, the fence and a retry. It stops acting for the runtime
+  leases it holds and admits no new ones until its next successful heartbeat.
+  Its open dashboard terminals close with WebSocket code 1012, "server
+  restarting", so the browser can reconnect to another replica; a
+  port-forward still opening or a daemon repair still waiting stops, and
+  leaves its lease `resolution_required`. Everything that holds no lease keeps
+  working, and the process never exits for this: one Postgres outage must not
+  stop every replica at once.
+- **A frozen process.** A process stopped for a while, by SIGSTOP or a paused
+  VM, fails no write while it is stopped, and its first write after resuming
+  may succeed. So before every write, and after a successful one, it fences if
+  its last success is older than `INCARNATION_FENCE`: holders that acted
+  through the freeze stop before acting again, since the sweep may have
+  settled their leases meanwhile. The fence then lifts with that successful
+  write, for new work.
+- **The sweep.** Every 30 s the `abandoned-leases` loop settles an active
+  runtime lease that no journal holds when its owner has written no heartbeat
+  for `INCARNATION_GRACE` (5 minutes) and the lease itself is that old, since
+  its owner was alive when it admitted it. Such a lease becomes
+  `resolution_required` with `environment_runtime_dispatch_owner_lost`. Five
+  minutes is well past the latest fence, so a lease is settled only after its
+  owner has died or stopped acting for it. The decision is one query over the
+  database's own times, so a failed pass, a skipped one or a change of leader
+  carries nothing over. Destroy and organization deletion resolve those leases
+  as they resolve any ambiguous runtime dispatch, and liveness no longer
+  waits on them. A heartbeat a day old whose owner holds no active lease is
+  deleted.
+- **Not covered here.** A lease admitted before owners were recorded carries
+  none, and is left to organization deletion as before. The cw runtime journal
+  settles its own leases, above. Managed platform agents' journal settles its
+  own, in a later change.

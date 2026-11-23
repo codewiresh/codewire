@@ -1922,6 +1922,7 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/api/presets.rs|\
       crates/codewire-orchestration/src/api/snapshots.rs|\
       crates/codewire-orchestration/src/confidential_storage.rs|\
+      crates/codewire-orchestration/src/worker/abandoned_leases.rs|\
       crates/codewire-orchestration/src/worker/activity_authority.rs|\
       crates/codewire-orchestration/src/worker/host_lifecycle.rs|\
       crates/codewire-orchestration/src/worker/host_lifecycle/*|\

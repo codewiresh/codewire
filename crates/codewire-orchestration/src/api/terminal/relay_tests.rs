@@ -640,6 +640,73 @@ async fn prelaunch_queue_overflow_retains_start_and_drains_accepted_session() {
     assert!(relay.await.unwrap());
 }
 
+#[tokio::test]
+async fn a_fence_ends_a_live_session_unproven_with_server_restarting() {
+    let daemon = daemon();
+    daemon
+        .output
+        .try_send(frame(DaemonRunOutput::Stdout(vec![1])))
+        .unwrap();
+    let (_browser, mut input, mut output, probe) = browser();
+    let (fence, fenced) = oneshot::channel::<()>();
+    let session = daemon.session;
+    let lifetime = daemon.lifetime.clone();
+    let relay = tokio::spawn(async move {
+        relay_until_fenced(
+            &mut output,
+            &mut input,
+            async { Ok(session) },
+            limits(),
+            async {
+                let _ = fenced.await;
+            },
+            std::future::pending(),
+        )
+        .await
+    });
+    // Live: its output reached the browser.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while probe.state.lock().unwrap().sent.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the session never relayed");
+    fence.send(()).unwrap();
+    assert!(!relay.await.unwrap(), "a fenced session was proven");
+    assert_eq!(probe.close_codes(), vec![1012]);
+    // The run's input went with the relay, which ends the daemon run.
+    lifetime.wait_dropped().await;
+    drop(daemon.output);
+}
+
+#[tokio::test]
+async fn a_fence_raised_before_the_relay_starts_ends_it_at_once() {
+    // The relay's own behaviour: a fence already raised when it starts ends
+    // it before the session runs. That the handler's fence is taken at
+    // admission is `LeaseOwner::admit`'s own test.
+    let (owner, switch) = crate::lease_owner::LeaseOwner::switchable();
+    let fenced = owner.admit().expect("not yet fenced");
+    switch.fence();
+    let daemon = daemon();
+    let (_browser, mut input, mut output, probe) = browser();
+    let proven = tokio::time::timeout(
+        Duration::from_secs(30),
+        relay_until_fenced(
+            &mut output,
+            &mut input,
+            async { Ok(daemon.session) },
+            limits(),
+            fenced,
+            std::future::pending(),
+        ),
+    )
+    .await
+    .expect("the relay ran past a fence raised before it started");
+    assert!(!proven);
+    assert_eq!(probe.close_codes(), vec![1012]);
+}
+
 /// #3586: a revoked credential ends a one-off terminal through the browser
 /// close's own path: the browser closes with 1008 "access revoked", the
 /// daemon's input is dropped, and the relay waits for the run's actual exit.

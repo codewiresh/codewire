@@ -47,6 +47,7 @@ pub mod internal_hmac;
 pub mod kek;
 #[cfg(feature = "kubernetes-identity")]
 pub mod kube_api_dial;
+pub mod lease_owner;
 pub mod metrics;
 pub mod migrate;
 pub mod nats;

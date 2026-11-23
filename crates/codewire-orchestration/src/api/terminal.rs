@@ -202,6 +202,12 @@ pub async fn terminal_websocket(
             Err(error) => return error.into_response(),
         };
 
+    // A fenced process holds no new terminal (#4523); the session watches
+    // the fence it was admitted under, so one raised from here on ends it.
+    let fenced = match state.lease_owner.admit() {
+        Ok(fenced) => fenced,
+        Err(error) => return error.into_response(),
+    };
     let lease = match acquire_environment_runtime_mutation_lease(
         &state.pool,
         &org_id,
@@ -227,7 +233,7 @@ pub async fn terminal_websocket(
                 settle_terminal_lease(&failed_pool, &failed_lease, true).await;
             });
         })
-        .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id, revoked))
+        .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id, fenced, revoked))
 }
 
 /// The user a socket request admits, for a caller that only authenticates.
@@ -287,18 +293,53 @@ async fn terminal_session(
     client: DaemonClient,
     pool: sqlx::PgPool,
     lease_id: String,
+    fenced: impl Future<Output = ()> + Send + 'static,
     revoked: SocketRevoked,
 ) {
     let (mut browser_output, mut browser_input) = socket.split();
-    let proven = relay_terminal_until(
+    let proven = relay_until_fenced(
         &mut browser_output,
         &mut browser_input,
         client.start_run(terminal_start()),
         TerminalLimits::default(),
+        fenced,
         revoked.into_future(),
     )
     .await;
     settle_terminal_lease(&pool, &lease_id, proven).await;
+}
+
+/// Relays until the session ends, its credential is revoked (#3586), or this
+/// process fences (#4523). A
+/// fence drops the relay, which ends the daemon run, and closes the browser
+/// with "server restarting" so it can reconnect elsewhere. Whether the run's
+/// child exited is then not proven, and the abandoned-leases sweep may count
+/// this process gone.
+async fn relay_until_fenced<Tx, Rx, E, F, S>(
+    browser_output: &mut Tx,
+    browser_input: &mut Rx,
+    start: F,
+    limits: TerminalLimits,
+    fenced: impl Future<Output = ()>,
+    revoked: impl Future<Output = ()> + Send,
+) -> bool
+where
+    Tx: Sink<Message> + Unpin + Send,
+    Rx: Stream<Item = Result<Message, E>> + Unpin + Send,
+    F: Future<Output = Result<S, DaemonClientError>> + Send,
+    S: TerminalSession,
+{
+    let io = limits.io;
+    tokio::select! {
+        biased;
+        () = fenced => {
+            close_browser(browser_output, TerminalEnd::ServerRestart, io).await;
+            false
+        }
+        proven = relay_terminal_until(browser_output, browser_input, start, limits, revoked) => {
+            proven
+        }
+    }
 }
 
 async fn settle_terminal_lease(pool: &sqlx::PgPool, lease_id: &str, proven: bool) {
@@ -391,6 +432,8 @@ enum TerminalEnd {
     InputLimit,
     DaemonFailure,
     Natural,
+    /// This server fenced (#4523); the browser may reconnect to another.
+    ServerRestart,
     /// The credential that admitted the socket was lost (#3586).
     Revoked,
 }
@@ -701,6 +744,7 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
                 let (code, reason) = match end {
                     TerminalEnd::Natural => (1000, "session ended"),
                     TerminalEnd::InputLimit => (1009, "terminal input limit exceeded"),
+                    TerminalEnd::ServerRestart => (1012, "server restarting"),
                     TerminalEnd::Revoked => (1008, "access revoked"),
                     _ => (1011, "terminal unavailable"),
                 };

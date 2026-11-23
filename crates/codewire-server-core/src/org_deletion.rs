@@ -20,6 +20,9 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::error::AppError;
 
+mod lease_admission;
+use lease_admission::admit_mutation_lease_in;
+
 const DELETION_REQUESTED_ACTION: &str = "org.deletion_requested";
 const DELETION_RETRY_REQUESTED_ACTION: &str = "org.deletion_retry_requested";
 const INITIAL_PHASE: &str = "write_fenced";
@@ -176,52 +179,6 @@ async fn admit_organization_mutation_lease(
     let lease =
         admit_mutation_lease_in(&mut tx, organization_id, mutation_class, environment_id).await?;
     tx.commit().await.map_err(AppError::from)?;
-    Ok(lease)
-}
-
-async fn admit_mutation_lease_in(
-    tx: &mut Transaction<'_, Postgres>,
-    organization_id: &str,
-    mutation_class: OrganizationMutationClass,
-    environment_id: Option<&str>,
-) -> Result<OrganizationMutationLease, AppError> {
-    let deletion_state: Option<String> =
-        sqlx::query_scalar(r#"SELECT deletion_state FROM organizations WHERE id = $1 FOR UPDATE"#)
-            .bind(organization_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(AppError::from)?;
-
-    match deletion_state.as_deref() {
-        Some("active") => {}
-        Some("deleting" | "delete_failed") => {
-            return Err(state_conflict("organization deletion is in progress"));
-        }
-        Some(_) => {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "organization {organization_id} has an unknown deletion state"
-            )));
-        }
-        None => return Err(AppError::NotFound("organization not found".into())),
-    }
-
-    let lease_id = format!("organization-mutation/{}", Uuid::new_v4());
-    let lease = sqlx::query_as::<_, OrganizationMutationLease>(
-        r#"
-        INSERT INTO organization_mutation_leases
-            (id, organization_id, mutation_class, deadline_at, environment_id)
-        VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 second'), $5)
-        RETURNING *
-        "#,
-    )
-    .bind(&lease_id)
-    .bind(organization_id)
-    .bind(mutation_class.as_str())
-    .bind(mutation_class.deadline_seconds())
-    .bind(environment_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(AppError::from)?;
     Ok(lease)
 }
 

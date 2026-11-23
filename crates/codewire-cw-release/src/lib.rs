@@ -17,6 +17,7 @@ pub mod build_record;
 pub mod identity;
 pub mod local_runtime;
 pub mod openpgp;
+pub mod platform_role;
 pub mod release;
 pub mod sha256;
 #[cfg(unix)]

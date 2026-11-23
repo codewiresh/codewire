@@ -464,6 +464,20 @@ fn require_runtime_images() -> anyhow::Result<()> {
     }
 }
 
+/// The migrated schema, the pool, and this process's lease owner, which
+/// exists before anything here can admit a runtime lease (#4523).
+async fn database(
+    database_url: &str,
+) -> anyhow::Result<(
+    sqlx::PgPool,
+    codewire_orchestration::lease_owner::LeaseOwner,
+)> {
+    codewire_server_core::migrate::ensure_schema_logged(database_url).await?;
+    let pool = codewire_server_core::db::connect(database_url).await?;
+    let lease_owner = codewire_orchestration::lease_owner::spawn(database_url.to_owned());
+    Ok((pool, lease_owner))
+}
+
 /// Where the Temporal worker and the trigger client connect. The worker is
 /// mandatory: it is the only env lifecycle execution path. A missing
 /// TEMPORAL_HOST_PORT is fatal (mirroring Go's requiresTemporal handling)
@@ -587,8 +601,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
-    let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
+    let (pool, lease_owner) = database(&cfg.database_url).await?;
     codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
     let confidential_storage_flags = FeatureFlags::from_env()?;
     let network_policy_flags =
@@ -874,6 +887,7 @@ async fn main() -> anyhow::Result<()> {
         environment_logs: codewire_orchestration::api::log_notifications::start(pool.clone()),
         live: codewire_orchestration::api::live::start(pool.clone()),
         drain: drain.clone(),
+        lease_owner: lease_owner.clone(),
         cw_runtime_staging,
         revocation,
     };

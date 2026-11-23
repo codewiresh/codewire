@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 
 use super::open_fenced_ssh_stream;
 use crate::api::runtime_lease_test_support::{LeaseFixture, drop_caller_after_operation_starts};
+use crate::lease_owner::LeaseOwner;
 
 /// Stands in for the port-forwarded stream; dropping it closes the stream.
 struct StreamProbe(Arc<AtomicBool>);
@@ -28,9 +29,13 @@ async fn db_stream_opened_after_the_client_left_releases_the_lease_and_closes() 
     let fixture = LeaseFixture::seed("synthetic-ssh-proxy").await;
 
     // A client that stays receives the stream and the lease is released.
-    let stream = open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async {
-        Ok("ssh stream")
-    })
+    let stream = open_fenced_ssh_stream(
+        &fixture.pool,
+        &fixture.id,
+        &fixture.id,
+        &LeaseOwner::none(),
+        async { Ok("ssh stream") },
+    )
     .await
     .unwrap()
     .unwrap();
@@ -43,11 +48,17 @@ async fn db_stream_opened_after_the_client_left_releases_the_lease_and_closes() 
     let (entered_tx, entered_rx) = oneshot::channel();
     let (finish_tx, finish_rx) = oneshot::channel::<()>();
     drop_caller_after_operation_starts(
-        open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async move {
-            let _ = entered_tx.send(());
-            let _ = finish_rx.await;
-            Ok(probe)
-        }),
+        open_fenced_ssh_stream(
+            &fixture.pool,
+            &fixture.id,
+            &fixture.id,
+            &LeaseOwner::none(),
+            async move {
+                let _ = entered_tx.send(());
+                let _ = finish_rx.await;
+                Ok(probe)
+            },
+        ),
         entered_rx,
     )
     .await;
@@ -79,9 +90,13 @@ async fn db_failed_port_forward_after_the_client_left_requires_resolution() {
     let fixture = LeaseFixture::seed("synthetic-ssh-proxy").await;
 
     // A client that stays sees the failure; the outcome is still unknown.
-    let failure = open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async {
-        Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure"))
-    })
+    let failure = open_fenced_ssh_stream(
+        &fixture.pool,
+        &fixture.id,
+        &fixture.id,
+        &LeaseOwner::none(),
+        async { Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure")) },
+    )
     .await
     .unwrap();
     assert!(failure.is_err());
@@ -100,11 +115,17 @@ async fn db_failed_port_forward_after_the_client_left_requires_resolution() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (finish_tx, finish_rx) = oneshot::channel::<()>();
     drop_caller_after_operation_starts(
-        open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async move {
-            let _ = entered_tx.send(());
-            let _ = finish_rx.await;
-            Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure"))
-        }),
+        open_fenced_ssh_stream(
+            &fixture.pool,
+            &fixture.id,
+            &fixture.id,
+            &LeaseOwner::none(),
+            async move {
+                let _ = entered_tx.send(());
+                let _ = finish_rx.await;
+                Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure"))
+            },
+        ),
         entered_rx,
     )
     .await;
@@ -116,6 +137,93 @@ async fn db_failed_port_forward_after_the_client_left_requires_resolution() {
         settled.recovery_code.as_deref(),
         Some("environment_runtime_dispatch_ambiguous")
     );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_fence_stops_a_port_forward_still_opening_and_admits_no_new_one() {
+    let fixture = LeaseFixture::seed("synthetic-ssh-proxy").await;
+    let (owner, switch) = LeaseOwner::switchable();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let opening = tokio::spawn({
+        let (pool, id, owner) = (fixture.pool.clone(), fixture.id.clone(), owner.clone());
+        async move {
+            open_fenced_ssh_stream(&pool, &id, &id, &owner, async move {
+                let _ = entered_tx.send(());
+                std::future::pending::<anyhow::Result<()>>().await
+            })
+            .await
+        }
+    });
+    entered_rx.await.unwrap();
+    let lease_id = fixture.only_unresolved_lease("active").await;
+
+    switch.fence();
+    let stopped = tokio::time::timeout(Duration::from_secs(30), opening)
+        .await
+        .expect("the port-forward kept waiting past the fence")
+        .unwrap()
+        .unwrap();
+    assert!(stopped.is_err());
+    let settled = fixture.settled_lease(&lease_id).await;
+    assert_eq!(settled.state, "resolution_required");
+    assert_eq!(
+        settled.recovery_code.as_deref(),
+        Some("environment_runtime_dispatch_ambiguous")
+    );
+    assert!(
+        open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, &owner, async {
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .is_err(),
+        "a fenced process opened a port-forward"
+    );
+    resolve_organization_mutation_lease(&fixture.pool, &lease_id)
+        .await
+        .unwrap();
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_fence_raised_while_the_lease_is_admitted_is_seen_before_any_wait() {
+    let fixture = LeaseFixture::seed("synthetic-ssh-proxy").await;
+    let (owner, switch) = LeaseOwner::switchable();
+    let held = fixture.hold_admission().await;
+    let connected = Arc::new(AtomicBool::new(false));
+    let opening = tokio::spawn({
+        let (pool, id, owner) = (fixture.pool.clone(), fixture.id.clone(), owner.clone());
+        let connected = Arc::clone(&connected);
+        async move {
+            open_fenced_ssh_stream(&pool, &id, &id, &owner, async move {
+                connected.store(true, Ordering::SeqCst);
+                std::future::pending::<anyhow::Result<()>>().await
+            })
+            .await
+        }
+    });
+    // Past the admission check, waiting on the lease: now the process fences.
+    fixture.admission_waiting(&held).await;
+    switch.fence();
+    drop(held);
+    let stopped = tokio::time::timeout(Duration::from_secs(30), opening)
+        .await
+        .expect("the port-forward waited past a fence raised during its admission")
+        .unwrap()
+        .unwrap();
+    assert!(stopped.is_err());
+    assert!(
+        !connected.load(Ordering::SeqCst),
+        "the port-forward was started"
+    );
+    let lease_id = fixture.only_unresolved_lease("resolution_required").await;
+    resolve_organization_mutation_lease(&fixture.pool, &lease_id)
+        .await
+        .unwrap();
 
     fixture.cleanup().await;
 }

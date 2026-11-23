@@ -31,7 +31,7 @@ pub(crate) use self::wire::{Action, Reply, ReplyBody, Request, SelectionExpectat
 use self::wire::{BoundedInput, BoundedOutput, Code, Correlation, Outcome};
 
 pub(crate) const ROLE: &str = "__platform-cw-runtime";
-const ROLE_BUDGET: Duration = Duration::from_secs(120);
+const ROLE_BUDGET: Duration = codewire_cw_release::platform_role::BUDGET;
 const LOCK_BUDGET: Duration = Duration::from_secs(10);
 const JOB: &str = "job.json";
 const JOB_TEMP: &str = ".job.tmp";
@@ -53,7 +53,10 @@ where
     // This is an early, single-threaded private process. The alarm also bounds
     // file syscalls which a userspace stdin deadline cannot interrupt. Death
     // after any possible effect yields no receipt and is Unknown to the owner.
-    if arm_deadline(ROLE_BUDGET.as_secs() as u32 + 1).is_err() {
+    let Ok(alarm) = u32::try_from(codewire_cw_release::platform_role::ALARM.as_secs()) else {
+        return 2;
+    };
+    if arm_deadline(alarm).is_err() {
         return 2;
     }
     let deadline = Instant::now() + ROLE_BUDGET;

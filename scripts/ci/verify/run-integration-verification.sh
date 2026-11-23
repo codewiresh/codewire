@@ -1100,6 +1100,12 @@ database_lane_orchestration() {
       'worker::sandbox_stopped_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "abandoned lease sweep matrix" abandoned-lease-sweep \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::abandoned_leases::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "stop reason matrix" stop-reason \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

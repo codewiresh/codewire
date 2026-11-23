@@ -127,6 +127,8 @@ pub struct ApiState {
     pub live: Arc<live::LiveNotifications>,
     /// This replica's drain, which ends its public streams (#4426).
     pub drain: crate::drain::Drain,
+    /// This process's lease-owner lock, and whether it is fenced (#4523).
+    pub lease_owner: crate::lease_owner::LeaseOwner,
     /// Where cw runtime uploads are staged, validated before serving (#5508).
     pub cw_runtime_staging: cw_runtime::staging::Staging,
     /// This process's revocation fence, which ends a stream when the

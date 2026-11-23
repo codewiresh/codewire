@@ -414,9 +414,8 @@ fn sole_runtime_command_has_no_public_command_path_environment_or_credential_fie
 
 #[test]
 fn a_request_is_abandoned_only_after_everything_acting_for_it_has_stopped() {
-    // `ROLE_BUDGET` plus one second: the alarm `platform_cw_runtime` arms in
-    // the sandbox before its first effect.
-    let role_alarm = Duration::from_secs(121);
+    // The alarm the role arms in the sandbox before its first effect.
+    let role_alarm = codewire_cw_release::platform_role::ALARM;
     let transaction = super::super::owner::TRANSACTION_TIMEOUT;
     assert!(ABANDONED_AFTER > transaction * 2 + OWNER_TIMEOUT + role_alarm);
 }
@@ -424,5 +423,5 @@ fn a_request_is_abandoned_only_after_everything_acting_for_it_has_stopped() {
 #[test]
 fn an_unknown_request_is_resolvable_only_after_its_role_can_no_longer_select() {
     // The role's alarm, measured from its start, which precedes the unknown end.
-    assert!(RESOLVABLE_AFTER > Duration::from_secs(121));
+    assert!(RESOLVABLE_AFTER > codewire_cw_release::platform_role::ALARM);
 }

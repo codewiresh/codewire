@@ -19,6 +19,7 @@ pub mod egress;
 pub mod environment_mesh;
 pub mod front_door;
 pub mod identity;
+pub mod lease_owner;
 pub mod lifecycle;
 pub(crate) mod openbao;
 pub(crate) mod repository_mount;

@@ -104,8 +104,14 @@ pub async fn ssh_proxy_websocket(
         let environment_id = target.environment_id.clone();
         async move { runtime.ssh_stream(&placement, &environment_id).await }
     };
-    let stream = match open_fenced_ssh_stream(&state.pool, &org_id, &target.environment_id, connect)
-        .await
+    let stream = match open_fenced_ssh_stream(
+        &state.pool,
+        &org_id,
+        &target.environment_id,
+        &state.lease_owner,
+        connect,
+    )
+    .await
     {
         Ok(Ok(stream)) => stream,
         Ok(Err(err)) => {
@@ -139,19 +145,29 @@ pub async fn ssh_proxy_websocket(
 /// releases it; a failed port-forward retains
 /// `environment_runtime_dispatch_ambiguous` evidence. A stream opened after the
 /// client left still releases the lease and is then dropped, which closes it.
+///
+/// A fenced process neither starts a port-forward nor waits on one: the
+/// abandoned-leases sweep may count it as gone (#4523). One that fences while
+/// the port-forward opens stops it, and the lease needs resolution.
 #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 async fn open_fenced_ssh_stream<S, F>(
     pool: &PgPool,
     org_id: &str,
     environment_id: &str,
+    lease_owner: &crate::lease_owner::LeaseOwner,
     connect: F,
 ) -> Result<anyhow::Result<S>, AppError>
 where
     F: Future<Output = anyhow::Result<S>> + Send + 'static,
     S: Send + 'static,
 {
+    let fenced = lease_owner.admit()?;
     run_environment_runtime_mutation_with_outcome(pool, org_id, environment_id, async move {
-        let stream = connect.await;
+        let stream = tokio::select! {
+            biased;
+            () = fenced => Err(anyhow::anyhow!("this Codewire server fenced")),
+            stream = connect => stream,
+        };
         if stream.is_ok() {
             RuntimeMutationOutcome::release(stream)
         } else {
