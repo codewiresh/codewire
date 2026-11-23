@@ -35,6 +35,7 @@
     "codewire.v1.OrganizationService": "orchestration",
     "codewire.v1.PortService": "orchestration",
     "codewire.v1.PresetService": "orchestration",
+    "codewire.v1.SandboxIdentityService": "orchestration",
     "codewire.v1.SecretService": "orchestration",
     "codewire.v1.SnapshotService": "orchestration"
   },

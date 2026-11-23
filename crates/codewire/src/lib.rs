@@ -42,7 +42,9 @@ pub mod hosts;
 mod mesh;
 mod network_policies;
 pub mod platform_agents;
+pub mod sandbox_identity;
 mod sdk;
+mod snapshots;
 mod transport;
 mod transport_error;
 
@@ -54,8 +56,8 @@ use codewire_proto::codewire::v1::{
     CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
     ExecServiceClient, FileServiceClient, GithubRepositoryServiceClient, MeshInviteServiceClient,
     MeshNetworkServiceClient, MeshNodeServiceClient, NetworkPolicyServiceClient,
-    OrganizationServiceClient, PortServiceClient, PresetServiceClient, SecretServiceClient,
-    SnapshotServiceClient,
+    OrganizationServiceClient, PortServiceClient, PresetServiceClient,
+    SandboxIdentityServiceClient, SecretServiceClient, SnapshotServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{CallOptions, ClientTransport};
@@ -224,6 +226,7 @@ pub struct CodewireClient {
     snapshots: SnapshotServiceClient<ReqwestConnectTransport>,
     access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
     network_policies: NetworkPolicyServiceClient<ReqwestConnectTransport>,
+    sandbox_identity: SandboxIdentityServiceClient<ReqwestConnectTransport>,
     credentials: CredentialServiceClient<ReqwestConnectTransport>,
     credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
     github_repositories: GithubRepositoryServiceClient<ReqwestConnectTransport>,
@@ -428,6 +431,7 @@ impl CodewireClient {
         let snapshot_config = config.connect_config()?;
         let access_profile_config = config.connect_config()?;
         let network_policy_config = config.connect_config()?;
+        let sandbox_identity_config = config.connect_config()?;
         let credential_config = config.connect_config()?;
         let credential_mutation_config = config.connect_config()?;
         let github_repository_config = config.connect_config()?;
@@ -470,6 +474,10 @@ impl CodewireClient {
             network_policies: NetworkPolicyServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 network_policy_config,
+            ),
+            sandbox_identity: SandboxIdentityServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                sandbox_identity_config,
             ),
             credentials: CredentialServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
@@ -724,50 +732,6 @@ impl CodewireClient {
     ) -> Result<DeletePortResponse, ClientError> {
         self.ports
             .delete_port_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn create_snapshot(
-        &self,
-        request: CreateSnapshotRequest,
-    ) -> Result<CreateSnapshotResponse, ClientError> {
-        self.snapshots
-            .create_snapshot_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn list_snapshots(
-        &self,
-        request: ListSnapshotsRequest,
-    ) -> Result<ListSnapshotsResponse, ClientError> {
-        self.snapshots
-            .list_snapshots_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn get_snapshot(
-        &self,
-        request: GetSnapshotRequest,
-    ) -> Result<GetSnapshotResponse, ClientError> {
-        self.snapshots
-            .get_snapshot_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn delete_snapshot(
-        &self,
-        request: DeleteSnapshotRequest,
-    ) -> Result<DeleteSnapshotResponse, ClientError> {
-        self.snapshots
-            .delete_snapshot_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

@@ -10,6 +10,7 @@ from codewire.access_profiles import AccessProfiles
 from codewire.credentials import Credentials
 from codewire.environments import Environments
 from codewire.network_policies import NetworkPolicies
+from codewire.sandbox_identity import SandboxIdentity
 from codewire.secrets import SecretProjects, Secrets
 from codewire.presets import Presets
 
@@ -46,6 +47,7 @@ class Codewire:
         self.secret_projects = SecretProjects(self._context)
         self.access_profiles = AccessProfiles(self._context)
         self.network_policies = NetworkPolicies(self._context)
+        self.sandbox_identity = SandboxIdentity(self._context)
         self.credentials = Credentials(self._context)
 
     def close(self) -> None:
@@ -53,6 +55,7 @@ class Codewire:
         self.api_keys.close()
         self.access_profiles.close()
         self.network_policies.close()
+        self.sandbox_identity.close()
         self.credentials.close()
 
     def __enter__(self) -> Codewire:

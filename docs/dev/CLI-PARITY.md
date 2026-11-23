@@ -783,6 +783,7 @@ Classified from `--help` and one read-only probe with each flag; not walked.
 | --- | --- | --- | --- |
 | Organizations | `org` | Both refused ("does not apply to `cw org`") | platform only: an organization has no local store. Separately, a **CLI-versus-dashboard gap**: `cw org invite` sends an invitation, but no command lists or revokes an organization's pending invitations; `ListInvitations` and `RevokeInvitation` exist in `proto/codewire/v1/organization.proto`, and only the dashboard calls them. `cw org invitations` lists invitations sent to you |
 | Account and organization administration | `api-keys`, `hosts`, `host`, `member` | Both refused | platform only: they administer the account, or let this computer serve the organization |
+| Sandbox identity | `identity` | Not yet checked | platform only: identity groups, audiences and minting stops exist only for cloud Sandboxes (#4663) |
 | This computer | `mesh`, `config`, `local-https`, `install` | `mesh`, `config` and `local-https` refuse both; `install` lists both in its help | local only: they configure this computer's `cw` |
 | Trusted host access | `control` | Needs `--environment`; not probed further | local only (Linux): grants on this host |
 | Environment runtime | `daemon`, `runtime`, `network` | Both accepted | both placements; not yet audited. `runtime info --local` with no local VM running prints a raw socket error ("Connect to existing native runtime publisher: filesystem operation failed for …/supervisor.sock …") |

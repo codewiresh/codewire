@@ -46,6 +46,7 @@ fn main() {
         "codewire/v1/organization.proto",
         "codewire/v1/port.proto",
         "codewire/v1/preset.proto",
+        "codewire/v1/sandbox_identity.proto",
         "codewire/v1/secret.proto",
         "codewire/v1/snapshot.proto",
         "codewire/testing/v1/ping.proto",

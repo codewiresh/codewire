@@ -91,6 +91,7 @@ mod tests {
     mod reserve_legal_page_slugs;
     mod runtime_dispatch_scope;
     mod sandbox_egress;
+    mod sandbox_identity;
     mod session_mutation;
     mod signup_credit_setting;
     mod ssh;
@@ -106,10 +107,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0048, and
-    // 0049.
+    // (which equals the 41-migration history it replaced), 0002 to 0050.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "7da33da2007d26d83a00afceaa624c98df3d3689663074be64d6fe8979f2f82b";
+        "5c975275caea0f1ccf7f4532918ee007ee408f212ad8608979eea5be28781d83";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -229,6 +229,8 @@ mod tests {
     const APPLIED_ENVIRONMENT_UNPLANNED_RESTART_CHECKSUM: &str = "910f83ce3fca64b36bf15daa7ece70986d940dd0e7cb2f67761de7630c2d1eaf1bb37ffbfdd2e44fd6117d9e6d3757fb";
     // SHA-384 of 0049_lease_owner_incarnation.sql (#4523).
     const APPLIED_LEASE_OWNER_INCARNATION_CHECKSUM: &str = "ecec5ff8ded38472dc1a49413f1e2ee193d1792c776d20af654d83ad8492b24a3d6ddb48333a360a13b7280663f20a36";
+    // SHA-384 of 0050_sandbox_identity.sql (#4663, #4664).
+    const APPLIED_SANDBOX_IDENTITY_CHECKSUM: &str = "66d704bb19dcc769bc984b1df07992e75472e602b18f3ec85485835e5aa0edd96782d68f08dffc311c258ee88dda3c1f";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1359,6 +1361,7 @@ mod tests {
             (47, APPLIED_ENVIRONMENT_SYSTEMD_RUNTIME_PROFILE_CHECKSUM),
             (48, APPLIED_ENVIRONMENT_UNPLANNED_RESTART_CHECKSUM),
             (49, APPLIED_LEASE_OWNER_INCARNATION_CHECKSUM),
+            (50, APPLIED_SANDBOX_IDENTITY_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1389,11 +1392,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 49
+                first.len() == 50
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                        41, 42, 43, 44, 45, 46, 47, 48, 49
+                        41, 42, 43, 44, 45, 46, 47, 48, 49, 50
                     ])
                     && first.iter().all(|migration| migration.2)
             );

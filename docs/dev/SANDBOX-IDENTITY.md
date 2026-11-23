@@ -51,6 +51,9 @@ workload identity tokens, not RFC 9068 access tokens.
   - A fork, duplicate or restore keeps the source's groups only when the actor
     is an admin of the organization. Otherwise it starts with none.
   - Moving a Sandbox to another organization clears its groups.
+  - Hosted Sandboxes have no duplicate, restore or move between organizations
+    today; a fork is a create from a snapshot. Each of those, when it is built,
+    keeps groups only under the rule above, and is not built yet.
   - Granting `operator` or `owner` on a Sandbox that has groups needs an admin.
 - **Effect:** a change applies to the next mint. Tokens already issued expire
   within their lifetime, at most 10 minutes.
@@ -71,8 +74,9 @@ a token for a registered audience.
   Registration stores it. A mint's `resource` is canonicalised the same way
   and must match exactly.
 - **Refused at registration:**
-  - any host equal to or under a domain the deployment serves (its API,
-    issuer, previews and dashboard domains, from configuration);
+  - any host equal to or under a domain the deployment serves: the hosts of
+    `FRONTEND_URL` and `CODEWIRE_IDENTITY_ISSUER_BASE`, and
+    `PREVIEW_BASE_DOMAIN`;
   - `kubernetes`, `kubernetes.default` and anything under
     `kubernetes.default.svc`;
   - IP literals, `localhost`, and link-local or private-address hosts.

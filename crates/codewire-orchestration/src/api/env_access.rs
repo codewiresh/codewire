@@ -164,6 +164,11 @@ pub(crate) async fn grant_environment_access_core(
             ));
         }
 
+        // A grant of operator or owner on a Sandbox with identity groups
+        // extends those groups to the grantee, so it needs an admin, and its
+        // audit row commits with it (docs/dev/SANDBOX-IDENTITY.md, "Groups").
+        let mut tx = pool.begin().await?;
+        super::identity::groups::admit_grant(&mut tx, pool, user, org_id, env_id, perm).await?;
         let row = sqlx::query(
             r#"INSERT INTO environment_access (environment_id, user_id, permission, granted_by)
                VALUES ($1, $2, $3, $4)
@@ -175,7 +180,7 @@ pub(crate) async fn grant_environment_access_core(
         .bind(&body.user_id)
         .bind(perm)
         .bind(&user.user_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "grant access failed");
@@ -195,16 +200,18 @@ pub(crate) async fn grant_environment_access_core(
             created_at: row.try_get("created_at")?,
         };
 
-        log_audit_info(
-            pool,
-            "environment.access.granted",
-            &user.user_id,
-            serde_json::json!({
-                "org_id": org_id, "environment_id": env_id,
-                "target_user_id": body.user_id, "permission": perm,
-            }),
+        sqlx::query(
+            r#"INSERT INTO audit_logs (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
+               VALUES (gen_random_uuid()::text, NOW(), 'environment.access.granted', $1, '', '', $2, 'info')"#,
         )
-        .await;
+        .bind(&user.user_id)
+        .bind(serde_json::json!({
+            "org_id": org_id, "environment_id": env_id,
+            "target_user_id": body.user_id, "permission": perm,
+        }))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
 
         Ok(grant)
     })

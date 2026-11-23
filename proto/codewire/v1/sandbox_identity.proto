@@ -1,0 +1,206 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// SandboxIdentityService manages the records behind sandbox identity
+// (`cw identity`, #4663; docs/dev/SANDBOX-IDENTITY.md): each hosted
+// Sandbox's identity groups, the audiences an organization registered, and
+// the switches that stop minting for one Sandbox or a whole organization.
+// Minting itself is WorkspaceBindingService.IssueIdentityToken, from inside a
+// Sandbox; nothing here issues a token.
+//
+// Every method needs a signed-in caller who is a member of `org_id`; a
+// non-member is told the organization does not exist, and a Sandbox of
+// another organization does not exist either. Changing groups, audiences
+// and the stop switches is for organization owners and admins. A platform
+// administrator may also stop and resume minting. Every change writes an
+// audit record in the same transaction.
+service SandboxIdentityService {
+  // GetEnvironmentIdentityGroups returns a Sandbox's groups. Organization
+  // owners and admins read any Sandbox's; others read those they can access.
+  rpc GetEnvironmentIdentityGroups(GetEnvironmentIdentityGroupsRequest) returns (GetEnvironmentIdentityGroupsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetEnvironmentIdentityGroups replaces a Sandbox's groups; an empty list
+  // removes them all. The change applies to the next token. The response
+  // names who can run code in the Sandbox, because each of them, and every
+  // process in it, can use the groups.
+  rpc SetEnvironmentIdentityGroups(SetEnvironmentIdentityGroupsRequest) returns (SetEnvironmentIdentityGroupsResponse);
+
+  // RegisterIdentityAudience registers a verifier. The audience is stored in
+  // its canonical form, and a form or denylist refusal is INVALID_ARGUMENT
+  // naming the rule. An audience, or a file name, the organization already
+  // registered is refused with ALREADY_EXISTS.
+  rpc RegisterIdentityAudience(RegisterIdentityAudienceRequest) returns (RegisterIdentityAudienceResponse);
+
+  // ListIdentityAudiences returns the organization's registrations, by
+  // audience, in one page.
+  rpc ListIdentityAudiences(ListIdentityAudiencesRequest) returns (ListIdentityAudiencesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // RemoveIdentityAudience removes a registration. The audience is matched
+  // in its canonical form.
+  rpc RemoveIdentityAudience(RemoveIdentityAudienceRequest) returns (RemoveIdentityAudienceResponse);
+
+  // StopIdentityMinting stops minting for one Sandbox, or for the whole
+  // organization when environment_id is empty. Tokens already issued stay
+  // valid until they expire, at most 10 minutes; this is not revocation.
+  rpc StopIdentityMinting(StopIdentityMintingRequest) returns (StopIdentityMintingResponse);
+
+  // ResumeIdentityMinting removes the stop StopIdentityMinting made for the
+  // same target. Resuming an organization leaves its Sandboxes' own stops.
+  rpc ResumeIdentityMinting(ResumeIdentityMintingRequest) returns (ResumeIdentityMintingResponse);
+}
+
+// A Sandbox's groups, stored bare: a token names each as `<org id>:<group>`.
+message EnvironmentIdentityGroups {
+  string environment_id = 1;
+  // Sorted. Each is lowercase `[a-z0-9-]`, 1 to 63 characters; at most 32.
+  repeated string groups = 2;
+  // Bumped on every change; 0 for a Sandbox whose groups were never set.
+  int64 version = 3;
+  // Unset for a Sandbox whose groups were never set.
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message GetEnvironmentIdentityGroupsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentIdentityGroupsResponse {
+  EnvironmentIdentityGroups groups = 1;
+}
+
+message SetEnvironmentIdentityGroupsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // The complete new set. Duplicates are kept once.
+  repeated string groups = 3;
+}
+
+// Why someone can run code in a Sandbox.
+enum IdentityGroupUserReason {
+  IDENTITY_GROUP_USER_REASON_UNSPECIFIED = 0;
+  // They created the Sandbox.
+  IDENTITY_GROUP_USER_REASON_CREATOR = 1;
+  // They were granted `owner` on it.
+  IDENTITY_GROUP_USER_REASON_OWNER_GRANT = 2;
+  // They were granted `operator` on it.
+  IDENTITY_GROUP_USER_REASON_OPERATOR_GRANT = 3;
+  // They are an owner or admin of the organization.
+  IDENTITY_GROUP_USER_REASON_ORGANIZATION_ADMIN = 4;
+}
+
+// A member who can run code in a Sandbox, and so use its groups.
+message IdentityGroupUser {
+  string user_id = 1;
+  string email = 2;
+  IdentityGroupUserReason reason = 3;
+}
+
+message SetEnvironmentIdentityGroupsResponse {
+  EnvironmentIdentityGroups groups = 1;
+  // The groups before this change, sorted.
+  repeated string previous_groups = 2;
+  // False when the new set equals the old one: nothing was written.
+  bool changed = 3;
+  // Everyone who can run code in the Sandbox, by email. Every process in it
+  // can use its groups as well.
+  repeated IdentityGroupUser can_run_code = 4;
+}
+
+// The groups an audience may see.
+message IdentityAudienceGroups {
+  // Only these of a Sandbox's groups; empty means none but `<org id>:all`.
+  repeated string names = 1;
+}
+
+message IdentityAudience {
+  string org_id = 1;
+  // The canonical form: lowercase scheme and host, the host as IDNA
+  // A-labels, no default port, and the path exactly as registered.
+  string audience = 2;
+  // Unset: the audience sees every group of a Sandbox.
+  IdentityAudienceGroups visible_groups = 3;
+  // One to ten minutes.
+  google.protobuf.Duration lifetime = 4;
+  // Whether tokens for this audience carry `created_by`, the creator's user
+  // ID, and `environment_name`.
+  bool claim_created_by = 5;
+  bool claim_environment_name = 6;
+  // When set, a Sandbox's daemon keeps `/codewire/run/identity/<name>.jwt`
+  // current for this audience.
+  optional string file_name = 7;
+  // Bumped on every change, and never reused for the same audience.
+  int64 version = 8;
+  string created_by = 9;
+  google.protobuf.Timestamp created_at = 10;
+}
+
+message RegisterIdentityAudienceRequest {
+  string org_id = 1;
+  // An absolute https URI with no user name, password, query or fragment.
+  string audience = 2;
+  // Unset: every group.
+  IdentityAudienceGroups visible_groups = 3;
+  // Unset: ten minutes. Otherwise whole seconds from one to ten minutes.
+  google.protobuf.Duration lifetime = 4;
+  bool claim_created_by = 5;
+  bool claim_environment_name = 6;
+  // Lowercase `[a-z0-9-]`, 1 to 63 characters; unique in the organization.
+  optional string file_name = 7;
+}
+
+message RegisterIdentityAudienceResponse {
+  IdentityAudience audience = 1;
+}
+
+message ListIdentityAudiencesRequest {
+  string org_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListIdentityAudiencesResponse {
+  repeated IdentityAudience audiences = 1;
+  string next_page_token = 2;
+}
+
+message RemoveIdentityAudienceRequest {
+  string org_id = 1;
+  string audience = 2;
+}
+
+message RemoveIdentityAudienceResponse {
+  // The canonical form that was removed.
+  string audience = 1;
+}
+
+message StopIdentityMintingRequest {
+  string org_id = 1;
+  // Empty stops the whole organization.
+  string environment_id = 2;
+}
+
+message StopIdentityMintingResponse {
+  // False when minting was already stopped for this target: nothing was
+  // written.
+  bool changed = 1;
+}
+
+message ResumeIdentityMintingRequest {
+  string org_id = 1;
+  // Empty resumes the organization.
+  string environment_id = 2;
+}
+
+message ResumeIdentityMintingResponse {
+  // False when minting was not stopped for this target.
+  bool changed = 1;
+}

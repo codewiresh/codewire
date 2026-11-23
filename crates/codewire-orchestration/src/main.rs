@@ -526,6 +526,21 @@ impl TemporalSettings {
     }
 }
 
+/// Sandbox identity's groups, audiences and stop switches for the public app
+/// (#4663). Registration refuses audiences under the deployment's dashboard,
+/// preview and issuer hosts.
+fn sandbox_identity_router(
+    api_state: &codewire_orchestration::api::ApiState,
+    identity: Option<&(Box<IdentitySettings>, SocketAddr)>,
+) -> connectrpc::Router {
+    let denylist = codewire_orchestration::identity::audience::AudienceDenylist::for_deployment(
+        &api_state.frontend_url,
+        &api_state.preview_base_domain,
+        identity.map(|(settings, _)| settings.issuer_base.as_str()),
+    );
+    codewire_orchestration::connect::sandbox_identity::router(api_state.pool.clone(), denylist)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if codewire_orchestration::identity::rotate_requested(std::env::args().skip(1))? {
@@ -638,9 +653,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let identity_app = identity
+        .as_ref()
         .map(|(settings, _)| {
             codewire_orchestration::identity::discovery_router(
-                &settings,
+                settings,
                 kube.clone(),
                 &cfg.database_url,
             )
@@ -990,6 +1006,10 @@ async fn main() -> anyhow::Result<()> {
         },
     );
     let app = AppBuilder::new("codewire-orchestration")
+        .with_unary_connect_routes_auth(
+            sandbox_identity_router(&api_state, identity.as_ref()),
+            connect_auth.clone(),
+        )
         .with_health_and_db_probe(pool.clone(), move || {
             let ready = secret_readiness.is_ready() && *pools_warm.borrow();
             async move { ready }

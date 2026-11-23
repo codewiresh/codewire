@@ -1,6 +1,10 @@
-//! `cw org`: organizations, their members and invitations.
+//! `cw org`: organizations, their members and invitations. `cw identity`,
+//! the organization's sandbox identity, is [`identity`].
 
 use super::*;
+
+mod identity;
+pub(crate) use identity::{IDENTITY_LONG_ABOUT, IdentityArgs, handle_identity_command};
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum OrgCommand {

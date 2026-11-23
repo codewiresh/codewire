@@ -1906,6 +1906,10 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "feedback:set_null",
             "hosted_snapshots:no_action",
             "hosts:cascade",
+            // Sandbox identity's audiences and stops go with their
+            // organization (0050, #4663).
+            "identity_audiences:cascade",
+            "identity_minting_stops:cascade",
             "org_invitations:cascade",
             "org_members:cascade",
             "org_subscriptions:cascade",
@@ -1931,6 +1935,9 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "confidential_storage_keys:cascade",
             "environment_access:cascade",
             "environment_egress_records:cascade",
+            // A Sandbox's identity groups and its stop go with it (0050,
+            // #4663).
+            "environment_identity_groups:cascade",
             "environment_lifecycle_journal:cascade",
             "environment_logs:cascade",
             "environment_mesh_attachments:cascade",
@@ -1938,6 +1945,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_ports:cascade",
             "environment_resize_operations:cascade",
             "environment_sessions:cascade",
+            "identity_minting_stops:cascade",
             "platform_environment_access_bindings:cascade",
             "platform_environment_network_policies:cascade",
             // An attached interception CA goes with its environment (0032,

@@ -227,7 +227,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
     ),
     HelpSection::full(
         "Account and organization",
-        &["logout", "whoami", "org", "api-keys", "cost"],
+        &["logout", "whoami", "org", "identity", "api-keys", "cost"],
     ),
     HelpSection::full("Session controls", &["send", "wait", "interrupt", "steer"]),
     HelpSection::full(
@@ -541,6 +541,11 @@ enum Command {
     Secrets(SecretsArgs),
     #[command(about = "Manage protected credentials and access profiles")]
     Credentials(CredentialsArgs),
+    #[command(
+        about = "Manage sandbox identity: groups, audiences and minting",
+        long_about = IDENTITY_LONG_ABOUT
+    )]
+    Identity(IdentityArgs),
     #[command(
         about = "Manage network policies: which destinations an environment may reach",
         long_about = "Manage network policies: which destinations an environment may reach.\n\nA network policy is named and reusable, and every edit makes a new revision. `open` (every public destination on TCP 22, 80 and 443) and `locked` (nothing) are built in. This is not `cw network`, which manages Mesh networks."
@@ -1074,6 +1079,7 @@ where
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets(args) => handle_secrets_command(&globals, args).await,
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
+        Command::Identity(args) => handle_identity_command(&globals, args).await,
         Command::Policy(args) => handle_policy_command(&globals, args).await,
         Command::Snapshot(args) => handle_snapshot_command(&globals, args).await,
         Command::Checkpoint(args) => handle_checkpoint_command(&globals, args).await,

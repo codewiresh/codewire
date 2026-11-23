@@ -17,6 +17,7 @@ import { PresetService } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import { SecretService } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
 import { AccessProfileService } from "@codewire/proto-ts/gen/codewire/v1/access_profile_pb";
 import { NetworkPolicyService } from "@codewire/proto-ts/gen/codewire/v1/network_policy_pb";
+import { SandboxIdentityService } from "@codewire/proto-ts/gen/codewire/v1/sandbox_identity_pb";
 import { CredentialService, CredentialMutationService, GithubRepositoryService } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
 
 export type ApiKeyClient = Client<typeof ApiKeyService>;
@@ -31,6 +32,7 @@ export type PresetClient = Client<typeof PresetService>;
 export type SecretClient = Client<typeof SecretService>;
 export type AccessProfileClient = Client<typeof AccessProfileService>;
 export type NetworkPolicyClient = Client<typeof NetworkPolicyService>;
+export type SandboxIdentityClient = Client<typeof SandboxIdentityService>;
 export type CredentialClient = Client<typeof CredentialService>;
 export type CredentialMutationClient = Client<typeof CredentialMutationService>;
 export type GithubRepositoryClient = Client<typeof GithubRepositoryService>;
@@ -41,6 +43,7 @@ export interface CodewireClients {
   githubRepositories: GithubRepositoryClient;
   accessProfiles: AccessProfileClient;
   networkPolicies: NetworkPolicyClient;
+  sandboxIdentity: SandboxIdentityClient;
   apiKeys: ApiKeyClient;
   environments: EnvironmentClient;
   cwRuntime: CwRuntimeClient;
@@ -150,6 +153,7 @@ export function createCodewireClients(
     githubRepositories: createClient(GithubRepositoryService, fetchTransport),
     accessProfiles: createClient(AccessProfileService, fetchTransport),
     networkPolicies: createClient(NetworkPolicyService, fetchTransport),
+    sandboxIdentity: createClient(SandboxIdentityService, fetchTransport),
     apiKeys: createClient(ApiKeyService, fetchTransport),
     environments: createClient(EnvironmentService, fetchTransport),
     cwRuntime: createClient(EnvironmentCwRuntimeService, runtimeUnaryTransport),

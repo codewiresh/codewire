@@ -30,6 +30,7 @@ pub mod network_policies;
 pub mod organizations;
 pub mod ports;
 pub mod presets;
+pub mod sandbox_identity;
 pub mod secrets;
 pub mod snapshots;
 

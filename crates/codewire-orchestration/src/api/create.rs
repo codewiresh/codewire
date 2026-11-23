@@ -916,6 +916,10 @@ async fn insert_environment(
         .await
         .map_err(insert_refused)?;
     let environment_id: String = row.try_get("id")?;
+    if let Some(snapshot_id) = source_snapshot_id {
+        let fork = (p.org_id, snapshot_id, environment_id.as_str());
+        super::identity::groups::inherit_on_fork(&mut transaction, pool, p.user, fork).await?;
+    }
     let mut admitted = p.body.clone();
     super::environment_sources::admit_create_sources_in(
         &mut transaction,
@@ -1439,6 +1443,8 @@ mod source_snapshot;
 pub(crate) use source_snapshot::admit_source_snapshot;
 use source_snapshot::validate_source_snapshot_request;
 
+#[cfg(test)]
+mod identity_database_tests;
 #[cfg(test)]
 mod limit_database_tests;
 #[cfg(test)]

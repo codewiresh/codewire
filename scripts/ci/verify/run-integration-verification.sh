@@ -1306,6 +1306,18 @@ database_lane_orchestration_workspaces() {
       'api::create::limit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "sandbox identity groups, audiences and stops" sandbox-identity-records \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::identity::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "a fork keeps identity groups only for an admin" sandbox-identity-fork \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::identity_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "failed create listing" failed-create-listing \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

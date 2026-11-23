@@ -29,6 +29,13 @@ from codewire.network_policies import (
     NetworkPolicy,
     NetworkPolicyRule,
 )
+from codewire.sandbox_identity import (
+    EnvironmentIdentityGroups,
+    IdentityAudience,
+    IdentityGroupUser,
+    SandboxIdentity,
+    SetEnvironmentIdentityGroupsResult,
+)
 from codewire.mesh import (
     MeshClient,
     MeshEnrollment,
@@ -75,6 +82,11 @@ __all__ = [
     "NetworkPolicies",
     "NetworkPolicy",
     "NetworkPolicyRule",
+    "SandboxIdentity",
+    "EnvironmentIdentityGroups",
+    "IdentityAudience",
+    "IdentityGroupUser",
+    "SetEnvironmentIdentityGroupsResult",
     "MeshClient",
     "MeshEnrollment",
     "MeshGroup",

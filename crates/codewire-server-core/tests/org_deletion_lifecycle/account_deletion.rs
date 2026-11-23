@@ -464,6 +464,22 @@ async fn the_request_disables_the_account_and_revokes_it_at_once() {
 async fn each_phase_resumes_and_the_email_can_sign_up_again() {
     let Some(pool) = pool().await else { return };
     let account = seed(&pool).await;
+    // Sandbox identity records the user changed in the shared organization,
+    // which name them without a foreign key (#4663).
+    sqlx::raw_sql(&format!(
+        "INSERT INTO environment_identity_groups (environment_id, groups, version, updated_by) \
+         VALUES ('{env}', '{{data-readers}}', 1, '{user}'); \
+         INSERT INTO identity_audiences (org_id, audience, created_by) \
+         VALUES ('{org}', 'https://acctdel.example', '{user}'); \
+         INSERT INTO identity_minting_stops (org_id, environment_id, stopped_by) \
+         VALUES ('{org}', '{env}', '{user}');",
+        env = account.shared_environment,
+        org = account.shared_org,
+        user = account.user_id,
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     let operation = request(&pool, &account).await;
 
     // Out of order: nothing moves before the personal organization is gone.
@@ -533,6 +549,25 @@ async fn each_phase_resumes_and_the_email_can_sign_up_again() {
     .unwrap();
     assert_eq!(shared_creator, DELETED_USER_ID);
     assert_eq!(environment_creator, DELETED_USER_ID);
+    let identity_actors: (String, String, String) = sqlx::query_as(
+        "SELECT (SELECT updated_by FROM environment_identity_groups WHERE environment_id = $2), \
+                (SELECT created_by FROM identity_audiences WHERE org_id = $1), \
+                (SELECT stopped_by FROM identity_minting_stops WHERE environment_id = $2)",
+    )
+    .bind(&account.shared_org)
+    .bind(&account.shared_environment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        identity_actors,
+        (
+            DELETED_USER_ID.to_owned(),
+            DELETED_USER_ID.to_owned(),
+            DELETED_USER_ID.to_owned()
+        ),
+        "the identity records outlive the user without naming them"
+    );
     assert_eq!(
         scalar_i64(
             &pool,

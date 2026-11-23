@@ -36,6 +36,7 @@ import { Environment } from "./environment.js";
 import { CodewireError } from "./types.js";
 import { runAccessProfileTests } from "./access-profiles.test.js";
 import { runNetworkPolicyTests } from "./network-policies.test.js";
+import { runSandboxIdentityTests } from "./sandbox-identity.test.js";
 import { runCredentialTests } from "./credentials.test.js";
 import {
   assertAPIKeyConverterCoverage,
@@ -1672,6 +1673,7 @@ async function runTests() {
   if (failed > 0) process.exit(1);
   await runAccessProfileTests();
   await runNetworkPolicyTests();
+  await runSandboxIdentityTests();
   await runCredentialTests();
 }
 

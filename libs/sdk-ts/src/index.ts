@@ -5,6 +5,7 @@ import { Secrets } from "./secrets.js";
 import { SecretProjects } from "./secret-projects.js";
 import { AccessProfiles } from "./access-profiles.js";
 import { NetworkPolicies } from "./network-policies.js";
+import { SandboxIdentity } from "./sandbox-identity.js";
 import { Credentials } from "./credentials.js";
 import { createCodewireClients } from "./transport.js";
 import type { ClientOptions } from "./types.js";
@@ -17,6 +18,7 @@ export class Codewire {
   readonly secretProjects: SecretProjects;
   readonly accessProfiles: AccessProfiles;
   readonly networkPolicies: NetworkPolicies;
+  readonly sandboxIdentity: SandboxIdentity;
   readonly credentials: Credentials;
 
   constructor(opts: ClientOptions = {}) {
@@ -38,6 +40,7 @@ export class Codewire {
     this.secretProjects = new SecretProjects(clients.secrets, orgId);
     this.accessProfiles = new AccessProfiles(clients.accessProfiles);
     this.networkPolicies = new NetworkPolicies(clients.networkPolicies, orgId);
+    this.sandboxIdentity = new SandboxIdentity(clients.sandboxIdentity, orgId);
     this.credentials = new Credentials(clients.credentials, clients.credentialMutations, clients.githubRepositories);
   }
 }
@@ -71,6 +74,15 @@ export type {
   NetworkPolicyRule,
   NetworkPolicySelector,
 } from "./network-policies.js";
+export { SandboxIdentity } from "./sandbox-identity.js";
+export type {
+  EnvironmentIdentityGroups,
+  IdentityAudience,
+  IdentityGroupUser,
+  IdentityGroupUserReasonName,
+  RegisterIdentityAudienceOptions,
+  SetEnvironmentIdentityGroupsResult,
+} from "./sandbox-identity.js";
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {
   Credential,

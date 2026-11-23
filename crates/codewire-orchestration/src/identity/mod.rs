@@ -6,9 +6,14 @@
 //! leaves OpenBao ([`transit`]), with the rotation job's rules ([`keys`],
 //! [`rotate`]). Nothing here mints a token. It is off unless
 //! `CODEWIRE_IDENTITY_ENABLED=true` ([`config`]).
+//!
+//! [`audience`] and [`groups`] are the names a registration and a Sandbox's
+//! groups hold, parsed once for the records API and for minting alike.
 
+pub mod audience;
 pub mod config;
 pub mod discovery;
+pub mod groups;
 pub mod keys;
 pub mod rotate;
 pub mod transit;

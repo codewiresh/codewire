@@ -27,6 +27,7 @@ pub mod host_operations;
 pub(crate) mod host_placement;
 pub mod host_session;
 pub mod hosts;
+pub mod identity;
 pub mod live;
 pub mod log_notifications;
 pub mod logs;

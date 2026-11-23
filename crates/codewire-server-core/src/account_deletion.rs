@@ -795,6 +795,9 @@ pub async fn finalize_account_deletion_database(
         "UPDATE environments SET created_by = $2 WHERE created_by = $1",
         "UPDATE environment_access SET granted_by = $2 WHERE granted_by = $1",
         "UPDATE org_member_assignments SET granted_by = $2 WHERE granted_by = $1",
+        "UPDATE environment_identity_groups SET updated_by = $2 WHERE updated_by = $1",
+        "UPDATE identity_audiences SET created_by = $2 WHERE created_by = $1",
+        "UPDATE identity_minting_stops SET stopped_by = $2 WHERE stopped_by = $1",
     ] {
         sqlx::query(statement)
             .bind(&user_id)
