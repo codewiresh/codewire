@@ -24,7 +24,7 @@ Updated 2026-11-22.
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
-| `sandbox-update-startup` | cw-cli | not yet observed (#5949) | not yet observed |
+| `sandbox-update-startup` | cw-cli | observed 2026-11-23 (#5949); other members, admins, the audit row and the creator leaving not yet observed | not yet observed |
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
@@ -613,10 +613,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
 
 ## `sandbox-update-startup`: an existing Sandbox gains a startup script
 
-Not shipped yet (#5949). A Sandbox keeps the `codewire.yaml` settings it was
-created with; recreating it to add a startup script gives it a new ID, and with
-it new preview host names, which breaks whatever is bound to them (passkeys,
-OAuth redirect URIs, cookies).
+Issue: #5949. A Sandbox keeps the `codewire.yaml` settings it was created
+with; recreating it to add a startup script gives it a new ID, and with it new
+preview host names, which breaks whatever is bound to them (passkeys, OAuth
+redirect URIs, cookies).
 
 - **Entry points:** `cw update SANDBOX --file codewire.yaml`; `cw export
   SANDBOX` to see the saved settings.
@@ -643,13 +643,13 @@ OAuth redirect URIs, cookies).
 
   ```sh
   cw --cloud create walk-start --file codewire.yaml --yes   # no startup_script
-  cw --cloud ls walk-start                                    # note the preview host
+  cw ports walk-start                                         # note the preview host
   printf 'startup_script: echo started > /workspace/started\n' >> codewire.yaml
   cw update walk-start --file codewire.yaml
   cw export walk-start
   cw --cloud stop walk-start && cw --cloud start walk-start
   cw exec --in walk-start cat /workspace/started
-  cw --cloud ls walk-start                                    # same preview host
+  cw ports walk-start                                         # same preview host
   ```
 
 - **Proof:** `cw export` shows the script before the restart; after it,
@@ -657,6 +657,24 @@ OAuth redirect URIs, cookies).
   `install_command` didn't run again (the Sandbox's setup stays complete, and a
   marker its install wrote isn't rewritten); each refusal leaves `cw export`
   unchanged.
+- **Observed:**
+  - Dev, 2026-11-23 (cw-cli): Dev ran source 1cf36b4f61, its services digest
+    rolled out. `cw` built from that commit, as the Dev smoke identity, on a
+    Sandbox created with an `install_command` and port 3000 and no
+    `startup_script`. Stopped, `cw update --file` printed the script and "It
+    runs at the next start, not now.", then "✓ Startup script added"; without
+    `--yes` and a terminal it saved nothing. `cw export` showed the script.
+    Each of two starts showed "Running startup script" and appended one line,
+    as UID 1000, to its marker; the install's marker kept its one line. The
+    ID and the preview host from `cw ports` were the same as at create. On the
+    running Sandbox a changed script was saved while it kept running and ran
+    only at the next start; a removed one ran at no later start; an identical
+    file said "Nothing to change"; `install_command` was refused by name with
+    `cw --cloud create --file` as the next step, and `secrets` pointing to
+    `--secrets`, each leaving `cw export` unchanged. `cw --local update` with
+    no local VM said the local environment wasn't found, before its own
+    refusal. Not walked: another member, an admin, the audit row and the
+    creator leaving.
 
 ## `sandbox-session-stop`: stopping a session ends every process it started
 

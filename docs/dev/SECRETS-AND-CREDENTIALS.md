@@ -1298,7 +1298,7 @@ Create and update preview source ownership, profile revision and impact before
 the confirmation prompt or `--yes`; there is no consent ID to copy. Update
 changes and clears only these selections; it does not edit the rest of the
 environment's specification. The one other in-place change, a cloud Sandbox's
-`startup_script` through `cw update ENV --file` (#5949, not shipped), is its
+`startup_script` through `cw update ENV --file` (#5949), is its
 own call and leaves these selections alone. Selection changes use a confirmed managed restart,
 invalidate old grants and retain workspace data. Secret-value changes affect
 the next managed launch; existing processes retain inherited values. Install

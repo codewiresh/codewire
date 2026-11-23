@@ -76,7 +76,7 @@ settings; a cloud create never reads that file. Repeated `--file` merges the
 named files in order: mappings merge by key, a later value or list replaces the
 earlier one, and `null` removes a key.
 
-Target, not shipped (#5949): `cw update ENV --file codewire.yaml` gives an
+`cw update ENV --file codewire.yaml` (#5949) gives an
 existing cloud Sandbox the file's `startup_script`, added, changed or removed,
 without recreating it, so its ID and preview host names stay. Repeated `--file`
 merges as create does. The update compares the file with the Sandbox's saved
