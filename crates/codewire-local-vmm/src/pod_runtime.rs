@@ -96,6 +96,8 @@ pub enum PodRuntimeError {
     Path(#[from] crate::host::path::PathError),
     #[error("the boot counter is unreadable")]
     BootCounter,
+    #[error("the VM's disks need {needed} bytes but the sandbox's volume holds {volume}")]
+    DisksExceedVolume { needed: u64, volume: u64 },
     #[error(
         "the sandbox's state disk is missing from its volume, so its work is gone; refusing to boot it empty"
     )]
@@ -112,6 +114,8 @@ pub struct PodSettings {
     pub vcpus: u8,
     pub memory_mib: u32,
     pub state_disk_bytes: u64,
+    /// The workspace's own Docker data disk, when the sandbox has Docker.
+    pub docker_disk_bytes: Option<u64>,
     pub workspace_image: String,
     pub image_disk_id: String,
     pub build_id: String,
@@ -155,10 +159,22 @@ impl PodSettings {
         let state_disk_bytes = number("CODEWIRE_VM_STATE_DISK_MIB")?
             .checked_mul(1024 * 1024)
             .ok_or(PodRuntimeError::Setting("CODEWIRE_VM_STATE_DISK_MIB"))?;
+        // Docker is optional: unset means none, and a set size must be one the
+        // runner admits.
+        let docker_disk_bytes = variable("CODEWIRE_VM_DOCKER_DISK_MIB")
+            .map(|mib| {
+                mib.parse::<u64>()
+                    .ok()
+                    .and_then(|mib| mib.checked_mul(1024 * 1024))
+                    .filter(|bytes| *bytes >= crate::state::MINIMUM_DOCKER_DISK_BYTES)
+                    .ok_or(PodRuntimeError::Setting("CODEWIRE_VM_DOCKER_DISK_MIB"))
+            })
+            .transpose()?;
         let settings = Self {
             vcpus,
             memory_mib,
             state_disk_bytes,
+            docker_disk_bytes,
             workspace_image: read("CODEWIRE_WORKSPACE_IMAGE")?,
             image_disk_id: read("CODEWIRE_IMAGE_DISK_ID")?,
             build_id: read("CODEWIRE_IMAGE_DISK_BUILD_ID")?,
@@ -301,6 +317,18 @@ fn admit_image(settings: &PodSettings, paths: &PodPaths) -> Result<AdmittedImage
     })
 }
 
+/// The state, Docker and root disks together fit within `volume` bytes.
+fn disks_fit(settings: &PodSettings, volume: u64) -> Result<(), PodRuntimeError> {
+    let needed = settings
+        .state_disk_bytes
+        .saturating_add(settings.docker_disk_bytes.unwrap_or(0))
+        .saturating_add(ROOT_DISK_BYTES);
+    if needed > volume {
+        return Err(PodRuntimeError::DisksExceedVolume { needed, volume });
+    }
+    Ok(())
+}
+
 /// Under `existing` the sandbox's state disk must already be on its volume:
 /// a missing one means the volume lost the sandbox's work, and the boot fails
 /// rather than starting the sandbox empty. Any other error reading it is that
@@ -328,7 +356,14 @@ fn boot_request(
     cw_runtime_catalog_generation: String,
 ) -> Result<CreateVmRequest, PodRuntimeError> {
     admit_vm_state(engine_root, settings.vm_state)?;
+    // The disks are sparse files on the sandbox's volume, so their sizes must
+    // fit it, or the guest could fill the volume under them.
+    let volume = rustix::fs::statvfs(engine_root).map_err(io::Error::from)?;
+    disks_fit(settings, volume.f_blocks.saturating_mul(volume.f_frsize))?;
     ensure_empty_state_disk(engine_root, POD_VM_ID, settings.state_disk_bytes)?;
+    if let Some(bytes) = settings.docker_disk_bytes {
+        crate::workspace::ensure_docker_data_disk(engine_root, POD_VM_ID, bytes)?;
+    }
     // The root disk is named by the build it sits on, so a new image build
     // starts a new root over it.
     let storage_generation = codewire_vmm_guest_probe::image_disk::image_root_generation(
@@ -372,7 +407,7 @@ fn boot_request(
         vsock_cid: vsock_cid(POD_VM_ID),
         daemon_vsock_port: DAEMON_VSOCK_PORT,
         state_disk_bytes: settings.state_disk_bytes,
-        docker_disk_bytes: None,
+        docker_disk_bytes: settings.docker_disk_bytes,
         root_generation: storage_generation,
         root_disk_bytes: ROOT_DISK_BYTES,
         vcpus: settings.vcpus,
@@ -685,17 +720,42 @@ mod tests {
     }
 
     #[test]
+    fn the_disks_must_fit_the_volume() {
+        let gib = 1024 * 1024 * 1024;
+        let docker =
+            PodSettings::from_environment(environment(&[("CODEWIRE_VM_DOCKER_DISK_MIB", "2048")]))
+                .unwrap();
+        // 20 GiB state + 2 GiB Docker + 4 GiB root.
+        disks_fit(&docker, 26 * gib).unwrap();
+        assert!(matches!(
+            disks_fit(&docker, 26 * gib - 1),
+            Err(PodRuntimeError::DisksExceedVolume { .. })
+        ));
+        let plain = PodSettings::from_environment(environment(&[])).unwrap();
+        disks_fit(&plain, 24 * gib).unwrap();
+        assert!(disks_fit(&plain, 24 * gib - 1).is_err());
+    }
+
+    #[test]
     fn the_pod_settings_are_read_by_fixed_names_and_bounded() {
         let settings = PodSettings::from_environment(environment(&[])).unwrap();
         assert_eq!(settings.vcpus, 2);
         assert_eq!(settings.memory_mib, 4096);
         assert_eq!(settings.state_disk_bytes, 20480 * 1024 * 1024);
+        // Docker is off unless the Pod sizes its disk.
+        assert_eq!(settings.docker_disk_bytes, None);
+        let docker =
+            PodSettings::from_environment(environment(&[("CODEWIRE_VM_DOCKER_DISK_MIB", "2048")]))
+                .unwrap();
+        assert_eq!(docker.docker_disk_bytes, Some(2048 * 1024 * 1024));
         assert_eq!(settings.vm_state, VmState::New);
         let existing =
             PodSettings::from_environment(environment(&[("CODEWIRE_VM_STATE", "existing")]))
                 .unwrap();
         assert_eq!(existing.vm_state, VmState::Existing);
         for (name, value) in [
+            ("CODEWIRE_VM_DOCKER_DISK_MIB", "lots"),
+            ("CODEWIRE_VM_DOCKER_DISK_MIB", "512"),
             ("CODEWIRE_VM_VCPUS", "0"),
             ("CODEWIRE_VM_VCPUS", "33"),
             ("CODEWIRE_VM_MEMORY_MIB", "64"),
