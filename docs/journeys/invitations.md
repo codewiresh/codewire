@@ -10,8 +10,10 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-22. Invite, email, accept and remove are observed on Dev
-(source 6c3651dcf), and leaving from `cw` on Dev (source 20f2f4b0a). On
+Updated 2026-11-23. Invite, email, accept and remove are observed on Dev
+(source 6c3651dcf), and leaving from `cw` on Dev (source 20f2f4b0a). A new
+invitee's sign-up by the link is observed on Dev up to its verification
+email being sent (source 1cf36b4f61). On
 Production (v0.4.18, source a9dd8b270), the invitation and its email's send
 are observed; the email's arrival is observed on Dev only. The account's
 hourly limit is observed on Dev and on Production (v0.4.19, source
@@ -28,7 +30,7 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
 | `org-leave` | the CLI observed 2026-11-15 on 20f2f4b0a (#4519); the account page observed on Kind 2026-11-22, main's dashboard 253add63cd | not yet observed |
 | `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268; the organization's limit and the dashboard refusal observed 2026-11-15 on e8e593b86 (#4457); the pending cap observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
 | `invite-unverified` | observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | not yet observed |
-| `invite-signup` | not yet observed | not yet observed |
+| `invite-signup` | observed 2026-11-23 on 1cf36b4f61 up to the verification email being sent; its arrival, verification and Accept not observed (#3840) | not yet observed |
 
 ## Before the walk
 
@@ -175,7 +177,8 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
     invited address only. The page shows the address masked as a hint, and
     the invitee types it (#4121, #3840). It still verifies its email before
     it can sign in, unless the server has no mail (#4481). A hosted server
-    admits it the same way (#4624, `invite-signup`), not yet observed;
+    admits it the same way (#4624, `invite-signup`), observed on Dev up to
+    the verification email being sent;
 - **Driving it:** as the invitee:
 
   ```sh
@@ -217,7 +220,8 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   and different-email states are not yet observed on Dev. The dashboard's
   invitation page is covered on Kind by
   `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`. The one-time link's
-  page and sign-up from it are not yet observed on Dev (#3840).
+  page is observed on Dev above, and sign-up from it in `invite-signup`
+  (#3840).
 
 ## `invite-signup`: an invitee with no account signs up by the link
 
@@ -234,7 +238,9 @@ Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
   - the same link at another address, refused with "This invitation is no
     longer valid. Ask for a new one.";
   - a resent invitation email's older link, refused the same way;
-  - a link whose invitation was revoked, refused the same way;
+  - a link whose invitation was revoked, refused on the invitation page
+    itself, before any sign-up form: "This invitation is no longer valid"
+    and "Ask for a new one.", with no **Create account**;
   - a second sign-up at the address after the first, refused as taken.
 - **Driving it:** with a fresh mail provider simulator address for each
   walk, since an address that already has an account can't sign up again.
@@ -244,8 +250,35 @@ Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
   verification email is opened. `cw org members` lists it only after Accept.
 - **Gotchas:** the link never signs anyone in or accepts anything. Signing up
   by it and then signing in with GitHub or Google at the same address links
-  nothing until the address is verified.
-- **Observed:** not yet observed.
+  nothing until the address is verified. The identity service logs nothing
+  when a sign-up succeeds or its verification email goes out, only a failure
+  ("failed to send signup verification email", or the mail limit's "mail not
+  sent"). So the evidence that the email was sent is the "Check your email"
+  page, the sign-in refused until the address is verified, and neither
+  failure line in the log.
+- **Observed:** Dev, 2026-11-23, source 1cf36b4f61 (with #5908), the
+  dashboard and identity service at the digests its release names. The
+  inviter was the Dev smoke identity with `cw` v0.4.26; each invitee was a
+  fresh mail provider simulator address. Headless Chromium ran signed out,
+  and every form post carried the page's own Origin.
+  - At the invited address: the link opened "… invited you to join as
+    Member" with the address masked, **Sign in** and **Create account**.
+    **Create account** said "Your invitation is for
+    s•••@simulator.amazonses.com. Sign up with that address.", with no bot
+    check and no reason question.
+    Submitting showed "Check your email". Signing in was then refused with
+    403, "Check your email to verify your address.", and `cw org members`
+    didn't list the address. Neither failure line appeared in the identity
+    service's log.
+  - The link at another address: refused with 400, "This invitation is no
+    longer valid. Ask for a new one.", and no account was made.
+  - A revoked invitation's link: 404, and the invitation page said "This
+    invitation is no longer valid" with no **Create account**.
+  - A second sign-up at a taken address: refused with 409, "An account with
+    this email already exists."
+  - Not observed: a resent invitation email's older link; the verification
+    email's arrival (Dev has no test mailbox), and so verification, sign-in
+    and Accept. The owner checks the email's arrival in the launch journey.
 
 ## `invite-remove`: an owner or admin removes the member
 
