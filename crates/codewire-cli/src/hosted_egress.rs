@@ -204,22 +204,26 @@ enum CarriedProbe<P> {
     Dns(&'static str, SocketAddrV4, P),
 }
 
-/// Runs every probe and logs each one's name, target and outcome, whether the
-/// check passes or fails. Any probe answered, or one that could not be set
-/// up, fails the check; a refusal, no route or a timeout is its pass, as in
-/// broker mode's self-check. A pass returns the record the daemon sends with
-/// its host key.
+/// Runs every probe at once, each under its own timeout, and logs each one's
+/// name, target and outcome in the order given, whether the check passes or
+/// fails. Any probe answered, or one that could not be set up, fails the
+/// check; a refusal, no route or a timeout is its pass, as in broker mode's
+/// self-check. A pass returns the record the daemon sends with its host key.
 async fn check_carried<P: SelfCheckProbes>(
     checks: &[CarriedProbe<P>],
 ) -> anyhow::Result<codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck> {
+    // Together the probes take about one timeout, not one each (#5602).
+    let outcomes = futures::future::join_all(checks.iter().map(|check| async move {
+        match check {
+            CarriedProbe::Dial(name, target, probes) => (name, target, probes.direct_dial().await),
+            CarriedProbe::Dns(name, target, probes) => (name, target, probes.dns_query().await),
+        }
+    }))
+    .await;
     let mut report = Vec::with_capacity(checks.len());
     let mut probes = Vec::with_capacity(checks.len());
     let mut answered = false;
-    for check in checks {
-        let (name, target, outcome) = match check {
-            CarriedProbe::Dial(name, target, probes) => (name, target, probes.direct_dial().await),
-            CarriedProbe::Dns(name, target, probes) => (name, target, probes.dns_query().await),
-        };
+    for (name, target, outcome) in outcomes {
         answered |= outcome == ProbeOutcome::Reached;
         probes.push(codewire_proto::codewire::internal::v1::SelfCheckProbe {
             name: (*name).to_owned(),
@@ -571,6 +575,42 @@ mod tests {
             let error = check_carried(&all(answered)).await.unwrap_err().to_string();
             assert!(error.contains("answered"), "{error}");
         }
+    }
+
+    /// Probes that each take a second to come back refused.
+    struct SlowProbes;
+
+    impl SelfCheckProbes for SlowProbes {
+        async fn direct_dial(&self) -> ProbeOutcome {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            ProbeOutcome::Blocked
+        }
+        async fn dns_query(&self) -> ProbeOutcome {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            ProbeOutcome::Blocked
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_guest_carried_probes_run_together_and_report_in_order() {
+        let target = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 53);
+        let checks = [
+            CarriedProbe::Dial("direct_dial", target, SlowProbes),
+            CarriedProbe::Dns("public_dns", target, SlowProbes),
+            CarriedProbe::Dns("cluster_dns", target, SlowProbes),
+        ];
+        let started = tokio::time::Instant::now();
+        let passed = check_carried(&checks).await.unwrap();
+        // Three one-second probes take one second together, not three.
+        assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+        assert_eq!(
+            passed
+                .probes
+                .iter()
+                .map(|probe| probe.name.as_str())
+                .collect::<Vec<_>>(),
+            ["direct_dial", "public_dns", "cluster_dns"]
+        );
     }
 
     #[test]
