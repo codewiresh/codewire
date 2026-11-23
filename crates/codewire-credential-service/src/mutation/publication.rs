@@ -7,7 +7,8 @@ use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, ProviderId,
 };
 use codewire_platform_credentials::{
-    CredentialRegistration, PreparedCredentialCreation, PreparedCredentialReplacement,
+    CredentialRegistration, CredentialVersion, PreparedCredentialCreation,
+    PreparedCredentialReplacement,
 };
 use codewire_protected_store::ProtectedValue;
 use sqlx::{Acquire, PgConnection, Postgres, Transaction};
@@ -369,6 +370,13 @@ async fn publish(
     scope: &Scope,
     mutation: Mutation,
 ) -> Publication<Option<CredentialMetadata>> {
+    let replaced = match &mutation {
+        Mutation::Replace(prepared) => {
+            let (id, before, after) = prepared.replaces();
+            Some((id.clone(), before, after))
+        }
+        _ => None,
+    };
     let deadline = scope.deadline.min(Instant::now() + shared.mutation_timeout);
     let acquired = tokio::time::timeout_at(deadline, scope.wait(shared.pool.acquire())).await;
     let mut connection = match acquired {
@@ -417,6 +425,16 @@ async fn publish(
     // in-flight server result into a safe rollback. Keep the owned worker and
     // connection alive until PostgreSQL returns a terminal commit result.
     let result = transaction.commit().await;
+    if let Some(replaced) = &replaced {
+        log_replaced(
+            replaced,
+            if result.is_ok() {
+                "committed"
+            } else {
+                "unknown"
+            },
+        );
+    }
     match result {
         Ok(()) => Publication {
             outcome: Outcome::Published,
@@ -438,6 +456,24 @@ async fn publish(
             }
         }
     }
+}
+
+/// An owner's reconnect or rotation moves the generations outside the refresh
+/// journal: one line names the credential and its generations before and
+/// after, and never a value (#4909). An unknown COMMIT may have replaced it.
+fn log_replaced(
+    (id, before, after): &(CredentialId, CredentialVersion, CredentialVersion),
+    outcome: &'static str,
+) {
+    tracing::info!(
+        credential_id = id.as_str(),
+        outcome,
+        material_generation = before.material_generation,
+        revocation_generation = before.revocation_generation,
+        material_generation_after = after.material_generation,
+        revocation_generation_after = after.revocation_generation,
+        "credential material replaced"
+    );
 }
 
 async fn prepare_publication<'connection>(

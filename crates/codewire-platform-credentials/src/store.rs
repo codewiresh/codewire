@@ -173,6 +173,17 @@ pub struct PreparedCredentialReplacement {
     refresh: bool,
 }
 
+impl PreparedCredentialReplacement {
+    /// The credential this replaces, with its version before and after.
+    pub fn replaces(&self) -> (&CredentialId, CredentialVersion, CredentialVersion) {
+        (
+            &self.original.metadata.id,
+            self.original.version,
+            self.next.version,
+        )
+    }
+}
+
 impl PlatformCredentialStore {
     pub(crate) fn pool(&self) -> &PgPool {
         &self.reader.pool

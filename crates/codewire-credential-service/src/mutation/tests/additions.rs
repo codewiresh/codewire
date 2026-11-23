@@ -146,6 +146,72 @@ async fn generated_reconnect_validates_before_challenge_and_preserves_named_iden
     h.finish(result).await
 }
 
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("log capture poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_reconnect_logs_its_generations_before_and_after_and_no_value() -> Result<()> {
+    // The whole process's log: the served owner runs on the runtime's other
+    // threads. Lines are told apart by credential id.
+    let captured = Captured::default();
+    let writer = captured.clone();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )?;
+    let h = Harness::new().await?;
+    let result = async {
+        let original = existing(&h, "work", CredentialAuthKind::OAuth).await?;
+        let mut response = h
+            .rpc
+            .enroll_request(Auth::Alice, replacement(&original))
+            .await?;
+        response.challenge().await?;
+        h.release()?;
+        response.committed().await?;
+        h.drained().await?;
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone())?;
+        let lines: Vec<&str> = logged
+            .lines()
+            .filter(|line| line.contains("credential material replaced"))
+            .filter(|line| line.contains(original.metadata.id.as_str()))
+            .collect();
+        ensure!(lines.len() == 1, "{lines:#?}");
+        for field in [
+            "outcome=\"committed\"",
+            "material_generation=1",
+            "revocation_generation=1",
+            "material_generation_after=2",
+            "revocation_generation_after=2",
+        ] {
+            ensure!(lines[0].contains(field), "{field}: {}", lines[0]);
+        }
+        for value in [ACCESS, REFRESH, "person@example.test", "previous-account"] {
+            ensure!(!logged.contains(value), "{value} logged");
+        }
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_reconnect_cannot_overwrite_a_revoke_during_device_login() -> Result<()> {
