@@ -14,14 +14,17 @@ lands. Every step reads "not yet observed" until it is walked.
 
 ## Where the journey stands
 
-Updated 2026-11-22. The CLI and the dashboard viewer are announced together,
+Updated 2026-11-23. The CLI and the dashboard viewer are announced together,
 when both have been observed.
 
 The 2026-11-22 walks ran `cw` built from a4a20f9d16e9 (#5853) against Dev at
 source b99ac9991704 and against a Linux local VM whose runtime was built from
 a4a20f9d16e9, on the default workspace image, whose digest was not recorded.
 They are recorded on #3223 in that day's Dev and local VM walk comments, and
-in the comment after them with the look and the listeners.
+in the comment after them with the look and the listeners. The Desktop panel
+was walked on Kind the same day, before review, at `43f5c10850`; that walk
+is recorded on #3223 in its Kind walk comment. The panel is not yet observed
+on Dev.
 
 | ID | Kind | Local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
@@ -34,8 +37,8 @@ in the comment after them with the look and the listeners.
 | `desktop-cli-refusals` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-loopback-only` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-access` | not yet observed | does not apply: one owner | not yet observed | not yet observed |
-| `desktop-dashboard` | not yet observed | does not apply: no dashboard | not yet observed | not yet observed |
-| `desktop-dashboard-ends` | not yet observed | does not apply: no dashboard | not yet observed | not yet observed |
+| `desktop-dashboard` | partly | does not apply: no dashboard | not yet observed | not yet observed |
+| `desktop-dashboard-ends` | partly | does not apply: no dashboard | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -494,7 +497,21 @@ in the comment after them with the look and the listeners.
   viewer that lands on another replica is admitted, and that is correct.
   Nothing is copied from the desktop to the computer without the button:
   check the clipboard before pressing it.
-- **Observed:** not yet observed.
+- **Observed:** partly, on Kind on 2026-11-22, before review, with the
+  dashboard at `43f5c10850` and the default workspace image (recorded on
+  #3223 in the Kind walk comment): steps 1, 2, 3, 5 and 6. The panel went from
+  stopped to starting to the desktop's picture in about a second, with no
+  reload; typed keys, the pasted text and Copy from desktop all crossed;
+  after "Release keyboard" keys no longer reached the desktop; tabs 2 to 4
+  connected and the fifth was refused with "4 viewers already watch this
+  desktop, the most it takes."; the image before the desktop showed the
+  unavailable state with the recreate hint and no Start, and a stopped
+  Sandbox asked for the Sandbox and showed no viewer; at 390 px there was no
+  sideways scroll; no page checked had a content-security-policy violation.
+  Not yet observed: step 4, `--status` and its start time, typing seen in a
+  second tab, and anything on Dev. The viewer's following of the Sandbox's
+  readiness and of the tab's visibility came in review and is proven by the
+  browser fixture spec only.
 
 ## `desktop-dashboard-ends`: the viewer ends when it should
 
@@ -526,4 +543,6 @@ in the comment after them with the look and the listeners.
   open viewer yet, as it does not end an open terminal
   (`docs/dev/AUTH-POLICY.md`); do not record that as observed. Time the
   sign-out with a clock: "it ended eventually" is not the 30 second bound.
-- **Observed:** not yet observed.
+- **Observed:** partly, in the same Kind walk: on Stop desktop in the panel,
+  the other open tab said "The desktop ended." and offered Start, and `Xvnc`
+  was gone. The other states are not yet observed.
