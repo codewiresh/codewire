@@ -67,7 +67,7 @@ function serveVnc(route: WebSocketRoute, stream: Stream, extendedClipboard: bool
 
 async function transport(page: Page) {
   const state = {
-    accountId: "account-a", desktop: "stopped" as DesktopState, sandboxRunning: true, gets: 0, starts: 0, stops: 0,
+    accountId: "account-a", desktop: "stopped" as DesktopState, sandboxRunning: true, readiness: 0, gets: 0, starts: 0, stops: 0,
     // Whether the server advertises the extended clipboard, as TigerVNC does.
     extendedClipboard: false,
     forms: [] as string[][], streams: [] as Stream[],
@@ -77,13 +77,13 @@ async function transport(page: Page) {
   const answer = () => ({ accountId: state.accountId, state: state.desktop, ...(state.desktop === "running" ? { password } : {}) });
   // The Sandbox's readiness, which the test can stop and start, and the
   // terminal beside the panel: one quiet session.
-  await page.route("**/_fragments/terminal-readiness?fields=terminals", (route) => route.fulfill({ json: {
+  await page.route("**/_fragments/terminal-readiness?fields=terminals", (route) => (state.readiness += 1, route.fulfill({ json: {
     environmentId: environment, running: state.sandboxRunning, setupComplete: true, setupRunning: false, setupFailed: false,
     detail: { state: state.sandboxRunning ? "running" : "stopped", desiredState: state.sandboxRunning ? "started" : "stopped",
       tone: state.sandboxRunning ? "success" : "neutral", lastEvent: "just now", resources: "1 vCPU · 2 GiB · 10 GiB",
       cpuMillicores: 1000, memoryMib: 2048, diskGib: 10, startEligible: !state.sandboxRunning, stopEligible: state.sandboxRunning,
       deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false },
-  } }));
+  } })));
   await page.route("**/_fragments/terminal-sessions", (route) => route.fulfill({ json: {
     accountId: state.accountId, sessions: [{ sessionId: "session-00000000-0000-4000-8000-000000000001", state: "running" }] } }));
   await page.routeWebSocket("**/terminal?**", () => {});
@@ -383,6 +383,23 @@ test("a Sandbox started from the page reads its desktop without a reload", async
   await checkReadinessNow(page);
   await expect(panel(page).locator("[data-desktop-status]")).toHaveText("The desktop is not running.");
   await expect(control(page, "Start desktop")).toBeVisible();
+});
+
+test("a viewer that arrives after readiness said the Sandbox stopped says so, and reads no desktop", async ({ page }) => {
+  const state = await transport(page);
+  state.sandboxRunning = false;
+  // The viewer's script is held until readiness has answered and settled,
+  // the order a loaded host can give (queue run 74697).
+  await page.route("**/desktop-viewer.js", async (route) => {
+    await expect.poll(() => state.readiness, { timeout: 12_000 }).toBeGreaterThan(0);
+    await page.waitForFunction(() => !document.querySelector("[data-sandbox-observation-status]")?.hasAttribute("aria-busy"));
+    await route.continue();
+  });
+  await openFixture(page);
+  await showDesktop(page);
+  await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox");
+  await expect(control(page, "Start desktop")).toBeHidden();
+  expect(state.gets).toBe(0);
 });
 
 test("a desktop answered while the tab was hidden connects when the tab shows again", async ({ page }) => {

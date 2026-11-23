@@ -299,7 +299,11 @@
     shown.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
     show("loading");
-    read();
+    // Readiness may have reported before this script arrived. A report that
+    // the Sandbox runs after all reads the desktop itself.
+    const rendered = sandboxRunning;
+    document.dispatchEvent(new CustomEvent("codewire:sandbox-status-request", { detail: { environmentId } }));
+    if (sandboxRunning === rendered) read();
   }
 
   // The workspace shows its terminals or its desktop. The terminal's own
