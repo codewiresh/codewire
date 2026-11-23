@@ -17,7 +17,7 @@ Updated 2026-11-23.
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
-| `mac-vm-refresh` | not yet observed (#5539) | not yet observed (#5539) |
+| `mac-vm-refresh` | a real Claude sign-in observed on a development build of #5957 (6636e3589f), and a synthetic one | not yet observed (#5539) |
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
 | `mac-vm-indexed-root` | the warning observed on a development build of #5831 (84a45bb16); a completed create not yet observed | not yet observed |
 | `mac-vm-backup-excluded` | observed on a development build of #5900 (84a45bb16), a new root and an older one | not yet observed |
@@ -355,8 +355,25 @@ Issues: #5537, #5539. The rule is in
   Seatbelt profile (`Operation not permitted`, #5537), so a Mac VM's sign-in
   worked only until its access token was due, about 8 hours for a Claude
   sign-in. Assert on the refresh's result, not the Sandbox log: that refusal
-  logged no file-write denial.
-- **Observed:** not yet observed.
+  logged no file-write denial. A real Claude sign-in's expiry is inside its
+  sealed login, not the store's `expires_at_unix`, so a walk waits about 8
+  hours from the sign-in and then makes a request every few minutes.
+- **Observed:** macOS 27.2.1, `cw` and the guest runtime built from #5957's
+  head 6636e3589f (interception on by default), 2026-11-23, in a scratch
+  `HOME` with a throwaway keychain (#5539):
+  - a real Claude sign-in by the owner at 12:52Z. In a VM on its profile,
+    `cw --local info` read `placeholders only` and `claude -p` answered.
+    At 20:20:47Z, `cw --local start` left it at generation 1. At 20:27:16Z,
+    after a proxied request, it was at **generation 2** with no journal row
+    and no broker ending. `/usage` in an interactive `claude` then showed the
+    account's weekly usage, and Status showed `Login method: Claude Ultra
+    account`. The account was at its weekly limit, so prompts answered with
+    that limit, from the provider, with the refreshed token accepted.
+  - a synthetic Claude sign-in from the featured smoke build of the same
+    head, its code piped in: a proxied request took it from generation 1 to
+    2 with no journal row and no broker ending (#4909).
+  - not walked: a due Codex sign-in, and a GitHub login renewing before a
+    host checkout's `git`.
 
 ## 7. `mac-vm-indexed-root`: a state root Spotlight may index is warned about
 
