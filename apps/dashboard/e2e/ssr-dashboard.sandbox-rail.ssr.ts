@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "./helpers/fixture-test";
+import { expect, pauseClock, test, type Page } from "./helpers/fixture-test";
 
 // The Sandbox rail is rendered in the desktop sidebar and again in the mobile
 // drawer. Only the copy on screen refreshes (#3395), and only when the live
@@ -47,11 +47,34 @@ test("a loading rail refreshes once, then only when a Sandbox changes", async ({
   // No timer: a minute passes without a request.
   await page.clock.runFor(60_000);
   expect(await refreshes(page)).toEqual(["sidebar"]);
+  // A change refreshes at once. Changes within the next second ride on one
+  // refresh a second after it, so the rail still ends on the last of them.
+  await pauseClock(page);
   await live(page, "sandbox");
-  await live(page, "sandbox");
-  await page.clock.runFor(1_000);
-  // Two events within the second are one refresh.
   await expect.poll(() => refreshes(page)).toEqual(["sidebar", "sidebar"]);
+  await live(page, "sandbox");
+  await live(page, "sandbox");
+  await page.clock.runFor(900);
+  expect(await refreshes(page)).toEqual(["sidebar", "sidebar"]);
+  await page.clock.runFor(100);
+  await expect.poll(() => refreshes(page)).toEqual(["sidebar", "sidebar", "sidebar"]);
+  await page.clock.runFor(60_000);
+  expect(await refreshes(page)).toEqual(["sidebar", "sidebar", "sidebar"]);
+});
+
+test("through a long change the rail refreshes about once a second and ends after its last change (#4762)", async ({ page }) => {
+  await openRails(page, { width: 1440, height: 900 }, false);
+  await pauseClock(page);
+  // A change every 300 ms for three seconds, as a Sandbox's start sends.
+  for (let i = 0; i < 10; i += 1) {
+    await live(page, "sandbox");
+    if (i === 0) expect(await refreshes(page)).toEqual(["sidebar"]);
+    await page.clock.runFor(300);
+  }
+  // At once, then at 1, 2 and 3 s: the last covers the change at 2.7 s.
+  expect(await refreshes(page)).toHaveLength(4);
+  await page.clock.runFor(60_000);
+  expect(await refreshes(page)).toHaveLength(4);
 });
 
 test("a rendered rail makes no request until the stream asks", async ({ page }) => {

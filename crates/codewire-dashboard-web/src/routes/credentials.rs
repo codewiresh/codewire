@@ -1076,9 +1076,9 @@ fn enrollment_events(
     context: &QueryParameters,
 ) -> Response {
     let connected = page_feedback_target(context, "message", "credential-connected", "");
-    let stream = ReceiverStream::new(receiver).map(move |event| {
-        Ok::<Bytes, Infallible>(Bytes::from(enrollment_event_frame(event, &connected)))
-    });
+    let stream = ReceiverStream::new(receiver)
+        .map(move |event| Bytes::from(enrollment_event_frame(event, &connected)));
+    let body = Body::from_stream(crate::sse_heartbeat::with_heartbeat(stream));
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -1086,7 +1086,7 @@ fn enrollment_events(
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header("x-accel-buffering", "no")
-        .body(Body::from_stream(stream))
+        .body(body)
         .expect("static enrollment event headers")
 }
 

@@ -618,15 +618,18 @@ document.addEventListener("htmx:afterSwap", (event) => {
 // The Sandbox rail is rendered twice, in the desktop sidebar and in the
 // mobile drawer, and CSS shows at most one. It makes no request of its own:
 // the copy on screen refreshes when the live stream says a Sandbox changed or
-// asks for a resync (#4762; private-docs designs/live-updates.md §3a),
-// coalesced over a second. A copy that is still loading, or that missed an
-// update while hidden, refreshes when the drawer opens or the tab returns.
+// asks for a resync (#4762; private-docs designs/live-updates.md §3a), at
+// most once a second: at once, then once more a second later if the burst
+// went on, so it follows a long change and still ends on its last state. A
+// copy that is still loading, or that missed an update while hidden,
+// refreshes when the drawer opens or the tab returns.
 (() => {
   "use strict";
-  const COALESCE_MS = 1000;
+  const THROTTLE_MS = 1000;
   const rails = () => Array.from(document.querySelectorAll("[data-sandbox-rail]"));
   const stale = (rail) => rail.dataset.railLoading === "true" || rail.dataset.railStale === "true";
-  let pending = 0;
+  let lastRefresh = -Infinity;
+  let trailing = 0;
   const refresh = (rail) => {
     rail.dataset.railStale = "false";
     rail.dataset.railLoading = "false";
@@ -634,14 +637,19 @@ document.addEventListener("htmx:afterSwap", (event) => {
   };
   // Every copy is out of date; the one on screen refreshes now, the other
   // when it is shown.
+  const refreshAll = () => {
+    lastRefresh = Date.now();
+    for (const rail of rails()) {
+      if (!document.hidden && rail.getClientRects().length > 0) refresh(rail);
+      else rail.dataset.railStale = "true";
+    }
+  };
+  // Changes while a trailing refresh waits are covered by it.
   const changed = () => {
-    window.clearTimeout(pending);
-    pending = window.setTimeout(() => {
-      for (const rail of rails()) {
-        if (!document.hidden && rail.getClientRects().length > 0) refresh(rail);
-        else rail.dataset.railStale = "true";
-      }
-    }, COALESCE_MS);
+    if (trailing) return;
+    const wait = lastRefresh + THROTTLE_MS - Date.now();
+    if (wait <= 0) { refreshAll(); return; }
+    trailing = window.setTimeout(() => { trailing = 0; refreshAll(); }, wait);
   };
   const refreshShownStale = () => {
     if (document.hidden) return;

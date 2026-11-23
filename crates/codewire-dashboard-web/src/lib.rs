@@ -37,6 +37,7 @@ mod routes;
 mod secrets_presets_connect;
 mod security;
 mod server_timing;
+mod sse_heartbeat;
 mod state;
 mod templates;
 #[cfg(test)]
