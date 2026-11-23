@@ -1891,6 +1891,7 @@ name = "codewire-daemon-bridge"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "buffa",
  "buffa-types",
  "bytes",
@@ -1900,6 +1901,8 @@ dependencies = [
  "codewire-workspace-hack",
  "connectrpc",
  "futures",
+ "http",
+ "http-body-util",
  "prost",
  "prost-types",
  "sha2 0.10.9",
@@ -1908,6 +1911,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower",
  "uuid",
 ]
 

@@ -1106,9 +1106,10 @@ async fn main() -> anyhow::Result<()> {
             connect_auth.clone(),
             codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
         )
-        .with_connect_routes_auth(
+        .with_connect_routes_auth_and_inner(
             codewire_orchestration::connect::file::router(api_state.clone()),
             connect_auth,
+            codewire_orchestration::connect::file::admission,
         )
         // The host session (#3609) authenticates the host by its key inside
         // the stream, so it takes no user credential at the HTTP layer. Its
@@ -1138,12 +1139,10 @@ async fn main() -> anyhow::Result<()> {
     let served = tokio::try_join!(
         codewire_server_core::serve_with_listener(app, listeners.public),
         async {
-            match internal_tls {
-                Some((listener, app)) => {
-                    codewire_server_core::serve_with_axum_listener(app, listener).await
-                }
-                None => Ok(()),
-            }
+            let Some((listener, app)) = internal_tls else {
+                return Ok(());
+            };
+            codewire_server_core::serve_with_axum_listener(app, listener).await
         },
         async {
             match workspace_binding_tls {

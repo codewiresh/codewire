@@ -140,3 +140,27 @@ class UploadFilePartResponse(_message.Message):
     size: int
     finished: bool
     def __init__(self, path: _Optional[str] = ..., upload_id: _Optional[str] = ..., size: _Optional[int] = ..., finished: _Optional[bool] = ...) -> None: ...
+
+class WriteFilesRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "files")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    FILES_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    files: _containers.RepeatedCompositeFieldContainer[WriteFile]
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., files: _Optional[_Iterable[_Union[WriteFile, _Mapping]]] = ...) -> None: ...
+
+class WriteFile(_message.Message):
+    __slots__ = ("path", "content")
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_FIELD_NUMBER: _ClassVar[int]
+    path: str
+    content: bytes
+    def __init__(self, path: _Optional[str] = ..., content: _Optional[bytes] = ...) -> None: ...
+
+class WriteFilesResponse(_message.Message):
+    __slots__ = ("files",)
+    FILES_FIELD_NUMBER: _ClassVar[int]
+    files: _containers.RepeatedCompositeFieldContainer[UploadFileResponse]
+    def __init__(self, files: _Optional[_Iterable[_Union[UploadFileResponse, _Mapping]]] = ...) -> None: ...

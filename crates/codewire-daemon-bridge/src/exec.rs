@@ -4,6 +4,7 @@
 //! discovery. This module owns public validation, timeout behavior, private
 //! framing, byte-preserving conversion, backpressure, and half-close behavior.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -258,7 +259,7 @@ where
             .ok_or_else(|| {
                 self.backend.validation_error(
                     vec![FieldViolation {
-                        path: "/start",
+                        path: Cow::Borrowed("/start"),
                         message: "must be the first message",
                     }],
                     request_id.as_deref(),
@@ -270,7 +271,7 @@ where
             _ => {
                 return Err(self.backend.validation_error(
                     vec![FieldViolation {
-                        path: "/start",
+                        path: Cow::Borrowed("/start"),
                         message: "must be the first message",
                     }],
                     request_id.as_deref(),
@@ -488,19 +489,19 @@ fn exec_violations(
     let mut violations = Vec::new();
     if org_id.trim().is_empty() {
         violations.push(FieldViolation {
-            path: org_path,
+            path: Cow::Borrowed(org_path),
             message: "must not be empty",
         });
     }
     if environment_id.trim().is_empty() {
         violations.push(FieldViolation {
-            path: environment_path,
+            path: Cow::Borrowed(environment_path),
             message: "must not be empty",
         });
     }
     if command.is_empty() {
         violations.push(FieldViolation {
-            path: command_path,
+            path: Cow::Borrowed(command_path),
             message: "must not be empty",
         });
     }
@@ -513,7 +514,7 @@ fn exec_timeout(timeout: Option<Duration>) -> Result<StdDuration, Vec<FieldViola
     };
     let timeout = StdDuration::try_from(timeout).map_err(|_| {
         vec![FieldViolation {
-            path: "/timeout",
+            path: Cow::Borrowed("/timeout"),
             message: "must be a valid non-negative duration",
         }]
     })?;
@@ -530,7 +531,7 @@ fn run_timeout(timeout: Option<Duration>) -> Result<Option<StdDuration>, Vec<Fie
     };
     let timeout = StdDuration::try_from(timeout).map_err(|_| {
         vec![FieldViolation {
-            path: "/start/timeout",
+            path: Cow::Borrowed("/start/timeout"),
             message: "must be a valid non-negative duration",
         }]
     })?;
@@ -546,11 +547,11 @@ fn run_input(request: proto::RunRequest) -> Result<DaemonRunInput, Vec<FieldViol
         }),
         Some(proto::run_request::Input::CloseStdin(_)) => Ok(DaemonRunInput::CloseStdin),
         Some(proto::run_request::Input::Start(_)) => Err(vec![FieldViolation {
-            path: "/start",
+            path: Cow::Borrowed("/start"),
             message: "may only be sent once",
         }]),
         None => Err(vec![FieldViolation {
-            path: "/input",
+            path: Cow::Borrowed("/input"),
             message: "is required",
         }]),
     }
@@ -709,15 +710,15 @@ mod tests {
             exec_violations("", "", &[], "/org_id", "/environment_id", "/command"),
             vec![
                 FieldViolation {
-                    path: "/org_id",
+                    path: Cow::Borrowed("/org_id"),
                     message: "must not be empty",
                 },
                 FieldViolation {
-                    path: "/environment_id",
+                    path: Cow::Borrowed("/environment_id"),
                     message: "must not be empty",
                 },
                 FieldViolation {
-                    path: "/command",
+                    path: Cow::Borrowed("/command"),
                     message: "must not be empty",
                 },
             ]

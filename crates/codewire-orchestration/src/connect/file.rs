@@ -5,9 +5,13 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use codewire_daemon_bridge::client::{DaemonClient, DaemonClientError};
-use codewire_daemon_bridge::file::FileBackend;
+use codewire_daemon_bridge::file::{FileBackend, written_files_message};
 use codewire_daemon_bridge::session::FieldViolation;
+use codewire_server_core::auth::AuthUser;
 use codewire_server_core::connect::{auth_user, wire_error};
+use codewire_server_core::connect_error::{
+    ConnectError as RenderedConnectError, ConnectErrorDetail, ERROR_INFO_DOMAIN, ErrorInfo,
+};
 use codewire_server_core::{AppError, ValidationIssue};
 use connectrpc::RequestContext;
 
@@ -17,6 +21,22 @@ use crate::connect::rendered_workspace_error;
 
 pub fn router(state: ApiState) -> connectrpc::Router {
     codewire_daemon_bridge::file::router(PlatformFileBackend { state })
+}
+
+/// The `WriteFiles` body budget for the file mount, charged to the user the
+/// auth layer admitted. The mount applies it inside authentication, so only an
+/// admitted caller is charged (#5804).
+pub fn admission(routes: axum::Router) -> axum::Router {
+    codewire_daemon_bridge::file::write_files_admission(routes, authenticated_user)
+}
+
+/// The admitted user's stable id, which for an API key is its owner's; never
+/// a credential.
+fn authenticated_user(request: &axum::extract::Request) -> Option<String> {
+    request
+        .extensions()
+        .get::<AuthUser>()
+        .map(|user| user.user_id.clone())
 }
 
 #[derive(Clone)]
@@ -57,7 +77,7 @@ impl FileBackend for PlatformFileBackend {
                 errors: violations
                     .into_iter()
                     .map(|violation| ValidationIssue {
-                        path: Cow::Borrowed(violation.path),
+                        path: violation.path,
                         message: Cow::Borrowed(violation.message),
                     })
                     .collect(),
@@ -72,6 +92,21 @@ impl FileBackend for PlatformFileBackend {
         request_id: Option<&str>,
     ) -> connectrpc::ConnectError {
         render(&file_client_error(error), request_id)
+    }
+
+    /// The daemon's error as [`Self::daemon_error`] renders it, its message
+    /// and its `ErrorInfo` metadata entry `written` (a JSON array) naming the
+    /// files already put in place.
+    fn written_files_error(
+        &self,
+        error: DaemonClientError,
+        written: &[String],
+        request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        wire_error(&written_files_error(
+            rendered_workspace_error(&file_client_error(error), request_id),
+            written,
+        ))
     }
 
     fn invalid_file_type(&self, request_id: Option<&str>) -> connectrpc::ConnectError {
@@ -139,6 +174,31 @@ fn file_client_error(error: DaemonClientError) -> AppError {
     }
 }
 
+fn written_files_error(
+    mut rendered: RenderedConnectError,
+    written: &[String],
+) -> RenderedConnectError {
+    let list = serde_json::Value::from(written).to_string();
+    let info = rendered.details.iter_mut().find_map(|detail| match detail {
+        ConnectErrorDetail::ErrorInfo(info) => Some(info),
+        _ => None,
+    });
+    match info {
+        Some(info) => {
+            info.metadata.insert("written".to_owned(), list);
+        }
+        None => rendered
+            .details
+            .push(ConnectErrorDetail::ErrorInfo(ErrorInfo {
+                reason: String::new(),
+                domain: ERROR_INFO_DOMAIN.to_owned(),
+                metadata: [("written".to_owned(), list)].into(),
+            })),
+    }
+    rendered.message = written_files_message(Some(&rendered.message), written);
+    rendered
+}
+
 fn daemon_readiness_error(state: codewire_daemon_proto::daemon::v1::DaemonState) -> AppError {
     use codewire_daemon_proto::daemon::v1::DaemonState;
 
@@ -169,7 +229,82 @@ fn request_id(ctx: &RequestContext) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::connect_error::{ConnectCode, ConnectErrorDetail};
+    use codewire_server_core::connect_error::ConnectCode;
+    use tower::ServiceExt as _;
+
+    /// The file mount's admission charges the user the auth layer admitted:
+    /// one user's share full refuses that user's next `WriteFiles` call before
+    /// its body is read, and not another user's.
+    #[tokio::test]
+    async fn the_write_files_admission_charges_the_authenticated_user() {
+        const WRITE_FILES: &str =
+            codewire_proto::codewire::v1::FILE_SERVICE_WRITE_FILES_SPEC.procedure;
+        const MAX: usize = codewire_daemon_bridge::file::WRITE_FILES_MAX_MESSAGE_BYTES;
+        let (reached, mut reached_rx) = tokio::sync::watch::channel(0_usize);
+        let inner = axum::Router::new().route(
+            WRITE_FILES,
+            // Like the Connect dispatcher, the route keeps the request's
+            // extensions, and its untaken charge, until it answers.
+            axum::routing::post(move |request: axum::extract::Request| async move {
+                reached.send_modify(|count| *count += 1);
+                let (parts, body) = request.into_parts();
+                let _read = axum::body::to_bytes(body, usize::MAX).await;
+                drop(parts);
+                StatusCode::OK
+            }),
+        );
+        let router = admission(inner);
+        let call = |user: &str, length: usize| {
+            let mut request = axum::http::Request::post(WRITE_FILES)
+                .header("content-type", "application/proto")
+                .header("content-length", length)
+                .body(axum::body::Body::from_stream(futures::stream::pending::<
+                    Result<axum::body::Bytes, std::convert::Infallible>,
+                >()))
+                .expect("request");
+            request.extensions_mut().insert(AuthUser {
+                user_id: user.to_owned(),
+                org_id: None,
+                is_admin: false,
+                via_api_key: true,
+            });
+            router.clone().oneshot(request)
+        };
+        let held = [
+            tokio::spawn(call("user-a", MAX)),
+            tokio::spawn(call("user-a", MAX)),
+        ];
+        let timeout = std::time::Duration::from_secs(10);
+        tokio::time::timeout(timeout, reached_rx.wait_for(|count| *count >= 2))
+            .await
+            .expect("held calls did not reach the service")
+            .expect("reached sender kept");
+
+        let refused = tokio::time::timeout(timeout, call("user-a", 10))
+            .await
+            .expect("refused at once")
+            .expect("infallible");
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(refused.into_body(), 64 * 1024)
+            .await
+            .expect("error body");
+        assert!(
+            body.starts_with(br#"{"code":"resource_exhausted""#),
+            "{body:?}"
+        );
+        assert_eq!(*reached_rx.borrow(), 2);
+
+        // Another user is admitted; its body never arrives, so it is left
+        // running and dropped with the test.
+        let other = tokio::spawn(call("user-b", 10));
+        tokio::time::timeout(timeout, reached_rx.wait_for(|count| *count >= 3))
+            .await
+            .expect("another user was not admitted")
+            .expect("reached sender kept");
+        for call in held.into_iter().chain([other]) {
+            call.abort();
+        }
+    }
 
     #[test]
     fn missing_and_denied_paths_keep_stable_public_codes() {
@@ -197,6 +332,59 @@ mod tests {
         assert!(denied.details.iter().any(|detail| matches!(
             detail,
             ConnectErrorDetail::ErrorInfo(info) if info.reason == "INVALID_PATH"
+        )));
+    }
+
+    #[test]
+    fn a_partial_write_names_the_files_written_in_its_error_info_and_message() {
+        let written = [
+            "/workspace/a.txt".to_owned(),
+            "/workspace/\"b\".txt".to_owned(),
+        ];
+        let rendered = written_files_error(
+            rendered_workspace_error(
+                &file_client_error(DaemonClientError::Status(tonic::Status::permission_denied(
+                    "private detail",
+                ))),
+                Some("req-write"),
+            ),
+            &written,
+        );
+        assert_eq!(rendered.code, ConnectCode::InvalidArgument);
+        let infos = rendered
+            .details
+            .iter()
+            .filter_map(|detail| match detail {
+                ConnectErrorDetail::ErrorInfo(info) => Some(info),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].reason, "INVALID_PATH");
+        assert_eq!(
+            infos[0].metadata.get("request_id").map(String::as_str),
+            Some("req-write")
+        );
+        let listed: Vec<String> =
+            serde_json::from_str(&infos[0].metadata["written"]).expect("a JSON array");
+        assert_eq!(listed, written);
+        assert!(rendered.message.contains("/workspace/a.txt"));
+
+        // An error with no ErrorInfo of its own gains one.
+        let rendered = written_files_error(
+            rendered_workspace_error(
+                &file_client_error(DaemonClientError::Status(tonic::Status::internal(
+                    "private detail",
+                ))),
+                None,
+            ),
+            &written[..1],
+        );
+        assert!(rendered.details.iter().any(|detail| matches!(
+            detail,
+            ConnectErrorDetail::ErrorInfo(info)
+                if info.metadata.get("written").map(String::as_str)
+                    == Some(r#"["/workspace/a.txt"]"#)
         )));
     }
 }

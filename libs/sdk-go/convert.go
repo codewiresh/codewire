@@ -32,6 +32,8 @@ var (
 	portCoverageErr             error
 	fileEntryCoverageOnce       sync.Once
 	fileEntryCoverageErr        error
+	writeManyCoverageOnce       sync.Once
+	writeManyCoverageErr        error
 )
 
 func fromProtoAPIKey(key *codewirev1.ApiKey) (APIKey, error) {
@@ -1326,6 +1328,28 @@ func ensureFileEntryConverterCoverage() error {
 		})
 	})
 	return fileEntryCoverageErr
+}
+
+func ensureWriteManyConverterCoverage() error {
+	writeManyCoverageOnce.Do(func() {
+		messages := codewirev1.File_codewire_v1_file_proto.Messages()
+		if err := ensureDescriptorCoverage("write files request", messages.ByName("WriteFilesRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "files",
+		}); err != nil {
+			writeManyCoverageErr = err
+			return
+		}
+		if err := ensureDescriptorCoverage("write file", messages.ByName("WriteFile"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "path", 2: "content",
+		}); err != nil {
+			writeManyCoverageErr = err
+			return
+		}
+		writeManyCoverageErr = ensureDescriptorCoverage("written file", messages.ByName("UploadFileResponse"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "path", 2: "size",
+		})
+	})
+	return writeManyCoverageErr
 }
 
 func ensureDescriptorCoverage(name string, descriptor protoreflect.MessageDescriptor, expected map[protoreflect.FieldNumber]protoreflect.Name) error {

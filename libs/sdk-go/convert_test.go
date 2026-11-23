@@ -548,6 +548,9 @@ func TestPresetSecretConverterDescriptorCoverage(t *testing.T) {
 	if err := ensureFileEntryConverterCoverage(); err != nil {
 		t.Fatalf("file entry converter descriptor coverage: %v", err)
 	}
+	if err := ensureWriteManyConverterCoverage(); err != nil {
+		t.Fatalf("write many converter descriptor coverage: %v", err)
+	}
 }
 
 func stringSlicePointer(values []string) *[]string {

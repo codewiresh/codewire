@@ -29,6 +29,20 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Writes 1 to 1,000 files, up to 16 MiB in all, in one call; no file is
+    /// put in place until every file is staged. A request that breaks a rule
+    /// is refused whole as `InvalidArgument`.
+    pub async fn write_files(
+        &self,
+        request: WriteFilesRequest,
+    ) -> Result<WriteFilesResponse, ClientError> {
+        self.files
+            .write_files_with_options(request, self.session_unary_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     /// The file's frames as they arrive, so a caller can write a large file
     /// without holding it (#3968).
     pub async fn download_file(

@@ -1,9 +1,10 @@
 use buffa_types::google::protobuf::Duration;
+use codewire_daemon_bridge::file::WRITE_FILES_MAX_CONTENT_BYTES;
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, DownloadFileResponse, ExecRequest, ExecServiceClient, FileServiceClient,
     ListFilesRequest, StatFileRequest, StreamExecRequest, StreamExecResponse,
-    UploadFilePartRequest, UploadFileRequest, stream_exec_response, upload_file_part_request,
-    upload_file_request,
+    UploadFilePartRequest, UploadFileRequest, WriteFile, WriteFilesRequest, stream_exec_response,
+    upload_file_part_request, upload_file_request,
 };
 use connectrpc::client::HttpClient;
 use connectrpc::{CodecFormat, ConnectError, ErrorCode};
@@ -57,6 +58,23 @@ fn exec_client(harness: &Harness, auth: Auth, codec: CodecFormat) -> ExecService
 
 fn file_client(harness: &Harness, auth: Auth, codec: CodecFormat) -> FileServiceClient<HttpClient> {
     FileServiceClient::new(HttpClient::plaintext(), harness.client_config(auth, codec))
+}
+
+/// A WriteFiles request naming each path with that many bytes.
+fn write_files(org_id: &str, environment_id: &str, files: &[(&str, usize)]) -> WriteFilesRequest {
+    WriteFilesRequest {
+        org_id: org_id.into(),
+        environment_id: environment_id.into(),
+        files: files
+            .iter()
+            .map(|&(path, size)| WriteFile {
+                path: path.into(),
+                content: vec![7; size],
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 async fn stream_exec_error(
@@ -335,6 +353,15 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
                 .await
                 .expect_err("StatFile gate must fail");
             assert_rpc_error(&error, code, message);
+            let error = client
+                .write_files(write_files(
+                    org_id,
+                    environment_id,
+                    &[("/workspace/a.txt", 1)],
+                ))
+                .await
+                .expect_err("WriteFiles gate must fail");
+            assert_rpc_error(&error, code, message);
         }
 
         let client = file_client(harness, Auth::Admin, codec);
@@ -372,6 +399,46 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
             .expect_err("StatFile without a path must fail");
         assert_rpc_error(&stat_path, ErrorCode::InvalidArgument, "validation failed");
         assert_rpc_bad_request(&stat_path, &["path"]);
+
+        // WriteFiles reads a request of 16 MiB of content in either codec, so
+        // one at the limit reaches the environment gate, and one byte more is
+        // refused by the bridge's rule rather than the transport.
+        let at_limit = client
+            .write_files(write_files(
+                PRIMARY_ORG,
+                NO_BACKEND_ENV,
+                &[("/workspace/big.bin", WRITE_FILES_MAX_CONTENT_BYTES)],
+            ))
+            .await
+            .expect_err("WriteFiles at its size limit reaches the environment gate");
+        assert_rpc_error(
+            &at_limit,
+            ErrorCode::Unavailable,
+            "sandbox backend not found",
+        );
+        let over = client
+            .write_files(write_files(
+                PRIMARY_ORG,
+                BACKEND_ENV,
+                &[
+                    ("/workspace/one.bin", WRITE_FILES_MAX_CONTENT_BYTES / 2),
+                    ("/workspace/two.bin", WRITE_FILES_MAX_CONTENT_BYTES / 2 + 1),
+                ],
+            ))
+            .await
+            .expect_err("WriteFiles over its size limit must fail");
+        assert_rpc_error(&over, ErrorCode::InvalidArgument, "validation failed");
+        assert_rpc_bad_request(&over, &["files"]);
+        let twice = client
+            .write_files(write_files(
+                PRIMARY_ORG,
+                BACKEND_ENV,
+                &[("/workspace/x.txt", 1), ("/workspace/x.txt", 1)],
+            ))
+            .await
+            .expect_err("WriteFiles naming a path twice must fail");
+        assert_rpc_error(&twice, ErrorCode::InvalidArgument, "validation failed");
+        assert_rpc_bad_request(&twice, &["files[1].path"]);
 
         let empty = client
             .upload_file(futures_util::stream::iter(std::iter::empty::<
@@ -608,5 +675,22 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
     assert_eq!(
         rpc_has_retry_info(&stat_error),
         harness.kube_mode == KubeMode::Configured
+    );
+
+    let write_error = file_client
+        .write_files(write_files(
+            PRIMARY_ORG,
+            UNAVAILABLE_ENV,
+            &[("/workspace/a.txt", 1)],
+        ))
+        .await
+        .expect_err("WriteFiles runtime boundary must fail");
+    assert_rpc_error(
+        &write_error,
+        ErrorCode::Unavailable,
+        match harness.kube_mode {
+            KubeMode::Configured => "environment daemon is unavailable",
+            KubeMode::Unconfigured => "sandbox client not configured",
+        },
     );
 }

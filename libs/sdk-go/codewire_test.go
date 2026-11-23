@@ -1,6 +1,7 @@
 package codewire_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -123,6 +125,14 @@ type fileServiceHandler struct {
 	download func(context.Context, *connect.Request[codewirev1.DownloadFileRequest], *connect.ServerStream[codewirev1.DownloadFileResponse]) error
 	upload   func(context.Context, *connect.ClientStream[codewirev1.UploadFileRequest]) (*connect.Response[codewirev1.UploadFileResponse], error)
 	stat     func(context.Context, *connect.Request[codewirev1.StatFileRequest]) (*connect.Response[codewirev1.StatFileResponse], error)
+	write    func(context.Context, *connect.Request[codewirev1.WriteFilesRequest]) (*connect.Response[codewirev1.WriteFilesResponse], error)
+}
+
+func (h fileServiceHandler) WriteFiles(ctx context.Context, req *connect.Request[codewirev1.WriteFilesRequest]) (*connect.Response[codewirev1.WriteFilesResponse], error) {
+	if h.write != nil {
+		return h.write(ctx, req)
+	}
+	return h.UnimplementedFileServiceHandler.WriteFiles(ctx, req)
 }
 
 func (h fileServiceHandler) StatFile(ctx context.Context, req *connect.Request[codewirev1.StatFileRequest]) (*connect.Response[codewirev1.StatFileResponse], error) {
@@ -861,6 +871,75 @@ func TestFilesStatAndExists(t *testing.T) {
 		if exists, err := env.Files.Exists(ctx, path); exists || !errors.As(err, &apiErr) || apiErr.StatusCode != status {
 			t.Errorf("Exists(%q) = %v, %v; want false and the %d *Error", path, exists, err, status)
 		}
+	}
+}
+
+func TestFilesWriteMany(t *testing.T) {
+	envJSON := codewire.EnvironmentData{Id: "env_123", OrgId: "org_test", State: "running"}
+	var received []*codewirev1.WriteFile
+	client, _ := testRuntimeServer(t, environmentServiceHandler{
+		get: func(_ context.Context, _ *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error) {
+			return connect.NewResponse(&codewirev1.GetEnvironmentResponse{Environment: environmentProto(envJSON)}), nil
+		},
+	}, execServiceHandler{}, fileServiceHandler{
+		write: func(_ context.Context, req *connect.Request[codewirev1.WriteFilesRequest]) (*connect.Response[codewirev1.WriteFilesResponse], error) {
+			if req.Msg.GetOrgId() != "org_test" || req.Msg.GetEnvironmentId() != "env_123" {
+				t.Errorf("unexpected write coordinates: %#v", req.Msg)
+			}
+			received = req.Msg.GetFiles()
+			if len(received) > 1000 {
+				return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("validation failed"))
+			}
+			response := &codewirev1.WriteFilesResponse{}
+			for _, file := range received {
+				response.Files = append(response.Files, &codewirev1.UploadFileResponse{Path: file.GetPath(), Size: int64(len(file.GetContent()))})
+			}
+			return connect.NewResponse(response), nil
+		},
+	}, portServiceHandler{})
+	ctx := context.Background()
+	env, err := client.Environments.Get(ctx, "env_123")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	files := []codewire.FileWrite{
+		{Path: "/workspace/proj/a.txt", Content: []byte("alpha")},
+		{Path: "/workspace/proj/src/b.txt", Content: []byte("bravo!")},
+		{Path: "/workspace/f.txt", Content: []byte{}},
+	}
+	written, err := env.Files.WriteMany(ctx, files)
+	if err != nil {
+		t.Fatalf("write many: %v", err)
+	}
+	want := []codewire.WrittenFile{
+		{Path: "/workspace/proj/a.txt", Size: 5},
+		{Path: "/workspace/proj/src/b.txt", Size: 6},
+		{Path: "/workspace/f.txt", Size: 0},
+	}
+	if !reflect.DeepEqual(written, want) {
+		t.Errorf("written = %#v, want %#v", written, want)
+	}
+	if len(received) != len(files) {
+		t.Fatalf("server received %d files, want %d in one call", len(received), len(files))
+	}
+	for i, file := range files {
+		if received[i].GetPath() != file.Path || !bytes.Equal(received[i].GetContent(), file.Content) {
+			t.Errorf("file %d sent as %#v, want %#v", i, received[i], file)
+		}
+	}
+
+	// The SDK sends a batch the server refuses as it is, and returns the refusal.
+	many := make([]codewire.FileWrite, 1001)
+	for i := range many {
+		many[i] = codewire.FileWrite{Path: fmt.Sprintf("/workspace/%d.txt", i)}
+	}
+	var apiErr *codewire.Error
+	if _, err := env.Files.WriteMany(ctx, many); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("write of 1,001 files = %v, want the 400 *Error", err)
+	}
+	if len(received) != len(many) {
+		t.Errorf("server received %d files, want all %d in one call", len(received), len(many))
 	}
 }
 

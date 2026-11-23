@@ -31,6 +31,7 @@ mod daemon_logs;
 mod desktop;
 mod exec_error;
 mod file_errors;
+mod files;
 mod semantics;
 mod session_error;
 use connect_only::enforce_connect_only;
@@ -79,14 +80,7 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
     let exec = axum::Router::new()
         .route_service(PUBLIC_EXEC_ROUTE, exec)
         .layer(axum::middleware::from_fn(enforce_connect_only));
-    let files = connectrpc::ConnectRpcService::new(codewire_daemon_bridge::file::router(
-        LocalFileBackend {
-            supervisor: supervisor.clone(),
-        },
-    ));
-    let files = axum::Router::new()
-        .route_service(PUBLIC_FILE_ROUTE, files)
-        .layer(axum::middleware::from_fn(enforce_connect_only));
+    let files = files::router(supervisor.clone());
 
     let desktop = desktop::router(supervisor.clone());
 
@@ -577,56 +571,13 @@ impl ExecBackend for LocalExecBackend {
     }
 }
 
-#[derive(Clone)]
-struct LocalFileBackend {
-    supervisor: SupervisorRpc,
-}
-
-#[async_trait]
-impl FileBackend for LocalFileBackend {
-    fn authorize(&self, _ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
-        Ok(())
-    }
-
-    fn validation_error(
-        &self,
-        violations: Vec<FieldViolation>,
-        _request_id: Option<&str>,
-    ) -> connectrpc::ConnectError {
-        local_bridge_validation("file", &violations)
-    }
-
-    fn daemon_error(
-        &self,
-        error: DaemonClientError,
-        _request_id: Option<&str>,
-    ) -> connectrpc::ConnectError {
-        local_file_error(error)
-    }
-
-    fn invalid_file_type(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
-        connectrpc::ConnectError::invalid_argument("local file path is not a regular file")
-    }
-
-    async fn daemon(
-        &self,
-        _ctx: &RequestContext,
-        org_id: &str,
-        environment_id: &str,
-    ) -> Result<DaemonClient, connectrpc::ConnectError> {
-        self.supervisor
-            .public_bridge_daemon_client(org_id, environment_id)
-            .await
-    }
-}
-
 fn local_bridge_validation(
     operation: &str,
     violations: &[FieldViolation],
 ) -> connectrpc::ConnectError {
     let fields = violations
         .iter()
-        .map(|violation| violation.path)
+        .map(|violation| violation.path.as_ref())
         .collect::<Vec<_>>()
         .join(", ");
     connectrpc::ConnectError::invalid_argument(format!(
@@ -659,7 +610,7 @@ impl EnvironmentSessionBackend for LocalSessionBackend {
     ) -> connectrpc::ConnectError {
         let fields = violations
             .iter()
-            .map(|violation| violation.path)
+            .map(|violation| violation.path.as_ref())
             .collect::<Vec<_>>()
             .join(", ");
         connectrpc::ConnectError::invalid_argument(format!(

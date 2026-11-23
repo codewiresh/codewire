@@ -53,7 +53,11 @@ import {
 import type { ExecResponse } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import {
   FileEntrySchema,
+  UploadFileResponseSchema,
+  WriteFileSchema,
+  WriteFilesRequestSchema,
   type FileEntry as ProtoFileEntry,
+  type UploadFileResponse as ProtoUploadFileResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
 import {
   PortAccess,
@@ -88,6 +92,7 @@ import type {
   ExecRequest,
   ExecResult,
   FileEntry,
+  WrittenFile,
   IsolationTier,
   NetworkAttachmentFailure,
   NetworkAttachmentState,
@@ -938,6 +943,10 @@ export function fromProtoExecResult(value: ExecResponse): ExecResult {
   };
 }
 
+export function fromProtoWrittenFile(value: ProtoUploadFileResponse): WrittenFile {
+  return { path: value.path, size: numberFromInt64(value.size) };
+}
+
 export function fromProtoFileEntry(value: ProtoFileEntry): FileEntry {
   return {
     is_dir: value.isDir,
@@ -1264,6 +1273,15 @@ export function assertRuntimeConverterCoverage(): void {
   ]));
   assertDescriptorCoverage("file entry", FileEntrySchema.fields, new Map([
     [1, "name"], [2, "size"], [3, "is_dir"], [4, "mode"], [5, "mod_time"],
+  ]));
+  assertDescriptorCoverage("write files request", WriteFilesRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "environment_id"], [3, "files"],
+  ]));
+  assertDescriptorCoverage("write file", WriteFileSchema.fields, new Map([
+    [1, "path"], [2, "content"],
+  ]));
+  assertDescriptorCoverage("written file", UploadFileResponseSchema.fields, new Map([
+    [1, "path"], [2, "size"],
   ]));
   assertDescriptorCoverage("preset", PresetSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "name"], [4, "slug"], [5, "language"], [6, "official"], [7, "description"], [8, "build_status"], [9, "build_error"], [13, "default_ttl_seconds"], [17, "created_at"], [18, "project_spec"],

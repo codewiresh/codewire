@@ -58,6 +58,8 @@ import {
 
 let passed = 0;
 let failed = 0;
+// Each WriteFiles call the fixture received: its files' paths and bytes.
+const writeCalls: Array<ReadonlyArray<readonly [string, Uint8Array]>> = [];
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -521,6 +523,19 @@ async function runTests() {
         ]);
       }
       throw new ConnectError("file path is invalid or denied", Code.InvalidArgument);
+    },
+    writeFiles: (request, context) => {
+      requireTestKey(context);
+      if (request.orgId !== "org_test" || request.environmentId !== "env_123") {
+        throw new ConnectError("access denied", Code.PermissionDenied);
+      }
+      writeCalls.push(request.files.map((file) => [file.path, file.content] as const));
+      if (request.files.length > 1000) {
+        throw new ConnectError("validation failed", Code.InvalidArgument);
+      }
+      return {
+        files: request.files.map((file) => ({ path: file.path, size: BigInt(file.content.byteLength) })),
+      };
     },
     async *downloadFile(_request, context) {
       requireTestKey(context);
@@ -1602,6 +1617,32 @@ async function runTests() {
       );
     }
 
+    const manyFiles = [
+      ["/workspace/proj/a.txt", new TextEncoder().encode("alpha")],
+      ["/workspace/proj/src/b.txt", new TextEncoder().encode("bravo!")],
+      ["/workspace/f.txt", new Uint8Array()],
+    ] as const;
+    const writtenFiles = [
+      { path: "/workspace/proj/a.txt", size: 5 },
+      { path: "/workspace/proj/src/b.txt", size: 6 },
+      { path: "/workspace/f.txt", size: 0 },
+    ];
+    writeCalls.length = 0;
+    nodeAssert.deepEqual(await env2.files.writeMany(manyFiles), writtenFiles);
+    nodeAssert.deepEqual(await env2.files.writeMany(new Map(manyFiles)), writtenFiles);
+    nodeAssert.deepEqual(await env2.files.writeMany(Object.fromEntries(manyFiles)), writtenFiles);
+    // Copied, since deepEqual narrows what it checks to the expected tuple.
+    nodeAssert.deepEqual([...writeCalls], [manyFiles, manyFiles, manyFiles], "files.writeMany sends every file in one call, in order");
+    await nodeAssert.rejects(
+      env2.files.writeMany(Array.from({ length: 1001 }, (_, i) => [`/workspace/${i}.txt`, new Uint8Array()] as const)),
+      (error: unknown) => error instanceof CodewireError && error.status === 400,
+      "files.writeMany returns the server's refusal of a larger batch",
+    );
+    assert(
+      writeCalls.length === 4 && writeCalls[3].length === 1001,
+      "files.writeMany does not split a larger batch",
+    );
+
     // Test: Ports
     console.log("Test: Ports");
     const ports = await env2.listPorts();
@@ -1674,7 +1715,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 200;
+  const expectedAssertions = 201;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

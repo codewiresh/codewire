@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, StatFileRequest, StatFileResponse, UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse
+from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, StatFileRequest, StatFileResponse, UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse, WriteFilesRequest, WriteFilesResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -48,6 +48,9 @@ class FileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def upload_file_part(self, request: AsyncIterator[UploadFilePartRequest], ctx: RequestContext[UploadFilePartRequest, UploadFilePartResponse]) -> UploadFilePartResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def write_files(self, request: WriteFilesRequest, ctx: RequestContext[WriteFilesRequest, WriteFilesResponse]) -> WriteFilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -113,6 +116,16 @@ class FileServiceASGIApplication(ConnectASGIApplication[FileService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.upload_file_part,
+                ),
+                "/codewire.v1.FileService/WriteFiles": Endpoint.unary(
+                    method=MethodInfo(
+                        name="WriteFiles",
+                        service_name="codewire.v1.FileService",
+                        input=WriteFilesRequest,
+                        output=WriteFilesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.write_files,
                 ),
             },
             interceptors=interceptors,
@@ -256,6 +269,26 @@ class FileServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def write_files(
+        self,
+        request: WriteFilesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> WriteFilesResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="WriteFiles",
+                service_name="codewire.v1.FileService",
+                input=WriteFilesRequest,
+                output=WriteFilesResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class FileServiceSync(Protocol):
     def list_files(self, request: ListFilesRequest, ctx: RequestContext[ListFilesRequest, ListFilesResponse]) -> ListFilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -270,6 +303,9 @@ class FileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def upload_file_part(self, request: Iterator[UploadFilePartRequest], ctx: RequestContext[UploadFilePartRequest, UploadFilePartResponse]) -> UploadFilePartResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def write_files(self, request: WriteFilesRequest, ctx: RequestContext[WriteFilesRequest, WriteFilesResponse]) -> WriteFilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -333,6 +369,16 @@ class FileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.upload_file_part,
+                ),
+                "/codewire.v1.FileService/WriteFiles": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="WriteFiles",
+                        service_name="codewire.v1.FileService",
+                        input=WriteFilesRequest,
+                        output=WriteFilesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.write_files,
                 ),
             },
             interceptors=interceptors,
@@ -466,6 +512,25 @@ class FileServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.FileService",
                 input=UploadFilePartRequest,
                 output=UploadFilePartResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def write_files(
+        self,
+        request: WriteFilesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> WriteFilesResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="WriteFiles",
+                service_name="codewire.v1.FileService",
+                input=WriteFilesRequest,
+                output=WriteFilesResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

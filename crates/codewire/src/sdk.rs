@@ -22,7 +22,8 @@ use crate::{
     Environment, EnvironmentState, ExecRequest, ExecResponse, FileEntry, GetEnvironmentRequest,
     ListFilesRequest, ListFilesResponse, ListPortsRequest, ListPortsResponse,
     StartEnvironmentRequest, StatFileRequest, StaticTokenProvider, StopEnvironmentRequest,
-    UploadFileHeader, UploadFileRequest, download_file_response, upload_file_request,
+    UploadFileHeader, UploadFileRequest, UploadFileResponse, WriteFile, WriteFilesRequest,
+    download_file_response, upload_file_request,
 };
 
 /// The API key the SDKs read, a `cw_` key or an OAuth access token.
@@ -278,6 +279,35 @@ impl EnvironmentHandle {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Writes every `(path, contents)` pair in one call, at most 1,000 files
+    /// and 16 MiB in all, each as [`Self::upload`] writes one: missing parent
+    /// folders are made, the mode is 0644 and an existing file is replaced.
+    /// No file is put in place until every file is staged. Returns each
+    /// file's path and size in the order given. A request that breaks a rule
+    /// is refused whole as `InvalidArgument`; a larger batch is not split.
+    pub async fn write_files<P, C>(
+        &self,
+        files: impl IntoIterator<Item = (P, C)>,
+    ) -> Result<Vec<UploadFileResponse>, ClientError>
+    where
+        P: Into<String>,
+        C: Into<Vec<u8>>,
+    {
+        let mut request = WriteFilesRequest {
+            files: files
+                .into_iter()
+                .map(|(path, content)| WriteFile {
+                    path: path.into(),
+                    content: content.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        Ok(self.codewire.client.write_files(request).await?.files)
     }
 
     /// Writes `contents` to `path`, replacing any file there. The contents

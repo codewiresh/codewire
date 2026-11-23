@@ -1,7 +1,7 @@
-import { fromProtoFileEntry } from "./convert.js";
+import { fromProtoFileEntry, fromProtoWrittenFile } from "./convert.js";
 import type { FileClient } from "./transport.js";
 import { CodewireError, mapConnectError } from "./types.js";
-import type { FileEntry } from "./types.js";
+import type { FileEntry, WrittenFile } from "./types.js";
 
 const uploadChunkSize = 32 * 1024;
 // The ErrorInfo reason the platform gives a missing file, as distinct from a
@@ -74,6 +74,31 @@ export class Files {
         return false;
       }
       throw error;
+    }
+  }
+
+  /**
+   * Write every file in one call, at most 1,000 files and 16 MiB in all, each
+   * as `upload` writes one: missing parent folders are made, the mode is 0644
+   * and an existing file is replaced. No file is put in place until every
+   * file is staged. `files` is a list of [path, bytes] pairs, a Map, or an
+   * object from path to bytes. Returns each file's path and size in the
+   * order given. A request that breaks a rule is refused whole with a
+   * CodewireError of status 400; a larger batch is not split.
+   */
+  async writeMany(
+    files: Iterable<readonly [string, Uint8Array]> | Record<string, Uint8Array>,
+  ): Promise<WrittenFile[]> {
+    const pairs = Symbol.iterator in files ? files : Object.entries(files);
+    try {
+      const response = await this.client.writeFiles({
+        orgId: this.orgId,
+        environmentId: this.environmentId,
+        files: Array.from(pairs, ([path, content]) => ({ path, content })),
+      });
+      return response.files.map(fromProtoWrittenFile);
+    } catch (error) {
+      throw mapConnectError(error);
     }
   }
 

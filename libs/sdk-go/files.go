@@ -151,3 +151,28 @@ func (f *Files) Exists(ctx context.Context, remotePath string) (bool, error) {
 	}
 	return err == nil, err
 }
+
+// WriteMany writes every file in one call, at most 1,000 files and 16 MiB in
+// all, each as [Files.Upload] writes one: missing parent folders are made,
+// the mode is 0644 and an existing file is replaced. No file is put in place
+// until every file is staged. It returns each file's path and size in the
+// order given. A request that breaks a rule is refused whole, as an [*Error]
+// with StatusCode 400; the SDK does not split a larger batch.
+func (f *Files) WriteMany(ctx context.Context, files []FileWrite) ([]WrittenFile, error) {
+	if err := ensureWriteManyConverterCoverage(); err != nil {
+		return nil, err
+	}
+	request := &codewirev1.WriteFilesRequest{OrgId: f.orgID, EnvironmentId: f.envID}
+	for _, file := range files {
+		request.Files = append(request.Files, &codewirev1.WriteFile{Path: file.Path, Content: file.Content})
+	}
+	response, err := f.client.files.WriteFiles(ctx, connect.NewRequest(request))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	written := make([]WrittenFile, 0, len(response.Msg.GetFiles()))
+	for _, file := range response.Msg.GetFiles() {
+		written = append(written, WrittenFile{Path: file.GetPath(), Size: file.GetSize()})
+	}
+	return written, nil
+}

@@ -22,6 +22,9 @@ service FileService {
   // request body and resumes after an interruption. A request without chunks
   // only reports the bytes held for the upload.
   rpc UploadFilePart(stream UploadFilePartRequest) returns (UploadFilePartResponse);
+  // Writes 1 to 1,000 files, up to 16 MiB in all, each as UploadFile writes
+  // one. No file is put in place until every file is staged.
+  rpc WriteFiles(WriteFilesRequest) returns (WriteFilesResponse);
 }
 
 message ListFilesRequest {
@@ -113,4 +116,20 @@ message UploadFilePartResponse {
   int64 size = 3;
   // Whether the file is now published at path.
   bool finished = 4;
+}
+
+message WriteFilesRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  repeated WriteFile files = 3;
+}
+
+message WriteFile {
+  string path = 1;
+  bytes content = 2;
+}
+
+message WriteFilesResponse {
+  // Each file's path and size, in the request's order.
+  repeated UploadFileResponse files = 1;
 }

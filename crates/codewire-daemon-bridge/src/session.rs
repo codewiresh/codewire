@@ -4,6 +4,7 @@
 //! credential. This module owns only validation, public/private conversion,
 //! bounded stream relay, and half-close behavior.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,9 +21,10 @@ const STREAM_BUFFER: usize = 32;
 const SESSION_RESTARTED: &str =
     "Codewire is restarting this server; the session keeps running, attach to it again";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldViolation {
-    pub path: &'static str,
+    /// The field, as a JSON pointer such as `/files/3/path`.
+    pub path: Cow<'static, str>,
     pub message: &'static str,
 }
 
@@ -751,7 +753,10 @@ pub fn coordinate_violations(
 }
 
 const fn violation(path: &'static str, message: &'static str) -> FieldViolation {
-    FieldViolation { path, message }
+    FieldViolation {
+        path: Cow::Borrowed(path),
+        message,
+    }
 }
 
 fn terminal_dimension(value: u32) -> i32 {

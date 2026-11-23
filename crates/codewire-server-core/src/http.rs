@@ -210,6 +210,24 @@ impl AppBuilder {
     }
 
     /// [`with_connect_routes_auth`](AppBuilder::with_connect_routes_auth) with
+    /// `inner` applied to the service routes inside the auth layer, so it runs
+    /// only for authenticated requests and can read their
+    /// [`AuthUser`](crate::auth::AuthUser). For a mount-specific admission,
+    /// such as a budget an unauthenticated request must never touch.
+    pub fn with_connect_routes_auth_and_inner(
+        mut self,
+        connect: connectrpc::Router,
+        auth: crate::connect::ConnectAuthLayer,
+        inner: impl FnOnce(axum::Router) -> axum::Router,
+    ) -> Self {
+        self.connect_routes
+            .push(crate::connect::connect_router_with_auth_and_inner(
+                connect, auth, inner,
+            ));
+        self
+    }
+
+    /// [`with_connect_routes_auth`](AppBuilder::with_connect_routes_auth) with
     /// an explicit wire-protocol policy for an evidence-approved first-party
     /// bidi mount.
     ///

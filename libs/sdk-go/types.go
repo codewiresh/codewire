@@ -356,6 +356,18 @@ type FileEntry struct {
 	Size      int64  `json:"size"`
 }
 
+// FileWrite is one file for [Files.WriteMany]: its path and its bytes.
+type FileWrite struct {
+	Path    string
+	Content []byte
+}
+
+// WrittenFile is a file [Files.WriteMany] put in place.
+type WrittenFile struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
 // APIKey is the SDK-owned public representation of an API key.
 type APIKey struct {
 	Schema         *string   `json:"$schema,omitempty"`

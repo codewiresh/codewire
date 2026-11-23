@@ -7,6 +7,7 @@
 //! retried and cancellation never removes an already published destination.
 //! Process/runtime shutdown does not guarantee that cleanup has drained.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::Path;
 #[cfg(test)]
@@ -27,8 +28,18 @@ use crate::client::{DaemonClient, DaemonClientError, v1};
 use crate::drain::{Restart, RestartSignal};
 use crate::session::FieldViolation;
 
+mod admission;
+pub use admission::{
+    WRITE_FILES_BODY_BUDGET, WRITE_FILES_ORGANIZATION_SHARE, WRITE_FILES_PRINCIPAL_SHARE,
+    WriteFilesPrincipal, write_files_admission,
+};
 mod staged;
 use staged::StagedWrites;
+mod write_many;
+pub use write_many::{
+    WRITE_FILES_MAX_CONTENT_BYTES, WRITE_FILES_MAX_FILES, WRITE_FILES_MAX_MESSAGE_BYTES,
+    WRITE_FILES_WORKER_TIMEOUT, written_files_message,
+};
 
 const STREAM_BUFFER: usize = 8;
 const DOWNLOAD_RESTARTED: &str =
@@ -111,6 +122,21 @@ pub trait FileBackend: Clone + Send + Sync + 'static {
 
     fn invalid_file_type(&self, request_id: Option<&str>) -> connectrpc::ConnectError;
 
+    /// A `WriteFiles` failure after the files in `written` were put in place
+    /// (SPEC.md, "File transfer"). The default names them in the message of
+    /// [`Self::daemon_error`]'s reply; a backend whose errors carry a
+    /// `google.rpc.ErrorInfo` also lists them in its `written` metadata entry.
+    fn written_files_error(
+        &self,
+        error: DaemonClientError,
+        written: &[String],
+        request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        let mut reply = self.daemon_error(error, request_id);
+        reply.message = Some(written_files_message(reply.message.as_deref(), written));
+        reply
+    }
+
     async fn daemon(
         &self,
         ctx: &RequestContext,
@@ -122,11 +148,24 @@ pub trait FileBackend: Clone + Send + Sync + 'static {
 #[derive(Clone)]
 pub struct FileBridge<B> {
     backend: B,
+    writes: write_many::WriteLimiter,
+    /// [`WRITE_FILES_WORKER_TIMEOUT`], shorter in tests.
+    write_timeout: Duration,
 }
 
 impl<B> FileBridge<B> {
     pub fn new(backend: B) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            writes: write_many::WriteLimiter::default(),
+            write_timeout: WRITE_FILES_WORKER_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_write_timeout(mut self, timeout: Duration) -> Self {
+        self.write_timeout = timeout;
+        self
     }
 }
 
@@ -134,7 +173,9 @@ pub fn router<B>(backend: B) -> connectrpc::Router
 where
     B: FileBackend,
 {
-    connectrpc::Router::new().add_service(Arc::new(FileBridge::new(backend)))
+    write_many::with_write_files_limit(
+        connectrpc::Router::new().add_service(Arc::new(FileBridge::new(backend))),
+    )
 }
 
 #[allow(refining_impl_trait)]
@@ -160,7 +201,7 @@ where
         );
         if !request.page_token.is_empty() {
             violations.push(FieldViolation {
-                path: "/page_token",
+                path: Cow::Borrowed("/page_token"),
                 message: "is not recognized",
             });
         }
@@ -314,7 +355,7 @@ where
             None => {
                 return Err(self.backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload",
+                        path: Cow::Borrowed("/payload"),
                         message: "header must be the first message",
                     }],
                     request_id.as_deref(),
@@ -326,7 +367,7 @@ where
             _ => {
                 return Err(self.backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload",
+                        path: Cow::Borrowed("/payload"),
                         message: "header must be the first message",
                     }],
                     request_id.as_deref(),
@@ -395,7 +436,7 @@ where
         let header_first = || {
             self.backend.validation_error(
                 vec![FieldViolation {
-                    path: "/payload",
+                    path: Cow::Borrowed("/payload"),
                     message: "header must be the first message",
                 }],
                 request_id.as_deref(),
@@ -419,13 +460,13 @@ where
         );
         if !valid_upload_id(&header.upload_id) {
             violations.push(FieldViolation {
-                path: "/header/upload_id",
+                path: Cow::Borrowed("/header/upload_id"),
                 message: "must be 16 to 64 letters, digits, '-' or '_'",
             });
         }
         if header.offset < 0 {
             violations.push(FieldViolation {
-                path: "/header/offset",
+                path: Cow::Borrowed("/header/offset"),
                 message: "must not be negative",
             });
         }
@@ -482,6 +523,14 @@ where
             let _ = response_tx.send(result);
         });
         worker_reply(response_rx, revoked).await
+    }
+
+    async fn write_files(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::WriteFilesRequest>,
+    ) -> ServiceResult<proto::WriteFilesResponse> {
+        write_many::write_files(self, ctx, request).await
     }
 }
 
@@ -544,7 +593,7 @@ async fn upload_to_daemon<B: FileBackend>(
                 staging.abort().await;
                 return Err(backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload/header",
+                        path: Cow::Borrowed("/payload/header"),
                         message: "must appear only once",
                     }],
                     request_id.as_deref(),
@@ -554,7 +603,7 @@ async fn upload_to_daemon<B: FileBackend>(
                 staging.abort().await;
                 return Err(backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload",
+                        path: Cow::Borrowed("/payload"),
                         message: "is required",
                     }],
                     request_id.as_deref(),
@@ -659,7 +708,7 @@ async fn upload_part_to_daemon<B: FileBackend>(
             Some(proto::upload_file_part_request::Payload::Header(_)) => {
                 return Err(backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload/header",
+                        path: Cow::Borrowed("/payload/header"),
                         message: "must appear only once",
                     }],
                     request_id.as_deref(),
@@ -668,7 +717,7 @@ async fn upload_part_to_daemon<B: FileBackend>(
             None => {
                 return Err(backend.validation_error(
                     vec![FieldViolation {
-                        path: "/payload",
+                        path: Cow::Borrowed("/payload"),
                         message: "is required",
                     }],
                     request_id.as_deref(),
@@ -1066,24 +1115,24 @@ fn coordinate_violations(
     let mut violations = Vec::new();
     if org_id.trim().is_empty() {
         violations.push(FieldViolation {
-            path: org_path,
+            path: Cow::Borrowed(org_path),
             message: "must not be empty",
         });
     }
     if environment_id.trim().is_empty() {
         violations.push(FieldViolation {
-            path: environment_path,
+            path: Cow::Borrowed(environment_path),
             message: "must not be empty",
         });
     }
     if path.is_some_and(|path| path.trim().is_empty()) {
         violations.push(FieldViolation {
-            path: file_path,
+            path: Cow::Borrowed(file_path),
             message: "must not be empty",
         });
     } else if path.is_some_and(reserved_upload_path) {
         violations.push(FieldViolation {
-            path: file_path,
+            path: Cow::Borrowed(file_path),
             message: "uses a reserved internal name",
         });
     }
@@ -1096,13 +1145,13 @@ fn staging_path(destination: &str) -> Result<String, FieldViolation> {
         || destination.as_bytes().contains(&0)
     {
         return Err(FieldViolation {
-            path: "/header/path",
+            path: Cow::Borrowed("/header/path"),
             message: "is too long or contains an invalid character",
         });
     }
     if destination.ends_with('/') {
         return Err(FieldViolation {
-            path: "/header/path",
+            path: Cow::Borrowed("/header/path"),
             message: "must name a file",
         });
     }
@@ -1113,7 +1162,7 @@ fn staging_path(destination: &str) -> Result<String, FieldViolation> {
         .is_none()
     {
         return Err(FieldViolation {
-            path: "/header/path",
+            path: Cow::Borrowed("/header/path"),
             message: "must name a file",
         });
     }
@@ -1126,7 +1175,7 @@ fn staging_path(destination: &str) -> Result<String, FieldViolation> {
     };
     if staging.len() > MAX_UPLOAD_PATH_BYTES {
         return Err(FieldViolation {
-            path: "/header/path",
+            path: Cow::Borrowed("/header/path"),
             message: "is too long or contains an invalid character",
         });
     }
@@ -1244,6 +1293,7 @@ mod tests {
     mod parts;
     mod stat;
     mod upload;
+    mod write_many;
 
     use std::time::{Duration, Instant};
 
@@ -1294,7 +1344,7 @@ mod tests {
         ) -> connectrpc::ConnectError {
             let fields = violations
                 .iter()
-                .map(|violation| violation.path)
+                .map(|violation| violation.path.as_ref())
                 .collect::<Vec<_>>()
                 .join(", ");
             connectrpc::ConnectError::invalid_argument(format!("invalid test request: {fields}"))
@@ -1353,6 +1403,7 @@ mod tests {
             proto::FILE_SERVICE_DOWNLOAD_FILE_SPEC,
             proto::FILE_SERVICE_UPLOAD_FILE_SPEC,
             proto::FILE_SERVICE_UPLOAD_FILE_PART_SPEC,
+            proto::FILE_SERVICE_WRITE_FILES_SPEC,
         ]
         .into_iter()
         .map(|spec| spec.method().to_owned())
@@ -1361,7 +1412,7 @@ mod tests {
             crate::test_support::public_service_methods("FileService"),
             expected
         );
-        assert_eq!(expected.len(), 5);
+        assert_eq!(expected.len(), 6);
     }
 
     #[test]

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/file.proto.
  */
 export const file_codewire_v1_file: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkcKD1N0YXRGaWxlUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSDAoEcGF0aBgDIAEoCSI5ChBTdGF0RmlsZVJlc3BvbnNlEiUKBWVudHJ5GAEgASgLMhYuY29kZXdpcmUudjEuRmlsZUVudHJ5IksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAyJoChVVcGxvYWRGaWxlUGFydFJlcXVlc3QSMwoGaGVhZGVyGAEgASgLMiEuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRIZWFkZXJIABIPCgVjaHVuaxgCIAEoDEgAQgkKB3BheWxvYWQifwoUVXBsb2FkRmlsZVBhcnRIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkSEQoJdXBsb2FkX2lkGAQgASgJEg4KBm9mZnNldBgFIAEoAxIOCgZmaW5pc2gYBiABKAgiWQoWVXBsb2FkRmlsZVBhcnRSZXNwb25zZRIMCgRwYXRoGAEgASgJEhEKCXVwbG9hZF9pZBgCIAEoCRIMCgRzaXplGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIMrYDCgtGaWxlU2VydmljZRJPCglMaXN0RmlsZXMSHS5jb2Rld2lyZS52MS5MaXN0RmlsZXNSZXF1ZXN0Gh4uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVzcG9uc2UiA5ACARJMCghTdGF0RmlsZRIcLmNvZGV3aXJlLnYxLlN0YXRGaWxlUmVxdWVzdBodLmNvZGV3aXJlLnYxLlN0YXRGaWxlUmVzcG9uc2UiA5ACARJaCgxEb3dubG9hZEZpbGUSIC5jb2Rld2lyZS52MS5Eb3dubG9hZEZpbGVSZXF1ZXN0GiEuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVzcG9uc2UiA5ACATABEk8KClVwbG9hZEZpbGUSHi5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVxdWVzdBofLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVSZXNwb25zZSgBElsKDlVwbG9hZEZpbGVQYXJ0EiIuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXF1ZXN0GiMuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXNwb25zZSgBQqwBCg9jb20uY29kZXdpcmUudjFCCUZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkcKD1N0YXRGaWxlUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSDAoEcGF0aBgDIAEoCSI5ChBTdGF0RmlsZVJlc3BvbnNlEiUKBWVudHJ5GAEgASgLMhYuY29kZXdpcmUudjEuRmlsZUVudHJ5IksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAyJoChVVcGxvYWRGaWxlUGFydFJlcXVlc3QSMwoGaGVhZGVyGAEgASgLMiEuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRIZWFkZXJIABIPCgVjaHVuaxgCIAEoDEgAQgkKB3BheWxvYWQifwoUVXBsb2FkRmlsZVBhcnRIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkSEQoJdXBsb2FkX2lkGAQgASgJEg4KBm9mZnNldBgFIAEoAxIOCgZmaW5pc2gYBiABKAgiWQoWVXBsb2FkRmlsZVBhcnRSZXNwb25zZRIMCgRwYXRoGAEgASgJEhEKCXVwbG9hZF9pZBgCIAEoCRIMCgRzaXplGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIImIKEVdyaXRlRmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIlCgVmaWxlcxgDIAMoCzIWLmNvZGV3aXJlLnYxLldyaXRlRmlsZSIqCglXcml0ZUZpbGUSDAoEcGF0aBgBIAEoCRIPCgdjb250ZW50GAIgASgMIkQKEldyaXRlRmlsZXNSZXNwb25zZRIuCgVmaWxlcxgBIAMoCzIfLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVSZXNwb25zZTKFBAoLRmlsZVNlcnZpY2USTwoJTGlzdEZpbGVzEh0uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVxdWVzdBoeLmNvZGV3aXJlLnYxLkxpc3RGaWxlc1Jlc3BvbnNlIgOQAgESTAoIU3RhdEZpbGUSHC5jb2Rld2lyZS52MS5TdGF0RmlsZVJlcXVlc3QaHS5jb2Rld2lyZS52MS5TdGF0RmlsZVJlc3BvbnNlIgOQAgESWgoMRG93bmxvYWRGaWxlEiAuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVxdWVzdBohLmNvZGV3aXJlLnYxLkRvd25sb2FkRmlsZVJlc3BvbnNlIgOQAgEwARJPCgpVcGxvYWRGaWxlEh4uY29kZXdpcmUudjEuVXBsb2FkRmlsZVJlcXVlc3QaHy5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVzcG9uc2UoARJbCg5VcGxvYWRGaWxlUGFydBIiLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVQYXJ0UmVxdWVzdBojLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVQYXJ0UmVzcG9uc2UoARJNCgpXcml0ZUZpbGVzEh4uY29kZXdpcmUudjEuV3JpdGVGaWxlc1JlcXVlc3QaHy5jb2Rld2lyZS52MS5Xcml0ZUZpbGVzUmVzcG9uc2VCrAEKD2NvbS5jb2Rld2lyZS52MUIJRmlsZVByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.v1.ListFilesRequest
@@ -403,6 +403,74 @@ export const UploadFilePartResponseSchema: GenMessage<UploadFilePartResponse> = 
   messageDesc(file_codewire_v1_file, 12);
 
 /**
+ * @generated from message codewire.v1.WriteFilesRequest
+ */
+export type WriteFilesRequest = Message<"codewire.v1.WriteFilesRequest"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: repeated codewire.v1.WriteFile files = 3;
+   */
+  files: WriteFile[];
+};
+
+/**
+ * Describes the message codewire.v1.WriteFilesRequest.
+ * Use `create(WriteFilesRequestSchema)` to create a new message.
+ */
+export const WriteFilesRequestSchema: GenMessage<WriteFilesRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 13);
+
+/**
+ * @generated from message codewire.v1.WriteFile
+ */
+export type WriteFile = Message<"codewire.v1.WriteFile"> & {
+  /**
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: bytes content = 2;
+   */
+  content: Uint8Array;
+};
+
+/**
+ * Describes the message codewire.v1.WriteFile.
+ * Use `create(WriteFileSchema)` to create a new message.
+ */
+export const WriteFileSchema: GenMessage<WriteFile> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 14);
+
+/**
+ * @generated from message codewire.v1.WriteFilesResponse
+ */
+export type WriteFilesResponse = Message<"codewire.v1.WriteFilesResponse"> & {
+  /**
+   * Each file's path and size, in the request's order.
+   *
+   * @generated from field: repeated codewire.v1.UploadFileResponse files = 1;
+   */
+  files: UploadFileResponse[];
+};
+
+/**
+ * Describes the message codewire.v1.WriteFilesResponse.
+ * Use `create(WriteFilesResponseSchema)` to create a new message.
+ */
+export const WriteFilesResponseSchema: GenMessage<WriteFilesResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 15);
+
+/**
  * FileService lists and transfers files in a running sandbox environment.
  *
  * @generated from service codewire.v1.FileService
@@ -454,6 +522,17 @@ export const FileService: GenService<{
     methodKind: "client_streaming";
     input: typeof UploadFilePartRequestSchema;
     output: typeof UploadFilePartResponseSchema;
+  },
+  /**
+   * Writes 1 to 1,000 files, up to 16 MiB in all, each as UploadFile writes
+   * one. No file is put in place until every file is staged.
+   *
+   * @generated from rpc codewire.v1.FileService.WriteFiles
+   */
+  writeFiles: {
+    methodKind: "unary";
+    input: typeof WriteFilesRequestSchema;
+    output: typeof WriteFilesResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_v1_file, 0);

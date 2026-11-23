@@ -162,6 +162,7 @@ export type {
   ExecRequest,
   ExecResult,
   FileEntry,
+  WrittenFile,
   EnvironmentPort,
   CreatePortRequest,
   SecretMetadata,

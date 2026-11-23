@@ -188,7 +188,7 @@ pub use codewire_proto::codewire::v1::{
 pub use codewire_proto::codewire::v1::{
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
     GetSnapshotRequest, GetSnapshotResponse, ListSnapshotsRequest, ListSnapshotsResponse, Snapshot,
-    SnapshotState,
+    SnapshotState, WriteFile, WriteFilesRequest, WriteFilesResponse,
 };
 pub use codewire_proto::codewire::v1::{
     CredentialDelegationKeepalive, CredentialDelegationOpen, CredentialDelegationProfile,

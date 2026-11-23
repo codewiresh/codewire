@@ -66,6 +66,7 @@ from codewire.v1.file_pb2 import (
     ListFilesResponse,
     StatFileResponse,
     UploadFileResponse,
+    WriteFilesResponse,
 )
 from codewire.v1.port_connect import PortServiceWSGIApplication
 from codewire.v1.port_pb2 import (
@@ -290,6 +291,7 @@ class ControlPlaneFixture:
     """Generated Connect service doubles for the unchanged public drivers."""
 
     uploaded_files: dict[str, bytes] = {}
+    write_calls: list[list[tuple[str, bytes]]] = []
     env_get_count = 0
     env_get_sequence: list[dict] | None = None
     last_create_isolation_tier = IsolationTier.ISOLATION_TIER_UNSPECIFIED
@@ -458,6 +460,20 @@ class ControlPlaneFixture:
                 [_connect_detail(ErrorInfo(reason="ENVIRONMENT_NOT_FOUND"))],
             )
         raise ConnectError(Code.INVALID_ARGUMENT, "file path is invalid or denied")
+
+    def write_files(self, request, ctx):
+        self._require_auth(ctx)
+        if (request.org_id, request.environment_id) != ("org_test", "env_123"):
+            raise ConnectError(Code.PERMISSION_DENIED, "access denied")
+        self.write_calls.append([(file.path, file.content) for file in request.files])
+        if len(request.files) > 1000:
+            raise ConnectError(Code.INVALID_ARGUMENT, "validation failed")
+        return WriteFilesResponse(
+            files=[
+                UploadFileResponse(path=file.path, size=len(file.content))
+                for file in request.files
+            ]
+        )
 
     def download_file(self, request, ctx):
         self._require_auth(ctx)
@@ -862,6 +878,28 @@ class SDKTestCase(unittest.TestCase):
             with self.assertRaises(CodewireError, msg=path) as refused:
                 env.files.exists(path)
             self.assertEqual(refused.exception.status, status)
+
+    def test_environment_file_write_many(self):
+        env = self.cw.environments.create(project_spec=_project_input())
+        files = [
+            ("/workspace/proj/a.txt", b"alpha"),
+            ("/workspace/proj/src/b.txt", b"bravo!"),
+            ("/workspace/f.txt", b""),
+        ]
+        expected = [
+            {"path": "/workspace/proj/a.txt", "size": 5},
+            {"path": "/workspace/proj/src/b.txt", "size": 6},
+            {"path": "/workspace/f.txt", "size": 0},
+        ]
+        FIXTURE.write_calls.clear()
+        self.assertEqual(env.files.write_many(files), expected)
+        self.assertEqual(env.files.write_many(dict(files)), expected)
+        self.assertEqual(FIXTURE.write_calls, [files, files])
+        # The SDK sends a batch the server refuses as it is.
+        with self.assertRaises(CodewireError) as refused:
+            env.files.write_many({f"/workspace/{i}.txt": b"" for i in range(1001)})
+        self.assertEqual(refused.exception.status, 400)
+        self.assertEqual([len(call) for call in FIXTURE.write_calls], [3, 3, 1001])
 
     def test_environment_list_ports(self):
         env = self.cw.environments.create(project_spec=_project_input())

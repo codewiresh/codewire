@@ -79,7 +79,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
                 errors: violations
                     .into_iter()
                     .map(|violation| ValidationIssue {
-                        path: Cow::Borrowed(violation.path),
+                        path: violation.path,
                         message: Cow::Borrowed(violation.message),
                     })
                     .collect(),

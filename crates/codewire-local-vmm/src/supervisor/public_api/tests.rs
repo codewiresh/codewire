@@ -747,6 +747,42 @@ async fn real_uds_connect_client_shares_the_owner_only_supervisor_endpoint() {
         stopped_error.message.as_deref(),
         Some("local environment is not in the required state")
     );
+    // WriteFiles reads a request of 16 MiB of content on this route: one at
+    // the limit reaches the same state check, and one byte more is refused by
+    // the bridge's rule rather than the transport.
+    let write = |sizes: &[usize]| proto::WriteFilesRequest {
+        org_id: namespace.to_string(),
+        environment_id: environment_id.clone(),
+        files: sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| proto::WriteFile {
+                path: format!("/workspace/{index}.bin"),
+                content: vec![7; size],
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let half = codewire_daemon_bridge::file::WRITE_FILES_MAX_CONTENT_BYTES / 2;
+    let stopped_error = files.write_files(write(&[half, half])).await.unwrap_err();
+    assert_eq!(
+        stopped_error.code,
+        connectrpc::ErrorCode::FailedPrecondition
+    );
+    assert_eq!(
+        stopped_error.message.as_deref(),
+        Some("local environment is not in the required state")
+    );
+    let over = files
+        .write_files(write(&[half, half + 1]))
+        .await
+        .unwrap_err();
+    assert_eq!(over.code, connectrpc::ErrorCode::InvalidArgument);
+    assert_eq!(
+        over.message.as_deref(),
+        Some("local file request is invalid: /files")
+    );
 
     drop(client);
     let grpc_transport = Http2Connection::connect_with_connector(

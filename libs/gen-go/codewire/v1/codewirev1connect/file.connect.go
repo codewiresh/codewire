@@ -45,6 +45,8 @@ const (
 	// FileServiceUploadFilePartProcedure is the fully-qualified name of the FileService's
 	// UploadFilePart RPC.
 	FileServiceUploadFilePartProcedure = "/codewire.v1.FileService/UploadFilePart"
+	// FileServiceWriteFilesProcedure is the fully-qualified name of the FileService's WriteFiles RPC.
+	FileServiceWriteFilesProcedure = "/codewire.v1.FileService/WriteFiles"
 )
 
 // FileServiceClient is a client for the codewire.v1.FileService service.
@@ -59,6 +61,9 @@ type FileServiceClient interface {
 	// request body and resumes after an interruption. A request without chunks
 	// only reports the bytes held for the upload.
 	UploadFilePart(context.Context) *connect.ClientStreamForClient[v1.UploadFilePartRequest, v1.UploadFilePartResponse]
+	// Writes 1 to 1,000 files, up to 16 MiB in all, each as UploadFile writes
+	// one. No file is put in place until every file is staged.
+	WriteFiles(context.Context, *connect.Request[v1.WriteFilesRequest]) (*connect.Response[v1.WriteFilesResponse], error)
 }
 
 // NewFileServiceClient constructs a client for the codewire.v1.FileService service. By default, it
@@ -105,6 +110,12 @@ func NewFileServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(fileServiceMethods.ByName("UploadFilePart")),
 			connect.WithClientOptions(opts...),
 		),
+		writeFiles: connect.NewClient[v1.WriteFilesRequest, v1.WriteFilesResponse](
+			httpClient,
+			baseURL+FileServiceWriteFilesProcedure,
+			connect.WithSchema(fileServiceMethods.ByName("WriteFiles")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -115,6 +126,7 @@ type fileServiceClient struct {
 	downloadFile   *connect.Client[v1.DownloadFileRequest, v1.DownloadFileResponse]
 	uploadFile     *connect.Client[v1.UploadFileRequest, v1.UploadFileResponse]
 	uploadFilePart *connect.Client[v1.UploadFilePartRequest, v1.UploadFilePartResponse]
+	writeFiles     *connect.Client[v1.WriteFilesRequest, v1.WriteFilesResponse]
 }
 
 // ListFiles calls codewire.v1.FileService.ListFiles.
@@ -142,6 +154,11 @@ func (c *fileServiceClient) UploadFilePart(ctx context.Context) *connect.ClientS
 	return c.uploadFilePart.CallClientStream(ctx)
 }
 
+// WriteFiles calls codewire.v1.FileService.WriteFiles.
+func (c *fileServiceClient) WriteFiles(ctx context.Context, req *connect.Request[v1.WriteFilesRequest]) (*connect.Response[v1.WriteFilesResponse], error) {
+	return c.writeFiles.CallUnary(ctx, req)
+}
+
 // FileServiceHandler is an implementation of the codewire.v1.FileService service.
 type FileServiceHandler interface {
 	ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error)
@@ -154,6 +171,9 @@ type FileServiceHandler interface {
 	// request body and resumes after an interruption. A request without chunks
 	// only reports the bytes held for the upload.
 	UploadFilePart(context.Context, *connect.ClientStream[v1.UploadFilePartRequest]) (*connect.Response[v1.UploadFilePartResponse], error)
+	// Writes 1 to 1,000 files, up to 16 MiB in all, each as UploadFile writes
+	// one. No file is put in place until every file is staged.
+	WriteFiles(context.Context, *connect.Request[v1.WriteFilesRequest]) (*connect.Response[v1.WriteFilesResponse], error)
 }
 
 // NewFileServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -196,6 +216,12 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(fileServiceMethods.ByName("UploadFilePart")),
 		connect.WithHandlerOptions(opts...),
 	)
+	fileServiceWriteFilesHandler := connect.NewUnaryHandler(
+		FileServiceWriteFilesProcedure,
+		svc.WriteFiles,
+		connect.WithSchema(fileServiceMethods.ByName("WriteFiles")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.FileService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case FileServiceListFilesProcedure:
@@ -208,6 +234,8 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 			fileServiceUploadFileHandler.ServeHTTP(w, r)
 		case FileServiceUploadFilePartProcedure:
 			fileServiceUploadFilePartHandler.ServeHTTP(w, r)
+		case FileServiceWriteFilesProcedure:
+			fileServiceWriteFilesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -235,4 +263,8 @@ func (UnimplementedFileServiceHandler) UploadFile(context.Context, *connect.Clie
 
 func (UnimplementedFileServiceHandler) UploadFilePart(context.Context, *connect.ClientStream[v1.UploadFilePartRequest]) (*connect.Response[v1.UploadFilePartResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.UploadFilePart is not implemented"))
+}
+
+func (UnimplementedFileServiceHandler) WriteFiles(context.Context, *connect.Request[v1.WriteFilesRequest]) (*connect.Response[v1.WriteFilesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.WriteFiles is not implemented"))
 }

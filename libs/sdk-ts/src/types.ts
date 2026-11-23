@@ -344,6 +344,12 @@ export interface FileEntry {
   size: number;
 }
 
+/** A file `files.writeMany` put in place. */
+export interface WrittenFile {
+  path: string;
+  size: number;
+}
+
 export interface CreatePortRequest {
   access?: string;
   label: string;

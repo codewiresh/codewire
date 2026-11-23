@@ -6,7 +6,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::{
     CreateEnvironmentResponse, DownloadFileResponse, FileEntry, GetEnvironmentResponse,
-    StatFileResponse, UploadFileResponse,
+    StatFileResponse, UploadFileResponse, WriteFilesResponse,
 };
 
 const CREATE_ENVIRONMENT_PATH: &str = "/codewire.v1.EnvironmentService/CreateEnvironment";
@@ -15,6 +15,7 @@ const EXEC_PATH: &str = "/codewire.v1.ExecService/Exec";
 const DOWNLOAD_FILE_PATH: &str = "/codewire.v1.FileService/DownloadFile";
 const UPLOAD_FILE_PATH: &str = "/codewire.v1.FileService/UploadFile";
 const STAT_FILE_PATH: &str = "/codewire.v1.FileService/StatFile";
+const WRITE_FILES_PATH: &str = "/codewire.v1.FileService/WriteFiles";
 
 fn codewire(server: &MockServer) -> Codewire {
     Codewire::from_env_values(
@@ -485,4 +486,77 @@ async fn file_exists_is_false_only_for_a_missing_file() {
             .expect_err("only a missing file is false");
         assert_eq!(refused.code(), code, "{file}");
     }
+}
+
+#[tokio::test]
+async fn write_files_sends_every_file_in_one_call_and_returns_them_in_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GET_ENVIRONMENT_PATH))
+        .respond_with(unary(&environment(EnvironmentState::Running)))
+        .mount(&server)
+        .await;
+    let files = [
+        ("/workspace/proj/a.txt", b"alpha".to_vec()),
+        ("/workspace/proj/src/b.txt", b"bravo!".to_vec()),
+        ("/workspace/f.txt", Vec::new()),
+    ];
+    let request = WriteFilesRequest {
+        org_id: "org_test".into(),
+        environment_id: "env_test".into(),
+        files: files
+            .iter()
+            .map(|(path, content)| WriteFile {
+                path: (*path).into(),
+                content: content.clone(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let written = files
+        .iter()
+        .map(|(path, content)| UploadFileResponse {
+            path: (*path).into(),
+            size: i64::try_from(content.len()).unwrap(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    Mock::given(method("POST"))
+        .and(path(WRITE_FILES_PATH))
+        .and(body_bytes(request.encode_to_vec()))
+        .respond_with(unary(&WriteFilesResponse {
+            files: written.clone(),
+            ..Default::default()
+        }))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(WRITE_FILES_PATH))
+        .respond_with(connect_error(connectrpc::ConnectError::invalid_argument(
+            "validation failed",
+        )))
+        .mount(&server)
+        .await;
+    let handle = codewire(&server)
+        .environment("env_test")
+        .await
+        .expect("get");
+
+    assert_eq!(handle.write_files(files).await.expect("write"), written);
+    // A batch the server refuses reaches the caller as one refused call.
+    let many = (0..1001).map(|index| (format!("/workspace/{index}.txt"), Vec::new()));
+    let refused = handle.write_files(many).await.expect_err("refused");
+    assert_eq!(refused.code(), ErrorCode::InvalidArgument);
+    let calls = server
+        .received_requests()
+        .await
+        .expect("recorded")
+        .into_iter()
+        .filter(|request| request.url.path() == WRITE_FILES_PATH)
+        .map(|request| WriteFilesRequest::decode(&mut request.body.as_slice()).expect("decode"))
+        .map(|request| request.files.len())
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [3, 1001]);
 }

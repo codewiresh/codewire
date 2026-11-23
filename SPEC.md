@@ -1242,7 +1242,7 @@ in a loop. The journey is
   supervisor's tests are what use it there.
 - Like the other file RPCs, it needs no API key permission.
 
-`WriteFiles` (#5804, not yet built) writes many small files in one call, for
+`WriteFiles` (#5804) writes many small files in one call, for
 a program that sets up a project's files before it runs something. The
 journey is [docs/journeys/sdk-files.md](docs/journeys/sdk-files.md).
 - A request names 1 to 1,000 files, each a path and its bytes, up to 16 MiB
@@ -1255,8 +1255,20 @@ journey is [docs/journeys/sdk-files.md](docs/journeys/sdk-files.md).
   missing parent folders made, mode `0644`, an existing file replaced. No
   file is put in place until every file is staged, so a failure while
   staging puts no file in place, though folders it made may remain. If
-  putting one in place fails, the call fails and names the files already
-  written.
+  putting one in place fails, the call fails and says which files were
+  already written: its message gives how many and names the first few, and
+  in the cloud the error's `written` metadata lists them all as JSON.
+- Each server process holds at most 64 MiB of `WriteFiles` requests at once,
+  and at most two of the largest (about 53 MB) for one account, counting a
+  compressed request or one of unknown length at its largest, and refuses
+  one that doesn't fit before reading it. It also holds at most two of the
+  largest for one organization, and refuses a call over that share once it
+  has read it, before writing anything. At most four calls run at once for
+  one organization and two for one environment. A refused call is
+  `resource_exhausted`.
+- A call still running after two minutes is abandoned as
+  `deadline_exceeded`, naming any files it had already written, and its
+  staging files are removed.
 - It returns each path with its size, in the request's order.
 - It is confined, and a local VM's supervisor answers it, as `StatFile` is,
   and it needs no API key permission.

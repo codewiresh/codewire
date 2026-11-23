@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from typing import BinaryIO
 
 from codewire._context import ConnectContext
-from codewire._convert import file_entry_to_dict
+from codewire._convert import file_entry_to_dict, proto_to_dict
 from codewire.errors import CodewireError
 from codewire.v1.file_connect import FileServiceClientSync
 from codewire.v1.file_pb2 import (
@@ -13,6 +13,8 @@ from codewire.v1.file_pb2 import (
     StatFileRequest,
     UploadFileHeader,
     UploadFileRequest,
+    WriteFile,
+    WriteFilesRequest,
 )
 
 # The ErrorInfo reason the platform gives a missing file, as distinct from a
@@ -65,6 +67,26 @@ class Files:
                 return False
             raise
         return True
+
+    def write_many(
+        self, files: Mapping[str, bytes] | Iterable[tuple[str, bytes]]
+    ) -> list[dict]:
+        """Write every file in one call, at most 1,000 files and 16 MiB in
+        all, each as ``upload`` writes one: missing parent folders are made,
+        the mode is 0644 and an existing file is replaced. No file is put in
+        place until every file is staged. ``files`` maps each path to its
+        bytes, or is a list of ``(path, bytes)`` pairs. Returns each file's
+        ``path`` and ``size`` in the order given. A request that breaks a rule
+        is refused whole with ``CodewireError`` status 400; a larger batch is
+        not split."""
+        pairs = files.items() if isinstance(files, Mapping) else files
+        request = WriteFilesRequest(
+            org_id=self._context.resolve_org_id(),
+            environment_id=self._environment_id,
+            files=[WriteFile(path=path, content=content) for path, content in pairs],
+        )
+        response = self._context.unary(self._client.write_files, request)
+        return [proto_to_dict(file) for file in response.files]
 
     def upload(self, src: bytes | BinaryIO, remote_path: str) -> None:
         data = src if isinstance(src, bytes) else src.read()

@@ -28,10 +28,12 @@ use crate::client::DaemonClient;
 pub(crate) const TEST_DAEMON_TOKEN: &str = "daemon-bridge-test-token";
 pub(crate) const FILE_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Only actual unary filesystem methods can be gated. Authorization, protobuf
-/// dispatch and confined filesystem operations still belong to the real daemon.
+/// Only actual unary filesystem methods, and the readiness check before
+/// them, can be gated. Authorization, protobuf dispatch and confined
+/// filesystem operations still belong to the real daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileRpc {
+    GetCapabilities,
     OpenFile,
     Write,
     SetStat,
@@ -46,6 +48,7 @@ impl FileRpc {
             <DaemonServiceServer<DaemonServiceImpl> as NamedService>::NAME
         );
         match path.strip_prefix(&prefix)? {
+            "GetCapabilities" => Some(Self::GetCapabilities),
             "OpenFile" => Some(Self::OpenFile),
             "Write" => Some(Self::Write),
             "SetStat" => Some(Self::SetStat),
