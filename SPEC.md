@@ -879,7 +879,10 @@ projection, `guest_records`, and the two share no code path that could widen
 what the guest sees. `cw info ENV` adds one line: how many requests were
 refused since the VM started and when the last was, naming `cw --local policy log
 ENV`; the rows keep counts, not a time series, so it can't count by hour.
-`cw --cloud policy log` for a hosted Sandbox stays with #4000.
+Target, not shipped (#6189): a hosted Sandbox's refusals are the `refused`
+events of its audit log ("Sandbox audit log"), and `cw --cloud policy log
+ENV` and `cw info ENV`'s `Refused:` line read them there, in the same table,
+JSON and words as a local VM's.
 
 Target, not shipped (#5114, #5116, #5117): the dashboard's Network policies
 page lists an organization's policies, each with its revision, its rules and
@@ -889,7 +892,7 @@ delete policies there, and members read them, under the store's own rules
 and refusals. A Sandbox's page shows its policy, revision and enforcement
 state under Network access, and lets the Sandbox's creator choose another
 policy without a restart; later it lists what was refused, with a one-step
-Allow. While hosted Sandboxes do not enforce network policies, each of these
+Allow, on the Sandbox's audit log page (#6189). While hosted Sandboxes do not enforce network policies, each of these
 pages says so. The dashboard never shows a local policy: those live on the
 user's computer. A page learns of a new revision, an enforcement change or a
 refusal from the live event stream, never by polling; those events are part
@@ -1376,6 +1379,7 @@ unaffected.
     address is refused, so traffic inside the tunnel rides DERP over 443.
     Each refusal is recorded by the Sandbox's egress broker, but a hosted
     broker does not report its refusals yet, so no log shows them (#4000).
+    The Sandbox audit log (#6189) is where they will show.
   - The control server must be at a public address, or the join is refused as
     protected.
   - The protected-address rule is unchanged because it is enforced on these
@@ -1665,7 +1669,8 @@ Pod's report. The status reads:
 reason in words, with the code under `--output json`.
 
 The records cw-egress reports of what a Pod reached are folded per
-environment and kept to the most recent 1,000. Hosted egress is off by default
+environment and kept to the most recent 1,000. The target reader of these
+records is the Sandbox audit log (#6189, below). Hosted egress is off by default
 (`CODEWIRE_HOSTED_EGRESS_ENABLED`) and cw-egress does not run yet, so every
 hosted environment reads `NOT_ENFORCED` today, and its egress is bounded only
 by the `NetworkPolicy` above. The journey is `hosted-enforcement` in
@@ -1731,6 +1736,235 @@ connection can read, push to and open pull requests in every repository the
 installation covers that the signed-in GitHub user can also reach; the token
 never enters the environment. Codewire never
 persists, injects or falls back to a raw forge token.
+
+### Sandbox audit log
+
+Target, not shipped (#6189): every hosted Sandbox has an audit log. It is
+one place where the Sandbox's members and its organization see what
+happened to it and through it. It is not the identity service's account
+audit log of sign-ins, members and API keys. The hosted refusal log (#6144)
+folds in here as the `refused` kind. A local VM has no audit log; its
+refusals are in `cw --local policy log` ("Networking and egress").
+
+- **What it records.** One event for each thing that happened, of five
+  kinds:
+  - `access`: a terminal, SSH, exec, desktop or preview session, with the
+    user or API key, the client IP, and when it opened and closed. The
+    client IP is the address of the request that opened the session, as
+    orchestration's trusted proxies report it. A preview request with no
+    Codewire sign-in is not recorded.
+  - `lifecycle`: create, start, stop, restart, resize, snapshot, restore
+    and delete. Each names who did it. The platform's own actions also say
+    why: an idle stop (#3384), or one of the four unplanned-restart causes
+    (#5997, "Hosted sandboxes").
+  - `policy`: the selection changed, from one policy to another; the
+    selected policy edited, from one revision to the next, with the rules
+    it added and removed; and what cw-egress reports it enforces: the
+    revision in force, or that it failed closed, with its `failure_code`
+    ("Hosted enforcement status" above).
+  - `refused`: an egress refusal, with #6144's fields: the destination, or
+    withheld; the latest address; the protocol and port; the raw reason;
+    and the policy and revision it was refused under.
+  - `credentials`: a credential or application secret attached to or
+    detached from the Sandbox, by name and provider; and a credential's use
+    through the broker, by provider and host.
+- **Every event carries** the organization, the environment, when it
+  began, the actor, the kind, the subject and a closed set of fields for
+  its kind.
+- **The actor** is one of four:
+  - a user, with their id, email and role in the organization;
+  - an API key, with its id and name;
+  - the platform, for its own actions;
+  - the Sandbox, for refusals and credential uses its workload caused.
+- **Never recorded:** what a session typed or showed, command lines, file
+  names or contents, request methods, paths, headers or bodies, response
+  text, credential or secret values, placeholders, and startup script text.
+- **Folding.** Events that come in bursts fold into one event per Sandbox,
+  kind, subject and hour, with a count and the first and last time. The
+  subject is:
+  - for `refused`, the destination, protocol, port, reason, policy and
+    revision;
+  - for a credential use, the credential and the host;
+  - for exec and preview access, the actor and the client IP.
+
+  Every other event is one event. A fold never spans two hours.
+- **Bounds.** At most 1,000 subjects fold for one Sandbox, kind and hour,
+  #6144's bound. Past it, the hour's other subjects add to one overflow
+  event for that kind, which counts events and subjects. A Sandbox that
+  floods refusals raises counts, never the number of rows past the bound or
+  the rate of writes.
+- **The host check.** Every name the workload chooses passes #6144's check
+  before it is stored or shown: ASCII only (an international name in its
+  IDNA form), at most 253 characters, and no control or escape character.
+  A name that fails is kept as `(a name cw won't show)`, with its count and
+  never its text.
+- **The refusal path** is #6144's. The hosted egress broker folds its
+  refusals and sends the rows that changed at most once a second, on its
+  existing control channel to cw-egress. cw-egress files each report under
+  the Pod whose broker holds that channel, labels each row with the policy
+  and revision it sent that broker, and sends count deltas to orchestration
+  through `ReportRecords`, at most every 5 seconds and 256 records a call.
+  Orchestration takes the environment from its own workspace binding, never
+  from the report. A record from a Pod bound to no environment is dropped.
+- **The other sources.** Orchestration records access where it grants it,
+  lifecycle where it acts or reconciles, and policy where it stores a
+  selection, a revision or an enforcement status. The credential service
+  reports each credential use to orchestration's internal service with the
+  binding it served. Orchestration files the use under that binding's
+  environment, never under a name the report gives. A `cw shell` that
+  reaches a Sandbox over its tailnet is admitted by the coordinator, not
+  orchestration: the coordinator reports each client it admits, with the
+  environment it checked access to, the user or API key, the role it
+  resolved, the client IP and, later, the close, to orchestration's
+  internal service. It reports only admissions it granted. The client IP is
+  the public address the coordinator saw through its trusted proxies, never
+  the client's tailnet address. Unlike the other sources, the coordinator
+  names the environment itself, so its report is a claim orchestration
+  checks:
+  - orchestration accepts these reports only from the coordinator's own
+    workload identity, authenticated as the credential service's are, and
+    from it only access reports, never refusals, policy or lifecycle;
+  - it files a report only when the environment exists and the user or API
+    key belongs to that environment's organization, and drops and counts
+    any other;
+  - an admin's admission names the admin's role, as "An admin's access"
+    says. A member's `operator` grant is an ordinary member's access, not
+    staff access. The coordinator has no staff path today; one added later
+    reports as staff access naming the person, per "Staff access", never as
+    a member or the platform.
+- **Storage.** One table in orchestration's database, partitioned by month.
+  Only orchestration writes it. Rows are only inserted: nothing updates a
+  row, and only the retention job deletes one. The current hour's folds
+  wait in a separate table, where each report adds to its count. When the
+  hour ends, orchestration inserts each fold as one row and removes it from
+  that table. A read covers both, so the current hour is never behind.
+- **Retention.** 90 days. A daily job deletes events older than that and
+  drops a month's partition once it is empty. Events are kept after the
+  Sandbox is deleted, until they expire. Deleting the organization deletes
+  its events.
+- **A deleted user's events** keep their email and client IP until they
+  expire. It is a security log, and one that forgot who opened a Sandbox
+  once that person left would lose its point. The 90 days bound it, as the
+  credit ledger outlives the deletion it records (#4823).
+- **Who reads what.**
+  - Organization owners and admins read every Sandbox's events, a deleted
+    Sandbox's included.
+  - A member of the organization reads the events of each Sandbox they can
+    open now. A deleted Sandbox can't be opened, so only owners and admins
+    read its events. Only members read: events carry the emails and client
+    IPs of the organization's people. Codewire has no direct share of a
+    Sandbox today; if one is added, someone who can open a Sandbox only
+    through it, and isn't a member, reads nothing.
+  - An API key reads what its creator may read. Every key may read,
+    whatever its permissions (#5688). A key a user puts inside their
+    Sandbox is that user's choice, and reads as its creator.
+  - Nothing is readable from inside the Sandbox. The read authorizes only a
+    user's session or an API key. It refuses every credential issued to or
+    for a Sandbox's workload: its binding token, its daemon credential, its
+    identity tokens, and any environment-scoped or delegated session a
+    hosted `cw` inside it uses.
+  - Every reader of a Sandbox sees the same events with the same fields,
+    the platform's actions and the client IPs included.
+- **An admin's access.** When an admin opens a member's Sandbox, the event
+  names the admin, their role and their client IP. The member, the other
+  admins and the owners all see the same line, such as `Desktop opened by
+  lee@example.com (admin) from 192.0.2.44`. No role sees less. Only the
+  90-day retention and the organization's deletion remove events: no API,
+  admin or platform path removes or edits a single one.
+- **Staff access.** A person at Codewire or an operator of the platform who
+  opens a Sandbox, through any support or admin path, is recorded as
+  `access`, naming that person and their client IP, and shown to the same
+  readers. The `platform` actor is for automatic actions only.
+- **The API read.** One new read on orchestration's public API. It takes
+  one environment, by name, or by ID for a deleted one. It filters by kinds
+  and by a time range, and returns events newest first, by when each began.
+  Its pages hold up to 1,000 events, 100 by default, with a cursor to the
+  next. The volume isn't bounded like #6144's 1,000 rows, so a cursor is
+  how a reader goes further back. `cw` and the dashboard both show the
+  last 7 days unless told otherwise, and the cursor continues past them to
+  older events, as far as the 90 days go. The answer also carries the
+  Sandbox's selected policy and revision. A `refused` event that the selected
+  policy's current revision now allows carries `allowed_since_revision`,
+  the first revision that allowed it, set by the server. With
+  `group_by_subject`, the read returns one event per kind and subject for
+  the whole range instead: its count is the sum across hours, `first` the
+  earliest and `last` the latest. A grouped answer holds at most 1,000
+  subjects, the most recently seen, and says how many more it left out.
+  Every key may read, so the work is bounded too: each read runs under a
+  5-second statement timeout, and the grouped read takes a per-user rate
+  limit (an API key counts against its creator) of 30 a minute. A read past
+  either fails at once, as `rate_limited` or `deadline_exceeded`, and `cw`
+  says which and suggests a shorter `--since`; neither slows orchestration's
+  database.
+- **The live event.** `AuditEvent { org_id, environment_id }`, a new arm of
+  `WatchResponse` in `proto/codewire/console/v1/live.proto`, sent at most
+  once per environment per write batch, and only to watchers who may read
+  that environment's log, so a member doesn't learn when a Sandbox they
+  can't open is used. It carries ids only. A page that receives it fetches
+  again through the read, which authorizes as usual.
+- **`cw audit ENV`.** Text lists events grouped by local day: Today,
+  Yesterday, then the weekday and date. Each line is the local time the
+  event began, its kind and one sentence. A folded event adds its count and
+  its first and last time; a session adds when it opened and closed.
+  - Flags: `--kind KIND`, repeatable, with the five kinds' names;
+    `--since` and `--until`, a duration such as `24h` or `90d`, or a time;
+    `--limit N`, 100 by default and at most 1,000.
+  - The last lines say which range is shown and, when older events exist,
+    that `--since 90d` shows them.
+  - One `→` step, as `cw --local policy log`'s: for the newest `refused`
+    event a rule can allow, under the selected policy, `cw --cloud policy
+    allow POLICY TARGET`; under `locked`, `cw --cloud policy create NAME
+    --from locked --allow TARGET`; under `open`, none. A refused event with
+    `allowed_since_revision` reads `Allowed since rev N` and offers no
+    step.
+  - Nothing in range reads `Nothing recorded for ENV in the last 7 days.`,
+    with `→ cw audit ENV --since 90d`, exit 0. A filter that matches
+    nothing names the kind, with `→ cw audit ENV`.
+  - `--output json` prints the read's answer and nothing else on stdout:
+    `environment`, `policy`, `events` and `next_cursor`. `--cursor`
+    continues from it. Each event has `id`, `kind`, `action`, `first`
+    (when it began), `last` (`null` while a session is open), `count`,
+    `actor` and the fields of its kind. A `refused` event's fields have the
+    names and values of a `cw --local policy log` row's. Times are RFC 3339.
+  - For a local VM, `cw audit` says local VMs have no audit log, with `→
+    cw --local policy log ENV`. Against a platform without the read, it
+    says the platform has no audit log yet, never an RPC error.
+  - The exact text, at 140 and 80 columns, empty, filtered and as JSON, is
+    in [docs/design/previews/cw-audit.txt](docs/design/previews/cw-audit.txt).
+- **`cw --cloud policy log ENV`.** A hosted Sandbox's refusals as `cw
+  --local policy log ENV` shows a local VM's (#4717): the same table and
+  columns, one row per destination, protocol, port, reason, policy and
+  revision, most recently seen first, the same `→` step, and the same JSON
+  (`refusals`, `dropped`). It reads the `refused` events of the last 7 days
+  with `group_by_subject`; `--since` widens the range up to 90 days, and the
+  last line says which range is shown. `dropped` counts the subjects the
+  grouped answer left out, and the hours' overflow events' subjects; the
+  line under the table says how many weren't listed. Nothing refused reads
+  `Nothing refused by ENV in the last 7 days.`, with `→ cw audit ENV`, exit
+  0. A local VM's log lasts one run of the VM and a hosted Sandbox's lasts
+  90 days; that is the one difference, and each says its range.
+- **`cw info ENV`** for a hosted Sandbox adds local's `Refused:` line, only
+  when something was refused in the last 7 days, such as `Refused: 42
+  requests in the last 7 days, the last 3m ago`, ending with ``; `cw
+  --cloud policy log ENV` lists them``. It comes from the same grouped read; when the read fails or the
+  platform has none, the line is left out and `cw info` still answers.
+- **The dashboard page.** The Sandbox's Audit log page shows the same
+  events, kinds and words as `cw audit`, with the same kind filters, the
+  same 7-day default, and "Show older events" for the cursor. It reads
+  through the same API as the signed-in member, and passes every name
+  through the same host check before it shows it. A `refused` event that a
+  rule can allow has a one-step Allow, or reads `Allowed since rev N`. The
+  page updates from the live event, never by polling.
+- **Rollout order.** As #6144's: orchestration refuses a whole
+  `ReportRecords` call that holds a reason it doesn't know, so
+  orchestration that accepts every reason and field is on Dev, then
+  Production, before a cw-egress that sends them. Then `cw` and the
+  dashboard read the log. cw-egress turns the hosted broker's reports on
+  last. A kind, a reason or a field added later reaches orchestration the
+  same way, a release ahead of its sender.
+
+The journey is [docs/journeys/audit-log.md](docs/journeys/audit-log.md),
+not yet observed.
 
 ## 9. Configuration for self-hosting
 

@@ -1,0 +1,346 @@
+cw audit ENV: output preview (#6189). Target, not shipped.
+
+SPEC.md "Sandbox audit log" defines this command, and `cw --cloud policy
+log` and `cw info`'s refusal line at the end; the journey is
+docs/journeys/audit-log.md. This file is the exact text they print, for
+one example Sandbox, before any code exists. The dashboard's Audit log
+page shows the same events in the same words.
+
+The example: the Sandbox walk-docs, created yesterday by ana@example.com,
+selects the organization policy walk-docs. Revision 1 allows docs.rs:443.
+Revision 2 also allows crates.io:443. The local time zone is UTC. At a
+terminal the day headings are bold and the counts and times are dim; piped,
+the text is the same with no escape sequences.
+
+Each line is the local time the event began, its kind, and one sentence.
+Events are newest first, by when they began. A line too long for the
+terminal wraps under its sentence, after a `·` where it can, else at a word.
+
+
+$ cw audit walk-docs          (140 columns)
+
+Today
+  14:38  refused      Refused pypi.org:443 (tcp) · name not allowed by walk-docs rev 2 · 3× · 14:38–14:40
+  14:12  policy       Enforcing walk-docs rev 2 · by the platform
+  14:11  policy       walk-docs edited by ana@example.com: rev 1 → rev 2 · allows crates.io:443
+  14:06  refused      Refused 8.8.8.8:53 (udp) · UDP not carried · 4× · 14:06–14:07
+  14:05  refused      Refused crates.io:443 (tcp) · name not allowed by walk-docs rev 1 · 12× · 14:05–14:09 · Allowed since rev 2
+  14:05  refused      Refused (a name cw won't show) (dns) · name not allowed by walk-docs rev 1 · 1×
+  14:02  access       Terminal opened by ana@example.com from 203.0.113.7 · 14:02–14:31
+  14:00  credentials  GitHub used for api.github.com · 37× in the hour 14:00
+  13:55  credentials  GitHub credential attached by ana@example.com
+  13:53  access       Exec by API key ci-runner from 198.51.100.20 · 6 sessions · 13:53–13:58
+  13:52  lifecycle    Started by ana@example.com
+
+Yesterday
+  23:41  lifecycle    Stopped by the platform: idle for 30 minutes
+  23:12  policy       Enforcing walk-docs rev 1 · by the platform
+  23:11  policy       Egress failed closed: lockdown not applied · by the platform · no outbound traffic until enforcing
+  23:10  lifecycle    Restarted by the platform: its runtime was replaced
+  23:04  policy       Policy changed from open to walk-docs by ana@example.com
+  18:02  access       Desktop opened by lee@example.com (admin) from 192.0.2.44 · 18:02–18:20
+  17:45  lifecycle    Resized by ana@example.com: 2 vCPU · 4 GiB RAM → 4 vCPU · 8 GiB RAM
+  17:40  lifecycle    Snapshot taken by ana@example.com · before-resize
+  09:30  lifecycle    Created by ana@example.com · preset Rust
+
+Showing the last 7 days.
+
+→ cw --cloud policy allow walk-docs pypi.org:443
+
+Notes:
+- The `→` step names the newest refused event a rule can allow under the
+  selected policy. crates.io:443 reads "Allowed since rev 2", so it gets no
+  step; 8.8.8.8:53 is UDP, which no rule carries; the withheld name has no
+  text to allow.
+- lee@example.com is an admin. The member ana@example.com, every other
+  admin and every owner see this same line, client IP included.
+- Exec and preview sessions fold per actor, client IP and hour; terminal,
+  SSH and desktop sessions are one line each.
+- walk-docs was created yesterday, so nothing is older than the range and
+  the `--since 90d` hint is left out.
+
+
+$ cw audit walk-docs          (80 columns)
+
+Today
+  14:38  refused      Refused pypi.org:443 (tcp) ·
+                      name not allowed by walk-docs rev 2 · 3× · 14:38–14:40
+  14:12  policy       Enforcing walk-docs rev 2 · by the platform
+  14:11  policy       walk-docs edited by ana@example.com: rev 1 → rev 2 ·
+                      allows crates.io:443
+  14:06  refused      Refused 8.8.8.8:53 (udp) · UDP not carried · 4× ·
+                      14:06–14:07
+  14:05  refused      Refused crates.io:443 (tcp) ·
+                      name not allowed by walk-docs rev 1 · 12× · 14:05–14:09 ·
+                      Allowed since rev 2
+  14:05  refused      Refused (a name cw won't show) (dns) ·
+                      name not allowed by walk-docs rev 1 · 1×
+  14:02  access       Terminal opened by ana@example.com from 203.0.113.7 ·
+                      14:02–14:31
+  14:00  credentials  GitHub used for api.github.com · 37× in the hour 14:00
+  13:55  credentials  GitHub credential attached by ana@example.com
+  13:53  access       Exec by API key ci-runner from 198.51.100.20 ·
+                      6 sessions · 13:53–13:58
+  13:52  lifecycle    Started by ana@example.com
+
+Yesterday
+  23:41  lifecycle    Stopped by the platform: idle for 30 minutes
+  23:12  policy       Enforcing walk-docs rev 1 · by the platform
+  23:11  policy       Egress failed closed: lockdown not applied ·
+                      by the platform · no outbound traffic until enforcing
+  23:10  lifecycle    Restarted by the platform: its runtime was replaced
+  23:04  policy       Policy changed from open to walk-docs by ana@example.com
+  18:02  access       Desktop opened by lee@example.com (admin) from
+                      192.0.2.44 · 18:02–18:20
+  17:45  lifecycle    Resized by ana@example.com:
+                      2 vCPU · 4 GiB RAM → 4 vCPU · 8 GiB RAM
+  17:40  lifecycle    Snapshot taken by ana@example.com · before-resize
+  09:30  lifecycle    Created by ana@example.com · preset Rust
+
+Showing the last 7 days.
+
+→ cw --cloud policy allow walk-docs pypi.org:443
+
+
+$ cw audit walk-docs --kind refused          (140 columns)
+
+Today
+  14:38  refused      Refused pypi.org:443 (tcp) · name not allowed by walk-docs rev 2 · 3× · 14:38–14:40
+  14:06  refused      Refused 8.8.8.8:53 (udp) · UDP not carried · 4× · 14:06–14:07
+  14:05  refused      Refused crates.io:443 (tcp) · name not allowed by walk-docs rev 1 · 12× · 14:05–14:09 · Allowed since rev 2
+  14:05  refused      Refused (a name cw won't show) (dns) · name not allowed by walk-docs rev 1 · 1×
+
+Showing refused events from the last 7 days.
+
+→ cw --cloud policy allow walk-docs pypi.org:443
+
+
+$ cw audit walk-docs          (nothing in the last 7 days)
+
+Nothing recorded for walk-docs in the last 7 days.
+
+→ cw audit walk-docs --since 90d
+
+Exit status 0.
+
+
+$ cw audit walk-docs --kind credentials --since 1h          (a filter that matches nothing)
+
+No credential events for walk-docs in the last hour.
+
+→ cw audit walk-docs
+
+Exit status 0.
+
+
+$ cw audit walk-log          (walk-log is a local VM)
+
+✗ walk-log is a local VM, and local VMs have no audit log.
+→ cw --local policy log walk-log
+
+Exit status 1.
+
+
+$ cw audit walk-docs          (a platform without the read)
+
+✗ This Codewire server has no audit log yet.
+
+Exit status 1.
+
+
+$ cw audit walk-docs --output json
+
+One event of each kind is shown here; the real answer holds all 20, newest
+first, in the same shape. `next_cursor` is null because nothing is older;
+otherwise `cw audit walk-docs --output json --cursor VALUE` continues.
+
+{
+  "environment": {
+    "id": "env_9c41d2e7a0b3",
+    "name": "walk-docs"
+  },
+  "policy": {
+    "name": "walk-docs",
+    "revision": 2
+  },
+  "events": [
+    {
+      "id": "aud_6b1f0c93e2a4",
+      "kind": "policy",
+      "action": "edited",
+      "first": "2026-11-23T14:11:26Z",
+      "last": "2026-11-23T14:11:26Z",
+      "count": 1,
+      "actor": {
+        "type": "user",
+        "id": "usr_3e8a51f0c2d7",
+        "email": "ana@example.com",
+        "role": "member"
+      },
+      "policy": "walk-docs",
+      "from_revision": 1,
+      "to_revision": 2,
+      "added": ["crates.io:443"],
+      "removed": []
+    },
+    {
+      "id": "aud_0d72a4e19c5b",
+      "kind": "refused",
+      "action": "refused",
+      "first": "2026-11-23T14:05:02Z",
+      "last": "2026-11-23T14:09:40Z",
+      "count": 12,
+      "actor": {
+        "type": "sandbox"
+      },
+      "destination": "crates.io",
+      "withheld": false,
+      "address": "192.0.2.80",
+      "port": 443,
+      "protocol": "tcp",
+      "reason": "name_not_allowed",
+      "source": "network",
+      "policy": "walk-docs",
+      "revision": 1,
+      "allowed_since_revision": 2
+    },
+    {
+      "id": "aud_a93c07d5e1f2",
+      "kind": "access",
+      "action": "terminal",
+      "first": "2026-11-23T14:02:07Z",
+      "last": "2026-11-23T14:31:40Z",
+      "count": 1,
+      "actor": {
+        "type": "user",
+        "id": "usr_3e8a51f0c2d7",
+        "email": "ana@example.com",
+        "role": "member"
+      },
+      "client_ip": "203.0.113.7"
+    },
+    {
+      "id": "aud_5e2d8b0f4a17",
+      "kind": "credentials",
+      "action": "used",
+      "first": "2026-11-23T14:00:14Z",
+      "last": "2026-11-23T14:36:51Z",
+      "count": 37,
+      "actor": {
+        "type": "sandbox"
+      },
+      "provider": "github",
+      "host": "api.github.com"
+    },
+    {
+      "id": "aud_c4f17e2b9d08",
+      "kind": "lifecycle",
+      "action": "restarted",
+      "first": "2026-11-22T23:10:12Z",
+      "last": "2026-11-22T23:10:12Z",
+      "count": 1,
+      "actor": {
+        "type": "platform"
+      },
+      "reason": "runtime_replaced"
+    }
+  ],
+  "next_cursor": null
+}
+
+
+The same Sandbox's refusals, as a local VM's are shown (#4717): `cw --cloud
+policy log` prints the table, JSON and `→` step of `cw --local policy log`,
+from the audit log's `refused` events grouped across hours. It is 14:41.
+The step skips crates.io, refused under rev 1, as the local log skips a row
+refused under an older revision.
+
+
+$ cw --cloud policy log walk-docs          (140 columns)
+
+DESTINATION             PROTOCOL  PORT  REASON            POLICY             COUNT  FIRST    LAST
+pypi.org                tcp       443   name not allowed  walk-docs · rev 2  3      3m ago   1m ago
+crates.io               tcp       443   name not allowed  walk-docs · rev 1  12     36m ago  32m ago
+8.8.8.8                 udp       53    UDP not carried   walk-docs · rev 1  4      35m ago  34m ago
+(a name cw won't show)  dns       -     name not allowed  walk-docs · rev 1  1      36m ago  36m ago
+
+Showing the last 7 days.
+
+→ cw --cloud policy allow walk-docs pypi.org:443
+
+
+$ cw --cloud policy log walk-docs          (nothing refused in the last 7 days)
+
+Nothing refused by walk-docs in the last 7 days.
+
+→ cw audit walk-docs
+
+Exit status 0.
+
+
+$ cw --cloud policy log walk-docs --since 90d          (the read ran past its 5-second bound)
+
+✗ Reading 90 days of walk-docs's refusals took too long.
+→ cw --cloud policy log walk-docs --since 7d
+
+Exit status 1.
+
+
+$ cw --cloud policy log walk-docs          (the 31st grouped read in a minute)
+
+✗ You've read refusals 30 times in the last minute; try again in a minute.
+
+Exit status 1.
+
+`cw audit` words a timeout the same way, with "events" for "refusals". It
+reads ungrouped, so the rate limit is not its; `cw info` leaves its
+`Refused:` line out after either.
+
+
+$ cw --cloud policy log walk-docs --output json
+
+The same shape as `cw --local policy log --output json`. Two of the four
+rows are shown.
+
+{
+  "refusals": [
+    {
+      "destination": "pypi.org",
+      "withheld": false,
+      "address": "192.0.2.91",
+      "port": 443,
+      "protocol": "tcp",
+      "reason": "name_not_allowed",
+      "source": "network",
+      "policy": "walk-docs",
+      "revision": 2,
+      "first": "2026-11-23T14:38:03Z",
+      "last": "2026-11-23T14:40:12Z",
+      "count": 3
+    },
+    {
+      "destination": null,
+      "withheld": true,
+      "address": null,
+      "port": null,
+      "protocol": "dns",
+      "reason": "name_not_allowed",
+      "source": "network",
+      "policy": "walk-docs",
+      "revision": 1,
+      "first": "2026-11-23T14:05:31Z",
+      "last": "2026-11-23T14:05:31Z",
+      "count": 1
+    }
+  ],
+  "dropped": 0
+}
+
+
+$ cw info walk-docs          (the one line it adds, among its fields)
+
+Refused:     20 requests in the last 7 days, the last 1m ago; `cw --cloud policy log walk-docs` lists them
+
+A local VM's line reads "since the VM started" where this reads "in the
+last 7 days"; the rest is the same. It is left out when nothing was refused,
+and when the read fails.
