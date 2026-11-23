@@ -1783,24 +1783,55 @@ above.
   that bundle, unless the image or project sets the name (kept and logged, as
   for Node). Codex ignores the Node variable, and the bundle serves whether
   Codex adds the file to its roots or replaces them with it. Without it, every
-  intercepted Codex request fails its handshake (#5447). Nothing else names
-  the bundle: `SSL_CERT_FILE` and the like replace a trust store for every
-  tool, so a CA the user adds after boot would silently stop being trusted.
+  intercepted Codex request fails its handshake (#5447). Only Git's
+  GitHub-scoped setting below also names the bundle. `SSL_CERT_FILE` is never
+  set: it replaces a trust store for every tool, so a CA the user adds after
+  boot would silently stop being trusted. The `SSL_CERT_DIR` below adds to
+  the store instead.
   Nothing is mounted over the image's trust store and its layer is never
   written. A restored boot publishes from its own seed before the workspace
   thaws.
+- **What Git and `gh` trust.** Only while GitHub's hosts are bound:
+  - Git gets `http.https://github.com/.sslCAInfo` naming the bundle, in the
+    same `GIT_CONFIG_*` list as its credential helper. The setting applies to
+    `https://github.com/` URLs only, so no other host's trust changes. Git's
+    TLS library on the image reads one bundle file, which is why it gets the
+    whole bundle and not the CA alone.
+  - `gh` gets `SSL_CERT_DIR`: the image's own certificate directory first,
+    then `/run/codewire-host/egress-ca.d`, colon-separated. The second
+    directory holds the CA alone, under its OpenSSL subject-hash name
+    (`<hash>.0`). `gh` reads the image's default bundle and every certificate
+    in those directories, so the CA is added to its roots and replaces
+    nothing. A root added to the image's store after boot is still trusted.
+  - Other tools that read `SSL_CERT_DIR` see the same addition, as Node
+    already does through `NODE_EXTRA_CA_CERTS`. What limits the CA differs by
+    placement:
+    - in a local VM, the CA is name-constrained to the bound hosts, and only
+      the front door holds its key;
+    - in a hosted Sandbox, the Pod's CA permits no DNS subtree, and the
+      credential service holds its key. The limit is the signer's binding
+      record: leaves are issued only for the binding's hosts, and `cw-egress`
+      serves only those names.
+
+    On both, the key never enters the guest.
+  - A value of either name that the image or project already sets is kept
+    and logged, as for Node; then that tool's intercepted connections fail
+    their TLS handshake.
 - **The agent's login.** A broker paired with the boot's front door seals
   Claude's and Codex's logins with this environment's placeholders, never the
   sign-in's tokens. One started with a front door it can't pair with seals no
   login at all. A boot that doesn't intercept still gets the real login under
   the direct delivery exceptions below, until #4002's local cutover refuses
   it there too.
-- **GitHub's two hosts.** The front door, the bridge and the broker can
-  serve `github.com` and `api.github.com` whole, so that Git and `gh` use
-  GitHub's own names. No boot binds them yet: that needs the boot chain to
-  bind hosts by the environment's clients (#4809), the projection to hand
-  Git and `gh` the placeholder, and their trust in the boot's CA. The
-  broker's rule for a request to either host, in order:
+- **GitHub's two hosts.** The front door, the bridge and the broker serve
+  `github.com` and `api.github.com` whole, so that Git and `gh` use GitHub's
+  own names. A boot binds them when its profile has a GitHub connection
+  (`front_door_hosts`, #5463), and then hands Git and `gh` the GitHub
+  placeholder and trust in the boot's CA (below). Not yet built: the
+  placeholder's delivery, the projection's call and the trust (#4001 comment
+  136112); until they are, `GITHUB_INTERCEPTED` stays off and GitHub stays on
+  its loopback route on both placements. The broker's rule for a request to
+  either host, in order:
   1. The environment's network policy must allow GitHub's hosts by rule, or
      nothing is sent, with or without a credential (#4926). Today that is
      the answer the broker is started with; the egress broker's signed
@@ -1831,7 +1862,13 @@ default, the guest holds a per-environment placeholder for each credential in
 place of the fixed `codewire-managed`. Before such a boot starts, the
 supervisor asks the authority for the placeholder of the selected Anthropic
 form (an API key or a subscription token; the sign-in form's comes with its
-login), and the runner carries it to the guest in the seed beside the CA. Guest
+login) and, when GitHub's hosts are bound, of the `github` slot. The runner
+carries them to the guest in the seed beside the CA, one entry per slot.
+GitHub's entry needs seed format 12. A format 11 guest init refuses a slot
+it doesn't know, so this is a guest ABI change: a stopped VM on older boot
+assets moves onto the installed runtime at its next start, and its earlier VM
+checkpoints become unrestorable, as `CLI-ORCHESTRATION.md` describes for any
+guest ABI change. Guest
 init gives it to the workspace's own processes and to the guest daemon, which
 projects it to every session and managed agent. A boot without interception,
 or one whose credentials come from the platform, carries none.
@@ -1862,7 +1899,7 @@ or one whose credentials come from the platform, carries none.
   the sign-in form projects no variable. `ANTHROPIC_API_KEY` is never set,
   because the swap rule refuses a placeholder sent beside a second credential
   header. Without interception, the projection is exactly the one above.
-- **What Git and `gh` will get.** Once a boot binds `github.com` and
+- **What Git and `gh` get.** When a boot binds `github.com` and
   `api.github.com`, the GitHub projection sends nothing to the loopback
   ingress, so `git remote -v` prints an HTTPS remote as written. Git prints
   a rewritten form after its rewrite, so a `git://` remote, and an SSH-form
@@ -1881,10 +1918,14 @@ or one whose credentials come from the platform, carries none.
     credential, and only this environment's own front door and broker
     exchange it for one.
 
-  Without a placeholder neither the helper nor `GH_TOKEN` is projected, so
-  the fixed `codewire-managed` never reaches the real host. The function
-  exists (`ManagedCredentialClientProjection::intercepted_github`); no boot
-  calls it yet, because nothing delivers a GitHub placeholder to a guest.
+  - the trust above: `http.https://github.com/.sslCAInfo` and `SSL_CERT_DIR`.
+
+  The placeholder is the plain `cwp1_` form: GitHub has no provider prefix
+  to keep. Without a placeholder neither the helper nor `GH_TOKEN` is
+  projected, so the fixed `codewire-managed` never reaches the real host.
+  `ManagedCredentialClientProjection::intercepted_github` builds this, and
+  the intercepted projection calls it when GitHub's hosts are bound, for
+  sessions, managed agents and `gh`'s generated configuration alike.
 
 - **Hosted (#4001).** The same derivation, under one key per environment in
   `platform_placeholder_keys`:
@@ -2521,8 +2562,40 @@ which its first bind will store, decides its CA.
 - **Every connected agent credential.** The Claude sign-in, with `/usage` and
   the plan display working; a Claude subscription token; an Anthropic API
   key; the Codex sign-in, with Codex's account routing; an OpenAI API key;
-  and GitHub (the App login and a personal access token), for Git over HTTPS
-  and `gh`. A credential the Sandbox's profile does not select is not bound.
+  and GitHub's App login, for Git over HTTPS and `gh` (the GitHub provider
+  takes an OAuth login only; a personal access token is not a GitHub
+  connection). A credential the Sandbox's profile does not select is not
+  bound.
+- **GitHub, hosted.** Not yet built (#4001 comment 136112). With GitHub's
+  hosts bound, the broker's rule for them is the local one above, with two
+  differences:
+  - A request with no placeholder-shaped value is never forwarded, since the
+    credential service forwards nothing untouched. A Git request instead
+    gets GitHub's own challenge: 401 with
+    `WWW-Authenticate: Basic realm="GitHub"` and a fixed body, built by the
+    credential service, with no lease and no upstream call. Git then asks
+    its credential helper, which answers with the placeholder. The challenge
+    is given only when all of these hold:
+    - the host is `github.com`, never `api.github.com`;
+    - the request is on Git's smart-HTTP grammar: `GET …/info/refs` with
+      `service=git-upload-pack` or `service=git-receive-pack`, or
+      `POST …/git-upload-pack` or `POST …/git-receive-pack`;
+    - the binding selects the `github` slot.
+
+    The image's Git predates `http.proactiveAuth`, so without the challenge
+    its first `info/refs` request would fail. An anonymous clone of a public
+    repository therefore uses the GitHub connection in a Sandbox. Every other
+    request with no placeholder is refused as now (`selected_credential_only`).
+  - Network policy: hosted policies are not enforced yet, and the loopback
+    route serves GitHub whatever the policy says. The bound hosts serve it
+    the same way, so binding them widens nothing. When hosted enforcement
+    lands, the credential service asks the same decision (does the policy
+    allow both hosts on 443 by rule) before it serves the GitHub slot.
+
+  A lease whose placeholder key could not be read is refused on GitHub's
+  hosts as on Anthropic's (#5087), whatever the request carries. Leaves are
+  signed for GitHub's hosts once they are bound, from the same selection
+  `cw-egress` binds.
 - **Placeholders, in the local shape.** Each placement carries a
   per-environment placeholder derived as above, under a key the credential
   service holds for that environment (#5017), never stored. It keeps its
@@ -2536,10 +2609,12 @@ which its first bind will store, decides its CA.
 - **What the Sandbox projects.** Exactly what a local guest's seed carries:
   the placeholder of the `anthropic` slot, which the API-key and
   subscription-token forms take as a variable. The sign-in form's and
-  Codex's placeholders travel in their delivered logins, an OpenAI API key
-  keeps its loopback route as it does locally, and GitHub keeps today's
-  hosted route while its hosts are not intercepted (Git and `gh` go through
-  the loopback ingress as before). The credential service derives the set
+  Codex's placeholders travel in their delivered logins, and an OpenAI API
+  key keeps its loopback route as it does locally. With GitHub's hosts
+  bound, the set also carries the `github` slot's placeholder, which the
+  daemon projects to Git and `gh` as a local guest does; while they are not
+  bound, GitHub keeps today's hosted route (Git and `gh` go through the
+  loopback ingress as before). The credential service derives the set
   at the intercepted epoch's admission, from the grant the binding gives
   that slot, as that epoch's leases derive theirs, so it arrives with the
   epoch's admission and never apart from it (cw-security, 2026-11-19,

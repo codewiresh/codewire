@@ -801,7 +801,8 @@ request adds.
     authority's certificate, the guest publishes it as a read-only file, and
     `NODE_EXTRA_CA_CERTS` names that file. Nothing else is set: no
     `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` or
-    `GIT_SSL_CAINFO`. The authority belongs to this boot alone, and its key
+    `GIT_SSL_CAINFO`, and, unless GitHub's hosts are bound (`agent-github`),
+    no `SSL_CERT_DIR`. The authority belongs to this boot alone, and its key
     exists only in the front door process's memory, never on a disk and
     never in the VM;
   - an image's own `NODE_EXTRA_CA_CERTS` is kept, and the boot log says
@@ -1298,8 +1299,9 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
     && git add .gitattributes a.bin && git commit -qm lfs && git push
   ```
 
-  `curl` here needs `--cacert` with the bundle `GIT_SSL_CAINFO` names; the walk
-  says so where it uses it.
+  `curl` here needs `--cacert /run/codewire-host/ca-certificates.crt`, the
+  bundle Git's `http.https://github.com/.sslCAInfo` names; the walk says so
+  where it uses it.
 - **Proof:**
   - `git remote -v` prints the HTTPS remote exactly as it was written. For
     the SSH-form clone it prints the SSH form on a profile with a key, and
@@ -1337,14 +1339,20 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
     GitHub without a rule that allows it, the managed credential included
     (#4926; the step is `locked-refuses-managed-github`).
 - **Gotchas:**
-  - Git trusts the boot's CA through `GIT_SSL_CAINFO` and `gh` through
-    `SSL_CERT_FILE`, both set only when the GitHub hosts are bound and both
-    naming a bundle made at boot from the image's roots plus the CA. A root
-    added to the image's store after boot is not in it, so a tool that reads
-    `SSL_CERT_FILE` does not see that root until the next boot.
-  - A value of either variable that the image or project already sets is kept.
-    Git or `gh` then fails its TLS check against GitHub until that bundle
-    includes the CA; the boot log names the variable.
+  - Git trusts the boot's CA through `http.https://github.com/.sslCAInfo`,
+    which names the bundle made at boot from the image's roots plus the CA and
+    applies to `https://github.com/` only. `gh` trusts it through
+    `SSL_CERT_DIR`: the image's own certificate directory, then a directory
+    holding the CA alone. That adds the CA without replacing the store, so a
+    root added to the image's store after boot is still trusted. Both are set
+    only when the GitHub hosts are bound.
+  - An `SSL_CERT_DIR` that the image or project already sets is kept. `gh`
+    then fails its TLS check against GitHub until that directory includes
+    the CA; the boot log names the variable.
+  - In a hosted Sandbox, a Git request without a credential is answered with
+    GitHub's own 401 challenge, so Git asks its helper and an anonymous clone
+    of a public repository uses the GitHub connection. Locally it reaches
+    GitHub as it is, when the policy allows GitHub's hosts.
   - The placeholder works only for Git's fetch and push requests and for the
     API operations the GitHub route grants. Anywhere else on the two hosts it
     is refused, whoever's placeholder it looks like. Git LFS is one such case.
