@@ -214,7 +214,10 @@ fn confidential_kbs_egress_rule(opts: &TemplateOpts) -> Option<Value> {
     if opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL {
         return None;
     }
-    kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url)
+    match &opts.kata_coco_kbs_peer {
+        Some(peer) => peer.egress_rule(&opts.kata_coco_kbs_url),
+        None => kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url),
+    }
 }
 
 fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {

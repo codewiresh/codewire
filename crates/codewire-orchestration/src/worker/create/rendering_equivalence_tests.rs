@@ -258,6 +258,7 @@ fn before_shape_template_opts(
         kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
         kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
         kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
+        kata_coco_kbs_peer: cfg.kata_coco_kbs_peer.clone(),
         kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
         kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
         kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
@@ -332,6 +333,9 @@ fn confidential_cfg() -> SandboxWorkerCfg {
         kata_coco_kbs_url: "https://kbs.example.invalid:8080".into(),
         kata_coco_kbs_ca_pem: "-----BEGIN CERTIFICATE-----\nkbs\n-----END CERTIFICATE-----\n"
             .into(),
+        kata_coco_kbs_peer: Some(
+            crate::sandbox::template::KbsPeer::parse("kbs-ns:app=kbs").expect("peer parses"),
+        ),
         kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
         kata_coco_test_resource_uri: "kbs:///default/codewire/runtime-test-resource".into(),
         kata_coco_test_resource_path: "/run/test-resource".into(),

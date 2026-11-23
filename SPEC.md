@@ -1276,8 +1276,11 @@ non-private addresses to UDP 31000 when the tailnet listener is enabled.
 Egress admits the public Internet (the private, loopback, link-local and
 carrier-grade NAT ranges are excluded), cluster DNS, the ingress controller on
 80 and 443, STUN, the UDP relay and the confidential key broker where
-configured. There is no user-facing per-environment egress rule on the hosted
-platform. A local VM's egress is bounded by its selected network policy,
+configured. The key broker is admitted by its namespace, read from its URL, or,
+when `SANDBOX_KATA_COCO_KBS_PEER` names them, only by its Pods: that namespace
+and those Pod labels together. A key-broker URL whose host is an address
+requires the Pods named, and orchestration refuses to start without them.
+There is no user-facing per-environment egress rule on the hosted platform. A local VM's egress is bounded by its selected network policy,
 `open` by default, as above.
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.

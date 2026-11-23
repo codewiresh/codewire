@@ -216,6 +216,14 @@ kubelet deadlines. Codewire adds `agent.image_registry_auth` only when
 images, prefer public immutable digests and later signing/encryption; use the
 KBS auth URI for private user images or a constrained dev proof.
 
+The workspace's network policy admits the key broker on the URL's port. By
+default the peer is the namespace in the URL's Service name.
+`SANDBOX_KATA_COCO_KBS_PEER=NAMESPACE:key=value,...` names the key broker's Pods
+instead, matched by namespace and labels together. A URL whose host is an
+address names no namespace, and a policy rule on a Service address never
+matches after the address is translated, so such a URL requires the peer, and
+orchestration refuses to start without it.
+
 `SANDBOX_KATA_AGENT_POLICY_ENABLED` defaults to `false` in the base config and
 is enabled in the hosted Dev profile once the active Kata/Cloud Hypervisor node
 accepts the annotation. `SANDBOX_KATA_COCO_INIT_DATA_ENABLED` remains `false` for

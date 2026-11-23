@@ -304,15 +304,21 @@ HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "COD
 HOSTED_EGRESS_VM_RUNTIME_CLASSES = ("commodity", "commodity-32g")
 HOSTED_EGRESS_TUN_COMMAND = "['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000']"
 # codewire#5002: a confidential per-environment template's one extra egress
-# rule, the Trustee KBS by namespace on one port, never in a pool.
+# rule, the Trustee KBS on one port, never in a pool: by namespace alone, or,
+# when kbsPeer carries Pod labels (#4000), by namespace and exactly those.
 ENVIRONMENT_KBS_FRAGMENTS = (
     "expression: '['codewire-trustee', 'TCP/8080']' name: kbsPeer",
     "object.spec.networkPolicy.egress.all(r, (variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
     "variables.pod.runtimeClassName == 'confidential' && dyn(r).all(k, k in ['to', 'ports']) && has(r.to) && size(r.to) == 1 && "
-    "dyn(r.to[0]).all(k, k == 'namespaceSelector') && has(r.to[0].namespaceSelector) && "
+    "dyn(r.to[0]).all(k, k in ['namespaceSelector', 'podSelector']) && has(r.to[0].namespaceSelector) && "
     "dyn(r.to[0].namespaceSelector).all(k, k == 'matchLabels') && has(r.to[0].namespaceSelector.matchLabels) && "
     "size(r.to[0].namespaceSelector.matchLabels) == 1 && 'kubernetes.io/metadata.name' in r.to[0].namespaceSelector.matchLabels && "
     "r.to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.kbsPeer[0] && "
+    "(size(variables.kbsPeer) == 2 ? !has(r.to[0].podSelector) : "
+    "has(r.to[0].podSelector) && dyn(r.to[0].podSelector).all(k, k == 'matchLabels') && "
+    "has(r.to[0].podSelector.matchLabels) && "
+    "size(r.to[0].podSelector.matchLabels) == size(variables.kbsPeer) - 2 && "
+    "r.to[0].podSelector.matchLabels.all(k, (k + '=' + r.to[0].podSelector.matchLabels[k]) in variables.kbsPeer)) && "
     "has(r.ports) && size(r.ports) == 1 && dyn(r.ports[0]).all(k, k in ['port', 'protocol']) && "
     "has(r.ports[0].port) && has(r.ports[0].protocol) && type(r.ports[0].port) == int && "
     "r.ports[0].protocol + '/' + string(r.ports[0].port) == variables.kbsPeer[1]) || ",
@@ -1913,7 +1919,10 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_TEMPLATE_POLICY, "variables.environmentTemplate ||", "true ||"),
             (WARM_POOL_TEMPLATE_POLICY, "(variables.environmentTemplate && has(variables.pod.runtimeClassName) &&", "(has(variables.pod.runtimeClassName) &&"),
             (WARM_POOL_TEMPLATE_POLICY, "runtimeClassName == ''confidential'' && dyn(r)", "runtimeClassName !=  && dyn(r)"),
-            (WARM_POOL_TEMPLATE_POLICY, "dyn(r.to[0]).all(k, k == 'namespaceSelector')", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(r.to[0]).all(k, k in ['namespaceSelector', 'podSelector'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "? !has(r.to[0].podSelector) :", "? true :"),
+            (WARM_POOL_TEMPLATE_POLICY, "== size(variables.kbsPeer) - 2", ">= 0"),
+            (WARM_POOL_TEMPLATE_POLICY, "+ r.to[0].podSelector.matchLabels[k]) in variables.kbsPeer))", "+ r.to[0].podSelector.matchLabels[k]) != ''))"),
             (WARM_POOL_TEMPLATE_POLICY, "has(r.ports) && size(r.ports) == 1", "has(r.ports)"),
             (WARM_POOL_TEMPLATE_POLICY, "== variables.kbsPeer[0]", "!= ''"),
             (WARM_POOL_TEMPLATE_POLICY, "== variables.kbsPeer[1]", "!= ''"),

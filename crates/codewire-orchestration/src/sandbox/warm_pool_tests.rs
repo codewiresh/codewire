@@ -975,6 +975,12 @@ fn the_admission_policy_admits_every_rendered_egress_rule() {
         "(variables.environmentTemplate && has(variables.pod.runtimeClassName) && \
          variables.pod.runtimeClassName == 'confidential' &&"
     ));
+    // Without Pod labels in kbsPeer the KBS rule is namespace-only; with
+    // them it names exactly those labels (#4000).
+    assert!(policy.contains("(size(variables.kbsPeer) == 2 ? !has(r.to[0].podSelector) :"));
+    assert!(
+        policy.contains("size(r.to[0].podSelector.matchLabels) == size(variables.kbsPeer) - 2 &&")
+    );
     for (opts, ingress_source) in [
         (full("", ""), &policy),
         (full("ingress-nginx", "ingress-nginx"), &kind_e2e),

@@ -265,6 +265,7 @@ pub struct SandboxWorkerCfg {
     pub kata_coco_init_data_enabled: bool,
     pub kata_coco_kbs_url: String,
     pub kata_coco_kbs_ca_pem: String,
+    pub kata_coco_kbs_peer: Option<crate::sandbox::template::KbsPeer>,
     pub kata_coco_image_registry_auth_uri: String,
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
@@ -421,24 +422,11 @@ impl SandboxWorkerCfg {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| d.to_string())
         };
-        let kata_coco_kbs_url = getenv(
-            "SANDBOX_KATA_COCO_KBS_URL",
-            &getenv("CONFIDENTIAL_STORAGE_KBS_URL", ""),
-        );
+        let kbs = crate::sandbox::template::KbsSettings::from_env(&getenv);
         let sandbox_namespace = getenv("SANDBOX_NAMESPACE", &format!("{env_prefix}-sandboxes"));
         let credential_runtime =
             crate::sandbox::template::CredentialRuntimeTemplateConfig::from_env(&sandbox_namespace)
                 .expect("platform credential runtime configuration must be complete and canonical");
-        let kbs_ca_path = getenv("CONFIDENTIAL_STORAGE_KBS_CA_PATH", "");
-        let kata_coco_kbs_ca_pem = if kbs_ca_path.is_empty() {
-            String::new()
-        } else {
-            std::fs::read_to_string(&kbs_ca_path).unwrap_or_else(|error| {
-                panic!(
-                    "failed to read public confidential-storage KBS CA at {kbs_ca_path}: {error}"
-                )
-            })
-        };
         let runtime_profile = std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default();
         let workspace_storage_class = crate::sandbox::template::required_workspace_storage_class(
             &runtime_profile,
@@ -482,8 +470,9 @@ impl SandboxWorkerCfg {
                 == "true",
             kata_coco_init_data_enabled: getenv("SANDBOX_KATA_COCO_INIT_DATA_ENABLED", "false")
                 == "true",
-            kata_coco_kbs_url,
-            kata_coco_kbs_ca_pem,
+            kata_coco_kbs_url: kbs.url,
+            kata_coco_kbs_ca_pem: kbs.ca_pem,
+            kata_coco_kbs_peer: kbs.peer,
             kata_coco_image_registry_auth_uri: getenv(
                 "SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI",
                 "",

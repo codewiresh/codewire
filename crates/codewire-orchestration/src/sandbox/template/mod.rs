@@ -16,6 +16,7 @@ mod dind;
 mod encoding;
 mod hosted_egress;
 mod identity;
+mod kbs;
 /// The hosted-egress TUN init container, which runs as root from the support
 /// image, and its device volume; the bind's isolation check admits them only
 /// while hosted egress is on.
@@ -32,6 +33,7 @@ mod workspace;
 mod workspace_flush;
 
 pub use credentials::{CredentialRuntimeTemplateConfig, MANAGED_CREDENTIAL_CLIENTS_ENV};
+pub use kbs::{KbsPeer, KbsSettings};
 
 #[cfg(test)]
 use encoding::gzip_base64;
@@ -317,6 +319,10 @@ pub struct TemplateOpts {
     pub kata_coco_init_data_enabled: bool,
     pub kata_coco_kbs_url: String,
     pub kata_coco_kbs_ca_pem: String,
+    /// The key broker's Pods (`SANDBOX_KATA_COCO_KBS_PEER`). Set, a
+    /// confidential workspace's KBS rule names them instead of a namespace
+    /// read from the URL; an address URL requires it (#4000).
+    pub kata_coco_kbs_peer: Option<KbsPeer>,
     pub kata_coco_image_registry_auth_uri: String,
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
@@ -448,6 +454,7 @@ impl fmt::Debug for TemplateOpts {
                 &self.kata_coco_init_data_enabled,
             )
             .field("kata_coco_kbs_url", &self.kata_coco_kbs_url)
+            .field("kata_coco_kbs_peer", &self.kata_coco_kbs_peer)
             .field(
                 "kata_coco_kbs_ca_pem",
                 &if self.kata_coco_kbs_ca_pem.is_empty() {

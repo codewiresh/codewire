@@ -179,6 +179,51 @@ fn broker_mode_names_only_the_reviewed_peers() {
     }
 }
 
+/// With the key broker at an address (#4000), a confidential broker-mode
+/// workspace reaches the key broker's labelled Pods and nothing else in its
+/// namespace: the namespace-only rule is gone from both policies.
+#[test]
+fn an_address_kbs_url_names_the_key_brokers_pods() {
+    let peer = KbsPeer::parse(
+        "codewire-trustee:app=kbs,app.kubernetes.io/instance=codewire-trustee,app.kubernetes.io/name=trustee",
+    )
+    .unwrap();
+    let kbs_pods = json!({
+        "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "codewire-trustee" } },
+        "podSelector": { "matchLabels": {
+            "app": "kbs",
+            "app.kubernetes.io/instance": "codewire-trustee",
+            "app.kubernetes.io/name": "trustee",
+        } },
+    });
+    let namespace_only = json!({ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "codewire-trustee" } } });
+    for relay in [false, true] {
+        let mut opts = opts(RUNTIME_PROFILE_CONFIDENTIAL, relay, Some(egress_template()));
+        opts.kata_coco_kbs_url = "https://10.44.0.45:8080".into();
+        opts.kata_coco_kbs_peer = Some(peer.clone());
+        let mut want = expected(true, relay);
+        assert!(want.remove(&format!("{namespace_only} TCP/8080")));
+        want.insert(format!("{kbs_pods} TCP/8080"));
+        for (policy, rules) in egress_policies(&opts) {
+            assert_eq!(allowed(&rules), want, "{policy}, relay {relay}");
+        }
+    }
+}
+
+/// Without a peer, an address URL names no namespace, so the template gets no
+/// path to the key broker at all; startup refuses that configuration
+/// (`KbsSettings::from_env`).
+#[test]
+fn an_address_kbs_url_without_a_peer_opens_nothing() {
+    let mut opts = opts(RUNTIME_PROFILE_CONFIDENTIAL, false, Some(egress_template()));
+    opts.kata_coco_kbs_url = "https://10.44.0.45:8080".into();
+    let mut want = expected(true, false);
+    want.retain(|entry| !entry.contains("codewire-trustee"));
+    for (policy, rules) in egress_policies(&opts) {
+        assert_eq!(allowed(&rules), want, "{policy}");
+    }
+}
+
 #[test]
 fn broker_mode_has_no_address_range_and_no_dns() {
     for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {

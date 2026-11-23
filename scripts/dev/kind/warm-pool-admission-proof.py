@@ -75,6 +75,8 @@ ON = {
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE": "gateway",
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT": "10443",
 }
+# The key broker's Pods, as a deployment that names them sets kbsPeer (#4000).
+KBS_PODS = {"app": "kbs", "app.kubernetes.io/instance": "codewire-trustee", "app.kubernetes.io/name": "trustee"}
 WORLD = {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": [
     "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]}}]}
 
@@ -205,6 +207,42 @@ def kbs_rule(t: dict) -> dict:
 def with_kbs(t: dict) -> None:
     egress(t).append({"ports": [{"port": 8080, "protocol": "TCP"}], "to": [
         {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "codewire-trustee"}}}]})
+
+
+def kbs_pods(t: dict, labels: dict[str, str], namespace: str = "codewire-trustee") -> None:
+    """The KBS rule narrowed to the key broker's Pods, as orchestration
+    renders it when SANDBOX_KATA_COCO_KBS_PEER is set."""
+    kbs_rule(t)["to"][0] = {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}},
+                            "podSelector": {"matchLabels": dict(labels)}}
+
+
+def labelled_kbs_cases(conf_broker: dict, env_broker: dict) -> list[tuple[str, dict, str | None]]:
+    """With kbsPeer carrying the key broker's Pod labels, the confidential
+    rule must name exactly them, and a namespace-only rule no longer passes."""
+    def drop_one(labels: dict[str, str]) -> dict[str, str]:
+        return {k: v for k, v in labels.items() if k != "app"}
+    return [
+        ("labelled kbsPeer, confidential: exactly the key broker's Pods", mutate(
+            conf_broker, lambda t: kbs_pods(t, KBS_PODS)), None),
+        ("labelled kbsPeer, confidential: namespace-only", conf_broker, EGRESS),
+        ("labelled kbsPeer, confidential: one label missing", mutate(
+            conf_broker, lambda t: kbs_pods(t, drop_one(KBS_PODS))), EGRESS),
+        ("labelled kbsPeer, confidential: an extra label", mutate(
+            conf_broker, lambda t: kbs_pods(t, KBS_PODS | {"extra": "x"})), EGRESS),
+        ("labelled kbsPeer, confidential: a label's value changed", mutate(
+            conf_broker, lambda t: kbs_pods(t, KBS_PODS | {"app": "attestation-service"})), EGRESS),
+        ("labelled kbsPeer, confidential: the Pods in another namespace", mutate(
+            conf_broker, lambda t: kbs_pods(t, KBS_PODS, "kube-system")), EGRESS),
+        ("labelled kbsPeer, confidential: the Pods on another port", mutate(
+            conf_broker, lambda t: kbs_pods(t, KBS_PODS), lambda t: kbs_rule_with_pods(t)["ports"][0].__setitem__(
+                "port", 443)), EGRESS),
+        ("labelled kbsPeer, environment: the labelled KBS rule under commodity", mutate(
+            env_broker, with_kbs, lambda t: kbs_pods(t, KBS_PODS)), EGRESS),
+    ]
+
+
+def kbs_rule_with_pods(t: dict) -> dict:
+    return next(r for r in egress(t) if any(p.get("podSelector", {}).get("matchLabels") == KBS_PODS for p in r["to"]))
 
 
 def pinned(t: dict) -> dict:
@@ -708,6 +746,20 @@ def main() -> int:
     results.append(check("on, Kind's runtime classes: runc", cluster.admit(
         "create", mutate(broker, setting(pod, "runtimeClassName", "runc"))), TUN))
     results.append(check("on, Kind's runtime classes: no runtime class", cluster.admit("create", no_class), TUN))
+    cluster.apply(policy)
+
+    # A deployment that names the key broker's Pods (#4000) gives kbsPeer
+    # their labels; namespace-only is then refused.
+    labelled_policy = copy.deepcopy(policy)
+    kbs_variable = next(v for v in labelled_policy["spec"]["variables"] if v["name"] == "kbsPeer")
+    kbs_variable["expression"] = "['codewire-trustee', 'TCP/8080', " + ", ".join(
+        f"'{key}={value}'" for key, value in KBS_PODS.items()) + "]"
+    cluster.apply(labelled_policy)
+    conf_broker = load("confidential-broker-sandboxtemplate.golden.json")
+    wait_for(cluster, conf_broker, EGRESS)
+    for name, template, expected in labelled_kbs_cases(
+            conf_broker, pinned(load("environment-broker-sandboxtemplate.golden.json"))):
+        results.append(check(name, cluster.admit("create", template), expected))
     cluster.apply(policy)
     cluster.param(OFF)
 

@@ -383,9 +383,13 @@ spec:
         [variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] +
         variables.gatewayPeers
     # The Trustee KBS a confidential per-environment workspace attests to,
-    # as namespace and PROTOCOL/port (network.rs, kata_coco_kbs_egress_rule):
-    # a namespace-only peer, never in a pool. An overlay whose KBS lives
-    # elsewhere replaces this variable.
+    # as namespace, PROTOCOL/port and, when orchestration names the key
+    # broker's Pods (SANDBOX_KATA_COCO_KBS_PEER, sandbox/template/kbs.rs),
+    # each Pod label as key=value. Without labels the rule must be
+    # namespace-only; with them it must carry exactly that label map
+    # (#4000). Never in a pool. The port is pinned here and must equal the
+    # key-broker URL's; an overlay whose KBS lives elsewhere, or that names
+    # its Pods, replaces this variable.
     - name: kbsPeer
       expression: "['codewire-trustee', 'TCP/8080']"
     # codewire#5002: every SandboxTemplate orchestration writes is matched.
@@ -642,11 +646,16 @@ spec:
         has(object.spec.networkPolicy.egress) &&
         object.spec.networkPolicy.egress.all(r, (variables.environmentTemplate && has(variables.pod.runtimeClassName) && variables.pod.runtimeClassName == 'confidential' &&
         dyn(r).all(k, k in ['to', 'ports']) && has(r.to) && size(r.to) == 1 &&
-        dyn(r.to[0]).all(k, k == 'namespaceSelector') && has(r.to[0].namespaceSelector) &&
+        dyn(r.to[0]).all(k, k in ['namespaceSelector', 'podSelector']) && has(r.to[0].namespaceSelector) &&
         dyn(r.to[0].namespaceSelector).all(k, k == 'matchLabels') && has(r.to[0].namespaceSelector.matchLabels) &&
         size(r.to[0].namespaceSelector.matchLabels) == 1 &&
         'kubernetes.io/metadata.name' in r.to[0].namespaceSelector.matchLabels &&
         r.to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.kbsPeer[0] &&
+        (size(variables.kbsPeer) == 2 ? !has(r.to[0].podSelector) :
+        has(r.to[0].podSelector) && dyn(r.to[0].podSelector).all(k, k == 'matchLabels') &&
+        has(r.to[0].podSelector.matchLabels) &&
+        size(r.to[0].podSelector.matchLabels) == size(variables.kbsPeer) - 2 &&
+        r.to[0].podSelector.matchLabels.all(k, (k + '=' + r.to[0].podSelector.matchLabels[k]) in variables.kbsPeer)) &&
         has(r.ports) && size(r.ports) == 1 && dyn(r.ports[0]).all(k, k in ['port', 'protocol']) &&
         has(r.ports[0].port) && has(r.ports[0].protocol) && type(r.ports[0].port) == int &&
         r.ports[0].protocol + '/' + string(r.ports[0].port) == variables.kbsPeer[1]) ||
@@ -664,7 +673,7 @@ spec:
         t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b) &&
         r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
         type(p.port) == int && (p.protocol + '/' + string(p.port)) in b[1].split(',')))))
-      message: with hosted egress on, a template's egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range; a confidential per-environment template also names its KBS namespace on its one port
+      message: with hosted egress on, a template's egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range; a confidential per-environment template also names its KBS, by namespace or by namespace and its exact Pod labels, on its one port
     # The broker arm's privilege (cw-network and cw-security, 2026-11-16).
     # The Pod runs as the workspace user and group, with no extra groups or
     # sysctls, so a container that sets no securityContext is never root.
