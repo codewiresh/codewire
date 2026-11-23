@@ -21,7 +21,9 @@ mod kbs;
 /// image, and its device volume; the bind's isolation check admits them only
 /// while hosted egress is on.
 pub(crate) use hosted_egress::{
-    DEVNET_VOLUME as HOSTED_EGRESS_DEVNET_VOLUME, TUN_INIT_COMMAND as HOSTED_EGRESS_TUN_COMMAND,
+    DEVNET_VOLUME as HOSTED_EGRESS_DEVNET_VOLUME,
+    FENCE_REVISION_ANNOTATION as HOSTED_EGRESS_FENCE_REVISION_ANNOTATION,
+    TUN_INIT_COMMAND as HOSTED_EGRESS_TUN_COMMAND,
     TUN_INIT_CONTAINER as HOSTED_EGRESS_TUN_CONTAINER, devnet_mount as hosted_egress_devnet_mount,
     devnet_volume as hosted_egress_devnet_volume,
 };

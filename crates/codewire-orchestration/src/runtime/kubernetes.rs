@@ -103,9 +103,11 @@ impl KubernetesDriver {
         self.rendering.environment(intent)
     }
 
-    /// Refuses, before anything is patched, a start, repair or replacement
+    /// Refuses, before anything is patched, a resume, repair or replacement
     /// whose next Pod hosted egress would leave direct: the bound Sandbox was
-    /// made before the switch ([`crate::egress::pre_switch`], #4000).
+    /// made before the switch and no start has moved it yet
+    /// ([`crate::egress::pre_switch`], #4000). A start's bootstrap refresh
+    /// moves it first, so its resume passes.
     async fn check_made_before_hosted_egress(
         &self,
         placement: &Placement,
@@ -819,15 +821,6 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
-    async fn refuse_made_before_hosted_egress(
-        &self,
-        placement: &Placement,
-        environment_id: &str,
-    ) -> anyhow::Result<()> {
-        self.check_made_before_hosted_egress(placement, environment_id)
-            .await
-    }
-
     async fn resume_current(
         &self,
         placement: &Placement,
@@ -1472,13 +1465,13 @@ mod tests {
             .any(|r| r.starts_with("PATCH "))
     }
 
-    /// #4000: an environment made while hosted egress was off, then stopped,
-    /// is started with the switch on. Its Sandbox would build a direct Pod,
-    /// so the start, a repair and a re-pin are each refused with the reason,
-    /// before anything is patched. On main the start patched the Sandbox and
-    /// its Pod came up direct (Dev, 2026-11-21).
+    /// #4000: an environment made while hosted egress was off, with the switch
+    /// on. Its Sandbox would build a direct Pod, so a resume that no start's
+    /// bootstrap refresh moved first, a repair and a re-pin are each refused
+    /// with the reason, before anything is patched. Only a start moves it
+    /// (`sandbox::client`'s `egress_migration`).
     #[tokio::test]
-    async fn a_sandbox_made_before_hosted_egress_is_refused_its_start_before_any_patch() {
+    async fn a_sandbox_made_before_hosted_egress_is_refused_a_resume_or_repair_before_any_patch() {
         let placement = Placement::new("dev-sandboxes");
         let member = Incarnation {
             name: SANDBOX.into(),
@@ -1506,7 +1499,7 @@ mod tests {
                     .is_some(),
                 "{refusal:#}"
             );
-            assert!(format!("{refusal}").contains("recreate the environment"));
+            assert!(format!("{refusal}").contains("stop it and start it again"));
         }
         assert!(!patched(&requests), "{:?}", requests.lock().unwrap());
     }

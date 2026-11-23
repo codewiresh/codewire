@@ -54,6 +54,8 @@ pub(crate) struct FakeRuntimeDriver {
     pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
     pub placements: Mutex<Vec<Placement>>,
+    /// What reading an incarnation again answers; unscripted, it fails.
+    pub member_facts: Mutex<Option<MemberFacts>>,
     /// Each step of a capture's keep asked for, in order.
     pub snapshot_calls: Mutex<Vec<String>>,
     /// What waiting for the kept snapshot answers, its restore size.
@@ -330,7 +332,10 @@ impl RuntimeObservations for FakeRuntimeDriver {
         _member_name: &str,
     ) -> anyhow::Result<Option<MemberFacts>> {
         self.placements.lock().unwrap().push(placement.clone());
-        anyhow::bail!("not scripted")
+        match self.member_facts.lock().unwrap().clone() {
+            Some(facts) => Ok(Some(facts)),
+            None => anyhow::bail!("not scripted"),
+        }
     }
 
     async fn current_member_facts(

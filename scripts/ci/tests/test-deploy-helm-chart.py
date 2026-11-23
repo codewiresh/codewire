@@ -91,10 +91,12 @@ _SERVICES = {
     ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool"),
     ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool-member"),
     ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool-template"),
+    ("ValidatingAdmissionPolicy", "codewire-sandbox-broker-mode"),
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-image-cache"),
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool"),
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-member"),
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-template"),
+    ("ValidatingAdmissionPolicyBinding", "codewire-sandbox-broker-mode"),
 }
 # DERP, in every environment.
 _DERP = {

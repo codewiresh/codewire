@@ -8,8 +8,10 @@ It matches every SandboxTemplate orchestration writes: the pool's allowlist
 holds cw-pool- templates, and the broker arm holds every template while hosted
 egress is on, so per-environment templates are proved here too, and so is
 the one template excepted from it, a snapshot's clearing template. The member
-policy's broker-mode rules, and its hold on a VM Sandbox made before hosted
-egress, are proved on Sandboxes.
+policy's broker-mode rules, its hold on a VM Sandbox made before hosted
+egress, and a start's move of one to broker mode, held to the template
+policy's own broker checks, are proved on Sandboxes, and so is the policy that
+keeps every other identity from adding broker mode.
 Each case names the outcome it expects and, for a denial, the rule whose
 message must be the one reported: validations run in order and the first that
 fails is reported, so a case denied by another rule first does not count.
@@ -62,8 +64,17 @@ DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memor
 RUNTIME = "warm-pool members run under the commodity runtime"
 EGRESS_MODE = "CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container"
 KEEPS_BROKER = "orchestration never takes broker mode"
-ADDS_BROKER = "orchestration never adds broker mode to an existing Sandbox"
-PRE_SWITCH = "with hosted egress on, orchestration never starts or changes a Sandbox made before it"
+MOVE = "orchestration adds broker mode to an existing Sandbox only with hosted egress on"
+PRE_SWITCH = "with hosted egress on, orchestration only stops a Sandbox made before it"
+HOST = "with hosted egress on, a broker-mode Pod shares no host network"
+LABEL_ONLY = "orchestration never adds the broker label (codewire.sh/egress=broker) without the whole broker shape"
+CLASS = "orchestration's move of a Sandbox to broker mode keeps its runtime class"
+FENCE = "with hosted egress on, a broker-mode Pod carries the fence revision"
+WRITER = "only orchestration adds broker mode"
+POOL_MEMBER = "orchestration never creates or changes an unclaimed warm-pool member"
+WRITER_POLICY = "codewire-sandbox-broker-mode"
+OTHER = f"system:serviceaccount:{SERVER}:another-writer"
+ENVIRONMENT_ID = "8f0c3a52-6b1e-4f0e-9d3b-2a7c41e5d901"
 NO_PARAM = "failed to configure binding: no params found"
 
 OFF: dict[str, str] = {}
@@ -74,6 +85,8 @@ ON = {
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME": "public",
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE": "gateway",
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT": "10443",
+    # The goldens' fence revision.
+    "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION": "2",
 }
 # The key broker's Pods, as a deployment that names them sets kbsPeer (#4000).
 KBS_PODS = {"app": "kbs", "app.kubernetes.io/instance": "codewire-trustee", "app.kubernetes.io/name": "trustee"}
@@ -104,9 +117,9 @@ class Cluster:
         self.apply({"apiVersion": "v1", "kind": "ConfigMap",
                     "metadata": {"name": PARAM, "namespace": SERVER}, "data": values})
 
-    def admit(self, verb: str, template: dict) -> str | None:
+    def admit(self, verb: str, template: dict, identity: str = AS) -> str | None:
         """None when admitted, else the reported denial."""
-        result = self.kubectl(verb, "--dry-run=server", f"--as={AS}", "-f", "-", stdin=json.dumps(template))
+        result = self.kubectl(verb, "--dry-run=server", f"--as={identity}", "-f", "-", stdin=json.dumps(template))
         if result.returncode == 0:
             return None
         text = result.stderr.strip()
@@ -312,21 +325,25 @@ def sandbox(labels: dict[str, str], runtime_class: str | None = None, mode: str 
 
 
 def sandbox_change(cluster: "Cluster", before: dict, change: Callable[[dict], object],
-                   param: dict[str, str] | None = None) -> str | None:
-    """With the switch at `param`, create `before` as orchestration (CREATE
-    holds none of the update rules), apply `change` to the stored Sandbox and
-    update it as orchestration, then delete it. A missing param denies the
-    create too, so that case creates with the switch on and then removes it."""
+                   param: dict[str, str] | None = None, identity: str = AS,
+                   creator: str | None = AS) -> str | None:
+    """With the switch at `param`, create `before` as `creator` (CREATE holds
+    none of the update rules; None is the cluster's administrator), apply
+    `change` to the stored Sandbox and update it as `identity`, then delete
+    it. A missing param denies the create too, so that case creates with the
+    switch on and then removes it."""
     cluster.param(ON if param is None else param)
-    stored = cluster.kubectl("create", f"--as={AS}", "-f", "-", stdin=json.dumps(before))
+    create_as = [f"--as={creator}"] if creator else []
+    stored = cluster.kubectl("create", *create_as, "-f", "-", stdin=json.dumps(before))
     if stored.returncode != 0:
         return "create failed: " + stored.stderr.strip()
     if param is None:
         cluster.param(None)
-    live = json.loads(cluster.kubectl("get", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "-o", "json").stdout)
+    name = before["metadata"]["name"]
+    live = json.loads(cluster.kubectl("get", "sandbox", name, "-n", SANDBOXES, "-o", "json").stdout)
     change(live)
-    denial = cluster.admit("replace", live)
-    cluster.kubectl("delete", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "--wait=true")
+    denial = cluster.admit("replace", live, identity)
+    cluster.kubectl("delete", "sandbox", name, "-n", SANDBOXES, "--wait=true")
     return denial
 
 def without_tun(t: dict) -> None:
@@ -400,13 +417,18 @@ def mode(value: str) -> Callable[[dict], object]:
 def pre_switch_cases(cluster: "Cluster") -> list[bool]:
     """codewire#4000: with the switch on, a VM Sandbox made before it is
     only stopped, never started or changed, and broker mode is never added
-    to an existing Sandbox; only create renders it."""
+    by a label alone (move_cases has the whole move)."""
     plain = {"codewire.sh/type": "workspace"}
     broker_label = plain | {"codewire.sh/egress": "broker"}
     def repin(s: dict) -> None:
         s["spec"]["podTemplate"]["spec"]["containers"][0]["image"] = "busybox:1.37"
     def add_broker(s: dict) -> None:
         labels(s)["codewire.sh/egress"] = "broker"
+    # A broker-mode Sandbox as create makes it: the label with its fence
+    # revision and TUN init. The label alone is a hollow one, made before.
+    whole = sandbox(broker_label, "commodity", "Running")
+    whole["spec"]["podTemplate"]["metadata"]["annotations"] = {"codewire.sh/egress-fence-revision": ON["CODEWIRE_HOSTED_EGRESS_FENCE_REVISION"]}
+    whole["spec"]["podTemplate"]["spec"]["initContainers"] = [{"name": "hosted-egress-tun", "image": "busybox"}]
     results = []
     for name, before, change, param, expected in [
         ("on, Sandbox: a pre-switch commodity one started", sandbox(plain, "commodity", "Suspended"),
@@ -422,8 +444,9 @@ def pre_switch_cases(cluster: "Cluster") -> list[bool]:
          ON, PRE_SWITCH),
         ("on, Sandbox: a pre-switch commodity one stopped", sandbox(plain, "commodity", "Running"),
          mode("Suspended"), ON, None),
-        ("on, Sandbox: a broker commodity one re-pinned", sandbox(broker_label, "commodity", "Running"),
-         repin, ON, None),
+        ("on, Sandbox: a broker commodity one re-pinned", whole, repin, ON, None),
+        ("on, Sandbox: a hollow broker commodity one re-pinned", sandbox(broker_label, "commodity", "Running"),
+         repin, ON, PRE_SWITCH),
         ("off, Sandbox: a pre-switch commodity one started", sandbox(plain, "commodity", "Suspended"),
          mode("Running"), OFF, None),
         ("on, Sandbox: a pre-switch runc one started", sandbox(plain, "runc", "Suspended"),
@@ -435,13 +458,161 @@ def pre_switch_cases(cluster: "Cluster") -> list[bool]:
         ("on, Sandbox: a pre-switch one with no runtime class started", sandbox(plain, None, "Suspended"),
          mode("Running"), ON, None),
         ("on, Sandbox: only the broker label added to a running commodity one",
-         sandbox(plain, "commodity", "Running"), add_broker, ON, ADDS_BROKER),
-        ("on, Sandbox: only the broker label added to a stopped commodity one",
-         sandbox(plain, "commodity", "Suspended"), add_broker, ON, ADDS_BROKER),
+         sandbox(plain, "commodity", "Running"), add_broker, ON, LABEL_ONLY),
+        ("on, Sandbox: only the broker label added to a stopped commodity one bound to no environment",
+         sandbox(plain, "commodity", "Suspended"), add_broker, ON, LABEL_ONLY),
         ("missing param: a Sandbox update", sandbox(plain, "commodity", "Suspended"),
          mode("Running"), None, NO_PARAM),
     ]:
         results.append(check(name, sandbox_change(cluster, before, change, param), expected))
+    return results
+
+
+def moved_sandbox(template: dict, mode: str = "Suspended", bound: bool = True,
+                  pool_member: bool = False) -> dict:
+    """A Sandbox built from `template`'s pod template, as a create made it,
+    bound to an environment as a claim's adoption labels it."""
+    pod_template = copy.deepcopy(template["spec"]["podTemplate"])
+    if bound:
+        pod_template["metadata"].setdefault("labels", {})["codewire.sh/environment-id"] = ENVIRONMENT_ID
+    document = {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                "metadata": {"name": "broker-mode-proof", "namespace": SANDBOXES},
+                "spec": {"operatingMode": mode, "podTemplate": pod_template}}
+    if pool_member:
+        document["metadata"]["labels"] = {"agents.x-k8s.io/warm-pool-sandbox": "cw-pool-proof"}
+    return document
+
+
+TEMPLATE_REF_HASH = "agents.x-k8s.io/sandbox-template-ref-hash"
+CLAIM_UID_LABEL = "agents.x-k8s.io/claim-uid"
+
+
+def pool_born_sandbox(pool_template: dict) -> dict:
+    """A Sandbox adopted from a shared pool before the switch, as Dev has
+    them: named for its pool, built from the pool's direct template and
+    labelled with that template's reference, bound to an environment."""
+    document = moved_sandbox(pool_template)
+    document["metadata"]["name"] = pool_template["metadata"]["name"] + "-bhlxf"
+    document["metadata"]["labels"] = {TEMPLATE_REF_HASH: "3c6b81b3", "agents.x-k8s.io/launch-type": "warm"}
+    labels(document).update({TEMPLATE_REF_HASH: "3c6b81b3", CLAIM_UID_LABEL: "claim-proof"})
+    return document
+
+
+def hollow_sandbox(template: dict) -> dict:
+    """A bound, stopped Sandbox with the broker label and nothing else of the
+    broker shape: no fence revision annotation and no TUN init."""
+    document = moved_sandbox(template)
+    labels(document)["codewire.sh/egress"] = "broker"
+    document["spec"]["podTemplate"]["metadata"].get("annotations", {}).pop("codewire.sh/egress-fence-revision", None)
+    return document
+
+
+def onto_own_template(s: dict) -> None:
+    """The label that selects the moved Sandbox by its environment's own
+    template, on the Sandbox and its pod template."""
+    s["metadata"]["labels"][TEMPLATE_REF_HASH] = "7e41d0a2"
+    labels(s)[TEMPLATE_REF_HASH] = "7e41d0a2"
+
+
+def move_to(template: dict, *changes: Callable[[dict], object]) -> Callable[[dict], object]:
+    """A start's move: the stored Sandbox's pod template becomes `template`'s,
+    keeping the Sandbox's own labels, then `changes` apply to the Sandbox."""
+    def change(s: dict) -> None:
+        kept = s["spec"]["podTemplate"]["metadata"].get("labels", {})
+        s["spec"]["podTemplate"] = copy.deepcopy(template["spec"]["podTemplate"])
+        s["spec"]["podTemplate"]["metadata"]["labels"] = kept | s["spec"]["podTemplate"]["metadata"]["labels"]
+        for each in changes:
+            each(s)
+    return change
+
+
+def move_cases(cluster: "Cluster", env_today: dict, env_broker: dict, pool_today: dict) -> list[bool]:
+    """codewire#4000, cw-security's conditions on a start's move to broker
+    mode: only the whole broker shape, with the switch on, by orchestration,
+    to a Sandbox bound to an environment and suspended before and after; and
+    what it adds passes every broker check a created template does."""
+    def annotations(s: dict) -> dict:
+        return s["spec"]["podTemplate"]["metadata"]["annotations"]
+    whole = move_to(env_broker)
+    results = []
+    for name, before, change, param, identity, creator, expected in [
+        ("on, Sandbox: a stopped one moved to the whole broker shape",
+         moved_sandbox(env_today), whole, ON, AS, AS, None),
+        ("on, Sandbox: only the broker label added to a stopped bound one",
+         moved_sandbox(env_today), lambda s: labels(s).__setitem__("codewire.sh/egress", "broker"), ON, AS, AS,
+         LABEL_ONLY),
+        # Without its TUN init or its fence revision the label goes on alone.
+        ("on, Sandbox: a move without the TUN init", moved_sandbox(env_today), move_to(env_broker, without_tun),
+         ON, AS, AS, LABEL_ONLY),
+        ("on, Sandbox: a move without the resolver", moved_sandbox(env_today),
+         move_to(env_broker, setting(pod, "dnsPolicy", "ClusterFirst"), lambda s: pod(s).pop("dnsConfig")),
+         ON, AS, AS, RESOLVER),
+        ("on, Sandbox: the whole shape and a host path", moved_sandbox(env_today), move_to(env_broker, lambda s: pod(
+            s)["volumes"].append({"name": "host", "hostPath": {"path": "/"}})), ON, AS, AS, HOST),
+        ("on, Sandbox: the whole shape and the host network", moved_sandbox(env_today),
+         move_to(env_broker, setting(pod, "hostNetwork", True)), ON, AS, AS, HOST),
+        ("on, Sandbox: the whole shape and a privileged container", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: container(s, "workspace").__setitem__("securityContext", {"privileged": True})),
+         ON, AS, AS, PRIVILEGE),
+        ("on, Sandbox: the whole shape and an added capability", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: container(s, "workspace").__setitem__(
+                "securityContext", {"capabilities": {"add": ["NET_ADMIN"]}})), ON, AS, AS, PRIVILEGE),
+        ("on, Sandbox: the whole shape and an extra nameserver", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: pod(s)["dnsConfig"]["nameservers"].append("10.44.0.10")), ON, AS, AS, RESOLVER),
+        ("on, Sandbox: the whole shape under another fence revision", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: annotations(s).__setitem__("codewire.sh/egress-fence-revision", "1")),
+         ON, AS, AS, FENCE),
+        ("on, Sandbox: the whole shape with no fence revision", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: annotations(s).pop("codewire.sh/egress-fence-revision")), ON, AS, AS, LABEL_ONLY),
+        ("off, Sandbox: a stopped one moved to the whole broker shape",
+         moved_sandbox(env_today), whole, OFF, AS, AS, MOVE),
+        ("on, Sandbox: a running one moved", moved_sandbox(env_today, mode="Running"), whole, ON, AS, AS, MOVE),
+        ("on, Sandbox: a stopped one moved and started in one update",
+         moved_sandbox(env_today), move_to(env_broker, mode("Running")), ON, AS, AS, MOVE),
+        ("on, Sandbox: a stopped one bound to no environment moved",
+         moved_sandbox(env_today, bound=False), whole, ON, AS, AS, MOVE),
+        ("on, Sandbox: a move that changes the environment", moved_sandbox(env_today), move_to(
+            env_broker, lambda s: labels(s).__setitem__("codewire.sh/environment-id", "another")), ON, AS, AS, MOVE),
+        ("on, Sandbox: the move by another identity", moved_sandbox(env_today), whole, ON, OTHER, AS, WRITER),
+        ("off, Sandbox: broker mode added by another identity", moved_sandbox(env_today), whole, OFF, OTHER, AS,
+         WRITER),
+        ("on, Sandbox: an unclaimed pool member moved", moved_sandbox(env_today, pool_member=True), whole,
+         ON, AS, None, POOL_MEMBER),
+        ("on, Sandbox: another identity changes a broker one", moved_sandbox(env_broker),
+         lambda s: labels(s).__setitem__("x", "y"), ON, OTHER, AS, None),
+        # A pool-born Sandbox (every one on Dev) moves onto its environment's
+        # own template: the whole shape and the new template reference in
+        # one update, under its cw-pool- name.
+        ("on, Sandbox: a pool-born one moved onto its own template", pool_born_sandbox(pool_today),
+         move_to(env_broker, onto_own_template), ON, AS, AS, None),
+        ("on, Sandbox: a pool-born one given only the label and its own template reference",
+         pool_born_sandbox(pool_today), lambda s: (labels(s).__setitem__("codewire.sh/egress", "broker"),
+                                                   onto_own_template(s)), ON, AS, AS, LABEL_ONLY),
+        # The controller, holding the Sandbox to its Claim's new template
+        # before orchestration's patch, may not add the label on its own.
+        ("on, Sandbox: the controller giving a pool-born one its new template's labels",
+         pool_born_sandbox(pool_today), lambda s: (labels(s).__setitem__("codewire.sh/egress", "broker"),
+                                                   onto_own_template(s)), ON, OTHER, AS, WRITER),
+        ("on, Sandbox: a pool-born one moved while running", pool_born_sandbox(pool_today) | {"spec": dict(
+            pool_born_sandbox(pool_today)["spec"], operatingMode="Running")},
+         move_to(env_broker, onto_own_template), ON, AS, AS, MOVE),
+        # A move keeps the runtime class: never commodity to standard.
+        ("on, Sandbox: a commodity one moved to the whole shape under standard", moved_sandbox(env_today),
+         move_to(env_broker, setting(pod, "runtimeClassName", "standard")), ON, AS, AS, CLASS),
+        # A Sandbox with the broker label alone (no fence revision, no TUN
+        # init), as only another writer could leave it: made before the
+        # switch, so not started as it is, and moved under every broker check.
+        ("on, Sandbox: a hollow one started as it is", hollow_sandbox(env_today), mode("Running"),
+         ON, AS, None, PRE_SWITCH),
+        ("on, Sandbox: a hollow one moved to the whole shape and a host path", hollow_sandbox(env_today),
+         move_to(env_broker, lambda s: pod(s)["volumes"].append({"name": "host", "hostPath": {"path": "/"}})),
+         ON, AS, None, HOST),
+        ("on, Sandbox: a hollow one moved to the whole shape", hollow_sandbox(env_today), whole,
+         ON, AS, None, None),
+        ("on, Sandbox: another identity completing a hollow one's shape", hollow_sandbox(env_today), whole,
+         ON, OTHER, None, WRITER),
+    ]:
+        results.append(check(name, sandbox_change(cluster, before, change, param, identity, creator), expected))
     return results
 
 
@@ -678,12 +849,13 @@ def main() -> int:
          "metadata": {"name": "warm-pool-admission-proof"},
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
                      "name": "warm-pool-admission-proof"},
-         "subjects": [{"kind": "ServiceAccount", "name": "codewire-orchestration", "namespace": SERVER}]}]})
+         "subjects": [{"kind": "ServiceAccount", "name": "codewire-orchestration", "namespace": SERVER},
+                      {"kind": "ServiceAccount", "name": OTHER.split(":")[-1], "namespace": SERVER}]}]})
     policy, binding = rendered_policy()
     cluster.param(OFF)
     cluster.apply(policy)
     cluster.apply(binding)
-    for document in rendered_policy(MEMBER_POLICY):
+    for document in rendered_policy(MEMBER_POLICY) + rendered_policy(WRITER_POLICY):
         cluster.apply(document)
     today = load("warm-pool-sandboxtemplate.golden.json")
     broker = load("warm-pool-broker-sandboxtemplate.golden.json")
@@ -730,6 +902,8 @@ def main() -> int:
     ]:
         results.append(check(name, sandbox_update(cluster, before, after), expected))
     results.extend(pre_switch_cases(cluster))
+    results.extend(move_cases(cluster, pinned(load("identity-free-sandboxtemplate.golden.json")),
+                              pinned(load("environment-broker-sandboxtemplate.golden.json")), today))
     cluster.param(ON)
 
     # Kind overlays widen runtimeClasses with diagnostic runtimes; the TUN

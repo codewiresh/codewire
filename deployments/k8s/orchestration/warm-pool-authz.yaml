@@ -29,9 +29,11 @@
 #   registry digest, and names its own ingress controller;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
 #   the agent-sandbox controller writes those;
-# - a Sandbox's broker mode never comes off; with hosted egress on it is
-#   never added either, and orchestration never starts or changes a VM
-#   Sandbox made before it, only stops it;
+# - a Sandbox's broker mode never comes off. With hosted egress on,
+#   orchestration starts or changes a VM Sandbox made before it only by
+#   stopping it or, while it stays suspended and bound to an environment, by
+#   adding the whole broker shape in one update, held to the template
+#   policy's own broker checks; no other identity adds broker mode;
 # - with hosted egress on, a snapshot's clearing template, exactly as
 #   rendered, is the one template excepted from the broker shape.
 #
@@ -759,6 +761,28 @@ spec:
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
         (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
       message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
+    # The broker arm's host isolation (codewire#4000): a broker-mode Pod,
+    # per-environment or pooled, or a Sandbox moved to broker mode at its
+    # start, shares no host namespace and mounts no host path. The privilege
+    # rule above holds root and capabilities.
+    - expression: >-
+        !variables.hostedEgress || !variables.broker ||
+        (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
+        (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
+        (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
+        variables.volumes.all(v, !has(v.hostPath))
+      message: with hosted egress on, a broker-mode Pod shares no host network, PID or IPC namespace and mounts no host path
+    # The fence revision (infra#1822) a broker-mode Pod was made under is the
+    # one the switch names, so a Pod is never rendered for another fence.
+    - expression: >-
+        !variables.hostedEgress || !variables.broker ||
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data &&
+        size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0 &&
+        has(object.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&
+        object.spec.podTemplate.metadata.annotations['codewire.sh/egress-fence-revision'] ==
+        params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']
+      message: with hosted egress on, a broker-mode Pod carries the fence revision the switch names in codewire.sh/egress-fence-revision
     # codewire#5602: CODEWIRE_VM_EGRESS_MODE is how a `standard` Pod's runtime
     # chooses broker mode inside the VM or the guest's own network session,
     # and the binding listener waives the guest's self-check only for
@@ -844,6 +868,73 @@ spec:
     # the same way).
     - name: directRuntimeClasses
       expression: "['runc', '']"
+    # The whole broker shape, not the label alone: the label, the fence
+    # revision annotation, and the TUN init, which a standard VM has in its
+    # runtime instead. A Sandbox with the label but not the rest is made
+    # before the switch as far as these rules go. This must match
+    # hollow_broker_mode in crates/codewire-orchestration/src/sandbox/client/
+    # egress_migration.rs, whose test pins this text.
+    - name: wholeBroker
+      expression: >-
+        variables.broker &&
+        has(object.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&
+        has(object.spec.podTemplate.spec) &&
+        (has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(object.spec.podTemplate.spec.initContainers) &&
+        object.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+    - name: wasWholeBroker
+      expression: >-
+        variables.wasBroker &&
+        has(oldObject.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in oldObject.spec.podTemplate.metadata.annotations &&
+        has(oldObject.spec.podTemplate.spec) &&
+        (has(oldObject.spec.podTemplate.spec.runtimeClassName) && oldObject.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(oldObject.spec.podTemplate.spec.initContainers) &&
+        oldObject.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+    # codewire#4000: what a start's move to broker mode may add (the first
+    # rule's exception) is held to the template policy's own broker checks,
+    # so a Sandbox gets no shape a created template would be refused. These
+    # variables, but for clearing and addsBroker, and the validations that
+    # start with `!variables.addsBroker ||` are the template policy's,
+    # copied verbatim, each validation in its order; the one that reads a
+    # template's network policy is not, since a Sandbox has none (its Pod's
+    # policies are its template's, which the template policy holds, and its
+    # environment's). scripts/checks/repo_policy/orchestration_security.py
+    # holds the two equal.
+    - name: pod
+      expression: object.spec.podTemplate.spec
+    - name: containers
+      expression: >-
+        object.spec.podTemplate.spec.containers +
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : [])
+    - name: volumes
+      expression: "has(object.spec.podTemplate.spec.volumes) ? object.spec.podTemplate.spec.volumes : []"
+    - name: egressLabelled
+      expression: >-
+        has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels
+    - name: brokerRequiredEnvironment
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR', 'CODEWIRE_API_ADDR', 'CODEWIRE_MESH_ADDR', 'CODEWIRE_DERP_ADDR', 'CODEWIRE_CLUSTER_DNS_IP']"
+    - name: vmRuntimeClasses
+      expression: "['commodity', 'commodity-32g']"
+    - name: daemonRepositories
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'].matches('^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$') ?
+        [string(params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'])] : []
+    - name: environmentTemplate
+      expression: "!request.name.startsWith('cw-pool-')"
+    - name: standardEnvironment
+      expression: >-
+        variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
+        variables.pod.runtimeClassName == 'standard'
+    # A Sandbox is never a snapshot's clearing template.
+    - name: clearing
+      expression: "false"
+    - name: addsBroker
+      expression: >-
+        request.operation == 'UPDATE' && variables.wholeBroker && !variables.wasWholeBroker
   validations:
     - expression: >-
         !(has(object.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels) &&
@@ -871,28 +962,163 @@ spec:
         'codewire.sh/egress' in object.spec.podTemplate.metadata.labels &&
         object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
       message: orchestration never takes broker mode (codewire.sh/egress=broker) off a Sandbox's pod template
-    # codewire#4000: nor puts it on. The label alone, without the TUN init and
-    # the rest of the broker shape, would pass a direct template off as
-    # broker-mode, and the next rule would then start it. With the switch on,
-    # no update adds it, a stop included; only create renders it.
+    # codewire#4000 (private-docs designs/hosted-egress.md, "Production:
+    # migrate on start"): a start moves a Sandbox made before hosted egress to
+    # create's render, adding the whole broker shape in one update, to one
+    # without the label or with the label alone. Only with the switch on;
+    # only to a Sandbox bound to an environment, since an unclaimed pool
+    # member is replaced instead and the rules above keep orchestration off
+    # it; and only while it was and stays suspended, since orchestration
+    # writes the move only once the Sandbox has no Pod. What it adds is held
+    # by the validations below that start with `!variables.addsBroker ||`.
     - expression: >-
-        request.operation != 'UPDATE' || !variables.hostedEgress || !variables.broker || variables.wasBroker
-      message: orchestration never adds broker mode to an existing Sandbox; only create renders it
+        !variables.addsBroker || variables.hostedEgress &&
+        has(oldObject.spec.operatingMode) && oldObject.spec.operatingMode == 'Suspended' &&
+        has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' &&
+        has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) &&
+        has(oldObject.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/environment-id' in oldObject.spec.podTemplate.metadata.labels &&
+        size(oldObject.spec.podTemplate.metadata.labels['codewire.sh/environment-id']) > 0 &&
+        'codewire.sh/environment-id' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/environment-id'] ==
+        oldObject.spec.podTemplate.metadata.labels['codewire.sh/environment-id']
+      message: orchestration adds broker mode to an existing Sandbox only with hosted egress on, to one bound to an environment, while it is and stays suspended
+    # A move keeps the Sandbox's runtime class, none included: a class it was
+    # not made under would read its disks as another runtime's.
+    - expression: >-
+        !variables.addsBroker ||
+        has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.spec) &&
+        has(object.spec.podTemplate.spec.runtimeClassName) == has(oldObject.spec.podTemplate.spec.runtimeClassName) &&
+        (!has(object.spec.podTemplate.spec.runtimeClassName) ||
+        object.spec.podTemplate.spec.runtimeClassName == oldObject.spec.podTemplate.spec.runtimeClassName)
+      message: orchestration's move of a Sandbox to broker mode keeps its runtime class
+    # The label never goes on without the rest of the shape, so no update by
+    # orchestration leaves a Sandbox broker-mode in name only.
+    - expression: >-
+        request.operation != 'UPDATE' || !variables.broker || variables.wasBroker || variables.wholeBroker
+      message: orchestration never adds the broker label (codewire.sh/egress=broker) without the whole broker shape
     # codewire#4000 (private-docs designs/hosted-egress.md, "A Sandbox made
     # before the switch"): a start builds the Pod from the Sandbox's own pod
     # template, so a VM Sandbox made while the switch was off would come back
     # with direct egress. With the switch on, orchestration may only stop it
-    # (Suspended), so the environment can still be stopped and removed; it is
-    # recreated, never started. Either side of the update under a VM class
-    # counts, so a runtime class change cannot slip past; a Pod with no
-    # runtime class is not a VM. Off, nothing changes.
+    # (Suspended), or move it to broker mode (the rule above), and the moved
+    # Sandbox then starts as any broker-mode one. One with the label alone is
+    # made before it too (wholeBroker). Either side of the update
+    # under a VM class counts, so a runtime class change cannot slip past; a
+    # Pod with no runtime class is not a VM. Off, nothing changes.
     - expression: >-
-        request.operation != 'UPDATE' || !variables.hostedEgress || variables.broker ||
+        request.operation != 'UPDATE' || !variables.hostedEgress || variables.wholeBroker ||
         has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' ||
         ![object, oldObject].exists(s, has(s.spec.podTemplate) && has(s.spec.podTemplate.spec) &&
         has(s.spec.podTemplate.spec.runtimeClassName) &&
         !(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))
-      message: with hosted egress on, orchestration never starts or changes a Sandbox made before it; the environment must be recreated
+      message: with hosted egress on, orchestration only stops a Sandbox made before it, or moves it to broker mode while it is stopped
+    - expression: >-
+        !variables.addsBroker || (
+        variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled
+        )
+      message: with hosted egress on, every template orchestration writes is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
+    - expression: >-
+        !variables.addsBroker || (
+        !variables.hostedEgress || variables.clearing ||
+        variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0)))
+        )
+      message: with hosted egress on, the workspace container sets the egress stream and workspace binding addresses
+    - expression: >-
+        !variables.addsBroker || (
+        !variables.hostedEgress || variables.clearing ||
+        has(variables.pod.dnsPolicy) && variables.pod.dnsPolicy == 'None' &&
+        has(variables.pod.dnsConfig) && dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) &&
+        has(variables.pod.dnsConfig.nameservers) && variables.pod.dnsConfig.nameservers == ['192.0.2.1'] &&
+        (!has(variables.pod.dnsConfig.searches) || size(variables.pod.dnsConfig.searches) == 0)
+        )
+      message: with hosted egress on, the netstack resolver 192.0.2.1 is a template's only nameserver, with no search list or options
+    - expression: >-
+        !variables.addsBroker || (
+        !variables.hostedEgress || variables.clearing ||
+        has(variables.pod.securityContext) &&
+        has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser == 1000 &&
+        has(variables.pod.securityContext.runAsGroup) && variables.pod.securityContext.runAsGroup == 1000 &&
+        (!has(variables.pod.securityContext.supplementalGroups) || size(variables.pod.securityContext.supplementalGroups) == 0) &&
+        (!has(variables.pod.securityContext.sysctls) || size(variables.pod.securityContext.sysctls) == 0) &&
+        variables.containers.all(c, !has(c.securityContext) ||
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0) &&
+        (!has(c.securityContext.allowPrivilegeEscalation) || !c.securityContext.allowPrivilegeEscalation)) &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'hosted-egress-tun' && !has(c.restartPolicy) ||
+        c.name == 'mount-workspace' && !has(c.restartPolicy) &&
+        variables.pod.initContainers.map(i, i.name).indexOf('mount-workspace') <
+        variables.pod.initContainers.map(i, i.name).indexOf('hosted-egress-tun'))) &&
+        variables.pod.containers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'dind' && c.image.matches('^docker[.]io/library/docker:[0-9][0-9.]*-dind@sha256:[0-9a-f]{64}$'))
+        )
+      message: with hosted egress on, the Pod runs as 1000:1000 with no extra groups or sysctls; only hosted-egress-tun and mount-workspace (init containers, not sidecars, mount-workspace before the TUN init) and dind (the official DinD image) run as root; and no container adds a capability or sets allowPrivilegeEscalation true
+    - expression: >-
+        !variables.addsBroker || (
+        variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, c.name != 'hosted-egress-tun' ||
+        (variables.hostedEgress &&
+        has(variables.pod.runtimeClassName) &&
+        (variables.pod.runtimeClassName in variables.vmRuntimeClasses ||
+        variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') &&
+        has(c.command) && c.command == ['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000'] &&
+        !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeDevices) &&
+        has(c.volumeMounts) && size(c.volumeMounts) == 1 &&
+        dyn(c.volumeMounts[0]).all(k, k in ['name', 'mountPath']) &&
+        c.volumeMounts[0].name == 'egress-devnet' && c.volumeMounts[0].mountPath == '/dev/net' &&
+        c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') &&
+        c.image.split('@')[0] in variables.daemonRepositories &&
+        (variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image) ||
+        variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
+        variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
+        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) &&
+        variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+        )
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template but a standard one has it
+    - expression: >-
+        !variables.addsBroker || (
+        variables.volumes.all(v, v.name != 'egress-devnet' ||
+        variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
+        has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
+        has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') &&
+        variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
+        (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
+        dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
+        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
+        )
+      message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
+    - expression: >-
+        !variables.addsBroker || (
+        !variables.hostedEgress || !variables.broker ||
+        (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
+        (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
+        (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
+        variables.volumes.all(v, !has(v.hostPath))
+        )
+      message: with hosted egress on, a broker-mode Pod shares no host network, PID or IPC namespace and mounts no host path
+    - expression: >-
+        !variables.addsBroker || (
+        !variables.hostedEgress || !variables.broker ||
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data &&
+        size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0 &&
+        has(object.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&
+        object.spec.podTemplate.metadata.annotations['codewire.sh/egress-fence-revision'] ==
+        params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']
+        )
+      message: with hosted egress on, a broker-mode Pod carries the fence revision the switch names in codewire.sh/egress-fence-revision
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -913,3 +1139,78 @@ spec:
     parameterNotFoundAction: Deny
   # No mutable namespace selector: orchestration can update namespace labels.
   # The identity match bounds the policy; it follows the writer everywhere.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-sandbox-broker-mode
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["UPDATE"]
+        resources: ["sandboxes"]
+  # codewire#4000: only orchestration adds broker mode to an existing
+  # Sandbox, at its start, under the member policy's checks. Every other
+  # writer, the sandbox controller and an administrator included, is held
+  # here; the controller makes a Sandbox broker-mode only by creating it from
+  # a broker-mode template.
+  matchConditions:
+    - name: not-orchestration
+      expression: "!request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')"
+  # The member policy's own, verbatim
+  # (scripts/checks/repo_policy/orchestration_security.py holds them equal):
+  # neither the label nor the rest of the shape is added by anyone else.
+  variables:
+    - name: broker
+      expression: >-
+        has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) &&
+        has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: wasBroker
+      expression: >-
+        has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) &&
+        has(oldObject.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels &&
+        oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: wholeBroker
+      expression: >-
+        variables.broker &&
+        has(object.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&
+        has(object.spec.podTemplate.spec) &&
+        (has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(object.spec.podTemplate.spec.initContainers) &&
+        object.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+    - name: wasWholeBroker
+      expression: >-
+        variables.wasBroker &&
+        has(oldObject.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in oldObject.spec.podTemplate.metadata.annotations &&
+        has(oldObject.spec.podTemplate.spec) &&
+        (has(oldObject.spec.podTemplate.spec.runtimeClassName) && oldObject.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(oldObject.spec.podTemplate.spec.initContainers) &&
+        oldObject.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+  validations:
+    - expression: >-
+        (variables.wasBroker || !variables.broker) && (variables.wasWholeBroker || !variables.wholeBroker)
+      message: only orchestration adds broker mode (codewire.sh/egress=broker) to an existing Sandbox
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-sandbox-broker-mode
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+spec:
+  policyName: codewire-sandbox-broker-mode
+  validationActions: [Deny]
+  # No mutable namespace selector: the identity match bounds the policy.

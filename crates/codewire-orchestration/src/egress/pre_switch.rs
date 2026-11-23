@@ -2,32 +2,84 @@
 //! `designs/hosted-egress.md`, "A Sandbox made before the switch").
 //!
 //! A start, a repair and a Pod replacement build the next Pod from the
-//! Sandbox's own pod template, and nothing renders its egress mode again. So
-//! with hosted egress on, a Sandbox on a VM runtime whose pod template lacks
-//! broker mode is refused before anything changes, and a Pod built from one
-//! is refused its bind. Only a VM runtime is broker-mode under the switch, as
-//! the renderer decides; a runc Pod, or one with no runtime class, never is.
-//! Neither runs in a shared sandbox namespace anyway: infra's Kyverno policy
-//! `codewire-shared-sandbox-runtime-security` refuses both there (its rule
-//! `enforce-shared-sandbox-runtime-class`), so the exception admits nothing a
-//! hosted Sandbox can be.
+//! Sandbox's own pod template, and nothing else renders its egress mode again.
+//! So with hosted egress on, a start moves such a Sandbox to create's render
+//! while it has no Pod (`sandbox::client`'s `egress_migration`), and
+//! everything else that would build a Pod from it, a repair or a replacement
+//! of a running one, is refused before anything changes; a Pod built from one
+//! is refused its bind. A missing broker shape is never itself a reason to
+//! stop or restart a running Sandbox. Only a VM runtime is broker-mode under
+//! the switch, as the renderer decides; a runc Pod, or one with no runtime
+//! class, never is. Neither runs in a shared sandbox namespace anyway:
+//! infra's Kyverno policy `codewire-shared-sandbox-runtime-security` refuses
+//! both there (its rule `enforce-shared-sandbox-runtime-class`), so the
+//! exception admits nothing a hosted Sandbox can be.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
 use crate::sandbox::template::RUNTIME_CLASS_RUNC;
 
-/// A start, repair or replacement refused because the Sandbox was made
-/// before hosted egress. `sandbox` is for the operator log; the message is
-/// what the user reads.
+/// A repair or replacement refused because the Sandbox was made before
+/// hosted egress and still runs direct. `sandbox` is for the operator log;
+/// the message is what the user reads.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "this environment was made before hosted egress was turned on, so it can't start with it on; recreate the environment"
-)]
+#[error("this environment moves to hosted egress at its next start: stop it and start it again")]
 pub struct MadeBeforeHostedEgress {
     pub sandbox: String,
+}
+
+/// What became of one start's move of a Sandbox made before hosted egress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveOutcome {
+    /// The Sandbox now has create's render.
+    Moved,
+    /// A precondition did not hold (a Pod, no suspension, not claimed, a
+    /// measured runtime), so nothing was written.
+    Refused,
+    /// The patch was sent and not admitted, or did not converge.
+    NotAdmitted,
+}
+
+impl MoveOutcome {
+    /// The outcome as a metric label: a closed set, never an identifier.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Moved => "moved",
+            Self::Refused => "refused",
+            Self::NotAdmitted => "not_admitted",
+        }
+    }
+}
+
+static MOVES: OnceLock<IntCounterVec> = OnceLock::new();
+
+fn moves_metric() -> &'static IntCounterVec {
+    MOVES.get_or_init(|| {
+        register_int_counter_vec!(
+            Opts::new(
+                "codewire_egress_sandbox_moves_total",
+                "Sandboxes made before hosted egress that a start moved to it, or tried to, by outcome."
+            ),
+            &["outcome"]
+        )
+        .expect("egress move metric registration must be unique")
+    })
+}
+
+/// Count one start's move of a Sandbox made before hosted egress.
+pub fn count_move(outcome: MoveOutcome) {
+    moves_metric().with_label_values(&[outcome.label()]).inc();
+}
+
+/// How many moves ended in `outcome` since this process started.
+#[cfg(test)]
+pub(crate) fn moves(outcome: MoveOutcome) -> u64 {
+    moves_metric().with_label_values(&[outcome.label()]).get()
 }
 
 /// Whether a Pod on `runtime_class_name` is broker-mode under the switch.
@@ -44,7 +96,7 @@ fn made_before(enabled: bool, pod_spec: Option<&Value>, labelled: bool) -> bool 
 }
 
 /// Refuses a Sandbox, before any patch, whose next Pod would run direct
-/// under a switched-on deployment.
+/// under a switched-on deployment: one a start moves to hosted egress first.
 pub fn check_sandbox(
     enabled: bool,
     name: &str,

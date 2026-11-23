@@ -1748,9 +1748,9 @@ Issue: #4000.
   - a Sandbox whose daemon speaks a version of the egress stream that its
     node's `cw-egress` does not accept, as when a release reaches the
     daemon before `cw-egress`;
-  - an environment made while hosted egress was off, then stopped and
-    started, repaired, and stopped and removed after the switch went on;
-    and its running Pod deleted, so the controller rebuilds it;
+  - an environment made while hosted egress was off, left running when the
+    switch went on, then repaired, then stopped and started; a second one
+    whose running Pod is deleted, so the controller rebuilds it;
   - with the switch on, a confidential environment created, one created
     from a snapshot, and a stopped one started and then removed; the same
     with the switch off.
@@ -1792,11 +1792,16 @@ Issue: #4000.
     absent. It still reads so after its stream has ended. Applying the
     lockdown and starting the Sandbox again clears it (#5068; not yet
     observed);
-  - an environment made before hosted egress, with the switch on: its start
-    and its repair fail with the reason that it was made before hosted
-    egress and must be recreated. Its Sandbox is unchanged, no Pod starts
-    from it, and its stop and removal work. A Pod the controller rebuilt from
-    it is refused its bind, so its daemon never serves (not yet observed);
+  - an environment made before hosted egress, with the switch on: while it
+    runs, nothing stops or restarts it for its egress, and its repair fails
+    with the reason that it must be stopped and started. Its start then
+    moves it to hosted egress: its Sandbox's pod template becomes what a
+    create renders for it, in one change made while it has no Pod, and its
+    workspace keeps its files. The new Pod passes the self-check and the
+    lockdown check, reaches an allowed host through `cw-egress`, and is
+    refused a host its policy doesn't allow. A Pod the controller rebuilt
+    from a Sandbox not yet moved is refused its bind, so its daemon never
+    serves (not yet observed);
   - with the switch on, a confidential create, a confidential create from a
     snapshot, and a stopped confidential environment's start each fail at
     once with "Confidential sandboxes are unavailable on this deployment

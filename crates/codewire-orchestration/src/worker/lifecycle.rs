@@ -531,14 +531,8 @@ pub(super) async fn restart_workspace_bootstrap(
 ) -> anyhow::Result<()> {
     let runtime = ctx.require_runtime()?;
     let claim = workspace_claim(env, backend);
-    // Before anything changes: a Sandbox made before hosted egress is never
-    // started under it (#4000).
-    authority
-        .run_while_authoritative_for_states(
-            states,
-            runtime.refuse_made_before_hosted_egress(&claim.placement, &env.id),
-        )
-        .await?;
+    // A Sandbox made before hosted egress moves to it in the bootstrap
+    // refresh below, once it has no Pod (#4000).
     let rendering =
         super::create::authorize_confidential_runtime(ctx, intent.clone(), authority, states)
             .await?;

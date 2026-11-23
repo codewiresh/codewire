@@ -343,17 +343,168 @@ SANDBOX_PRE_SWITCH = [
     "- expression: has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) && "
     "has(object.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in object.spec.podTemplate.metadata.labels && "
     "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker' name: broker",
-    "request.operation != 'UPDATE' || !variables.hostedEgress || variables.broker || "
+    # A Sandbox with the broker label alone is made before it too.
+    "request.operation != 'UPDATE' || !variables.hostedEgress || variables.wholeBroker || "
     "has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' || "
     "![object, oldObject].exists(s, has(s.spec.podTemplate) && has(s.spec.podTemplate.spec) && "
     "has(s.spec.podTemplate.spec.runtimeClassName) && "
     "!(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))",
-    # Nor is broker mode ever added to an existing Sandbox, a stop included.
     "- expression: has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) && "
     "has(oldObject.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels && "
     "oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker' name: wasBroker",
-    "request.operation != 'UPDATE' || !variables.hostedEgress || !variables.broker || variables.wasBroker message:",
+    # Broker mode is added to an existing Sandbox only by a start's move to
+    # it: with the switch on, to a Sandbox bound to an environment, while it
+    # was and stays suspended. What it adds is held by the template policy's
+    # broker checks (member_broker_shape_violations).
+    "- expression: '!variables.addsBroker || variables.hostedEgress && "
+    "has(oldObject.spec.operatingMode) && oldObject.spec.operatingMode == 'Suspended' && "
+    "has(object.spec.operatingMode) && object.spec.operatingMode == 'Suspended' && "
+    "has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) && "
+    "has(oldObject.spec.podTemplate.metadata.labels) && "
+    "'codewire.sh/environment-id' in oldObject.spec.podTemplate.metadata.labels && "
+    "size(oldObject.spec.podTemplate.metadata.labels['codewire.sh/environment-id']) > 0 && "
+    "'codewire.sh/environment-id' in object.spec.podTemplate.metadata.labels && "
+    "object.spec.podTemplate.metadata.labels['codewire.sh/environment-id'] == "
+    "oldObject.spec.podTemplate.metadata.labels['codewire.sh/environment-id']' message:",
+    # A move keeps the Sandbox's runtime class, none included.
+    "- expression: '!variables.addsBroker || has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.spec) && "
+    "has(object.spec.podTemplate.spec.runtimeClassName) == has(oldObject.spec.podTemplate.spec.runtimeClassName) && "
+    "(!has(object.spec.podTemplate.spec.runtimeClassName) || "
+    "object.spec.podTemplate.spec.runtimeClassName == oldObject.spec.podTemplate.spec.runtimeClassName)' message:",
+    # The label never goes on without the rest of the shape.
+    "request.operation != 'UPDATE' || !variables.broker || variables.wasBroker || variables.wholeBroker message:",
 ]
+# codewire#4000: every identity but orchestration's is refused broker mode
+# added to an existing Sandbox; the controller makes one only by creating it.
+SANDBOX_BROKER_WRITER_POLICY = "codewire-sandbox-broker-mode"
+SANDBOX_BROKER_WRITER = [
+    "operations: - UPDATE resources: - sandboxes",
+    "- expression: '!request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')' "
+    "name: not-orchestration",
+    "validations: - expression: (variables.wasBroker || !variables.broker) && "
+    "(variables.wasWholeBroker || !variables.wholeBroker) message:",
+]
+# The writer policy's variables are the member policy's, verbatim.
+SANDBOX_BROKER_WRITER_VARIABLES = ("broker", "wasBroker", "wholeBroker", "wasWholeBroker")
+# codewire#4000, cw-security's first condition on the move to broker mode: the
+# member policy holds what a move adds to every check the template policy's
+# broker arm applies, from one source. Its validations that start with this
+# gate are the template policy's broker rules, each whole, in order: every
+# template rule that reads the switch, but for the pool's own (gated on the
+# name) and the one that reads a template's network policy, which a Sandbox
+# has none of. Every variable those rules read is the template's, verbatim,
+# but for these, which a Sandbox decides for itself; its `broker` reads the
+# same label (SANDBOX_PRE_SWITCH).
+MEMBER_BROKER_SHAPE_GATE = "!variables.addsBroker || ( "
+MEMBER_BROKER_SHAPE_RULES = 8
+# The whole broker shape: the label, the fence revision annotation, and the
+# TUN init or a standard VM. It must match hollow_broker_mode
+# (crates/codewire-orchestration/src/sandbox/client/egress_migration.rs),
+# whose test pins the same text.
+def whole_broker(side: str, label: str) -> str:
+    return (f"variables.{label} && has({side}.spec.podTemplate.metadata.annotations) && "
+            f"'codewire.sh/egress-fence-revision' in {side}.spec.podTemplate.metadata.annotations && "
+            f"has({side}.spec.podTemplate.spec) && (has({side}.spec.podTemplate.spec.runtimeClassName) && "
+            f"{side}.spec.podTemplate.spec.runtimeClassName == 'standard' || "
+            f"has({side}.spec.podTemplate.spec.initContainers) && "
+            f"{side}.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))")
+
+
+MEMBER_OWN_VARIABLES = {
+    "clearing": "false",
+    "wholeBroker": whole_broker("object", "broker"),
+    "wasWholeBroker": whole_broker("oldObject", "wasBroker"),
+    "addsBroker": "request.operation == 'UPDATE' && variables.wholeBroker && !variables.wasWholeBroker",
+}
+
+
+def yaml_scalar(lines: list[str]) -> str:
+    """One scalar as kustomize renders it: plain, quoted or a block, folded
+    across its lines."""
+    first = lines[0].strip()
+    if first in ("|", "|-", ">", ">-"):
+        return "\n".join(line.strip() for line in lines[1:])
+    text = " ".join(line.strip() for line in lines)
+    if len(text) > 1 and text[0] == text[-1] == "'":
+        return text[1:-1].replace("''", "'")
+    if len(text) > 1 and text[0] == text[-1] == '"':
+        return json.loads(text)
+    return text
+
+
+def policy_items(policy: str, field: str) -> list[dict[str, str]]:
+    """A policy's `validations` or `variables`, each value compacted, as
+    kustomize renders it or as its source writes it."""
+    lines = [line for line in top_level_block(policy, "spec").split("\n") if not line.lstrip().startswith("#")]
+    if f"  {field}:" not in lines:
+        return []
+    rest = lines[lines.index(f"  {field}:") + 1 :]
+    dash = next((line[: len(line) - len(line.lstrip())] for line in rest if line.lstrip().startswith("- ")), "")
+    if dash not in ("  ", "    "):
+        return []
+    key_indent = dash + "  "
+    items: list[dict[str, list[str]]] = []
+    key = ""
+    for line in rest:
+        indent = len(line) - len(line.lstrip())
+        # A line out of the list's indentation, or at it but not an item,
+        # ends the list.
+        if line.strip() and (indent < len(dash) or indent == len(dash) and not line.lstrip().startswith("- ")):
+            break
+        match = re.match(rf"^(?:{re.escape(dash)}- |{re.escape(key_indent)})([A-Za-z]+):(?: (.*))?$", line)
+        if match and not line.startswith(key_indent + " "):
+            if line.startswith(dash + "- "):
+                items.append({})
+            key = match.group(1)
+            items[-1][key] = [match.group(2) or ""]
+        elif items and line.strip():
+            items[-1][key].append(line)
+    return [{key: compact(yaml_scalar(value)) for key, value in item.items()} for item in items]
+
+
+def template_broker_rules(template: str) -> list[dict[str, str]]:
+    return [
+        item for item in policy_items(template, "validations")
+        if not item["expression"].startswith("variables.environmentTemplate ||")
+        and "variables.hostedEgress" in item["expression"]
+        and "object.spec.networkPolicy" not in item["expression"]
+    ]
+
+
+def member_broker_shape_violations(template: str, member: str) -> list[str]:
+    output: list[str] = []
+    rules = template_broker_rules(template)
+    if len(rules) != MEMBER_BROKER_SHAPE_RULES:
+        output.append(f"the template policy has {len(rules)} broker rules a move to broker mode is held to, "
+                      f"not {MEMBER_BROKER_SHAPE_RULES}")
+    expected = [(MEMBER_BROKER_SHAPE_GATE + rule["expression"] + " )", rule.get("message"))
+                for rule in rules]
+    gated = [(item["expression"], item.get("message")) for item in policy_items(member, "validations")
+             if item["expression"].startswith(MEMBER_BROKER_SHAPE_GATE.strip())]
+    if gated != expected:
+        difference = next((pair for pair in zip(gated, expected) if pair[0] != pair[1]), None)
+        output.append(f"{WARM_POOL_MEMBER_POLICY} must hold a move to broker mode to the template policy's "
+                      f"{len(expected)} broker rules, each whole and in order, behind {MEMBER_BROKER_SHAPE_GATE.strip()}; "
+                      f"it has {len(gated)}" + (f", first differing: {difference[0][0]}" if difference else ""))
+    template_variables = {item["name"]: item["expression"] for item in policy_items(template, "variables")}
+    member_variables = {item["name"]: item["expression"] for item in policy_items(member, "variables")}
+    read: set[str] = set()
+    pending = [rule["expression"] for rule in rules]
+    while pending:
+        for name in re.findall(r"variables\.([A-Za-z]+)", pending.pop()):
+            if name not in read:
+                read.add(name)
+                if name not in MEMBER_OWN_VARIABLES and name != "broker":
+                    pending.append(template_variables.get(name, ""))
+    for name in sorted(read - set(MEMBER_OWN_VARIABLES) - {"broker"}):
+        if member_variables.get(name) != template_variables.get(name):
+            output.append(f"{WARM_POOL_MEMBER_POLICY} variable {name} must be the template policy's, verbatim: "
+                          f"{member_variables.get(name)}")
+    for name, expression in MEMBER_OWN_VARIABLES.items():
+        if member_variables.get(name) != expression:
+            output.append(f"{WARM_POOL_MEMBER_POLICY} variable {name} must be exactly {expression}: "
+                          f"{member_variables.get(name)}")
+    return output
 # A snapshot's clearing template, exactly as rendered, is excepted from the
 # broker arm's shape (codewire#4000): the arm itself, the workspace addresses,
 # the resolver, the privilege rule and the TUN init's and its volume's presence.
@@ -371,6 +522,19 @@ SNAPSHOT_CLEARING = (
 )
 SNAPSHOT_CLEARING_USES = 6
 HOSTED_EGRESS_FRAGMENTS = [
+    # codewire#4000: a broker-mode Pod shares no host namespace, mounts no host
+    # path and carries the switch's fence revision; a Sandbox's move to broker
+    # mode is held to the same rules (member_broker_shape_violations).
+    "!variables.hostedEgress || !variables.broker || (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) && "
+    "(!has(variables.pod.hostPID) || !variables.pod.hostPID) && (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) && "
+    "variables.volumes.all(v, !has(v.hostPath))",
+    "!variables.hostedEgress || !variables.broker || has(params.data) && "
+    "'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data && "
+    "size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0 && "
+    "has(object.spec.podTemplate.metadata.annotations) && "
+    "'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations && "
+    "object.spec.podTemplate.metadata.annotations['codewire.sh/egress-fence-revision'] == "
+    "params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']",
     "paramKind: apiVersion: v1 kind: ConfigMap",
     f"'{HOSTED_EGRESS_SWITCH}' in params.data && params.data['{HOSTED_EGRESS_SWITCH}'] == 'true'",
     "'codewire.sh/egress' in object.spec.podTemplate.metadata.labels",
@@ -587,6 +751,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             SANDBOX_KEEPS_BROKER_MODE,
             *SANDBOX_PRE_SWITCH,
         ],
+        SANDBOX_BROKER_WRITER_POLICY: SANDBOX_BROKER_WRITER,
     }
     for policy_name, required in required_by_policy.items():
         policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
@@ -660,6 +825,18 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                     output.append(f"{label}: {policy_name} binding must never be pruned")
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
                 output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
+    template = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY)
+    member = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", WARM_POOL_MEMBER_POLICY)
+    if len(template) == 1 and len(member) == 1:
+        output.extend(f"{label}: {violation}" for violation in member_broker_shape_violations(template[0], member[0]))
+    writer = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", SANDBOX_BROKER_WRITER_POLICY)
+    if len(writer) == 1 and len(member) == 1:
+        ours = {item["name"]: item["expression"] for item in policy_items(writer[0], "variables")}
+        theirs = {item["name"]: item["expression"] for item in policy_items(member[0], "variables")}
+        for name in SANDBOX_BROKER_WRITER_VARIABLES:
+            if name not in theirs or ours.get(name) != theirs[name]:
+                output.append(f"{label}: {SANDBOX_BROKER_WRITER_POLICY} variable {name} must be "
+                              f"{WARM_POOL_MEMBER_POLICY}'s, verbatim: {ours.get(name)}")
     assert_hosted_egress_param(resources, target, label, output)
     output.extend(orchestration_configmap_writes(resources, label))
 
@@ -1936,11 +2113,47 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'\n", "true\n"),
             # codewire#4000: with the switch on, a pre-switch VM Sandbox only stops.
             (WARM_POOL_MEMBER_POLICY, "|| !variables.hostedEgress ||", "|| true ||"),
-            (WARM_POOL_MEMBER_POLICY, "|| variables.broker ||", "|| true ||"),
+            (WARM_POOL_MEMBER_POLICY, "|| variables.wholeBroker ||", "|| variables.broker ||"),
             (WARM_POOL_MEMBER_POLICY, "object.spec.operatingMode == 'Suspended'", "object.spec.operatingMode != ''"),
             (WARM_POOL_MEMBER_POLICY, "[object, oldObject].exists(s,", "[object].exists(s,"),
-            (WARM_POOL_MEMBER_POLICY, "|| !variables.broker || variables.wasBroker", "|| true"),
-            (WARM_POOL_MEMBER_POLICY, "!variables.hostedEgress || !variables.broker ||", "!variables.hostedEgress || true ||"),
+            # codewire#4000: broker mode is added only by a start's move: with
+            # the switch on, to a Sandbox bound to an environment, suspended
+            # before and after.
+            (WARM_POOL_MEMBER_POLICY, "!variables.addsBroker || variables.hostedEgress &&", "true ||"),
+            (WARM_POOL_MEMBER_POLICY, "!variables.addsBroker || variables.hostedEgress && has(oldObject.spec.operatingMode)",
+             "!variables.addsBroker || has(oldObject.spec.operatingMode)"),
+            # ... it keeps the runtime class ...
+            (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.spec.runtimeClassName == oldObject.spec.podTemplate.spec.runtimeClassName",
+             "true"),
+            (WARM_POOL_MEMBER_POLICY, "has(object.spec.podTemplate.spec.runtimeClassName) == has(oldObject.spec.podTemplate.spec.runtimeClassName) &&",
+             ""),
+            # ... the label never goes on alone ...
+            (WARM_POOL_MEMBER_POLICY, "|| variables.wasBroker || variables.wholeBroker", "|| true"),
+            # ... and broker mode means the whole shape: the fence revision
+            # and the TUN init (or a standard VM), not the label alone.
+            (WARM_POOL_MEMBER_POLICY, "'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&", ""),
+            (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun')", "true"),
+            (WARM_POOL_MEMBER_POLICY, "oldObject.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun')", "true"),
+            (WARM_POOL_MEMBER_POLICY, "oldObject.spec.operatingMode == 'Suspended' &&", "true &&"),
+            (WARM_POOL_MEMBER_POLICY, "size(oldObject.spec.podTemplate.metadata.labels['codewire.sh/environment-id']) > 0", "true"),
+            (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.metadata.labels['codewire.sh/environment-id'] ==", "true ||"),
+            # ... and what it adds is the template policy's broker shape, each
+            # rule whole, from the same variables.
+            (WARM_POOL_MEMBER_POLICY, "!variables.addsBroker || (", "true || ("),
+            (WARM_POOL_MEMBER_POLICY, "&& !variables.wasWholeBroker", ""),
+            (WARM_POOL_MEMBER_POLICY, "variables.wholeBroker && !variables.wasWholeBroker", "variables.broker && !variables.wasBroker"),
+            (WARM_POOL_MEMBER_POLICY, "variables.volumes.all(v, !has(v.hostPath))", "true"),
+            (WARM_POOL_MEMBER_POLICY, "variables.pod.dnsConfig.nameservers == ['192.0.2.1']", "true"),
+            (WARM_POOL_MEMBER_POLICY, "variables.pod.runtimeClassName == 'standard'", "true"),
+            (WARM_POOL_MEMBER_POLICY, "expression: \"false\"", "expression: \"true\""),
+            (WARM_POOL_TEMPLATE_POLICY, "variables.volumes.all(v, !has(v.hostPath))", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "(!has(variables.pod.hostPID) || !variables.pod.hostPID) &&", ""),
+            (WARM_POOL_TEMPLATE_POLICY, "object.spec.podTemplate.metadata.annotations['codewire.sh/egress-fence-revision'] ==", "true ||"),
+            # No other identity adds broker mode to an existing Sandbox.
+            (SANDBOX_BROKER_WRITER_POLICY, "!request.userInfo.username.matches(", "request.userInfo.username.matches("),
+            (SANDBOX_BROKER_WRITER_POLICY, "(variables.wasWholeBroker || !variables.wholeBroker)", "true"),
+            (SANDBOX_BROKER_WRITER_POLICY, "(variables.wasBroker || !variables.broker)", "true"),
+            (SANDBOX_BROKER_WRITER_POLICY, "object.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun')", "true"),
             # The VM test stays an exclusion: back to an allow-list, or a
             # VM class counted as direct, is refused.
             (WARM_POOL_MEMBER_POLICY, "!(s.spec.podTemplate.spec.runtimeClassName in variables.directRuntimeClasses))",
@@ -1954,7 +2167,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",
                              "spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n",
                              WARM_POOL_POLICY)
-        for missing in [WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY]:
+        for missing in [WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY, SANDBOX_BROKER_WRITER_POLICY]:
             expect_rejected(f"missing {missing}", lambda resources, missing=missing: [
                 resource for resource in resources
                 if metadata_field(resource, "name") != missing

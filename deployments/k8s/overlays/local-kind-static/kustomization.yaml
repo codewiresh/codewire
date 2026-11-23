@@ -293,7 +293,7 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(image-cache|warm-pool|warm-pool-template|warm-pool-member)
+      name: codewire-(orchestration-(image-cache|warm-pool|warm-pool-template|warm-pool-member)|sandbox-broker-mode)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

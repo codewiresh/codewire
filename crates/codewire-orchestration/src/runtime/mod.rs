@@ -492,18 +492,6 @@ pub trait RuntimeLifecycle: Send + Sync {
         support_image: &str,
     ) -> anyhow::Result<()>;
 
-    /// Refuses, before a start changes anything, an environment whose bound
-    /// Sandbox was made before hosted egress was turned on: its next Pod
-    /// would run direct (#4000, [`crate::egress::pre_switch`]). A driver
-    /// without hosted egress has nothing to refuse.
-    async fn refuse_made_before_hosted_egress(
-        &self,
-        _placement: &Placement,
-        _environment_id: &str,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     /// Replace exactly this incarnation, re-pinned to `support_image`. It never
     /// touches a newer one.
     async fn replace_member(
@@ -556,7 +544,8 @@ pub trait RuntimeLifecycle: Send + Sync {
     ) -> anyhow::Result<()>;
 
     /// Bring the claim's suspended runtime to `intent` before it resumes. It
-    /// never changes a running incarnation. A measured runtime takes the
+    /// never changes a running incarnation. With hosted egress on, a Sandbox
+    /// made before it moves to `intent`'s broker-mode render here (#4000). A measured runtime takes the
     /// SHA-256 of its authorized init data, as
     /// [`publish_measured_runtime`](Self::publish_measured_runtime) does; any
     /// other takes none.

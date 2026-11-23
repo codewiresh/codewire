@@ -434,6 +434,78 @@ fn environment_binding(generation: i64, digest: Option<&str>, clients: &str) -> 
     }
 }
 
+/// #4000: a missing broker shape is never itself a reason to restart. The
+/// stuck sweep's running bootstrap check asks only whether the bound Pod's
+/// bootstrap is current, so a running direct Pod on a VM runtime, which hosted
+/// egress would refuse a new bind, reads current while its binding is, and
+/// keeps running until a start moves its Sandbox.
+#[tokio::test]
+async fn a_running_direct_sandbox_is_never_restarted_for_its_egress() {
+    let none = codewire_access::ManagedCredentialClients::default();
+    let mut pod = legacy_pod(Vec::new());
+    pod.metadata.name = Some("workspace-pod".into());
+    let spec = pod.spec.as_mut().unwrap();
+    spec.runtime_class_name = Some("commodity".into());
+    spec.volumes
+        .as_mut()
+        .unwrap()
+        .push(binding_volume(WORKSPACE_BINDING_TOKEN_AUDIENCE));
+    let live = facts(&pod);
+    assert!(crate::egress::pre_switch::pod_made_before(
+        true,
+        &live.labels,
+        &live.spec_json
+    ));
+    let runtime = crate::runtime::fake::FakeRuntimeDriver {
+        member_facts: std::sync::Mutex::new(Some(live)),
+        ..Default::default()
+    };
+    let intent = crate::runtime::RenderingIntent {
+        image: WORKSPACE_IMAGE.into(),
+        template_base: "workspace".into(),
+        isolation: crate::runtime::Isolation::Standard,
+        dedicated_cpu: false,
+        systemd_workspace: false,
+        systemd_opted_in: false,
+        systemd_runtime_profile: None,
+        shape: crate::sandbox::warm_pool::WorkspaceShape {
+            cpu_millicores: 1000,
+            memory_mib: 4096,
+            disk_gib: 10,
+        },
+        identity: crate::runtime::RenderingIdentity {
+            environment_id: "8f0c3a52-6b1e-4f0e-9d3b-2a7c41e5d901".into(),
+            organization_id: "org".into(),
+            operation_generation: 7,
+            projection_selection_sha256: None,
+            earlier_projection_selection_sha256: Vec::new(),
+            managed_credential_clients: none,
+            source_snapshot_id: None,
+            confidential_storage_manifest_uri: String::new(),
+        },
+    };
+    let current = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::worker::workspace_binding::workspace_bootstrap_current(
+            &runtime,
+            &crate::runtime::Placement::new("dev-sandboxes"),
+            &intent,
+            &crate::sandbox::client::WorkspacePodIdentity {
+                name: "workspace-pod".into(),
+                uid: POD_UID.into(),
+            },
+            Some(&environment_binding(7, None, none.encode())),
+        ),
+    )
+    .await
+    .expect("the check reads one fake")
+    .unwrap();
+    assert!(
+        current,
+        "a current binding on a direct Pod is not restarted"
+    );
+}
+
 /// Design §12: a bound identity-free runtime is stale when its binding row,
 /// not its (absent) Pod environment, differs from the current template
 /// options. The generation matters only while a projection is selected,

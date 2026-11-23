@@ -1368,23 +1368,45 @@ and only infra's reviewed GitOps creates those (infra#1822).
 Target, not shipped (#4000): an environment made while hosted egress was off
 keeps its direct Sandbox, because a start, a repair or a Pod replacement
 builds the next Pod from the Sandbox's own pod template. So with hosted
-egress on, orchestration refuses to start, repair or replace a Sandbox on a
-VM runtime whose pod template lacks broker mode (`codewire.sh/egress:
-broker`), before it changes anything, and the start fails with a reason
-that says the environment was made before hosted egress and must be
-recreated. A stop still works, so such an environment can be stopped and
-removed. Admission is the backstop: with the switch on it denies an
-orchestration update that would start or change such a Sandbox, or add
-broker mode to one, since only create renders it. With the switch on,
-every template orchestration writes is broker-mode except one: a
-snapshot's clearing template, which runs one container on the restored
-disk, is never a workspace, and has a network policy with no ingress and
-no egress. The binding
-service refuses a bind from a Pod on a VM runtime without broker mode, so a
-Pod the controller rebuilt on its own never serves. A restore makes a new
-environment through create, so it is broker-mode. Production will instead
-migrate such a Sandbox to create's broker-mode render at its next start;
-that is designed, not built.
+egress on, its next start moves it to hosted egress: once the start has
+stopped its Pod and seen the Sandbox suspended with no Pod, orchestration
+replaces the Sandbox's pod template with the one a create renders for that
+environment now, in one patch: the broker label, the TUN init and its
+volume, the resolver, the platform addresses, the fence revision, and the
+daemon and DinD images. The workspace disk and its state are kept. Only a
+claimed Sandbox moves; an unclaimed warm-pool member is replaced, as idle
+members already are. The sandbox controller holds a claimed Sandbox's pod
+labels to the template of the pool its claim names, so the environment's own
+template takes create's render first; one adopted from a shared warm pool
+gets its own template, as a cold create makes it, and its claim names that
+template from then on, while the shared pool's template is left as it is.
+The template's policy selects no Pod until the Sandbox's patch, and its
+NetworkPolicy takes create's render after the patch and before the Pod is
+created, so the lockdown check accepts the new Pod as it accepts a created
+one. A render that can't be
+made, such as a confidential environment's while confidential guests are
+held, sends no patch and refuses the start with its reason. A move never
+changes the environment's runtime class: where the deployment would now
+render it on another runtime, the start is refused with its reason before
+anything is written. A Sandbox with the broker label but not the rest of
+the broker shape is treated as made before hosted egress. A running
+direct Sandbox is never stopped or restarted for this: it moves at the next
+start that a user or an existing recovery makes. Until then a repair or a
+Pod replacement of it is refused with a reason that says to stop and start
+it, and the binding service refuses a bind from a Pod on a VM runtime
+without broker mode, so a Pod the controller rebuilt on its own never
+serves. Admission is the backstop: with the switch on it denies an
+orchestration update that would start or change such a Sandbox, other
+than a stop, and admits broker mode added to an existing Sandbox only on a
+suspended Sandbox bound to an environment, keeping its runtime class, when
+the result passes the same broker checks as a created template; the broker
+label never goes on without the rest of the shape, and no other identity
+may add either. With
+the switch on, every template orchestration writes is broker-mode except
+one: a snapshot's clearing template, which runs one container on the
+restored disk, is never a workspace, and has a network policy with no
+ingress and no egress. A restore makes a new environment through create,
+so it is broker-mode.
 
 Target, not shipped (#4000): with hosted egress on, a confidential guest
 can't boot yet, because broker mode leaves it no way to reach the key broker
