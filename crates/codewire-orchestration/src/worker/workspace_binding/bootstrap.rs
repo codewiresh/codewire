@@ -64,16 +64,19 @@ pub(crate) enum BootstrapCheck {
     /// Only a release's reserved names differ: the environment did not
     /// change, so the Pod keeps its bootstrap until its next start (#6005).
     EarlierReservedNames,
-    /// What the environment changed: the projection selection, the managed
-    /// clients or the generation.
+    /// What the environment changed: the projection selection or the
+    /// generation.
     Stale(&'static str),
 }
 
 /// Stale-bootstrap comparison for a bound Pod-scope runtime (design §12): the
-/// binding row's captured generation, projection digest and managed clients
-/// against the environment's current rendering identity, with the same rule
-/// as the rendered environment check: the generation only matters while a
-/// projection is selected.
+/// binding row's captured generation and projection digest against the
+/// environment's current rendering identity, with the same rule as the
+/// rendered environment check: the generation only matters while a projection
+/// is selected. The managed clients are not compared: a running Pod keeps the
+/// ones its binding captured, and its next start applies the current ones
+/// (#6093, #6092). The credential service serves the captured ones and
+/// refuses a revoked or failed credential at its next use.
 #[cfg(test)]
 pub(crate) fn binding_bootstrap_current(
     binding: &EnvironmentBinding,
@@ -110,8 +113,6 @@ pub(crate) fn binding_bootstrap_check(
         });
     if binding.projection_selection_sha256 != digest && !earlier {
         BootstrapCheck::Stale("projection selection")
-    } else if binding.managed_credential_clients != identity.managed_credential_clients.encode() {
-        BootstrapCheck::Stale("managed clients")
     } else if digest.is_some() && binding.operation_generation != identity.operation_generation {
         BootstrapCheck::Stale("generation")
     } else if earlier {

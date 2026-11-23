@@ -2186,8 +2186,8 @@ impl Drop for DaemonRead {
 ///   environment row's generation, projection digest and managed clients,
 ///   re-checked under the bind's fence. `runtime` holds that row, so an
 ///   unchanged row compares equal to the binding, and any change that could
-///   make the bootstrap stale (a republished selection, new clients, a new
-///   generation) misses here and reconciles, with recovery;
+///   make the bootstrap stale (a republished selection, a new generation)
+///   misses here and reconciles, with recovery;
 /// - the §5 checks (images, PVC, service account, pool rendering): the bind
 ///   ran them on this Pod UID, whose spec is immutable; a repeat for an
 ///   already-bound Sandbox no longer checks the pool rendering at all;
@@ -4329,14 +4329,19 @@ mod tests {
         if let Ok(Some(selection)) = republished.projection_selection.as_mut() {
             selection.ordinary_keys.insert("APP_REGION".into());
         }
+        // New managed clients, such as GitHub lapsing or a release deriving
+        // them differently, keep the Pod's bootstrap (#6093, #6092).
         let mut new_clients = env.clone();
         new_clients.managed_credential_clients =
             Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap());
+        assert_eq!(
+            binding_bootstrap_check(&earlier, &identity(&new_clients, 7)),
+            BootstrapCheck::EarlierReservedNames
+        );
         let mut new_generation = env.clone();
         new_generation.operation_generation = 8;
         for (republished, generation, differs) in [
             (republished, 7, "projection selection"),
-            (new_clients, 7, "managed clients"),
             (new_generation, 8, "generation"),
         ] {
             assert_eq!(
@@ -4419,24 +4424,35 @@ mod tests {
         if let Ok(Some(selection)) = new_selection.projection_selection.as_mut() {
             selection.ordinary_keys = ["APP_MODE".into(), "APP_REGION".into()].into();
         }
+        assert!(!binding_bootstrap_current(&binding, &opts(&new_selection)));
+        // New clients still miss the fresh bind and reconcile, which finds
+        // the bootstrap current and keeps the Pod (#6093).
+        assert!(binding_bootstrap_current(&binding, &opts(&new_clients)));
         for (case, republished) in [
             ("new managed clients", new_clients),
             ("republished selection", new_selection),
         ] {
-            assert!(
-                !binding_bootstrap_current(&binding, &opts(&republished)),
-                "{case}"
-            );
             assert_eq!(step(&republished), RuntimeIdentityStep::Reconcile, "{case}");
         }
 
         // The loop: the republished row reconciles, finds the stale
         // bootstrap, recovers onto a replacement Pod, and reconciles that.
         let (actions, steps) = walk_warm_create(WarmWalk {
+            // A selection published after the bind (#6093: new managed
+            // clients alone keep the Pod).
             after_bind: |env, _, _| {
-                env.managed_credential_clients =
-                    codewire_access::ManagedCredentialClients::from_profile_slots(["github"])
-                        .map_err(|_| codewire_project::PlatformProjectionSelectionError);
+                env.projection_selection =
+                    Ok(Some(codewire_project::PlatformProjectionSelection {
+                        creator: "synthetic-creator".into(),
+                        organization: "org-1".into(),
+                        organization_selected: true,
+                        project_id: None,
+                        user_selected: false,
+                        profile: None,
+                        ordinary_keys: ["APP_REGION".into()].into(),
+                        reserved_keys: codewire_project::platform_projection_reserved_keys([])
+                            .unwrap(),
+                    }));
             },
             stale_bootstrap: true,
             ..Default::default()

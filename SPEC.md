@@ -466,12 +466,19 @@ detail; this section states the contract.
   credential selection's digest, and they are kept as append-only versions.
   A running Sandbox keeps the version its binding captured until its next
   start; orchestration's bootstrap check and the credential service both
-  rebuild its selection under that version. A changed selection, managed
-  clients or generation still restarts it. A rollback to code that lacks a
+  rebuild its selection under that version. A changed selection still
+  restarts it. A rollback to code that lacks a
   version restarts the Sandboxes bound under it. An owner-local delegation
   may use any shipped version, so an older `cw` keeps working. A version is
   retired only once no live binding and no supported `cw` still uses it;
   an older `cw` must then upgrade.
+- **A credential's state never restarts a running Sandbox** (#6093, #6092).
+  Its managed clients are fixed when its Pod binds, and its next start
+  applies the current ones. A credential that is revoked or deleted, or whose
+  refresh fails, is refused at its next use in the running Sandbox, as
+  `credential_revoked` or `credential_needs_reconnect`, and a reconnect serves
+  the use after it, with no restart either way. Every shipped managed-clients
+  encoding stays valid, so a binding's recorded clients always decode.
 - **Unplanned restarts** (#5997, target, not shipped). When a running
   Sandbox's runtime is restarted or replaced without a member asking, the
   Sandbox says when and why, and its organization's owners are told. Four

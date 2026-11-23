@@ -1716,3 +1716,53 @@ fn stock_git_offers_the_placeholder_to_github_com_alone() {
         assert!(!fill(host).contains(placeholder.as_str()), "{host}");
     }
 }
+
+/// Every shipped managed-clients encoding (#6092). A binding records one of
+/// these, and the credential service, the daemon and a local VM decode it for
+/// as long as the binding lives, so a shipped encoding never changes: a new
+/// client or form adds entries. Each valid selection encodes and decodes back
+/// to itself.
+#[test]
+fn every_shipped_managed_clients_encoding_is_pinned_and_round_trips() {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for table in [
+        &MANAGED_CLIENT_ENCODINGS[..],
+        &ANTHROPIC_SUBSCRIPTION_ENCODINGS[..],
+        &ANTHROPIC_SIGN_IN_ENCODINGS[..],
+    ] {
+        hash.update((table.len() as u64).to_be_bytes());
+        for encoding in table {
+            hash.update((encoding.len() as u64).to_be_bytes());
+            hash.update(encoding.as_bytes());
+        }
+    }
+    let pinned: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        pinned,
+        "58e3c96bcdaf9426aecf430ee76a0e8f214489eac05f9dfcddff48dc11667d18"
+    );
+
+    let mut seen = std::collections::BTreeSet::new();
+    for bits in 0..32_u8 {
+        let base = ManagedCredentialClients(bits);
+        let mut selections = vec![base];
+        if base.contains(ManagedCredentialClient::Anthropic) {
+            selections.push(base.with_anthropic_subscription_token().unwrap());
+            selections.push(base.with_anthropic_sign_in().unwrap());
+        }
+        for selection in selections {
+            let encoded = selection.encode();
+            assert_eq!(
+                ManagedCredentialClients::decode(encoded).unwrap(),
+                selection
+            );
+            assert!(seen.insert(encoded), "{encoded} encodes two selections");
+        }
+    }
+    assert_eq!(seen.len(), 64);
+}

@@ -530,7 +530,8 @@ fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
         &environment_binding(3, None, none.encode()),
         &opts
     ));
-    assert!(!binding_bootstrap_current(
+    // Clients the Pod was bound with stay until its next start (#6093).
+    assert!(binding_bootstrap_current(
         &environment_binding(7, None, github.encode()),
         &opts
     ));
@@ -538,7 +539,7 @@ fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
         &environment_binding(7, Some(DIGEST), none.encode()),
         &opts
     ));
-    // A selected projection binds digest, clients and generation.
+    // A selected projection binds digest and generation, never clients.
     let digest = [0x33; 32];
     opts.projection_selection_sha256 = Some(digest);
     opts.managed_credential_clients = github;
@@ -558,7 +559,10 @@ fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
         &environment_binding(7, Some(&"44".repeat(32)), github.encode()),
         &opts
     ));
-    assert!(!binding_bootstrap_current(
+    // GitHub lapsing, or a release deriving the clients differently, keeps
+    // the bootstrap; the credential service refuses what the Pod may no
+    // longer use (#6093, #6092).
+    assert!(binding_bootstrap_current(
         &environment_binding(7, Some(DIGEST), none.encode()),
         &opts
     ));

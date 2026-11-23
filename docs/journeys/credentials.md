@@ -232,6 +232,12 @@ only what differs.
     dialog says GitHub is disconnected but Codewire couldn't remove its
     record, and to disconnect again to finish; until then the card reads
     Disconnected. Not yet observed.
+- **A running Sandbox while the connection changes** (#6093): disconnect
+  GitHub, or let a refresh fail, while a hosted Sandbox that uses it runs.
+  The Sandbox keeps its Pod: `cw info SANDBOX` shows no restart. Its next
+  `git clone` or `gh` call is refused as needing a reconnect, and after
+  `connect github` the same command works, still on the same Pod. Not yet
+  observed.
 
 ## 2. `cred-codex-sign-in`: connect Codex with ChatGPT
 
