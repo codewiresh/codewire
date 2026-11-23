@@ -79,6 +79,9 @@ pub async fn run(
 }
 
 #[cfg(test)]
+mod openbao_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 

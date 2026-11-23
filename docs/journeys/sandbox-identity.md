@@ -26,7 +26,7 @@ yet.
 | `identity-changes-apply` | #4663, #4664 | not yet built | not yet built |
 | `identity-limits` | #4664 | not yet built | not yet built |
 | `identity-discovery` | #4662 | observed (2026-11-23) | not yet observed |
-| `identity-custody` | #4662 | observed except a drifted key (2026-11-23) | not yet observed |
+| `identity-custody` | #4662 | observed; a drifted key by test (2026-11-23) | not yet observed |
 | `identity-own-openbao` | #4666 | not yet built | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
 | `identity-audit` | #4663, #4664 | not yet built | not yet built |
@@ -230,18 +230,21 @@ yet.
   - The policy check runs against a fixture policy that lacks the deny
     rules.
   - It names each alert and where it lands.
+
+  A drifted key is never made on Dev. The orchestration test
+  `identity::rotate::openbao_tests`, ignored by default, runs the rotation
+  job's own code against a throwaway OpenBao dev server on loopback instead:
+  it logs in under the rotator's production policy and drifts each pinned
+  setting on a fresh key.
 - **Proof:**
   - each call above is refused with 403;
   - the policy check fails the fixture;
   - each refused call raises its alert;
   - `codewire-orchestration identity rotate` fails, and changes nothing, on a
     drifted key.
-- **Gotchas:** walk drift only with a setting that can be undone, such as
-  `auto_rotate_period`, and set it back at once. Never set `exportable` or
-  `allow_plaintext_backup` on a real key: neither can be turned off again.
-- **Next pass:** a drifted key. It needs a reversible drift, such as
-  `auto_rotate_period`, set back at once, and `identity rotate` run against
-  it.
+- **Gotchas:** never drift a real key. `exportable` and
+  `allow_plaintext_backup` can't be turned off again, and the test drifts
+  only throwaway keys.
 - **Observed:** partly, on Dev on 2026-11-22 (#4662). No helper exists yet, so
   OpenBao's own engine is the evidence, not live refused calls:
   - the key's custody pins read back exact (`exportable=false`,
@@ -264,7 +267,12 @@ yet.
     `SandboxIdentityKeyUnexpectedCaller` (warning). Three pages reached the
     on-call channel within 30 seconds, matched to the alerts by time.
 
-  Not yet observed: `identity rotate` on a drifted key.
+  Then, by test, on 2026-11-23 (#4662), against an OpenBao 2.5.4 dev server:
+  - With every pin intact, the job raised both minimums to 3 and rotated
+    to version 4 under the rotator's policy.
+  - With `auto_rotate_period`, `exportable`, `allow_plaintext_backup` or
+    `deletion_allowed` drifted, each on its own key, the job failed with
+    its drift error, and each key read back identical before and after.
 
 ## 10. `identity-rotation`: rotating the key fails no request
 
