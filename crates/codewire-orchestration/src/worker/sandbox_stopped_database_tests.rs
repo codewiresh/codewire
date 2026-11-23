@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::api::environments::OrgQuota;
 use crate::lifecycle::{
-    PgLifecycleStore, SANDBOX_REPLACING_ERROR_CODE, SANDBOX_REPLACING_MESSAGE,
+    PgLifecycleStore, RestartCause, SANDBOX_REPLACING_ERROR_CODE, SANDBOX_REPLACING_MESSAGE,
     SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE, SANDBOX_STOPPED_MESSAGE, Service,
     StartQuota,
 };
@@ -837,6 +837,145 @@ async fn db_a_repair_leased_after_the_read_is_never_marked_replacing() -> Result
         .await?;
         ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
         replacing(pool).await
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// When and why an unplanned restart happened (#5997).
+async fn restart(pool: &PgPool) -> Result<(bool, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT restarted_at IS NOT NULL, restart_cause FROM environments WHERE id = $1",
+    )
+    .bind(ENVIRONMENT)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// A replaced runtime and a failed Pod each record when the Sandbox ran again
+/// and why, with the notice (#5997).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_restart_nobody_asked_for_records_when_and_why() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        ensure!(
+            restart(pool).await? == (false, None),
+            "nothing recorded yet"
+        );
+
+        ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        set_state(pool, "running").await?;
+        svc.mark_started(ENVIRONMENT).await?;
+        let recorded = restart(pool).await?;
+        ensure!(
+            recorded == (true, Some("runtime_replaced".into())),
+            "{recorded:?}"
+        );
+
+        stopped_and_restarted(&svc, pool).await?;
+        let recorded = restart(pool).await?;
+        ensure!(
+            recorded == (true, Some("pod_failed".into())),
+            "{recorded:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The bootstrap check's restart keeps the Sandbox running; it records the
+/// notice, the time and `configuration_changed`, and only while running.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_bootstrap_restart_records_its_cause() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+
+        ensure!(
+            svc.mark_restarted(ENVIRONMENT, RestartCause::ConfigurationChanged)
+                .await?
+        );
+        let (state, code, reason) = row(pool).await?;
+        ensure!(state == "running", "{state}");
+        ensure!(
+            code.as_deref() == Some(SANDBOX_RESTARTED_ERROR_CODE),
+            "{code:?}"
+        );
+        let reason = reason.unwrap_or_default();
+        ensure!(
+            reason.starts_with("Restarted at ")
+                && reason.ends_with(
+                    " UTC after its credentials or settings changed. Running processes were lost."
+                ),
+            "{reason}"
+        );
+        let recorded = restart(pool).await?;
+        ensure!(
+            recorded == (true, Some("configuration_changed".into())),
+            "{recorded:?}"
+        );
+
+        set_state(pool, "stopped").await?;
+        ensure!(
+            !svc.mark_restarted(ENVIRONMENT, RestartCause::ConfigurationChanged)
+                .await?,
+            "a stopped Sandbox did not restart"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A stop or a start a member asks for ends what an unplanned restart
+/// recorded, as it ends the notice.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_requested_stop_or_start_clears_the_restart() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+
+        ensure!(
+            svc.mark_restarted(ENVIRONMENT, RestartCause::ConfigurationChanged)
+                .await?
+        );
+        set_state(pool, "stopped").await?;
+        svc.mark_stopped(ENVIRONMENT).await?;
+        ensure!(restart(pool).await? == (false, None), "a stop clears it");
+
+        set_state(pool, "running").await?;
+        ensure!(
+            svc.mark_restarted(ENVIRONMENT, RestartCause::ConfigurationChanged)
+                .await?
+        );
+        set_state(pool, "stopped").await?;
+        let quota = StartQuota {
+            quota: OrgQuota {
+                max_concurrent_environments: -1,
+                max_concurrent_sandbox: -1,
+                max_cpu_millicores: -1,
+                max_memory_mb: -1,
+            },
+            env_type: "sandbox",
+            cpu_millicores: 1000,
+            memory_mb: 1024,
+            credit_enforcement: Default::default(),
+        };
+        svc.admit_start(ENVIRONMENT, ORGANIZATION, "standard", quota)
+            .await?;
+        ensure!(restart(pool).await? == (false, None), "a start clears it");
+        Ok(())
     }
     .await;
     db.finish(result).await

@@ -28,7 +28,9 @@ use super::setup::{
 use super::start_timing::{duration_ms, start_profile};
 use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
-use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
+use crate::lifecycle::{
+    Action, PgLifecycleStore, RestartCause, RuntimeAbsenceProof, Service, Snapshot,
+};
 use crate::runtime::RuntimeProbe;
 use crate::runtime::{
     ClaimRef, Incarnation, Placement, RuntimeTeardown, within_workspace_deadline,
@@ -177,12 +179,18 @@ async fn reconcile_running_runtime_identity(
     .await?;
     if restarted {
         // Infra's unplanned-restart alert matches this line's text
-        // (docs/CONFIGURATION.md, "Unplanned restarts").
+        // (docs/CONFIGURATION.md, "Unplanned restarts"). It comes first, so
+        // the alert fires even when the record below fails.
         tracing::warn!(
             environment_id = environment.id,
             reason = "workspace bootstrap is stale",
             "running bootstrap check: running sandbox's runtime was restarted"
         );
+        // Nobody asked for this restart: its user and the organization's
+        // owners are told (#5997).
+        Service::for_activity(ctx.pool.clone(), authority.clone())
+            .mark_restarted(&environment.id, RestartCause::ConfigurationChanged)
+            .await?;
     }
     Ok(())
 }
