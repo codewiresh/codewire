@@ -2664,7 +2664,9 @@ signer outage (#5032).
   neither starts nor advances that clock, because a wrongly forgotten CA
   strands a live Sandbox's interception (cw-test-health, #5030). Without
   `CREDENTIAL_SANDBOX_NAMESPACE`, the check refuses as unavailable and no sweep
-  runs. The credential service's role can insert and read rows, but delete
+  runs, so the credential service refuses to start with hosted placeholders on
+  and no sandbox namespace: every intercepted admission would fail closed
+  (#4001). The credential service's role can insert and read rows, but delete
   none.
 - **Never logged:** no key, envelope or leaf key appears in a log or an error.
 

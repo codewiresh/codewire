@@ -189,7 +189,7 @@ impl CredentialServiceConfig {
                 ));
             }
         };
-        Ok(Self {
+        let config = Self {
             database_url,
             public_listen,
             public_origin,
@@ -202,8 +202,23 @@ impl CredentialServiceConfig {
             hosted_placeholders: hosted_placeholders_config(&lookup)?,
             relay_namespace,
             sandbox_namespace: sandbox_namespace(&lookup)?,
-        })
+        };
+        // Hosted placeholders serve intercepted Sandboxes, whose admission
+        // needs the interception CAs; without them every intercepted
+        // admission fails closed (#4001, Dev 2026-11-23). Refuse to start
+        // instead, on the same condition the runtime wires them by.
+        if config.hosted_placeholders && interception_namespace(&config.sandbox_namespace).is_none()
+        {
+            return Err(RuntimeError::Configuration(SANDBOX_NAMESPACE));
+        }
+        Ok(config)
     }
+}
+
+/// The sandbox namespace the interception CAs and their sweep are wired
+/// with; `None` wires neither. Startup and the runtime's wiring both read it.
+pub(super) fn interception_namespace(sandbox_namespace: &Option<String>) -> Option<&str> {
+    sandbox_namespace.as_deref()
 }
 
 const HOSTED_PLACEHOLDERS: &str = "CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED";
@@ -595,7 +610,6 @@ mod tests {
             values.insert(HOSTED_PLACEHOLDERS, value.into());
             CredentialServiceConfig::from_lookup(move |name| values.get(name).cloned())
         };
-        assert!(with("true").unwrap().hosted_placeholders);
         assert!(!with("false").unwrap().hosted_placeholders);
         for typo in ["TRUE", "1", "on", ""] {
             assert!(matches!(
@@ -603,6 +617,44 @@ mod tests {
                 Err(RuntimeError::Configuration(HOSTED_PLACEHOLDERS))
             ));
         }
+    }
+
+    /// Hosted placeholders start only with the interception CAs wired: on
+    /// with a sandbox namespace, it starts and wires them for that namespace;
+    /// without one, startup refuses, naming the missing setting (#4001, Dev
+    /// 2026-11-23). A namespace alone, placeholders off, still starts.
+    #[test]
+    fn hosted_placeholders_start_only_with_the_interception_cas_wired() {
+        let with = |pairs: &[(&'static str, &str)]| {
+            let mut values = inputs();
+            for (name, value) in pairs {
+                values.insert(name, (*value).into());
+            }
+            CredentialServiceConfig::from_lookup(move |name| values.get(name).cloned())
+        };
+        let both = with(&[
+            (HOSTED_PLACEHOLDERS, "true"),
+            (SANDBOX_NAMESPACE, "dev-sandboxes"),
+        ])
+        .unwrap();
+        assert!(both.hosted_placeholders);
+        assert_eq!(
+            interception_namespace(&both.sandbox_namespace),
+            Some("dev-sandboxes")
+        );
+        assert!(matches!(
+            with(&[(HOSTED_PLACEHOLDERS, "true")]),
+            Err(RuntimeError::Configuration(SANDBOX_NAMESPACE))
+        ));
+        let namespace_only = with(&[(SANDBOX_NAMESPACE, "dev-sandboxes")]).unwrap();
+        assert!(!namespace_only.hosted_placeholders);
+        assert_eq!(
+            interception_namespace(&namespace_only.sandbox_namespace),
+            Some("dev-sandboxes")
+        );
+        let neither = with(&[]).unwrap();
+        assert!(!neither.hosted_placeholders);
+        assert_eq!(interception_namespace(&neither.sandbox_namespace), None);
     }
 
     #[test]

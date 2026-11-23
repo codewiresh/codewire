@@ -267,16 +267,17 @@ where
                 _ = tokio::time::sleep(wait) => {}
             }
             let sweep = self.sweep_once(Instant::now()).await;
-            if sweep.forgotten + sweep.skipped > 0 || !sweep.complete {
-                tracing::info!(
-                    present = sweep.present,
-                    absent = sweep.absent,
-                    forgotten = sweep.forgotten,
-                    skipped = sweep.skipped,
-                    complete = sweep.complete,
-                    "interception CA sweep finished"
-                );
-            }
+            // Every pass logs, so a clean pass is told apart from a sweep
+            // that died or hung (cw-security, #4001).
+            tracing::info!(
+                rows = sweep.present + sweep.absent + sweep.forgotten + sweep.skipped,
+                present = sweep.present,
+                absent = sweep.absent,
+                forgotten = sweep.forgotten,
+                skipped = sweep.skipped,
+                complete = sweep.complete,
+                "interception CA sweep pass"
+            );
             wait = SWEEP_INTERVAL;
         }
     }

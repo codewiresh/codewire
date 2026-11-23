@@ -193,3 +193,119 @@ async fn unreadable_rows_forget_nothing() {
     assert!(!counts.complete);
     assert!(rows.forgotten.lock().unwrap().is_empty());
 }
+
+/// Only the API's own 404 is a missing Pod. A refusal (403), a server error or
+/// any other failure is unavailable, which never starts or advances a CA's
+/// forget clock, so a namespace this service may not read never empties the
+/// table (#4001).
+#[tokio::test]
+async fn only_a_not_found_answer_reads_as_a_missing_pod() {
+    use axum::{Router, body::Body, http::Request, response::Response};
+
+    let status = |code: u16, reason: &str| {
+        serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "metadata": {},
+            "status": "Failure", "reason": reason, "code": code,
+        })
+        .to_string()
+    };
+    let pods = |code: u16, body: String| {
+        KubernetesPods::new(kube::Client::new(
+            Router::new().fallback(move |request: Request<Body>| {
+                let body = body.clone();
+                async move {
+                    assert_eq!(
+                        request.uri().path(),
+                        "/api/v1/namespaces/sandboxes/pods/workspace"
+                    );
+                    Response::builder()
+                        .status(code)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+            "synthetic",
+        ))
+    };
+    let read = |code, body| async move { pods(code, body).read("sandboxes", "workspace").await };
+    assert!(matches!(
+        read(404, status(404, "NotFound")).await,
+        PodRead::NotFound
+    ));
+    for (code, reason) in [
+        (403, "Forbidden"),
+        (401, "Unauthorized"),
+        (500, "InternalError"),
+    ] {
+        assert!(
+            matches!(read(code, status(code, reason)).await, PodRead::Unavailable),
+            "{code} read as other than unavailable"
+        );
+    }
+    let pod = serde_json::json!({
+        "kind": "Pod", "apiVersion": "v1",
+        "metadata": {"name": "workspace", "uid": POD, "labels": {EGRESS_MODE_LABEL: EGRESS_MODE_BROKER}},
+    })
+    .to_string();
+    assert!(matches!(
+        read(200, pod).await,
+        PodRead::Found {
+            broker_mode: true,
+            terminating: false,
+            ..
+        }
+    ));
+}
+
+/// Every pass logs one line, a clean one too, so silence never stands for a
+/// clean pass: it is a sweep that died or hung (#4001).
+#[tokio::test(start_paused = true)]
+async fn every_sweep_pass_logs_one_line_whether_or_not_it_found_anything() {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let _logging = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let passes = || {
+        String::from_utf8(captured.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("interception CA sweep pass"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (rows, cluster, sweep) = sweep();
+    cluster.set("workspace", running(POD));
+    let sweep = Arc::new(sweep);
+    sweep.start();
+    tokio::time::sleep(SWEEP_INTERVAL / 4 + Duration::from_secs(1)).await;
+    let clean = passes();
+    assert_eq!(clean.len(), 1, "{clean:#?}");
+    assert!(
+        clean[0].contains("rows=1") && clean[0].contains("present=1"),
+        "{}",
+        clean[0]
+    );
+    assert!(clean[0].contains("complete=true"), "{}", clean[0]);
+    rows.unreadable.store(true, Ordering::SeqCst);
+    tokio::time::sleep(SWEEP_INTERVAL).await;
+    let all = passes();
+    assert_eq!(all.len(), 2, "{all:#?}");
+    assert!(all[1].contains("complete=false"), "{}", all[1]);
+    sweep.shutdown().await;
+}

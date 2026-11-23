@@ -286,7 +286,7 @@ async fn run_connected(
     let store = authorities.credential_store(pool.clone());
     // Unbound Pods' interception CAs are forgotten once their Pod leaves the
     // cluster; only with a sandbox namespace configured (#5030).
-    let interception_sweep = config.sandbox_namespace.as_ref().map(|_| {
+    let interception_sweep = config::interception_namespace(&config.sandbox_namespace).map(|_| {
         Arc::new(crate::interception::InterceptionCaSweep::new(
             store.clone(),
             crate::interception::KubernetesPods::new(client.clone()),
@@ -335,16 +335,23 @@ async fn run_connected(
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
     // Without a sandbox namespace no Pod can be checked, so the interception
     // CAs' methods answer UNAVAILABLE (#4001).
-    let bridge = match &config.sandbox_namespace {
-        Some(namespace) => bridge
-            .with_interception_cas(Arc::new(crate::interception::PlatformInterceptionCas::new(
-                crate::interception::SandboxPods::new(
-                    crate::interception::KubernetesPods::new(client.clone()),
-                    namespace.clone(),
-                ),
-                store.clone(),
-            )))
-            .map_err(|_| RuntimeError::Configuration("interception CAs"))?,
+    let bridge = match config::interception_namespace(&config.sandbox_namespace) {
+        Some(namespace) => {
+            tracing::info!(
+                namespace,
+                hosted_placeholders = config.hosted_placeholders,
+                "interception CAs wired"
+            );
+            bridge
+                .with_interception_cas(Arc::new(crate::interception::PlatformInterceptionCas::new(
+                    crate::interception::SandboxPods::new(
+                        crate::interception::KubernetesPods::new(client.clone()),
+                        namespace.to_owned(),
+                    ),
+                    store.clone(),
+                )))
+                .map_err(|_| RuntimeError::Configuration("interception CAs"))?
+        }
         None => bridge,
     };
     // Revoking a credential also asks its provider, each over a transport
