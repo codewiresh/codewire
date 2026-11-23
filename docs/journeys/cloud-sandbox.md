@@ -17,7 +17,7 @@ Updated 2026-11-23.
 | --- | --- | --- | --- |
 | `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
-| `sandbox-failure-trace-id` | cw-tracing | a server error's id observed 2026-11-22 (#5633); a reworded refusal not yet | not yet observed |
+| `sandbox-failure-trace-id` | cw-tracing | observed 2026-11-23 (#5633) | not yet observed |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
@@ -236,9 +236,18 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
     /codewire.v1.CredentialService/GetCredential` on `codewire-orchestration`.
     The unresolvable server and a successful `cw --cloud ls` printed no line,
     and neither did `cw --cloud info` with a missing name, as above.
-  - Not yet observed: the `--output json` form and `policy check`. Until the
-    change that keeps the id on a reworded error is on Dev, `policy check`
-    prints no line.
+  - Dev, 2026-11-23 (#5633), as the Dev smoke identity, with a `cw` built from
+    main `b93e21eba5` (which contains #6116):
+    - `cw --cloud policy check walk-missing-20261123 example.com` exited 1 with
+      `✗ Couldn't read the network policy: network policy not found`, in `cw`'s
+      words, then `trace f8578dd3b6782de44a80f8b2a66c686e`. The trace store
+      holds it, rooted at `POST /codewire.v1.NetworkPolicyService/GetNetworkPolicy`
+      on `codewire-orchestration`. Dev now has organization network policies on,
+      so the refusal is "not found" rather than "not enabled"; both take the
+      same path.
+    - With `--output json`, `policy check` and `credentials get` each exited 1
+      with the error and a `trace` line.
+    - A successful `cw --cloud ls` printed no line.
 
 ## `sandbox-run-exec`: run a command in a sandbox
 
