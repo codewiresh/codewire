@@ -15,20 +15,21 @@ journey was written before the code. The format is in [README.md](README.md).
 Updated 2026-11-23. Walked on Dev on 2026-11-23 against a Headscale tailnet,
 with hosted egress on (#5741 comment 135387). The walk corrected the join: a
 cloud sandbox has no `$XDG_RUNTIME_DIR`, `tailscaled` needs its own session,
-and a tagged key carries its tag. Reaching a target by a name the control
-server publishes as a DNS record is a gap (#6167); by address it works. Not
-yet observed: an expired key, most of Codewire's own networking while joined,
-tailscale.com, and Production.
+and a tagged key carries its tag. A second walk the same day (#6167 comment
+135831) reached the target by its tailnet name, once the control server
+published its DNS records without a type, and walked an expired key and
+Codewire's own networking while joined. Not yet observed: `cw network
+connect` while joined, the refusal log, tailscale.com, and Production.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `own-tailnet-binaries` | observed 2026-11-23 | not yet observed |
 | `own-tailnet-join` | observed 2026-11-23 | not yet observed |
-| `own-tailnet-reach` | gap (#6167): by address observed 2026-11-23, by the control server's DNS name not | not yet observed |
+| `own-tailnet-reach` | observed 2026-11-23 | not yet observed |
 | `own-tailnet-relay` | observed 2026-11-23, under hosted egress | not yet observed |
-| `own-tailnet-bad-key` | observed 2026-11-23, but an expired key | not yet observed |
+| `own-tailnet-bad-key` | observed 2026-11-23 | not yet observed |
 | `own-tailnet-leave` | observed 2026-11-23 | not yet observed |
-| `own-tailnet-sandbox-unchanged` | observed 2026-11-23 for `cw exec` and `cw run` only | not yet observed |
+| `own-tailnet-sandbox-unchanged` | observed 2026-11-23, but `cw network connect` and the refusal log | not yet observed |
 
 ## Before the walk
 
@@ -165,19 +166,24 @@ tailscale.com, and Production.
   - Step 3 fails: nothing outside the proxy uses the tailnet, so the name
     doesn't resolve, or resolves to an address the sandbox can't reach.
 - **Gotchas:**
-  - Gap (#6167): `tailscaled` 1.104.7's proxies don't resolve a name the
-    control server publishes as a typed DNS record, which is every extra
-    record Headscale sends. The SOCKS5 lookup falls through to the sandbox's
-    resolver. `tailscale dns query TARGET_NAME A` still answers with the
-    address, and
+  - `tailscaled`'s proxies (checked against 1.104.7) skip a DNS record the
+    control server sends with a type, and the SOCKS5 lookup then falls
+    through to the sandbox's resolver (#6167). `tailscale dns query
+    TARGET_NAME A` answers either way, so it doesn't show the difference. A
+    Headscale `dns.extra_records` entry needs only `name` and `value`; leave
+    out `type`. Until the control server changes,
     `curl --proxy http://127.0.0.1:1056 --connect-to TARGET_NAME:443:ADDRESS:443 https://TARGET_NAME/TARGET_PATH`
-    reaches it with the name kept for TLS.
-- **Observed:** 2026-11-23 on Dev, as above (#5741 comment 135387). By the
-  front door's name, which Headscale publishes as an extra record, step 1
-  failed with "CONNECT tunnel failed, response 500" and step 2 with "Can't
-  complete SOCKS5 connection". By address, with the name kept for TLS, the HTTP
-  proxy (`--connect-to`) and SOCKS5 (`--resolve`) both returned the registry's
-  fixed `401` refusal. Step 3 failed with "Could not resolve host".
+    reaches the target with the name kept for TLS.
+- **Observed:** 2026-11-23 on Dev, twice.
+  - First walk (#5741 comment 135387): the control server's records had a
+    type. By name, step 1 failed with "CONNECT tunnel failed, response 500"
+    and step 2 with "Can't complete SOCKS5 connection".
+  - Also in the first walk: by address, with the name kept for TLS, the HTTP
+    proxy (`--connect-to`) and SOCKS5 (`--resolve`) both returned the
+    registry's fixed `401` refusal.
+  - Second walk (#6167 comment 135831), with records without a type: steps 1
+    and 2 both returned the registry's fixed `401` refusal by name.
+  - In both walks, step 3 failed with "Could not resolve host".
 
 ## `own-tailnet-relay`: no direct UDP, still connected
 
@@ -207,11 +213,14 @@ tailscale.com, and Production.
 - **Gotchas:**
   - Run these on a second userspace `tailscaled` with its own socket, so the
     joined node is untouched.
-- **Observed:** 2026-11-23 on Dev, as above, on a second `tailscaled` (#5741
-  comment 135387), except the expired key, which was not walked. The used key
-  was refused with "backend error: authkey already used". With no key, `up
-  --reset` printed a sign-in URL and waited until the timeout. Afterwards
-  Headscale listed no node from either attempt.
+- **Observed:** 2026-11-23 on Dev, as above, on a second `tailscaled`.
+  - First walk (#5741 comment 135387): the used key was refused with
+    "backend error: authkey already used".
+  - Also in the first walk: with no key, `up --reset` printed a sign-in URL
+    and waited until the timeout.
+  - Second walk (#6167 comment 135831): a key minted 11 minutes earlier and
+    never used was refused with "backend error: authkey expired".
+  - Afterwards Headscale listed no node from any of these attempts.
 
 ## `own-tailnet-leave`: stop and remove
 
@@ -246,7 +255,18 @@ tailscale.com, and Production.
     protected addresses. `tailscaled`'s sends to peers' private endpoints
     appear there, refused. Nothing the environment's policy allows is refused,
     and nothing reaches a protected address.
-- **Observed:** 2026-11-23 on Dev, as above, for two of the five only (#5741
-  comment 135387): `cw exec --in tailnet-walk -- true` exited 0, and `cw run
-  --detach` started a session. `cw shell`, `cw attach`, a preview, `cw network
-  connect` and the refusal log are not yet observed.
+- **Gotchas:**
+  - A session started with `cw run --detach` and no `-t` has no terminal.
+    `cw attach` shows its output but reads no keys, so Ctrl-B, then d, doesn't
+    detach. This is the same with no tailnet joined.
+- **Observed:** 2026-11-23 on Dev, as above, for four of the five (#5741
+  comment 135387, #6167 comment 135831):
+  - `cw exec --in tailnet-walk -- true` exited 0.
+  - `cw shell` ran a command and exited with the shell's own status.
+  - `cw attach` to a `cw run --detach` session showed its live output.
+  - A preview of a server bound to 127.0.0.1 served its page on the first
+    request, and answered 404 after `cw ports --unpublish`.
+- **Not yet observed:**
+  - `cw network connect`: Dev's Mesh refused the smoke identity
+    ("forbidden"), so the sandbox had no Mesh member.
+  - The refusal log: the hosted refusal log isn't built yet.
