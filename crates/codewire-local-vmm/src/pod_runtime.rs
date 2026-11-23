@@ -123,6 +123,17 @@ pub struct PodSettings {
     pub platform_peers: Vec<std::net::SocketAddrV4>,
     /// `CODEWIRE_VM_STATE`: whether this sandbox's state disk may be made.
     pub vm_state: VmState,
+    /// `CODEWIRE_VM_EGRESS_MODE`, which orchestration renders on every
+    /// standard Pod. The runtime never defaults it.
+    pub egress_mode: EgressMode,
+}
+
+/// How the guest's workload reaches the network (#5602).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressMode {
+    /// The workload has no egress, and the daemon reaches only the platform
+    /// peers. The runtime marks the guest with `codewire.guest_carried=1`.
+    GuestCarried,
 }
 
 /// Orchestration renders `new` and sets `existing` once the sandbox's
@@ -186,6 +197,13 @@ impl PodSettings {
                 "new" => VmState::New,
                 "existing" => VmState::Existing,
                 _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_STATE")),
+            },
+            // `broker` (the daemon's broker mode inside the VM) is agreed on
+            // #5602 but not built here yet, so it is refused, like any value
+            // other than these.
+            egress_mode: match read("CODEWIRE_VM_EGRESS_MODE")?.as_str() {
+                "guest-carried" => EgressMode::GuestCarried,
+                _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_EGRESS_MODE")),
             },
         };
         if !settings
@@ -637,6 +655,7 @@ mod tests {
             ("CODEWIRE_VM_VCPUS", "2"),
             ("CODEWIRE_VM_MEMORY_MIB", "4096"),
             ("CODEWIRE_VM_STATE_DISK_MIB", "20480"),
+            ("CODEWIRE_VM_EGRESS_MODE", "guest-carried"),
             ("CODEWIRE_VM_STATE", "new"),
             ("CODEWIRE_WORKSPACE_IMAGE", "registry.example/workspace:1"),
             (
@@ -742,6 +761,7 @@ mod tests {
         assert_eq!(settings.vcpus, 2);
         assert_eq!(settings.memory_mib, 4096);
         assert_eq!(settings.state_disk_bytes, 20480 * 1024 * 1024);
+        assert_eq!(settings.egress_mode, EgressMode::GuestCarried);
         // Docker is off unless the Pod sizes its disk.
         assert_eq!(settings.docker_disk_bytes, None);
         let docker =
@@ -766,6 +786,11 @@ mod tests {
                 "ABCDEF0123456789abcdef0123456789",
             ),
             ("CODEWIRE_WORKSPACE_IMAGE", ""),
+            // Missing, not yet built, and unknown: never defaulted.
+            ("CODEWIRE_VM_EGRESS_MODE", ""),
+            ("CODEWIRE_VM_EGRESS_MODE", "broker"),
+            ("CODEWIRE_VM_EGRESS_MODE", "Guest-carried"),
+            ("CODEWIRE_VM_EGRESS_MODE", "direct"),
             ("CODEWIRE_VM_STATE", ""),
             ("CODEWIRE_VM_STATE", "New"),
             ("CODEWIRE_VM_STATE", "fresh"),
