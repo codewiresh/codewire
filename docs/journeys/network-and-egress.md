@@ -31,7 +31,7 @@ separately.
 | --- | --- | --- | --- | --- | --- |
 | `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 | not yet observed | n/a | n/a |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
-| `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
+| `policy-hosted` | #4000, #4211 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (steps 1 to 5 and 8, and the enforcement half; step 6 not walked) | not yet observed |
 | `policy-dashboard` | #5114, #5116, #5117 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
@@ -52,7 +52,7 @@ separately.
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
-| `hosted-enforcement` | #4000 | n/a | n/a | no command yet | no command yet |
+| `hosted-enforcement` | #4000 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (`cw info` on a running Sandbox's selected and changed revision, and on `locked`) | not yet observed |
 
 #2537's status comment of 2026-10-24 records an earlier host walk of
 `policy-select` (select at create and update, and a live edit across two VMs).
@@ -270,8 +270,39 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
 - **Observed:**
   - on a local Kind cluster, 2026-11-16 (#4000): steps 1 to 8 as written,
     with the "not enforced" line on every command that's meant to show it;
-  - Dev and Production: not yet observed. The enforcement half of the proof
-    waits for `hosted-enforcement`.
+  - on Dev, 2026-11-23, Dev source 42306388f8, as the Dev smoke identity,
+    with hosted egress and the store on (#4000 comment 135597, with every
+    command and its output). The Sandbox `policy-walk` and the
+    policy `walk-docs` were removed by name afterwards.
+    - **Step 1:** `walk-docs` rev 1 allows `docs.rs:443`. The JSON carries
+      its digest and its reference, `platform:id:…`.
+    - **Step 2:** `cw info` read `NetworkPolicy: walk-docs · rev 1 ·
+      enforces rev 1` and `Egress: enforced`.
+    - **Enforcement, from inside the Sandbox:**
+      - `https://docs.rs` answered 200;
+      - `crates.io` and `example.com` didn't resolve (curl exit 6);
+      - `docs.rs` on port 80 was refused at once (curl exit 7).
+    - **Step 3:** `allow walk-docs crates.io:443` made rev 2, and
+      `check` named the rule. `cw info` read `enforces rev 2` within about
+      5 s, with no restart, and `https://crates.io` then answered while
+      `example.com` stayed refused.
+    - **Step 4:** `--policy locked` read `locked · enforced` within 3 s. The
+      terminal kept working, and `docs.rs` and `crates.io` were then
+      refused.
+    - **Step 5:** deleting `walk-docs` while `policy-walk` selected it was
+      refused, naming the Sandbox. After a move to `locked` it deleted.
+    - **Step 8:** `cw --local policy ls` never showed `walk-docs`.
+  - **Found on Dev:** the client still prints that hosted Sandboxes don't
+    enforce network policies yet, on `policy create`, `allow`, `ls` and
+    `check` (`"enforced": false, "enforcement": "not_available"`), and on
+    create ("is not enforced yet: this environment's outbound connections
+    are not restricted"). On Dev that is false; #3997's wording replaces it.
+  - **Not walked on Dev:**
+    - step 6 needs a member of another organization, and the walk has one
+      identity;
+    - step 7 needs the store off;
+    - an edit ending an open connection the new revision refuses;
+    - refusals in `cw policy log`, which wait for #6144.
 
 ## `policy-dashboard`: an organization's policies in the dashboard
 
@@ -1923,4 +1954,17 @@ Issue: #4000.
     new connection made then is delayed, not refused; record the gap.
   - The deadline takes 30 minutes to reach. A walk that shortens it says so,
     and does not count as an observation of the deadline.
-- **Observed:** not yet observed.
+- **Observed:**
+  - on Dev, 2026-11-23, Dev source 42306388f8, through `policy-hosted`'s
+    walk, as the Dev smoke identity (#4000 comment 135597):
+    - **The command is `cw info ENV`.** It showed `NetworkPolicy: NAME ·
+      rev N · enforces rev N` and `Egress: enforced` for a running Sandbox
+      on its selected revision. It showed `enforces rev 2` about 5 s after
+      an edit, and `locked · enforced` about 3 s after a move.
+    - **The Sandbox saw:** allowed hosts answered, a name the policy
+      doesn't allow got no answer, and a disallowed port was refused at
+      once.
+    - **What doesn't show the decisions yet:** cw-egress logs no admission
+      or refusal lines at info level, and `cw policy log` shows no hosted
+      refusals until #6144.
+    - **Every other state above:** not yet observed.
