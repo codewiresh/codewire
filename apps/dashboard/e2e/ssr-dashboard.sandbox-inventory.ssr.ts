@@ -286,7 +286,7 @@ async function openLiveInventory(page: Page) {
 const listRefreshes = (page: Page) => page.evaluate(() =>
   (window as unknown as { listRefreshes: number[] }).listRefreshes.length);
 
-const live = (page: Page, kind: "sandbox" | "resync", environment = "", organization = "org_fixture") =>
+const live = (page: Page, kind: "sandbox" | "resize" | "resync", environment = "", organization = "org_fixture") =>
   page.evaluate(({ kind, environment, organization }) => document.body.dispatchEvent(
     new CustomEvent(`codewire:live:${kind}`, { detail: { organization, environment } })), { kind, environment, organization });
 
@@ -381,4 +381,36 @@ test("another organization's change touches nothing", async ({ page }) => {
   await page.clock.runFor(300);
   expect(asked).toEqual([]);
   expect(await listRefreshes(page)).toBe(0);
+});
+
+test("an active resize card re-reads itself on its Sandbox's resize events and on resync, and on nothing else (#4762)", async ({ page }) => {
+  await openLiveInventory(page);
+  // An active card as environment-resize-operation.html renders it; its
+  // hx-trigger turns codewire:resize-operation-refresh into its request.
+  await page.evaluate((id) => {
+    const card = document.createElement("section");
+    card.id = "environment-resize-operation";
+    card.dataset.environmentId = id;
+    card.setAttribute("hx-get", `resize-card?resize_environment=${id}`);
+    const refreshes: number[] = [];
+    card.addEventListener("codewire:resize-operation-refresh", () => refreshes.push(Date.now()));
+    Object.assign(window, { cardRefreshes: refreshes });
+    document.querySelector("main")?.append(card);
+  }, quietMesa);
+  const cardRefreshes = () => page.evaluate(() => (window as unknown as { cardRefreshes: number[] }).cardRefreshes.length);
+  // Ten seconds with no change, another Sandbox's resize, and a Sandbox
+  // change that is not a resize ask for nothing.
+  await page.clock.runFor(10_000);
+  await live(page, "resize", dryHarbor);
+  await live(page, "sandbox", quietMesa);
+  expect(await cardRefreshes()).toBe(0);
+  await live(page, "resize", quietMesa);
+  expect(await cardRefreshes()).toBe(1);
+  await live(page, "resync");
+  expect(await cardRefreshes()).toBe(2);
+  // A card whose resize has finished has no request to make.
+  await page.locator("#environment-resize-operation").evaluate((card) => card.removeAttribute("hx-get"));
+  await live(page, "resize", quietMesa);
+  await live(page, "resync");
+  expect(await cardRefreshes()).toBe(2);
 });

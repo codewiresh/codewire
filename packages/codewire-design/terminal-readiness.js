@@ -232,28 +232,43 @@
         }
       }
     }
+    // The live stream says when this Sandbox changes (#4762), so a read runs
+    // on its events, on resync, and when the page is shown or focused. Only a
+    // failed read is retried by time, with backoff, since no event may follow.
+    const RETRY_FIRST_MS = 5000;
+    const RETRY_MAX_MS = 60000;
     let epoch = 0;
     let pending = null;
     let timer = null;
+    let retryDelay = 0;
+    // An event that arrives during a read asks for one more read after it.
+    let owed = false;
     let paused = document.hidden;
     let lastRequest = -Infinity;
+    let lastStatus = null;
+    const sendStatus = () => document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail: { ...lastStatus } }));
+    // A script that mounts after a report, such as Resize or setup progress
+    // when its file arrives late, asks for the current one: nothing repeats
+    // it on a timer (#4762).
+    document.addEventListener("codewire:sandbox-status-request", (event) => {
+      if (event.detail?.environmentId === environmentId && lastStatus) sendStatus();
+    });
     const report = (available, value) => {
       lastObservation = { available, value };
       observe(available, value);
-      document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
-        detail: { environmentId, available, running: value?.running === true,
-          setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
-          // Setup failed and nothing owns the Sandbox: terminals open under
-          // the failure (#4767).
-          setupFailed: value?.setupFailed === true,
-          // Asked to run and on its way up, not stopped and not failed.
-          starting: value?.running !== true && value?.detail?.desiredState === "started"
-            && !["error", "build failed"].includes(value?.detail?.state),
-          actionsAllowed: value?.detail?.actionsAllowed === true,
-          pending: value?.detail?.pending !== false, checking: !settled,
-          // The validated notice, so setup progress can say a recorded failure.
-          notice: available ? value?.notice ?? null : null },
-      }));
+      lastStatus = { environmentId, available, running: value?.running === true,
+        setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+        // Setup failed and nothing owns the Sandbox: terminals open under
+        // the failure (#4767).
+        setupFailed: value?.setupFailed === true,
+        // Asked to run and on its way up, not stopped and not failed.
+        starting: value?.running !== true && value?.detail?.desiredState === "started"
+          && !["error", "build failed"].includes(value?.detail?.state),
+        actionsAllowed: value?.detail?.actionsAllowed === true,
+        pending: value?.detail?.pending !== false, checking: !settled,
+        // The validated notice, so setup progress can say a recorded failure.
+        notice: available ? value?.notice ?? null : null };
+      sendStatus();
     };
     document.addEventListener("codewire:resize-mutation-status", (event) => {
       if (event.detail?.environmentId !== environmentId || typeof event.detail.locked !== "boolean") return;
@@ -274,14 +289,18 @@
       epoch += 1;
       clearTimeout(timer);
       timer = null;
+      owed = false;
       pending?.abort();
       pending = null;
       checking();
       report(false);
     }
     async function refresh() {
-      if (paused || document.hidden || pending || !root.isConnected) return;
+      if (paused || document.hidden || !root.isConnected) return;
+      if (pending) { owed = true; return; }
       clearTimeout(timer);
+      timer = null;
+      let failed = false;
       const version = ++epoch;
       const controller = new AbortController();
       pending = controller;
@@ -319,16 +338,36 @@
           || !validDetail(value.detail)) throw new Error("Invalid readiness");
         if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = everSettled = true; report(true, value); }
       } catch {
+        failed = true;
         if (version === epoch && !paused && root.isConnected) { settled = everSettled = true; report(false); }
       } finally {
         clearTimeout(timeout);
         if (pending === controller) pending = null;
         checking();
-        if (version === epoch) {
-          if (!paused && !document.hidden && root.isConnected && !deleted) timer = setTimeout(refresh, 5000);
+        if (version === epoch && !paused && !document.hidden && root.isConnected && !deleted) {
+          retryDelay = failed ? Math.min(retryDelay ? retryDelay * 2 : RETRY_FIRST_MS, RETRY_MAX_MS) : 0;
+          if (owed) { owed = false; void refresh(); }
+          else if (failed) timer = setTimeout(retryAfterFailure, retryDelay);
         }
       }
     }
+    function retryAfterFailure() {
+      timer = null;
+      void refresh();
+    }
+    document.body.addEventListener("codewire:live:sandbox", (event) => {
+      if (event.detail?.environment === environmentId && !deleted) void refresh();
+    });
+    document.body.addEventListener("codewire:live:resync", () => {
+      if (!deleted) void refresh();
+    });
+    // An open Resize dialog keeps its draft; closing it shows the last
+    // observed resources at once, with no read to wait for.
+    document.addEventListener("close", (event) => {
+      if (event.target instanceof HTMLDialogElement && event.target.dataset.resizeEnhanced === "true" && lastObservation) {
+        observe(lastObservation.available, lastObservation.value);
+      }
+    }, true);
     document.addEventListener("visibilitychange", () => {
       paused = document.hidden;
       if (paused) invalidate();

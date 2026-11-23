@@ -9,27 +9,6 @@
       "step": "live.js's own fallback while the stream answers busy or keeps failing: a resync once a minute while visible, the one timer for server state the design allows (live-updates.md, Fallback)"
     },
     {
-      "path": "crates/codewire-dashboard-web/templates/environment-resize-operation.html",
-      "pattern": "hx-every",
-      "count": 1,
-      "issue": "#4762",
-      "step": "Resize: subscribe to codewire:live:resize"
-    },
-    {
-      "path": "packages/codewire-design/terminal-readiness.js",
-      "pattern": "setTimeout-loop",
-      "count": 1,
-      "issue": "#4762",
-      "step": "Terminal page: re-fetch readiness on codewire:live:sandbox"
-    },
-    {
-      "path": "packages/codewire-design/sandbox-resize.js",
-      "pattern": "setTimeout-loop",
-      "count": 1,
-      "issue": "#4762",
-      "step": "Resize: subscribe to codewire:live:resize"
-    },
-    {
       "path": "packages/codewire-design/reference/source/runtime.js",
       "pattern": "setTimeout-loop",
       "count": 1,

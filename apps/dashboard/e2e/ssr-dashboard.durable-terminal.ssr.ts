@@ -83,7 +83,7 @@ async function gotoFixture(page: Page) {
   await page.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
 }
 
-// Start-up is the page's own asynchronous work. The first readiness poll
+// Start-up is the page's own asynchronous work. The first readiness read
 // disables the readiness refresh until it settles, and its fetch aborts after
 // 10 s (terminal-readiness.js). For a ready Sandbox it starts the session
 // list in the same task, which disables the session refresh until it settles
@@ -203,19 +203,30 @@ async function dropConnection(page: Page, connection: Connection) {
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
 }
 
-// A fake-clock jump can start a readiness poll. Let it finish before time
+// A fake-clock jump can start a readiness read. Let it finish before time
 // moves again so its own abort deadline cannot report the Sandbox unavailable.
 async function settleReadiness(page: Page) {
   await expect(page.locator("[data-sandbox-observation-status]")).not.toHaveAttribute("aria-busy", "true", readinessDeadline);
 }
 
-// A test that counts session lists reaches the next readiness check through
-// the page's clock: dispatching visibilitychange or focus to ask sooner also
-// makes the terminal re-check its account, which lists sessions (#4542).
+// Reaches the page's timers, such as the retry after a failed readiness read.
 // fastForward fires each due timer once at the target time; runFor would also
-// fire a just-started poll's abort deadline within the same long advance.
+// fire a just-started read's abort deadline within the same long advance.
 async function advance(page: Page, ms: number) {
   await page.clock.fastForward(ms);
+  await settleReadiness(page);
+}
+
+// An event from the live stream, as live.js dispatches it (#4762).
+const sendLive = (page: Page, kind: "sandbox" | "resync", id = environment) => page.evaluate(({ kind, id }) =>
+  document.body.dispatchEvent(new CustomEvent(`codewire:live:${kind}`, { detail: { organization: "org_fixture", environment: id } })), { kind, id });
+
+// This Sandbox changed: the page reads its status again. Asking with
+// visibilitychange or focus instead would also make the terminal re-check its
+// account, which lists sessions (#4542).
+async function sandboxChanged(page: Page) {
+  await settleReadiness(page);
+  await sendLive(page, "sandbox");
   await settleReadiness(page);
 }
 
@@ -455,11 +466,11 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   // A Sandbox status outage pauses it in amber, then a terminal that cannot
   // continue reads in red.
   state.statusAvailable = false;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(shown).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
   await expect(shown).toHaveAttribute("data-tone", "warning");
   state.statusAvailable = true;
-  await advance(page, 5000);
+  await advance(page, 5000); // the failed read is retried 5 s later
   // The open Terminal 2 stayed attached through the outage.
   expect(attached(state, sessionId(2))).toHaveLength(1);
   await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
@@ -1296,7 +1307,7 @@ test("a Sandbox deleted while its page is open ends with a way back and no dead 
   await expect(page.getByRole("region", { name: "Sandbox terminal", exact: true })).toBeHidden();
   await expect(back).toBeHidden();
   state.detail = { ...deletingDetail, state: "destroyed", tone: "neutral", pending: false };
-  await page.clock.fastForward(5_000);
+  await sandboxChanged(page);
   await expect(status).toHaveText("This Sandbox was deleted.");
   await expect(page.locator("[data-sandbox-state]")).toHaveText("deleted");
   await expect(back).toBeVisible();
@@ -1320,7 +1331,7 @@ test("a failed deletion restores the actions that recover the Sandbox", async ({
   const status = page.locator("[data-sandbox-observation-status]");
   await expect(status).toHaveText("This Sandbox is being deleted.");
   state.detail = { ...deletingDetail, state: "error", tone: "danger", pending: false, startEligible: true, deleteEligible: true };
-  await page.clock.fastForward(5_000);
+  await sandboxChanged(page);
   await expect(status).toHaveText("This Sandbox could not be deleted. Choose Delete to try again.");
   await expect(page.locator("[data-sandbox-state]")).toHaveText("error");
   await expect(page.locator("[data-sandbox-actions]")).toBeVisible();
@@ -1830,7 +1841,7 @@ test("incomplete setup blocks launch and attachment until readiness, then re-att
   expect(state.launches).toBe(0);
   expect(state.connections).toHaveLength(0);
   state.setupComplete = true;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   // Readiness re-attaches the restored existing session; it never launches one.
   await expect.poll(() => state.connections.length).toBe(1);
@@ -1857,7 +1868,7 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   expect(state.launches).toBe(0);
   state.setupComplete = true;
   state.listStatus = 200;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   // The first list after setup finishes opens the page's terminal, once.
   await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
@@ -1938,7 +1949,7 @@ test("starting a stopped Sandbox enables terminals after its first ready status 
   state.running = true;
   state.setupComplete = true;
   state.listStatus = 200;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
 });
@@ -1972,15 +1983,18 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   await expect.poll(() => state.lists).toBe(1);
   state.running = true;
   state.setupComplete = true;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
+  // The restoration readiness asked for waits on its own release.
+  let releaseRestoration!: () => void;
+  state.listGate = new Promise<void>((resolve) => { releaseRestoration = resolve; });
   release();
-  // The failed list replaces the empty state's text, beside Retry.
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("Terminal sessions are unavailable right now.");
-  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  // The stopped-state list fails and launches nothing; the page then restores
+  // once, with no second status to wait for (#4762).
+  await expect.poll(() => state.lists).toBe(2);
   expect(state.launches).toBe(0);
   state.listStatus = 200;
-  await advance(page, 5000);
+  releaseRestoration();
   await automaticTerminal(page, state);
   expect(state.lists).toBe(2);
 });
@@ -2302,7 +2316,7 @@ test("an automatic reconnect whose old output cannot finish rendering stays manu
   expect(state.stops).toBe(0);
 });
 
-test("a failed readiness poll keeps open terminals attached and typing; a stopped Sandbox still pauses them", async ({ page }) => {
+test("a failed readiness read keeps open terminals attached and typing; a stopped Sandbox still pauses them", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
@@ -2319,11 +2333,11 @@ test("a failed readiness poll keeps open terminals attached and typing; a stoppe
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await settleReadiness(page);
   const lists = state.lists;
-  // One failed poll leaves the Sandbox's state unknown, not stopped: the open
+  // One failed read leaves the Sandbox's state unknown, not stopped: the open
   // terminal keeps its socket and its input, nothing new starts, and the
   // disconnected tab says why it waits.
   state.statusAvailable = false;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(connectionStatus(page, sessionId(2))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
@@ -2338,7 +2352,7 @@ test("a failed readiness poll keeps open terminals attached and typing; a stoppe
   // The status returns: the open terminal never dropped, so nothing re-lists
   // or re-attaches, and the disconnected tab offers Reconnect again.
   state.statusAvailable = true;
-  await advance(page, 5000);
+  await advance(page, 5000); // the failed read is retried 5 s later
   await expect(connectionStatus(page, sessionId(1))).toHaveText("Connected");
   await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
   await expect(connectionStatus(page, sessionId(2))).toHaveText("Disconnected. Reconnect to resume this terminal.");
@@ -2347,7 +2361,7 @@ test("a failed readiness poll keeps open terminals attached and typing; a stoppe
   expect(state.lists).toBe(lists);
   // A status that says the Sandbox stopped still pauses the open terminal.
   state.running = false;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect.poll(() => first.closed).toBe(true);
   await expect(connectionStatus(page, sessionId(1))).toHaveText("Start this Sandbox to use its terminals.");
   expect(state.launches).toBe(0);
@@ -2499,10 +2513,10 @@ test("readiness returning during a pending launch re-lists sessions before re-at
   await expect.poll(() => state.launches).toBe(1);
   // The Sandbox reports stopped, then running again: it may have restarted.
   state.running = false;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(connectionStatus(page, sessionId(11))).toHaveText("Start this Sandbox to use its terminals.");
   state.running = true;
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(connectionStatus(page, sessionId(11))).toHaveText("Reconnecting…");
   expect(state.lists).toBe(1);
   // Completing the launch promptly re-lists; the clock does not advance.
@@ -2873,10 +2887,7 @@ test("live detail pauses stale actions and leaves an open Resize draft unchanged
   const resize = page.getByRole("dialog", { name: "Resize Fixture Sandbox", exact: true });
   await resize.getByLabel("CPU", { exact: true }).selectOption("4000");
   state.statusAvailable = false;
-  // The periodic poll (every 5 s) refreshes on its own. The page's clock
-  // reaches it, not real time: waiting for a real 5 s poll timed out under
-  // load (PR run 23655).
-  await advance(page, 5000);
+  await sandboxChanged(page);
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeDisabled();
   await expect(resize).toBeVisible();
@@ -2885,14 +2896,13 @@ test("live detail pauses stale actions and leaves an open Resize draft unchanged
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "a moment ago",
     resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
     startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false };
-  await advance(page, 5000);
+  await advance(page, 5000); // the failed read is retried 5 s later
   await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources]);
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeEnabled();
   // Closed, the dialog follows the Sandbox's current resources again.
   await resize.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(resize).toBeHidden();
-  await advance(page, 5000);
   await expect(page.locator('#sandbox-resize [name="cpu_millicores"]')).toHaveValue("2000");
   expect(state.launches).toBe(0);
 });
@@ -3098,4 +3108,85 @@ test("Retry hands focus to its status line while it re-lists, then to the termin
   await expect(page.getByRole("tab")).toBeFocused();
   expect(state.lists).toBe(2);
   expect(state.launches).toBe(2);
+});
+
+// Status reads the page made, counted as the browser sends them.
+function readinessReads(page: Page) {
+  const reads: string[] = [];
+  page.on("request", (request) => { if (request.url().includes("/_fragments/terminal-readiness")) reads.push(request.url()); });
+  return reads;
+}
+
+
+test("status is read on this Sandbox's live events and on resync, never on a timer (#4762)", async ({ page }) => {
+  await page.clock.install();
+  await transport(page);
+  const reads = readinessReads(page);
+  await openFixture(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  const settled = reads.length;
+  // A minute with no change, and another Sandbox's change, read nothing.
+  await advance(page, 60_000);
+  await sendLive(page, "sandbox", "cccccccc-cccc-cccc-cccc-cccccccccccc");
+  await settleReadiness(page);
+  // This Sandbox's change reads once, and so does a resync.
+  await sendLive(page, "sandbox");
+  await settleReadiness(page);
+  await expect.poll(() => reads.length).toBe(settled + 1);
+  await sendLive(page, "resync");
+  await settleReadiness(page);
+  await expect.poll(() => reads.length).toBe(settled + 2);
+  await advance(page, 60_000);
+  expect(reads).toHaveLength(settled + 2);
+});
+
+test("a change during a status read is read once more after it, not dropped (#4762)", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  const reads = readinessReads(page);
+  await openFixture(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  const settled = reads.length;
+  let release!: () => void;
+  state.statusGate = new Promise<void>((resolve) => { release = resolve; });
+  await sendLive(page, "sandbox");
+  await expect.poll(() => reads.length).toBe(settled + 1);
+  // Two more changes while that read waits ask for one read after it.
+  await sendLive(page, "sandbox");
+  await sendLive(page, "sandbox");
+  state.statusGate = Promise.resolve();
+  release();
+  await expect.poll(() => reads.length).toBe(settled + 2);
+  await settleReadiness(page);
+  await advance(page, 60_000);
+  expect(reads).toHaveLength(settled + 2);
+});
+
+test("a failed status read is retried after 5 s, then 10 s, until a read succeeds (#4762)", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  const reads = readinessReads(page);
+  await openFixture(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  const settled = reads.length;
+  state.statusAvailable = false;
+  await sendLive(page, "sandbox");
+  await settleReadiness(page);
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
+  await advance(page, 4_999);
+  expect(reads).toHaveLength(settled + 1);
+  await advance(page, 1);
+  await expect.poll(() => reads.length).toBe(settled + 2);
+  await advance(page, 9_999);
+  expect(reads).toHaveLength(settled + 2);
+  state.statusAvailable = true;
+  await advance(page, 1);
+  await expect.poll(() => reads.length).toBe(settled + 3);
+  await expect(page.locator("[data-sandbox-observation-status]")).not.toContainText("status is unavailable");
+  // Read again, the Sandbox needs no more retries.
+  await advance(page, 60_000);
+  expect(reads).toHaveLength(settled + 3);
 });

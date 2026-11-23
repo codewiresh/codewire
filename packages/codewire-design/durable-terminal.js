@@ -106,6 +106,10 @@
     // open either way (#4767).
     let setupSettled = false;
     let initialStatusReceived = false;
+    // Readiness that arrived while a list was in flight. The status is sent
+    // when the Sandbox changes, not again on a timer, so the restoration it
+    // asked for runs when that list settles (#4762).
+    let initialOwed = false;
     let runtimeChecking = true;
     const runtimeControlReady = () => runtimeAvailable && runtimeRunning;
     const runtimeReady = () => runtimeControlReady() && setupSettled;
@@ -904,11 +908,14 @@
         if (current === epoch) {
           pending = false;
           const again = foregroundCheck && !document.hidden;
+          const restore = !again && initialOwed && !initialStatusReceived && runtimeReady() && !suspended && !document.hidden;
+          initialOwed = false;
           // Launch before rendering, so the empty state goes straight from
           // the list to "Opening a terminal…" with its controls held.
           if (launch && !again) void mutate("launch", undefined, true);
           showInventory();
-          if (again) void refresh();
+          if (restore) initialStatusReceived = true;
+          if (again || restore) void refresh();
         }
       }
     }
@@ -1206,6 +1213,7 @@
         }
       }
       updateControls();
+      if (ready && !initialStatusReceived && pending) initialOwed = true;
       if (ready && !initialStatusReceived && !pending && !suspended && !document.hidden) {
         initialStatusReceived = true;
         // Initial restoration must wait until setup stops owning workspace

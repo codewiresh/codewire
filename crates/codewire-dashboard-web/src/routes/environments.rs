@@ -4576,7 +4576,7 @@ mod tests {
     }
 
     #[test]
-    fn active_resize_operation_polls_only_until_terminal() {
+    fn active_resize_operation_refreshes_only_until_terminal() {
         let organization = OrganizationContext {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
@@ -4608,7 +4608,11 @@ mod tests {
         assert!(
             active_html.contains("_fragments/sandbox-resize?resize_environment=environment-id")
         );
-        assert!(active_html.contains("every 2s"));
+        assert!(
+            active_html
+                .contains(r#"hx-trigger="load delay:1s, codewire:resize-operation-refresh""#)
+        );
+        assert!(active_html.contains(r#"data-environment-id="environment-id""#));
 
         let completed = crate::view::EnvironmentResizeOperationView {
             state: "completed",
@@ -4621,7 +4625,7 @@ mod tests {
         }
         .render()
         .expect("completed resize operation template");
-        assert!(!completed_html.contains("every 2s"));
+        assert!(!completed_html.contains("hx-trigger"));
         assert!(completed_html.contains("Close"));
     }
 

@@ -440,4 +440,6 @@
     finish();
     section.hidden = true;
   });
+  // Readiness may have reported before this script arrived.
+  document.dispatchEvent(new CustomEvent("codewire:sandbox-status-request", { detail: { environmentId } }));
 })();

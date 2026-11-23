@@ -90,6 +90,11 @@
     let busy = null;
     let epoch = 0;
     let timer = null;
+    const RETRY_FIRST_MS = 5000;
+    const RETRY_MAX_MS = 60000;
+    let retryDelay = 0;
+    // An event that arrives during a request asks for one more read after it.
+    let owed = false;
     const locked = () => storageBlocked || attempt !== null;
     // Choosing and reviewing are editor steps (Cancel plus one primary action,
     // and Back while reviewing). A submitted change and its outcome are
@@ -156,6 +161,7 @@
       epoch += 1;
       clearTimeout(timer);
       timer = null;
+      owed = false;
       busy?.abort();
       busy = null;
       controls();
@@ -208,13 +214,26 @@
         if (storageBlocked) unresolved();
       }
     }
+    // The live stream says when this Sandbox's resize changes (#4762), so the
+    // operation is read on its events and on resync. Only a failed read is
+    // retried by time, with backoff, since no event may follow.
     async function poll() {
-      if (!attempt?.operationId || storageBlocked || busy || !dialog.open || document.hidden) return;
+      if (!attempt?.operationId || storageBlocked || !dialog.open || document.hidden) return;
+      if (busy) { owed = true; return; }
       clearTimeout(timer);
+      timer = null;
+      let failed = false;
       await request(`${base}/_fragments/resize-operation?${new URLSearchParams({ account_id: actor, operation_id: attempt.operationId })}`,
         { headers: { Accept: "application/json" } }, observe,
-        () => { status.textContent = "Resize status is unavailable. The submitted change stays locked; nothing was retried."; });
-      if (attempt?.operationId && !storageBlocked && dialog.open && !document.hidden) timer = setTimeout(poll, 5000);
+        () => { failed = true; status.textContent = "Resize status is unavailable. The submitted change stays locked; nothing was retried."; });
+      if (!attempt?.operationId || storageBlocked || !dialog.open || document.hidden) return;
+      retryDelay = failed ? Math.min(retryDelay ? retryDelay * 2 : RETRY_FIRST_MS, RETRY_MAX_MS) : 0;
+      if (owed) { owed = false; void poll(); }
+      else if (failed) timer = setTimeout(retryAfterFailure, retryDelay);
+    }
+    function retryAfterFailure() {
+      timer = null;
+      void poll();
     }
     planForm.addEventListener("input", () => { plan = null; review.hidden = true; controls(); });
     planForm.addEventListener("submit", (event) => {
@@ -281,8 +300,10 @@
       payload.set("request_id", candidate.requestId);
       payload.set("allow_restart", String(candidate.allowRestart));
       payload.set("force", String(candidate.force));
+      // Events that arrive while Apply runs have no operation to match yet,
+      // so the operation is read once when Apply answers.
       void request(`${base}/_actions/resize/apply`, { method: "POST", headers: { Accept: "application/json" }, body: payload }, observe, unresolved)
-        .then(() => { if (attempt?.operationId && dialog.open && !document.hidden) timer = setTimeout(poll, 5000); });
+        .then(() => { void poll(); });
     });
     observeButton.addEventListener("click", () => { void poll(); });
     dialog.addEventListener("codewire:dialog-open", () => {
@@ -301,12 +322,18 @@
     window.addEventListener("pagehide", invalidate);
     window.addEventListener("pageshow", (event) => { if (event.persisted && attempt?.operationId) void poll(); });
     document.addEventListener("visibilitychange", () => { if (document.hidden) invalidate(); else if (attempt?.operationId) void poll(); });
+    document.body.addEventListener("codewire:live:resize", (event) => {
+      if (event.detail?.environment === environment) void poll();
+    });
+    document.body.addEventListener("codewire:live:resync", () => { void poll(); });
     document.addEventListener("codewire:sandbox-status", (event) => {
       if (event.detail?.environmentId !== environment) return;
       eligible = event.detail.available === true && event.detail.actionsAllowed === true && event.detail.pending === false
         && event.detail.setupRunning !== true;
       controls();
     });
+    // Readiness may have reported before this script arrived.
+    document.dispatchEvent(new CustomEvent("codewire:sandbox-status-request", { detail: { environmentId: environment } }));
   }
   document.querySelectorAll("dialog[data-resize-account-id]").forEach(mount);
 })();

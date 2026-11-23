@@ -726,6 +726,19 @@
   document.addEventListener("close", (event) => {
     if (event.target instanceof HTMLDialogElement) settleLive();
   }, true);
+  // An active resize card re-reads itself on its Sandbox's resize events and
+  // on resync. htmx can't filter an event by its detail without eval, so the
+  // card listens for this page's own event instead.
+  const refreshResizeCard = (matches) => {
+    const card = document.getElementById("environment-resize-operation");
+    if (card?.hasAttribute("hx-get") && matches(card.dataset.environmentId)) {
+      card.dispatchEvent(new CustomEvent("codewire:resize-operation-refresh"));
+    }
+  };
+  document.body.addEventListener("codewire:live:resize", (event) => {
+    refreshResizeCard((id) => canonicalId(id) && id === event.detail?.environment);
+  });
+  document.body.addEventListener("codewire:live:resync", () => refreshResizeCard(() => true));
 
   const nextIndex = (container, selector, minimum = 0) => {
     let highest = minimum - 1;

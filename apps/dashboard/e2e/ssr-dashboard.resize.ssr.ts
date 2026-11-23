@@ -1,4 +1,4 @@
-import { artifactScreenshot, checkReadinessNow, expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, checkReadinessNow, expect, pauseClock, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Synthetic private-controller proof, not managed auth/daemon qualification.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
@@ -463,4 +463,69 @@ test("Review resize keeps keyboard focus while its plan is pending, on success a
   await expect(reviewButton).not.toHaveAttribute("aria-disabled", "true");
   await expect(reviewButton).toBeFocused();
   expect(state.plans).toBe(2);
+});
+
+// An event from the live stream, as live.js dispatches it (#4762).
+const sendLive = (page: Page, kind: "resize" | "sandbox" | "resync", id = environment) => page.evaluate(({ kind, id }) =>
+  document.body.dispatchEvent(new CustomEvent(`codewire:live:${kind}`, { detail: { organization: "org_fixture", environment: id } })), { kind, id });
+
+test("an applied resize is read on its Sandbox's resize events and on resync, and a failed read is retried (#4762)", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  await open(page);
+  await pauseClock(page);
+  const dialog = await review(page);
+  const settled = async () => expect(dialog.locator("[data-resize-content]")).toHaveAttribute("aria-busy", "false");
+  await dialog.getByRole("button", { name: "Apply resize", exact: true }).click();
+  await expect(dialog.locator("[data-resize-status]")).toContainText("Resize applying");
+  // Apply's answer is read once.
+  await expect.poll(() => state.observations).toBe(1);
+  await settled();
+  // A minute with no change, another Sandbox's resize, and a Sandbox change
+  // that is not a resize read nothing.
+  await page.clock.fastForward(60_000);
+  await sendLive(page, "resize", "cccccccc-cccc-cccc-cccc-cccccccccccc");
+  await sendLive(page, "sandbox");
+  // A resync reads it.
+  await sendLive(page, "resync");
+  await expect.poll(() => state.observations).toBe(2);
+  await settled();
+  // A failed read is retried after 5 s, and again after 10 s.
+  state.observationUnavailable = true;
+  await sendLive(page, "resize");
+  await expect.poll(() => state.observations).toBe(3);
+  await settled();
+  await expect(dialog.locator("[data-resize-status]")).toContainText("stays locked");
+  await page.clock.fastForward(4_999);
+  expect(state.observations).toBe(3);
+  await page.clock.fastForward(1);
+  await expect.poll(() => state.observations).toBe(4);
+  await settled();
+  state.observationUnavailable = false;
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => state.observations).toBe(5);
+  await settled();
+  await page.clock.fastForward(60_000);
+  expect(state.observations).toBe(5);
+  // This Sandbox's resize event brings the outcome.
+  state.operationState = "completed";
+  await sendLive(page, "resize");
+  await expect(dialog.locator("[data-resize-status]")).toContainText("Resize completed");
+  expect(state.observations).toBe(6);
+});
+
+test("Resize enables when readiness reported before its script arrived (#4762)", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
+  await transport(page);
+  // The Resize script arrives only after readiness has reported, as a slow
+  // download would; nothing reports again on a timer.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/sandbox-resize.js", async (route) => { await held; await route.continue(); });
+  await page.goto(`${origin}/reference/fixtures/sandbox-resize.html`, { waitUntil: "commit" });
+  await expect(page.locator('[data-sandbox-action="stop"]')).toBeEnabled({ timeout: 15_000 });
+  await expect(page.locator("[data-resize-open]")).toBeHidden();
+  release();
+  await expect(page.getByRole("button", { name: "Resize", exact: true })).toBeEnabled();
 });
