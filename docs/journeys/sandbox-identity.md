@@ -11,7 +11,7 @@ discovery. The work is #4661; the configuration is in
 
 ## Where it stands
 
-Updated 2026-11-22. Dev serves the issuer at `https://identity.codewire-dev.sh`,
+Updated 2026-11-23. Dev serves the issuer at `https://identity.codewire-dev.sh`,
 from its own signing key in OpenBao (#4662). Production serves nothing yet
 (#4667). The contract for groups, audiences and minting is
 [dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md); nothing mints a token
@@ -25,7 +25,7 @@ yet.
 | `identity-groups-stay-put` | #4663 | not yet built | not yet built |
 | `identity-changes-apply` | #4663, #4664 | not yet built | not yet built |
 | `identity-limits` | #4664 | not yet built | not yet built |
-| `identity-discovery` | #4662 | partly observed (2026-11-22) | not yet observed |
+| `identity-discovery` | #4662 | observed (2026-11-23) | not yet observed |
 | `identity-custody` | #4662 | partly observed (2026-11-22) | not yet observed |
 | `identity-own-openbao` | #4666 | not yet built | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
@@ -199,7 +199,17 @@ yet.
   - 6: 150 parallel requests drew 102 answers of 429, and a canonical
     document right after answered 200.
 
-  Not yet observed: 6's second client from inside a Dev sandbox, and 7.
+  The rest on 2026-11-23:
+  - 6, second client: a Dev Sandbox of the smoke organization asked for an
+    unknown organization's document five times a second while this
+    workstation sent 150 at once. The workstation drew 67 answers of 429.
+    All 60 of the Sandbox's requests answered 404, two of them inside the
+    flood's second.
+  - 7: as a signed-in test account, because an API key can't create an
+    organization. The throwaway organization's document answered 200, with
+    `public, max-age=300` and the exact `issuer`. After `cw org delete`
+    finished and five minutes passed, it answered 404 `no-store`, with no
+    `Location` and no ID in the body.
 
 ## 8. `identity-custody`: the signing key never leaves OpenBao
 
