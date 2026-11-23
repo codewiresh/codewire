@@ -417,6 +417,30 @@ async fn database_capture_selects_github_client_only_while_connected() -> Result
         ensure!(expired_clients == "v1:codex", "expired: {expired_clients}");
         ensure!(expired_digest == missing_digest);
 
+        // A failed refresh or a revoke drops the client the same way, and the
+        // next start after a reconnect selects it again (#6093).
+        for status in ["refresh_failed", "revoked"] {
+            sqlx::query(
+                "UPDATE platform_credentials SET status='active', expires_at_unix=NULL WHERE id=$1",
+            )
+            .bind(&github)
+            .execute(&db.pool)
+            .await?;
+            let (_, _, reconnected_clients) = capture("reconnected").await?;
+            ensure!(
+                reconnected_clients == "v2:11",
+                "reconnected before {status}: {reconnected_clients}"
+            );
+            sqlx::query("UPDATE platform_credentials SET status=$2 WHERE id=$1")
+                .bind(&github)
+                .bind(status)
+                .execute(&db.pool)
+                .await?;
+            let (digest, _, clients) = capture(status).await?;
+            ensure!(clients == "v1:codex", "{status}: {clients}");
+            ensure!(digest == missing_digest, "{status}: the selection changed");
+        }
+
         sqlx::query("DELETE FROM platform_credentials WHERE id=$1")
             .bind(&github)
             .execute(&db.pool)
