@@ -19,10 +19,10 @@ use crate::desktop::{
 use crate::{
     ClientConfig, ClientError, CodewireClient, CreateEnvironmentRequest, CreatePortRequest,
     CreatePortResponse, DeleteEnvironmentRequest, DeletePortRequest, DownloadFileRequest,
-    Environment, EnvironmentState, ExecRequest, ExecResponse, GetEnvironmentRequest,
+    Environment, EnvironmentState, ExecRequest, ExecResponse, FileEntry, GetEnvironmentRequest,
     ListFilesRequest, ListFilesResponse, ListPortsRequest, ListPortsResponse,
-    StartEnvironmentRequest, StaticTokenProvider, StopEnvironmentRequest, UploadFileHeader,
-    UploadFileRequest, download_file_response, upload_file_request,
+    StartEnvironmentRequest, StatFileRequest, StaticTokenProvider, StopEnvironmentRequest,
+    UploadFileHeader, UploadFileRequest, download_file_response, upload_file_request,
 };
 
 /// The API key the SDKs read, a `cw_` key or an OAuth access token.
@@ -35,6 +35,9 @@ pub const CODEWIRE_ORG_ID_ENV: &str = "CODEWIRE_ORG_ID";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// The size of each upload frame.
 const UPLOAD_CHUNK: usize = 256 * 1024;
+/// The ErrorInfo reason the platform gives a missing file, as distinct from
+/// a missing organization or environment.
+const FILE_NOT_FOUND_REASON: &str = "FILE_NOT_FOUND";
 
 /// A Codewire client bound to one organization.
 #[derive(Clone)]
@@ -239,6 +242,42 @@ impl EnvironmentHandle {
     ) -> Result<ListFilesResponse, ClientError> {
         self.ids(&mut request.org_id, &mut request.environment_id);
         self.codewire.client.list_files(request).await
+    }
+
+    /// The entry [`Self::list_files`] shows for `path`, without listing its
+    /// folder; a final symlink is described as itself. A missing path is
+    /// `NotFound`.
+    pub async fn stat_file(&self, path: impl Into<String>) -> Result<FileEntry, ClientError> {
+        let mut request = StatFileRequest {
+            path: path.into(),
+            ..Default::default()
+        };
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire
+            .client
+            .stat_file(request)
+            .await?
+            .entry
+            .into_option()
+            .ok_or_else(|| {
+                ClientError::new(ErrorCode::Internal, "the server returned no file entry")
+            })
+    }
+
+    /// Whether `path` exists. Only a missing file (`NotFound` with reason
+    /// `FILE_NOT_FOUND`) is false; any other failure, such as an unknown
+    /// organization, is returned.
+    pub async fn file_exists(&self, path: impl Into<String>) -> Result<bool, ClientError> {
+        match self.stat_file(path).await {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error.code() == ErrorCode::NotFound
+                    && error.reason() == Some(FILE_NOT_FOUND_REASON) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Writes `contents` to `path`, replacing any file there. The contents

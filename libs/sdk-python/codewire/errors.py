@@ -13,11 +13,15 @@ class CodewireError(Exception):
         detail: str,
         request_id: str = "",
         violations: list[dict[str, str]] | None = None,
+        reason: str = "",
     ):
         self.status = status
         self.detail = detail
         self.request_id = request_id
         self.violations = violations or []
+        # The google.rpc.ErrorInfo reason the server named, such as
+        # FILE_NOT_FOUND; empty when it named none.
+        self.reason = reason
         msg = f"Codewire API error {status}: {detail}"
         if request_id:
             msg += f" (request_id: {request_id})"
@@ -48,6 +52,7 @@ def codewire_error_from_connect(error: ConnectError) -> CodewireError:
     """Map one generated-runtime error into the stable SDK error shape."""
     violations: list[dict[str, str]] = []
     request_id = ""
+    reason = ""
     for detail in error.details:
         if detail.type_name == "google.rpc.BadRequest":
             bad_request = _decode_detail(detail.message_bytes, BadRequest)
@@ -59,15 +64,17 @@ def codewire_error_from_connect(error: ConnectError) -> CodewireError:
                     }
                     for violation in bad_request.field_violations
                 )
-        elif detail.type_name == "google.rpc.ErrorInfo" and not request_id:
+        elif detail.type_name == "google.rpc.ErrorInfo":
             error_info = _decode_detail(detail.message_bytes, ErrorInfo)
             if error_info is not None:
-                request_id = error_info.metadata.get("request_id", "")
+                request_id = request_id or error_info.metadata.get("request_id", "")
+                reason = reason or error_info.reason
     return CodewireError(
         _CONNECT_STATUS[error.code],
         error.message,
         request_id,
         violations,
+        reason,
     )
 
 

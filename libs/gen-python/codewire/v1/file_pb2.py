@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x63odewire/v1/file.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x01\n\x10ListFilesRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\x12\x1b\n\tpage_size\x18\x04 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x05 \x01(\tR\tpageToken\"m\n\x11ListFilesResponse\x12\x30\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x16.codewire.v1.FileEntryR\x07\x65ntries\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x95\x01\n\tFileEntry\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n\x04size\x18\x02 \x01(\x03R\x04size\x12\x15\n\x06is_dir\x18\x03 \x01(\x08R\x05isDir\x12\x12\n\x04mode\x18\x04 \x01(\rR\x04mode\x12\x35\n\x08mod_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x07modTime\"g\n\x13\x44ownloadFileRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\"g\n\x14\x44ownloadFileResponse\x12,\n\x04info\x18\x01 \x01(\x0b\x32\x16.codewire.v1.FileEntryH\x00R\x04info\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"o\n\x11UploadFileRequest\x12\x37\n\x06header\x18\x01 \x01(\x0b\x32\x1d.codewire.v1.UploadFileHeaderH\x00R\x06header\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"d\n\x10UploadFileHeader\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\"<\n\x12UploadFileResponse\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n\x04size\x18\x02 \x01(\x03R\x04size\"w\n\x15UploadFilePartRequest\x12;\n\x06header\x18\x01 \x01(\x0b\x32!.codewire.v1.UploadFilePartHeaderH\x00R\x06header\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"\xb5\x01\n\x14UploadFilePartHeader\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\x12\x1b\n\tupload_id\x18\x04 \x01(\tR\x08uploadId\x12\x16\n\x06offset\x18\x05 \x01(\x03R\x06offset\x12\x16\n\x06\x66inish\x18\x06 \x01(\x08R\x06\x66inish\"y\n\x16UploadFilePartResponse\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n\tupload_id\x18\x02 \x01(\tR\x08uploadId\x12\x12\n\x04size\x18\x03 \x01(\x03R\x04size\x12\x1a\n\x08\x66inished\x18\x04 \x01(\x08R\x08\x66inished2\xe8\x02\n\x0b\x46ileService\x12O\n\tListFiles\x12\x1d.codewire.v1.ListFilesRequest\x1a\x1e.codewire.v1.ListFilesResponse\"\x03\x90\x02\x01\x12Z\n\x0c\x44ownloadFile\x12 .codewire.v1.DownloadFileRequest\x1a!.codewire.v1.DownloadFileResponse\"\x03\x90\x02\x01\x30\x01\x12O\n\nUploadFile\x12\x1e.codewire.v1.UploadFileRequest\x1a\x1f.codewire.v1.UploadFileResponse(\x01\x12[\n\x0eUploadFilePart\x12\".codewire.v1.UploadFilePartRequest\x1a#.codewire.v1.UploadFilePartResponse(\x01\x42\xac\x01\n\x0f\x63om.codewire.v1B\tFileProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x63odewire/v1/file.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x01\n\x10ListFilesRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\x12\x1b\n\tpage_size\x18\x04 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x05 \x01(\tR\tpageToken\"m\n\x11ListFilesResponse\x12\x30\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x16.codewire.v1.FileEntryR\x07\x65ntries\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x95\x01\n\tFileEntry\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n\x04size\x18\x02 \x01(\x03R\x04size\x12\x15\n\x06is_dir\x18\x03 \x01(\x08R\x05isDir\x12\x12\n\x04mode\x18\x04 \x01(\rR\x04mode\x12\x35\n\x08mod_time\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x07modTime\"c\n\x0fStatFileRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\"@\n\x10StatFileResponse\x12,\n\x05\x65ntry\x18\x01 \x01(\x0b\x32\x16.codewire.v1.FileEntryR\x05\x65ntry\"g\n\x13\x44ownloadFileRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\"g\n\x14\x44ownloadFileResponse\x12,\n\x04info\x18\x01 \x01(\x0b\x32\x16.codewire.v1.FileEntryH\x00R\x04info\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"o\n\x11UploadFileRequest\x12\x37\n\x06header\x18\x01 \x01(\x0b\x32\x1d.codewire.v1.UploadFileHeaderH\x00R\x06header\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"d\n\x10UploadFileHeader\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\"<\n\x12UploadFileResponse\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n\x04size\x18\x02 \x01(\x03R\x04size\"w\n\x15UploadFilePartRequest\x12;\n\x06header\x18\x01 \x01(\x0b\x32!.codewire.v1.UploadFilePartHeaderH\x00R\x06header\x12\x16\n\x05\x63hunk\x18\x02 \x01(\x0cH\x00R\x05\x63hunkB\t\n\x07payload\"\xb5\x01\n\x14UploadFilePartHeader\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\x12\x12\n\x04path\x18\x03 \x01(\tR\x04path\x12\x1b\n\tupload_id\x18\x04 \x01(\tR\x08uploadId\x12\x16\n\x06offset\x18\x05 \x01(\x03R\x06offset\x12\x16\n\x06\x66inish\x18\x06 \x01(\x08R\x06\x66inish\"y\n\x16UploadFilePartResponse\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n\tupload_id\x18\x02 \x01(\tR\x08uploadId\x12\x12\n\x04size\x18\x03 \x01(\x03R\x04size\x12\x1a\n\x08\x66inished\x18\x04 \x01(\x08R\x08\x66inished2\xb6\x03\n\x0b\x46ileService\x12O\n\tListFiles\x12\x1d.codewire.v1.ListFilesRequest\x1a\x1e.codewire.v1.ListFilesResponse\"\x03\x90\x02\x01\x12L\n\x08StatFile\x12\x1c.codewire.v1.StatFileRequest\x1a\x1d.codewire.v1.StatFileResponse\"\x03\x90\x02\x01\x12Z\n\x0c\x44ownloadFile\x12 .codewire.v1.DownloadFileRequest\x1a!.codewire.v1.DownloadFileResponse\"\x03\x90\x02\x01\x30\x01\x12O\n\nUploadFile\x12\x1e.codewire.v1.UploadFileRequest\x1a\x1f.codewire.v1.UploadFileResponse(\x01\x12[\n\x0eUploadFilePart\x12\".codewire.v1.UploadFilePartRequest\x1a#.codewire.v1.UploadFilePartResponse(\x01\x42\xac\x01\n\x0f\x63om.codewire.v1B\tFileProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,6 +35,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\017com.codewire.v1B\tFileProtoP\001ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\242\002\003CXX\252\002\013Codewire.V1\312\002\013Codewire\\V1\342\002\027Codewire\\V1\\GPBMetadata\352\002\014Codewire::V1'
   _globals['_FILESERVICE'].methods_by_name['ListFiles']._loaded_options = None
   _globals['_FILESERVICE'].methods_by_name['ListFiles']._serialized_options = b'\220\002\001'
+  _globals['_FILESERVICE'].methods_by_name['StatFile']._loaded_options = None
+  _globals['_FILESERVICE'].methods_by_name['StatFile']._serialized_options = b'\220\002\001'
   _globals['_FILESERVICE'].methods_by_name['DownloadFile']._loaded_options = None
   _globals['_FILESERVICE'].methods_by_name['DownloadFile']._serialized_options = b'\220\002\001'
   _globals['_LISTFILESREQUEST']._serialized_start=73
@@ -43,22 +45,26 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_LISTFILESRESPONSE']._serialized_end=344
   _globals['_FILEENTRY']._serialized_start=347
   _globals['_FILEENTRY']._serialized_end=496
-  _globals['_DOWNLOADFILEREQUEST']._serialized_start=498
-  _globals['_DOWNLOADFILEREQUEST']._serialized_end=601
-  _globals['_DOWNLOADFILERESPONSE']._serialized_start=603
-  _globals['_DOWNLOADFILERESPONSE']._serialized_end=706
-  _globals['_UPLOADFILEREQUEST']._serialized_start=708
-  _globals['_UPLOADFILEREQUEST']._serialized_end=819
-  _globals['_UPLOADFILEHEADER']._serialized_start=821
-  _globals['_UPLOADFILEHEADER']._serialized_end=921
-  _globals['_UPLOADFILERESPONSE']._serialized_start=923
-  _globals['_UPLOADFILERESPONSE']._serialized_end=983
-  _globals['_UPLOADFILEPARTREQUEST']._serialized_start=985
-  _globals['_UPLOADFILEPARTREQUEST']._serialized_end=1104
-  _globals['_UPLOADFILEPARTHEADER']._serialized_start=1107
-  _globals['_UPLOADFILEPARTHEADER']._serialized_end=1288
-  _globals['_UPLOADFILEPARTRESPONSE']._serialized_start=1290
-  _globals['_UPLOADFILEPARTRESPONSE']._serialized_end=1411
-  _globals['_FILESERVICE']._serialized_start=1414
-  _globals['_FILESERVICE']._serialized_end=1774
+  _globals['_STATFILEREQUEST']._serialized_start=498
+  _globals['_STATFILEREQUEST']._serialized_end=597
+  _globals['_STATFILERESPONSE']._serialized_start=599
+  _globals['_STATFILERESPONSE']._serialized_end=663
+  _globals['_DOWNLOADFILEREQUEST']._serialized_start=665
+  _globals['_DOWNLOADFILEREQUEST']._serialized_end=768
+  _globals['_DOWNLOADFILERESPONSE']._serialized_start=770
+  _globals['_DOWNLOADFILERESPONSE']._serialized_end=873
+  _globals['_UPLOADFILEREQUEST']._serialized_start=875
+  _globals['_UPLOADFILEREQUEST']._serialized_end=986
+  _globals['_UPLOADFILEHEADER']._serialized_start=988
+  _globals['_UPLOADFILEHEADER']._serialized_end=1088
+  _globals['_UPLOADFILERESPONSE']._serialized_start=1090
+  _globals['_UPLOADFILERESPONSE']._serialized_end=1150
+  _globals['_UPLOADFILEPARTREQUEST']._serialized_start=1152
+  _globals['_UPLOADFILEPARTREQUEST']._serialized_end=1271
+  _globals['_UPLOADFILEPARTHEADER']._serialized_start=1274
+  _globals['_UPLOADFILEPARTHEADER']._serialized_end=1455
+  _globals['_UPLOADFILEPARTRESPONSE']._serialized_start=1457
+  _globals['_UPLOADFILEPARTRESPONSE']._serialized_end=1578
+  _globals['_FILESERVICE']._serialized_start=1581
+  _globals['_FILESERVICE']._serialized_end=2019
 # @@protoc_insertion_point(module_scope)

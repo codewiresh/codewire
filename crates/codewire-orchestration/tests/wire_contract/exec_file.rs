@@ -1,8 +1,9 @@
 use buffa_types::google::protobuf::Duration;
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, DownloadFileResponse, ExecRequest, ExecServiceClient, FileServiceClient,
-    ListFilesRequest, StreamExecRequest, StreamExecResponse, UploadFilePartRequest,
-    UploadFileRequest, stream_exec_response, upload_file_part_request, upload_file_request,
+    ListFilesRequest, StatFileRequest, StreamExecRequest, StreamExecResponse,
+    UploadFilePartRequest, UploadFileRequest, stream_exec_response, upload_file_part_request,
+    upload_file_request,
 };
 use connectrpc::client::HttpClient;
 use connectrpc::{CodecFormat, ConnectError, ErrorCode};
@@ -324,6 +325,16 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
                 .await
                 .expect_err("ListFiles gate must fail");
             assert_rpc_error(&error, code, message);
+            let error = client
+                .stat_file(StatFileRequest {
+                    org_id: org_id.into(),
+                    environment_id: environment_id.into(),
+                    path: "/workspace".into(),
+                    ..Default::default()
+                })
+                .await
+                .expect_err("StatFile gate must fail");
+            assert_rpc_error(&error, code, message);
         }
 
         let client = file_client(harness, Auth::Admin, codec);
@@ -350,6 +361,17 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
         .await;
         assert_rpc_error(&path, ErrorCode::InvalidArgument, "validation failed");
         assert_rpc_bad_request(&path, &["path"]);
+
+        let stat_path = client
+            .stat_file(StatFileRequest {
+                org_id: PRIMARY_ORG.into(),
+                environment_id: BACKEND_ENV.into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("StatFile without a path must fail");
+        assert_rpc_error(&stat_path, ErrorCode::InvalidArgument, "validation failed");
+        assert_rpc_bad_request(&stat_path, &["path"]);
 
         let empty = client
             .upload_file(futures_util::stream::iter(std::iter::empty::<
@@ -563,6 +585,28 @@ pub(super) async fn assert_runtime_boundaries(harness: &Harness) {
     );
     assert_eq!(
         rpc_has_retry_info(&file_error),
+        harness.kube_mode == KubeMode::Configured
+    );
+
+    let stat_error = file_client
+        .stat_file(StatFileRequest {
+            org_id: PRIMARY_ORG.into(),
+            environment_id: UNAVAILABLE_ENV.into(),
+            path: "/workspace".into(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("StatFile runtime boundary must fail");
+    assert_rpc_error(
+        &stat_error,
+        ErrorCode::Unavailable,
+        match harness.kube_mode {
+            KubeMode::Configured => "environment daemon is unavailable",
+            KubeMode::Unconfigured => "sandbox client not configured",
+        },
+    );
+    assert_eq!(
+        rpc_has_retry_info(&stat_error),
         harness.kube_mode == KubeMode::Configured
     );
 }

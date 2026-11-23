@@ -939,6 +939,7 @@ export function fromProtoExecResult(value: ExecResponse): ExecResult {
 export function fromProtoFileEntry(value: ProtoFileEntry): FileEntry {
   return {
     is_dir: value.isDir,
+    is_symlink: (value.mode & 0o170000) === 0o120000,
     mod_time: timestampString(value.modTime) ?? "",
     mode: (value.mode & 0o777).toString(8).padStart(4, "0"),
     name: value.name,

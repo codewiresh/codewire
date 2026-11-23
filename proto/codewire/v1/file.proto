@@ -9,6 +9,11 @@ service FileService {
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // Returns the entry ListFiles shows for one path, describing a final
+  // symlink as itself. A missing path is NOT_FOUND.
+  rpc StatFile(StatFileRequest) returns (StatFileResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   rpc DownloadFile(DownloadFileRequest) returns (stream DownloadFileResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -38,6 +43,16 @@ message FileEntry {
   bool is_dir = 3;
   uint32 mode = 4;
   google.protobuf.Timestamp mod_time = 5;
+}
+
+message StatFileRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string path = 3;
+}
+
+message StatFileResponse {
+  FileEntry entry = 1;
 }
 
 message DownloadFileRequest {

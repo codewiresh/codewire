@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/file.proto.
  */
 export const file_codewire_v1_file: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAyJoChVVcGxvYWRGaWxlUGFydFJlcXVlc3QSMwoGaGVhZGVyGAEgASgLMiEuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRIZWFkZXJIABIPCgVjaHVuaxgCIAEoDEgAQgkKB3BheWxvYWQifwoUVXBsb2FkRmlsZVBhcnRIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkSEQoJdXBsb2FkX2lkGAQgASgJEg4KBm9mZnNldBgFIAEoAxIOCgZmaW5pc2gYBiABKAgiWQoWVXBsb2FkRmlsZVBhcnRSZXNwb25zZRIMCgRwYXRoGAEgASgJEhEKCXVwbG9hZF9pZBgCIAEoCRIMCgRzaXplGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIMugCCgtGaWxlU2VydmljZRJPCglMaXN0RmlsZXMSHS5jb2Rld2lyZS52MS5MaXN0RmlsZXNSZXF1ZXN0Gh4uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVzcG9uc2UiA5ACARJaCgxEb3dubG9hZEZpbGUSIC5jb2Rld2lyZS52MS5Eb3dubG9hZEZpbGVSZXF1ZXN0GiEuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVzcG9uc2UiA5ACATABEk8KClVwbG9hZEZpbGUSHi5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVxdWVzdBofLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVSZXNwb25zZSgBElsKDlVwbG9hZEZpbGVQYXJ0EiIuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXF1ZXN0GiMuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXNwb25zZSgBQqwBCg9jb20uY29kZXdpcmUudjFCCUZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkcKD1N0YXRGaWxlUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSDAoEcGF0aBgDIAEoCSI5ChBTdGF0RmlsZVJlc3BvbnNlEiUKBWVudHJ5GAEgASgLMhYuY29kZXdpcmUudjEuRmlsZUVudHJ5IksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAyJoChVVcGxvYWRGaWxlUGFydFJlcXVlc3QSMwoGaGVhZGVyGAEgASgLMiEuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRIZWFkZXJIABIPCgVjaHVuaxgCIAEoDEgAQgkKB3BheWxvYWQifwoUVXBsb2FkRmlsZVBhcnRIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkSEQoJdXBsb2FkX2lkGAQgASgJEg4KBm9mZnNldBgFIAEoAxIOCgZmaW5pc2gYBiABKAgiWQoWVXBsb2FkRmlsZVBhcnRSZXNwb25zZRIMCgRwYXRoGAEgASgJEhEKCXVwbG9hZF9pZBgCIAEoCRIMCgRzaXplGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIMrYDCgtGaWxlU2VydmljZRJPCglMaXN0RmlsZXMSHS5jb2Rld2lyZS52MS5MaXN0RmlsZXNSZXF1ZXN0Gh4uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVzcG9uc2UiA5ACARJMCghTdGF0RmlsZRIcLmNvZGV3aXJlLnYxLlN0YXRGaWxlUmVxdWVzdBodLmNvZGV3aXJlLnYxLlN0YXRGaWxlUmVzcG9uc2UiA5ACARJaCgxEb3dubG9hZEZpbGUSIC5jb2Rld2lyZS52MS5Eb3dubG9hZEZpbGVSZXF1ZXN0GiEuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVzcG9uc2UiA5ACATABEk8KClVwbG9hZEZpbGUSHi5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVxdWVzdBofLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVSZXNwb25zZSgBElsKDlVwbG9hZEZpbGVQYXJ0EiIuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXF1ZXN0GiMuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXNwb25zZSgBQqwBCg9jb20uY29kZXdpcmUudjFCCUZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.v1.ListFilesRequest
@@ -111,6 +111,50 @@ export const FileEntrySchema: GenMessage<FileEntry> = /*@__PURE__*/
   messageDesc(file_codewire_v1_file, 2);
 
 /**
+ * @generated from message codewire.v1.StatFileRequest
+ */
+export type StatFileRequest = Message<"codewire.v1.StatFileRequest"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string path = 3;
+   */
+  path: string;
+};
+
+/**
+ * Describes the message codewire.v1.StatFileRequest.
+ * Use `create(StatFileRequestSchema)` to create a new message.
+ */
+export const StatFileRequestSchema: GenMessage<StatFileRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 3);
+
+/**
+ * @generated from message codewire.v1.StatFileResponse
+ */
+export type StatFileResponse = Message<"codewire.v1.StatFileResponse"> & {
+  /**
+   * @generated from field: codewire.v1.FileEntry entry = 1;
+   */
+  entry?: FileEntry | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.StatFileResponse.
+ * Use `create(StatFileResponseSchema)` to create a new message.
+ */
+export const StatFileResponseSchema: GenMessage<StatFileResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 4);
+
+/**
  * @generated from message codewire.v1.DownloadFileRequest
  */
 export type DownloadFileRequest = Message<"codewire.v1.DownloadFileRequest"> & {
@@ -135,7 +179,7 @@ export type DownloadFileRequest = Message<"codewire.v1.DownloadFileRequest"> & {
  * Use `create(DownloadFileRequestSchema)` to create a new message.
  */
 export const DownloadFileRequestSchema: GenMessage<DownloadFileRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 3);
+  messageDesc(file_codewire_v1_file, 5);
 
 /**
  * @generated from message codewire.v1.DownloadFileResponse
@@ -164,7 +208,7 @@ export type DownloadFileResponse = Message<"codewire.v1.DownloadFileResponse"> &
  * Use `create(DownloadFileResponseSchema)` to create a new message.
  */
 export const DownloadFileResponseSchema: GenMessage<DownloadFileResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 4);
+  messageDesc(file_codewire_v1_file, 6);
 
 /**
  * @generated from message codewire.v1.UploadFileRequest
@@ -193,7 +237,7 @@ export type UploadFileRequest = Message<"codewire.v1.UploadFileRequest"> & {
  * Use `create(UploadFileRequestSchema)` to create a new message.
  */
 export const UploadFileRequestSchema: GenMessage<UploadFileRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 5);
+  messageDesc(file_codewire_v1_file, 7);
 
 /**
  * @generated from message codewire.v1.UploadFileHeader
@@ -220,7 +264,7 @@ export type UploadFileHeader = Message<"codewire.v1.UploadFileHeader"> & {
  * Use `create(UploadFileHeaderSchema)` to create a new message.
  */
 export const UploadFileHeaderSchema: GenMessage<UploadFileHeader> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 6);
+  messageDesc(file_codewire_v1_file, 8);
 
 /**
  * @generated from message codewire.v1.UploadFileResponse
@@ -242,7 +286,7 @@ export type UploadFileResponse = Message<"codewire.v1.UploadFileResponse"> & {
  * Use `create(UploadFileResponseSchema)` to create a new message.
  */
 export const UploadFileResponseSchema: GenMessage<UploadFileResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 7);
+  messageDesc(file_codewire_v1_file, 9);
 
 /**
  * @generated from message codewire.v1.UploadFilePartRequest
@@ -271,7 +315,7 @@ export type UploadFilePartRequest = Message<"codewire.v1.UploadFilePartRequest">
  * Use `create(UploadFilePartRequestSchema)` to create a new message.
  */
 export const UploadFilePartRequestSchema: GenMessage<UploadFilePartRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 8);
+  messageDesc(file_codewire_v1_file, 10);
 
 /**
  * @generated from message codewire.v1.UploadFilePartHeader
@@ -320,7 +364,7 @@ export type UploadFilePartHeader = Message<"codewire.v1.UploadFilePartHeader"> &
  * Use `create(UploadFilePartHeaderSchema)` to create a new message.
  */
 export const UploadFilePartHeaderSchema: GenMessage<UploadFilePartHeader> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 9);
+  messageDesc(file_codewire_v1_file, 11);
 
 /**
  * @generated from message codewire.v1.UploadFilePartResponse
@@ -356,7 +400,7 @@ export type UploadFilePartResponse = Message<"codewire.v1.UploadFilePartResponse
  * Use `create(UploadFilePartResponseSchema)` to create a new message.
  */
 export const UploadFilePartResponseSchema: GenMessage<UploadFilePartResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_file, 10);
+  messageDesc(file_codewire_v1_file, 12);
 
 /**
  * FileService lists and transfers files in a running sandbox environment.
@@ -371,6 +415,17 @@ export const FileService: GenService<{
     methodKind: "unary";
     input: typeof ListFilesRequestSchema;
     output: typeof ListFilesResponseSchema;
+  },
+  /**
+   * Returns the entry ListFiles shows for one path, describing a final
+   * symlink as itself. A missing path is NOT_FOUND.
+   *
+   * @generated from rpc codewire.v1.FileService.StatFile
+   */
+  statFile: {
+    methodKind: "unary";
+    input: typeof StatFileRequestSchema;
+    output: typeof StatFileResponseSchema;
   },
   /**
    * @generated from rpc codewire.v1.FileService.DownloadFile

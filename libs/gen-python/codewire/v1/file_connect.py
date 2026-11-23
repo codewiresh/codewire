@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse
+from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, StatFileRequest, StatFileResponse, UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -36,6 +36,9 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class FileService(Protocol):
     async def list_files(self, request: ListFilesRequest, ctx: RequestContext[ListFilesRequest, ListFilesResponse]) -> ListFilesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def stat_file(self, request: StatFileRequest, ctx: RequestContext[StatFileRequest, StatFileResponse]) -> StatFileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def download_file(self, request: DownloadFileRequest, ctx: RequestContext[DownloadFileRequest, DownloadFileResponse]) -> AsyncIterator[DownloadFileResponse]:
@@ -70,6 +73,16 @@ class FileServiceASGIApplication(ConnectASGIApplication[FileService]):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_files,
+                ),
+                "/codewire.v1.FileService/StatFile": Endpoint.unary(
+                    method=MethodInfo(
+                        name="StatFile",
+                        service_name="codewire.v1.FileService",
+                        input=StatFileRequest,
+                        output=StatFileResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.stat_file,
                 ),
                 "/codewire.v1.FileService/DownloadFile": Endpoint.server_stream(
                     method=MethodInfo(
@@ -161,6 +174,28 @@ class FileServiceClient(ConnectClient):
             use_get=use_get,
         )
 
+    async def stat_file(
+        self,
+        request: StatFileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> StatFileResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StatFile",
+                service_name="codewire.v1.FileService",
+                input=StatFileRequest,
+                output=StatFileResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
     def download_file(
         self,
         request: DownloadFileRequest,
@@ -225,6 +260,9 @@ class FileServiceSync(Protocol):
     def list_files(self, request: ListFilesRequest, ctx: RequestContext[ListFilesRequest, ListFilesResponse]) -> ListFilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def stat_file(self, request: StatFileRequest, ctx: RequestContext[StatFileRequest, StatFileResponse]) -> StatFileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def download_file(self, request: DownloadFileRequest, ctx: RequestContext[DownloadFileRequest, DownloadFileResponse]) -> Iterator[DownloadFileResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -255,6 +293,16 @@ class FileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_files,
+                ),
+                "/codewire.v1.FileService/StatFile": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="StatFile",
+                        service_name="codewire.v1.FileService",
+                        input=StatFileRequest,
+                        output=StatFileResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.stat_file,
                 ),
                 "/codewire.v1.FileService/DownloadFile": EndpointSync.server_stream(
                     method=MethodInfo(
@@ -339,6 +387,27 @@ class FileServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.FileService",
                 input=ListFilesRequest,
                 output=ListFilesResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def stat_file(
+        self,
+        request: StatFileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> StatFileResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StatFile",
+                service_name="codewire.v1.FileService",
+                input=StatFileRequest,
+                output=StatFileResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

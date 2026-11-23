@@ -6,7 +6,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::{
     CreateEnvironmentResponse, DownloadFileResponse, FileEntry, GetEnvironmentResponse,
-    UploadFileResponse,
+    StatFileResponse, UploadFileResponse,
 };
 
 const CREATE_ENVIRONMENT_PATH: &str = "/codewire.v1.EnvironmentService/CreateEnvironment";
@@ -14,6 +14,7 @@ const GET_ENVIRONMENT_PATH: &str = "/codewire.v1.EnvironmentService/GetEnvironme
 const EXEC_PATH: &str = "/codewire.v1.ExecService/Exec";
 const DOWNLOAD_FILE_PATH: &str = "/codewire.v1.FileService/DownloadFile";
 const UPLOAD_FILE_PATH: &str = "/codewire.v1.FileService/UploadFile";
+const STAT_FILE_PATH: &str = "/codewire.v1.FileService/StatFile";
 
 fn codewire(server: &MockServer) -> Codewire {
     Codewire::from_env_values(
@@ -348,4 +349,140 @@ async fn upload_sends_the_header_then_the_contents_in_chunks() {
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].len(), UPLOAD_CHUNK);
     assert_eq!(chunks.concat(), contents);
+}
+
+/// A Connect unary error as the platform renders it.
+fn connect_error(error: connectrpc::ConnectError) -> ResponseTemplate {
+    ResponseTemplate::new(error.http_status().as_u16())
+        .insert_header("content-type", "application/json")
+        .set_body_bytes(error.to_json())
+}
+
+/// A `not_found` whose ErrorInfo names `reason`, or with no ErrorInfo.
+fn not_found_with_reason(message: &str, reason: Option<&str>) -> connectrpc::ConnectError {
+    let error = connectrpc::ConnectError::not_found(message);
+    match reason {
+        Some(reason) => error.with_detail(connectrpc::ErrorDetail::from_message(
+            "google.rpc.ErrorInfo",
+            &codewire_proto::google::rpc::ErrorInfo {
+                reason: reason.into(),
+                ..Default::default()
+            },
+        )),
+        None => error,
+    }
+}
+
+/// Answers StatFile for env_test in org_test: `/workspace/f.txt` is a
+/// 5-byte file, `/workspace/missing` is a missing file, `no-org` and
+/// `other-reason` are not found for another cause, anything else is refused.
+async fn stat_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GET_ENVIRONMENT_PATH))
+        .respond_with(unary(&environment(EnvironmentState::Running)))
+        .mount(&server)
+        .await;
+    let request = |file: &str| StatFileRequest {
+        org_id: "org_test".into(),
+        environment_id: "env_test".into(),
+        path: file.into(),
+        ..Default::default()
+    };
+    Mock::given(method("POST"))
+        .and(path(STAT_FILE_PATH))
+        .and(body_bytes(request("/workspace/f.txt").encode_to_vec()))
+        .respond_with(unary(&StatFileResponse {
+            entry: FileEntry {
+                name: "f.txt".into(),
+                size: 5,
+                mode: 0o100644,
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        }))
+        .mount(&server)
+        .await;
+    for (file, error) in [
+        (
+            "/workspace/missing",
+            not_found_with_reason("file not found", Some("FILE_NOT_FOUND")),
+        ),
+        (
+            "/workspace/no-org",
+            not_found_with_reason("organization not found", None),
+        ),
+        (
+            "/workspace/other-reason",
+            not_found_with_reason("environment not found", Some("ENVIRONMENT_NOT_FOUND")),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(STAT_FILE_PATH))
+            .and(body_bytes(request(file).encode_to_vec()))
+            .respond_with(connect_error(error))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path(STAT_FILE_PATH))
+        .respond_with(connect_error(connectrpc::ConnectError::invalid_argument(
+            "file path is invalid or denied",
+        )))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn stat_file_fills_both_ids_and_returns_the_entry() {
+    let server = stat_server().await;
+    let handle = codewire(&server)
+        .environment("env_test")
+        .await
+        .expect("get");
+    let entry = handle.stat_file("/workspace/f.txt").await.expect("stat");
+    assert_eq!(
+        (entry.name.as_str(), entry.size, entry.mode),
+        ("f.txt", 5, 0o100644)
+    );
+    let missing = handle
+        .stat_file("/workspace/missing")
+        .await
+        .expect_err("missing");
+    assert_eq!(missing.code(), ErrorCode::NotFound);
+    assert_eq!(missing.reason(), Some("FILE_NOT_FOUND"));
+}
+
+#[tokio::test]
+async fn file_exists_is_false_only_for_a_missing_file() {
+    let server = stat_server().await;
+    let handle = codewire(&server)
+        .environment("env_test")
+        .await
+        .expect("get");
+    assert!(
+        handle
+            .file_exists("/workspace/f.txt")
+            .await
+            .expect("exists")
+    );
+    assert!(
+        !handle
+            .file_exists("/workspace/missing")
+            .await
+            .expect("missing")
+    );
+    for (file, code) in [
+        ("/etc/passwd", ErrorCode::InvalidArgument),
+        ("/workspace/no-org", ErrorCode::NotFound),
+        ("/workspace/other-reason", ErrorCode::NotFound),
+    ] {
+        let refused = handle
+            .file_exists(file)
+            .await
+            .expect_err("only a missing file is false");
+        assert_eq!(refused.code(), code, "{file}");
+    }
 }

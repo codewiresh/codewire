@@ -87,4 +87,17 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_missing_path_is_not_found_and_an_outside_one_is_refused() {
+        let missing = local_file_error(DaemonClientError::Status(tonic::Status::not_found(
+            "guest detail",
+        )));
+        assert_eq!(missing.code, connectrpc::ErrorCode::NotFound);
+        assert_eq!(missing.message.as_deref(), Some("local file was not found"));
+        let outside = local_file_error(DaemonClientError::Status(tonic::Status::invalid_argument(
+            "guest detail",
+        )));
+        assert_eq!(outside.code, connectrpc::ErrorCode::InvalidArgument);
+    }
 }

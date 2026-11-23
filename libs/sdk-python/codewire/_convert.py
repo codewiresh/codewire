@@ -277,6 +277,7 @@ def port_to_dict(message: Message) -> dict[str, Any]:
 def file_entry_to_dict(message: Message) -> dict[str, Any]:
     """Render FileService metadata in the historical REST value shape."""
     value = proto_to_dict(message)
+    value["is_symlink"] = message.mode & 0o170000 == 0o120000
     value["mode"] = f"{message.mode & 0o777:04o}"
     if not message.mod_time.seconds and not message.mod_time.nanos:
         value["mod_time"] = ""

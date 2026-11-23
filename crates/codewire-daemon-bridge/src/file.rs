@@ -190,6 +190,52 @@ where
         })
     }
 
+    async fn stat_file(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::StatFileRequest>,
+    ) -> ServiceResult<proto::StatFileResponse> {
+        self.backend.authorize(&ctx)?;
+        let request_id = request_id(&ctx);
+        let request = request.to_owned_message();
+        // A staging name is answered as missing rather than invalid, since
+        // ListFiles never shows one (SPEC.md, "File transfer").
+        let hidden = reserved_upload_path(&request.path);
+        let violations = coordinate_violations(
+            &request.org_id,
+            &request.environment_id,
+            (!hidden).then_some(request.path.as_str()),
+            "/org_id",
+            "/environment_id",
+            "/path",
+        );
+        if !violations.is_empty() {
+            return Err(self.backend.validation_error(violations, request_id));
+        }
+        let daemon = self
+            .backend
+            .daemon(&ctx, &request.org_id, &request.environment_id)
+            .await?;
+        daemon
+            .require_ready(&[DAEMON_CAPABILITY_FILES])
+            .await
+            .map_err(|error| self.backend.daemon_error(error, request_id))?;
+        if hidden {
+            return Err(self.backend.daemon_error(
+                DaemonClientError::Status(tonic::Status::not_found("file not found")),
+                request_id,
+            ));
+        }
+        let entry = daemon
+            .stat_file(request.path, false)
+            .await
+            .map_err(|error| self.backend.daemon_error(error, request_id))?;
+        connectrpc::Response::ok(proto::StatFileResponse {
+            entry: buffa::MessageField::some(public_file_entry(entry)),
+            ..Default::default()
+        })
+    }
+
     async fn download_file(
         &self,
         ctx: RequestContext,
@@ -1196,6 +1242,7 @@ mod tests {
     mod download;
     mod drain;
     mod parts;
+    mod stat;
     mod upload;
 
     use std::time::{Duration, Instant};
@@ -1242,18 +1289,39 @@ mod tests {
 
         fn validation_error(
             &self,
-            _violations: Vec<FieldViolation>,
+            violations: Vec<FieldViolation>,
             _request_id: Option<&str>,
         ) -> connectrpc::ConnectError {
-            connectrpc::ConnectError::invalid_argument("invalid test request")
+            let fields = violations
+                .iter()
+                .map(|violation| violation.path)
+                .collect::<Vec<_>>()
+                .join(", ");
+            connectrpc::ConnectError::invalid_argument(format!("invalid test request: {fields}"))
         }
 
+        /// Keeps the codes both real backends give a missing or refused path.
         fn daemon_error(
             &self,
-            _error: DaemonClientError,
+            error: DaemonClientError,
             _request_id: Option<&str>,
         ) -> connectrpc::ConnectError {
-            connectrpc::ConnectError::internal("test daemon request failed")
+            match error {
+                DaemonClientError::Status(status) if status.code() == tonic::Code::NotFound => {
+                    connectrpc::ConnectError::not_found("test file not found")
+                }
+                DaemonClientError::Status(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::InvalidArgument | tonic::Code::PermissionDenied
+                    ) =>
+                {
+                    connectrpc::ConnectError::invalid_argument(
+                        "test file path is invalid or denied",
+                    )
+                }
+                _ => connectrpc::ConnectError::internal("test daemon request failed"),
+            }
         }
 
         fn invalid_file_type(&self, _request_id: Option<&str>) -> connectrpc::ConnectError {
@@ -1281,6 +1349,7 @@ mod tests {
     fn every_generated_file_route_is_owned_by_the_bridge() {
         let expected = [
             proto::FILE_SERVICE_LIST_FILES_SPEC,
+            proto::FILE_SERVICE_STAT_FILE_SPEC,
             proto::FILE_SERVICE_DOWNLOAD_FILE_SPEC,
             proto::FILE_SERVICE_UPLOAD_FILE_SPEC,
             proto::FILE_SERVICE_UPLOAD_FILE_PART_SPEC,
@@ -1292,7 +1361,7 @@ mod tests {
             crate::test_support::public_service_methods("FileService"),
             expected
         );
-        assert_eq!(expected.len(), 4);
+        assert_eq!(expected.len(), 5);
     }
 
     #[test]

@@ -938,7 +938,8 @@ func fromProtoFileEntry(entry *codewirev1.FileEntry) (FileEntry, error) {
 		return FileEntry{}, err
 	}
 	return FileEntry{
-		IsDir: entry.GetIsDir(), ModTime: valueOrEmpty(modTime), Mode: fmt.Sprintf("%04o", entry.GetMode()&0o777),
+		IsDir: entry.GetIsDir(), IsSymlink: entry.GetMode()&0o170000 == 0o120000,
+		ModTime: valueOrEmpty(modTime), Mode: fmt.Sprintf("%04o", entry.GetMode()&0o777),
 		Name: entry.GetName(), Size: entry.GetSize(),
 	}, nil
 }

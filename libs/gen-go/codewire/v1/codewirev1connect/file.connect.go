@@ -35,6 +35,8 @@ const (
 const (
 	// FileServiceListFilesProcedure is the fully-qualified name of the FileService's ListFiles RPC.
 	FileServiceListFilesProcedure = "/codewire.v1.FileService/ListFiles"
+	// FileServiceStatFileProcedure is the fully-qualified name of the FileService's StatFile RPC.
+	FileServiceStatFileProcedure = "/codewire.v1.FileService/StatFile"
 	// FileServiceDownloadFileProcedure is the fully-qualified name of the FileService's DownloadFile
 	// RPC.
 	FileServiceDownloadFileProcedure = "/codewire.v1.FileService/DownloadFile"
@@ -48,6 +50,9 @@ const (
 // FileServiceClient is a client for the codewire.v1.FileService service.
 type FileServiceClient interface {
 	ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error)
+	// Returns the entry ListFiles shows for one path, describing a final
+	// symlink as itself. A missing path is NOT_FOUND.
+	StatFile(context.Context, *connect.Request[v1.StatFileRequest]) (*connect.Response[v1.StatFileResponse], error)
 	DownloadFile(context.Context, *connect.Request[v1.DownloadFileRequest]) (*connect.ServerStreamForClient[v1.DownloadFileResponse], error)
 	UploadFile(context.Context) *connect.ClientStreamForClient[v1.UploadFileRequest, v1.UploadFileResponse]
 	// Uploads one part of a file, so a large file crosses proxies that cap a
@@ -71,6 +76,13 @@ func NewFileServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+FileServiceListFilesProcedure,
 			connect.WithSchema(fileServiceMethods.ByName("ListFiles")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		statFile: connect.NewClient[v1.StatFileRequest, v1.StatFileResponse](
+			httpClient,
+			baseURL+FileServiceStatFileProcedure,
+			connect.WithSchema(fileServiceMethods.ByName("StatFile")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -99,6 +111,7 @@ func NewFileServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 // fileServiceClient implements FileServiceClient.
 type fileServiceClient struct {
 	listFiles      *connect.Client[v1.ListFilesRequest, v1.ListFilesResponse]
+	statFile       *connect.Client[v1.StatFileRequest, v1.StatFileResponse]
 	downloadFile   *connect.Client[v1.DownloadFileRequest, v1.DownloadFileResponse]
 	uploadFile     *connect.Client[v1.UploadFileRequest, v1.UploadFileResponse]
 	uploadFilePart *connect.Client[v1.UploadFilePartRequest, v1.UploadFilePartResponse]
@@ -107,6 +120,11 @@ type fileServiceClient struct {
 // ListFiles calls codewire.v1.FileService.ListFiles.
 func (c *fileServiceClient) ListFiles(ctx context.Context, req *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error) {
 	return c.listFiles.CallUnary(ctx, req)
+}
+
+// StatFile calls codewire.v1.FileService.StatFile.
+func (c *fileServiceClient) StatFile(ctx context.Context, req *connect.Request[v1.StatFileRequest]) (*connect.Response[v1.StatFileResponse], error) {
+	return c.statFile.CallUnary(ctx, req)
 }
 
 // DownloadFile calls codewire.v1.FileService.DownloadFile.
@@ -127,6 +145,9 @@ func (c *fileServiceClient) UploadFilePart(ctx context.Context) *connect.ClientS
 // FileServiceHandler is an implementation of the codewire.v1.FileService service.
 type FileServiceHandler interface {
 	ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error)
+	// Returns the entry ListFiles shows for one path, describing a final
+	// symlink as itself. A missing path is NOT_FOUND.
+	StatFile(context.Context, *connect.Request[v1.StatFileRequest]) (*connect.Response[v1.StatFileResponse], error)
 	DownloadFile(context.Context, *connect.Request[v1.DownloadFileRequest], *connect.ServerStream[v1.DownloadFileResponse]) error
 	UploadFile(context.Context, *connect.ClientStream[v1.UploadFileRequest]) (*connect.Response[v1.UploadFileResponse], error)
 	// Uploads one part of a file, so a large file crosses proxies that cap a
@@ -146,6 +167,13 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 		FileServiceListFilesProcedure,
 		svc.ListFiles,
 		connect.WithSchema(fileServiceMethods.ByName("ListFiles")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	fileServiceStatFileHandler := connect.NewUnaryHandler(
+		FileServiceStatFileProcedure,
+		svc.StatFile,
+		connect.WithSchema(fileServiceMethods.ByName("StatFile")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -172,6 +200,8 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 		switch r.URL.Path {
 		case FileServiceListFilesProcedure:
 			fileServiceListFilesHandler.ServeHTTP(w, r)
+		case FileServiceStatFileProcedure:
+			fileServiceStatFileHandler.ServeHTTP(w, r)
 		case FileServiceDownloadFileProcedure:
 			fileServiceDownloadFileHandler.ServeHTTP(w, r)
 		case FileServiceUploadFileProcedure:
@@ -189,6 +219,10 @@ type UnimplementedFileServiceHandler struct{}
 
 func (UnimplementedFileServiceHandler) ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.ListFiles is not implemented"))
+}
+
+func (UnimplementedFileServiceHandler) StatFile(context.Context, *connect.Request[v1.StatFileRequest]) (*connect.Response[v1.StatFileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.StatFile is not implemented"))
 }
 
 func (UnimplementedFileServiceHandler) DownloadFile(context.Context, *connect.Request[v1.DownloadFileRequest], *connect.ServerStream[v1.DownloadFileResponse]) error {

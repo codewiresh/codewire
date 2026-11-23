@@ -15,6 +15,8 @@ import (
 	"connectrpc.com/connect"
 	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
 	codewirev1connect "github.com/codewiresh/codewire/libs/gen-go/codewire/v1/codewirev1connect"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	codewire "codewire.sh/sdk-go"
@@ -119,6 +121,14 @@ type fileServiceHandler struct {
 	list     func(context.Context, *connect.Request[codewirev1.ListFilesRequest]) (*connect.Response[codewirev1.ListFilesResponse], error)
 	download func(context.Context, *connect.Request[codewirev1.DownloadFileRequest], *connect.ServerStream[codewirev1.DownloadFileResponse]) error
 	upload   func(context.Context, *connect.ClientStream[codewirev1.UploadFileRequest]) (*connect.Response[codewirev1.UploadFileResponse], error)
+	stat     func(context.Context, *connect.Request[codewirev1.StatFileRequest]) (*connect.Response[codewirev1.StatFileResponse], error)
+}
+
+func (h fileServiceHandler) StatFile(ctx context.Context, req *connect.Request[codewirev1.StatFileRequest]) (*connect.Response[codewirev1.StatFileResponse], error) {
+	if h.stat != nil {
+		return h.stat(ctx, req)
+	}
+	return h.UnimplementedFileServiceHandler.StatFile(ctx, req)
 }
 
 func (h fileServiceHandler) ListFiles(ctx context.Context, req *connect.Request[codewirev1.ListFilesRequest]) (*connect.Response[codewirev1.ListFilesResponse], error) {
@@ -762,6 +772,93 @@ func TestEnvironmentFileUploadDownload(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	if string(got) != content {
 		t.Errorf("expected %q, got %q", content, string(got))
+	}
+}
+
+// notFound is a not_found answer whose google.rpc.ErrorInfo names reason,
+// or that carries no ErrorInfo when reason is empty.
+func notFound(t *testing.T, message, reason string) *connect.Error {
+	t.Helper()
+	err := connect.NewError(connect.CodeNotFound, errors.New(message))
+	if reason != "" {
+		info := protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), reason)
+		detail, detailErr := connect.NewErrorDetail(&anypb.Any{TypeUrl: "type.googleapis.com/google.rpc.ErrorInfo", Value: info})
+		if detailErr != nil {
+			t.Fatalf("ErrorInfo detail: %v", detailErr)
+		}
+		err.AddDetail(detail)
+	}
+	return err
+}
+
+func TestFilesStatAndExists(t *testing.T) {
+	envJSON := codewire.EnvironmentData{Id: "env_123", OrgId: "org_test", State: "running"}
+	client, _ := testRuntimeServer(t, environmentServiceHandler{
+		get: func(_ context.Context, _ *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error) {
+			return connect.NewResponse(&codewirev1.GetEnvironmentResponse{Environment: environmentProto(envJSON)}), nil
+		},
+	}, execServiceHandler{}, fileServiceHandler{
+		stat: func(_ context.Context, req *connect.Request[codewirev1.StatFileRequest]) (*connect.Response[codewirev1.StatFileResponse], error) {
+			if req.Msg.GetOrgId() != "org_test" || req.Msg.GetEnvironmentId() != "env_123" {
+				t.Errorf("unexpected stat coordinates: %#v", req.Msg)
+			}
+			switch req.Msg.GetPath() {
+			case "/workspace/f.txt":
+				return connect.NewResponse(&codewirev1.StatFileResponse{Entry: &codewirev1.FileEntry{
+					Name: "f.txt", Size: 5, Mode: 0o100644, ModTime: timestamppb.New(time.Unix(1_700_000_000, 0)),
+				}}), nil
+			case "/workspace/link":
+				return connect.NewResponse(&codewirev1.StatFileResponse{Entry: &codewirev1.FileEntry{
+					Name: "link", Size: 5, Mode: 0o120777, ModTime: timestamppb.New(time.Unix(1_700_000_000, 0)),
+				}}), nil
+			case "/workspace/missing":
+				return nil, notFound(t, "file not found", "FILE_NOT_FOUND")
+			case "/workspace/no-org":
+				return nil, notFound(t, "organization not found", "")
+			case "/workspace/other-reason":
+				return nil, notFound(t, "environment not found", "ENVIRONMENT_NOT_FOUND")
+			default:
+				return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("file path is invalid or denied"))
+			}
+		},
+	}, portServiceHandler{})
+	ctx := context.Background()
+	env, err := client.Environments.Get(ctx, "env_123")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	entry, err := env.Files.Stat(ctx, "/workspace/f.txt")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	want := codewire.FileEntry{Name: "f.txt", Size: 5, Mode: "0644", ModTime: "2023-11-14T22:13:20Z"}
+	if entry != want {
+		t.Errorf("stat = %#v, want %#v", entry, want)
+	}
+	link, err := env.Files.Stat(ctx, "/workspace/link")
+	if err != nil || !link.IsSymlink || link.IsDir || link.Mode != "0777" {
+		t.Errorf("stat of a symlink = %#v, %v; want IsSymlink with mode 0777", link, err)
+	}
+	var apiErr *codewire.Error
+	if _, err := env.Files.Stat(ctx, "/workspace/missing"); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Reason != "FILE_NOT_FOUND" {
+		t.Errorf("stat of a missing path = %v, want a 404 *Error with reason FILE_NOT_FOUND", err)
+	}
+
+	for path, want := range map[string]bool{"/workspace/f.txt": true, "/workspace/link": true, "/workspace/missing": false} {
+		exists, err := env.Files.Exists(ctx, path)
+		if err != nil || exists != want {
+			t.Errorf("Exists(%q) = %v, %v; want %v, nil", path, exists, err, want)
+		}
+	}
+	for path, status := range map[string]int{
+		"/etc/passwd":             http.StatusBadRequest,
+		"/workspace/no-org":       http.StatusNotFound,
+		"/workspace/other-reason": http.StatusNotFound,
+	} {
+		if exists, err := env.Files.Exists(ctx, path); exists || !errors.As(err, &apiErr) || apiErr.StatusCode != status {
+			t.Errorf("Exists(%q) = %v, %v; want false and the %d *Error", path, exists, err, status)
+		}
 	}
 }
 

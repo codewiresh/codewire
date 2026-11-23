@@ -2,14 +2,20 @@ package codewire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"connectrpc.com/connect"
 	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
 )
 
 const fileUploadChunkSize = 32 * 1024
+
+// fileNotFoundReason is the ErrorInfo reason the platform gives a missing
+// file, as distinct from a missing organization or environment.
+const fileNotFoundReason = "FILE_NOT_FOUND"
 
 // Files provides file operations on an environment through FileService.
 type Files struct {
@@ -119,4 +125,29 @@ func (f *Files) List(ctx context.Context, dirPath *string) ([]FileEntry, error) 
 			return entries, nil
 		}
 	}
+}
+
+// Stat returns the entry [Files.List] shows for remotePath, without listing
+// its folder; a final symlink is described as itself. A missing path is an
+// [*Error] with StatusCode 404.
+func (f *Files) Stat(ctx context.Context, remotePath string) (FileEntry, error) {
+	response, err := f.client.files.StatFile(ctx, connect.NewRequest(&codewirev1.StatFileRequest{
+		OrgId: f.orgID, EnvironmentId: f.envID, Path: remotePath,
+	}))
+	if err != nil {
+		return FileEntry{}, connectSDKError(err)
+	}
+	return fromProtoFileEntry(response.Msg.GetEntry())
+}
+
+// Exists reports whether remotePath exists. Only a missing file (404 with
+// reason FILE_NOT_FOUND) is false; any other failure, such as an unknown
+// organization, is returned as the error.
+func (f *Files) Exists(ctx context.Context, remotePath string) (bool, error) {
+	_, err := f.Stat(ctx, remotePath)
+	var sdkError *Error
+	if errors.As(err, &sdkError) && sdkError.StatusCode == http.StatusNotFound && sdkError.Reason == fileNotFoundReason {
+		return false, nil
+	}
+	return err == nil, err
 }

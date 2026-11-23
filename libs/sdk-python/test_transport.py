@@ -418,6 +418,10 @@ class TransportTestCase(unittest.TestCase):
         )
 
         self.assertEqual(file_value["mode"], "0755")
+        self.assertFalse(file_value["is_symlink"])
+        link_value = file_entry_to_dict(FileEntry(name="link", size=7, mode=0o120777))
+        self.assertTrue(link_value["is_symlink"])
+        self.assertEqual(link_value["mode"], "0777")
         self.assertEqual(file_value["mod_time"], "2026-01-01T00:00:00Z")
         project = preset_value["project_spec"]
         self.assertEqual(project["schema_version"], 1)
@@ -468,11 +472,16 @@ class TransportTestCase(unittest.TestCase):
                         ]
                     )
                 ),
-                _connect_detail(ErrorInfo(metadata={"request_id": "req_api_key"})),
+                _connect_detail(
+                    ErrorInfo(
+                        reason="INVALID_API_KEY", metadata={"request_id": "req_api_key"}
+                    )
+                ),
             ],
         )
 
         mapped = codewire_error_from_connect(error)
+        self.assertEqual(mapped.reason, "INVALID_API_KEY")
 
         self.assertEqual(mapped.status, 400)
         self.assertEqual(mapped.detail, "invalid API key")

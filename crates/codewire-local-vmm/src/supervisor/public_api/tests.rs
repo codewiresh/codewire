@@ -729,6 +729,24 @@ async fn real_uds_connect_client_shares_the_owner_only_supervisor_endpoint() {
         stopped_error.message.as_deref(),
         Some("local environment is not in the required state")
     );
+    // StatFile is served by the same file service and refused the same way.
+    let stopped_error = files
+        .stat_file(proto::StatFileRequest {
+            org_id: namespace.to_string(),
+            environment_id: environment_id.clone(),
+            path: "/workspace/f.txt".to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stopped_error.code,
+        connectrpc::ErrorCode::FailedPrecondition
+    );
+    assert_eq!(
+        stopped_error.message.as_deref(),
+        Some("local environment is not in the required state")
+    );
 
     drop(client);
     let grpc_transport = Http2Connection::connect_with_connector(

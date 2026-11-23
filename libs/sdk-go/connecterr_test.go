@@ -11,7 +11,8 @@ import (
 
 func TestConnectSDKErrorUsesCanonicalStatusAndDetails(t *testing.T) {
 	badRequest := appendBytesField(nil, 1, appendStringField(appendStringField(nil, 1, "disabled"), 2, "must be set"))
-	errorInfo := appendBytesField(nil, 3, appendStringField(appendStringField(nil, 1, "request_id"), 2, "detail-request-id"))
+	errorInfo := appendStringField(nil, 1, "INVALID_API_KEY")
+	errorInfo = appendBytesField(errorInfo, 3, appendStringField(appendStringField(nil, 1, "request_id"), 2, "detail-request-id"))
 	badRequestDetail, err := connect.NewErrorDetail(&anypb.Any{
 		TypeUrl: "type.googleapis.com/google.rpc.BadRequest",
 		Value:   badRequest,
@@ -36,7 +37,7 @@ func TestConnectSDKErrorUsesCanonicalStatusAndDetails(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected error type: %T", connectSDKError(connectError))
 	}
-	if got.StatusCode != 400 || got.Detail != "invalid API key" || got.RequestID != "detail-request-id" {
+	if got.StatusCode != 400 || got.Detail != "invalid API key" || got.RequestID != "detail-request-id" || got.Reason != "INVALID_API_KEY" {
 		t.Errorf("unexpected API error: %#v", got)
 	}
 	if len(got.Violations()) != 1 || got.Violations()[0] != (FieldViolation{Field: "disabled", Message: "must be set"}) {

@@ -130,6 +130,9 @@ type Error struct {
 	StatusCode int
 	Detail     string
 	RequestID  string
+	// Reason is the google.rpc.ErrorInfo reason the server named, such as
+	// FILE_NOT_FOUND; empty when it named none.
+	Reason     string
 	violations []FieldViolation
 }
 

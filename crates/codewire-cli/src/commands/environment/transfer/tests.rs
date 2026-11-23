@@ -5,8 +5,8 @@ use std::task::{Context, Poll};
 
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, FileEntry, FileService, ListFilesRequest, ListFilesResponse,
-    UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse,
-    upload_file_part_request, upload_file_request,
+    StatFileRequest, StatFileResponse, UploadFilePartRequest, UploadFilePartResponse,
+    UploadFileRequest, UploadFileResponse, upload_file_part_request, upload_file_request,
 };
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
@@ -287,6 +287,14 @@ impl FileService for FakeFiles {
         _: ServiceRequest<'_, ListFilesRequest>,
     ) -> ServiceResult<ListFilesResponse> {
         Err(ConnectError::unimplemented("list_files"))
+    }
+
+    async fn stat_file(
+        &self,
+        _: RequestContext,
+        _: ServiceRequest<'_, StatFileRequest>,
+    ) -> ServiceResult<StatFileResponse> {
+        Err(ConnectError::unimplemented("stat_file"))
     }
 
     async fn download_file(

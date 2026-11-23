@@ -8,8 +8,7 @@ supervisor's tests until they reach local VMs too. The format is in
 
 ## Where it stands
 
-Updated 2026-11-22. Written before the code; nothing here has been built or
-walked.
+Updated 2026-11-23. Built; not yet walked.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -34,15 +33,19 @@ walked.
   1. `stat` and `exists` on `/workspace/f.txt`, `/workspace/d`,
      `/workspace/link` and `/workspace/missing`;
   2. `stat` on `/etc/passwd`;
-  3. with an API key made with `--no-permissions`, step 1 again.
+  3. with an API key made with `--no-permissions`, step 1 again;
+  4. `exists` on `/workspace/f.txt` with a wrong organization ID, or in an
+     environment of another organization.
 - **What must be seen:**
-  - `f.txt` has size 5 and is not a folder; `d` is a folder; `link` is a
-    symlink (mode `0o120000`), not the file it points to. Each matches its
-    `ListFiles` row and `exists` is true for all three.
-  - `missing` raises the SDK's not-found error from `stat`, and `exists` is
-    false.
+  - `f.txt` has size 5 and is not a folder; `d` is a folder; for `link`,
+    `is_symlink` is true (the Rust SDK's mode has `0o120000`), not the file
+    it points to. Each matches its `ListFiles` row and `exists` is true for
+    all three.
+  - `missing` raises the SDK's not-found error from `stat`, with reason
+    `FILE_NOT_FOUND`, and `exists` is false.
   - `/etc/passwd` is refused with the same error `ListFiles` gives for it.
   - Step 3 gives the same answers as step 1.
+  - Step 4 is an error from `exists`, not false.
 
 ## `files-write-many`: many files in one call
 

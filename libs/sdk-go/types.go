@@ -342,11 +342,12 @@ type UpdatePresetBody struct {
 
 // FileEntry describes an environment file.
 type FileEntry struct {
-	IsDir   bool   `json:"is_dir"`
-	ModTime string `json:"mod_time"`
-	Mode    string `json:"mode"`
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	IsSymlink bool   `json:"is_symlink"`
+	ModTime   string `json:"mod_time"`
+	Mode      string `json:"mode"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
 }
 
 // APIKey is the SDK-owned public representation of an API key.

@@ -45,6 +45,22 @@ class FileEntry(_message.Message):
     mod_time: _timestamp_pb2.Timestamp
     def __init__(self, name: _Optional[str] = ..., size: _Optional[int] = ..., is_dir: _Optional[bool] = ..., mode: _Optional[int] = ..., mod_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
+class StatFileRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "path")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    path: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., path: _Optional[str] = ...) -> None: ...
+
+class StatFileResponse(_message.Message):
+    __slots__ = ("entry",)
+    ENTRY_FIELD_NUMBER: _ClassVar[int]
+    entry: FileEntry
+    def __init__(self, entry: _Optional[_Union[FileEntry, _Mapping]] = ...) -> None: ...
+
 class DownloadFileRequest(_message.Message):
     __slots__ = ("org_id", "environment_id", "path")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]

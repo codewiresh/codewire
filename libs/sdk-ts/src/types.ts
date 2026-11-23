@@ -333,6 +333,7 @@ export interface ExecResult {
 
 export interface FileEntry {
   is_dir: boolean;
+  is_symlink: boolean;
   mod_time: string;
   mode: string;
   name: string;
@@ -429,6 +430,8 @@ export class CodewireError extends Error {
     public detail: string,
     public requestId?: string,
     public violations?: FieldViolation[],
+    /** The google.rpc.ErrorInfo reason the server named, such as FILE_NOT_FOUND; empty when it named none. */
+    public reason = "",
   ) {
     let msg = `Codewire API error ${status}: ${detail}`;
     if (requestId) msg += ` (request_id: ${requestId})`;
@@ -478,8 +481,9 @@ export function mapConnectError(error: unknown): unknown {
       description,
     })),
   );
+  const errorInfo = error.findDetails(ErrorInfoSchema)[0];
   const requestId =
-    error.findDetails(ErrorInfoSchema)[0]?.metadata.request_id ??
+    errorInfo?.metadata.request_id ??
     error.metadata.get("x-request-id") ??
     undefined;
 
@@ -488,5 +492,6 @@ export function mapConnectError(error: unknown): unknown {
     error.rawMessage,
     requestId,
     violations.length === 0 ? undefined : violations,
+    errorInfo?.reason ?? "",
   );
 }

@@ -242,6 +242,13 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 	if wantFile := (FileEntry{Name: "main.go", Size: 42, IsDir: false, Mode: "0755", ModTime: "2026-03-01T00:07:00Z"}); !reflect.DeepEqual(file, wantFile) {
 		t.Errorf("converted file mismatch (-want +got):\nwant: %#v\n got: %#v", wantFile, file)
 	}
+	link, err := fromProtoFileEntry(&codewirev1.FileEntry{Name: "link", Size: 7, Mode: 0o120777})
+	if err != nil {
+		t.Fatalf("convert symlink entry: %v", err)
+	}
+	if wantLink := (FileEntry{Name: "link", Size: 7, IsSymlink: true, Mode: "0777"}); !reflect.DeepEqual(link, wantLink) {
+		t.Errorf("converted symlink mismatch:\nwant: %#v\n got: %#v", wantLink, link)
+	}
 
 	if result := fromProtoExecResult(&codewirev1.ExecResponse{ExitCode: 7, Stdout: []byte("out"), Stderr: []byte("err")}); result != (ExecResult{ExitCode: 7, Stdout: "out", Stderr: "err"}) {
 		t.Errorf("converted exec result = %#v", result)

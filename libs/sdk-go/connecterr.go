@@ -27,7 +27,9 @@ func connectSDKError(err error) error {
 	for _, detail := range connectError.Details() {
 		switch detail.Type() {
 		case "google.rpc.ErrorInfo":
-			if requestID := requestIDFromErrorInfo(detail.Bytes()); requestID != "" {
+			reason, requestID := errorInfoFields(detail.Bytes())
+			sdkError.Reason = reason
+			if requestID != "" {
 				sdkError.RequestID = requestID
 			}
 		case "google.rpc.BadRequest":
@@ -66,31 +68,35 @@ func connectStatusCode(code connect.Code) int {
 	}
 }
 
-func requestIDFromErrorInfo(message []byte) string {
+// errorInfoFields reads a google.rpc.ErrorInfo's reason and its
+// request_id metadata entry.
+func errorInfoFields(message []byte) (reason, requestID string) {
 	for len(message) > 0 {
 		number, kind, length := protowire.ConsumeTag(message)
 		if length < 0 {
-			return ""
+			return reason, requestID
 		}
 		message = message[length:]
-		if number == 3 && kind == protowire.BytesType {
+		if (number == 1 || number == 3) && kind == protowire.BytesType {
 			entry, consumed := protowire.ConsumeBytes(message)
 			if consumed < 0 {
-				return ""
+				return reason, requestID
 			}
-			if key, value, ok := stringMapEntry(entry); ok && key == "request_id" {
-				return value
+			if number == 1 {
+				reason = string(entry)
+			} else if key, value, ok := stringMapEntry(entry); ok && key == "request_id" {
+				requestID = value
 			}
 			message = message[consumed:]
 			continue
 		}
 		consumed := protowire.ConsumeFieldValue(number, kind, message)
 		if consumed < 0 {
-			return ""
+			return reason, requestID
 		}
 		message = message[consumed:]
 	}
-	return ""
+	return reason, requestID
 }
 
 func fieldViolationsFromBadRequest(message []byte) []FieldViolation {

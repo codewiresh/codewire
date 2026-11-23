@@ -1,9 +1,12 @@
 import { fromProtoFileEntry } from "./convert.js";
 import type { FileClient } from "./transport.js";
-import { mapConnectError } from "./types.js";
+import { CodewireError, mapConnectError } from "./types.js";
 import type { FileEntry } from "./types.js";
 
 const uploadChunkSize = 32 * 1024;
+// The ErrorInfo reason the platform gives a missing file, as distinct from a
+// missing organization or environment.
+const fileNotFoundReason = "FILE_NOT_FOUND";
 
 export class Files {
   constructor(
@@ -31,6 +34,46 @@ export class Files {
       return entries;
     } catch (error) {
       throw mapConnectError(error);
+    }
+  }
+
+  /**
+   * The entry `list` shows for a path, without listing its folder; a final
+   * symlink is described as itself. A missing path throws a CodewireError
+   * with status 404.
+   */
+  async stat(path: string): Promise<FileEntry> {
+    try {
+      const response = await this.client.statFile({
+        orgId: this.orgId,
+        environmentId: this.environmentId,
+        path,
+      });
+      if (!response.entry) throw new Error("stat response omitted entry");
+      return fromProtoFileEntry(response.entry);
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /**
+   * Whether a path exists. Only a missing file (404 with reason
+   * FILE_NOT_FOUND) is false; any other failure, such as an unknown
+   * organization, throws.
+   */
+  async exists(path: string): Promise<boolean> {
+    try {
+      await this.stat(path);
+      return true;
+    } catch (error) {
+      if (
+        error instanceof CodewireError &&
+        error.status === 404 &&
+        error.reason === fileNotFoundReason
+      ) {
+        return false;
+      }
+      throw error;
     }
   }
 

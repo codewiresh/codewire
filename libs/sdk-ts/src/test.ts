@@ -122,7 +122,10 @@ async function runTests() {
           },
           {
             desc: ErrorInfoSchema,
-            value: create(ErrorInfoSchema, { metadata: { request_id: "req_api_key" } }),
+            value: create(ErrorInfoSchema, {
+              reason: "INVALID_API_KEY",
+              metadata: { request_id: "req_api_key" },
+            }),
           },
         ]);
       }
@@ -488,6 +491,34 @@ async function runTests() {
           },
         ],
       };
+    },
+    statFile: (request, context) => {
+      requireTestKey(context);
+      if (request.orgId !== "org_test" || request.environmentId !== "env_123") {
+        throw new ConnectError("access denied", Code.PermissionDenied);
+      }
+      if (request.path === "/workspace/f.txt") {
+        return {
+          entry: { name: "f.txt", size: 5n, isDir: false, mode: 0o100644, modTime: timestamp },
+        };
+      }
+      if (request.path === "/workspace/link") {
+        return { entry: { name: "link", size: 5n, isDir: false, mode: 0o120777, modTime: timestamp } };
+      }
+      if (request.path === "/workspace/missing") {
+        throw new ConnectError("file not found", Code.NotFound, undefined, [
+          { desc: ErrorInfoSchema, value: create(ErrorInfoSchema, { reason: "FILE_NOT_FOUND" }) },
+        ]);
+      }
+      if (request.path === "/workspace/no-org") {
+        throw new ConnectError("organization not found", Code.NotFound);
+      }
+      if (request.path === "/workspace/other-reason") {
+        throw new ConnectError("environment not found", Code.NotFound, undefined, [
+          { desc: ErrorInfoSchema, value: create(ErrorInfoSchema, { reason: "ENVIRONMENT_NOT_FOUND" }) },
+        ]);
+      }
+      throw new ConnectError("file path is invalid or denied", Code.InvalidArgument);
     },
     async *downloadFile(_request, context) {
       requireTestKey(context);
@@ -970,6 +1001,9 @@ async function runTests() {
     modTime: timestamp,
   }));
   assert(convertedFile.mode === "0644", "file modes keep REST octal strings");
+  assert(!convertedFile.is_symlink, "a regular file is not a symlink");
+  const convertedLink = fromProtoFileEntry(create(FileEntrySchema, { name: "link", size: 7n, mode: 0o120777 }));
+  assert(convertedLink.is_symlink && convertedLink.mode === "0777", "a symlink entry says so and keeps its permission string");
   assert(convertedFile.size === 128, "file sizes convert int64 to numbers");
   assert(convertedFile.mod_time === "2026-01-01T00:00:00Z", "file times keep REST timestamps");
 
@@ -1388,6 +1422,7 @@ async function runTests() {
       assert((e as CodewireError).status === 400, "Connect validation status is 400");
       assert((e as CodewireError).violations?.[0]?.field === "name", "Connect validation exposes field violations");
       assert((e as CodewireError).requestId === "req_api_key", "Connect ErrorInfo request ID is retained");
+      assert((e as CodewireError).reason === "INVALID_API_KEY", "Connect ErrorInfo reason is retained");
     }
 
     try {
@@ -1528,6 +1563,30 @@ async function runTests() {
     );
     const listedFiles = await env2.files.list("/workspace");
     assert(listedFiles[0].name === "main.go", "files.list returns entries");
+    const statted = await env2.files.stat("/workspace/f.txt");
+    assert(
+      statted.name === "f.txt" && statted.size === 5 && !statted.is_dir && statted.mode === "0644",
+      "files.stat returns the entry",
+    );
+    assert(await env2.files.exists("/workspace/f.txt"), "files.exists is true for an entry");
+    assert(!(await env2.files.exists("/workspace/missing")), "files.exists is false for a missing file");
+    assert((await env2.files.stat("/workspace/link")).is_symlink, "files.stat says a symlink is one");
+    await nodeAssert.rejects(
+      env2.files.stat("/workspace/missing"),
+      (error: unknown) =>
+        error instanceof CodewireError && error.status === 404 && error.reason === "FILE_NOT_FOUND",
+    );
+    for (const [path, status] of [
+      ["/etc/passwd", 400],
+      ["/workspace/no-org", 404],
+      ["/workspace/other-reason", 404],
+    ] as const) {
+      await nodeAssert.rejects(
+        env2.files.exists(path),
+        (error: unknown) => error instanceof CodewireError && error.status === status,
+        path,
+      );
+    }
 
     // Test: Ports
     console.log("Test: Ports");
@@ -1601,7 +1660,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 190;
+  const expectedAssertions = 197;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

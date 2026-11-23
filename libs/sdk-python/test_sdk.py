@@ -62,6 +62,7 @@ from codewire.v1.file_pb2 import (
     DownloadFileResponse,
     FileEntry,
     ListFilesResponse,
+    StatFileResponse,
     UploadFileResponse,
 )
 from codewire.v1.port_connect import PortServiceWSGIApplication
@@ -422,6 +423,39 @@ class ControlPlaneFixture:
                 )
             ]
         )
+
+    def stat_file(self, request, ctx):
+        self._require_auth(ctx)
+        if (request.org_id, request.environment_id) != ("org_test", "env_123"):
+            raise ConnectError(Code.PERMISSION_DENIED, "access denied")
+        if request.path == "/workspace/f.txt":
+            return StatFileResponse(
+                entry=FileEntry(
+                    name="f.txt",
+                    size=5,
+                    mode=0o100644,
+                    mod_time=_timestamp("2026-01-01T00:00:00Z"),
+                )
+            )
+        if request.path == "/workspace/link":
+            return StatFileResponse(
+                entry=FileEntry(name="link", size=5, mode=0o120777)
+            )
+        if request.path == "/workspace/missing":
+            raise ConnectError(
+                Code.NOT_FOUND,
+                "file not found",
+                [_connect_detail(ErrorInfo(reason="FILE_NOT_FOUND"))],
+            )
+        if request.path == "/workspace/no-org":
+            raise ConnectError(Code.NOT_FOUND, "organization not found")
+        if request.path == "/workspace/other-reason":
+            raise ConnectError(
+                Code.NOT_FOUND,
+                "environment not found",
+                [_connect_detail(ErrorInfo(reason="ENVIRONMENT_NOT_FOUND"))],
+            )
+        raise ConnectError(Code.INVALID_ARGUMENT, "file path is invalid or denied")
 
     def download_file(self, request, ctx):
         self._require_auth(ctx)
@@ -794,6 +828,38 @@ class SDKTestCase(unittest.TestCase):
         files = env.files.list("/workspace")
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]["name"], "test.txt")
+
+    def test_environment_file_stat_and_exists(self):
+        env = self.cw.environments.create(project_spec=_project_input())
+        self.assertEqual(
+            env.files.stat("/workspace/f.txt"),
+            {
+                "name": "f.txt",
+                "size": 5,
+                "is_dir": False,
+                "is_symlink": False,
+                "mode": "0644",
+                "mod_time": "2026-01-01T00:00:00Z",
+            },
+        )
+        link = env.files.stat("/workspace/link")
+        self.assertTrue(link["is_symlink"])
+        self.assertEqual(link["mode"], "0777")
+        with self.assertRaises(CodewireError) as missing:
+            env.files.stat("/workspace/missing")
+        self.assertEqual(missing.exception.status, 404)
+        self.assertEqual(missing.exception.reason, "FILE_NOT_FOUND")
+        self.assertTrue(env.files.exists("/workspace/f.txt"))
+        self.assertTrue(env.files.exists("/workspace/link"))
+        self.assertFalse(env.files.exists("/workspace/missing"))
+        for path, status in [
+            ("/etc/passwd", 400),
+            ("/workspace/no-org", 404),
+            ("/workspace/other-reason", 404),
+        ]:
+            with self.assertRaises(CodewireError, msg=path) as refused:
+                env.files.exists(path)
+            self.assertEqual(refused.exception.status, status)
 
     def test_environment_list_ports(self):
         env = self.cw.environments.create(project_spec=_project_input())
