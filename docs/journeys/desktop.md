@@ -538,7 +538,12 @@ on Dev.
     holds a `stream.revoked` event naming the desktop stream and the
     environment;
   - across the rollout, the viewer reconnects by itself to the same
-    desktop.
+    desktop;
+  - a viewer that cannot use its stream closes it and says the desktop's
+    state is unknown; the panel never stays at "Connecting…" holding an
+    open stream. A browser does not refuse its own WebSocket, so this is
+    proven by the panel's browser fixture spec, which opens the view with
+    a WebSocket noVNC refuses.
 - **Gotchas:** removing a member from the organization does not end their
   open viewer yet, as it does not end an open terminal
   (`docs/dev/AUTH-POLICY.md`); do not record that as observed. Time the

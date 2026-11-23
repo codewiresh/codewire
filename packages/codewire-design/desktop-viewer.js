@@ -169,7 +169,15 @@
       socket.binaryType = "arraybuffer";
       let closed = null;
       socket.addEventListener("close", (event) => { closed = event; });
-      const viewer = new RFB(screen, socket, { credentials: { password } });
+      let viewer;
+      try {
+        viewer = new RFB(screen, socket, { credentials: { password } });
+      } catch {
+        // A viewer that refuses its socket would leave it open and the panel
+        // connecting; close it and say the state is unknown.
+        socket.close();
+        return show("unknown");
+      }
       viewer.scaleViewport = true;
       viewer.focusOnClick = true;
       viewer.addEventListener("connect", () => {

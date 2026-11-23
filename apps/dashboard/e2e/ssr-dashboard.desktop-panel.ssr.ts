@@ -10,8 +10,9 @@ const password = "a1b2c3d4";
 const refusal = "4 viewers already watch this desktop, the most it takes";
 type DesktopState = "unavailable" | "stopped" | "starting" | "running";
 
-// One viewer's stream: what the page sent after the VNC handshake.
-type Stream = { route: WebSocketRoute; url: URL; afterInit: Buffer; ready: boolean };
+// One viewer's stream: what the page sent after the VNC handshake, and
+// whether the page closed it.
+type Stream = { route: WebSocketRoute; url: URL; afterInit: Buffer; ready: boolean; closed: boolean };
 
 const u32 = (value: number) => { const bytes = Buffer.alloc(4); bytes.writeUInt32BE(value); return bytes; };
 
@@ -79,8 +80,9 @@ async function transport(page: Page) {
     });
   }
   await page.routeWebSocket("**/desktop-stream?**", (route) => {
-    const stream: Stream = { route, url: new URL(route.url()), afterInit: Buffer.alloc(0), ready: false };
+    const stream: Stream = { route, url: new URL(route.url()), afterInit: Buffer.alloc(0), ready: false, closed: false };
     state.streams.push(stream);
+    route.onClose(() => { stream.closed = true; });
     if (state.refuse) {
       const { code, reason } = state.refuse;
       state.refuse = null;
@@ -292,6 +294,19 @@ test("a Sandbox that stops while the viewer loads opens no stream", async ({ pag
   expect(state.streams).toHaveLength(0);
   await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox");
   await expect(panel(page).locator("[data-desktop-screen]")).toBeHidden();
+});
+
+test("a viewer that refuses its socket closes it and says the state is unknown", async ({ page }) => {
+  const state = await transport(page);
+  state.desktop = "running";
+  await openFixture(page);
+  // Without showDesktop's copy, the routed socket keeps its members on a base
+  // class, which noVNC refuses: what the Dev walk met before #6049.
+  await page.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: "Desktop", exact: true }).click();
+  await expect(panel(page)).toHaveAttribute("data-desktop-state", "unknown");
+  await expect(panel(page).locator("[data-desktop-status]")).toHaveText("The desktop's state is unknown. Reload this page to check it.");
+  await expect.poll(() => state.streams[0]?.closed).toBe(true);
+  expect(state.streams).toHaveLength(1);
 });
 
 test("a Sandbox started from the page reads its desktop without a reload", async ({ page }) => {
