@@ -22,7 +22,10 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
-use crate::sandbox::template::RUNTIME_CLASS_RUNC;
+use crate::sandbox::template::{
+    HOSTED_EGRESS_FENCE_REVISION_ANNOTATION, HOSTED_EGRESS_TUN_CONTAINER, RUNTIME_CLASS_RUNC,
+    RUNTIME_CLASS_STANDARD,
+};
 
 /// A repair or replacement refused because the Sandbox was made before
 /// hosted egress and still runs direct. `sandbox` is for the operator log;
@@ -87,27 +90,72 @@ fn broker_required(runtime_class_name: &str) -> bool {
     !matches!(runtime_class_name, "" | RUNTIME_CLASS_RUNC)
 }
 
-fn made_before(enabled: bool, pod_spec: Option<&Value>, labelled: bool) -> bool {
+/// Whether a pod template, or a Pod, has the whole broker shape: the broker
+/// label, the fence revision annotation, and the TUN init container unless it
+/// runs on a `standard` VM, which has its own. The label alone is not broker
+/// mode (#6019): only a writer other than orchestration could leave it, and
+/// admission refuses that (`codewire-sandbox-broker-mode`). This must match
+/// `wholeBroker` in the member admission policy
+/// (`deployments/k8s/orchestration/warm-pool-authz.yaml`), which
+/// `sandbox::client::egress_migration`'s tests pin.
+fn whole_broker(labelled: bool, fenced: bool, spec: Option<&Value>) -> bool {
+    let tun = spec
+        .and_then(|spec| spec.get("runtimeClassName"))
+        .and_then(Value::as_str)
+        == Some(RUNTIME_CLASS_STANDARD)
+        || spec
+            .and_then(|spec| spec.get("initContainers"))
+            .and_then(Value::as_array)
+            .is_some_and(|inits| {
+                inits
+                    .iter()
+                    .any(|init| init["name"] == HOSTED_EGRESS_TUN_CONTAINER)
+            });
+    labelled && fenced && tun
+}
+
+/// [`whole_broker`] over a Sandbox's `spec.podTemplate`.
+pub fn template_whole_broker(template: Option<&Value>) -> bool {
+    let metadata = template.and_then(|template| template.get("metadata"));
+    let labelled = metadata
+        .and_then(|metadata| metadata.pointer("/labels"))
+        .and_then(|labels| labels.get(EGRESS_MODE_LABEL))
+        .and_then(Value::as_str)
+        == Some(EGRESS_MODE_BROKER);
+    let fenced = metadata
+        .and_then(|metadata| metadata.pointer("/annotations"))
+        .and_then(|annotations| annotations.get(HOSTED_EGRESS_FENCE_REVISION_ANNOTATION))
+        .is_some();
+    whole_broker(
+        labelled,
+        fenced,
+        template.and_then(|template| template.get("spec")),
+    )
+}
+
+fn made_before(enabled: bool, pod_spec: Option<&Value>, broker: bool) -> bool {
     let class = pod_spec
         .and_then(|spec| spec.get("runtimeClassName"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    enabled && !labelled && broker_required(class)
+    enabled && !broker && broker_required(class)
 }
 
 /// Refuses a Sandbox, before any patch, whose next Pod would run direct
 /// under a switched-on deployment: one a start moves to hosted egress first.
+/// One with the broker label but not the whole shape counts as direct.
 pub fn check_sandbox(
     enabled: bool,
     name: &str,
     sandbox: &Value,
 ) -> Result<(), MadeBeforeHostedEgress> {
-    let labelled = sandbox
-        .pointer("/spec/podTemplate/metadata/labels")
-        .and_then(|labels| labels.get(EGRESS_MODE_LABEL))
-        .and_then(Value::as_str)
-        == Some(EGRESS_MODE_BROKER);
-    if made_before(enabled, sandbox.pointer("/spec/podTemplate/spec"), labelled) {
+    let template = sandbox.pointer("/spec/podTemplate");
+    let broker = template_whole_broker(template);
+    if made_before(
+        enabled,
+        template.and_then(|template| template.get("spec")),
+        broker,
+    ) {
         return Err(MadeBeforeHostedEgress {
             sandbox: name.to_owned(),
         });
@@ -115,11 +163,21 @@ pub fn check_sandbox(
     Ok(())
 }
 
-/// Whether a bound Pod, with these labels and this spec, runs direct under a
-/// switched-on deployment.
-pub fn pod_made_before(enabled: bool, labels: &BTreeMap<String, String>, spec: &Value) -> bool {
-    let labelled = labels.get(EGRESS_MODE_LABEL).map(String::as_str) == Some(EGRESS_MODE_BROKER);
-    made_before(enabled, Some(spec), labelled)
+/// Whether a bound Pod, with these labels, annotations and spec, runs direct
+/// under a switched-on deployment. One with the broker label but not the
+/// whole shape counts as direct.
+pub fn pod_made_before(
+    enabled: bool,
+    labels: &BTreeMap<String, String>,
+    annotations: &BTreeMap<String, String>,
+    spec: &Value,
+) -> bool {
+    let broker = whole_broker(
+        labels.get(EGRESS_MODE_LABEL).map(String::as_str) == Some(EGRESS_MODE_BROKER),
+        annotations.contains_key(HOSTED_EGRESS_FENCE_REVISION_ANNOTATION),
+        Some(spec),
+    );
+    made_before(enabled, Some(spec), broker)
 }
 
 #[cfg(test)]
@@ -128,16 +186,68 @@ mod tests {
 
     use super::*;
 
-    fn sandbox(class: Option<&str>, broker: bool) -> Value {
+    /// The parts of the broker shape a pod template has.
+    #[derive(Clone, Copy)]
+    struct Shape {
+        label: bool,
+        fence: bool,
+        tun: bool,
+    }
+
+    const WHOLE: Shape = Shape {
+        label: true,
+        fence: true,
+        tun: true,
+    };
+    const DIRECT: Shape = Shape {
+        label: false,
+        fence: false,
+        tun: false,
+    };
+
+    fn shaped(class: Option<&str>, shape: Shape) -> Value {
         let mut labels = json!({"codewire.sh/type": "workspace"});
-        if broker {
+        if shape.label {
             labels[EGRESS_MODE_LABEL] = json!(EGRESS_MODE_BROKER);
         }
+        let mut metadata = json!({"labels": labels});
+        if shape.fence {
+            metadata["annotations"] = json!({HOSTED_EGRESS_FENCE_REVISION_ANNOTATION: "4"});
+        }
         let mut spec = json!({"containers": []});
+        if shape.tun {
+            spec["initContainers"] = json!([{"name": HOSTED_EGRESS_TUN_CONTAINER}]);
+        }
         if let Some(class) = class {
             spec["runtimeClassName"] = json!(class);
         }
-        json!({"spec": {"podTemplate": {"metadata": {"labels": labels}, "spec": spec}}})
+        json!({"spec": {"podTemplate": {"metadata": metadata, "spec": spec}}})
+    }
+
+    fn sandbox(class: Option<&str>, broker: bool) -> Value {
+        shaped(class, if broker { WHOLE } else { DIRECT })
+    }
+
+    /// A Pod's labels, annotations and spec, as the bind reads them.
+    fn pod(
+        shape: Shape,
+        class: &str,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>, Value) {
+        let template = shaped(Some(class), shape);
+        let strings = |value: &Value| -> BTreeMap<String, String> {
+            value
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+                .collect()
+        };
+        let metadata = &template["spec"]["podTemplate"]["metadata"];
+        (
+            strings(&metadata["labels"]),
+            strings(&metadata["annotations"]),
+            template["spec"]["podTemplate"]["spec"].clone(),
+        )
     }
 
     #[test]
@@ -184,18 +294,88 @@ mod tests {
     }
 
     #[test]
-    fn a_pod_is_judged_by_its_own_labels_and_runtime() {
-        let broker =
-            BTreeMap::from([(EGRESS_MODE_LABEL.to_owned(), EGRESS_MODE_BROKER.to_owned())]);
-        let none = BTreeMap::new();
-        let vm = json!({"runtimeClassName": "commodity"});
-        assert!(pod_made_before(true, &none, &vm));
-        assert!(!pod_made_before(true, &broker, &vm));
-        assert!(!pod_made_before(false, &none, &vm));
-        assert!(!pod_made_before(
-            true,
-            &none,
-            &json!({"runtimeClassName": "runc"})
-        ));
+    fn a_pod_is_judged_by_its_own_shape_and_runtime() {
+        let made_before = |shape, class| {
+            let (labels, annotations, spec) = pod(shape, class);
+            pod_made_before(true, &labels, &annotations, &spec)
+        };
+        assert!(made_before(DIRECT, "commodity"));
+        assert!(!made_before(WHOLE, "commodity"));
+        let (labels, annotations, spec) = pod(DIRECT, "commodity");
+        assert!(!pod_made_before(false, &labels, &annotations, &spec));
+        assert!(!made_before(DIRECT, "runc"));
+    }
+
+    /// #6019: the broker label without the rest of the shape is direct, for
+    /// a Sandbox's resume or repair and for a Pod's bind alike. A `standard`
+    /// VM has its own TUN, so the label and the fence are its whole shape.
+    #[test]
+    fn the_label_without_the_whole_shape_is_made_before() {
+        let hollow = [
+            Shape {
+                label: true,
+                fence: false,
+                tun: false,
+            },
+            Shape {
+                label: true,
+                fence: true,
+                tun: false,
+            },
+            Shape {
+                label: true,
+                fence: false,
+                tun: true,
+            },
+            Shape {
+                label: false,
+                fence: true,
+                tun: true,
+            },
+        ];
+        for (index, shape) in hollow.into_iter().enumerate() {
+            assert_eq!(
+                check_sandbox(true, "s", &shaped(Some("commodity"), shape)),
+                Err(MadeBeforeHostedEgress {
+                    sandbox: "s".into()
+                }),
+                "shape {index}"
+            );
+            assert!(
+                format!(
+                    "{}",
+                    check_sandbox(true, "s", &shaped(Some("commodity"), shape)).unwrap_err()
+                )
+                .contains("stop it and start it again"),
+                "shape {index}"
+            );
+            let (labels, annotations, spec) = pod(shape, "commodity");
+            assert!(
+                pod_made_before(true, &labels, &annotations, &spec),
+                "shape {index}"
+            );
+            assert_eq!(
+                check_sandbox(false, "s", &shaped(Some("commodity"), shape)),
+                Ok(()),
+                "shape {index}"
+            );
+        }
+        let standard = Shape {
+            label: true,
+            fence: true,
+            tun: false,
+        };
+        assert_eq!(
+            check_sandbox(true, "s", &shaped(Some("standard"), standard)),
+            Ok(())
+        );
+        let (labels, annotations, spec) = pod(standard, "standard");
+        assert!(!pod_made_before(true, &labels, &annotations, &spec));
+        let unfenced = Shape {
+            label: true,
+            fence: false,
+            tun: false,
+        };
+        assert!(check_sandbox(true, "s", &shaped(Some("standard"), unfenced)).is_err());
     }
 }

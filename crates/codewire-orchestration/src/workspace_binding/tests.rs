@@ -968,18 +968,34 @@ async fn interception_is_sent_only_for_a_broker_mode_sandbox_with_it_on() {
 
 // With hosted egress on (#4000), a Pod on a VM runtime without broker mode
 // was built from a Sandbox made before the switch: its bind is refused, so it
-// never serves with its egress direct. A runc Pod is never broker-mode, and
+// never serves with its egress direct. Broker mode is the whole shape, so the
+// label alone is refused too (#6019). A runc Pod is never broker-mode, and
 // with the switch off nothing changes.
 #[tokio::test]
 async fn with_hosted_egress_on_a_direct_vm_pod_is_refused_its_bind() {
-    let pod = |class: &str, broker: bool| {
+    let pod = |class: &str, label: bool, rest: bool| {
         let mut pod = workspace_pod();
         pod.spec.as_mut().unwrap().runtime_class_name = Some(class.into());
-        if broker {
+        if label {
             pod.metadata.labels.as_mut().unwrap().insert(
                 crate::egress::admission::EGRESS_MODE_LABEL.into(),
                 crate::egress::admission::EGRESS_MODE_BROKER.into(),
             );
+        }
+        if rest {
+            pod.metadata.annotations.get_or_insert_default().insert(
+                crate::sandbox::template::HOSTED_EGRESS_FENCE_REVISION_ANNOTATION.into(),
+                "4".into(),
+            );
+            pod.spec
+                .as_mut()
+                .unwrap()
+                .init_containers
+                .get_or_insert_default()
+                .push(k8s_openapi::api::core::v1::Container {
+                    name: crate::sandbox::template::HOSTED_EGRESS_TUN_CONTAINER.into(),
+                    ..Default::default()
+                });
         }
         pod
     };
@@ -994,12 +1010,22 @@ async fn with_hosted_egress_on_a_direct_vm_pod_is_refused_its_bind() {
         .map(|_| ())
     };
     assert_eq!(
-        bind(pod("commodity", false), true).await,
+        bind(pod("commodity", false, false), true).await,
         Err(BindError::FailedPrecondition)
     );
-    assert_eq!(bind(pod("commodity", true), true).await, Ok(()));
-    assert_eq!(bind(pod("commodity", false), false).await, Ok(()));
-    assert_eq!(bind(pod("runc", false), true).await, Ok(()));
+    assert_eq!(bind(pod("commodity", true, true), true).await, Ok(()));
+    assert_eq!(
+        bind(pod("commodity", true, false), true).await,
+        Err(BindError::FailedPrecondition),
+        "the label alone"
+    );
+    assert_eq!(
+        bind(pod("commodity", false, true), true).await,
+        Err(BindError::FailedPrecondition),
+        "the shape without the label"
+    );
+    assert_eq!(bind(pod("commodity", false, false), false).await, Ok(()));
+    assert_eq!(bind(pod("runc", false, false), true).await, Ok(()));
 }
 
 /// The Pod's first bind decides and stores its interception; a rebind after

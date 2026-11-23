@@ -55,6 +55,7 @@ pub(crate) fn member_facts(pod: &Pod) -> anyhow::Result<MemberFacts> {
         service_account: spec.and_then(|spec| spec.service_account_name.clone()),
         controllers: controllers(pod.metadata.owner_references.as_ref()),
         labels: pod.metadata.labels.clone().unwrap_or_default(),
+        annotations: pod.metadata.annotations.clone().unwrap_or_default(),
         has_spec: spec.is_some(),
         volumes: spec
             .into_iter()

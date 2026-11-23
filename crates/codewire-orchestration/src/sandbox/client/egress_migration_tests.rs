@@ -776,6 +776,7 @@ async fn a_pool_born_sandbox_moves_onto_its_own_template_and_leaves_the_pools_po
         service_account: None,
         controllers: Vec::new(),
         labels,
+        annotations: BTreeMap::new(),
         has_spec: true,
         volumes: Vec::new(),
         containers: Vec::new(),

@@ -115,6 +115,7 @@ pub struct MemberFacts {
     /// Owner references marked as the controller, in their order.
     pub controllers: Vec<ControllerFact>,
     pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
     /// `false` when it was read without a spec; every spec fact is then empty.
     pub has_spec: bool,
     pub volumes: Vec<VolumeFact>,

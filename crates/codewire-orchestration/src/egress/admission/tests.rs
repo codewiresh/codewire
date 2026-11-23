@@ -41,6 +41,7 @@ fn facts(identity: Reviewed<'_>, account: &str, labels: &[(&str, &str)]) -> Memb
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect::<BTreeMap<_, _>>(),
+        annotations: BTreeMap::new(),
         has_spec: true,
         volumes: Vec::new(),
         containers: Vec::new(),

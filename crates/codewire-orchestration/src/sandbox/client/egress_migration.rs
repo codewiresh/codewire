@@ -77,35 +77,12 @@ fn broker_mode(object: &DynamicObject) -> bool {
         == Some(EGRESS_MODE_BROKER)
 }
 
-/// The broker label without the rest of the broker shape: no fence revision,
-/// or no TUN init on a VM that has one (a `standard` VM has its own). Only a
-/// writer other than orchestration could leave it, which admission refuses
-/// (`codewire-sandbox-broker-mode`); a start moves such a Sandbox as if it
-/// had no label. This must match `wholeBroker` in the member admission
-/// policy (`deployments/k8s/orchestration/warm-pool-authz.yaml`), which this
-/// module's tests pin.
+/// The broker label without the rest of the broker shape
+/// (`pre_switch::template_whole_broker`, which admission's `wholeBroker`
+/// matches). A start moves such a Sandbox as if it had no label.
 fn hollow_broker_mode(object: &DynamicObject) -> bool {
-    let template = object.data.pointer("/spec/podTemplate");
-    let fenced = template
-        .and_then(|template| template.pointer("/metadata/annotations"))
-        .and_then(|annotations| {
-            annotations.get(super::super::template::HOSTED_EGRESS_FENCE_REVISION_ANNOTATION)
-        })
-        .is_some();
-    let spec = template.and_then(|template| template.get("spec"));
-    let tun = spec
-        .and_then(|spec| spec.get("runtimeClassName"))
-        .and_then(Value::as_str)
-        == Some(super::super::template::RUNTIME_CLASS_STANDARD)
-        || spec
-            .and_then(|spec| spec.get("initContainers"))
-            .and_then(Value::as_array)
-            .is_some_and(|inits| {
-                inits
-                    .iter()
-                    .any(|init| init["name"] == super::super::template::HOSTED_EGRESS_TUN_CONTAINER)
-            });
-    broker_mode(object) && !(fenced && tun)
+    broker_mode(object)
+        && !pre_switch::template_whole_broker(object.data.pointer("/spec/podTemplate"))
 }
 
 impl SandboxClient {

@@ -454,6 +454,7 @@ async fn a_running_direct_sandbox_is_never_restarted_for_its_egress() {
     assert!(crate::egress::pre_switch::pod_made_before(
         true,
         &live.labels,
+        &live.annotations,
         &live.spec_json
     ));
     let runtime = crate::runtime::fake::FakeRuntimeDriver {

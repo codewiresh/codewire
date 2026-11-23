@@ -1429,8 +1429,8 @@ direct Sandbox is never stopped or restarted for this: it moves at the next
 start that a user or an existing recovery makes. Until then a repair or a
 Pod replacement of it is refused with a reason that says to stop and start
 it, and the binding service refuses a bind from a Pod on a VM runtime
-without broker mode, so a Pod the controller rebuilt on its own never
-serves. Admission is the backstop: with the switch on it denies an
+without the whole broker shape, the label alone included, so a Pod the
+controller rebuilt on its own never serves. Admission is the backstop: with the switch on it denies an
 orchestration update that would start or change such a Sandbox, other
 than a stop, and admits broker mode added to an existing Sandbox only on a
 suspended Sandbox bound to an environment, keeping its runtime class, when

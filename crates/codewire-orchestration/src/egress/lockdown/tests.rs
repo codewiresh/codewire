@@ -26,6 +26,7 @@ fn guest(labels: &[(&str, &str)]) -> MemberFacts {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect(),
+        annotations: Default::default(),
         has_spec: true,
         volumes: Vec::new(),
         containers: Vec::new(),

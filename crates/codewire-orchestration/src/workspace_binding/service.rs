@@ -404,6 +404,7 @@ impl WorkspaceBindingState {
                 || crate::egress::pre_switch::pod_made_before(
                     true,
                     &member.labels,
+                    &member.annotations,
                     &member.spec_json,
                 ))
         {

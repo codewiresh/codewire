@@ -1376,18 +1376,22 @@ mod tests {
 
     /// A Sandbox as a create renders it: with hosted egress on it carries
     /// broker mode; one made while it was off does not.
+    /// A suspended Sandbox, with the whole broker shape when `broker`.
     fn rendered_sandbox(broker: bool) -> serde_json::Value {
-        let mut labels =
-            json!({"codewire.sh/type": "workspace", "codewire.sh/environment-id": ENV});
-        if broker {
-            labels["codewire.sh/egress"] = json!("broker");
-        }
-        json!({
+        let mut sandbox = json!({
             "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
             "metadata": {"name": SANDBOX, "namespace": "dev-sandboxes", "uid": "4f7a", "resourceVersion": "7"},
-            "spec": {"operatingMode": "Suspended", "podTemplate": {"metadata": {"labels": labels},
+            "spec": {"operatingMode": "Suspended", "podTemplate": {"metadata": {"labels":
+                {"codewire.sh/type": "workspace", "codewire.sh/environment-id": ENV}},
                 "spec": {"runtimeClassName": "commodity", "containers": []}}},
-        })
+        });
+        if broker {
+            let template = &mut sandbox["spec"]["podTemplate"];
+            template["metadata"]["labels"]["codewire.sh/egress"] = json!("broker");
+            template["metadata"]["annotations"] = json!({"codewire.sh/egress-fence-revision": "4"});
+            template["spec"]["initContainers"] = json!([{"name": "hosted-egress-tun"}]);
+        }
+        sandbox
     }
 
     /// A driver over a cluster holding the environment's Claim, bound to
@@ -1477,31 +1481,36 @@ mod tests {
             name: SANDBOX.into(),
             uid: "pod-1".into(),
         };
-        let (driver, requests) = driver_over(rendered_sandbox(false), true);
-        let refusals = [
-            driver
-                .resume_current(&placement, ENV, "img")
-                .await
-                .unwrap_err(),
-            driver
-                .repin_daemon_image(&placement, ENV, "img")
-                .await
-                .unwrap_err(),
-            driver
-                .replace_member(&placement, ENV, &member, "img")
-                .await
-                .unwrap_err(),
-        ];
-        for refusal in refusals {
-            assert!(
-                refusal
-                    .downcast_ref::<crate::egress::pre_switch::MadeBeforeHostedEgress>()
-                    .is_some(),
-                "{refusal:#}"
-            );
-            assert!(format!("{refusal}").contains("stop it and start it again"));
+        // The broker label alone is made before it too (#6019).
+        let mut hollow = rendered_sandbox(false);
+        hollow["spec"]["podTemplate"]["metadata"]["labels"]["codewire.sh/egress"] = json!("broker");
+        for sandbox in [rendered_sandbox(false), hollow] {
+            let (driver, requests) = driver_over(sandbox, true);
+            let refusals = [
+                driver
+                    .resume_current(&placement, ENV, "img")
+                    .await
+                    .unwrap_err(),
+                driver
+                    .repin_daemon_image(&placement, ENV, "img")
+                    .await
+                    .unwrap_err(),
+                driver
+                    .replace_member(&placement, ENV, &member, "img")
+                    .await
+                    .unwrap_err(),
+            ];
+            for refusal in refusals {
+                assert!(
+                    refusal
+                        .downcast_ref::<crate::egress::pre_switch::MadeBeforeHostedEgress>()
+                        .is_some(),
+                    "{refusal:#}"
+                );
+                assert!(format!("{refusal}").contains("stop it and start it again"));
+            }
+            assert!(!patched(&requests), "{:?}", requests.lock().unwrap());
         }
-        assert!(!patched(&requests), "{:?}", requests.lock().unwrap());
     }
 
     /// The refusal reads only what decides it: a broker-mode Sandbox, or any
