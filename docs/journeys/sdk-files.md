@@ -14,6 +14,7 @@ walked.
 | ID | Dev | Production |
 | --- | --- | --- |
 | `files-stat` | not yet observed | not yet observed |
+| `files-write-many` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -42,3 +43,23 @@ walked.
     false.
   - `/etc/passwd` is refused with the same error `ListFiles` gives for it.
   - Step 3 gives the same answers as step 1.
+
+## `files-write-many`: many files in one call
+
+- **Entry points:** `files.write_many` in each SDK (`writeMany`,
+  `WriteMany`), over `WriteFiles`.
+- **Driving it:** in each SDK, against `files-a`:
+  1. write `/workspace/proj/a.txt`, `/workspace/proj/src/b.txt` (a folder
+     that doesn't exist yet) and `/workspace/f.txt` (replacing it) in one
+     call, then `stat` each and read each back with `cw exec cat`;
+  2. one call holding 1,001 files; one holding 17 MiB; one naming
+     `/workspace/x.txt` twice; one naming `/etc/x` beside a good path;
+  3. with an API key made with `--no-permissions`, step 1 again with new
+     paths.
+- **What must be seen:**
+  - step 1 returns the three paths with their sizes in order; each file
+    holds exactly what was sent, with mode `0644`, and `/workspace/proj/src`
+    now exists;
+  - each call in step 2 is refused with `invalid_argument` naming the rule,
+    and none of its files, the good path's included, exists afterwards;
+  - step 3 writes as step 1 does.

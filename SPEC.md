@@ -1153,6 +1153,25 @@ in a loop. The journey is
   supervisor's tests are what use it there.
 - Like the other file RPCs, it needs no API key permission.
 
+`WriteFiles` (#5804, not yet built) writes many small files in one call, for
+a program that sets up a project's files before it runs something. The
+journey is [docs/journeys/sdk-files.md](docs/journeys/sdk-files.md).
+- A request names 1 to 1,000 files, each a path and its bytes, up to 16 MiB
+  of bytes in all; a larger file goes through `UploadFile`'s parts. A path
+  follows the upload rules (absolute, at most 4,096 bytes and 256 parts, not
+  a reserved upload name), and no path appears twice. A request that breaks
+  a rule is refused whole with `invalid_argument` naming the path, and
+  writes nothing.
+- Each file is written as an upload is: staged beside its destination,
+  missing parent folders made, mode `0644`, an existing file replaced. No
+  file is put in place until every file is staged, so a failure while
+  staging puts no file in place, though folders it made may remain. If
+  putting one in place fails, the call fails and names the files already
+  written.
+- It returns each path with its size, in the request's order.
+- It is confined, and a local VM's supervisor answers it, as `StatFile` is,
+  and it needs no API key permission.
+
 ### Desktop
 
 Target, not shipped (#3223). The contract is
