@@ -172,6 +172,50 @@ test("a refused live stream falls back to one resync, not a retry loop", async (
   expect(refreshes).toHaveLength(1);
 });
 
+test("an opened card form holds the live refresh only while a card is typed in (#4981)", async ({ page }) => {
+  // Stripe's Payment Element, reduced to what the hold reads: its change
+  // event, which says whether the field is empty.
+  await page.addInitScript(() => {
+    const element = { handlers: {} as Record<string, (event: { empty: boolean }) => void> };
+    Object.assign(window, {
+      typeCard: (empty: boolean) => element.handlers.change?.({ empty }),
+      Stripe: () => ({
+        elements: () => ({
+          create: () => ({
+            on: (name: string, handler: (event: { empty: boolean }) => void) => { element.handlers[name] = handler; },
+            mount: () => {},
+          }),
+        }),
+      }),
+    });
+  });
+  await open(page);
+  const refreshes: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/_fragments/billing")) refreshes.push(request.url());
+  });
+  const credit = () => page.evaluate(() => document.body.dispatchEvent(new CustomEvent("codewire:live:credit")));
+  const typeCard = (empty: boolean) => page.evaluate((value) => (window as unknown as { typeCard: (empty: boolean) => void }).typeCard(value), empty);
+  // Opened and left empty: the refresh runs.
+  const empty = page.locator("#billing-stack-empty");
+  await empty.locator("form[data-add-credit] [data-add-credit-submit]").click();
+  await expect(empty.locator("[data-card-form]")).toBeVisible();
+  await credit();
+  await expect.poll(() => refreshes.length).toBe(1);
+  // A card typed in: the refresh waits, and the form stays.
+  await typeCard(false);
+  await credit();
+  await credit();
+  await page.waitForTimeout(250);
+  expect(refreshes).toHaveLength(1);
+  await expect(empty.locator("[data-card-form]")).toBeVisible();
+  // Cleared again: the held refresh runs, once.
+  await typeCard(true);
+  await expect.poll(() => refreshes.length).toBe(2);
+  await page.waitForTimeout(250);
+  expect(refreshes).toHaveLength(2);
+});
+
 test("a bank's return cleans the address before any request and finishes with only the SetupIntent", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");

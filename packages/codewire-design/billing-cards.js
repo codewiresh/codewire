@@ -150,7 +150,14 @@
         mode: "setup", currency: "eur", paymentMethodTypes: ["card"], appearance: appearance(),
       });
       // Cards only, as v4 shows them: no Link sign-up and no wallets.
-      form.elements.create("payment", { wallets: { applePay: "never", googlePay: "never", link: "never" } }).mount(form.element);
+      const payment = form.elements.create("payment", { wallets: { applePay: "never", googlePay: "never", link: "never" } });
+      // Whether a card is typed in, which is what holds a live refresh
+      // (#4981); emptied again, a held refresh runs.
+      payment.on("change", (event) => {
+        form.typed = !event.empty;
+        if (event.empty) settle();
+      });
+      payment.mount(form.element);
       say(form, "");
     })().catch((error) => {
       form.mounting = null;
@@ -240,17 +247,19 @@
   };
 
   // The stack re-fetches itself on codewire:live:credit (#4762). A swap would
-  // throw away a card form being filled in, a confirmed card not yet
-  // finished, or an open dialog, so the refresh waits until none is in use,
-  // and runs once then.
+  // throw away a card being typed, a confirmed card not yet finished, or an
+  // open dialog, so the refresh waits until none is in use, and runs once
+  // then. An opened form with nothing typed in holds nothing (#4981), so one
+  // left open doesn't keep the balance stale until a reload.
   let refreshOwed = false;
   const inUse = () => document.querySelector("dialog[open]") !== null ||
     [...document.querySelectorAll("[data-card-form]")].some((region) => {
       const form = forms.get(region);
       if (!form) return false;
       // A confirmed card waits for its finish wherever its form is; the form
-      // under Add credit is in use once opened, the dialog's while it's open.
-      return Boolean(form.confirmed) || (!region.closest("dialog") && Boolean(form.mounting) && !region.hidden);
+      // under Add credit is in use while a card is typed in, the dialog's
+      // while it's open.
+      return Boolean(form.confirmed) || (!region.closest("dialog") && Boolean(form.typed) && !region.hidden);
     });
   const refresh = () => document.body.dispatchEvent(new CustomEvent("codewire:live:credit"));
   document.addEventListener("htmx:beforeRequest", (event) => {
