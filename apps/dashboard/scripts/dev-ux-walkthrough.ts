@@ -201,7 +201,8 @@ async function organizationApiKeys(page: Page, slug: string): Promise<void> {
 // prints not-held and does not fail the walk.
 async function updatesLink(page: Page): Promise<void> {
   const started = Date.now();
-  const links = page.locator("nav.cw-console-sidebar a.cw-nav-link");
+  // The mobile drawer holds a second copy of the sidebar; read the desktop one.
+  const links = page.locator(".cw-sidebar-slot nav.cw-console-sidebar a.cw-nav-link");
   if (await holds("updates-link", [
     ["sidebar-link", async () => {
       await visit(page, "/dashboard/");
@@ -219,8 +220,10 @@ async function updatesLink(page: Page): Promise<void> {
 }
 
 // An organization's Network policies page is in its settings navigation and
-// lists the built-in open and locked policies (#5114, docs/journeys/
-// network-and-egress.md policy-dashboard). View only: nothing is created.
+// lists the built-in open and locked policies, or says the deployment hasn't
+// turned the store on (#5114, docs/journeys/network-and-egress.md
+// policy-dashboard). A list that failed to load holds neither. View only:
+// nothing is created.
 async function networkPolicies(page: Page, slug: string): Promise<void> {
   const started = Date.now();
   if (await holds("network-policies", [
@@ -232,7 +235,11 @@ async function networkPolicies(page: Page, slug: string): Promise<void> {
       await expect(page.locator(`a.cw-nav-link[href="/${slug}/network-policies/"]`)).toHaveAttribute("aria-current", "page");
     }],
     ["built-ins", async () => {
-      await expect(page.locator(".cw-network-policy-list .cw-network-policy-copy > strong")).toHaveText(["open", "locked"]);
+      const builtIns = page.locator(".cw-network-policy-list .cw-network-policy-copy > strong");
+      const off = page.locator("#network-policies-off-title");
+      await expect(builtIns.or(off).first()).toBeVisible();
+      if (await off.count()) await expect(off).toHaveText("Network policies aren't available here yet");
+      else await expect(builtIns).toHaveText(["open", "locked"]);
     }],
   ])) passed("network-policies", started);
 }
