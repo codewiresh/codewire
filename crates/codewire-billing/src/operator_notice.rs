@@ -23,10 +23,6 @@ use crate::stripe_client::{CREDIT_CHECKOUT_INVOICE_KIND, CREDIT_TOP_UP_KIND};
 /// The one subject the site-wide notice limit counts under.
 const SITE: &str = "all";
 
-/// The prefix every Add credit top-up id has (`purchase_top_up_id`); an
-/// automatic top-up's id is a generated one.
-const PURCHASE_TOP_UP_PREFIX: &str = "credit-";
-
 const REASON: &str =
     "You got this email because this address is the operator address of a Codewire server.";
 
@@ -67,7 +63,9 @@ pub(crate) fn purchase_kind(
         Some(CREDIT_TOP_UP_KIND) => Some(
             if metadata
                 .get("top_up_id")
-                .is_some_and(|id| id.starts_with(PURCHASE_TOP_UP_PREFIX))
+                // An Add credit top-up's id starts with the purchase prefix; an
+                // automatic top-up's is a generated one.
+                .is_some_and(|id| id.starts_with(crate::credit_purchase::PURCHASE_TOP_UP_PREFIX))
             {
                 PurchaseKind::AddCredit
             } else {
