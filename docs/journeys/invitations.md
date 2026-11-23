@@ -10,7 +10,7 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-18. Invite, email, accept and remove are observed on Dev
+Updated 2026-11-22. Invite, email, accept and remove are observed on Dev
 (source 6c3651dcf), and leaving from `cw` on Dev (source 20f2f4b0a). On
 Production (v0.4.18, source a9dd8b270), the invitation and its email's send
 are observed; the email's arrival is observed on Dev only. The account's
@@ -23,9 +23,9 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
 | --- | --- | --- |
 | `invite-send` | observed 2026-11-13 on 6c3651dcf (#3840) | observed 2026-11-14 on a9dd8b270 (#3847) |
 | `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | sent 2026-11-14 on a9dd8b270, arrival not observed (#3847) |
-| `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
+| `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840); from the invitation page in a browser 2026-11-22 on bb84688d14 (#5911) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
-| `org-leave` | the CLI observed 2026-11-15 on 20f2f4b0a (#4519); the account page not yet observed | not yet observed |
+| `org-leave` | the CLI observed 2026-11-15 on 20f2f4b0a (#4519); the account page observed on Kind 2026-11-22, main's dashboard 253add63cd | not yet observed |
 | `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268; the organization's limit and the dashboard refusal observed 2026-11-15 on e8e593b86 (#4457); the pending cap observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
 | `invite-unverified` | observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | not yet observed |
 | `invite-signup` | not yet observed | not yet observed |
@@ -198,6 +198,15 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
     sign-up invite code or review (#4121), and still verifies its address
     first (owner, 2026-11-13, on #4481). A sign-up without the link, even at
     the invited address, goes through the server's normal sign-up.
+- **Observed, from the invitation page:** Dev, 2026-11-22, promote source
+  bb84688d14 (with #5911), headless Chromium as the synthetic Dev invitee
+  signed in with its password session, the smoke identity inviting it into
+  `codewire-dev-smoke` with `cw org invite` (v0.4.26): the open post carried
+  `Origin: https://codewire-dev.sh` (303, then 200); the page offered **Accept
+  invitation**, naming the address masked; accepting showed "Welcome to the
+  team", and the inviter's `cw org members` listed the invitee, who was then
+  removed. Before #5911 the page's own posts were refused in a real browser
+  (403 "The form expired or came from another site"), seen on Kind.
 - **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
   `cw login`, then `cw org invitations` listing the organization, then `cw org
   accept` joining as member, by `invitations-journey.sh` (#3840). With `cw`
@@ -217,7 +226,8 @@ Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
 
 - **Entry points:** the invitation's link, copied by the inviter or, once the
   invitation email carries it, in the email. It opens `/accept-invite`, which
-  offers sign-up with the address filled in.
+  offers sign-up, names the invited address masked (`s•••@example.com`) and
+  asks for it: a link holder is never shown the full address (#5907).
 - **States to exercise:**
   - a sign-up at the invited address, admitted at once with no code, review
     or reason, then email verification, sign-in and Accept;
@@ -275,7 +285,9 @@ Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
   - an owner leaves while another owner remains;
   - the only owner is refused: "you are the organization's only owner; make
     someone else an owner first, or delete the organization". On the
-    dashboard its Leave is disabled, with the same reason;
+    dashboard its Leave is disabled, and the card, under the organization's
+    name, says "You're its only owner. Make someone else an owner first, or
+    delete the organization." (#5910);
   - answering no to the prompt: "Not left.";
   - an account in no organization: the card says "You're not in an
     organization yet." and offers to create one or see your invitations.
@@ -297,6 +309,16 @@ Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
     leave it without an owner. The script uses `codewire-dev-invitee-walk`.
   - Deleting an organization finishes in the background. A rerun soon after
     can still find `codewire-dev-invitee-walk` while it is being deleted.
+- **Observed, the account page:** the retained Kind cluster, 2026-11-22,
+  main's dashboard 253add63cd against an older orchestration, headless
+  Chromium with scratch accounts: a member's **Leave** asked "Leave ORG? You
+  lose access to its sandboxes, secrets and billing at once. …" and then said
+  "You left the organization." with "You're not in an organization yet." and
+  its two offers; the inviter's `cw org members` then listed only the owner;
+  the only owner's **Leave** is disabled, its reason reading "You're its only
+  owner. Make someone else an owner first, or delete the organization.", as
+  this step says. Whether the account page's removal needs
+  current orchestration is untested; rewalk on Dev.
 - **Observed:** Dev, 2026-11-15, source 20f2f4b0a (deploy-dev run 50777),
   `cw` built from 528ac2680, by `invitations-journey.sh`: the invitee joined
   again and left with `--yes` ("Left Codewire Dev Smoke
