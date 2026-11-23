@@ -60,11 +60,9 @@ included. A start opens a new session.
 ## Prices
 
 **Partly built (#5782).** The storage rate, the admin-only call
-(`UpdateRateCard` on the admin `BillingCatalogService`) and its audit entry
-exist. There's no Pricing page yet, and `pricing.html` and the usage
-documentation still copy the numbers (€0.0438 a vCPU-hour, €0.0141 a GiB-hour
-of memory, €0.000087 a GiB-hour of disk). What follows is the rule #5782
-builds.
+(`UpdateRateCard` on the admin `BillingCatalogService`), its audit entry and
+the public pricing page's live read exist. There's no Pricing page yet. What
+follows is the rule #5782 builds.
 
 Every price is a row of `billing_rate_cards`, one per rate card: Regular,
 Discounted and Unlimited (#5782).
@@ -87,9 +85,12 @@ Discounted and Unlimited (#5782).
   the ledger keeps its amount; nothing is re-priced.
 - **What it records:** each change writes one audit entry, with the
   administrator, the card, the rate, and its old and new value.
-- **What shows a price:** the public pricing page, home, the Billing page
-  and the Sandboxes menu's estimate read the live cards (the public pages
-  show Regular). The public pages read Regular's rates through billing's
+- **What shows a price:** the public pricing page, the Billing page and
+  the Sandboxes menu's estimate read the live cards (the public pricing page
+  shows Regular). The public pages read Regular's rates through billing's
   unauthenticated `GetPublicRates`, which answers only those four rates.
-  The usage documentation points to the pricing page.
+  The pricing page asks at most once a minute. When billing doesn't answer
+  it shows the last rates it read, and no prices if it has read none since
+  it started; it never shows a copied number. The usage documentation points
+  to the pricing page.
 

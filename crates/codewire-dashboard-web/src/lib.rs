@@ -31,6 +31,7 @@ mod mailto;
 mod network_policies_connect;
 mod organization_connect;
 mod personal_api_keys_connect;
+mod public_rates;
 mod raw_auth;
 mod response;
 mod routes;

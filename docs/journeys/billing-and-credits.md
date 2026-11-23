@@ -365,20 +365,22 @@ Issue: #5782. The rule is [`docs/dev/BILLING.md`](../dev/BILLING.md),
 "Prices".
 
 - **Entry points:** the admin panel's Pricing page, the public pricing page,
-  home, the Billing page and the Sandboxes menu's estimate.
+  the Billing page and the Sandboxes menu's estimate.
 - **States to exercise:**
   - a rate changed, its old and new value shown before it saves;
   - the suspended or hibernated storage rate at 0;
   - Unlimited, which can't be changed;
-  - a non-administrator, who can't open the page or make the call.
+  - a non-administrator, who can't open the page or make the call;
+  - billing down: the public pricing page keeps the last rates it read, or
+    says "Prices can't be shown right now." if it has read none.
 - **Driving it:** on Dev, as a platform administrator, raise Regular's vCPU
   price by a cent an hour. Keep a Sandbox of a metered test organization
   running across the change, then set the price back.
 - **Proof:**
   - the page shows the old and new value before saving, and one audit
     entry records the administrator, the card, the rate and both values;
-  - the public pricing page, home, the Billing page and the Sandboxes
-    estimate show the new price without a release;
+  - the public pricing page, the Billing page and the Sandboxes estimate
+    show the new price without a release, the pricing page within a minute;
   - the first draw after the change uses the new price, and the draws
     before it keep their amounts in the ledger;
   - setting it back does the same in reverse.

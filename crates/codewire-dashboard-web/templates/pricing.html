@@ -106,7 +106,8 @@
 
   <section class="sec" id="estimate" aria-labelledby="estimate-title">
     <div class="grid head"><p class="label n">(2.0)</p><p class="label k grey">Calculator</p><h2 id="estimate-title">Price a sandbox.</h2></div>
-    <form class="grid body calc" aria-label="Sandbox price calculator" data-pricing-estimator data-rate-cpu="0.0438" data-rate-memory="0.0141" data-rate-disk="0.000087">
+    {% if let Some(rates) = rates -%}
+    <form class="grid body calc" aria-label="Sandbox price calculator" data-pricing-estimator data-rate-cpu="{{ rates.cpu }}" data-rate-memory="{{ rates.memory }}" data-rate-disk="{{ rates.disk }}">
       <div class="calc-controls">
         <p class="copy">Pick a size, or set each resource yourself. You pay per second while a sandbox runs, and nothing while it’s stopped.</p>
         <div class="seg sizes" role="group" aria-label="Common sizes" hidden data-pricing-controls>
@@ -142,20 +143,23 @@
           <button type="button" class="cw-site-segment" data-period="week" aria-pressed="false">Week</button>
           <button type="button" class="cw-site-segment" data-period="month" aria-pressed="false">Month</button>
         </div>
-        <p class="total"><output for="estimate-cpu estimate-memory estimate-disk" data-pricing-cost="total">€0.2091</output> <span class="label grey" data-pricing-period-label>per hour</span></p>
+        <p class="total"><output for="estimate-cpu estimate-memory estimate-disk" data-pricing-cost="total">{{ rates.total }}</output> <span class="label grey" data-pricing-period-label>per hour</span></p>
         <p class="mono grey" data-pricing-shape>2 vCPU · 8 GB memory · 100 GB disk</p>
         <div class="tw"><table>
           <thead><tr><th scope="col">Resource</th><th scope="col">Rate</th><th scope="col" class="r">Cost</th></tr></thead>
           <tbody>
-            <tr><td>vCPU</td><td class="m">€0.0438 per vCPU-hour</td><td class="m r" data-pricing-cost="cpu">€0.0876</td></tr>
-            <tr><td>Memory</td><td class="m">€0.0141 per GB-hour</td><td class="m r" data-pricing-cost="memory">€0.1128</td></tr>
-            <tr><td>Disk</td><td class="m">€0.000087 per GB-hour</td><td class="m r" data-pricing-cost="disk">€0.0087</td></tr>
+            <tr><td>vCPU</td><td class="m">€{{ rates.cpu }} per vCPU-hour</td><td class="m r" data-pricing-cost="cpu">{{ rates.cpu_cost }}</td></tr>
+            <tr><td>Memory</td><td class="m">€{{ rates.memory }} per GB-hour</td><td class="m r" data-pricing-cost="memory">{{ rates.memory_cost }}</td></tr>
+            <tr><td>Disk</td><td class="m">€{{ rates.disk }} per GB-hour</td><td class="m r" data-pricing-cost="disk">{{ rates.disk_cost }}</td></tr>
           </tbody>
         </table></div>
         <p class="mono grey fnote">Billed per second on the sandbox’s size while it runs. A month is 730 hours.</p>
         <a class="btn" href="/signup">{% if let Some(credit) = signup_credit %}Start with {{ credit }} of compute{% else %}Start building{% endif %} <span aria-hidden="true">→</span></a>
       </div>
     </form>
+    {%- else -%}
+    <div class="grid body"><div class="calc-controls"><p class="copy">Prices can’t be shown right now.</p></div></div>
+    {%- endif %}
   </section>
 
   <section class="sec" id="questions" aria-labelledby="faq-title">

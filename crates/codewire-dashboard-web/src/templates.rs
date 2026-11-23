@@ -28,6 +28,9 @@ pub(crate) struct PricingTemplate {
     /// The sign-up credit as the page says it ("€10"), or `None` when there
     /// is none and the page promises nothing.
     pub(crate) signup_credit: Option<String>,
+    /// Regular's rates, or `None` when billing has never answered and the
+    /// page shows no prices.
+    pub(crate) rates: Option<crate::public_rates::PricingRatesView>,
 }
 
 #[derive(Template)]

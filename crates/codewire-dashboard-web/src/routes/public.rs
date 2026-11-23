@@ -37,6 +37,7 @@ pub(super) async fn pricing(State(state): State<AppState>) -> Response {
     let credit = crate::billing_connect::signup_credit_nano_eur(&state).await;
     render_page(PricingTemplate {
         signup_credit: crate::billing_connect::signup_credit_text(credit),
+        rates: crate::public_rates::public_rates(&state).await,
     })
 }
 

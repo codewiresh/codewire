@@ -1407,6 +1407,7 @@ mod tests {
         let render = |signup_credit: Option<&str>| {
             crate::templates::PricingTemplate {
                 signup_credit: signup_credit.map(str::to_owned),
+                rates: Some(crate::public_rates::fixture_rates()),
             }
             .render()
             .unwrap()

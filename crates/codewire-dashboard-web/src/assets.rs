@@ -443,6 +443,18 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
                 crate::templates::PricingTemplate {
                     signup_credit: None,
+                    rates: Some(crate::public_rates::fixture_rates()),
+                }
+                .render()
+                .unwrap(),
+            ),
+            (
+                include_str!(
+                    "../../../packages/codewire-design/reference/fixtures/pricing-unavailable.html"
+                ),
+                crate::templates::PricingTemplate {
+                    signup_credit: None,
+                    rates: None,
                 }
                 .render()
                 .unwrap(),
