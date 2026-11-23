@@ -82,6 +82,7 @@ async fn sources(f: &Fixture, secrets: Value, ordinary: Value, profile: bool) ->
     }
     sqlx::query("UPDATE environments SET project_spec=(project_spec-'secrets'-'environment'-'credentials') || $2 WHERE id=$1")
         .bind(&f.scope.environment_id).bind(addition).execute(&f.db.pool).await?;
+    super::recapture(f, profile.then_some(&f.profile)).await?;
     Ok(())
 }
 
@@ -259,6 +260,48 @@ async fn provider_only_projection_is_authenticated_empty_and_performs_no_app_rea
     f.finish(result).await
 }
 
+/// #6005: the request, the binding and the rebuilt selection must agree. A
+/// Pod bound under an earlier version projects with that version's digest;
+/// a Pod bound under the current version can't present an earlier one, and
+/// no Pod can present a digest its binding didn't capture.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn a_projection_request_carries_exactly_its_bindings_digest() -> Result<()> {
+    let f = Fixture::create().await?;
+    let result = async {
+        sqlx::query(&format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text) TO {}",quote_ident(&f.role)))
+            .execute(&f.db.pool).await?;
+        let first = codewire_project::ReservedNamesVersion::newest_first().last().unwrap();
+        let earlier = super::selection_under(&f.scope, &f.profile, first)?.sha256()?;
+        let current = super::selection_under(
+            &f.scope,
+            &f.profile,
+            codewire_project::ReservedNamesVersion::CURRENT,
+        )?
+        .sha256()?;
+        let provider = Arc::new(ObservedProvider::default());
+        // Bound under the current names: an earlier version's digest is refused.
+        let authority = admitted(&f, provider.clone()).await?;
+        let (mut message, _, _) = request(&authority)?;
+        message.selection_sha256 = earlier.to_vec();
+        ensure!(authority.project_environment(message).await.is_err());
+        // Bound under version 1: its own digest projects, the current one is refused.
+        super::set_binding_digest(&f.db.pool, &f.scope.pod_uid, Some(&super::hex(earlier))).await?;
+        let authority = admitted(&f, provider.clone()).await?;
+        let (message, recipient, context) = request(&authority)?;
+        ensure!(context.selection_sha256 == earlier);
+        let sealed = authority.project_environment(message).await?;
+        ensure!(recipient.open(&sealed, &context, now_ms())?.entries().len() == 0);
+        let (mut message, _, _) = request(&authority)?;
+        message.selection_sha256 = current.to_vec();
+        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(provider.calls.load(Ordering::SeqCst) == 0);
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
 async fn organization_profile_does_not_change_the_personal_application_source_owner() -> Result<()>
@@ -274,6 +317,10 @@ async fn organization_profile_does_not_change_the_personal_application_source_ow
         sqlx::query("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=NULL")
             .execute(&f.db.pool).await?;
         sources(&f,json!({"user":"platform"}),json!({}),true).await?;
+        // The profile is now the organization's, which reserves no GitHub names.
+        let mut organization_profile=f.profile.clone();
+        organization_profile.owner=codewire_access::Owner::Organization(codewire_access::OwnerId::parse(&f.scope.organization)?);
+        super::recapture(&f,Some(&organization_profile)).await?;
         put(&f,&format!("/users/{}",f.scope.creator),"APP_VALUE",b"creator-owned").await?;
         let provider=Arc::new(ObservedProvider::default());
         let authority=admitted(&f,provider.clone()).await?;
@@ -726,6 +773,7 @@ async fn bind_two_capabilities(
             Some(&context.user_id),
         )
         .await?;
+    super::recapture(f, Some(&revised)).await?;
     Ok((codex, anthropic))
 }
 

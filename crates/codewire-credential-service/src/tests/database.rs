@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::platform_test_support as support;
+use codewire_project::{PlatformProjectionSelection, ReservedNamesVersion};
 use support::{StatementCounter, TestDatabase, ensure_cheap_plans, quote_ident};
 
 mod projection;
@@ -14,6 +15,93 @@ struct Fixture {
     context: GrantContext,
     owner: Owner,
     kube: KubeFixture,
+}
+
+/// The fixture environment's selection, as a capture under `version` makes it:
+/// its profile, and no secrets or variables.
+fn selection_under(
+    scope: &Scope,
+    profile: &AccessProfile,
+    version: ReservedNamesVersion,
+) -> Result<PlatformProjectionSelection> {
+    Ok(PlatformProjectionSelection {
+        creator: scope.creator.clone(),
+        organization: scope.organization.clone(),
+        organization_selected: false,
+        project_id: None,
+        user_selected: false,
+        profile: Some((profile.id.to_string(), profile.revision)),
+        ordinary_keys: Default::default(),
+        reserved_keys: codewire_project::platform_projection_reserved_keys_at(
+            version,
+            profile.reserved_slots(),
+        )?,
+    })
+}
+
+fn hex(digest: [u8; 32]) -> String {
+    digest.map(|byte| format!("{byte:02x}")).join("")
+}
+
+/// Rewrite the workspace Pod's captured digest. Only a test can: the
+/// binding's immutability trigger is suspended for this one update.
+async fn set_binding_digest(
+    pool: &sqlx::PgPool,
+    pod_uid: &str,
+    digest: Option<&str>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE public.sandbox_workspace_bindings \
+         DISABLE TRIGGER codewire_workspace_binding_immutable",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE public.sandbox_workspace_bindings SET projection_selection_sha256=$1 WHERE pod_uid=$2",
+    )
+    .bind(digest)
+    .bind(pod_uid)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    ensure!(updated == 1, "the workspace Pod's binding was not updated");
+    sqlx::query(
+        "ALTER TABLE public.sandbox_workspace_bindings \
+         ENABLE TRIGGER codewire_workspace_binding_immutable",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Write the digest the binding of a Pod restarted onto the environment's
+/// selection as it stands would capture (#6005): `profile` is the bound
+/// profile now, or `None` once none is bound. A selection the metadata
+/// refuses leaves the digest as it was.
+async fn recapture(f: &Fixture, profile: Option<&AccessProfile>) -> Result<()> {
+    let metadata: crate::projection::ProjectionMetadata =
+        sqlx::query_as("SELECT * FROM public.codewire_platform_projection_metadata($1)")
+            .bind(&f.scope.environment_id)
+            .fetch_one(&f.db.pool)
+            .await?;
+    let mut scope = f.scope.clone();
+    scope.profile_id = profile.map(|profile| profile.id.to_string());
+    scope.profile_revision = profile.map(|profile| profile.revision as i64);
+    let slots: Vec<&str> = profile
+        .map(|profile| profile.reserved_slots().collect())
+        .unwrap_or_default();
+    let reserved = codewire_project::platform_projection_reserved_keys(slots)?;
+    if let Ok(selection) = metadata.selection(&scope, reserved) {
+        set_binding_digest(
+            &f.db.pool,
+            &f.scope.pod_uid,
+            Some(&hex(selection.sha256()?)),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 impl Fixture {
@@ -72,6 +160,11 @@ impl Fixture {
             sqlx::query("UPDATE environments SET project_spec=jsonb_set(project_spec,'{credentials}',$2) WHERE id=$1")
                 .bind(&selected.environment_id)
                 .bind(json!({"profile":format!("platform:id:{}",profile.id)})).execute(&db.pool).await?;
+            // The digest orchestration's capture gives this selection, written
+            // out here rather than read back from the service (#6005).
+            let digest=hex(selection_under(&selected,&profile,ReservedNamesVersion::CURRENT)?.sha256()?);
+            set_binding_digest(&db.pool,&selected.pod_uid,Some(&digest)).await?;
+            selected.projection_selection_sha256=Some(digest);
             let (pool,role)=db.metadata_pool().await?;
             let role_ident=quote_ident(&role);
             sqlx::query(&format!("REVOKE SELECT ON public.platform_credentials FROM {role_ident}")).execute(&db.pool).await?;
@@ -80,7 +173,7 @@ impl Fixture {
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at) ON public.sandbox_environment_backend",
-                "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,credential_scope,released_at) ON public.sandbox_workspace_bindings",
+                "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at) ON public.sandbox_workspace_bindings",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
                 "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",
@@ -158,7 +251,7 @@ impl Fixture {
             .bind(json!({"profile":format!("platform:id:{}",profile.id)}))
             .execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(())
+        recapture(self, Some(&profile)).await
     }
     /// Point the workspace Pod's binding at another Sandbox. Only a test can:
     /// the binding's immutability trigger is suspended for this one update,
@@ -288,6 +381,50 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
             "connected tokens were re-reviewed/substituted"
         );
         fixture.admitted().await?.current_session().await?;
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}
+
+/// #6005: a Pod is admitted with the reserved names its binding captured,
+/// an earlier shipped version's included, until its next start. A binding
+/// with no digest, or one no version of this selection gives, admits nothing.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn a_running_pod_is_admitted_with_the_reserved_names_its_binding_captured() -> Result<()> {
+    let fixture = Fixture::create().await?;
+    let result = async {
+        let first = ReservedNamesVersion::newest_first().last().unwrap();
+        let earlier = selection_under(&fixture.scope, &fixture.profile, first)?;
+        let current = selection_under(
+            &fixture.scope,
+            &fixture.profile,
+            ReservedNamesVersion::CURRENT,
+        )?;
+        ensure!(earlier.sha256()? != current.sha256()?);
+        ensure!(fixture.admitted().await?.initial.selection == current);
+        set_binding_digest(
+            &fixture.db.pool,
+            &fixture.scope.pod_uid,
+            Some(&hex(earlier.sha256()?)),
+        )
+        .await?;
+        ensure!(fixture.admitted().await?.initial.selection == earlier);
+        // The column admits only 64 lowercase hexadecimal digits or none.
+        for digest in [None, Some("44".repeat(32))] {
+            set_binding_digest(&fixture.db.pool, &fixture.scope.pod_uid, digest.as_deref()).await?;
+            ensure!(
+                matches!(
+                    fixture
+                        .authenticator()
+                        .authenticate(&headers(unix_now()? + 600))
+                        .await,
+                    Err(PlatformBridgeAuthenticationError::Denied)
+                ),
+                "{digest:?} was admitted"
+            );
+        }
         Ok(())
     }
     .await;
@@ -498,6 +635,7 @@ async fn each_runtime_authority_resolve_takes_a_fixed_number_of_statement_round_
                 sqlx::query("UPDATE environments SET project_spec=project_spec-'credentials'")
                     .execute(&fixture.db.pool)
                     .await?;
+                recapture(&fixture, None).await?;
             }
             let authority = authenticator
                 .authenticate(&headers(unix_now()? + 600))

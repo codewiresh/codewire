@@ -47,6 +47,7 @@ fn intent(isolation: Isolation) -> RenderingIntent {
             organization_id: "76169e1f-3bbf-46be-96e0-cac68e0ac910".into(),
             operation_generation: 7,
             projection_selection_sha256: None,
+            earlier_projection_selection_sha256: Vec::new(),
             managed_credential_clients: Default::default(),
             source_snapshot_id: None,
             confidential_storage_manifest_uri: String::new(),

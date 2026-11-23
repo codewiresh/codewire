@@ -13,6 +13,7 @@ use codewire_access::{
 };
 use codewire_daemon_proto::projection::{decode_local_inventories, decode_platform_inventories};
 use codewire_platform_credentials::{CredentialRegistration, PlatformAccessProfileStore};
+use codewire_project::platform_projection_reserved_keys;
 use codewire_protected_store::ProtectedValue;
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretCoordinates,
@@ -193,6 +194,30 @@ fn owner_local_reservations_allow_extra_native_names_but_require_selected_platfo
 
     platform.reserved_keys.remove(NATIVE_CODEX_HOME_KEY);
     assert!(validate_reserved_keys(&platform, ["ssh"]).is_err());
+}
+
+/// #6005: a cw that shipped with an earlier version of the reserved names
+/// still delegates until it upgrades; a set below the oldest version, or one
+/// whose ordinary names overlap its reserved ones, is refused.
+#[test]
+fn owner_local_reservations_accept_any_shipped_version_and_nothing_below_it() {
+    let first = ReservedNamesVersion::newest_first().last().unwrap();
+    let mut platform = platform_selection();
+    platform.reserved_keys = platform_projection_reserved_keys_at(first, ["github"]).unwrap();
+    platform.reserved_keys.insert(NATIVE_CODEX_HOME_KEY.into());
+    assert!(
+        !platform
+            .reserved_keys
+            .contains("CODEWIRE_WORKSPACE_SHIM_LISTEN_FD")
+    );
+    validate_reserved_keys(&platform, ["github"]).expect("an earlier version still delegates");
+
+    let mut overlapping = platform.clone();
+    overlapping.ordinary_keys.insert("GH_TOKEN".into());
+    assert!(validate_reserved_keys(&overlapping, ["github"]).is_err());
+
+    platform.reserved_keys.remove("CODEWIRE_MESH_URL");
+    assert!(validate_reserved_keys(&platform, ["github"]).is_err());
 }
 
 async fn setup_owner_sources(h: &Harness) -> Result<(OwnerLocalSelection, String)> {

@@ -2348,7 +2348,7 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
 {
     use crate::worker::create::{
         FreshWarmBind, ReconciledRuntime, RuntimeIdentityStep, confirm_fresh_warm_bind_with,
-        environment_template_opts, runtime_identity_step, workspace_bootstrap_current,
+        environment_template_opts, runtime_identity_step,
     };
     let db = TestDatabase::create().await?;
     let result = async {
@@ -2807,6 +2807,7 @@ fn pool_intent() -> crate::runtime::RenderingIntent {
             organization_id: String::new(),
             operation_generation: GENERATION,
             projection_selection_sha256: None,
+            earlier_projection_selection_sha256: Vec::new(),
             managed_credential_clients: Default::default(),
             source_snapshot_id: None,
             confidential_storage_manifest_uri: String::new(),

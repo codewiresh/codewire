@@ -37,6 +37,10 @@ pub struct RenderingIdentity {
     pub operation_generation: i64,
     /// Shared metadata-only selection captured for this operation, never values.
     pub projection_selection_sha256: Option<[u8; 32]>,
+    /// The same selection's digest under each earlier shipped version of the
+    /// reserved names, newest first. A Pod bound under one of them keeps it
+    /// until its next start (#6005).
+    pub earlier_projection_selection_sha256: Vec<[u8; 32]>,
     /// Exact clients selected by the captured immutable profile revision.
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     /// The hosted snapshot a new workspace volume restores from.

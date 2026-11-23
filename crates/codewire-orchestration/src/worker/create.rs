@@ -12,15 +12,13 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::environment_auth::WorkspaceCredentialScope;
 use super::start_timing::{
     POD_STAGE_PHASES, bind_stage_path, create_milestone_path, duration_ms, pod_stage_timings,
     record_create_milestone, since_accepted, start_profile, with_since_accepted,
 };
 use super::workspace_binding::{
-    EarlyBind, EnvironmentBinding, bind_before_ready, bind_workspace_runtime,
-    binding_bootstrap_current, claim_of, credential_scope, definitive_refusal,
-    live_environment_binding, sandbox_bound_by_any,
+    EarlyBind, bind_before_ready, bind_workspace_runtime, claim_of, definitive_refusal,
+    live_environment_binding, sandbox_bound_by_any, workspace_bootstrap_current,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -3004,35 +3002,6 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     authority.ensure_for_states(states).await
 }
 
-/// Stale-bootstrap check for the observed Pod (design §12). A bound Pod-scope
-/// runtime compares the binding row's captured generation, digest and
-/// clients; a legacy environment-scope Pod is never current; a Pod that is
-/// not bound yet is
-/// current by construction, because its binding captures the current
-/// environment row under the same fence.
-pub(super) async fn workspace_bootstrap_current(
-    runtime: &dyn RuntimeDriver,
-    placement: &Placement,
-    intent: &RenderingIntent,
-    pod: &WorkspacePodIdentity,
-    binding: Option<&EnvironmentBinding>,
-) -> anyhow::Result<bool> {
-    let live = runtime
-        .observe_member(placement, &pod.name)
-        .await?
-        .filter(|live| live.uid.as_deref() == Some(pod.uid.as_str()))
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
-    match credential_scope(&live) {
-        // A Pod rendered before claim-time binding is never current: recovery
-        // restarts it onto the binding rendering (no legacy compatibility).
-        Some(WorkspaceCredentialScope::Environment) => Ok(false),
-        Some(WorkspaceCredentialScope::Pod) => Ok(binding
-            .filter(|binding| binding.pod_uid == pod.uid)
-            .is_none_or(|binding| binding_bootstrap_current(binding, &intent.identity))),
-        None => anyhow::bail!("workspace credential scope is ambiguous"),
-    }
-}
-
 /// How long a cold re-claim waits for the pool-born Claim to be gone.
 const RECLAIM_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -3279,6 +3248,8 @@ fn _claim_name_used(env_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::sandbox::template::runtime_profile_spec;
+    use crate::worker::environment_auth::WorkspaceCredentialScope;
+    use crate::worker::workspace_binding::{EnvironmentBinding, binding_bootstrap_current};
 
     /// The init data a measured runtime is authorized with is the driver's
     /// own, hashed as published; a runtime that isn't measured has none.
@@ -4295,6 +4266,83 @@ mod tests {
         assert!(keeps_fresh_warm_bind(WaitForReady));
         for action in [ResumeWorkspace, EnsureNamespace, CreateClaim] {
             assert!(!keeps_fresh_warm_bind(action), "{action}");
+        }
+    }
+
+    /// #6005: a release that changes only the reserved names leaves a running
+    /// Pod's bootstrap current, and the Pod takes the new names at its next
+    /// start. Any change to the environment itself still makes it stale.
+    #[test]
+    fn a_release_that_changes_only_the_reserved_names_keeps_a_bound_bootstrap() {
+        use crate::worker::workspace_binding::{BootstrapCheck, binding_bootstrap_check};
+        use codewire_project::ReservedNamesVersion;
+        let hex = |digest: [u8; 32]| digest.map(|byte| format!("{byte:02x}")).join("");
+        let codex =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+        let mut env = environment("running");
+        let selection = codewire_project::PlatformProjectionSelection {
+            creator: "synthetic-creator".into(),
+            organization: "org-1".into(),
+            organization_selected: true,
+            project_id: None,
+            user_selected: false,
+            profile: Some(("98657d60-ce77-40c7-897c-6323b52e3a96".into(), 3)),
+            ordinary_keys: ["APP_MODE".into()].into(),
+            reserved_keys: codewire_project::platform_projection_reserved_keys(["codex"]).unwrap(),
+        };
+        env.projection_selection = Ok(Some(selection.clone()));
+        env.managed_credential_clients = Ok(codex);
+        let identity = |env: &EnvironmentRow, generation| {
+            environment_rendering_intent("ghcr.io/codewiresh/workspace:1", "base", env, generation)
+                .unwrap()
+                .identity
+        };
+        let first = ReservedNamesVersion::newest_first().last().unwrap();
+        let bound = |digest: String| EnvironmentBinding {
+            pod_uid: BOUND_POD.into(),
+            operation_generation: 7,
+            projection_selection_sha256: Some(digest),
+            managed_credential_clients: codex.encode().into(),
+            credential_scope: WorkspaceCredentialScope::Pod,
+        };
+        let earlier = bound(hex(selection
+            .at_reserved_version(first)
+            .unwrap()
+            .sha256()
+            .unwrap()));
+        let current = bound(hex(selection.sha256().unwrap()));
+
+        assert_eq!(
+            binding_bootstrap_check(&current, &identity(&env, 7)),
+            BootstrapCheck::Current
+        );
+        assert_eq!(
+            binding_bootstrap_check(&earlier, &identity(&env, 7)),
+            BootstrapCheck::EarlierReservedNames
+        );
+        assert_eq!(
+            binding_bootstrap_check(&bound("44".repeat(32)), &identity(&env, 7)),
+            BootstrapCheck::Stale("projection selection")
+        );
+
+        let mut republished = env.clone();
+        if let Ok(Some(selection)) = republished.projection_selection.as_mut() {
+            selection.ordinary_keys.insert("APP_REGION".into());
+        }
+        let mut new_clients = env.clone();
+        new_clients.managed_credential_clients =
+            Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap());
+        let mut new_generation = env.clone();
+        new_generation.operation_generation = 8;
+        for (republished, generation, differs) in [
+            (republished, 7, "projection selection"),
+            (new_clients, 7, "managed clients"),
+            (new_generation, 8, "generation"),
+        ] {
+            assert_eq!(
+                binding_bootstrap_check(&earlier, &identity(&republished, generation)),
+                BootstrapCheck::Stale(differs)
+            );
         }
     }
 

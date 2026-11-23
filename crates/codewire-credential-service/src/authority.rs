@@ -407,6 +407,9 @@ pub(crate) struct Scope {
     pub(crate) binding_sandbox_uid: String,
     /// Canonical managed-client selection captured when the Pod was bound.
     pub(crate) managed_credential_clients: String,
+    /// The selection digest captured when the Pod was bound. The Pod keeps
+    /// that selection's reserved names until its next start (#6005).
+    pub(crate) projection_selection_sha256: Option<String>,
     /// `pod` (claim-time binding) or `environment` (a pre-binding Pod).
     pub(crate) credential_scope: String,
     pub(crate) member_id: String,
@@ -419,6 +422,24 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
+    /// `selection` rebuilt under the version of the reserved names that
+    /// reproduces this binding's captured digest (#6005). A binding with no
+    /// digest, or one no shipped version reproduces, admits nothing.
+    fn bound_selection(
+        &self,
+        selection: &PlatformProjectionSelection,
+    ) -> Result<PlatformProjectionSelection, Error> {
+        let digest = self
+            .projection_selection_sha256
+            .as_deref()
+            .and_then(digest_bytes)
+            .ok_or(Error::Denied)?;
+        match selection.bound_to(&digest) {
+            Ok(Some((_, bound))) => Ok(bound),
+            Ok(None) | Err(_) => Err(Error::Denied),
+        }
+    }
+
     fn context(&self) -> Result<GrantContext, Error> {
         if self.generation <= 0 || self.member_id.is_empty() || self.member_role.is_empty() {
             return Err(Error::Denied);
@@ -520,7 +541,7 @@ macro_rules! scope_query {
      e.environment_operation_generation AS generation,s.namespace,s.sandbox_claim_name AS claim_name, \
      s.sandbox_claim_uid AS claim_uid,s.pod_name,s.pod_uid, \
      w.claim_uid AS binding_claim_uid,w.sandbox_uid AS binding_sandbox_uid, \
-     w.managed_credential_clients,w.credential_scope, \
+     w.managed_credential_clients,w.projection_selection_sha256,w.credential_scope, \
      m.id AS member_id,m.role AS member_role, \
      b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by, \
      p.user_id AS profile_user,p.organization_id AS profile_organization \
@@ -567,7 +588,7 @@ const SCOPE_AND_METADATA_QUERY: &str = concat!(
     "SELECT scope.environment_id, scope.creator, scope.organization, scope.generation, \
      scope.namespace, scope.claim_name, scope.claim_uid, scope.pod_name, scope.pod_uid, \
      scope.binding_claim_uid, scope.binding_sandbox_uid, scope.managed_credential_clients, \
-     scope.credential_scope, scope.member_id, scope.member_role, scope.profile_id, \
+     scope.projection_selection_sha256, scope.credential_scope, scope.member_id, scope.member_role, scope.profile_id, \
      scope.profile_revision, scope.confirmed_by, scope.profile_user, scope.profile_organization, \
      metadata.organization_selected, metadata.user_placement, metadata.project_reference, \
      metadata.credential_reference, metadata.ordinary_keys, metadata.selection_valid \
@@ -721,7 +742,7 @@ impl AuthoritySource {
             profile.iter().flat_map(|profile| profile.reserved_slots()),
         )
         .map_err(|_| Error::Denied)?;
-        let selection = metadata.selection(&scope, reserved_keys)?;
+        let selection = scope.bound_selection(&metadata.selection(&scope, reserved_keys)?)?;
         // The lineage reads run concurrently, so this adds their wall time,
         // not their sum.
         let (lineage, names) = kubernetes_read(
@@ -893,6 +914,18 @@ pub(crate) fn unix_now() -> Result<u64, Error> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| Error::Unavailable)
+}
+
+/// A binding's digest as stored: 64 hexadecimal digits.
+fn digest_bytes(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut digest = [0; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(digest)
 }
 
 #[cfg(test)]

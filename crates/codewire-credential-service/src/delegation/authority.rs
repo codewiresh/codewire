@@ -15,7 +15,9 @@ use codewire_credential_broker::platform::{
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
-use codewire_project::{PlatformProjectionSelection, platform_projection_reserved_keys};
+use codewire_project::{
+    PlatformProjectionSelection, ReservedNamesVersion, platform_projection_reserved_keys_at,
+};
 use codewire_protected_store::secret_envelope::KekProvider;
 use codewire_server_core::auth::{OAuthBearerAuthority, OAuthBearerAuthorityError};
 use codewire_workload_secrets::{
@@ -583,22 +585,41 @@ impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
     }
 }
 
+/// The local selection must keep its ordinary names apart from its reserved
+/// ones, and reserve Codex's home and every name some shipped version of the
+/// reserved names gives its slots, newest first (#6005). The owner's own
+/// host-side cw builds it, and its runtime uses only the names of the version
+/// it shipped with, so an older cw keeps delegating until it upgrades. A set
+/// below the oldest shipped version is refused.
 fn validate_reserved_keys<'a>(
     selection: &PlatformProjectionSelection,
     platform_slots: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), Error> {
-    let mut required =
-        platform_projection_reserved_keys(platform_slots).map_err(|_| Error::Denied)?;
-    required.insert(NATIVE_CODEX_HOME_KEY.to_owned());
-    if selection
+    if !selection
         .ordinary_keys
         .is_disjoint(&selection.reserved_keys)
-        && selection.reserved_keys.is_superset(&required)
     {
-        Ok(())
-    } else {
-        Err(Error::Denied)
+        return Err(Error::Denied);
     }
+    let slots: Vec<&str> = platform_slots.into_iter().collect();
+    for version in ReservedNamesVersion::newest_first() {
+        let mut required = platform_projection_reserved_keys_at(version, slots.iter().copied())
+            .map_err(|_| Error::Denied)?;
+        required.insert(NATIVE_CODEX_HOME_KEY.to_owned());
+        if selection.reserved_keys.is_superset(&required) {
+            if version != ReservedNamesVersion::CURRENT {
+                // Counted in the logs, so a version's last use is visible
+                // before it is retired.
+                tracing::info!(
+                    event = "owner_local_reserved_names_earlier",
+                    version = version.number(),
+                    "owner-local selection admitted under an earlier version of the reserved names"
+                );
+            }
+            return Ok(());
+        }
+    }
+    Err(Error::Denied)
 }
 
 async fn resolve_profile_owner(

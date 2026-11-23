@@ -69,6 +69,7 @@ pub(crate) fn scope() -> Scope {
         binding_claim_uid: CLAIM_UID.into(),
         binding_sandbox_uid: SANDBOX_UID.into(),
         managed_credential_clients: ManagedCredentialClients::default().encode().into(),
+        projection_selection_sha256: None,
         credential_scope: "pod".into(),
         member_id: "synthetic-membership".into(),
         member_role: "member".into(),

@@ -16,9 +16,11 @@ GRANT SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_a
 GRANT SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at)
     ON public.sandbox_environment_backend TO codewire_credential_broker;
 -- Claim-time workspace binding (Codewire migration 34): the broker authorizes
--- by the recorded Pod UID and reads managed clients from the live binding.
--- Only the columns it reads; never the PVC UID, generation or projection.
-GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,credential_scope,released_at)
+-- by the recorded Pod UID and reads managed clients from the live binding,
+-- and the selection digest that binding captured, so a running Sandbox keeps
+-- projecting under the reserved names it was bound with (Codewire #6005).
+-- Only the columns it reads; never the PVC UID or the generation.
+GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at)
     ON public.sandbox_workspace_bindings TO codewire_credential_broker;
 GRANT SELECT (id,user_id,organization_id,name,current_revision)
     ON public.platform_access_profiles TO codewire_credential_broker;

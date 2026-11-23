@@ -434,6 +434,17 @@ detail; this section states the contract.
   through Temporal. Every Start re-pins the Sandbox's daemon to the configured
   support image, except for confidential Sandboxes, whose attested Pod policy
   admits exactly the containers they were rendered with.
+- **A release never restarts a running Sandbox through its credentials**
+  (#6005). The runtime's reserved environment names are part of every
+  credential selection's digest, and they are kept as append-only versions.
+  A running Sandbox keeps the version its binding captured until its next
+  start; orchestration's bootstrap check and the credential service both
+  rebuild its selection under that version. A changed selection, managed
+  clients or generation still restarts it. A rollback to code that lacks a
+  version restarts the Sandboxes bound under it. An owner-local delegation
+  may use any shipped version, so an older `cw` keeps working. A version is
+  retired only once no live binding and no supported `cw` still uses it;
+  an older `cw` must then upgrade.
 - **Unplanned restarts** (#5997, target, not shipped). When a running
   Sandbox's runtime is restarted or replaced without a member asking, the
   Sandbox says when and why, and its organization's owners are told. Four

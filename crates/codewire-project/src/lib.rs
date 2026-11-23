@@ -38,8 +38,8 @@ pub use idle_stop::{
 };
 pub use overrides::{ProjectYamlFile, merge_project_files};
 pub use platform_projection::{
-    PlatformProjectionSelection, PlatformProjectionSelectionError,
-    platform_projection_reserved_keys,
+    PlatformProjectionSelection, PlatformProjectionSelectionError, ReservedNamesVersion,
+    platform_projection_reserved_keys, platform_projection_reserved_keys_at,
 };
 pub use repository::{
     GITHUB_SSH_KNOWN_HOSTS, GitHubSourceForm, GitHubSshSource, RepositorySshHost,
@@ -73,6 +73,8 @@ pub const VM_ONLY_FIELD: &str = "workspace.vm_only";
 /// top-level folders only.
 pub const DEFAULT_VM_ONLY_PATTERNS: [&str; 3] = ["node_modules", "target", ".venv"];
 /// Environment names reserved for Codewire-owned runtime control channels.
+/// A change here is also a new version of the platform reserved names in
+/// `platform_projection.rs`, which a test enforces (#6005).
 pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 6] = [
     "CODEWIRE_MESH_URL",
     "CODEWIRE_MESH_AUTH_TOKEN",

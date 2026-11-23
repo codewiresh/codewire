@@ -447,6 +447,7 @@ fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
         organization_id: String::new(),
         operation_generation: 7,
         projection_selection_sha256: None,
+        earlier_projection_selection_sha256: Vec::new(),
         managed_credential_clients: none,
         source_snapshot_id: None,
         confidential_storage_manifest_uri: String::new(),

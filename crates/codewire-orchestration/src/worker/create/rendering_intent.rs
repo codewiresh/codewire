@@ -22,6 +22,13 @@ pub fn environment_rendering_intent(
         .as_ref()
         .map(|selection| selection.sha256())
         .transpose()?;
+    let earlier_projection_selection_sha256 = match selection {
+        None => Vec::new(),
+        Some(selection) => codewire_project::ReservedNamesVersion::newest_first()
+            .filter(|version| *version != codewire_project::ReservedNamesVersion::CURRENT)
+            .map(|version| selection.at_reserved_version(version)?.sha256())
+            .collect::<Result<_, _>>()?,
+    };
     let managed_credential_clients = *env
         .managed_credential_clients
         .as_ref()
@@ -58,6 +65,7 @@ pub fn environment_rendering_intent(
             organization_id: env.org_id.clone(),
             operation_generation,
             projection_selection_sha256,
+            earlier_projection_selection_sha256,
             managed_credential_clients,
             source_snapshot_id: env.source_snapshot_id.clone(),
             confidential_storage_manifest_uri: String::new(),

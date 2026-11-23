@@ -1709,26 +1709,6 @@ pub(crate) async fn environment_daemon_credential(
     )
 }
 
-/// Stale-bootstrap comparison for a bound Pod-scope runtime (design §12): the
-/// binding row's captured generation, projection digest and managed clients
-/// against the environment's current rendering identity, with the same rule
-/// as the rendered environment check: the generation only matters while a
-/// projection is selected.
-pub(crate) fn binding_bootstrap_current(
-    binding: &EnvironmentBinding,
-    identity: &crate::runtime::RenderingIdentity,
-) -> bool {
-    let digest = identity.projection_selection_sha256.map(|digest| {
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    });
-    binding.projection_selection_sha256 == digest
-        && binding.managed_credential_clients == identity.managed_credential_clients.encode()
-        && (digest.is_none() || binding.operation_generation == identity.operation_generation)
-}
-
 // ------------------------------------------------------------- backfill
 
 /// Pause between backfill passes. The backfill runs as its own leader task,
@@ -1985,6 +1965,10 @@ pub(crate) async fn workspace_binding_backfill_loop(
     }
 }
 
+mod bootstrap;
+pub(crate) use bootstrap::workspace_bootstrap_current;
+#[cfg(test)]
+pub(crate) use bootstrap::{BootstrapCheck, binding_bootstrap_check, binding_bootstrap_current};
 pub(crate) mod checks;
 pub(crate) use checks::{
     credential_scope, environment_scope_capture, images_match, member_still_observed,
