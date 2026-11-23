@@ -122,6 +122,45 @@ RUN set -euo pipefail; \
     install -D -m 0755 "$binaries/hcloud" /out/hcloud; \
     rm -rf /tmp/gopath /tmp/gocache
 
+# tailscale and tailscaled, so a user can join their own tailnet in userspace
+# mode (SPEC.md "A user's own tailnet", #5741). They ship but never start. An
+# exact module version, which Go verifies against the checksum database; the
+# builder reaches only the Go proxy and that database, not Tailscale's own
+# download host. The version stamps are the ones Tailscale's build_dist.sh
+# sets; without them a module build reports "-ERR-BuildInfo".
+FROM --platform=$BUILDPLATFORM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS workspace-tailscale
+SHELL ["/bin/bash", "-c"]
+ARG BUILDARCH
+ARG TARGETARCH
+ARG GO_VERSION=1.27.4
+ARG TAILSCALE_VERSION=1.104.7
+RUN set -euo pipefail; \
+    case "$BUILDARCH" in \
+      amd64) go_sha=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+      arm64) go_sha=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+      *) echo "unsupported build architecture: $BUILDARCH" >&2; exit 1 ;; \
+    esac; \
+    case "$TARGETARCH" in \
+      amd64|arm64) ;; \
+      *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
+      "https://go.dev/dl/go${GO_VERSION}.linux-${BUILDARCH}.tar.gz" -o /tmp/go.tgz; \
+    echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
+    tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
+    rm -f /tmp/go.tgz; \
+    export GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0 \
+      GOFLAGS=-trimpath GONOSUMDB= GOPRIVATE= GOSUMDB=sum.golang.org; \
+    /usr/local/go/bin/go install \
+      -ldflags="-X tailscale.com/version.longStamp=${TAILSCALE_VERSION} -X tailscale.com/version.shortStamp=${TAILSCALE_VERSION}" \
+      "tailscale.com/cmd/tailscale@v${TAILSCALE_VERSION}" \
+      "tailscale.com/cmd/tailscaled@v${TAILSCALE_VERSION}"; \
+    binaries=/tmp/gopath/bin; \
+    [ "$TARGETARCH" = "$BUILDARCH" ] || binaries="$binaries/linux_$TARGETARCH"; \
+    install -D -m 0755 "$binaries/tailscale" /out/tailscale; \
+    install -D -m 0755 "$binaries/tailscaled" /out/tailscaled; \
+    rm -rf /tmp/gopath /tmp/gocache
+
 FROM scratch AS codewire-verified-cw
 
 FROM scratch AS cw-builder-amd64
@@ -410,6 +449,12 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     rm -f /etc/apt/sources.list.d/codewire-chromium.sources /etc/apt/preferences.d/codewire-chromium && \
     rm -rf /var/lib/apt/lists/* && \
     test -z "$(find /usr/lib/chromium -perm /6000 -print -quit)" && chromium --version
+
+# A user's own tailnet (#5741): the binaries only. Nothing in the image starts
+# tailscaled; the user runs it in userspace mode, as docs/journeys/own-tailnet.md
+# shows.
+COPY --from=workspace-tailscale --chown=0:0 --chmod=0755 /out/ /usr/local/bin/
+RUN tailscale version && tailscaled --version
 
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.

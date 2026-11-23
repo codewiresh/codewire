@@ -272,6 +272,9 @@ check_version psql psql --version
 check_version protoc protoc --version
 # Codex's Linux sandbox runs commands through the system bubblewrap on PATH.
 check_version bwrap bwrap --version
+# A user's own tailnet (#5741): shipped, never started by the image.
+check_version tailscale tailscale version
+check_version tailscaled tailscaled --version
 # `cw shell` from these terminals finds their terminfo, as ssh would (#4332).
 for terminal in xterm-kitty alacritty wezterm foot tmux-256color xterm-256color; do
   infocmp "$terminal" >/dev/null

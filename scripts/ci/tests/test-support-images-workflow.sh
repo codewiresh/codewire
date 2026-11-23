@@ -514,8 +514,9 @@ done
 [[ "$(grep -Ec "node_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 2 ]] ||
   fail "workspace image does not define node_sha exactly once per supported architecture"
 # The installed Go and the build-platform Go that cross-compiles the Go tools
-# are the same archive: two stages, one checksum per architecture.
-[[ "$(grep -Ec "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 4 \
+# and tailscale are the same archive: three stages, one checksum per
+# architecture.
+[[ "$(grep -Ec "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 6 \
   && "$(grep -Eo "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE" | sort -u | wc -l)" -eq 2 ]] ||
   fail "workspace image does not use one Go archive checksum per supported architecture"
 grep -qF 'snapshot.ubuntu.com/ubuntu/20261015T000000Z/' "$ROOT/images/base/ubuntu.sources" ||
