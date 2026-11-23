@@ -1,7 +1,7 @@
 ---
 title: Usage and costs
-description: Organization plans, per-second metering of hosted sandboxes, reading your usage with cw cost, and the Billing page.
-updated: 2026-11-14
+description: Prices, per-second metering of hosted sandboxes, reading your usage with cw cost, and the Billing page.
+updated: 2026-11-23
 weight: 4
 aliases: ["/reference/subscription-plans"]
 ---
@@ -9,19 +9,13 @@ aliases: ["/reference/subscription-plans"]
 Hosted sandboxes are billed to the organization that owns them. Local VMs and
 trusted host sessions cost nothing.
 
-## Plans
+## Prices
 
-| Plan | Price |
-| --- | --- |
-| Starter | $49 per month |
-| Pro | $199 per month |
-| Team | $499 per month |
-| Enterprise | contact us |
-
-Each plan includes a monthly allowance of CPU, memory and disk hours for
-running sandboxes and a number of concurrent sandboxes; the current allowances
-and overage rates are shown on your organization's **Billing** page. Human
-developer seats are $18 per developer per month; agents are not seats.
+There are no plans, seats or minimums. Each organization keeps a prepaid
+compute credit, and its running cloud sandboxes draw it down per second at the
+organization's rates. Members and agents cost nothing. The standard rates are
+on the [pricing page](https://codewire.sh/pricing), and an organization's own
+are on its **Billing** page.
 
 ## Metering
 
@@ -44,13 +38,15 @@ of compute credit:
   Balance      This month   CPU hrs Mem GB·hrs Storage GB·hrs
   -€0.270793   €0.270793    0.2     0.8        8.0
 
-  Rates: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk
+  Rates: {rates}
   Automatic top-up: off
   Credit ran out at 2026-10-31T15:24:55Z: creates and starts are refused, and running sandboxes stop 24 hours later.
 ```
 
 `Balance` is the organization's prepaid compute credit, and `This month` is
-what running sandboxes have drawn from it so far. `CPU hrs`, `Mem GB·hrs` and
+what running sandboxes have drawn from it so far. `Rates` are the
+organization's prices per vCPU-hour and per GiB-hour of memory and disk; the
+standard ones are on the [pricing page](https://codewire.sh/pricing). `CPU hrs`, `Mem GB·hrs` and
 `Storage GB·hrs` are the month's metered use so far. `--org SLUG` picks an organization when you belong to several, and
 `--output json` gives the same numbers to a script. What counts toward the
 organization's limits is in [Resources and limits](@/environments/resources.md).
