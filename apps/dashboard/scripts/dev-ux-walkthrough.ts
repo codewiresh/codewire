@@ -244,6 +244,84 @@ async function networkPolicies(page: Page, slug: string): Promise<void> {
   ])) passed("network-policies", started);
 }
 
+// Create's GitHub link opens on Credentials the dialog it names, and Return
+// to Create Sandbox comes back (#4905, docs/journeys/cloud-sandbox.md
+// sandbox-credential-links). Which link shows depends on the walk account's
+// GitHub connection. View only: no dialog is submitted.
+const GITHUB_LINK_DIALOG: Record<string, RegExp> = {
+  "Connect GitHub": /&dialog=connect-github#connect-github$/,
+  "Reconnect GitHub": /&dialog=(credential-[a-z0-9-]+-reconnect)#\1$/,
+  "Manage GitHub connection": /^[^&#]*$/,
+};
+async function credentialLink(page: Page, slug: string): Promise<void> {
+  const started = Date.now();
+  const link = page.locator("[data-github-setup-link]");
+  let label = "";
+  if (await holds("sandbox-credential-links", [
+    ["link-target", async () => {
+      label = (await link.innerText()).trim();
+      const href = (await link.getAttribute("href")) ?? "";
+      expect(href).toMatch(/^\/settings\/credentials\/\?creation_draft=[0-9a-f-]{36}/);
+      expect(href).toMatch(GITHUB_LINK_DIALOG[label] ?? /^$/);
+    }],
+    ["dialog-open", async () => {
+      await link.click();
+      const leave = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
+      await Promise.race([page.waitForURL(/\/settings\/credentials\//), leave.waitFor()]);
+      if (await leave.isVisible()) await button(leave, "Save draft and leave").click();
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?creation_draft=/);
+      const open = page.locator("dialog[open]");
+      if (label === "Manage GitHub connection") await expect(open).toHaveCount(0);
+      else {
+        await expect(open).toHaveCount(1);
+        await expect(open).toHaveAccessibleName(label === "Connect GitHub" ? "Connect GitHub" : /^Reconnect /);
+      }
+    }],
+    ["returns", async () => {
+      await page.keyboard.press("Escape");
+      await expect(page.locator("dialog[open]")).toHaveCount(0);
+      await page.getByRole("link", { name: "Return to Create Sandbox", exact: true }).click();
+      await expect(page).toHaveURL(new RegExp(`/${slug}/new/\\?creation_draft=[0-9a-f-]{36}$`));
+    }],
+  ])) passed("sandbox-credential-links", started);
+}
+
+// A Sandboxes row's menu stays open past the list's 5 s refresh, and its
+// actions are items that open dialogs, with no caret (#5383,
+// docs/journeys/cloud-sandbox.md sandbox-row-menu). View only: the menu is
+// opened and closed, and no action is chosen.
+async function rowMenu(walk: Page, slug: string, name: string): Promise<void> {
+  const started = Date.now();
+  // A tab of its own, so the walk's page stays on the Sandbox.
+  const page = await walk.context().newPage();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const menu = page.locator("details.cw-row-menu").filter({ has: page.getByLabel(`Actions for ${name}`, { exact: true }) });
+  if (await holds("sandbox-row-menu", [
+    ["opens", async () => {
+      await visit(page, `/${slug}/`);
+      await menu.locator(":scope > summary").click();
+      await expect(menu).toHaveJSProperty("open", true);
+    }],
+    ["stays-open", async () => {
+      // Past a refresh: a check that looks sooner passes on the broken code.
+      await page.waitForTimeout(6_000);
+      await expect(menu).toHaveJSProperty("open", true);
+    }],
+    ["dialog-items", async () => {
+      const panel = menu.locator(".cw-menu-panel");
+      for (const item of ["Secrets and credentials", "Resize", "Delete"]) {
+        await expect(panel.getByRole("button", { name: item, exact: true })).toHaveAttribute("aria-haspopup", "dialog");
+      }
+      await expect(panel.locator("details.cw-disclosure:not([data-inventory-stop-fallback])")).toHaveCount(0);
+    }],
+    ["closes", async () => {
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveJSProperty("open", false);
+    }],
+  ])) passed("sandbox-row-menu", started);
+  await page.close();
+}
+
 // A table with declared column headers when keys exist, else the empty state.
 async function apiKeyTable(page: Page, columns: string[], empty: string): Promise<void> {
   if (await page.locator(".cw-table").count()) {
@@ -586,6 +664,7 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
       await fits(page, page.locator("#environment-create-card"));
     });
   }
+  if (width === 1440) await credentialLink(page, slug);
 }
 
 // What each theme paints. The terminal keeps its own dark surface and text in
@@ -982,6 +1061,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     firstId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(firstId).toBeTruthy();
   });
+  await rowMenu(page, slug, owned.name);
   passed("create-to-terminal", submitted);
   const failing = await page.context().newPage();
   const installing = own();
