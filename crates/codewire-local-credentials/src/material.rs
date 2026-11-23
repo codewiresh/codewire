@@ -77,8 +77,34 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         generation: u64,
         status: CredentialStatus,
     ) -> Result<ProtectedValue, LocalCredentialError> {
+        self.lease_material_in(id, generation, status, MaterialState::Ready)
+    }
+
+    /// As [`Self::executor_lease_material`], for a credential a delete has
+    /// revoked and moved out of `ready` (#6128); its material stays until
+    /// the delete removes it.
+    pub(crate) fn deleting_lease_material(
+        &self,
+        id: &CredentialId,
+        generation: u64,
+    ) -> Result<ProtectedValue, LocalCredentialError> {
+        self.lease_material_in(
+            id,
+            generation,
+            CredentialStatus::Revoked,
+            MaterialState::PendingDelete,
+        )
+    }
+
+    fn lease_material_in(
+        &self,
+        id: &CredentialId,
+        generation: u64,
+        status: CredentialStatus,
+        material_state: MaterialState,
+    ) -> Result<ProtectedValue, LocalCredentialError> {
         let connection = self.material_connection()?;
-        let current = crate::load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        let current = crate::load_internal_credential(&connection, id, Some(material_state))?;
         if current.material_generation != generation || current.public.metadata.status != status {
             return Err(LocalCredentialError::CredentialUnavailable);
         }

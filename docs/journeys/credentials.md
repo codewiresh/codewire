@@ -942,7 +942,9 @@ sign-in and a Codex sign-in both named after their email address.
      then `cw create --local --profile local:same` and a request on each
      provider's route in the VM.
   6. `delete openai/walk` while the profile selects it, then
-     `--profile same unset openai`, `delete openai/walk` and `list`.
+     `--profile same unset openai` and `delete openai/walk` while the VM from
+     step 5 still holds the earlier revision, then
+     `cw update VM --profile local:same`, `delete openai/walk` and `list`.
   7. Steps 1 to 6 again with `--cloud` on Dev, and the dashboard's list.
   8. On Dev, a second account that isn't a member of the organization runs
      `get NAME` for a name two of the organization's credentials share.
@@ -957,7 +959,10 @@ sign-in and a Codex sign-in both named after their email address.
   - step 5: each slot takes its own provider's `walk`, and each request
     reaches its provider;
   - step 6: the first delete is refused, naming profile `same` and the
-    `unset` that frees it; after the unset, only the Codex credential is gone;
+    `unset` that frees it; the second is refused before any revoke, naming the
+    VM and the `cw update` that frees it, and `list` still shows the
+    credential active (#6128); after the update, only the Codex credential is
+    gone;
   - step 7: the same in the cloud, and the dashboard shows the provider
     beside each name;
   - step 8: `not found`, exactly as for a name that doesn't exist, with no

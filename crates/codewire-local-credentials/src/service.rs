@@ -1247,9 +1247,9 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
 
     async fn delete_credential(
         &self,
-        request: Request<v1::CredentialSelector>,
+        request: Request<v1::DeleteCredentialRequest>,
     ) -> Result<Response<v1::DeleteCredentialResponse>, Status> {
-        credential_lifecycle::delete(&self.authority, request.into_inner()).await
+        credential_lifecycle::delete(&self.authority, &self.revocations, request.into_inner()).await
     }
 
     async fn revoke_credential_at_provider(

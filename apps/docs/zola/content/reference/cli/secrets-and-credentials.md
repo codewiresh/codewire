@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-22
+updated: 2026-11-23
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -136,7 +136,9 @@ keeps it. `-y` (`--yes`) goes ahead without asking. Without a terminal, or with
 `--output json`, there is no one to ask, so they refuse unless `--yes` is
 given: a script that revokes or deletes a credential passes `--yes`. A
 credential a profile selects isn't deleted; `cw` prints the `unset` that frees
-it. Afterwards `cw` says what the provider still holds, and gives the link to
+it. Nor is one a local VM still uses because it was made with an earlier
+version of a profile: `cw` names the VM and the `cw update` that moves it to the
+profile as it is now. A refused delete revokes nothing. Afterwards `cw` says what the provider still holds, and gives the link to
 revoke it there where Codewire can't.
 
 `--expires-at` takes a date, `YYYY-MM-DD` (the start of that day in UTC), or

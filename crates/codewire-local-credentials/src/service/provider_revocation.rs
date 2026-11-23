@@ -49,12 +49,33 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
         &self,
         id: CredentialId,
     ) -> Result<(CredentialRecord, Option<v1::ProviderRevocation>), LocalCredentialError> {
+        self.revoke_and_ask(id, Revoking::Revoke).await
+    }
+
+    /// As [`Self::revoke_at_provider`], for a delete (#6128): the store
+    /// refuses before any change while the credential is in use, and the
+    /// executor reads the generation the delete has moved out of `ready`.
+    pub(crate) async fn revoke_for_delete(
+        &self,
+        id: CredentialId,
+    ) -> Result<(CredentialRecord, Option<v1::ProviderRevocation>), LocalCredentialError> {
+        self.revoke_and_ask(id, Revoking::ForDelete).await
+    }
+
+    async fn revoke_and_ask(
+        &self,
+        id: CredentialId,
+        revoking: Revoking,
+    ) -> Result<(CredentialRecord, Option<v1::ProviderRevocation>), LocalCredentialError> {
         let authority = Arc::clone(&self.authority);
-        let revoking = id.clone();
+        let revoked = id.clone();
         let (record, material_generation, was_active) =
-            tokio::task::spawn_blocking(move || authority.revoke_for_provider(&revoking))
-                .await
-                .map_err(|_| LocalCredentialError::DatabaseUnavailable)??;
+            tokio::task::spawn_blocking(move || match revoking {
+                Revoking::Revoke => authority.revoke_for_provider(&revoked),
+                Revoking::ForDelete => authority.revoke_for_delete(&revoked),
+            })
+            .await
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)??;
         if !was_active {
             return Ok((record, None));
         }
@@ -74,12 +95,13 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
         // A locked keyring that never answers is NOT_READ at the bound.
         let authority = Arc::clone(&self.authority);
         let reading = id.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            authority.executor_lease_material(
+        let read = tokio::task::spawn_blocking(move || match revoking {
+            Revoking::Revoke => authority.executor_lease_material(
                 &reading,
                 material_generation,
                 CredentialStatus::Revoked,
-            )
+            ),
+            Revoking::ForDelete => authority.deleting_lease_material(&reading, material_generation),
         });
         let Ok(Ok(Ok(material))) = tokio::time::timeout(EXECUTOR_BOUND, read).await else {
             return Ok((record, Some(not_read())));
@@ -94,6 +116,13 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
             .unwrap_or_else(|()| not_read());
         Ok((record, Some(reported)))
     }
+}
+
+/// Which revoke runs before the provider is asked.
+#[derive(Clone, Copy)]
+enum Revoking {
+    Revoke,
+    ForDelete,
 }
 
 async fn run_executor(

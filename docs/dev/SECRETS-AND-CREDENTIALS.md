@@ -229,7 +229,15 @@ or kind can't be added to a command without its row (#5446):
 The first profile `set` creates the profile if absent. Enrollment does not
 silently select an identity. Profiles retain immutable revisions and current
 user/organization authorization. Editing a profile does not advance existing
-environment bindings. Codewire revocation stops Codewire use at once. Where
+environment bindings. So a local credential is in use while a profile selects
+it or a local VM is bound to a profile revision that does, and
+`cw credentials --local delete` of one in use changes nothing: it is refused
+before any revoke. The refusal names the profile and the `unset` that frees
+it, or the VMs and the `cw update NAME --profile local:PROFILE` that moves each
+to the profile as it is now, or `cw rm NAME` (#6128). Otherwise one store
+step revokes it, asks its provider and removes it; if removing the stored
+copy fails after the revoke, the credential is no longer listed and the store
+finishes the removal when it next starts. Codewire revocation stops Codewire use at once. Where
 the provider offers a revocation Codewire can ask for, revoking also asks it,
 and `cw` reports the answer ([Revoking at the provider](#revoking-at-the-provider));
 it is never a promise of provider-side logout.

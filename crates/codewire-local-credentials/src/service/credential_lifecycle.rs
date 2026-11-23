@@ -35,14 +35,31 @@ pub(super) async fn revoke_at_provider<S: ProtectedStore + 'static>(
     }))
 }
 
+/// With `revoke_first`, the store's revoke for a delete runs first and
+/// refuses before any change while the credential is in use; its provider is
+/// asked; then the delete finishes (#6128). A failure after the revoke
+/// leaves the credential revoked and pending delete, and a plain delete
+/// finishes it.
 pub(super) async fn delete<S: ProtectedStore + 'static>(
     authority: &Arc<LocalCredentialAuthority<S>>,
-    selector: v1::CredentialSelector,
+    revocations: &super::provider_revocation::ProviderRevocations<S>,
+    request: v1::DeleteCredentialRequest,
 ) -> Result<Response<v1::DeleteCredentialResponse>, Status> {
-    let id = credential_id(selector.credential_id)?;
+    let id = credential_id(request.credential_id)?;
+    let provider_revocation = if request.revoke_first {
+        let (_, reported) = revocations
+            .revoke_for_delete(id.clone())
+            .await
+            .map_err(super::status_for_error)?;
+        reported
+    } else {
+        None
+    };
     let authority = Arc::clone(authority);
     run_blocking(move || authority.delete_credential(&id)).await?;
-    Ok(Response::new(v1::DeleteCredentialResponse {}))
+    Ok(Response::new(v1::DeleteCredentialResponse {
+        provider_revocation,
+    }))
 }
 
 impl<S: ProtectedStore> Clone for AuthorityRpc<S> {

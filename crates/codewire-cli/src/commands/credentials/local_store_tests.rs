@@ -429,3 +429,109 @@ async fn provider_name_acts_on_one_credential_and_a_bare_shared_name_changes_not
         openai.metadata.id
     );
 }
+
+/// #6128: a local VM keeps the profile revision it was made with, so after
+/// `unset` the profile no longer selects the credential but the VM still
+/// does. Each delete the store refuses changes nothing, the credential stays
+/// active, and `cw` names what frees it; once the VM is moved to the
+/// profile as it is now, the delete revokes and deletes it.
+#[tokio::test]
+async fn a_delete_a_local_vm_still_holds_changes_nothing() {
+    let (_authority, mut client) = serve(Store::default()).await;
+    let walk = save(&mut client, "openai", CredentialAuthKind::ApiKey, "walk").await;
+    set_profile_entry(
+        &mut client,
+        crate::commands::CredentialProfileSetArgs {
+            profile: "same".into(),
+            slot: Some("openai".into()),
+            credential: Some("walk".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let made_with = client.list_profiles().await.unwrap().remove(0).profile;
+    let vm = codewire_access::EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+    client
+        .create_environment_access_binding(&codewire_access::EnvironmentAccessBinding {
+            environment_id: vm.clone(),
+            profile_id: made_with.id.clone(),
+            profile_revision: made_with.revision,
+        })
+        .await
+        .unwrap();
+    let names =
+        || async { std::collections::BTreeMap::from([(vm.to_string(), "same-vm".to_owned())]) };
+    let args = |credential: &str| crate::commands::CredentialDeleteArgs {
+        credential: Some(credential.into()),
+        yes: true,
+    };
+    // Without `--yes` and with no terminal, the question itself would refuse:
+    // a holder named instead shows it was read before anyone was asked.
+    let unasked = |credential: &str| crate::commands::CredentialDeleteArgs {
+        credential: Some(credential.into()),
+        yes: false,
+    };
+    let before = client.list_credentials().await.unwrap();
+
+    // The profile selects it: its unset frees it.
+    let refusal = delete::delete_credential_naming_vms(&mut client, unasked("openai/walk"), names)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        format!("{refusal:#}"),
+        "local credential \"walk\" is selected by profile \"same\"; free it with `cw credentials --local --profile same unset openai`"
+    );
+    assert_eq!(client.list_credentials().await.unwrap(), before);
+
+    unset_profile_entry(
+        &mut client,
+        crate::commands::CredentialProfileSlotArgs {
+            profile: "same".into(),
+            slot: "openai".into(),
+        },
+    )
+    .await
+    .unwrap();
+    // The VM's revision still selects it: refused before the question.
+    let refusal = delete::delete_credential_naming_vms(&mut client, unasked("openai/walk"), names)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        format!("{refusal:#}"),
+        "local credential \"walk\" is still used by local VM same-vm, made with an earlier version of profile \"same\"; move it to the profile as it is now with `cw update same-vm --profile local:same`, or remove it with `cw rm same-vm`"
+    );
+    assert_eq!(client.list_credentials().await.unwrap(), before);
+    assert_eq!(
+        client
+            .get_credential(&walk.metadata.id)
+            .await
+            .unwrap()
+            .metadata
+            .status,
+        codewire_access::CredentialStatus::Active
+    );
+
+    // `cw update` moves the VM to the profile as it is now; the delete goes.
+    let now = client.list_profiles().await.unwrap().remove(0).profile;
+    client
+        .replace_environment_access_binding(
+            &vm,
+            &made_with.id,
+            made_with.revision,
+            &now.id,
+            now.revision,
+        )
+        .await
+        .unwrap();
+    delete::delete_credential_naming_vms(&mut client, args("openai/walk"), names)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .list_credentials()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| record.metadata.id != walk.metadata.id)
+    );
+}

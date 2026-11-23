@@ -550,6 +550,39 @@ pub(in crate::commands) mod refusal {
         )
     }
 
+    /// `delete` of a credential local VMs still use: each was made with an
+    /// earlier revision of a profile that selected it, and keeps it until
+    /// `cw update` moves it to the profile as it is now (#6128). `vms` is
+    /// each VM's name and its profile's.
+    pub(in crate::commands) fn held_by_vms(name: &str, vms: &[(String, String)]) -> String {
+        let mut profiles: Vec<&str> = vms.iter().map(|(_, profile)| profile.as_str()).collect();
+        profiles.sort_unstable();
+        profiles.dedup();
+        let names = vms.iter().map(|(vm, _)| vm.as_str()).collect::<Vec<_>>();
+        let (noun, which, vm) = match names.as_slice() {
+            [one] => ("local VM", "it", *one),
+            _ => ("local VMs", "each", "NAME"),
+        };
+        let (made_with, profile) = match profiles.as_slice() {
+            [one] => (format!("an earlier version of profile {one:?}"), *one),
+            _ => (
+                format!(
+                    "earlier versions of profiles {}",
+                    profiles
+                        .iter()
+                        .map(|profile| format!("{profile:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "PROFILE",
+            ),
+        };
+        format!(
+            "local credential {name:?} is still used by {noun} {}, made with {made_with}; move {which} to the profile as it is now with `cw update {vm} --profile local:{profile}`, or remove {which} with `cw rm {vm}`",
+            names.join(", ")
+        )
+    }
+
     /// `revoke` or `delete` with nobody to ask and no `--yes`, as `cw rm`
     /// refuses.
     /// `what` is "credential" or "profile"; `command` is what
@@ -584,6 +617,15 @@ pub(in crate::commands) mod refusal {
         let again = crate::commands::platform_commands::shell_word(&format!("{provider}/{name}"));
         format!(
             "{placement} credential {name:?} was revoked, but may not have been deleted; run `cw credentials --{placement} delete {again}` again"
+        )
+    }
+
+    /// A local `delete` that revoked the credential and moved it out of the
+    /// listing, then failed to remove its stored copy: the local credential
+    /// store finishes that when it next starts (#6128).
+    pub(in crate::commands) fn revoked_pending_removal(name: &str) -> String {
+        format!(
+            "local credential {name:?} was revoked and is no longer listed, but its stored copy may not have been removed yet; the local credential store removes it when it next starts"
         )
     }
 
@@ -1406,6 +1448,21 @@ mod delete_tests {
         assert_eq!(
             refusal::in_use("local", "work", "daily", "codex"),
             "local credential \"work\" is selected by profile \"daily\"; free it with `cw credentials --local --profile daily unset codex`"
+        );
+        // A VM made with an earlier revision (#6128): one VM, then several
+        // across two profiles.
+        let vm = |vm: &str, profile: &str| (vm.to_owned(), profile.to_owned());
+        assert_eq!(
+            refusal::held_by_vms("work", &[vm("dev", "daily")]),
+            "local credential \"work\" is still used by local VM dev, made with an earlier version of profile \"daily\"; move it to the profile as it is now with `cw update dev --profile local:daily`, or remove it with `cw rm dev`"
+        );
+        assert_eq!(
+            refusal::held_by_vms("work", &[vm("dev", "daily"), vm("web", "daily")]),
+            "local credential \"work\" is still used by local VMs dev, web, made with an earlier version of profile \"daily\"; move each to the profile as it is now with `cw update NAME --profile local:daily`, or remove each with `cw rm NAME`"
+        );
+        assert_eq!(
+            refusal::held_by_vms("work", &[vm("dev", "same"), vm("web", "daily")]),
+            "local credential \"work\" is still used by local VMs dev, web, made with earlier versions of profiles \"daily\", \"same\"; move each to the profile as it is now with `cw update NAME --profile local:PROFILE`, or remove each with `cw rm NAME`"
         );
         assert_eq!(
             revoke_question("cloud", "work"),

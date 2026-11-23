@@ -510,7 +510,7 @@ impl LocalCredentialClient {
 
     pub async fn delete_credential(&mut self, id: &CredentialId) -> Result<(), Status> {
         self.inner
-            .delete_credential(credential_selector(id))
+            .delete_credential(provider_revocation::delete_request(id, false))
             .await?;
         Ok(())
     }

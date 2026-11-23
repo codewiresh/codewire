@@ -1,12 +1,18 @@
-//! `cw credentials --local delete` (#4717 C6). A credential a profile
-//! selects is refused with the exact `unset` that frees it. An active one is
-//! asked about once, then revoked and deleted, and what its provider still
-//! holds is said after, in the sentences the cloud's delete uses too.
+//! `cw credentials --local delete` (#4717 C6). An active credential is
+//! asked about once, then revoked and deleted as one step the store refuses
+//! before any change while a profile or a local VM's profile revision
+//! selects it (#6128); `cw` names what holds it and what frees it, read
+//! before the question in the common case, so nobody is asked first. What
+//! its provider still holds is said after, in the sentences the cloud's
+//! delete uses too.
+
+use std::collections::BTreeMap;
+use std::future::Future;
 
 use anyhow::Context as _;
-use codewire_access::CredentialStatus;
+use codewire_access::{CredentialId, CredentialStatus};
 use codewire_local_credentials::{
-    AuthorityFeature, LocalCredentialClient, LocalProviderRevocation,
+    AuthorityFeature, CredentialRecord, LocalCredentialClient, LocalProviderRevocation,
     LocalProviderRevocationFailure as Failure, LocalProviderRevocationOutcome as Outcome,
 };
 
@@ -19,6 +25,20 @@ pub(super) async fn delete_credential(
     client: &mut LocalCredentialClient,
     args: CredentialDeleteArgs,
 ) -> anyhow::Result<()> {
+    delete_credential_naming_vms(client, args, local_vm_names).await
+}
+
+/// [`delete_credential`], with where the local VMs' names come from: a
+/// test names its own, never the computer's.
+pub(super) async fn delete_credential_naming_vms<N, F>(
+    client: &mut LocalCredentialClient,
+    args: CredentialDeleteArgs,
+    vm_names: N,
+) -> anyhow::Result<()>
+where
+    N: Fn() -> F,
+    F: Future<Output = BTreeMap<String, String>>,
+{
     let record = resolve_credential(
         client,
         args.credential
@@ -28,53 +48,39 @@ pub(super) async fn delete_credential(
     )
     .await?;
     let name = &record.metadata.display_name;
-    let profiles = client
-        .list_profiles()
-        .await
-        .context("list local profiles before deleting a credential")?;
-    let selected = profiles.iter().find_map(|profile| {
-        profile
-            .profile
-            .entries
-            .iter()
-            .find(|(_, id)| **id == record.metadata.id)
-            .map(|(slot, _)| (profile.profile.name.as_str(), slot.as_str()))
-    });
-    if let Some((profile, slot)) = selected {
-        anyhow::bail!(refusal::in_use("local", name, profile, slot));
-    }
     let active = record.metadata.status != CredentialStatus::Revoked;
+    let gate = AuthorityFeature::DeleteGate;
+    if active && !gate.served_by(client.info().protocol_version) {
+        *client = super::super::connect_local_credential_authority_serving(
+            gate,
+            "check that nothing uses a credential before it revokes it for a delete",
+        )
+        .await?;
+    }
+    // Read only, so the common case is refused before the question; the
+    // store's gate below stays the guarantee.
+    if let Some(refusal) = held(client, &record, &vm_names).await {
+        return Err(refusal);
+    }
     let change = Change::Delete { active };
     if !confirm::confirm("local", name, change, args.yes, OutputFormat::Text)? {
         return Ok(());
     }
-    let mut answer = ProviderAnswer::NotAsked;
-    if active {
-        // Codewire's own revoke failing stops here: nothing is deleted. An
-        // authority that serves it also asks the provider (#4717).
-        if authority_asks_provider(client.info().protocol_version) {
-            let (_, reported) = client
-                .revoke_credential_at_provider(&record.metadata.id)
-                .await
-                .context("revoke local credential before deleting it")?;
-            answer = provider_answer(reported.as_ref());
-        } else {
-            client
-                .revoke_credential(&record.metadata.id)
-                .await
-                .context("revoke local credential before deleting it")?;
-        }
-    }
-    let deleted = client.delete_credential(&record.metadata.id).await;
-    if active {
-        deleted.context(refusal::revoked_not_deleted(
-            "local",
-            record.metadata.provider.as_str(),
-            name,
-        ))?;
+    let deleted = if active {
+        client
+            .delete_credential_revoking_first(&record.metadata.id)
+            .await
+            .map(|reported| provider_answer(reported.as_ref()))
     } else {
-        deleted.context("delete local credential")?;
-    }
+        client
+            .delete_credential(&record.metadata.id)
+            .await
+            .map(|()| ProviderAnswer::NotAsked)
+    };
+    let answer = match deleted {
+        Ok(answer) => answer,
+        Err(status) => return Err(refused(client, &record, status, &vm_names).await),
+    };
     output::print_done(&output::deleted("local", name));
     if let Some(line) = output::after_deleted(
         record.metadata.provider.as_str(),
@@ -84,6 +90,158 @@ pub(super) async fn delete_credential(
         eprintln!("{line}");
     }
     Ok(())
+}
+
+/// What a failed delete says. The store refused before any change while
+/// something holds the credential, which [`held`] names. A credential
+/// the delete revoked and still lists is finished by running it again; one
+/// it no longer lists is pending delete, which the store finishes when it
+/// next starts.
+async fn refused<N, F>(
+    client: &mut LocalCredentialClient,
+    record: &CredentialRecord,
+    status: tonic::Status,
+    vm_names: &N,
+) -> anyhow::Error
+where
+    N: Fn() -> F,
+    F: Future<Output = BTreeMap<String, String>>,
+{
+    let name = &record.metadata.display_name;
+    let failed = anyhow::Error::from(status);
+    if record.metadata.status != CredentialStatus::Revoked
+        && let Ok(listed) = client.list_credentials().await
+    {
+        match listed
+            .iter()
+            .find(|now| now.metadata.id == record.metadata.id)
+        {
+            None => return failed.context(refusal::revoked_pending_removal(name)),
+            Some(now) if now.metadata.status == CredentialStatus::Revoked => {
+                return failed.context(refusal::revoked_not_deleted(
+                    "local",
+                    record.metadata.provider.as_str(),
+                    name,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    held(client, record, vm_names)
+        .await
+        .unwrap_or_else(|| failed.context("delete local credential"))
+}
+
+/// The refusal naming what holds the credential and what frees it: a
+/// profile that selects it now, with its `unset`, or local VMs made with an
+/// earlier revision, with the `cw update` that moves each on. None when
+/// nothing does, or the holders can't be read.
+async fn held<N, F>(
+    client: &mut LocalCredentialClient,
+    record: &CredentialRecord,
+    vm_names: &N,
+) -> Option<anyhow::Error>
+where
+    N: Fn() -> F,
+    F: Future<Output = BTreeMap<String, String>>,
+{
+    let name = &record.metadata.display_name;
+    match holders(client, &record.metadata.id).await {
+        Ok(Holders {
+            profile: Some((profile, slot)),
+            ..
+        }) => Some(anyhow::anyhow!(refusal::in_use(
+            "local", name, &profile, &slot
+        ))),
+        Ok(Holders { vms, .. }) if !vms.is_empty() => {
+            let names = vm_names().await;
+            let vms: Vec<(String, String)> = vms
+                .into_iter()
+                .map(|(id, profile)| (names.get(&id).cloned().unwrap_or(id), profile))
+                .collect();
+            Some(anyhow::anyhow!(refusal::held_by_vms(name, &vms)))
+        }
+        _ => None,
+    }
+}
+
+/// What holds a credential, for naming in a refused delete; the store
+/// decides. A local VM keeps the profile revision it was made with until
+/// `cw update` moves it, so an `unset` doesn't free it.
+#[derive(Default)]
+struct Holders {
+    /// A profile whose current revision selects it, and the slot.
+    profile: Option<(String, String)>,
+    /// Each local VM's environment ID and the name of the profile whose
+    /// earlier revision it is bound to.
+    vms: Vec<(String, String)>,
+}
+
+async fn holders(
+    client: &mut LocalCredentialClient,
+    id: &CredentialId,
+) -> Result<Holders, tonic::Status> {
+    let profiles = client.list_profiles().await?;
+    let profile_name = |profile_id: &codewire_access::AccessProfileId| {
+        profiles
+            .iter()
+            .find(|profile| profile.profile.id == *profile_id)
+            .map(|profile| profile.profile.name.to_string())
+    };
+    let mut found = Holders {
+        profile: profiles.iter().find_map(|profile| {
+            profile
+                .profile
+                .entries
+                .iter()
+                .find(|(_, selected)| *selected == id)
+                .map(|(slot, _)| (profile.profile.name.to_string(), slot.as_str().to_owned()))
+        }),
+        ..Holders::default()
+    };
+    for record in client.list_environment_access_bindings().await? {
+        let binding = record.binding;
+        let revisions = client.list_profile_revisions(&binding.profile_id).await?;
+        let selects = revisions.iter().any(|revision| {
+            revision.profile.revision == binding.profile_revision
+                && revision
+                    .profile
+                    .entries
+                    .values()
+                    .any(|selected| selected == id)
+        });
+        if selects {
+            let profile = profile_name(&binding.profile_id).unwrap_or_default();
+            found
+                .vms
+                .push((binding.environment_id.to_string(), profile));
+        }
+    }
+    Ok(found)
+}
+
+/// The local VMs' names by environment ID; none when the local VM runtime
+/// was never set up or can't be read.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn local_vm_names() -> BTreeMap<String, String> {
+    use super::super::native::{native_environments, native_state_exists};
+    let listed = async {
+        if !native_state_exists()? {
+            return anyhow::Ok(Vec::new());
+        }
+        native_environments().await
+    }
+    .await;
+    listed
+        .unwrap_or_default()
+        .into_iter()
+        .map(|environment| (environment.id, environment.name))
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn local_vm_names() -> BTreeMap<String, String> {
+    BTreeMap::new()
 }
 
 /// Whether an authority at `protocol_version` asks the provider. One from

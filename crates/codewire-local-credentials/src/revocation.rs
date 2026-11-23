@@ -43,6 +43,63 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             was_active,
         ))
     }
+
+    /// Revokes `id` for its delete (#6128), refused before any change while
+    /// it is in use. One immediate transaction checks the store's own rule
+    /// (a profile, or a local VM's bound profile revision, selects it),
+    /// revokes it, and moves its material out of `ready`, so no profile or
+    /// binding can take it up before [`Self::delete_credential`] finishes.
+    /// Anything that fails after that leaves it revoked and pending delete,
+    /// and a delete finishes it. Answers as [`Self::revoke_for_provider`].
+    pub(crate) fn revoke_for_delete(
+        &self,
+        id: &CredentialId,
+    ) -> Result<(CredentialRecord, Option<u64>, bool), LocalCredentialError> {
+        // As delete does: no refresh is admitted while the mark is made.
+        let active_refreshes = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        if active_refreshes.contains_key(id) {
+            return Err(LocalCredentialError::CredentialRefreshInProgress);
+        }
+        let connection = self.material_connection()?;
+        let transaction = immediate(&connection)?;
+        if profile_or_binding_references_credential(&transaction, id)? {
+            return Err(LocalCredentialError::CredentialInUse);
+        }
+        let current = load_internal_credential(&transaction, id, Some(MaterialState::Ready))?;
+        let was_active = current.public.metadata.status == CredentialStatus::Active;
+        let unrotated = matches!(
+            load_credential_refresh_marker(&transaction, id),
+            Ok(None)
+                | Ok(Some(CredentialRefreshJournal {
+                    phase: CredentialRefreshPhase::Reserved,
+                    ..
+                }))
+        );
+        let record = revoke_on(&transaction, id)?;
+        let changed = transaction
+            .execute(
+                "UPDATE credentials SET material_state = 'pending_delete', updated_at_unix_ms = ?2
+                 WHERE id = ?1 AND material_state = 'ready'",
+                params![
+                    id.as_str(),
+                    i64::try_from(unix_millis()?).map_err(|_| LocalCredentialError::InvalidTime)?
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        transaction.commit().map_err(database_error)?;
+        drop(active_refreshes);
+        Ok((
+            record,
+            unrotated.then_some(current.material_generation),
+            was_active,
+        ))
+    }
 }
 
 fn revoke_on(

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 33;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 34;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -103,6 +103,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         33,
         "the repository and provider revocation executors receive their one value in their lease and open no store (#4984)",
     ),
+    (
+        34,
+        "DeleteCredential.revoke_first revokes and deletes as one step that the store refuses before any change while a profile or a local VM's profile revision selects the credential (#6128)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -155,10 +159,14 @@ pub enum AuthorityFeature {
     /// joined to its admitted delegation (#4909). An older authority answers
     /// Unimplemented, and its platform boots don't intercept.
     FrontDoorDelegation,
+    /// `DeleteCredential.revoke_first`: the store refuses a delete that a
+    /// profile or a local VM's profile revision blocks before it revokes
+    /// anything (#6128). An older authority ignores the field.
+    DeleteGate,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -171,6 +179,7 @@ impl AuthorityFeature {
         Self::NamesPerProvider,
         Self::NetworkPolicyHosts,
         Self::FrontDoorDelegation,
+        Self::DeleteGate,
     ];
 
     /// The protocol that introduced it.
@@ -188,6 +197,7 @@ impl AuthorityFeature {
             Self::NamesPerProvider => 25,
             Self::NetworkPolicyHosts => 27,
             Self::FrontDoorDelegation => 28,
+            Self::DeleteGate => 34,
         }
     }
 
