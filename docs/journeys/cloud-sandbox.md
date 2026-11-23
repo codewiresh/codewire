@@ -11,7 +11,7 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-22.
+Updated 2026-11-23.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -19,6 +19,7 @@ Updated 2026-11-22.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-failure-trace-id` | cw-tracing | not yet observed | not yet observed |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
@@ -283,6 +284,54 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
     exit status 7, the stdin line, and the two `cw run` lines again from
     `cw logs`. Evidence: the pull
     request that added this section.
+
+## `sandbox-run-env`: pass a variable by name
+
+Not shipped yet (#5222). A program that holds a secret, such as a per-thread
+token, hands it to one command in a sandbox without putting it in `cw`'s
+arguments.
+
+- **Entry points:** `cw exec` and `cw run` with `--env KEY` or
+  `--env KEY=VALUE`; `cw create --env` and `cw init --env`.
+- **States to exercise:**
+  - `--env KEY=VALUE`, as today;
+  - `--env KEY` with `KEY` set in the caller's environment, through `cw exec`
+    and through `cw run`, in a sandbox and in a local VM;
+  - `--env KEY` with `KEY` unset, and with `KEY` set to an empty string;
+  - `cw create --env KEY`, in a sandbox and a local VM, and `cw init --env
+    KEY`: refused;
+  - `cw run --agent claude --env KEY` in a local VM: the agent's process has
+    the value;
+  - the host's process table while `cw` runs.
+- **Driving it:**
+
+  ```sh
+  export WALK_TOKEN=walk-value-5222
+  cw exec --in walk --env WALK_TOKEN -- sh -c 'printf "%s\n" "$WALK_TOKEN"'
+  cw run --in walk --name env-job --env WALK_TOKEN -- sh -c 'printf "%s\n" "$WALK_TOKEN"; sleep 20' &
+  ps -axo args= | grep -F 'cw run --in walk'   # while it runs
+  wait
+  env -u WALK_TOKEN cw exec --in walk --env WALK_TOKEN -- true; echo $?
+  WALK_TOKEN= cw exec --in walk --env WALK_TOKEN -- sh -c 'printf "[%s]\n" "$WALK_TOKEN"'
+  cw --cloud create --name walk-env --env WALK_TOKEN --yes; echo $?
+  ```
+
+- **Proof:**
+  - each command prints `walk-value-5222`, from `cw exec` and from the
+    session's output in `cw logs walk --session env-job`;
+  - the process table shows `--env WALK_TOKEN` and never the value;
+  - unset: refused before anything starts, naming `WALK_TOKEN` and saying it
+    isn't set, exit 1, with no session made;
+  - set to an empty string: sent as empty, `[]`;
+  - `cw create --env WALK_TOKEN`: refused, saying `cw create --env` needs
+    `KEY=VALUE` and naming `cw secrets` for a secret; nothing created; the
+    same for `cw init --env WALK_TOKEN`;
+  - the local VM's agent session starts with `--env WALK_TOKEN`, its
+    process environment holds the value (`cw exec` reading
+    `/proc/PID/environ` of the agent's process), and the host's process
+    table shows only the name;
+  - no output or error of `cw` contains the value.
+- **Observed:** not yet.
 
 ## `sandbox-msg-session`: send text to a session and list its sessions
 

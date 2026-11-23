@@ -192,6 +192,27 @@ session ends it and every process it started, within a stated bound. Stopping
 the environment stops its sessions; after a start, each one is restarted under
 its own name with `cw restart ENV --session NAME`.
 
+Target, not shipped (#5222): `--env` on `cw run` and `cw exec` takes
+`KEY=VALUE`, or `KEY` alone, which sends the value `KEY` has in `cw`'s own
+environment, so a program can hand a secret it already holds to one process
+without putting it in `cw`'s arguments, where anything that can read the
+host's process table sees it. A `KEY` that isn't set is refused by its name
+before anything starts; it is never sent empty. `cw` never prints a value it
+sends, in its output or its errors. Every command that saves `--env` in an
+environment's settings as a plain variable (`cw create`, local or cloud, and
+`cw init`) keeps requiring `KEY=VALUE` and refuses `KEY` alone, pointing to
+`cw secrets`. Codewire never stores or logs the values a run or exec sends.
+The platform passes them to the environment's daemon and writes no part of
+the request. Every message that carries them marks its `env` field
+`debug_redact`, so no `Debug` of a request shows them: in `codewire.v1`,
+`LaunchSessionRequest`, `ExecRequest`, `StreamExecRequest` and `RunStart`; in
+`daemon.v1`, which the bridge forwards them in, `LaunchSessionRequest`,
+`ExecStartRequest` and `PtyStartRequest`. The daemon holds them for the
+process it starts and never writes them to its session record on disk (`env`
+is skipped when `PersistedSession` is serialized,
+`crates/codewire-daemon/src/durable_session.rs`), so they aren't kept across
+its restart.
+
 A **managed agent** (`cw run --agent codex|claude`, and `--agent noel` on a
 trusted Linux host) is a conversation Codewire drives through the agent's own
 protocol: `cw msg` sends a task, `cw inbox` lists messages and results,
