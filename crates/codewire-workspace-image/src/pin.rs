@@ -2,17 +2,17 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:22bcf08bd3a3fddebc64dee9e1749dec559e23af0eea6fe5d6b01756e5728ff8";
+pub const DIGEST: &str = "sha256:c8cfc9a193c4709332eac4432a58ef0dc96e11bd4b599c642266fdfb068e8e3a";
 /// The image at the public GHCR mirror, pulled anonymously by local
 /// environments. A deployment pulls the same digest from its configured
 /// repository.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:22bcf08bd3a3fddebc64dee9e1749dec559e23af0eea6fe5d6b01756e5728ff8";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:c8cfc9a193c4709332eac4432a58ef0dc96e11bd4b599c642266fdfb068e8e3a";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "52ab0972740573e6bc403090408ffa5b1a6686a6";
+pub const SOURCE_SHA: &str = "977ede4a1aa26422ef237cd16cb0eabbb5ec078a";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "fa979b91a546760a504f780a51307e89811f6270aecb830e08a2f0c1aad7d62d";
+pub const INPUTS_SHA256: &str = "5a67e5bff41952db96e35c6c6786f1188982ad8c38b4a4966b4e35601c7fb3c9";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
     ("claude", "2.1.308"),
@@ -23,6 +23,8 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:318ef37d09fa03e6117766f435d19344ad6e83ab86fd112b26b39db9e5b8d3b0",
+    "sha256:22bcf08bd3a3fddebc64dee9e1749dec559e23af0eea6fe5d6b01756e5728ff8",
     "sha256:0f2343201f1e3a495ac696e8e5385f1357120d231567cf9128c6f2955cde0cfa",
     "sha256:3cf7fab02c9c66d4760d03e64bbcd06beacecf9ccdf7b7278e9129a93229ca78",
     "sha256:8e6e985aeba203842d74927e555d2f85e9c279afbd611671b4b409d955301795",
