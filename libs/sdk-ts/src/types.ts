@@ -126,6 +126,10 @@ export interface EnvironmentData {
   preset_name?: string | null;
   protected: boolean;
   recoverable: boolean;
+  /** When a running Sandbox was running again after a restart nobody asked for (#5997); cleared by the next start or stop. */
+  restarted_at?: string | null;
+  /** Why, with `restarted_at`: `pod_failed`, `runtime_replaced`, `node_lost` or `configuration_changed`. */
+  restart_cause?: string | null;
   retry_count: number;
   setup_complete: boolean;
   setup_error?: string | null;

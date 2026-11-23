@@ -479,7 +479,7 @@ pub(crate) fn local_entry(
             selected: selection
                 .is_some_and(|selected| selected.is_local_vm(&environment.id, &environment.name)),
             state: native_state_label(environment.state).to_owned(),
-            restarted: false,
+            restart: Default::default(),
             failed: None,
             stop_reason: None,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
@@ -522,7 +522,7 @@ pub(crate) fn cloud_entry(
             } else {
                 environment.state.clone()
             },
-            restarted: environment.error_code.as_deref() == Some("sandbox_restarted"),
+            restart: super::environment::info::UnplannedRestart::of(environment),
             failed,
             stop_reason: environment.stop_reason.clone(),
             daemon_health: daemon_health.to_owned(),
@@ -578,7 +578,7 @@ fn host_entry(
                 selected.location == SelectionLocation::Host && selected.id == environment.id
             }),
             state: environment.state,
-            restarted: false,
+            restart: Default::default(),
             failed: None,
             stop_reason: None,
             daemon_health,
@@ -1137,6 +1137,7 @@ fn format_environment_inventory_at(
     out.push_str(&format!("\n  {}\n", dim(&legend.join(style.separator()))));
     out.push_str(&notes);
     out.push_str(&failed_create_notes(rows, style));
+    out.push_str(&restart_notes(rows, style, now));
     // A failed create has no sessions to list, so it is the last choice.
     let first = rows
         .iter()
@@ -1166,7 +1167,8 @@ fn format_environment_inventory_at(
 }
 
 /// A listing's STATE cell. A sandbox that came back after its Pod failed says so,
-/// because its processes went with the old Pod (#3772). A sandbox the platform
+/// because its processes went with the old Pod (#3772), unless the server said
+/// when: a note under the list says so instead (#5997). A sandbox the platform
 /// stopped says why; one a person stopped needs no reason (#3384).
 ///
 /// A create the platform ended says when, because a new environment may
@@ -1178,7 +1180,7 @@ fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono:
             display_str(&entry.state),
             super::collaboration::time_ago_at(&failed.at, now)
         )
-    } else if entry.restarted {
+    } else if entry.restart.restarted && !entry.restart.recorded() {
         format!("{} (restarted)", display_str(&entry.state))
     } else if let Some(reason @ ("idle" | "credit")) = entry.stop_reason.as_deref() {
         format!("{} ({reason})", display_str(&entry.state))
@@ -1227,6 +1229,47 @@ fn failed_create_notes(rows: &[InventoryRow], style: Style) -> String {
     notes
 }
 
+/// One line under the table for each Sandbox that restarted on its own,
+/// then the command that shows the first one (#5997).
+fn restart_notes(
+    rows: &[InventoryRow],
+    style: Style,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let mut notes = String::new();
+    let mut first = None;
+    for row in rows {
+        let Some(note) = row.entry.restart.list_note(&row.entry.name, now) else {
+            continue;
+        };
+        notes.push_str(&format!(
+            "{} {}\n",
+            style.status(Status::Attention),
+            terminal_text(&note)
+        ));
+        first.get_or_insert(row);
+    }
+    let Some(first) = first else {
+        return notes;
+    };
+    // A shared name is named by its ID, which every location resolves.
+    let shared = rows
+        .iter()
+        .filter(|row| row.entry.name == first.entry.name)
+        .count()
+        > 1;
+    let target = if shared {
+        &first.entry.id
+    } else {
+        &first.entry.name
+    };
+    format!(
+        "\n{notes}{} cw info {}\n",
+        style.status(Status::Next),
+        terminal_text(target)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,7 +1286,7 @@ mod tests {
             placement: placement.into(),
             selected: name == "app",
             state: state.into(),
-            restarted: false,
+            restart: Default::default(),
             failed: None,
             stop_reason: None,
             daemon_health: String::new(),
@@ -1809,7 +1852,7 @@ mod tests {
         let quiet = serde_json::to_value(&restarted).unwrap();
         assert!(quiet.get("restarted").is_none(), "{quiet}");
 
-        restarted.restarted = true;
+        restarted.restart.restarted = true;
         assert_eq!(
             state_cell(&restarted, chrono::Utc::now()),
             "running (restarted)"
@@ -1982,6 +2025,88 @@ mod tests {
         assert!(long.contains(&format!("{}…\n", "x".repeat(FAILED_REASON_LISTED_CHARS))));
         // A failed create has no sessions: a list of nothing else offers none.
         assert!(!long.contains("Sessions:"), "{long}");
+    }
+
+    /// A Sandbox that restarted on its own stays `running`, with a note under
+    /// the list saying when and why and the command that says more (#5997).
+    #[test]
+    fn ls_notes_a_restart_nobody_asked_for_under_the_list() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-22T14:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let restarted = |name: &str, at: &str, cause: &str| {
+            let mut sandbox = entry(name, Location::Cloud, "running");
+            sandbox.list.restart = super::super::environment::info::UnplannedRestart {
+                restarted: true,
+                restarted_at: Some(at.into()),
+                restart_cause: Some(cause.into()),
+            };
+            sandbox
+        };
+        let app = restarted("app", "2026-11-22T12:00:00Z", "runtime_replaced");
+        assert_eq!(state_cell(&app.list, now), "running");
+        let rows = [row(&app, Some(0), NetworkRef::NotAttached)];
+        assert_eq!(
+            format_environment_inventory_at(&rows, None, &[], PLAIN, now),
+            concat!(
+                "  NAME  LOCATION  STATE    SESSIONS  NETWORK\n",
+                "› app   cloud     running  0         —\n",
+                "\n",
+                "  › current environment · NETWORK is the saved attachment\n",
+                "\n",
+                "! app restarted on its own 2 h ago: its runtime was replaced. Programs that were running stopped.\n",
+                "→ cw info app\n",
+                "\n",
+                "→ Sessions: cw ls app\n",
+            )
+        );
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["restarted"], true);
+        assert_eq!(json["restarted_at"], "2026-11-22T12:00:00Z");
+        assert_eq!(json["restart_cause"], "runtime_replaced");
+
+        // Several: one note each, and the hint names the first. A cause this
+        // `cw` does not know is left out.
+        let rows = [
+            row(
+                &restarted("api", "2026-11-22T13:55:00Z", "pod_failed"),
+                Some(0),
+                NetworkRef::NotAttached,
+            ),
+            row(
+                &restarted("web", "2026-11-19T14:00:00Z", "something_new"),
+                Some(0),
+                NetworkRef::NotAttached,
+            ),
+        ];
+        let text = format_environment_inventory_at(&rows, None, &[], PLAIN, now);
+        assert!(
+            text.contains(concat!(
+                "\n! api restarted on its own 5 min ago: it stopped unexpectedly. Programs that were running stopped.\n",
+                "! web restarted on its own 3 d ago. Programs that were running stopped.\n",
+                "→ cw info api\n",
+            )),
+            "{text}"
+        );
+        assert_eq!(text.matches("cw info").count(), 1, "{text}");
+
+        // Piped text carries no escapes; at a terminal `!` is the attention status.
+        let colored = format_environment_inventory_at(
+            &rows,
+            None,
+            &[],
+            Style::new(true, Charset::Unicode),
+            now,
+        );
+        assert!(
+            colored.contains(&format!(
+                "{} api restarted on its own",
+                Style::new(true, Charset::Unicode).status(Status::Attention)
+            )),
+            "{colored:?}"
+        );
+        assert!(!text.contains('\x1b'));
     }
 
     #[test]

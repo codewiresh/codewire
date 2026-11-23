@@ -573,6 +573,38 @@ fn an_environment_says_whether_idle_stop_is_enforced() {
     }
 }
 
+/// An unplanned restart reaches clients as when and why (#5997); a Sandbox
+/// with none carries neither.
+#[test]
+fn an_unplanned_restart_carries_when_and_why() {
+    let mut environment = test_environment("running", true);
+    environment.restarted_at = Some("2026-11-22T12:00:00Z".into());
+    environment.restart_cause = Some("runtime_replaced".into());
+    let wire = proto_environment(
+        environment,
+        NetworkPolicyFlags::default(),
+        Default::default(),
+    )
+    .unwrap();
+    let restarted_at = wire.restarted_at.as_option().unwrap();
+    assert_eq!(
+        restarted_at.seconds,
+        chrono::DateTime::parse_from_rfc3339("2026-11-22T12:00:00Z")
+            .unwrap()
+            .timestamp()
+    );
+    assert_eq!(wire.restart_cause, "runtime_replaced");
+
+    let quiet = proto_environment(
+        test_environment("running", true),
+        NetworkPolicyFlags::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(quiet.restarted_at.as_option().is_none());
+    assert!(quiet.restart_cause.is_empty());
+}
+
 #[test]
 fn the_network_policy_shows_only_while_platform_policies_are_on() {
     let mut environment = test_environment("running", true);
@@ -619,6 +651,8 @@ fn test_environment(state: &str, setup_complete: bool) -> Environment {
         error_code: None,
         stop_reason: None,
         idle_stop_seconds: 0,
+        restarted_at: None,
+        restart_cause: None,
         recoverable: false,
         state_changed_at: "2026-07-18T12:34:56Z".into(),
         retry_count: 0,

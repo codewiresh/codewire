@@ -7,7 +7,7 @@ mod cp;
 pub(crate) mod cpu;
 mod host_placement;
 mod idle_stop;
-mod info;
+pub(crate) mod info;
 pub(crate) mod lifecycle;
 mod platform_create;
 pub(crate) mod progress;
@@ -1286,9 +1286,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     pub(crate) placement: String,
     pub(crate) selected: bool,
     pub(crate) state: String,
-    /// Running again after its Pod failed, with every process lost (#3772).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) restarted: bool,
+    /// Running again without anyone asking: whether, when and why (#5997).
+    #[serde(flatten)]
+    pub(crate) restart: info::UnplannedRestart,
     /// A create the platform ended; `state` is then `failed` (#4482).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failed: Option<FailedCreate>,

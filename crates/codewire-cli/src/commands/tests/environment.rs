@@ -2961,6 +2961,92 @@ fn format_env_info_text_shows_a_replacement_or_restart_as_a_notice() {
     }
 }
 
+/// A restart nobody asked for is one line after `StartedAt`: when, in local
+/// time and as an age, and why (#5997). The JSON keeps the time and the
+/// cause's code.
+#[test]
+fn format_env_info_text_says_when_and_why_a_sandbox_restarted_on_its_own() {
+    use crate::commands::environment::info::format_env_info_text_at;
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-22T14:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("app"),
+        "running",
+    );
+    environment.started_at = Some("2026-11-22T09:00:00Z".to_string());
+    let quiet = format_env_info_text_at(&environment, now, &chrono::Utc);
+    assert!(!quiet.contains("Restarted:"), "{quiet}");
+    let json = serde_json::to_value(&environment).unwrap();
+    assert!(json.get("restarted_at").is_none(), "{json}");
+    assert!(json.get("restart_cause").is_none(), "{json}");
+
+    environment.error_code = Some("sandbox_restarted".to_string());
+    environment.error_reason = Some(
+        "Restarted at 12:00 UTC after its runtime was replaced. Running processes were lost."
+            .to_string(),
+    );
+    environment.restarted_at = Some("2026-11-22T12:00:00Z".to_string());
+    environment.restart_cause = Some("runtime_replaced".to_string());
+    let text = format_env_info_text_at(&environment, now, &chrono::Utc);
+    assert!(
+        text.contains(concat!(
+            "StartedAt:     2026-11-22T09:00:00Z\n",
+            "Restarted:     22 Nov 12:00 (2 h ago) on its own: its runtime was replaced. ",
+            "Files are safe; programs that were running stopped.\n",
+        )),
+        "{text}"
+    );
+    // #3772's notice stays, as `reboot-restart-notice` reads it.
+    assert!(text.contains("Notice:        Restarted at 12:00 UTC"), "{text}");
+    // The time is local: here two hours east of UTC.
+    let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+    assert!(
+        format_env_info_text_at(&environment, now, &east)
+            .contains("Restarted:     22 Nov 14:00 (2 h ago) on its own")
+    );
+
+    for (cause, at, value) in [
+        (
+            "pod_failed",
+            "2026-11-22T13:55:00Z",
+            "22 Nov 13:55 (5 min ago) on its own: it stopped unexpectedly.",
+        ),
+        (
+            "node_lost",
+            "2026-11-19T14:00:00Z",
+            "19 Nov 14:00 (3 d ago) on its own: the machine it ran on stopped responding, so it moved to another.",
+        ),
+        (
+            "configuration_changed",
+            "2026-11-22T13:59:30Z",
+            "22 Nov 13:59 (just now) on its own: its credentials or settings changed.",
+        ),
+        // A cause this `cw` does not know is left out.
+        (
+            "something_new",
+            "2026-11-22T12:00:00Z",
+            "22 Nov 12:00 (2 h ago) on its own.",
+        ),
+    ] {
+        environment.restarted_at = Some(at.to_string());
+        environment.restart_cause = Some(cause.to_string());
+        let text = format_env_info_text_at(&environment, now, &chrono::Utc);
+        assert!(
+            text.contains(&format!(
+                "Restarted:     {value} Files are safe; programs that were running stopped.\n"
+            )),
+            "{cause}: {text}"
+        );
+    }
+
+    let json = serde_json::to_value(&environment).unwrap();
+    assert_eq!(json["restarted_at"], "2026-11-22T12:00:00Z");
+    assert_eq!(json["restart_cause"], "something_new");
+    assert_eq!(json["error_code"], "sandbox_restarted");
+}
+
 /// The cloud request for `args` with only the file `--file` names, as before
 /// creates searched for one.
 fn prepare_platform_env_create_request(

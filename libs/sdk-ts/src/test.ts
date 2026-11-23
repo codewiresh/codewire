@@ -837,6 +837,17 @@ async function runTests() {
   assert(idleStopped.stop_reason === "idle", "a stop reason is retained");
   assert(idleStopped.idle_stop_seconds === 21_600, "an idle stop is retained");
   assert(convertedEnvironment.stop_reason === undefined, "a running environment has no stop reason");
+  const restarted = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_restarted", EnvironmentState.RUNNING),
+    restartedAt: { seconds: 1_795_348_800n, nanos: 0 },
+    restartCause: "runtime_replaced",
+  }));
+  assert(restarted.restarted_at === "2026-11-22T12:00:00Z", "an unplanned restart keeps when it ran again");
+  assert(restarted.restart_cause === "runtime_replaced", "an unplanned restart keeps why");
+  assert(
+    convertedEnvironment.restarted_at === undefined && convertedEnvironment.restart_cause === undefined,
+    "an environment that did not restart reports no restart",
+  );
 
   const attachedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_attached", EnvironmentState.RUNNING),
@@ -1661,7 +1672,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 197;
+  const expectedAssertions = 200;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

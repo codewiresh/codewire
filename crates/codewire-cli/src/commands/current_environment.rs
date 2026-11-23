@@ -514,7 +514,7 @@ mod tests {
                 placement: "local".into(),
                 selected: false,
                 state: state.into(),
-                restarted: false,
+                restart: Default::default(),
                 failed: None,
                 stop_reason: None,
                 daemon_health: String::new(),

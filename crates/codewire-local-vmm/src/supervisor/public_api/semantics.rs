@@ -102,6 +102,9 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     // A local VM never stops itself for being idle, so says nothing of it (#3384).
     field(40, "idle_stop_seconds", ZERO),
     field(41, "idle_stop_enforced", ZERO),
+    // Only the platform records an unplanned restart; a local VM reports none (#5997).
+    field(43, "restarted_at", ZERO),
+    field(44, "restart_cause", ZERO),
 ];
 
 pub(super) const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[

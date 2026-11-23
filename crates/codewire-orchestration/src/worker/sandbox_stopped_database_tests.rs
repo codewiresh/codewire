@@ -906,6 +906,20 @@ async fn restart(pool: &PgPool) -> Result<(bool, Option<String>)> {
     .await?)
 }
 
+/// When and why, as a client's read of the Sandbox carries them (#5997).
+async fn client_restart(pool: &PgPool) -> Result<(Option<String>, Option<String>)> {
+    let row = sqlx::query(&format!(
+        "SELECT {} FROM environments e {} WHERE e.id = $1",
+        crate::api::environments::ENV_SELECT_COLS,
+        crate::api::environments::ENV_SELECT_JOINS
+    ))
+    .bind(ENVIRONMENT)
+    .fetch_one(pool)
+    .await?;
+    let environment = crate::api::environments::scan_environment(&row)?;
+    Ok((environment.restarted_at, environment.restart_cause))
+}
+
 /// A replaced runtime and a failed Pod each record when the Sandbox ran again
 /// and why, with the notice (#5997).
 #[tokio::test]
@@ -976,6 +990,17 @@ async fn db_a_bootstrap_restart_records_its_cause() -> Result<()> {
             recorded == (true, Some("configuration_changed".into())),
             "{recorded:?}"
         );
+        // A client reads both, the time as RFC 3339.
+        let (at, cause) = client_restart(pool).await?;
+        ensure!(
+            at.as_deref()
+                .is_some_and(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok()),
+            "{at:?}"
+        );
+        ensure!(
+            cause.as_deref() == Some("configuration_changed"),
+            "{cause:?}"
+        );
 
         set_state(pool, "stopped").await?;
         ensure!(
@@ -1029,6 +1054,10 @@ async fn db_a_requested_stop_or_start_clears_the_restart() -> Result<()> {
         svc.admit_start(ENVIRONMENT, ORGANIZATION, "standard", quota)
             .await?;
         ensure!(restart(pool).await? == (false, None), "a start clears it");
+        ensure!(
+            client_restart(pool).await? == (None, None),
+            "a client reads nothing once it is cleared"
+        );
         Ok(())
     }
     .await;

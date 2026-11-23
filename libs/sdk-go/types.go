@@ -139,6 +139,12 @@ type EnvironmentData struct {
 	// false the timeout is kept but not enforced.
 	// Nil from a server older than the field.
 	IdleStopEnforced *bool `json:"idle_stop_enforced,omitempty"`
+	// RestartedAt is when a running Sandbox was running again after a restart
+	// nobody asked for (#5997); nil otherwise. The next start or stop clears it.
+	RestartedAt *string `json:"restarted_at,omitempty"`
+	// RestartCause says why, set with RestartedAt: pod_failed,
+	// runtime_replaced, node_lost or configuration_changed.
+	RestartCause *string `json:"restart_cause,omitempty"`
 	// StopReason says why a stopped environment was stopped: user, credit or idle.
 	StopReason          *string                     `json:"stop_reason,omitempty"`
 	SourceSelection     *EnvironmentSourceSelection `json:"source_selection,omitempty"`

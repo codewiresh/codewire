@@ -2,7 +2,23 @@
 
 use super::*;
 
+mod restart;
+pub(crate) use restart::UnplannedRestart;
+
 pub(crate) fn format_env_info_text(environment: &Environment) -> String {
+    format_env_info_text_at(environment, chrono::Utc::now(), &chrono::Local)
+}
+
+/// [`format_env_info_text`] with the time an unplanned restart's age is
+/// measured from, and the zone its time is shown in.
+pub(crate) fn format_env_info_text_at<Tz: chrono::TimeZone>(
+    environment: &Environment,
+    now: chrono::DateTime<chrono::Utc>,
+    zone: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     let mut output = String::new();
     output.push_str(&format!("{:<14} {}\n", "ID:", environment.id));
     output.push_str(&format!(
@@ -60,6 +76,9 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     ));
     if let Some(started_at) = environment.started_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("StartedAt:     {started_at}\n"));
+    }
+    if let Some(restarted) = restart::info_value(environment, now, zone) {
+        output.push_str(&format!("Restarted:     {restarted}\n"));
     }
     if let Some(stopped_at) = environment.stopped_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("StoppedAt:     {stopped_at}\n"));

@@ -25,7 +25,8 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     31: "ports", 32: "isolation_tier", 33: "operation_generation",
     34: "source_selection", 35: "network_state", 36: "network_failure",
     37: "error_code", 38: "network_policy", 39: "stop_reason",
-    40: "idle_stop_seconds", 41: "idle_stop_enforced",
+    40: "idle_stop_seconds", 41: "idle_stop_enforced", 43: "restarted_at",
+    44: "restart_cause",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
@@ -154,6 +155,9 @@ def environment_to_dict(message: Message) -> dict[str, Any]:
     # Absent unless it is stopped, like the REST resource (#3384).
     if not value.get("stop_reason"):
         value.pop("stop_reason", None)
+    # Absent unless it restarted on its own, with restarted_at (#5997).
+    if not value.get("restart_cause"):
+        value.pop("restart_cause", None)
     # Absent while the deployment's platform network policies are off.
     value.pop("network_policy", None)
     if message.HasField("network_policy"):

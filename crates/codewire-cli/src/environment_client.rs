@@ -2382,6 +2382,30 @@ credentials: {profile: platform:user/work}
         assert_eq!(grant.created_at, "2026-01-01 00:00:00.123456+00");
     }
 
+    /// An unplanned restart's time and cause reach `cw` from the wire, the
+    /// time as RFC 3339; a Sandbox with none carries neither (#5997).
+    #[test]
+    fn an_unplanned_restart_reaches_the_cli_from_the_wire() {
+        let restarted = environment_from_proto(rpc::Environment {
+            state: rpc::EnvironmentState::Running.into(),
+            restarted_at: Some(rpc::Timestamp {
+                seconds: 1_795_348_800,
+                ..Default::default()
+            })
+            .into(),
+            restart_cause: "node_lost".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            restarted.restarted_at.as_deref(),
+            Some("2026-11-22T12:00:00Z")
+        );
+        assert_eq!(restarted.restart_cause.as_deref(), Some("node_lost"));
+        let quiet = environment_from_proto(rpc::Environment::default()).unwrap();
+        assert_eq!((quiet.restarted_at, quiet.restart_cause), (None, None));
+    }
+
     #[test]
     fn environment_setup_metadata_is_independent_from_running_state() {
         let running = environment_from_proto(rpc::Environment {

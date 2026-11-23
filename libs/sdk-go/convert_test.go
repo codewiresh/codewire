@@ -368,6 +368,26 @@ func TestEnvironmentStopReasonRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentUnplannedRestartRoundTrips(t *testing.T) {
+	restarted, err := fromProtoEnvironment(&codewirev1.Environment{
+		RestartedAt:  &timestamppb.Timestamp{Seconds: 1_795_348_800},
+		RestartCause: "runtime_replaced",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valueOrEmpty(restarted.RestartedAt) != "2026-11-22T12:00:00Z" || valueOrEmpty(restarted.RestartCause) != "runtime_replaced" {
+		t.Fatalf("restart changed: %+v", restarted)
+	}
+	quiet, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiet.RestartedAt != nil || quiet.RestartCause != nil {
+		t.Fatalf("an environment that did not restart reports no restart: %+v", quiet)
+	}
+}
+
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)

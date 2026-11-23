@@ -172,7 +172,9 @@ message Environment {
   // Why joining `network` failed; set only with NETWORK_ATTACHMENT_STATE_FAILED.
   NetworkAttachmentFailure network_failure = 36;
   // Why error_reason was set, when it has a stable name: no_capacity means the
-  // cluster had no room. error_reason is its message, written for the user.
+  // cluster had no room; sandbox_restarted means a running Sandbox restarted
+  // without anyone asking, with restarted_at and restart_cause saying when and
+  // why. error_reason is its message, written for the user.
   string error_code = 37;
   // The network policy the environment selects, and what enforces it
   // (#4000). Unset while the deployment's platform network policies are off.
@@ -190,6 +192,12 @@ message Environment {
   // idle_stop_seconds is kept but nothing is stopped for being idle. Unset
   // from a server older than this field, which says nothing either way.
   optional bool idle_stop_enforced = 41;
+  // When the Sandbox was running again after a restart nobody asked for
+  // (#5997). Absent otherwise; the next start or stop clears it.
+  google.protobuf.Timestamp restarted_at = 43;
+  // Why it restarted, set with restarted_at: pod_failed, runtime_replaced,
+  // node_lost or configuration_changed. Empty otherwise.
+  string restart_cause = 44;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network

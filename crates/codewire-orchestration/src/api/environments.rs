@@ -50,6 +50,12 @@ pub struct Environment {
     /// Seconds with no activity after which it stops itself, 0 for off
     /// (#3384).
     pub idle_stop_seconds: i32,
+    /// When a running Sandbox was running again after a restart nobody
+    /// asked for, and why (#5997); cleared by the next start or stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restarted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_cause: Option<String>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
@@ -157,7 +163,8 @@ pub(crate) fn compute_preview_url(
 /// create handler's `WITH ins AS (...)` CTE can reuse them.
 pub(crate) const ENV_SELECT_COLS: &str = concat!(
     r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
-    e.state, e.desired_state, e.error_reason, e.error_code, e.stop_reason, e.recoverable, e.state_changed_at, e.retry_count,
+    e.state, e.desired_state, e.error_reason, e.error_code, e.stop_reason,
+    e.restarted_at, e.restart_cause, e.recoverable, e.state_changed_at, e.retry_count,
     e.environment_operation_generation,
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
                        'credentials',e.project_spec->'credentials') AS source_spec,
@@ -217,6 +224,12 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         error_code: row.try_get("error_code")?,
         stop_reason: row.try_get("stop_reason")?,
         idle_stop_seconds: row.try_get("idle_stop_seconds")?,
+        // TIMESTAMPTZ, unlike the older timestamps.
+        restarted_at: format_time_opt(
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("restarted_at")?
+                .map(|at| at.naive_utc()),
+        ),
+        restart_cause: row.try_get("restart_cause")?,
         recoverable: row.try_get("recoverable")?,
         state_changed_at: format_time(row.try_get("state_changed_at")?),
         retry_count: row.try_get("retry_count")?,
@@ -1651,6 +1664,8 @@ mod tests {
             error_code: None,
             stop_reason: None,
             idle_stop_seconds: 0,
+            restarted_at: None,
+            restart_cause: None,
             recoverable: true,
             state_changed_at: "2026-06-12T00:00:00Z".into(),
             retry_count: 0,

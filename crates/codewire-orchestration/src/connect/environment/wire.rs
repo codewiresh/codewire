@@ -27,6 +27,8 @@ pub(super) fn proto_environment(
         stop_reason: environment.stop_reason.unwrap_or_default(),
         idle_stop_seconds: environment.idle_stop_seconds,
         idle_stop_enforced: Some(idle_stop.is_on()),
+        restarted_at: optional_timestamp(environment.restarted_at)?,
+        restart_cause: environment.restart_cause.unwrap_or_default(),
         recoverable: environment.recoverable,
         state_changed_at: Some(proto_timestamp(&environment.state_changed_at)?).into(),
         retry_count: environment.retry_count,

@@ -34,6 +34,14 @@ pub struct Environment {
     /// than the field, which says nothing either way (#3384).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_stop_enforced: Option<bool>,
+    /// When a running Sandbox was running again after a restart nobody
+    /// asked for, RFC 3339 (#5997); cleared by the next start or stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restarted_at: Option<String>,
+    /// Why, with `restarted_at`: `pod_failed`, `runtime_replaced`,
+    /// `node_lost` or `configuration_changed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_cause: Option<String>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,

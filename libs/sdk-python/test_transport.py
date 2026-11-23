@@ -262,6 +262,9 @@ class TransportTestCase(unittest.TestCase):
         detached = environment_to_dict(Environment())
         self.assertNotIn("network_state", detached)
         self.assertNotIn("network_failure", detached)
+        # A Sandbox that never restarted on its own says nothing of it (#5997).
+        self.assertNotIn("restarted_at", detached)
+        self.assertNotIn("restart_cause", detached)
 
     def test_environment_converter_preserves_native_values_and_short_enums(self) -> None:
         created_at = Timestamp()
@@ -298,6 +301,8 @@ class TransportTestCase(unittest.TestCase):
                 protected=True,
                 deletion_requested_at=created_at,
                 deletion_grace_until=created_at,
+                restarted_at=created_at,
+                restart_cause="runtime_replaced",
                 preset_name="Python",
                 network="net_1",
                 ports=[
@@ -347,6 +352,8 @@ class TransportTestCase(unittest.TestCase):
                 "protected": True,
                 "deletion_requested_at": "2026-01-01T00:00:00Z",
                 "deletion_grace_until": "2026-01-01T00:00:00Z",
+                "restarted_at": "2026-01-01T00:00:00Z",
+                "restart_cause": "runtime_replaced",
                 "preset_name": "Python",
                 "network": "net_1",
                 "operation_generation": 0,
