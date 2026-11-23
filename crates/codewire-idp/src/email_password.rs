@@ -1061,6 +1061,30 @@ mod tests {
         emails.extend(crate::two_factor::notice_previews(
             "https://codewire.sh/forgot-password",
         ));
+        // The operator's notices (#5358), to the operator address only.
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-21T16:40:42Z")
+            .unwrap()
+            .to_utc();
+        emails.push((
+            "idp-operator-access-request",
+            crate::operator_notice::sign_up_notice(
+                &crate::operator_notice::SignUp {
+                    address: "grace@example.com".into(),
+                    method: crate::operator_notice::Method::Email,
+                    waiting: true,
+                    at,
+                },
+                "https://codewire.sh/admin/accounts/",
+            ),
+        ));
+        emails.push((
+            "idp-operator-more-waiting",
+            crate::operator_notice::more_waiting_notice(
+                12,
+                at,
+                "https://codewire.sh/admin/accounts/",
+            ),
+        ));
         for (name, email) in emails {
             std::fs::write(dir.join(format!("{name}.html")), email.html()).unwrap();
             std::fs::write(dir.join(format!("{name}.txt")), email.text()).unwrap();

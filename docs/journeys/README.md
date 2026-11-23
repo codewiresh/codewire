@@ -24,6 +24,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-git.md](local-vm-git.md) | Git in a local VM's mounted folder (#5478): a mounted checkout, its nested repositories and submodules work with nothing set by hand, and a user's own `safe.directory` lines stay |
 | [local-vm-linux.md](local-vm-linux.md) | Local VMs on Linux: the steps that differ from the Mac's, starting with the shared image disk (#4646, trial branch) |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
+| [email.md](email.md) | Every email Codewire sends (#4553): one plain layout and a text part, from `Codewire <hello@codewire.sh>`, and which have been seen arriving |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
 | [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |

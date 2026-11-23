@@ -121,6 +121,23 @@ check. Billing needs only `ses:SendEmail`.
 The Kind overlays provide neither credential, so local email delivery stays
 disabled and needs no sender.
 
+**How every email looks** (#4553). One layout in `codewire-email`
+(`layout.rs`) renders every IdP and billing email, and each one has an HTML
+part and a plain-text part with the same words. The HTML is:
+- a centred column at most 640 px wide on a white page, with left-aligned text;
+- the system font, about 16 px on a 24 px line;
+- a heading, short paragraphs, at most one dark pill button, a thin rule, and a
+  small grey footer that names Codewire and says why the email was sent;
+- no images, tracking pixels, remote fonts or dark-mode styles.
+
+The text part writes every link out. Codewire's own servers send as
+`Codewire <hello@codewire.sh>` (Dev: `Codewire <hello@codewire-dev.sh>`).
+The one exception is feedback to the operator (#5466): it carries a person's
+own words, so it goes as plain text only. To see every email,
+`EMAIL_PREVIEW_DIR=<dir> cargo test -p codewire-idp -p codewire-billing --lib
+write_email_previews -- --ignored` writes each one as `<name>.html` and
+`<name>.txt`.
+
 Organization invitation email goes through an outbox: CreateInvitation, in
 orchestration, queues a row in `org_invitation_emails` in the invitation's
 transaction, and every IdP replica sends due rows every 2 seconds, each row

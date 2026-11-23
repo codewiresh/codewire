@@ -572,6 +572,34 @@ mod tests {
                 credit_exhausted_email(None, &billing),
             ),
             ("billing-account-deleted", account_deleted_email()),
+            // The operator's purchase notices (#5358), to the operator only.
+            (
+                "billing-operator-credit-bought",
+                crate::operator_notice::purchase_notice(
+                    &crate::operator_notice::CreditPurchase {
+                        organization_id: "org_1".into(),
+                        amount_cents: 2000,
+                        currency: "eur".into(),
+                        kind: crate::operator_notice::PurchaseKind::AutomaticTopUp,
+                        at: chrono::DateTime::parse_from_rfc3339("2026-11-21T16:47:55Z")
+                            .unwrap()
+                            .to_utc(),
+                    },
+                    "Acme",
+                    "acme",
+                    "https://codewire.sh/admin/organizations/org_1/",
+                ),
+            ),
+            (
+                "billing-operator-more-purchases",
+                crate::operator_notice::more_purchases_notice(
+                    11,
+                    chrono::DateTime::parse_from_rfc3339("2026-11-21T17:00:00Z")
+                        .unwrap()
+                        .to_utc(),
+                    "https://codewire.sh/admin/organizations/",
+                ),
+            ),
         ] {
             std::fs::write(dir.join(format!("{name}.html")), email.html()).unwrap();
             std::fs::write(dir.join(format!("{name}.txt")), email.text()).unwrap();
