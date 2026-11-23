@@ -334,25 +334,36 @@ where
         refusal.decision().clone()
     }
 
-    /// A refused dial to `destination`, under the name of the lease that
-    /// points at its address when one does.
+    /// A refused dial or datagram to `address`, under the name of the lease
+    /// that points at it when one does.
     pub(crate) fn note_dial(
         &self,
         state: &EgressLeaseTable,
-        destination: SocketAddr,
+        address: IpAddr,
+        transport: Transport,
         refusal: &Refusal,
     ) -> PolicyDecision {
         let name = state
-            .lease_name_at(destination.ip(), self.route_class)
+            .lease_name_at(address, self.route_class)
             .map(Destination::checked_name);
         self.note(
-            name.unwrap_or(Destination::Address(destination.ip())),
-            Some(destination.ip()),
-            Transport::Tcp {
-                port: destination.port(),
-            },
+            name.unwrap_or(Destination::Address(address)),
+            Some(address),
+            transport,
             refusal,
         )
+    }
+
+    /// Refuse a guest UDP datagram to `destination`, which the worker
+    /// dropped (#3997): counted and folded as a refused dial is, so the
+    /// owner's log shows it. Nothing reaches the destination either way.
+    pub async fn refuse_udp(&self, destination: SocketAddr) {
+        let state = self.state.lock().await;
+        let refusal = state.refuse_udp();
+        let transport = Transport::Udp {
+            port: destination.port(),
+        };
+        self.note_dial(&state, destination.ip(), transport, &refusal);
     }
 
     pub fn route_class(&self) -> RouteClass {
@@ -628,7 +639,10 @@ where
                 TcpVerdict::Refused(refusal) => {
                     return Err(BrokerError::Denied(self.note_dial(
                         &state,
-                        destination,
+                        destination.ip(),
+                        Transport::Tcp {
+                            port: destination.port(),
+                        },
                         &refusal,
                     )));
                 }

@@ -46,6 +46,7 @@ use crate::{
 };
 
 mod late;
+mod udp;
 
 pub use late::LateAnswerStatus;
 
@@ -110,6 +111,7 @@ impl BrokerIpcSessionClass {
         matches!(
             (self, request),
             (Self::Admission, BrokerRequest::AuthorizeTcp(_))
+                | (Self::Admission, BrokerRequest::RefuseUdp(_))
                 | (Self::Dns, BrokerRequest::ResolveDns { .. })
                 | (Self::Connect, BrokerRequest::ConnectTcp(_))
         )
@@ -119,6 +121,7 @@ impl BrokerIpcSessionClass {
 const OP_RESOLVE_DNS: u8 = 1;
 const OP_AUTHORIZE_TCP: u8 = 2;
 const OP_CONNECT_TCP: u8 = 3;
+const OP_REFUSE_UDP: u8 = 4;
 
 const STATUS_OK: u8 = 0;
 const STATUS_DENIED: u8 = 1;
@@ -756,6 +759,10 @@ where
                 )
                 .await?;
             }
+            BrokerRequest::RefuseUdp(destination) => {
+                broker.refuse_udp(destination).await;
+                udp::write_refused(&mut stream, sequence, binding, &key).await?;
+            }
             BrokerRequest::ConnectTcp(destination) => {
                 match connect_and_record(&broker, destination).await {
                     Ok(connected) => {
@@ -799,6 +806,8 @@ enum BrokerRequest {
     },
     AuthorizeTcp(SocketAddr),
     ConnectTcp(SocketAddr),
+    /// A guest UDP datagram the worker dropped, to record as refused.
+    RefuseUdp(SocketAddr),
 }
 
 fn encode_dns_request(name: &str, family: DnsRecordFamily) -> Result<Vec<u8>, BrokerIpcError> {
@@ -815,7 +824,9 @@ fn encode_dns_request(name: &str, family: DnsRecordFamily) -> Result<Vec<u8>, Br
 }
 
 fn encode_tcp_request(operation: u8, destination: SocketAddr) -> Result<Vec<u8>, BrokerIpcError> {
-    if !matches!(operation, OP_AUTHORIZE_TCP | OP_CONNECT_TCP) || destination.port() == 0 {
+    if !matches!(operation, OP_AUTHORIZE_TCP | OP_CONNECT_TCP | OP_REFUSE_UDP)
+        || destination.port() == 0
+    {
         return Err(BrokerIpcError::MalformedFrame);
     }
     let mut payload = Vec::with_capacity(20);
@@ -841,7 +852,7 @@ fn decode_request(payload: &[u8]) -> Result<BrokerRequest, BrokerIpcError> {
             decoder.finish()?;
             Ok(BrokerRequest::ResolveDns { name, family })
         }
-        OP_AUTHORIZE_TCP | OP_CONNECT_TCP => {
+        OP_AUTHORIZE_TCP | OP_CONNECT_TCP | OP_REFUSE_UDP => {
             let address = decode_address(&mut decoder)?;
             let port = decoder.u16()?;
             if port == 0 {
@@ -849,11 +860,11 @@ fn decode_request(payload: &[u8]) -> Result<BrokerRequest, BrokerIpcError> {
             }
             decoder.finish()?;
             let destination = SocketAddr::new(address, port);
-            if operation == OP_AUTHORIZE_TCP {
-                Ok(BrokerRequest::AuthorizeTcp(destination))
-            } else {
-                Ok(BrokerRequest::ConnectTcp(destination))
-            }
+            Ok(match operation {
+                OP_AUTHORIZE_TCP => BrokerRequest::AuthorizeTcp(destination),
+                OP_CONNECT_TCP => BrokerRequest::ConnectTcp(destination),
+                _ => BrokerRequest::RefuseUdp(destination),
+            })
         }
         _ => Err(BrokerIpcError::MalformedFrame),
     }
@@ -1492,7 +1503,8 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use codewire_egress_policy::lease::{DnsAddress, DnsResolution, LeaseInstant};
+    use codewire_egress_policy::lease::{DnsAddress, DnsResolution, LeaseInstant, RefusalReason};
+    use codewire_egress_policy::record::{Destination, Transport};
     use codewire_egress_policy::{CompiledPolicy, PolicyDocument};
     use tokio::sync::Notify;
 
@@ -3226,6 +3238,14 @@ rules:
                 FIRST_CONNECT,
                 encode_dns_request("example.com", DnsRecordFamily::Ipv4).unwrap(),
             ),
+            (
+                FIRST_DNS,
+                encode_tcp_request(OP_REFUSE_UDP, destination).unwrap(),
+            ),
+            (
+                FIRST_CONNECT,
+                encode_tcp_request(OP_REFUSE_UDP, destination).unwrap(),
+            ),
         ];
         for (index, payload) in wrong_class {
             let (mut clients, server_streams) = session_pairs();
@@ -3253,6 +3273,51 @@ rules:
             );
         }
         assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A dropped guest datagram crosses on the admission session and is
+    /// folded as a UDP refusal, and the session carries on (#3997).
+    #[tokio::test]
+    async fn a_dropped_datagram_is_recorded_over_the_admission_session() {
+        let (binding, broker) = developer_broker(Arc::default());
+        let fold = Arc::new(crate::refusals::RefusalFold::new());
+        let broker = Arc::into_inner(broker)
+            .unwrap()
+            .with_refusal_fold(Arc::clone(&fold));
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::new(broker),
+        ));
+        let client = client(client_streams, binding);
+        let destination = SocketAddr::new(PUBLIC_V4, 3478);
+        for _ in 0..2 {
+            client.refuse_udp(destination).await.unwrap();
+        }
+        assert_eq!(
+            client.authorize_tcp(SocketAddr::new(PUBLIC_V4, 25)).await,
+            Err(BrokerIpcError::Denied)
+        );
+        let rows = fold.take().rows;
+        let udp: Vec<_> = rows
+            .iter()
+            .filter(|row| row.reason == RefusalReason::UdpNotCarried)
+            .map(|row| (row.destination.clone(), row.transport, row.count))
+            .collect();
+        assert_eq!(
+            udp,
+            [(
+                Destination::Address(PUBLIC_V4),
+                Transport::Udp { port: 3478 },
+                2
+            )]
+        );
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
     }
 
     #[tokio::test]

@@ -94,6 +94,31 @@ example.org      dns       -     name not allowed   walk-log · rev 1  6      10
     );
 }
 
+/// A dropped datagram reads as `udp` with its port and no step: no rule
+/// carries UDP (#3997).
+#[test]
+fn a_refused_datagram_is_a_udp_row_with_its_port_and_no_step() {
+    let refusals = rows(&[refusal(
+        Wire::AddressOnly("198.51.100.7".to_owned()),
+        v1::EgressRefusalProtocol::Udp,
+        3478,
+        "udp_not_carried",
+        ("walk-log", 1),
+        5,
+    )]);
+    assert_eq!(
+        text("walk-log", &refusals, 0, NOW, 120, PLAIN, &current()),
+        "\
+DESTINATION   PROTOCOL  PORT  REASON           POLICY            COUNT  FIRST    LAST
+198.51.100.7  udp       3478  UDP not carried  walk-log · rev 1  6      10m ago  5s ago
+"
+    );
+    let json: serde_json::Value = serde_json::from_str(&json(&refusals, 0).unwrap()).unwrap();
+    assert_eq!(json["refusals"][0]["protocol"], "udp");
+    assert_eq!(json["refusals"][0]["port"], 3478);
+    assert_eq!(json["refusals"][0]["reason"], "udp_not_carried");
+}
+
 #[test]
 fn nothing_refused_reads_as_empty() {
     assert_eq!(

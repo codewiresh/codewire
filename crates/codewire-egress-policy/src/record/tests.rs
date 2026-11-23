@@ -273,6 +273,7 @@ fn the_guest_never_sees_a_protected_reason() {
         (RefusalReason::ProtectedAddress, "address_not_allowed"),
         (RefusalReason::LeaseExpired, "lease_expired"),
         (RefusalReason::InterceptUnavailable, "unavailable"),
+        (RefusalReason::UdpNotCarried, "udp_not_carried"),
     ];
     assert_eq!(expected.len(), RefusalReason::ALL.len());
     for (reason, code) in expected {

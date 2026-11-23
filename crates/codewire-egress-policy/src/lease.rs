@@ -349,10 +349,13 @@ pub enum RefusalReason {
     /// The dial is to a name bound for interception, and nothing receives
     /// intercepted connections yet (#3999).
     InterceptUnavailable,
+    /// A UDP datagram other than a DNS question to the environment's own
+    /// resolver: no policy carries one (#3997).
+    UdpNotCarried,
 }
 
 impl RefusalReason {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NameNotAllowed,
         Self::ProtectedAnswersOnly,
         Self::PortNotAllowed,
@@ -360,6 +363,7 @@ impl RefusalReason {
         Self::ProtectedAddress,
         Self::LeaseExpired,
         Self::InterceptUnavailable,
+        Self::UdpNotCarried,
     ];
 
     /// The stable code logs and status report.
@@ -372,6 +376,7 @@ impl RefusalReason {
             Self::ProtectedAddress => "protected_address",
             Self::LeaseExpired => "lease_expired",
             Self::InterceptUnavailable => "intercept_unavailable",
+            Self::UdpNotCarried => "udp_not_carried",
         }
     }
 
@@ -385,6 +390,7 @@ impl RefusalReason {
             Self::ProtectedAddress => "protected address",
             Self::LeaseExpired => "lease expired",
             Self::InterceptUnavailable => "interception unavailable",
+            Self::UdpNotCarried => "UDP not carried",
         }
     }
 
@@ -397,6 +403,7 @@ impl RefusalReason {
             Self::ProtectedAddress => 4,
             Self::LeaseExpired => 5,
             Self::InterceptUnavailable => 6,
+            Self::UdpNotCarried => 7,
         }
     }
 }
@@ -1065,6 +1072,16 @@ impl EgressLeaseTable {
                 rule_id: None,
                 policy_digest: interception.policy_digest,
             },
+        )
+    }
+
+    /// Refuse a guest UDP datagram, counted as
+    /// [`RefusalReason::UdpNotCarried`]: the worker carries no UDP but DNS
+    /// to its own resolver, whatever the policy says (#3997).
+    pub fn refuse_udp(&self) -> Refusal {
+        self.refuse(
+            RefusalReason::UdpNotCarried,
+            self.policy.deny(DecisionReason::DefaultDeny, None),
         )
     }
 
@@ -2392,6 +2409,7 @@ rules:
                 (RefusalReason::ProtectedAddress, 2),
                 (RefusalReason::LeaseExpired, 1),
                 (RefusalReason::InterceptUnavailable, 0),
+                (RefusalReason::UdpNotCarried, 0),
             ]
         );
         assert_eq!(counts.total(), 7);
@@ -2422,6 +2440,7 @@ rules:
                 "protected_address",
                 "lease_expired",
                 "intercept_unavailable",
+                "udp_not_carried",
             ]
         );
         assert_eq!(
@@ -2434,6 +2453,7 @@ rules:
                 "protected address",
                 "lease expired",
                 "interception unavailable",
+                "UDP not carried",
             ]
         );
         for (index, reason) in RefusalReason::ALL.into_iter().enumerate() {

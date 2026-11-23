@@ -961,3 +961,62 @@ async fn a_flow_admitted_before_an_intercept_replacement_is_not_recorded() {
     ));
     assert_eq!(broker.passed_flows().await, 0);
 }
+
+/// A datagram the worker dropped is counted and folded as `udp_not_carried`
+/// with its port: under the name a lease gives its address, else the
+/// address, one row however often it is refused (#3997).
+#[tokio::test]
+async fn a_dropped_datagram_is_a_folded_udp_refusal_with_its_port() {
+    let fold = Arc::new(refusals::RefusalFold::new());
+    let broker = broker(
+        named_policy(),
+        RouteClass::General,
+        Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)])),
+        Arc::new(FakeConnector::new([])),
+        Arc::new(FakeClock::default()),
+    )
+    .with_refusal_fold(Arc::clone(&fold));
+    let digest = broker.policy_digest().await;
+
+    for _ in 0..3 {
+        broker
+            .refuse_udp(SocketAddr::new(OTHER_PUBLIC_V4, 3478))
+            .await;
+    }
+    broker
+        .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+        .await
+        .unwrap();
+    broker.refuse_udp(SocketAddr::new(PUBLIC_V4, HTTPS)).await;
+
+    let mut rows = fold.take().rows;
+    rows.sort_by_key(|row| row.count);
+    assert_eq!(
+        rows,
+        [
+            refusals::RefusedRow {
+                destination: Destination::checked_name("allowed.example.com"),
+                address: Some(PUBLIC_V4),
+                transport: Transport::Udp { port: HTTPS },
+                reason: RefusalReason::UdpNotCarried,
+                policy_digest: digest,
+                count: 1,
+            },
+            refusals::RefusedRow {
+                destination: Destination::Address(OTHER_PUBLIC_V4),
+                address: Some(OTHER_PUBLIC_V4),
+                transport: Transport::Udp { port: 3478 },
+                reason: RefusalReason::UdpNotCarried,
+                policy_digest: digest,
+                count: 3,
+            },
+        ]
+    );
+    assert_eq!(
+        broker
+            .refusal_counts()
+            .await
+            .get(RefusalReason::UdpNotCarried),
+        4
+    );
+}

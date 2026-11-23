@@ -631,6 +631,13 @@ impl EgressBroker for IpcEgressBroker {
         Ok(Box::pin(stream))
     }
 
+    async fn refuse_udp(&self, destination: SocketAddr) -> io::Result<()> {
+        self.client
+            .refuse_udp(destination)
+            .await
+            .map_err(ipc_broker_error)
+    }
+
     async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
         if question.source.ip() != IpAddr::V4(GUEST_IP)
             || question.source.port() == 0

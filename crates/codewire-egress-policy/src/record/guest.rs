@@ -21,6 +21,9 @@ pub enum GuestRefusal {
     LeaseExpired,
     /// The destination is handled by a component that is not running.
     Unavailable,
+    /// UDP other than DNS to the environment's resolver. Every such datagram
+    /// is refused, so the reason tells the guest nothing about where it went.
+    UdpNotCarried,
 }
 
 impl GuestRefusal {
@@ -36,6 +39,7 @@ impl GuestRefusal {
             }
             RefusalReason::LeaseExpired => Self::LeaseExpired,
             RefusalReason::InterceptUnavailable => Self::Unavailable,
+            RefusalReason::UdpNotCarried => Self::UdpNotCarried,
         }
     }
 
@@ -46,6 +50,7 @@ impl GuestRefusal {
             Self::AddressNotAllowed => "address_not_allowed",
             Self::LeaseExpired => "lease_expired",
             Self::Unavailable => "unavailable",
+            Self::UdpNotCarried => "udp_not_carried",
         }
     }
 }

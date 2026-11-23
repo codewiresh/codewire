@@ -89,3 +89,29 @@ fn a_record_orchestration_would_refuse_is_not_sent() {
     beyond.policy.revision = MAX_POLICY_REVISION;
     assert!(wire_record(&beyond).is_some());
 }
+
+/// A datagram the worker dropped crosses as a UDP refusal with its port and
+/// a reason orchestration reads back (#3997).
+#[test]
+fn a_refused_datagram_crosses_as_udp_with_its_port_and_reason() {
+    let address = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let wire = wire_record(&record(
+        Destination::Address(address),
+        Transport::Udp { port: 3478 },
+        Outcome::Refused(RefusalReason::UdpNotCarried),
+    ))
+    .unwrap();
+    assert_eq!(
+        wire.destination,
+        Some(WireDestination::AddressOnly("198.51.100.7".into()))
+    );
+    assert_eq!(wire.transport.as_known(), Some(EgressTransport::Udp));
+    assert_eq!(wire.port, 3478);
+    assert_eq!(wire.refusal, "udp_not_carried");
+    assert_eq!(
+        RefusalReason::ALL
+            .into_iter()
+            .find(|reason| reason.code() == wire.refusal),
+        Some(RefusalReason::UdpNotCarried)
+    );
+}

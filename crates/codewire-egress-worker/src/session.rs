@@ -31,6 +31,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+mod udp;
+
 pub const PACKET_QUEUE: usize = 256;
 pub const MAX_INBOUND_STREAM_FLOWS: usize = 64;
 pub const NETWORK_MTU: usize = 1_500;
@@ -80,6 +82,13 @@ pub trait EgressBroker: Send + Sync + 'static {
 
     /// Resolve one already-parsed canonical DNS question.
     async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer>;
+
+    /// Record one guest UDP datagram to `destination` that the worker
+    /// dropped (#3997); nothing is sent anywhere. A broker that keeps no
+    /// refusal record has nothing to do.
+    async fn refuse_udp(&self, _destination: SocketAddr) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Requests refused because the broker's answer missed its deadline, and
     /// how long it has refused (#4965); `None` for a broker with no deadline
@@ -551,6 +560,7 @@ async fn dispatch_packets<B: EgressBroker>(
     let mut dialing = HashSet::<(SocketAddr, SocketAddr)>::new();
     let mut inbound_bridges = JoinSet::new();
     let mut dns_questions = JoinSet::new();
+    let mut udp_refusals = udp::UdpRefusals::default();
     let mut draining = false;
     let mut recheck = tokio::time::interval(DRAIN_RECHECK);
     loop {
@@ -677,8 +687,7 @@ async fn dispatch_packets<B: EgressBroker>(
         }
 
         let Ok(tcp) = parse_canonical_ipv4_tcp_packet(&packet) else {
-            // UDP other than canonical virtual-resolver DNS, ICMP, IPv6, and
-            // malformed/fragmented packets are intentionally not admitted.
+            udp_refusals.refuse(&packet, &broker);
             continue;
         };
         if tcp.source.ip() != IpAddr::V4(GUEST_IP) {
@@ -830,6 +839,7 @@ mod tests {
     use super::*;
 
     mod hosted;
+    mod udp;
 
     const TOKEN: &str = "portable-session-test-token-0123456789";
     const TEST_DNS_NAME: &str = "fixture.codewire.test";

@@ -36,7 +36,7 @@ separately.
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
-| `refusal-log` | #5058, #4000 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet built) | not yet observed | no command yet (#4000) | no command yet (#4000) |
+| `refusal-log` | #5058, #4000, #3997 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet built; the UDP rows not yet observed) | not yet observed | no command yet (#4000) | no command yet (#4000) |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
@@ -389,8 +389,9 @@ Issues: #2537, #4000.
 - **Gotchas:** a user's own tailnet ([own-tailnet.md](own-tailnet.md)) reaches
   private addresses inside its tunnel. That is not a way round this step.
   `tailscaled` does send UDP to peers' advertised endpoints, private ones
-  included, and each of those sends is refused and logged here like any
-  other. A
+  included. Each of those sends is refused, as every UDP send but DNS to the
+  environment's resolver is, and recorded as `udp_not_carried`, on a local VM
+  in `cw --local policy log` (not yet observed). A
   name that resolves only to protected addresses is refused as
   a name. Do not read that as a DNS outage. `policy check` reports such a
   name as `Allowed … when the name answers public addresses`: it judges the
@@ -511,8 +512,10 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
   - one refusal of each egress reason: a name not allowed, a port not
     allowed, an address not allowed, a protected address, a name that
     answers only protected addresses (refused at the lookup), an expired
-    lease, and a connection to an intercepted host whose front door is gone
-    (`intercept_unavailable`);
+    lease, a connection to an intercepted host whose front door is gone
+    (`intercept_unavailable`), and UDP other than DNS to the environment's
+    resolver: a lookup sent to another server and a datagram to a public
+    address (`udp_not_carried`, not yet observed);
   - a VM in learn mode (#4015, once it exists), which shows only refusals;
   - a request refused on an intercepted host: no credential selected for
     the provider (the credential broker's), a path the route doesn't serve
@@ -533,6 +536,7 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
   cw --local policy log walk-log
   cw exec --in walk-log -- sh -c 'curl -sS -m 5 https://example.org/ ; curl -sS -m 5 http://example.com:8080/ ; curl -sS -m 5 http://169.254.169.254/ ; true'
   cw exec --in walk-log -- sh -c 'for i in 1 2 3 4 5; do curl -sS -m 5 http://example.com:8080/ ; done ; true'
+  cw exec --in walk-log -- sh -c 'timeout 10 nslookup example.com 8.8.8.8 ; bash -c "echo stun > /dev/udp/1.1.1.1/3478" ; true'
   cw --local policy log walk-log
   cw --local policy log walk-log --output json
   cw --local info walk-log
@@ -558,6 +562,12 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     serve is a row with no path in it;
   - five refusals of one destination are one row with a count of 5 (6 with
     the first);
+  - UDP other than DNS to the resolver (not yet observed): `nslookup` waits
+    out its timeout with no answer, and the log has a `udp` row for
+    `8.8.8.8` port 53 and one for `1.1.1.1` port 3478, each `UDP not
+    carried`, with no `→` step, since no rule carries UDP. A datagram sent
+    again while the broker is still recording the last one to the same
+    destination is not counted, as a retransmitted connection attempt isn't;
   - the rows are most recently seen first; at a terminal the table fits its
     width, the policy column giving way first and an address never cut, and
     piped it is whole;

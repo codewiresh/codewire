@@ -2012,7 +2012,10 @@ next request gets `credential_needs_reconnect`.
 
 **Refused at the connection** (no answer; the agent sees a failed lookup or
 a reset): `name_not_allowed`, `port_not_allowed`, `address_not_allowed`,
-`lease_expired`, and, when the front door itself is down, `unavailable`.
+`lease_expired`, and, when the front door itself is down, `unavailable`. A UDP
+datagram other than DNS to the environment's resolver gets no answer at all
+and is `udp_not_carried`, the same in both views: every such datagram is
+refused, so it says nothing about where it went.
 These are the guest reasons of the egress broker's `RefusalReason`
 (`protected_answers_only` and `protected_address` fold into the matching
 not-allowed reason, `intercept_unavailable` into `unavailable`), so a refusal

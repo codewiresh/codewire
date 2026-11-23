@@ -23,6 +23,8 @@
 //! - [`parse_initial_ipv4_tcp_syn`] surfaces a strict initial flow before bind.
 //! - [`parse_ipv4_dns_question`] and [`build_ipv4_dns_response`] admit bounded
 //!   DNS without exposing a general UDP socket.
+//! - [`parse_canonical_ipv4_udp_datagram`] names any other datagram's
+//!   destination, so a consumer can record what it did not carry.
 //!
 //! All internal queues and live socket counts are bounded by
 //! [`NetstackLimits`], and construction rejects packet-channel capacities above
@@ -39,6 +41,7 @@ mod dns;
 mod driver;
 mod ingress;
 mod stream;
+mod udp;
 
 pub use dns::{
     build_ipv4_dns_response, parse_ipv4_dns_question, DnsAnswer, DnsBoundaryError, DnsQuestion,
@@ -49,6 +52,7 @@ pub use ingress::{
     CanonicalIpv4TcpPacket, InitialTcpSyn, InitialTcpSynError,
 };
 pub use stream::{TcpListener, TcpStream};
+pub use udp::{parse_canonical_ipv4_udp_datagram, Ipv4UdpDatagram, Ipv4UdpDatagramError};
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;

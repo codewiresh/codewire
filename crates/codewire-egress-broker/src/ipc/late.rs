@@ -14,8 +14,9 @@ use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{
     BrokerIpcClient, BrokerIpcError, CheckedOut, ClientState, DnsRecordFamily, FRAME_KIND_RESPONSE,
-    OP_AUTHORIZE_TCP, OP_CONNECT_TCP, STATUS_INTERCEPTED, SessionPool, decode_dns_response,
-    decode_empty_response, read_client_exact, read_client_frame, receive_descriptor,
+    OP_AUTHORIZE_TCP, OP_CONNECT_TCP, OP_REFUSE_UDP, STATUS_INTERCEPTED, SessionPool,
+    decode_dns_response, decode_empty_response, read_client_exact, read_client_frame,
+    receive_descriptor,
 };
 
 /// Once an answer starts to arrive, the rest of its frame follows within this,
@@ -39,6 +40,7 @@ pub(super) enum LateOperation {
     Dns(DnsRecordFamily),
     Authorize,
     Connect,
+    RefuseUdp,
 }
 
 impl ClientState {
@@ -115,6 +117,7 @@ impl ClientState {
         let decoded = match operation {
             LateOperation::Dns(family) => decode_dns_response(&response, family).map(drop),
             LateOperation::Authorize => decode_empty_response(&response, OP_AUTHORIZE_TCP),
+            LateOperation::RefuseUdp => decode_empty_response(&response, OP_REFUSE_UDP),
             LateOperation::Connect if response == [OP_CONNECT_TCP, STATUS_INTERCEPTED] => Ok(()),
             LateOperation::Connect => decode_empty_response(&response, OP_CONNECT_TCP),
         };

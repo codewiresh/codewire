@@ -713,7 +713,13 @@ their combined root disk.
 The VM has no network device. Inside the guest a TUN device carries raw IP
 over a vsock port to the host, where the confined network worker
 (`cw __native-network-worker`, on `crates/codewire-netstack`) terminates the
-guest's TCP and DNS and has no dial authority of its own. The egress broker
+guest's TCP and DNS and has no dial authority of its own. It carries no other
+UDP: a well-formed IPv4 datagram that is not a DNS A or AAAA question to the
+environment's resolver (`192.0.2.1:53`), such as DNS sent to another server or
+STUN, is dropped with no reply, so its sender waits out its own timeout, and
+is recorded as refused, `udp_not_carried`, against its address and port in
+the refusal log below (#3997). ICMP, IPv6, and malformed or fragmented
+packets are dropped with no record. The egress broker
 (`cw __native-egress-broker`, on `crates/codewire-egress-broker`) dials on the
 guest's behalf under the VM's selected network policy, from
 `crates/codewire-egress-policy`. The default is the built-in `open` (deny
@@ -810,8 +816,8 @@ address, printed as `-` (JSON `null`). The rows come from two sources, with
 the reason codes of "Refusals an agent or a person can read" in
 `docs/dev/SECRETS-AND-CREDENTIALS.md`:
 
-- the egress broker's refusals of a lookup or a connection, with the raw
-  `RefusalReason`, so the owner sees `protected_address` and
+- the egress broker's refusals of a lookup, a connection or a UDP datagram,
+  with the raw `RefusalReason`, so the owner sees `protected_address` and
   `intercept_unavailable` where the guest sees only not allowed or
   unavailable. Its record log (`crates/codewire-egress-policy/src/record.rs`)
   also keeps passes while learn mode runs (#4015); the broker sends only
@@ -1344,9 +1350,11 @@ unaffected.
   private addresses. All of it is ordinary egress under the environment's
   policy:
   - Under the hosted default (TCP and DNS only), only the TCP to public
-    addresses passes. Every non-DNS UDP send, and every send to a protected
-    address, is refused and logged, so traffic inside the tunnel rides DERP
-    over 443.
+    addresses passes. Every UDP send other than DNS to the environment's
+    resolver is refused as `udp_not_carried`, and every send to a protected
+    address is refused, so traffic inside the tunnel rides DERP over 443.
+    Each refusal is recorded by the Sandbox's egress broker, but a hosted
+    broker does not report its refusals yet, so no log shows them (#4000).
   - The control server must be at a public address, or the join is refused as
     protected.
   - The protected-address rule is unchanged because it is enforced on these
