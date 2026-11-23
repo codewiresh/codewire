@@ -681,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn every_page_names_the_brand_icon() {
+        // A page that names no icon makes the browser ask for /favicon.ico,
+        // which the dashboard does not serve.
+        let icon = format!("<link rel=\"icon\" href=\"{BRAND_ICON_PATH}\" type=\"image/svg+xml\">");
+        let templates = concat!(env!("CARGO_MANIFEST_DIR"), "/templates");
+        let mut pages = 0;
+        for entry in std::fs::read_dir(templates).unwrap() {
+            let path = entry.unwrap().path();
+            let html = std::fs::read_to_string(&path).unwrap();
+            if html.contains("<head>") {
+                pages += 1;
+                assert!(html.contains(&icon), "{}", path.display());
+            }
+        }
+        assert!(pages > 40, "{pages} pages");
+    }
+
+    #[test]
     fn assets_name_the_assets_they_use_by_final_content_hash() {
         let mut references = 0;
         for &(path, _, _) in ASSETS {

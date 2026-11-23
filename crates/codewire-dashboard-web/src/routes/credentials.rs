@@ -1166,7 +1166,7 @@ fn enrollment_response(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <script src=\"/assets/codewire/theme-v1.js\"></script>\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-<title>Connect credential · Codewire</title>\
+<title>Connect credential · Codewire</title><link rel=\"icon\" href=\"/assets/codewire/brand-icon-v1.svg\" type=\"image/svg+xml\">\
 <link rel=\"stylesheet\" href=\"/assets/codewire/design-v1.css\">\
 <link rel=\"stylesheet\" href=\"/assets/codewire/routes/dashboard-v1.css\">\
 <link rel=\"stylesheet\" href=\"/assets/codewire/routes/settings-v1.css\">\
