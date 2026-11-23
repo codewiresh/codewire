@@ -1677,7 +1677,9 @@ CLI and local VM configuration is documented for users on the site
 - **Rollouts drain.** A release replaces the orchestration Pod without
   cutting what it serves (#4426). The old Pod keeps serving for 10 s while the
   gateway drops it. Then it releases leadership and Temporal work, and lets
-  open transfers finish. Streams whose clients re-attach end at once, and
+  open transfers finish. The new Pod waits on that release and leads at once,
+  so the leader-gated credential relay is down only while the new leader
+  starts it (#6099). Streams whose clients re-attach end at once, and
   anything still open 270 s after SIGTERM ends with an error the client can
   retry, before the 300 s grace runs out. The walk is `sandbox-rollout` in
   [docs/journeys/cloud-sandbox.md](docs/journeys/cloud-sandbox.md).

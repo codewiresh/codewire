@@ -1325,8 +1325,10 @@ an error the client can retry.
   - the old Pod logs `draining: releasing leadership, Temporal tasks and
     re-attachable streams`, then `leader: draining, released leadership` and
     `temporal worker stopped`;
-  - the new Pod logs `leader: acquired leadership` within about 5 s of that
-    release;
+  - the new Pod logs `leader: acquired leadership` within about 1 s of that
+    release, because it waits on the release instead of retrying every 5 s
+    (#6099), and its `credential relay admitted its first epoch` follows
+    within about 2 s;
   - the old Pod is gone within its 300 s grace.
 - **Gotchas:**
   - A Pod's own spec decides how it stops. The rollout that first delivers
@@ -1365,6 +1367,11 @@ an error the client can retry.
     UDP, not orchestration.
   - `AttachHost` at SIGTERM: not yet observed. It needs a host agent on Dev
     (#4426).
+  - The handover gap, before #6099: over 7 Production releases and 9 Dev
+    deliveries on 2026-11-20 to 2026-11-23, leadership moved 0.5–4.6 s
+    after its release, and the relay admitted its first epoch 2.0–6.5 s
+    after SIGTERM. Evidence: #6099.
+  - The handover gap with the release notice (#6099): not yet observed.
   - Production: not yet observed.
 
 ## `sandbox-amp`: Amp from the image, and its update into the home

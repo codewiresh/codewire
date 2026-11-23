@@ -100,8 +100,10 @@ async fn a_draining_leader_hands_over_after_its_running_pass_and_a_draining_foll
     );
     ensure!(!second.leads(), "the follower leads beside a running pass");
 
-    // The pass ends: the lock goes at once, and the waiting follower leads
-    // within one retry instead of after the old replica exits.
+    // The pass ends: the lock goes at once with its notice, and the waiting
+    // follower leads at once (#6099), not at its next 5 s retry and not after
+    // the old replica exits. The follower last tried about 3 s ago, so its
+    // next retry is about 2 s away and could not lead within the bound.
     let released = Instant::now();
     drop(running);
     draining.await.context("drain task")??;
@@ -112,8 +114,8 @@ async fn a_draining_leader_hands_over_after_its_running_pass_and_a_draining_foll
     )
     .await?;
     ensure!(
-        released.elapsed() < Duration::from_secs(7),
-        "the handover took {:?}, longer than one retry",
+        released.elapsed() < Duration::from_millis(1500),
+        "the handover took {:?}; a waiting follower leads on the release notice",
         released.elapsed()
     );
 

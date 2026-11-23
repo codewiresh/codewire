@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 mod leadership;
+mod release_notice;
 pub(crate) use leadership::{LeaderPass, Leadership};
 
 use super::WorkerContext;
@@ -160,16 +161,20 @@ pub fn start_loops(
 /// Mirrors `runLeaderLoop`/`holdLock`: a dedicated connection holds
 /// pg_try_advisory_lock; lost connection = lost leadership. Draining (#4426)
 /// gives leadership up for good: no new pass starts, the running ones finish
-/// (within [`PASS_DRAIN_BOUND`]), and closing the connection then releases
-/// the lock at once, so the next replica leads within one retry while this
-/// one finishes its open streams.
+/// (within [`PASS_DRAIN_BOUND`]), and the lock is released with a notice the
+/// standbys wait on, so the next replica leads at once (#6099) while this one
+/// finishes its open streams.
 async fn leader_loop(
     database_url: &str,
     leadership: Arc<Leadership>,
     leader_notify: Arc<Notify>,
     draining: CancellationToken,
 ) {
+    let mut notice = None;
     while !draining.is_cancelled() {
+        if notice.is_none() {
+            notice = release_notice::subscribe(database_url).await;
+        }
         let mut conn = match PgConnection::connect(database_url).await {
             Ok(c) => c,
             Err(e) => {
@@ -194,11 +199,12 @@ async fn leader_loop(
             };
 
         if !acquired {
-            tracing::debug!("leader: lock held by another instance, retrying");
-            drained_during(&draining, Duration::from_secs(5)).await;
+            tracing::debug!("leader: lock held by another instance, waiting for its release");
+            release_notice::wait(&mut notice, &draining, Duration::from_secs(5)).await;
             continue;
         }
 
+        notice = None;
         tracing::info!("leader: acquired leadership");
         leadership.acquired();
         leader_notify.notify_waiters();
@@ -210,8 +216,16 @@ async fn leader_loop(
                     "leader: a pass still runs at the drain bound; releasing leadership"
                 );
             }
-            // Closing the session releases the lock; a close that stalls is
-            // abandoned, and dropping the connection closes its socket.
+            match tokio::time::timeout(Duration::from_secs(5), release_notice::release(&mut conn))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "leader: announcing the release failed"),
+                Err(_) => tracing::warn!("leader: announcing the release timed out"),
+            }
+            // Closing the session releases the lock if the release above
+            // failed; a close that stalls is abandoned, and dropping the
+            // connection closes its socket.
             match tokio::time::timeout(Duration::from_secs(5), conn.close()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
