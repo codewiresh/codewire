@@ -80,6 +80,7 @@ async function runTests() {
   let uploadHeaders = 0;
   let uploadedBytes = 0;
   let sourceUpdateCalls = 0;
+  const startupScripts: string[] = [];
 
   const router = createConnectRouter({
     connect: true,
@@ -350,6 +351,19 @@ async function runTests() {
     startEnvironment: (_request, context) => {
       requireTestKey(context);
       return { status: "ok" };
+    },
+    setEnvironmentStartupScript: (request, context) => {
+      requireTestKey(context);
+      startupScripts.push(request.startupScript);
+      return {
+        changed: request.startupScript !== "echo unchanged",
+        state:
+          request.environmentId === "stopped-env"
+            ? EnvironmentState.STOPPED
+            : request.environmentId === "starting-env"
+              ? EnvironmentState.STARTING
+              : EnvironmentState.RUNNING,
+      };
     },
     updateEnvironmentSources: (request, context) => {
       requireTestKey(context);
@@ -1152,6 +1166,24 @@ async function runTests() {
     );
     assert(fetchedResize.request_id === "stable-request", "resize operation identity is stable");
 
+    const added = await cw.environments.setStartupScript("env_123", "echo started");
+    assert(added.changed && added.state === "running", "a saved startup script reports its state");
+    const removed = await env.setStartupScript("");
+    assert(removed.changed && removed.state === "running", "an empty startup script removes it");
+    const stopped = await cw.environments.setStartupScript("stopped-env", "echo unchanged");
+    assert(!stopped.changed && stopped.state === "stopped", "an unchanged startup script says so");
+    let refusedState = false;
+    try {
+      await cw.environments.setStartupScript("starting-env", "echo started");
+    } catch {
+      refusedState = true;
+    }
+    assert(refusedState, "a state other than running or stopped is refused");
+    assert(
+      startupScripts.join("|") === "echo started||echo unchanged|echo started",
+      "each startup script is sent as given",
+    );
+
     const sourceUpdate = await cw.environments.updateSources("env_123", {
       expected_operation_generation: 9_007_199_254_741_007n,
       expected: {
@@ -1569,7 +1601,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 185;
+  const expectedAssertions = 190;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

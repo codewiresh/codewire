@@ -57,3 +57,14 @@ pub(super) fn proto_environment_state(state: &str) -> AppResult<proto::Environme
         unexpected => invalid_stored_value("environment state", unexpected),
     }
 }
+
+/// The state a startup script was saved in (#5949).
+pub(super) fn proto_scriptable_state(
+    state: crate::api::environment_startup_script::ScriptableState,
+) -> proto::EnvironmentState {
+    use crate::api::environment_startup_script::ScriptableState;
+    match state {
+        ScriptableState::Running => proto::EnvironmentState::Running,
+        ScriptableState::Stopped => proto::EnvironmentState::Stopped,
+    }
+}

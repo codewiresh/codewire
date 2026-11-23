@@ -127,6 +127,7 @@ export type {
   EnvironmentSourceSelection,
   EnvironmentSourcesUpdate,
   EnvironmentSourcesUpdateOutcome,
+  StartupScriptUpdate,
   UpdateEnvironmentSourcesRequest,
   IsolationTier,
   EnvironmentResources,

@@ -360,9 +360,11 @@ pub(crate) async fn remove_member_core(
     .await
 }
 
-/// Deletes a membership and disables the member's API keys for that
-/// organization in one transaction. A key bound to the organization must not
-/// outlive the membership, and a later re-add does not revive it (#3254).
+/// Deletes a membership, clears the saved startup scripts of the
+/// environments the member created there (#5949) and disables the member's
+/// API keys for that organization in one transaction. A key bound to the
+/// organization must not outlive the membership, and a later re-add does not
+/// revive it (#3254).
 async fn delete_membership(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     delete_membership_in(&mut tx, org_id, user_id).await?;
@@ -378,6 +380,8 @@ async fn delete_membership_in(
         .bind(org_id)
         .bind(user_id)
         .execute(&mut *conn)
+        .await?;
+    codewire_server_core::org::clear_departed_creator_startup_scripts(conn, org_id, user_id)
         .await?;
     sqlx::query(
         r#"UPDATE api_keys SET disabled_at = NOW()
@@ -1279,6 +1283,8 @@ pub(crate) mod invitation_refusals {
     }
 }
 
+#[cfg(test)]
+mod departure_database_tests;
 #[cfg(test)]
 mod invitation_database_tests;
 #[cfg(test)]

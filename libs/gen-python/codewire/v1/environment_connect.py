@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -81,6 +81,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_environment_idle_stop(self, request: SetEnvironmentIdleStopRequest, ctx: RequestContext[SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse]) -> SetEnvironmentIdleStopResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_environment_startup_script(self, request: SetEnvironmentStartupScriptRequest, ctx: RequestContext[SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse]) -> SetEnvironmentStartupScriptResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
@@ -289,6 +292,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_environment_idle_stop,
+                ),
+                "/codewire.v1.EnvironmentService/SetEnvironmentStartupScript": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetEnvironmentStartupScript",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SetEnvironmentStartupScriptRequest,
+                        output=SetEnvironmentStartupScriptResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_environment_startup_script,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport": Endpoint.unary(
                     method=MethodInfo(
@@ -768,6 +781,26 @@ class EnvironmentServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def set_environment_startup_script(
+        self,
+        request: SetEnvironmentStartupScriptRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetEnvironmentStartupScriptResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetEnvironmentStartupScript",
+                service_name="codewire.v1.EnvironmentService",
+                input=SetEnvironmentStartupScriptRequest,
+                output=SetEnvironmentStartupScriptResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def get_environment_trust_report(
         self,
         request: GetEnvironmentTrustReportRequest,
@@ -1045,6 +1078,9 @@ class EnvironmentServiceSync(Protocol):
     def set_environment_idle_stop(self, request: SetEnvironmentIdleStopRequest, ctx: RequestContext[SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse]) -> SetEnvironmentIdleStopResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def set_environment_startup_script(self, request: SetEnvironmentStartupScriptRequest, ctx: RequestContext[SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse]) -> SetEnvironmentStartupScriptResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1249,6 +1285,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_environment_idle_stop,
+                ),
+                "/codewire.v1.EnvironmentService/SetEnvironmentStartupScript": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetEnvironmentStartupScript",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SetEnvironmentStartupScriptRequest,
+                        output=SetEnvironmentStartupScriptResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_environment_startup_script,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport": EndpointSync.unary(
                     method=MethodInfo(
@@ -1707,6 +1753,25 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=SetEnvironmentIdleStopRequest,
                 output=SetEnvironmentIdleStopResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_environment_startup_script(
+        self,
+        request: SetEnvironmentStartupScriptRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetEnvironmentStartupScriptResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetEnvironmentStartupScript",
+                service_name="codewire.v1.EnvironmentService",
+                input=SetEnvironmentStartupScriptRequest,
+                output=SetEnvironmentStartupScriptResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

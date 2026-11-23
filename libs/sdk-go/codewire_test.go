@@ -32,6 +32,7 @@ type environmentServiceHandler struct {
 	stop          func(context.Context, *connect.Request[codewirev1.StopEnvironmentRequest]) (*connect.Response[codewirev1.StopEnvironmentResponse], error)
 	start         func(context.Context, *connect.Request[codewirev1.StartEnvironmentRequest]) (*connect.Response[codewirev1.StartEnvironmentResponse], error)
 	updateSources func(context.Context, *connect.Request[codewirev1.UpdateEnvironmentSourcesRequest]) (*connect.Response[codewirev1.UpdateEnvironmentSourcesResponse], error)
+	startupScript func(context.Context, *connect.Request[codewirev1.SetEnvironmentStartupScriptRequest]) (*connect.Response[codewirev1.SetEnvironmentStartupScriptResponse], error)
 }
 
 func (h environmentServiceHandler) ListEnvironments(ctx context.Context, req *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error) {
@@ -93,6 +94,12 @@ func (h environmentServiceHandler) UpdateEnvironmentSources(ctx context.Context,
 		return h.updateSources(ctx, req)
 	}
 	return h.UnimplementedEnvironmentServiceHandler.UpdateEnvironmentSources(ctx, req)
+}
+func (h environmentServiceHandler) SetEnvironmentStartupScript(ctx context.Context, req *connect.Request[codewirev1.SetEnvironmentStartupScriptRequest]) (*connect.Response[codewirev1.SetEnvironmentStartupScriptResponse], error) {
+	if h.startupScript != nil {
+		return h.startupScript(ctx, req)
+	}
+	return h.UnimplementedEnvironmentServiceHandler.SetEnvironmentStartupScript(ctx, req)
 }
 
 type execServiceHandler struct {
@@ -556,6 +563,46 @@ func TestEnvironmentsCRUD(t *testing.T) {
 	// Delete
 	if err := client.Environments.Delete(ctx, "env_123"); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+}
+
+func TestSetStartupScriptSendsTheScriptAndReturnsTheSavedState(t *testing.T) {
+	state := codewirev1.EnvironmentState_ENVIRONMENT_STATE_RUNNING
+	var sent []string
+	client, _ := testRuntimeServer(t, environmentServiceHandler{
+		startupScript: func(_ context.Context, req *connect.Request[codewirev1.SetEnvironmentStartupScriptRequest]) (*connect.Response[codewirev1.SetEnvironmentStartupScriptResponse], error) {
+			if req.Msg.GetOrgId() != "org_test" || req.Msg.GetEnvironmentId() != "env_123" {
+				t.Errorf("startup script request changed: %#v", req.Msg)
+			}
+			sent = append(sent, req.Msg.GetStartupScript())
+			return connect.NewResponse(&codewirev1.SetEnvironmentStartupScriptResponse{
+				Changed: req.Msg.GetStartupScript() != "echo unchanged", State: state,
+			}), nil
+		},
+	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
+	ctx := context.Background()
+	result, err := client.Environments.SetStartupScript(ctx, "env_123", "echo started")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed || result.State != "running" {
+		t.Fatalf("startup script result changed: %#v", result)
+	}
+	state = codewirev1.EnvironmentState_ENVIRONMENT_STATE_STOPPED
+	result, err = client.Environments.SetStartupScript(ctx, "env_123", "")
+	if err != nil || !result.Changed || result.State != "stopped" {
+		t.Fatalf("removal: %#v %v", result, err)
+	}
+	result, err = client.Environments.SetStartupScript(ctx, "env_123", "echo unchanged")
+	if err != nil || result.Changed {
+		t.Fatalf("unchanged: %#v %v", result, err)
+	}
+	state = codewirev1.EnvironmentState_ENVIRONMENT_STATE_STARTING
+	if _, err := client.Environments.SetStartupScript(ctx, "env_123", "echo started"); err == nil {
+		t.Fatal("a state other than running or stopped was accepted")
+	}
+	if strings.Join(sent, "|") != "echo started||echo unchanged|echo started" {
+		t.Fatalf("scripts sent: %q", sent)
 	}
 }
 

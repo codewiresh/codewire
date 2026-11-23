@@ -81,6 +81,9 @@ const (
 	// EnvironmentServiceSetEnvironmentIdleStopProcedure is the fully-qualified name of the
 	// EnvironmentService's SetEnvironmentIdleStop RPC.
 	EnvironmentServiceSetEnvironmentIdleStopProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleStop"
+	// EnvironmentServiceSetEnvironmentStartupScriptProcedure is the fully-qualified name of the
+	// EnvironmentService's SetEnvironmentStartupScript RPC.
+	EnvironmentServiceSetEnvironmentStartupScriptProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentStartupScript"
 	// EnvironmentServiceGetEnvironmentTrustReportProcedure is the fully-qualified name of the
 	// EnvironmentService's GetEnvironmentTrustReport RPC.
 	EnvironmentServiceGetEnvironmentTrustReportProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport"
@@ -143,6 +146,12 @@ type EnvironmentServiceClient interface {
 	// Changes how long the environment may have no activity before it is
 	// stopped. It never stops, starts or restarts the environment.
 	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
+	// Saves, replaces or removes the startup script every start of the
+	// environment runs. Only its creator may, while it is running or stopped;
+	// a running environment keeps running and runs the new script at its next
+	// start. It changes no other saved setting and is audited without the
+	// script's text.
+	SetEnvironmentStartupScript(context.Context, *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
 	// The SSH host public key the daemon of the environment's currently bound
 	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
@@ -273,6 +282,12 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
 			connect.WithClientOptions(opts...),
 		),
+		setEnvironmentStartupScript: connect.NewClient[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse](
+			httpClient,
+			baseURL+EnvironmentServiceSetEnvironmentStartupScriptProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentStartupScript")),
+			connect.WithClientOptions(opts...),
+		),
 		getEnvironmentTrustReport: connect.NewClient[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse](
 			httpClient,
 			baseURL+EnvironmentServiceGetEnvironmentTrustReportProcedure,
@@ -366,6 +381,7 @@ type environmentServiceClient struct {
 	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
 	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
 	setEnvironmentIdleStop        *connect.Client[v1.SetEnvironmentIdleStopRequest, v1.SetEnvironmentIdleStopResponse]
+	setEnvironmentStartupScript   *connect.Client[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse]
 	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
 	getEnvironmentHostKey         *connect.Client[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse]
 	getEnvironmentDaemonStatus    *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
@@ -459,6 +475,11 @@ func (c *environmentServiceClient) SetEnvironmentIdleStop(ctx context.Context, r
 	return c.setEnvironmentIdleStop.CallUnary(ctx, req)
 }
 
+// SetEnvironmentStartupScript calls codewire.v1.EnvironmentService.SetEnvironmentStartupScript.
+func (c *environmentServiceClient) SetEnvironmentStartupScript(ctx context.Context, req *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {
+	return c.setEnvironmentStartupScript.CallUnary(ctx, req)
+}
+
 // GetEnvironmentTrustReport calls codewire.v1.EnvironmentService.GetEnvironmentTrustReport.
 func (c *environmentServiceClient) GetEnvironmentTrustReport(ctx context.Context, req *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error) {
 	return c.getEnvironmentTrustReport.CallUnary(ctx, req)
@@ -541,6 +562,12 @@ type EnvironmentServiceHandler interface {
 	// Changes how long the environment may have no activity before it is
 	// stopped. It never stops, starts or restarts the environment.
 	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
+	// Saves, replaces or removes the startup script every start of the
+	// environment runs. Only its creator may, while it is running or stopped;
+	// a running environment keeps running and runs the new script at its next
+	// start. It changes no other saved setting and is audited without the
+	// script's text.
+	SetEnvironmentStartupScript(context.Context, *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
 	// The SSH host public key the daemon of the environment's currently bound
 	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
@@ -667,6 +694,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceSetEnvironmentStartupScriptHandler := connect.NewUnaryHandler(
+		EnvironmentServiceSetEnvironmentStartupScriptProcedure,
+		svc.SetEnvironmentStartupScript,
+		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentStartupScript")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceGetEnvironmentTrustReportHandler := connect.NewUnaryHandler(
 		EnvironmentServiceGetEnvironmentTrustReportProcedure,
 		svc.GetEnvironmentTrustReport,
@@ -773,6 +806,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceExtendEnvironmentTtlHandler.ServeHTTP(w, r)
 		case EnvironmentServiceSetEnvironmentIdleStopProcedure:
 			environmentServiceSetEnvironmentIdleStopHandler.ServeHTTP(w, r)
+		case EnvironmentServiceSetEnvironmentStartupScriptProcedure:
+			environmentServiceSetEnvironmentStartupScriptHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentTrustReportProcedure:
 			environmentServiceGetEnvironmentTrustReportHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentHostKeyProcedure:
@@ -866,6 +901,10 @@ func (UnimplementedEnvironmentServiceHandler) ExtendEnvironmentTtl(context.Conte
 
 func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleStop is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) SetEnvironmentStartupScript(context.Context, *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentStartupScript is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error) {

@@ -147,7 +147,7 @@ pub(crate) async fn lock_source_owners_in(
     Ok(())
 }
 
-async fn lock_membership_in(
+pub(crate) async fn lock_membership_in(
     tx: &mut Transaction<'_, Postgres>,
     user: &AuthUser,
     organization: &str,

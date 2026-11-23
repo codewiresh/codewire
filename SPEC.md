@@ -83,8 +83,10 @@ merges as create does. The update compares the file with the Sandbox's saved
 settings (what `cw export` prints) and shows each difference before the prompt
 or `--yes`. `startup_script` is the one setting it changes: every start reads
 the saved script and runs it, so the change takes effect at the next start, and
-a running Sandbox keeps running. Any other setting that differs refuses the
-whole update by name, with where it changes instead: `secrets` and
+a running Sandbox keeps running. Only the settings the file states are
+compared, since create may have filled the rest from a preset, a flag or a
+default; a file with no `startup_script` removes the saved one. Any other
+stated setting that differs refuses the whole update by name, with where it changes instead: `secrets` and
 `credentials` with `--secrets` and `--profile`, `resources` with `cw resize`,
 `idle_stop` with `--idle-stop`, and the rest (the image, preset, repositories,
 `install_command`, ports, agents, skills, network, `working_directory` and
@@ -103,12 +105,16 @@ The rules for the startup script after create:
   validates `codewire.yaml`, with the same size limit and encoding, and it
   changes no other setting.
 - **Only while running or stopped.** A running Sandbox gets the new script at
-  its next start, not now, and `cw` says so, so nobody takes it to have run.
+  its next start, not now, and `cw` says so, so nobody takes it to have run. A
+  running Sandbox whose setup hasn't finished is refused, since its setup
+  would run the new script at once.
 - **Audited without its text.** The audit row names the actor, the Sandbox,
   and the script's SHA-256 and length, never the script. A startup script is
   not a place for secrets; use `secrets`.
-- **Never under someone else.** A saved script runs only for its creator. When
-  the creator leaves or is removed from the organization, the script is
+- **Never under someone else.** A saved script runs only for its creator. A
+  departure keeps the creator's Sandboxes, and an organization owner or
+  admin can still start them, so when the creator leaves, is removed or
+  deletes their account, any saved startup script, from create or update, is
   cleared with the departure. No Sandbox changes owner today, and any future
   transfer must clear it too.
 - **No wider reading.** Whoever can read the Sandbox's saved settings today

@@ -18,6 +18,7 @@ pub mod environment_project_spec;
 pub mod environment_resize;
 pub mod environment_setup_retry;
 pub mod environment_sources;
+pub mod environment_startup_script;
 pub mod environments;
 pub mod feedback;
 pub mod host_key;

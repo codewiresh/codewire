@@ -225,6 +225,15 @@ type CreateEnvironmentBody struct {
 	NetworkPolicy *string `json:"network_policy,omitempty"`
 }
 
+// StartupScriptUpdate is the result of saving an environment's startup script.
+type StartupScriptUpdate struct {
+	// Changed is false when the saved script was already this one.
+	Changed bool `json:"changed"`
+	// State is "running" or "stopped": the state it was saved in. A running
+	// environment runs the new script at its next start.
+	State string `json:"state"`
+}
+
 // UpdateEnvironmentSourcesRequest replaces only an environment's complete
 // application-secret and credential-profile source selection.
 type UpdateEnvironmentSourcesRequest struct {

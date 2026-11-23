@@ -87,6 +87,29 @@ pub fn can_admin(role: &str, assignments: &[String]) -> bool {
     role == "owner" || role == "admin" || assignments.iter().any(|a| a == "super_admin")
 }
 
+/// Clears the saved startup script of every environment `user_id` created in
+/// `org_id`, as their membership there ends: a saved script runs only for
+/// its creator (SPEC.md, "The rules for the startup script after create",
+/// #5949). Call it in the transaction that ends the membership, after the
+/// membership row is deleted: a change that already holds the membership
+/// commits first and its script is cleared here, and a later one finds no
+/// membership and is refused.
+pub async fn clear_departed_creator_startup_scripts(
+    conn: &mut sqlx::PgConnection,
+    org_id: &str,
+    user_id: &str,
+) -> sqlx::Result<u64> {
+    sqlx::query(
+        "UPDATE environments SET project_spec = project_spec - 'startup_script' \
+         WHERE org_id = $1 AND created_by = $2 AND project_spec ? 'startup_script'",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(conn)
+    .await
+    .map(|done| done.rows_affected())
+}
+
 /// An email address shown to someone who may not own it (#3840): the first
 /// character of the local part, then "•••", then the domain, as in
 /// "j•••@example.com". Comparing two masks can only say two addresses

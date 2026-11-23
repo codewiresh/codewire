@@ -11,6 +11,7 @@ from codewire._convert import (
     environment_resize_plan_to_dict,
     environment_source_selection_from_dict,
     environment_sources_update_to_dict,
+    startup_script_update_to_dict,
     environment_to_dict,
     explicit_bool,
     port_to_dict,
@@ -31,6 +32,7 @@ from codewire.v1.environment_pb2 import (
     PlanEnvironmentResizeRequest,
     ListEnvironmentsRequest,
     ResizeEnvironmentRequest,
+    SetEnvironmentStartupScriptRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
     UpdateEnvironmentSourcesRequest,
@@ -182,6 +184,26 @@ class Environments:
         if response.environment_id != env_id:
             raise RuntimeError("source update response changed environment identity")
         return environment_sources_update_to_dict(response)
+
+    def set_startup_script(self, env_id: str, startup_script: str) -> dict[str, Any]:
+        """Save the script every start of the environment runs; an empty one
+        removes it.
+
+        Only the environment's creator may, while it is running or stopped. A
+        running environment keeps running and runs the new script at its next
+        start. Returns ``{"changed": bool, "state": "running" | "stopped"}``.
+        """
+        if not isinstance(startup_script, str):
+            raise TypeError("codewire: startup_script must be a string")
+        request = SetEnvironmentStartupScriptRequest(
+            org_id=self._context.resolve_org_id(),
+            environment_id=env_id,
+            startup_script=startup_script,
+        )
+        response = self._context.unary(
+            self._client.set_environment_startup_script, request
+        )
+        return startup_script_update_to_dict(response)
 
     def list(
         self, *, type: str | None = None, state: str | None = None

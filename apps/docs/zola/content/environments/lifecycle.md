@@ -1,7 +1,7 @@
 ---
 title: Lifecycle
 description: Stop, start, resize and remove environments; give hosted sandboxes a lifetime, extend it, and protect them from deletion.
-updated: 2026-11-21
+updated: 2026-11-22
 weight: 5
 aliases: ["/guides/lifecycle"]
 ---
@@ -148,8 +148,13 @@ and `cw cancel-delete` cancels a pending deletion. See the
 
 **Can I change an environment after creating it?** Resize it
 (`cw resize`), change its selected secrets and credential profile
-(`cw update ENV`), and publish ports (`cw ports ENV --publish PORT`). For a
-different image or repositories, create a new one.
+(`cw update ENV`), and publish ports (`cw ports ENV --publish PORT`). A cloud
+Sandbox's startup script changes from a file, without recreating it:
+`cw update ENV --file codewire.yaml` saves the file's `startup_script`, which
+runs at the next start, and refuses a file whose other settings differ from
+the saved ones. Only the Sandbox's creator may change it, and a startup
+script isn't a place for secrets; use `secrets`. For a different image or
+repositories, create a new one.
 
 **What happens to my data when I stop an environment?** Workspace storage is
 kept and compute is released. Removing it deletes the storage. A hosted

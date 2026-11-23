@@ -54,6 +54,10 @@ _SOURCE_DESCRIPTOR_FIELDS = {
     "UpdateEnvironmentSourcesResponse": {
         1: "environment_id", 2: "operation_generation", 3: "selection", 4: "outcome",
     },
+    "SetEnvironmentStartupScriptRequest": {
+        1: "org_id", 2: "environment_id", 3: "startup_script",
+    },
+    "SetEnvironmentStartupScriptResponse": {1: "changed", 2: "state"},
 }
 
 _PRESET_DESCRIPTOR_FIELDS = {
@@ -349,6 +353,16 @@ def environment_sources_update_to_dict(message: Message) -> dict[str, Any]:
         message, "outcome", "ENVIRONMENT_SOURCES_UPDATE_OUTCOME_"
     )
     return value
+
+
+def startup_script_update_to_dict(message: Message) -> dict[str, Any]:
+    """Render a saved startup script: whether it changed, and the state it was
+    saved in. A running environment runs it at its next start."""
+    assert_environment_converter_coverage()
+    state = _enum_suffix_or_unknown(message, "state", "ENVIRONMENT_STATE_")
+    if state not in ("running", "stopped"):
+        raise RuntimeError("startup script response omitted a running or stopped state")
+    return {"changed": bool(message.changed), "state": state}
 
 
 def environment_source_selection_to_dict(message: Message) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import {
   environmentSourceSelectionAcknowledges,
   fromProtoEnvironment,
   fromProtoEnvironmentSourcesUpdate,
+  fromProtoStartupScriptUpdate,
   fromProtoEnvironmentResizeOperation,
   fromProtoEnvironmentResizePlan,
   fromProtoEnvironmentPort,
@@ -32,6 +33,7 @@ import type {
   FileEntry,
   ListEnvironmentsParams,
   ResizeEnvironmentRequest,
+  StartupScriptUpdate,
   UpdateEnvironmentSourcesRequest,
 } from "./types.js";
 
@@ -251,6 +253,26 @@ export class Environments {
         envId,
         request.expected_operation_generation,
         request.replacement,
+      );
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Save the script every start of the environment runs; an empty one
+   * removes it. Only its creator may, while it is running or stopped; a
+   * running environment runs the new script at its next start. */
+  async setStartupScript(
+    envId: string,
+    startupScript: string,
+  ): Promise<StartupScriptUpdate> {
+    try {
+      return fromProtoStartupScriptUpdate(
+        await this.clients.environments.setEnvironmentStartupScript({
+          orgId: resolveOrgId(this.orgId),
+          environmentId: envId,
+          startupScript,
+        }),
       );
     } catch (error) {
       throw mapConnectError(error);

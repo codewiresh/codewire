@@ -33,6 +33,7 @@ class SourceFixture:
         self.outcome = pb.ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED
         self.response_mutation = lambda response: None
         self.failure = None
+        self.startup_state = pb.ENVIRONMENT_STATE_RUNNING
 
     def __getattr__(self, name):
         def unimplemented(*args, **kwargs):
@@ -67,6 +68,13 @@ class SourceFixture:
         )
         self.response_mutation(response)
         return response
+
+    def set_environment_startup_script(self, request, ctx):
+        self.record("SetEnvironmentStartupScript", request, ctx)
+        return pb.SetEnvironmentStartupScriptResponse(
+            changed=request.startup_script != "echo unchanged",
+            state=self.startup_state,
+        )
 
 
 class EnvironmentSourcesTestCase(unittest.TestCase):
@@ -306,3 +314,31 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
         }):
             with self.assertRaisesRegex(RuntimeError, "converter covers"):
                 _convert.assert_environment_converter_coverage()
+
+    def test_set_startup_script_sends_the_script_and_returns_the_saved_state(self):
+        self.assertEqual(
+            self.cw.environments.set_startup_script("environment-one", "echo started"),
+            {"changed": True, "state": "running"},
+        )
+        method, request = self.fixture.calls[-1]
+        self.assertEqual(method, "SetEnvironmentStartupScript")
+        self.assertEqual(request.environment_id, "environment-one")
+        self.assertEqual(request.startup_script, "echo started")
+        self.assertEqual(self.paths, ["/codewire.v1.EnvironmentService/SetEnvironmentStartupScript"])
+
+        self.fixture.startup_state = pb.ENVIRONMENT_STATE_STOPPED
+        self.assertEqual(
+            self.cw.environments.set_startup_script("environment-one", ""),
+            {"changed": True, "state": "stopped"},
+        )
+        self.assertEqual(self.fixture.calls[-1][1].startup_script, "")
+        self.assertEqual(
+            self.cw.environments.set_startup_script("environment-one", "echo unchanged")["changed"],
+            False,
+        )
+
+        self.fixture.startup_state = pb.ENVIRONMENT_STATE_STARTING
+        with self.assertRaisesRegex(RuntimeError, "running or stopped"):
+            self.cw.environments.set_startup_script("environment-one", "echo started")
+        with self.assertRaises(TypeError):
+            self.cw.environments.set_startup_script("environment-one", None)

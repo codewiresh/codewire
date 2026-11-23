@@ -51,6 +51,9 @@ pub(super) struct PlatformDocument {
     pub(super) spec: codewire_project::ProjectSpec,
     /// `idle_stop`, which a create sends beside the spec.
     pub(super) idle_stop_seconds: Option<i32>,
+    /// Whether the file names `working_directory`, rather than leaving it to
+    /// follow its repositories.
+    pub(super) working_directory_explicit: bool,
     /// Settings only a local VM uses, accepted and left out.
     pub(super) unused_fields: Vec<&'static str>,
 }
@@ -86,10 +89,28 @@ pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<Platform
         unused_fields.push("workspace.path_mode");
     }
     Ok(PlatformDocument {
+        working_directory_explicit: document.working_directory_is_explicit(),
         spec: document.spec,
         idle_stop_seconds: document.idle_stop_seconds,
         unused_fields,
     })
+}
+
+/// The flags given beside `--file`, which it doesn't combine with (#5949).
+fn other_update_flags(args: &EnvUpdateArgs) -> Vec<&'static str> {
+    [
+        (args.secrets.is_some(), "--secrets"),
+        (args.user_secrets.is_some(), "--user-secrets"),
+        (args.org_secrets, "--org-secrets"),
+        (args.clear_secrets, "--clear-secrets"),
+        (args.profile.is_some(), "--profile"),
+        (args.clear_profile, "--clear-profile"),
+        (args.policy.is_some(), "--policy"),
+        (args.idle_stop.is_some(), "--idle-stop"),
+    ]
+    .into_iter()
+    .filter_map(|(given, flag)| given.then_some(flag))
+    .collect()
 }
 
 /// Whether the update changes the environment's secret or credential sources.
@@ -105,9 +126,20 @@ pub(super) fn changes_sources(args: &EnvUpdateArgs) -> bool {
 pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
     trimmed_required(&args.environment, "environment")?;
     anyhow::ensure!(
-        changes_sources(args) || args.policy.is_some() || args.idle_stop.is_some(),
-        "select a change with --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, --policy, or --idle-stop"
+        changes_sources(args)
+            || args.policy.is_some()
+            || args.idle_stop.is_some()
+            || !args.file.is_empty(),
+        "select a change with --file, --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, --policy, or --idle-stop"
     );
+    if !args.file.is_empty() {
+        let others = other_update_flags(args);
+        anyhow::ensure!(
+            others.is_empty(),
+            "`--file` changes only the startup script and doesn't combine with {}; run them as separate updates",
+            others.join(" or ")
+        );
+    }
     if let Some(idle_stop) = &args.idle_stop {
         codewire_project::parse_idle_stop(idle_stop)?;
     }
@@ -263,7 +295,7 @@ fn confirm_sources_with(
     Ok(())
 }
 
-fn read_confirmation(reader: impl BufRead) -> anyhow::Result<bool> {
+pub(super) fn read_confirmation(reader: impl BufRead) -> anyhow::Result<bool> {
     let mut input = String::new();
     let count = reader
         .take(65)
@@ -963,5 +995,39 @@ mod tests {
         let both = update_args(&["--idle-stop", "1h", "--clear-profile"]);
         validate_update_args(&both).unwrap();
         assert!(changes_sources(&both));
+    }
+
+    /// `--file` is a change of its own, and names the flags given beside it
+    /// (#5949).
+    #[test]
+    fn file_is_an_update_that_takes_no_other_change() {
+        let args = update_args(&["--file", "codewire.yaml", "--file", "dev.yaml"]);
+        validate_update_args(&args).unwrap();
+        assert_eq!(args.file.len(), 2);
+        assert!(!changes_sources(&args));
+        let error = validate_update_args(&update_args(&[
+            "--file",
+            "codewire.yaml",
+            "--policy",
+            "open",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`--file` changes only the startup script and doesn't combine with --policy; run them as separate updates"
+        );
+        let error = validate_update_args(&update_args(&[
+            "--file",
+            "codewire.yaml",
+            "--secrets",
+            "dev",
+            "--idle-stop",
+            "1h",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`--file` changes only the startup script and doesn't combine with --secrets or --idle-stop; run them as separate updates"
+        );
     }
 }

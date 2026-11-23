@@ -23,7 +23,8 @@ struct Account {
     /// An organization this user created and owns with another owner.
     shared_org: String,
     other_owner: String,
-    /// An environment this user created in the shared organization.
+    /// An environment this user created in the shared organization, with a
+    /// saved startup script.
     shared_environment: String,
 }
 
@@ -107,7 +108,8 @@ async fn seed(pool: &PgPool) -> Account {
         r#"INSERT INTO environments
                (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
            VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
-                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+                   '{"schema_version":1,"working_directory":"/workspace",
+                     "startup_script":"echo departing-creator"}'::jsonb)"#,
     )
     .bind(&shared_environment)
     .bind(&shared_org)
@@ -413,6 +415,16 @@ async fn the_request_disables_the_account_and_revokes_it_at_once() {
         0,
         "the shared membership is removed"
     );
+    // A saved startup script runs only for its creator: it goes with the
+    // membership (#5949).
+    let script: Option<String> = sqlx::query_scalar(
+        "SELECT project_spec->>'startup_script' FROM environments WHERE id = $1",
+    )
+    .bind(&account.shared_environment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(script, None);
     assert_eq!(
         scalar_i64(
             &pool,

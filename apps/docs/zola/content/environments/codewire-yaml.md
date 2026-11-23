@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-updated: 2026-11-19
+updated: 2026-11-22
 weight: 1
 aliases: ["/guides/project-file"]
 ---
@@ -42,7 +42,16 @@ platform saved for its first repository, and says so.
 
 Starting, restarting or attaching to an existing environment never reads a
 file: it keeps the configuration it was created with, even after the file
-changes. A new `cw create` reads the file again.
+changes. A new `cw create` reads the file again. The one exception is the
+startup script of a cloud Sandbox: `cw update ENV --file codewire.yaml` gives
+it the file's `startup_script`, added, changed or removed, without recreating
+it, so its ID and preview host names stay. The script runs at the Sandbox's
+next start; a running Sandbox keeps running until then. Every other setting
+in the file must match the Sandbox's saved settings (what `cw export`
+prints), or the update is refused and names the setting. A startup script
+isn't a place for secrets: anyone who can read the Sandbox's saved settings
+can read it, so put secret values in `secrets`. A local VM's setup is sealed
+when it is created, and `cw --local update --file` is refused.
 
 `cw init` refuses to overwrite an existing file without `--force`. Given only
 direct inputs (image, commands, resources, variables) it works offline;

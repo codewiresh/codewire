@@ -298,6 +298,31 @@ func (s *EnvironmentService) UpdateEnvironmentSources(ctx context.Context, envID
 	}, nil
 }
 
+// SetStartupScript saves the script every start of the environment runs; an
+// empty script removes it. Only the environment's creator may, while it is
+// running or stopped. A running environment keeps running and runs the new
+// script at its next start.
+func (s *EnvironmentService) SetStartupScript(ctx context.Context, envID, startupScript string) (*StartupScriptUpdate, error) {
+	if err := ensureEnvironmentConverterCoverage(); err != nil {
+		return nil, err
+	}
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.client.environments.SetEnvironmentStartupScript(ctx, connect.NewRequest(&codewirev1.SetEnvironmentStartupScriptRequest{
+		OrgId: orgID, EnvironmentId: envID, StartupScript: startupScript,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	state := environmentState(response.Msg.GetState())
+	if state != "running" && state != "stopped" {
+		return nil, fmt.Errorf("codewire: startup script response omitted a running or stopped state")
+	}
+	return &StartupScriptUpdate{Changed: response.Msg.GetChanged(), State: state}, nil
+}
+
 // Exec runs a command in the environment and returns the result.
 func (s *EnvironmentService) Exec(ctx context.Context, envID string, body ExecBody) (*ExecResult, error) {
 	orgID, err := s.client.resolveOrgID()

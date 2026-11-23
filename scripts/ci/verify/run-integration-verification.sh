@@ -1192,6 +1192,12 @@ database_lane_orchestration_workspaces() {
     cargo test --locked -p codewire-orchestration --test environment_sources \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "environment startup script matrix" environment-startup-script \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_startup_script::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "admin startup summary matrix" admin-startup-summary \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1366,6 +1372,12 @@ database_lane_orchestration_hosts() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::organizations::membership_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "organization departure clears startup scripts" organization-departure-startup-scripts \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::organizations::departure_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
   counted_suite "organization invitation acceptance" organization-invitation-acceptance \

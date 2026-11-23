@@ -400,7 +400,8 @@ pub async fn begin_account_deletion_in(
 
 /// The request itself, once the initiator's checks passed: refuse while the
 /// account is the only owner of an organization with other members, begin
-/// deleting its personal organizations, end its other memberships, disable
+/// deleting its personal organizations, end its other memberships, clearing
+/// the startup scripts of the environments it created there (#5949), disable
 /// it and record the operation and the audit entry.
 pub(crate) async fn request_in(
     tx: &mut Transaction<'_, Postgres>,
@@ -451,6 +452,9 @@ pub(crate) async fn request_in(
             .bind(&organization.id)
             .bind(user_id)
             .execute(&mut **tx)
+            .await
+            .map_err(AppError::from)?;
+        crate::org::clear_departed_creator_startup_scripts(tx, &organization.id, user_id)
             .await
             .map_err(AppError::from)?;
     }

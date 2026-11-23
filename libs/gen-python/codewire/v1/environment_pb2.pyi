@@ -706,6 +706,24 @@ class SetEnvironmentIdleStopResponse(_message.Message):
     status: str
     def __init__(self, status: _Optional[str] = ...) -> None: ...
 
+class SetEnvironmentStartupScriptRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "startup_script")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    STARTUP_SCRIPT_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    startup_script: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., startup_script: _Optional[str] = ...) -> None: ...
+
+class SetEnvironmentStartupScriptResponse(_message.Message):
+    __slots__ = ("changed", "state")
+    CHANGED_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    changed: bool
+    state: EnvironmentState
+    def __init__(self, changed: _Optional[bool] = ..., state: _Optional[_Union[EnvironmentState, str]] = ...) -> None: ...
+
 class AccessGrant(_message.Message):
     __slots__ = ("id", "environment_id", "user_id", "permission", "granted_by", "created_at")
     ID_FIELD_NUMBER: _ClassVar[int]

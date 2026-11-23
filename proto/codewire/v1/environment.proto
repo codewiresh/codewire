@@ -48,6 +48,12 @@ service EnvironmentService {
   // Changes how long the environment may have no activity before it is
   // stopped. It never stops, starts or restarts the environment.
   rpc SetEnvironmentIdleStop(SetEnvironmentIdleStopRequest) returns (SetEnvironmentIdleStopResponse);
+  // Saves, replaces or removes the startup script every start of the
+  // environment runs. Only its creator may, while it is running or stopped;
+  // a running environment keeps running and runs the new script at its next
+  // start. It changes no other saved setting and is audited without the
+  // script's text.
+  rpc SetEnvironmentStartupScript(SetEnvironmentStartupScriptRequest) returns (SetEnvironmentStartupScriptResponse);
   rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -554,6 +560,21 @@ message SetEnvironmentIdleStopRequest {
 }
 message SetEnvironmentIdleStopResponse {
   string status = 1;
+}
+
+message SetEnvironmentStartupScriptRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // The script, as codewire.yaml's startup_script: at most 64 KiB, no NUL,
+  // no leading or trailing whitespace. Empty removes the saved script.
+  string startup_script = 3;
+}
+
+message SetEnvironmentStartupScriptResponse {
+  // False when the saved script was already this one: nothing was written.
+  bool changed = 1;
+  // The environment's state when the script was saved: running or stopped.
+  EnvironmentState state = 2;
 }
 
 enum AccessPermission {

@@ -6,6 +6,7 @@ import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewi
 import {
   fromProtoEnvironment,
   fromProtoEnvironmentSourcesUpdate,
+  fromProtoStartupScriptUpdate,
   fromProtoEnvironmentResizeOperation,
   fromProtoEnvironmentResizePlan,
   fromProtoEnvironmentPort,
@@ -27,6 +28,7 @@ import {
   type EnvironmentResources,
   type EnvironmentSourceSelection,
   type EnvironmentSourcesUpdate,
+  type StartupScriptUpdate,
   type ExecRequest,
   type ExecResult,
   type IsolationTier,
@@ -181,6 +183,23 @@ export class Environment implements EnvironmentData {
         this.id,
         request.expected_operation_generation,
         request.replacement,
+      );
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Save the script every start of this environment runs; an empty one
+   * removes it. Only its creator may, while it is running or stopped; a
+   * running environment runs the new script at its next start. */
+  async setStartupScript(startupScript: string): Promise<StartupScriptUpdate> {
+    try {
+      return fromProtoStartupScriptUpdate(
+        await this.clients.environments.setEnvironmentStartupScript({
+          orgId: this.orgId,
+          environmentId: this.id,
+          startupScript,
+        }),
       );
     } catch (error) {
       throw mapConnectError(error);

@@ -15,6 +15,7 @@ mod runtime;
 mod sources;
 mod stop_start;
 mod transfer;
+mod update;
 use cp::handle_unified_environment_cp;
 pub(crate) use cpu::{local_vm_vcpus, local_vm_vcpus_from_millicores, parse_resize_cpu};
 #[cfg(test)]
@@ -243,9 +244,7 @@ pub(crate) async fn handle_env_command(
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
-        EnvCommand::Update(update) => {
-            handle_unified_environment_update(globals, placement, update).await
-        }
+        EnvCommand::Update(update) => update::handle_unified(globals, placement, update).await,
         EnvCommand::Info(info) => handle_unified_environment_info(globals, placement, info).await,
         EnvCommand::Resize(resize) => {
             handle_unified_environment_resize(globals, placement, resize).await
@@ -627,48 +626,8 @@ async fn handle_platform_env_command_with_created(
         }
         EnvCommand::Runtime(_) => anyhow::bail!("cw runtime supports only native Linux VMs"),
         EnvCommand::Create(_) => unreachable!("handled before the organization listing"),
-        EnvCommand::Update(mut args) => {
-            let policy = args.policy.take();
-            let idle_stop = args
-                .idle_stop
-                .take()
-                .as_deref()
-                .map(codewire_project::parse_idle_stop)
-                .transpose()?;
-            let output = args.output;
-            let environment = args.environment.clone();
-            let sources_changed = args.clear_secrets
-                || args.clear_profile
-                || args.secrets.is_some()
-                || args.user_secrets.is_some()
-                || args.org_secrets
-                || args.profile.is_some();
-            if sources_changed || (policy.is_none() && idle_stop.is_none()) {
-                sources::update_platform_sources(&platform, &environment_client, &org_id, args)
-                    .await?;
-            }
-            if let Some(reference) = policy {
-                update_platform_network_policy(
-                    globals,
-                    &environment_client,
-                    &org_id,
-                    &environment,
-                    &reference,
-                    output,
-                )
-                .await?;
-            }
-            if let Some(idle_stop_seconds) = idle_stop {
-                let environment_id =
-                    resolve_environment_id(&environment_client, &org_id, &environment).await?;
-                let response = environment_client
-                    .set_environment_idle_stop(&org_id, &environment_id, idle_stop_seconds)
-                    .await
-                    .context("set idle stop")?;
-                print_env_idle_stop_status(&environment, &response, idle_stop_seconds, output)?;
-                idle_stop::note_after_update(&environment_client, &org_id, &environment_id, output)
-                    .await;
-            }
+        EnvCommand::Update(args) => {
+            update::platform(globals, &platform, &environment_client, &org_id, args).await?;
         }
         EnvCommand::Info(args) => {
             let environment_id =
@@ -1398,27 +1357,6 @@ async fn handle_unified_environment_create(
         Some(EnvironmentPlacement::Platform) | None => {
             reject_local_create_options(&args)?;
             handle_platform_env_command(globals, EnvCommand::Create(args)).await
-        }
-    }
-}
-
-async fn handle_unified_environment_update(
-    globals: &Globals,
-    placement: Option<EnvironmentPlacement>,
-    mut args: EnvUpdateArgs,
-) -> anyhow::Result<()> {
-    sources::validate_update_args(&args)?;
-    let target =
-        resolve_unified_environment_target(globals, placement, &args.environment, "update").await?;
-    match target {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        UnifiedEnvironmentTarget::NativeLocal(name) => {
-            args.environment = name;
-            handle_native_environment_update(globals, args).await
-        }
-        UnifiedEnvironmentTarget::Platform(id) => {
-            args.environment = id;
-            handle_platform_env_command(globals, EnvCommand::Update(args)).await
         }
     }
 }

@@ -17,6 +17,7 @@ pub mod hosted_shell;
 #[cfg(target_os = "linux")]
 pub mod member_tailnet;
 pub mod session_wire;
+mod startup_script;
 mod tailnet;
 #[cfg(feature = "tailnet-session")]
 pub mod tailnet_session;

@@ -1224,6 +1224,18 @@ func ensureEnvironmentConverterCoverage() error {
 		environmentCoverageErr = ensureDescriptorCoverage("update environment sources response", messages.ByName("UpdateEnvironmentSourcesResponse"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "environment_id", 2: "operation_generation", 3: "selection", 4: "outcome",
 		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("set environment startup script request", messages.ByName("SetEnvironmentStartupScriptRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "startup_script",
+		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("set environment startup script response", messages.ByName("SetEnvironmentStartupScriptResponse"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "changed", 2: "state",
+		})
 	})
 	return environmentCoverageErr
 }

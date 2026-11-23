@@ -42,6 +42,7 @@ use crate::api::environment_sources::{
     EnvironmentSourceSelection, EnvironmentSourcesUpdate, EnvironmentSourcesUpdateOutcome,
     UpdateEnvironmentSourcesBody, update_environment_sources_core,
 };
+use crate::api::environment_startup_script::set_environment_startup_script_core;
 use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
@@ -534,6 +535,29 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         .map_err(|error| environment_rpc_error(&error, &ctx))?;
         connectrpc::Response::ok(proto::SetEnvironmentIdleStopResponse {
             status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn set_environment_startup_script(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SetEnvironmentStartupScriptRequest>,
+    ) -> ServiceResult<proto::SetEnvironmentStartupScriptResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = set_environment_startup_script_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            request.startup_script,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::SetEnvironmentStartupScriptResponse {
+            changed: result.changed,
+            state: state::proto_scriptable_state(result.state).into(),
             ..Default::default()
         })
     }

@@ -271,6 +271,15 @@ export interface EnvironmentSourcesUpdate {
   outcome: EnvironmentSourcesUpdateOutcome;
 }
 
+/** The result of saving an environment's startup script. */
+export interface StartupScriptUpdate {
+  /** False when the saved script was already this one. */
+  changed: boolean;
+  /** The state it was saved in. A running environment runs the new script
+   * at its next start. */
+  state: "running" | "stopped";
+}
+
 export interface CreatePresetRequest {
   name: string;
   slug?: string;

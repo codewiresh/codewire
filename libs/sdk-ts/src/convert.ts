@@ -39,12 +39,15 @@ import {
   IsolationTier as ProtoIsolationTier,
   NetworkAttachmentFailure as ProtoNetworkAttachmentFailure,
   NetworkAttachmentState as ProtoNetworkAttachmentState,
+  SetEnvironmentStartupScriptRequestSchema,
+  SetEnvironmentStartupScriptResponseSchema,
   UpdateEnvironmentSourcesRequestSchema,
   UpdateEnvironmentSourcesResponseSchema,
   type Environment as ProtoEnvironment,
   type EnvironmentSourceSelection as ProtoEnvironmentSourceSelection,
   type EnvironmentResizeOperation as ProtoEnvironmentResizeOperation,
   type EnvironmentResizePlan as ProtoEnvironmentResizePlan,
+  type SetEnvironmentStartupScriptResponse as ProtoSetEnvironmentStartupScriptResponse,
   type UpdateEnvironmentSourcesResponse as ProtoUpdateEnvironmentSourcesResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import type { ExecResponse } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
@@ -96,6 +99,7 @@ import type {
   SecretMetadata,
   SecretProject,
   PresetData,
+  StartupScriptUpdate,
   UpdatePresetRequest,
   UpdateEnvironmentSourcesRequest,
   WorkloadSecretSource,
@@ -779,6 +783,21 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
   };
 }
 
+export function fromProtoStartupScriptUpdate(
+  value: ProtoSetEnvironmentStartupScriptResponse,
+): StartupScriptUpdate {
+  switch (value.state) {
+    case EnvironmentState.RUNNING:
+      return { changed: value.changed, state: "running" };
+    case EnvironmentState.STOPPED:
+      return { changed: value.changed, state: "stopped" };
+    default:
+      throw new Error(
+        "codewire: startup script response omitted a running or stopped state",
+      );
+  }
+}
+
 export function fromProtoEnvironmentSourcesUpdate(
   value: ProtoUpdateEnvironmentSourcesResponse,
   expectedEnvironmentId: string,
@@ -1230,6 +1249,12 @@ export function assertRuntimeConverterCoverage(): void {
   ]));
   assertDescriptorCoverage("update environment sources response", UpdateEnvironmentSourcesResponseSchema.fields, new Map([
     [1, "environment_id"], [2, "operation_generation"], [3, "selection"], [4, "outcome"],
+  ]));
+  assertDescriptorCoverage("set environment startup script request", SetEnvironmentStartupScriptRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "environment_id"], [3, "startup_script"],
+  ]));
+  assertDescriptorCoverage("set environment startup script response", SetEnvironmentStartupScriptResponseSchema.fields, new Map([
+    [1, "changed"], [2, "state"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],

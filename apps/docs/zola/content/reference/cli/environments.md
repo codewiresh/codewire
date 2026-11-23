@@ -199,6 +199,7 @@ See [Lifecycle](@/environments/lifecycle.md).
 ```sh
 cw update ENV [--secrets NAME] [--user-secrets local|platform] [--org-secrets] [--clear-secrets]
               [--profile NAME] [--clear-profile] [-y]
+cw update ENV --file FILE [--file FILE]... [-y] [--output json]   # cloud: the startup script
 cw resize ENV [--cpu N] [--memory SIZE] [--disk SIZE] [--force] [--allow-restart] [-y]
 cw refresh-skills ENV   # local VM: re-snapshot user and repository skills
 ```
@@ -206,7 +207,33 @@ cw refresh-skills ENV   # local VM: re-snapshot user and repository skills
 `update` (also `cw update --in ENV`) changes only the selected
 application-secret sources and credential profile, with a confirmed restart
 that keeps workspace data; without `ENV` it is refused. It never upgrades
-`cw` itself: that is `cw upgrade`. `resize` runs a wizard at a terminal when
+`cw` itself: that is `cw upgrade`.
+
+`update ENV --file` gives a cloud Sandbox the file's `startup_script`, added,
+changed or removed, without recreating it; repeated `--file` merges as
+`cw create` does. It compares the file with the Sandbox's saved settings (what
+`cw export` prints), shows the script before asking, and saves it for the next
+start: a running Sandbox keeps running, and `cw --cloud stop ENV && cw --cloud
+start ENV` runs it. Any other setting the file states differently refuses the
+whole update and names it, with where it changes instead: `secrets` and
+`credentials` with `--secrets` and `--profile`, `cpu`, `memory` and `disk`
+with `cw resize`, `idle_stop` with `--idle-stop`, and the rest only in a new
+Sandbox. A setting the file leaves out isn't compared. Only the Sandbox's
+creator may change its startup script, while it is running or stopped, and
+the change is audited without the script's text. `--file` takes no other
+change, and a local VM refuses it.
+
+```text
+$ cw update walk-start --file codewire.yaml
+Adds this startup script to walk-start, from codewire.yaml:
+  echo started > /workspace/started
+It runs at the next start, not now.
+Save it? [y/N]: y
+✓ Startup script added to walk-start · it runs at the next start, not now
+→ cw --cloud stop walk-start && cw --cloud start walk-start
+```
+
+`resize` runs a wizard at a terminal when
 no quantity is given; disks never shrink, and a cloud disk grows up to
 200 GiB; a local VM restarts, and `--force`
 ends active cloud sessions when a restart is required.
