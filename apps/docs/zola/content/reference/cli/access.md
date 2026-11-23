@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-17
+updated: 2026-11-23
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -21,7 +21,7 @@ interactive `run` say how to choose one: `cw use ENV`, or `--in ENV`.
 ```sh
 cw run [--in ENV] [OPTIONS] COMMAND [ARG]...
 cw run [--in ENV] [OPTIONS] -- COMMAND [ARG]...
-cw run claude|codex [--in ENV] [--name NAME] [--env KEY=VALUE]... [-- AGENT_ARG...]
+cw run claude|codex [--in ENV] [--name NAME] [--env KEY[=VALUE]]... [-- AGENT_ARG...]
 cw run --in ENV --agent codex|claude [--prompt TEXT] [--name NAME] [--parent SESSION] [--model M] [--effort E] --detach
 cw run
 ```
@@ -67,7 +67,7 @@ environment, may be.
 | `--name NAME` | Unique name for the new session; never reuses one |
 | `--parent SESSION` | Parent session name or ID within this environment |
 | `-w, --workdir DIR` | Working directory inside the environment |
-| `-e, --env KEY=VALUE` | Set a variable for this session; repeatable. Not kept across a daemon restart |
+| `-e, --env KEY[=VALUE]` | Set a variable for this session; `KEY` alone sends the value `KEY` has where `cw` runs. Repeatable. Not kept across a daemon restart |
 | `-t, --tty`, `--no-tty` | Allocate a terminal, or not; the default is a terminal when stdin and stdout are terminals, and always for `claude` and `codex` |
 | `-d, --detach` | Launch without attaching |
 | `-y, --yes` | Never ask: without an agent, a command or an environment, fail and name what to pass instead of opening a picker or setup |
@@ -80,6 +80,20 @@ environment, may be.
 A foreground run streams output and fails when the command exits
 unsuccessfully. A hosted sandbox refuses `--tty`, a command and `--env`
 together with `--agent`.
+
+`--env KEY` with no value sends the value `KEY` has in `cw`'s own
+environment, so a program can hand a secret it holds to one command without
+putting it in `cw`'s arguments, which anything that can list the host's
+processes can read. A `KEY` that isn't set is refused by its name before
+anything starts; one set to an empty string is sent empty. `cw` never prints
+a value it sends. `cw create --env` and `cw init --env` save a plain variable
+in the environment's settings, so they take only `KEY=VALUE`; keep a secret
+with `cw secrets`.
+
+```sh
+export DEPLOY_TOKEN=…
+cw exec --in app --env DEPLOY_TOKEN -- ./deploy.sh
+```
 
 Example:
 
@@ -100,7 +114,7 @@ The second command exits 1 because the session failed.
 ## cw exec
 
 ```sh
-cw exec [--in ENV] [-w DIR] [-e KEY=VALUE]... [-t] COMMAND [ARG]...
+cw exec [--in ENV] [-w DIR] [-e KEY[=VALUE]]... [-t] COMMAND [ARG]...
 ```
 
 Runs a command once and waits for it, as `ssh HOST COMMAND` does. No session
@@ -124,7 +138,7 @@ in the environment's folder; a relative `-w` is inside it.
 | --- | --- |
 | `--in ENV` | Environment name or ID; defaults to the selected environment |
 | `-w, --workdir DIR` | Working directory inside the environment |
-| `-e, --env KEY=VALUE` | Set a variable for this command; repeatable |
+| `-e, --env KEY[=VALUE]` | Set a variable for this command; `KEY` alone sends the value `KEY` has where `cw` runs, as for `cw run`. Repeatable |
 | `-t, --tty` | Give the command a terminal |
 
 ## cw ls

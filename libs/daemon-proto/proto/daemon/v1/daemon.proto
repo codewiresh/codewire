@@ -473,7 +473,7 @@ message SessionRecord {
 message LaunchSessionRequest {
   repeated string command = 1;
   string working_dir = 2;
-  repeated string env = 3;
+  repeated string env = 3 [debug_redact = true];
   bool pty = 4;
   string term = 5;
   int32 width = 6;
@@ -606,13 +606,13 @@ message SessionAttachMessage {
 message ExecStartRequest {
   repeated string command = 1;
   string working_dir = 2;
-  repeated string env = 3;
+  repeated string env = 3 [debug_redact = true];
 }
 
 message PtyStartRequest {
   repeated string command = 1;
   string working_dir = 2;
-  repeated string env = 3;
+  repeated string env = 3 [debug_redact = true];
   string term = 4;
   int32 width = 5;
   int32 height = 6;

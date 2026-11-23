@@ -767,8 +767,8 @@ pub(crate) struct EnvironmentRunArgs {
     #[arg(
         short = 'e',
         long = "env",
-        value_name = "KEY=VALUE",
-        help = "Set a variable for this session; repeatable"
+        value_name = "KEY[=VALUE]",
+        help = "Set a variable for this session; KEY alone sends the value KEY has where cw runs; repeatable"
     )]
     pub(crate) env: Vec<String>,
     #[arg(
@@ -822,8 +822,8 @@ pub(crate) struct ExecArgs {
     #[arg(
         short = 'e',
         long = "env",
-        value_name = "KEY=VALUE",
-        help = "Set a variable for this command; repeatable"
+        value_name = "KEY[=VALUE]",
+        help = "Set a variable for this command; KEY alone sends the value KEY has where cw runs; repeatable"
     )]
     pub(crate) env: Vec<String>,
     #[arg(

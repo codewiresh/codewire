@@ -1,5 +1,8 @@
 use super::*;
 
+mod env_entries;
+pub(crate) use env_entries::{parse_env_overrides, parse_env_settings};
+
 /// The default workspace: the published pin at its public mirror, which local
 /// environments pull anonymously and the platform resolves to Harbor.
 pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;
@@ -998,19 +1001,6 @@ pub(crate) fn parse_go_duration_seconds(raw: &str) -> anyhow::Result<i32> {
         anyhow::bail!("duration out of range");
     }
     Ok(seconds as i32)
-}
-
-pub(crate) fn parse_env_overrides(entries: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
-    let mut env = BTreeMap::new();
-    for entry in entries {
-        let entry = trimmed_required(entry, "environment override")?;
-        let Some((key, value)) = entry.split_once('=') else {
-            anyhow::bail!("environment override must be KEY=VALUE");
-        };
-        let key = trimmed_required(key, "environment override key")?;
-        env.insert(key.to_string(), value.to_string());
-    }
-    Ok(env)
 }
 
 pub(crate) fn trimmed_str(value: &str) -> Option<&str> {

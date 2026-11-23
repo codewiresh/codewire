@@ -656,6 +656,8 @@ pub(crate) fn env_create_request_from_init_args(
     {
         anyhow::bail!("--branch requires a repo URL");
     }
+    // Refused in `cw init`'s words; the create request below parses them.
+    parse_env_settings(&args.env, "cw init")?;
     let env_args = EnvCreateArgs {
         guided: false,
         policy: None,

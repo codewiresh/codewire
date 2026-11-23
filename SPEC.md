@@ -192,18 +192,27 @@ session ends it and every process it started, within a stated bound. Stopping
 the environment stops its sessions; after a start, each one is restarted under
 its own name with `cw restart ENV --session NAME`.
 
-Target, not shipped (#5222): `--env` on `cw run` and `cw exec` takes
-`KEY=VALUE`, or `KEY` alone, which sends the value `KEY` has in `cw`'s own
-environment, so a program can hand a secret it already holds to one process
-without putting it in `cw`'s arguments, where anything that can read the
-host's process table sees it. A `KEY` that isn't set is refused by its name
+`--env` on `cw run` and `cw exec` takes `KEY=VALUE`, or `KEY` alone
+(#5222), which sends the value `KEY` has in `cw`'s own environment, so a
+program can hand a secret it already holds to one process without putting it
+in `cw`'s arguments, where anything that can read the host's process table
+sees it. A `KEY` that isn't set is refused by its name
 before anything starts; it is never sent empty. `cw` never prints a value it
 sends, in its output or its errors. Every command that saves `--env` in an
 environment's settings as a plain variable (`cw create`, local or cloud, and
 `cw init`) keeps requiring `KEY=VALUE` and refuses `KEY` alone, pointing to
 `cw secrets`. Codewire never stores or logs the values a run or exec sends.
-The platform passes them to the environment's daemon and writes no part of
-the request. Every message that carries them marks its `env` field
+The platform passes a run's values to the environment's daemon and writes no
+part of the request. A cloud `cw exec` sends its values over the
+environment's own SSH channel, in its command line (`env KEY=VALUE` before
+the command), so inside the environment they are in the arguments of the
+processes that start the command, the SSH server's `SHELL -c LINE` among
+them, and can stay there while it runs. Only the environment's user, who can
+read the command's environment anyway, sees them there; the host's process
+table never does. That SSH server
+(`crates/codewire-workspace-access/src/ssh.rs`) logs that a session started,
+with its connection, channel and terminal, never the command. Every message
+that carries them marks its `env` field
 `debug_redact`, so no `Debug` of a request shows them: in `codewire.v1`,
 `LaunchSessionRequest`, `ExecRequest`, `StreamExecRequest` and `RunStart`; in
 `daemon.v1`, which the bridge forwards them in, `LaunchSessionRequest`,

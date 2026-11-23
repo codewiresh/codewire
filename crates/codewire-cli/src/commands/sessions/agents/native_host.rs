@@ -482,7 +482,7 @@ pub(super) async fn run(
     if let Some(prompt) = &args.prompt {
         validate_text(prompt)?;
     }
-    let launch_env = parse_env_overrides(&args.env)?;
+    let launch_env = parse_env_overrides(&args.env, &OsEnv)?;
     let working_dir = args
         .workdir
         .clone()

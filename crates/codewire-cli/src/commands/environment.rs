@@ -2411,7 +2411,7 @@ pub(crate) fn env_create_request_from_source(
     }
     project_spec
         .environment
-        .extend(parse_env_overrides(&args.env)?);
+        .extend(parse_env_settings(&args.env, "cw create")?);
     if let Some(agent) = args.coding_agent.as_deref().and_then(trimmed_str) {
         project_spec.agents = codewire_project::AgentsSpec {
             install: None,

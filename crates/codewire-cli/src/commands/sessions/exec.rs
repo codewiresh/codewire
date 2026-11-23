@@ -21,7 +21,7 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
         !args.command.is_empty(),
         "`cw exec` needs a command: `cw exec --in ENV COMMAND`"
     );
-    let env = parse_env_overrides(&args.env)?;
+    let env = parse_env_overrides(&args.env, &OsEnv)?;
     let target = resolve_environment_session_target(globals, args.environment.as_deref())
         .await
         .map_err(crate::command_line::name_hint)?;
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn a_run_start_carries_the_command_and_a_terminal_only_with_tty() {
         let args = exec_args(&line("cw exec -w src -e A=1 env"));
-        let env = parse_env_overrides(&args.env).unwrap();
+        let env = parse_env_overrides(&args.env, &crate::config::MapEnv::default()).unwrap();
         let start = run_start(&args, env, "/workspace/app").unwrap();
         assert_eq!(start.command, ["env"]);
         assert_eq!(start.working_dir, "src");
@@ -542,7 +542,7 @@ mod tests {
             "x",
             "a b",
         ]);
-        let env = parse_env_overrides(&args.env).unwrap();
+        let env = parse_env_overrides(&args.env, &crate::config::MapEnv::default()).unwrap();
         let line = ssh_line(&args, &env, "/nonexistent-default");
         assert!(line.starts_with("'sh' '-c' "), "{line}");
         let output = std::process::Command::new("sh")
@@ -593,7 +593,7 @@ mod tests {
         std::fs::create_dir(folder.path().join("sub")).unwrap();
         let code = |words: &[&str]| {
             let args = exec_args(words);
-            let env = parse_env_overrides(&args.env).unwrap();
+            let env = parse_env_overrides(&args.env, &crate::config::MapEnv::default()).unwrap();
             let folder = folder.path().to_owned();
             async move { exec_on_host(&folder, &args, env).await.unwrap() }
         };

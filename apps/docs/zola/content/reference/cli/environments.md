@@ -44,7 +44,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and an 80 GiB disk, and its disk is at most 200 GiB |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |
-| `--env KEY=VALUE` | Cloud: plain environment variables (repeatable) |
+| `--env KEY=VALUE` | Cloud: plain environment variables, saved in the environment's settings (repeatable); `KEY` alone is refused, so keep a secret with `cw secrets` |
 | `--profile NAME`, `--no-profile` | Credential profile: `local:NAME` or `platform:NAME`, or none. A cloud create with neither uses the `codewire.yaml` profile, then your default profile |
 | `--secrets NAME`, `--user-secrets local\|platform`, `--org-secrets` | Application-secret sources |
 | `--ttl 8h` | Cloud: delete after a lifetime |

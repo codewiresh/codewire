@@ -510,8 +510,8 @@ pub(crate) async fn create_native_environment(
     mut args: EnvCreateArgs,
     caps: &crate::output::Capabilities,
 ) -> anyhow::Result<Option<NativeCreated>> {
-    host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
+    host_support::require_local_vm_host()?;
     // Gather and review inputs before booting the supervisor or allocating a VM.
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
@@ -3333,7 +3333,7 @@ fn native_plan(
         args.branch.as_deref().and_then(trimmed_str),
         true,
     )?;
-    let environment = parse_env_overrides(&args.env)?;
+    let environment = parse_env_settings(&args.env, "cw create")?;
     project.spec.environment.extend(environment);
     provenance.default_image =
         project.spec.image.is_empty() && args.image.as_deref().and_then(trimmed_str).is_none();
@@ -4252,7 +4252,7 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
             unsupported.join(", ")
         );
     }
-    Ok(())
+    parse_env_settings(&args.env, "cw create").map(drop)
 }
 
 fn parse_native_memory(value: &str) -> anyhow::Result<u32> {

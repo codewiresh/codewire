@@ -1,16 +1,3 @@
-#[test]
-fn parse_env_overrides_requires_key_value_shape() {
-    let parsed = parse_env_overrides(&["FOO=bar".to_string(), "EMPTY=".to_string()]).unwrap();
-    assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
-    assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
-
-    let canary = "synthetic-bearer-do-not-render";
-    let err = parse_env_overrides(&[canary.to_string()]).unwrap_err();
-    let rendered = err.to_string();
-    assert_eq!(rendered, "environment override must be KEY=VALUE");
-    assert!(!rendered.contains(canary));
-}
-
 fn test_billing_overview() -> BillingOverview {
     BillingOverview {
         billing_enabled: true,

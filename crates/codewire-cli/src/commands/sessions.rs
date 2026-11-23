@@ -1603,6 +1603,7 @@ async fn launch_run(
         return super::member_control::terminal::run(globals, args).await;
     }
     anyhow::ensure!(args.request_id.is_none(), "--request-id requires --member");
+    let env_overrides = parse_env_overrides(&args.env, &OsEnv)?;
     let caps = super::lifecycle_output::capabilities(args.output);
     let can_ask = run_can_ask(&args, &caps);
     let bare = check_run_request(&args, can_ask)?;
@@ -1746,7 +1747,6 @@ async fn launch_run(
     let parent_session_id = resolve_parent_session(&target, args.parent.as_deref()).await?;
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
     target.ensure_ready_for_run().await?;
-    let env_overrides = parse_env_overrides(&args.env)?;
     // A restart can begin after the list above (#4342). The launch is made
     // again only after a restart: when the gate refused it while starting, or
     // the daemon answered that it was still starting. Neither makes a session.

@@ -569,6 +569,7 @@ pub mod projection;
 
 mod desktop;
 pub use desktop::{DESKTOP_VIEWER_PASSWORD_LENGTH, is_desktop_viewer_password, vetted_desktop};
+mod env_debug;
 mod login_debug;
 
 mod placeholder_debug;

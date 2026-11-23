@@ -365,7 +365,7 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
 
 ## `sandbox-run-env`: pass a variable by name
 
-Not shipped yet (#5222). A program that holds a secret, such as a per-thread
+#5222. A program that holds a secret, such as a per-thread
 token, hands it to one command in a sandbox without putting it in `cw`'s
 arguments.
 
