@@ -559,7 +559,8 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - A workload started by a custom image's own entrypoint does not see the
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
   - On Kind there is no `https` server origin, so the variable is absent and
-    `cw` says "no server configured" there, as on any machine without one.
+    `cw` says it isn't signed in, with `→ cw login`, as on any machine
+    without a sign-in.
   - A workspace image older than #5202's launcher runs its own `cw` from
     PATH, which can be older than the release. The `readlink` proof shows
     which one ran.

@@ -539,7 +539,7 @@ mod tests {
                 "✓ Current environment: app\n",
                 "  local VM · stopped\n",
                 "  2 vCPU · 4 GiB RAM · 40 GiB disk\n",
-                "  Credentials: platform:work\n",
+                "  Credentials: work (cloud)\n",
                 "\n",
                 "→ cw --local shell app\n",
             )

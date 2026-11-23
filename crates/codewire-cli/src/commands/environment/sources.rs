@@ -1,8 +1,7 @@
 //! Hosted source selection is metadata-only. Material remains behind the
 //! environment operation, and every mutation uses the exact previewed inputs.
-use std::io::BufRead;
-
 use super::*;
+use crate::commands::lifecycle_output::source_preview::{self, SourceRows, UpdateEffect};
 use crate::environment_client::validate_source_selection;
 use crate::presentation::{
     EnvironmentSourceSelection, EnvironmentSourcesUpdateOutcome, UpdateEnvironmentSourcesRequest,
@@ -233,75 +232,21 @@ async fn resolve_platform_sources(
     Ok(names)
 }
 
-fn selection_preview(selection: &EnvironmentSourceSelection) -> String {
-    let project = if selection.secrets.project.is_empty() {
-        "none"
-    } else {
-        &selection.secrets.project
-    };
-    let user = match selection.secrets.user {
-        None => "none",
-        Some(codewire_project::StoragePlacement::Platform) => {
-            "platform / current authenticated user (personal)"
-        }
-        Some(codewire_project::StoragePlacement::Local) => "local / current user (personal)",
-    };
-    let profile = match (&selection.credentials, selection.profile_revision) {
-        (Some(credentials), Some(revision)) => format!(
-            "{:?} revision {revision} (personal, current authenticated user)",
-            credentials.profile
-        ),
-        _ => "none".to_owned(),
-    };
-    format!(
-        "  Application-secret project: {project:?}\n  Organization application secrets: {}\n  Personal application secrets: {user}\n  Credential profile: {profile}\n",
-        if selection.secrets.organization {
-            "selected organization"
-        } else {
-            "none"
-        }
+/// The preview's rows for `selection`, named by `names`.
+fn preview_rows(
+    selection: &EnvironmentSourceSelection,
+    names: &super::lifecycle::SourceNames,
+) -> SourceRows {
+    SourceRows::new(
+        &selection.secrets,
+        names.project.as_deref(),
+        selection
+            .credentials
+            .as_ref()
+            .map(|binding| binding.profile.as_str()),
+        names.profile.as_deref(),
+        selection.profile_revision,
     )
-}
-
-fn confirm_sources(assume_yes: bool, output: OutputFormat) -> anyhow::Result<()> {
-    let interactive = !matches!(output, OutputFormat::Json)
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal();
-    confirm_sources_with(assume_yes, interactive, || {
-        eprint!("Apply this exact source selection? [y/N]: ");
-        std::io::stderr()
-            .flush()
-            .context("flush source confirmation")?;
-        read_confirmation(std::io::stdin().lock())
-    })
-}
-
-fn confirm_sources_with(
-    assume_yes: bool,
-    interactive: bool,
-    prompt: impl FnOnce() -> anyhow::Result<bool>,
-) -> anyhow::Result<()> {
-    if assume_yes {
-        return Ok(());
-    }
-    anyhow::ensure!(
-        interactive,
-        "source selection requires --yes for noninteractive or JSON commands; no source change was submitted"
-    );
-    anyhow::ensure!(
-        prompt()?,
-        "source selection canceled; no source change was submitted"
-    );
-    Ok(())
-}
-
-pub(super) fn read_confirmation(reader: impl BufRead) -> anyhow::Result<bool> {
-    let mut input = String::new();
-    let count = reader
-        .take(65)
-        .read_line(&mut input)
-        .context("read source confirmation")?;
-    Ok(count > 0 && count < 65 && matches!(input.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
 pub(super) async fn prepare_create_sources(
@@ -338,14 +283,15 @@ pub(super) async fn prepare_create_sources(
         }
         return Ok(apply_create_selection(request, selection, names));
     }
-    eprintln!(
-        "Create environment {:?} on platform {:?}, organization {:?}.\n{}Application secrets are visible to the managed workload; provider credentials remain behind their supported handlers.",
-        request.name.as_deref().unwrap_or("(server assigned)"),
-        platform.server_url,
-        org_id,
-        selection_preview(&selection)
+    eprint!(
+        "{}",
+        source_preview::create_preview(
+            request.name.as_deref().unwrap_or("(named by the server)"),
+            VmLocation::Cloud,
+            &preview_rows(&selection, &names),
+        )
     );
-    confirm_sources(args.yes, args.output)?;
+    source_preview::confirm(args.yes, args.output)?;
     Ok(apply_create_selection(request, selection, names))
 }
 
@@ -413,7 +359,7 @@ pub(super) async fn update_platform_sources(
     )?;
     validate_source_selection(expected, true)?;
     let mut replacement = replacement_sources(expected, &args);
-    resolve_platform_sources(
+    let resolved = resolve_platform_sources(
         platform,
         client,
         org_id,
@@ -427,25 +373,42 @@ pub(super) async fn update_platform_sources(
         matches!(environment.state.as_str(), "running" | "stopped"),
         "source updates require a running or stopped environment; wait for the current operation to finish"
     );
-    let restart = changed && environment.state == "running";
-    eprintln!(
-        "Update environment {:?} ({:?}) on platform {:?}, organization {:?}, operation {}.\nCurrent:\n{}Replacement:\n{}{}",
-        environment.name,
-        environment.id,
-        platform.server_url,
-        org_id,
-        environment.operation_generation,
-        selection_preview(expected),
-        selection_preview(&replacement),
-        if restart {
-            "This change requires a managed restart; workspace contents are preserved."
-        } else if changed {
-            "The stopped environment will use this selection at its next managed start."
-        } else {
-            "The selected sources and pinned profile revision are unchanged."
-        }
+    let name = super::lifecycle::display_name(&environment);
+    if !changed {
+        source_preview::report_unchanged(&name, args.output);
+        return Ok(());
+    }
+    let restart = environment.state == "running";
+    let effect = if restart {
+        UpdateEffect::Restart
+    } else {
+        UpdateEffect::NextStart
+    };
+    let current_names =
+        super::lifecycle::resolve_source_names(platform, client, org_id, &environment).await;
+    let replacement_names = super::lifecycle::SourceNames {
+        profile: resolved.profile.or_else(|| {
+            (replacement.credentials == expected.credentials)
+                .then(|| current_names.profile.clone())
+                .flatten()
+        }),
+        project: resolved.project.or_else(|| {
+            (replacement.secrets.project == expected.secrets.project)
+                .then(|| current_names.project.clone())
+                .flatten()
+        }),
+    };
+    eprint!(
+        "{}",
+        source_preview::update_preview(
+            &name,
+            VmLocation::Cloud,
+            &preview_rows(expected, &current_names),
+            &preview_rows(&replacement, &replacement_names),
+            effect,
+        )
     );
-    confirm_sources(args.yes, args.output)?;
+    source_preview::confirm(args.yes, args.output)?;
     let selected = replacement.clone();
     let began = Instant::now();
     let cursor = if restart {
@@ -467,32 +430,29 @@ pub(super) async fn update_platform_sources(
         // The next update is refused until this restart ends, so the update
         // ends with it, as `cw start` ends with its start.
         let caps = crate::commands::lifecycle_output::capabilities(args.output);
-        let name = environment.name.as_deref().unwrap_or(&environment.id);
         let feed = super::progress::PlatformLogFeed {
             client,
             org_id,
             environment_id: &environment.id,
         };
         let view = StartProgress::new(std::io::stderr(), &caps, began, "Restarting");
-        let interrupt = InterruptNotice::new(VmLocation::Cloud, "restart", name);
+        let interrupt = InterruptNotice::new(VmLocation::Cloud, "restart", &name);
         Box::pin(super::stop_start::follow_platform_start(
             &feed, cursor, false, view, &caps, &interrupt,
         ))
         .await?;
     }
-    match args.output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
-        OutputFormat::Text => println!(
-            "{}",
-            match result.outcome {
-                EnvironmentSourcesUpdateOutcome::Unchanged =>
-                    "Environment source selection unchanged.",
-                EnvironmentSourcesUpdateOutcome::Stored =>
-                    "Environment source selection stored for the next managed launch.",
-                EnvironmentSourcesUpdateOutcome::RestartRequired =>
-                    "Environment source selection stored; the environment restarted with it.",
-            }
-        ),
+    match (args.output, result.outcome) {
+        (OutputFormat::Json, _) => println!("{}", serde_json::to_string_pretty(&result)?),
+        (OutputFormat::Text, EnvironmentSourcesUpdateOutcome::Unchanged) => {
+            source_preview::report_unchanged(&name, args.output)
+        }
+        (OutputFormat::Text, EnvironmentSourcesUpdateOutcome::Stored) => {
+            source_preview::print_result(&name, VmLocation::Cloud, UpdateEffect::NextStart)
+        }
+        (OutputFormat::Text, EnvironmentSourcesUpdateOutcome::RestartRequired) => {
+            source_preview::print_result(&name, VmLocation::Cloud, UpdateEffect::Restart)
+        }
     }
     // The credentials its agents can't use, as a local update says them
     // (#5594).
@@ -909,19 +869,6 @@ mod tests {
             &update_args(&["--clear-secrets", "--clear-profile"]),
         );
         assert_eq!(cleared, EnvironmentSourceSelection::default());
-    }
-
-    #[test]
-    fn confirmation_requires_explicit_yes_and_never_prompts_noninteractive() {
-        assert!(confirm_sources_with(false, false, || panic!("must not read input")).is_err());
-        assert!(confirm_sources_with(true, false, || panic!("must not read input")).is_ok());
-        assert!(confirm_sources_with(false, true, || Ok(false)).is_err());
-        assert!(confirm_sources_with(false, true, || Ok(true)).is_ok());
-        for input in ["", "\n", "no\n", "yesterday\n"] {
-            assert!(!read_confirmation(input.as_bytes()).unwrap());
-        }
-        assert!(read_confirmation("yes\n".as_bytes()).unwrap());
-        assert!(!read_confirmation(format!("yes{}", " ".repeat(100)).as_bytes()).unwrap());
     }
 
     #[test]

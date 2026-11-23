@@ -1,7 +1,7 @@
 ---
 title: Personal assistants
 description: Keep an agent running in a hosted sandbox with your project, message it from any terminal, and read its answers later; it remembers the conversation.
-updated: 2026-11-08
+updated: 2026-11-23
 weight: 4
 ---
 
@@ -23,7 +23,7 @@ cw create --name assistant --image workspace \
 ```text
 assistant · cloud VM
   2 vCPU · 8 GiB RAM · 80 GiB disk
-  Credentials: platform:agents-dev
+  Credentials: agents-dev (cloud)
   ✓ Cloning repositories  1s
   ✓ Setup complete
 ✓ Environment assistant created · cloud VM

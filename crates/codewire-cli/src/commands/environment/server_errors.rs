@@ -26,15 +26,44 @@ pub(crate) fn map_env_delete_error(environment_ref: &str, err: anyhow::Error) ->
     reworded(format!("delete environment: {err:#}"), trace_id)
 }
 
+/// A create's failure: the one refusal when the server has network policies
+/// turned off, otherwise `create environment` and the error.
+pub(super) fn create_failed(error: anyhow::Error) -> anyhow::Error {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<codewire_client::ClientError>())
+        .find_map(crate::commands::policy::policies_disabled)
+        .unwrap_or_else(|| error.context("create environment"))
+}
+
+/// A cloud publish refused because the port is already published, as a
+/// local one is refused; any other failure, a label in use included, as it
+/// came.
+pub(super) fn port_create_failed(
+    name: &str,
+    port: u16,
+    labelled: bool,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if !labelled && lifecycle::error_has_reason(&error, "port_conflict") {
+        return crate::commands::lifecycle_output::port_already_published(
+            crate::output::VmLocation::Cloud,
+            name,
+            port,
+            trace_id(&error),
+        );
+    }
+    error.context("create port")
+}
+
 /// Selecting an environment's network policy, refused or failed.
 pub(super) fn network_policy_selection(error: codewire_client::ClientError) -> anyhow::Error {
-    let text = match error.reason() {
-        Some("NETWORK_POLICIES_DISABLED") => {
-            "organization network policies are not enabled on this deployment".to_owned()
-        }
-        _ => format!("select the network policy: {}", error.message()),
-    };
-    reworded(text, error.trace_id())
+    crate::commands::policy::policies_disabled(&error).unwrap_or_else(|| {
+        reworded(
+            format!("select the network policy: {}", error.message()),
+            error.trace_id(),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -81,8 +110,12 @@ mod tests {
             "NETWORK_POLICIES_DISABLED",
         ));
         assert_eq!(
-            disabled.to_string(),
-            "organization network policies are not enabled on this deployment"
+            crate::error_report::sentence(&disabled),
+            "network policies are turned off on this Codewire server; a local VM can still use one"
+        );
+        assert_eq!(
+            crate::error_report::next_step(&disabled).as_deref(),
+            Some("cw --local policy")
         );
         assert_eq!(trace_id(&disabled), Some(TRACE));
         let other = network_policy_selection(answered(

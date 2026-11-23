@@ -133,7 +133,12 @@ async fn resolve_snapshot(
         .await?
         .into_iter()
         .find(|snapshot| snapshot.id == target || snapshot.name == target)
-        .ok_or_else(|| anyhow::anyhow!("no snapshot named {}", terminal_text(target)))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no cloud snapshot is named {}; list them with `cw --cloud snapshot ls`",
+                terminal_text(target)
+            )
+        })
 }
 
 /// The snapshot `rm` removes. One already being removed is gone, as a local
@@ -284,6 +289,28 @@ pub(crate) async fn create_environments_from_platform_snapshot(
     Ok(())
 }
 
+/// A create the server refused, in the local sentences, which name the next
+/// command (docs/dev/CLI-PARITY.md, K2); any other failure as it came.
+fn create_refused(error: anyhow::Error, environment: &str, name: &str) -> anyhow::Error {
+    let reason = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<ClientError>())
+        .find_map(ClientError::reason)
+        .map(str::to_owned);
+    let (environment, name) = (terminal_text(environment), terminal_text(name));
+    let trace_id = crate::error_report::trace_id(&error);
+    let text = match reason.as_deref() {
+        Some("invalid_state") => format!(
+            "{environment} is running; stop it first (`cw --cloud stop {environment}`), then snapshot it"
+        ),
+        Some("snapshot_name_taken") => format!(
+            "a snapshot named {name} already exists; choose another name or remove it first (`cw --cloud snapshot rm {name}`)"
+        ),
+        _ => return error.context("snapshot create"),
+    };
+    crate::reworded::reworded(text, trace_id)
+}
+
 pub(super) async fn handle_platform_snapshot_command(
     globals: &Globals,
     command: SnapshotCommand,
@@ -303,7 +330,7 @@ pub(super) async fn handle_platform_snapshot_command(
             let created = client
                 .create_snapshot(&org_id, &environment_id, &name)
                 .await
-                .context("snapshot create")?;
+                .map_err(|error| create_refused(error, environment, &name))?;
             let snapshot = wait_for_capture(&client, &org_id, &created.id).await?;
             if snapshot.state.as_known() != Some(SnapshotState::Ready) {
                 anyhow::bail!(

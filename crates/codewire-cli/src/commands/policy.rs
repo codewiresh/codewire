@@ -21,6 +21,22 @@ use super::*;
 mod platform;
 mod refusal_log;
 
+/// The one refusal for a server with network policies turned off, from
+/// `cw policy`, `create --policy` and `update --policy` alike
+/// (docs/dev/CLI-PARITY.md, P4), or `None` for any other error. It keeps the
+/// id of the trace the answer named.
+pub(crate) fn policies_disabled(error: &codewire_client::ClientError) -> Option<anyhow::Error> {
+    (error.reason() == Some("NETWORK_POLICIES_DISABLED")).then(|| {
+        crate::error_report::with_next_step(
+            crate::reworded::reworded(
+                "network policies are turned off on this Codewire server; a local VM can still use one",
+                error.trace_id(),
+            ),
+            "cw --local policy",
+        )
+    })
+}
+
 /// `cw --cloud policy log`'s answer until hosted Sandboxes keep a log (#4000).
 const NO_HOSTED_REFUSAL_LOG: &str =
     "hosted Sandboxes have no refusal log yet; `cw --local policy log ENV` shows a local VM's";

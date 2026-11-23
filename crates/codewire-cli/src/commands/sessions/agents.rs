@@ -1652,6 +1652,7 @@ pub(crate) async fn handle_agent_interrupt_command(
     }
     let (environment, session) = split_session_target(&args.target)?;
     let target = resolve_environment_session_target(globals, environment).await?;
+    dispatch::refuse_terminal_interrupt(&target, session).await?;
     if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
         return platform_host::action(
             target,
@@ -1661,11 +1662,8 @@ pub(crate) async fn handle_agent_interrupt_command(
         )
         .await;
     }
-    {
-        let target = resolve_environment_session_target(globals, environment).await?;
-        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
-            return native_host::interrupt(target, session, args.output).await;
-        }
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+        return native_host::interrupt(target, session, args.output).await;
     }
     let managed = resolve_managed(globals, environment, session).await?;
     ensure_accepting(&managed)?;

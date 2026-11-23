@@ -1615,32 +1615,12 @@ pub(crate) async fn handle_native_environment_update(
         sources::SourceChanges::update(&args),
     )
     .await?;
-    let profile = if args.clear_profile {
-        None
-    } else if args.profile.is_some() {
-        resolved.profile
-    } else {
-        sources::profile_from_environment(&environment)
+    let Some(request) = sources::reviewed_update(&environment, &current, &target, resolved, &args)?
+    else {
+        return Ok(());
     };
-    let platform = sources::select_platform_authority(
-        environment.platform_source_authority.as_ref(),
-        resolved.platform,
-        sources::retained_platform_source(&current, &args),
-        &target,
-        profile.as_ref(),
-    )?;
-    let request =
-        sources::update_request(&environment, &target, profile.as_ref(), platform.as_ref())?;
-    sources::confirm_update_sources(
-        &environment,
-        &current,
-        &target,
-        profile.as_ref(),
-        platform.as_ref(),
-        request.allow_restart,
-        &args,
-    )?;
     let request_id = request.request_id.clone();
+    let restarts = request.allow_restart;
     // The supervisor client follows its existing durable operation. A failed
     // exact CAS is returned once, never refetched or submitted with new inputs.
     let operation = supervisor
@@ -1663,7 +1643,7 @@ pub(crate) async fn handle_native_environment_update(
         "native environment identity changed after the source operation"
     );
     profile::print_withheld(&profile::withheld_credentials(&updated).await);
-    print_native_environment(&updated, args.output)
+    sources::print_update_result(&updated, restarts, args.output)
 }
 
 pub(crate) fn native_orphan_report() -> anyhow::Result<NativeOrphanReport> {

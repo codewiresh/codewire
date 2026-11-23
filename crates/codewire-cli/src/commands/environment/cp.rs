@@ -1,7 +1,8 @@
-//! The entry of `cw cp`, moved from the parent module with no change in
-//! behaviour.
+//! The entry of `cw cp`. A missing or refused remote path fails in the same
+//! words in both placements (docs/dev/CLI-PARITY.md, W4).
 
 use super::*;
+use codewire_client::ErrorCode;
 
 pub(super) async fn handle_unified_environment_cp(
     globals: &Globals,
@@ -9,11 +10,73 @@ pub(super) async fn handle_unified_environment_cp(
     args: EnvCpArgs,
 ) -> anyhow::Result<()> {
     let (src_remote, dst_remote) = env_cp_remote_paths(&args.src, &args.dst)?;
+    let (direction, environment, path) = match (src_remote, dst_remote) {
+        (Some((environment, path)), _) => ("download", environment.to_owned(), path.to_owned()),
+        (None, Some((environment, path))) => ("upload", environment.to_owned(), path.to_owned()),
+        (None, None) => unreachable!("validated copy direction has one remote environment"),
+    };
+    let target = resolve_unified_environment_target(globals, placement, &environment, "cp").await?;
+    copy(globals, target, args)
+        .await
+        .map_err(|error| transfer_failed(error, direction, &environment, &path))
+}
+
+/// `error` in the user's terms when the remote path is missing or refused:
+/// the path as `ENV:PATH`, with no service code. Any other failure is left
+/// as it came.
+fn transfer_failed(
+    error: anyhow::Error,
+    direction: &str,
+    environment: &str,
+    path: &str,
+) -> anyhow::Error {
+    let remote = format!("{environment}:{path}");
+    // A cloud answer keeps the id of the trace it named.
+    let trace_id = crate::error_report::trace_id(&error);
+    match rpc_code(&error) {
+        Some(ErrorCode::NotFound) => {
+            crate::reworded::reworded(format!("{direction}: there is no file {remote}"), trace_id)
+        }
+        Some(ErrorCode::InvalidArgument | ErrorCode::PermissionDenied) => {
+            crate::reworded::reworded(
+                format!("{direction}: cw can't copy {remote}: the path is invalid or not allowed"),
+                trace_id,
+            )
+        }
+        _ => error,
+    }
+}
+
+/// The service code of the first service error in `error`'s chain, from
+/// either placement.
+fn rpc_code(error: &anyhow::Error) -> Option<ErrorCode> {
+    error.chain().find_map(|cause| {
+        if let Some(error) = cause.downcast_ref::<codewire_client::ClientError>() {
+            return Some(error.code());
+        }
+        if let Some(error) = cause.downcast_ref::<connectrpc::ConnectError>() {
+            return Some(error.code);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(codewire_local_vmm::public_client::NativePublicClientError::Rpc(error)) =
+            cause.downcast_ref::<codewire_local_vmm::public_client::NativePublicClientError>()
+        {
+            return Some(error.code);
+        }
+        None
+    })
+}
+
+async fn copy(
+    globals: &Globals,
+    target: UnifiedEnvironmentTarget,
+    args: EnvCpArgs,
+) -> anyhow::Result<()> {
+    let (src_remote, dst_remote) = env_cp_remote_paths(&args.src, &args.dst)?;
     let target_ref = src_remote
         .or(dst_remote)
         .map(|(environment, _)| environment)
         .expect("validated copy direction has one remote environment");
-    let target = resolve_unified_environment_target(globals, placement, target_ref, "cp").await?;
     match target {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => match (src_remote, dst_remote) {

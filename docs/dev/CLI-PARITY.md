@@ -10,7 +10,7 @@ A gap is fixed with one implementation that both placements call, where only
 the store differs: the local credential authority (the operating system's
 protected store) or the platform credential service. Never a second copy.
 
-## Where it stands (2026-11-22)
+## Where it stands (2026-11-23)
 
 The second pass (2026-11-21, `cw` v0.4.26) audited every other command group:
 secrets, network policy, create and run, lifecycle, inventory, sessions, ports
@@ -24,7 +24,11 @@ Since then (2026-11-22), not yet observed on a surface:
   (ff0d91d276), P3 (07ad66bb3f), L1 (d3505ab915), N1's missing program
   (c9b80bf7c8) and L7 (bffcb26313); then R3 (e5aece4c8c), R2
   (868eae223d), H1 (643b739dbc), B1 (a5a66569a6), R8 (b5078084f3) and N2
-  (ef334abf33).
+  (ef334abf33); then A1, S2, P4, R4, R5, N5, W2, W4, K2 and H2 (#6182).
+  A1 keeps one local sentence, "native local preview does not yet support",
+  until #6056 lands beside it. A source shows as `work (cloud)` or
+  `app-dev (local)`; the `platform:` and `local:` prefixes stay what a user
+  types in codewire.yaml and `--profile`.
 - **Open:** every other gap below, and N1's `exec -t` blank line.
 
 The credentials tables are the audit as it ran on 2026-11-15. Since then:
@@ -406,19 +410,19 @@ store the platform's secret service, and each branch prints its own results.
 | `set` an empty value, or nothing on stdin | "Workload-secret value must be non-empty UTF-8 without NUL bytes and at most 65536 bytes", exit 1 | Same | same |
 | `set` a key that isn't a variable name | Parser error, exit 2 | Same | same |
 | `rename`, `delete` | `Local user secret A renamed to B.`, `… deleted.` | `Secret A renamed to B.`, `… deleted.` | **Gap S1** |
-| `rename` a key that isn't there | Raw store error: `Rename local user secret: code: 'Some requested entity was not found', message: "local credential record was not found"` | "Rename user secret: secret not found" | **Gap S2** |
+| `rename` a key that isn't there, or to a name in use | "There is no local user secret A, so nothing was renamed", or "local user secret B already exists, so nothing was renamed"; `→ cw --local secrets --user list` | The same, `cloud` | Same in both now (#6182); was S2: the raw store error locally, "Rename user secret: secret not found" in the cloud |
 | `delete` a key that isn't there | "There is no local user secret KEY, so nothing was deleted", `→ cw --local secrets --user list`, exit 1 | The same, `cloud`; the service answers NotFound | Same in both now (19a51afe40); was S3: the raw store error locally, `Secret KEY deleted.` and exit 0 in the cloud |
 | `--organization` (list, set, delete) | "Organization workload secrets are unsupported locally; use --cloud", exit 1 | Works | intended: a local store has one user and no organization. The message is plain, but "workload secrets" is an internal word; help says "application secrets" |
 | Guided `set` at a terminal | "Where should this secret live?": A project, Your account | Same, plus Organization | intended, as above |
 | `projects list`, nothing there | "No secret projects found." | Same | same |
 | `projects create NAME` | `Local secret project "NAME" created (ID).` | `Secret project "NAME" created. (id: ID)` | **Gap S1** |
-| `projects create` a name in use | Raw store error ending "local credential record already exists" | "Create secret project: secret project with this name already exists" | **Gap S2** |
+| `projects create` a name in use | "A local secret project named "P" already exists", `→ cw --local secrets projects list` | The same, `cloud` | Same in both now (#6182); was S2: the raw store error locally, "Create secret project: secret project with this name already exists" in the cloud |
 | `projects create 'bad name'` | Refused before the store: "a secret project name starts with a letter or digit and has only letters, digits, '-', '_' and '.', at most 64 characters" | The same, before the store; the service refuses the same names | Same in both now (ff0d91d276); was S4: the raw store error locally, a project named `bad name` in the cloud |
 | `projects list`, text and JSON | NAME, SECRETS, CREATED. JSON has `org_id: ""` and `secret_count` | Same columns. JSON leaves out `secret_count` when it is 0 | **Gap S1** |
-| A project that doesn't exist | "Local secret project was not found" | "Platform secret project was not found in the selected organization" | **Gap S2** (neither names it), A1 |
+| A project that doesn't exist | "There is no local secret project "P"", `→ cw --local secrets projects list` | The same, `cloud` | Same in both now (#6182); was S2 and A1: "Local secret project was not found", "Platform secret project was not found in the selected organization" |
 | `--project P set`, `list`, `delete` | `Local secret KEY set in project "P".` | `Secret KEY set in project "P".` | **Gap S1** |
 | `projects delete` without `--yes`, no terminal | "Project deletion requires --yes when noninteractive", exit 1 | Same | same |
-| `projects delete` at a terminal | `Delete local secret project "P" (ID) and all its keys? [y/N]`; `n` prints `Canceled.`, exit 0 | `Delete platform secret project "P" (ID) in organization ORG_ID and all its keys? [y/N]` | **Gap S1** (the raw organization ID), A1 |
+| `projects delete` at a terminal | `Delete local secret project "P" (ID) and all its keys? [y/N]`; `n` prints `Canceled.`, exit 0 | `Delete cloud secret project "P" (ID) and all its keys? [y/N]` | Same in both now (#6182); was A1 and S1's raw organization ID |
 | `preview --file` | PLACEMENT, KEY, SOURCE, OVERRIDDEN; JSON the same fields | Same renderer | same |
 | `preview` of a file that selects organization secrets | "Organization workload secrets are unsupported in local preview; use --cloud" | "No workload secrets selected." when the organization has none | intended, as `--organization` |
 
@@ -464,7 +468,7 @@ cloud rows are *read, not run*.
 | `allow` on a policy an environment uses | `Changed network policy X · rev 2`, then `Enforced now in: ENV` | The stored line above (*read, not run*) | **P1** |
 | `check POLICY DEST` | `Allowed: example.com:443 by X rev 4, when the name answers public addresses` or `Refused: … (name not allowed)`, exit 0 either way; JSON `allowed`, `reason`, `revision` | Same for `open` and `locked`; a stored policy *read, not run* | same |
 | `delete` a policy an environment selects | "Delete the network policy: local network policy X is selected by ENV" | *read, not run* | **Gap P2** |
-| `create --policy X`, `update ENV --policy X` | Selected and enforced; `info` shows `X · rev 1`. `update --policy` applies at once, without asking, even at a terminal | On Dev, `create`: "Create environment: platform network policies are not enabled on this deployment"; `update`: "Organization network policies are not enabled on this deployment", with no next step | **P1**, **Gap P4** |
+| `create --policy X`, `update ENV --policy X` | Selected and enforced; `info` shows `X · rev 1`. `update --policy` applies at once, without asking, even at a terminal | On a server with network policies turned off, `create`, `update` and `cw policy` all say "Network policies are turned off on this Codewire server; a local VM can still use one", `→ cw --local policy` | **P1**; the refusal is one sentence now (#6182); was P4: three wordings, two with no next step |
 
 ### The gaps
 
@@ -495,22 +499,22 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 | Default size | 2 vCPU · 4 GiB RAM · 20 GiB disk | 2 vCPU · 8 GiB RAM · 80 GiB disk | intended: a local VM uses this computer's memory and disk |
 | Progress | Preparing sources, Checking the VM runtime, Preparing the image, Starting the VM, Booting the workspace. The first create downloads the runtime (219 MiB) and says so | Creating sandbox, Waiting for SSH access, Waiting for the workspace daemon, Configuring environment | intended: different machinery, each in the user's terms |
 | A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Refused by the service, under the organization lock, in the same sentence: `cloud environment "N" already exists (remove it with cw --cloud rm N or choose another --name)`. A removed environment's name is free | Same in both now (242addf606); was R1: the cloud created a second `N` |
-| Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "native source selection requires --yes …" (*read*) | Created, with nothing to confirm | same rule, in two copies (R4) |
+| Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "Applying sources needs --yes outside an interactive terminal or with JSON output; nothing was changed", `→ --yes` | Created, with nothing to confirm; with sources to confirm, the same refusal | Same in both now (#6182); was R4: two copies of the rule |
 | `-e KEY=VALUE` | Taken, over codewire.yaml's value; the VM's sessions get it | Taken; the variable reaches `exec` | Same in both now (868eae223d); was R2: "Native local preview does not yet support: --env", exit 1 |
 | `--cpu 0.5`, `500m`, `lots` | The cloud's grammar, before the supervisor starts or the configuration is shown. A VM boots whole vCPUs, so a fraction rounds up (0.5 and 500m are 1 vCPU), at most 32; `--help` says so. `lots`: `Invalid CPU quantity "lots"; use values such as 500m, 0.5, or 4` | Before anything: the same refusal | Same in both now (e5aece4c8c); was R3: 0.5 and 500m refused locally, and `lots` refused after the configuration lines in other words |
-| `--secrets` a missing project | "Source was not found in the eligible authenticated stores" | "Platform secret project was not found in the selected organization" | **R4**, S2 |
-| `--secrets P`, the confirmation block | `Create native environment "N" with these exact sources:`, `Secret project: "local:id:ID"`; the result says `Secrets: local:P` | `Create environment "N" on platform "URL", organization "ORG_ID".`, `Application-secret project: "platform:id:ID"`; the result says `Secrets: platform:P` | **Gap R4**, A1 |
+| `--secrets` a missing project | "There is no local secret project "P"", `→ cw --local secrets projects list`; a reference with no placement: "… "P", local or cloud" | The same, `cloud` | Same in both now (#6182); was R4 and S2: "Source was not found in the eligible authenticated stores", "Platform secret project was not found in the selected organization" |
+| `--secrets P`, the confirmation block | `Create environment N · local VM with these sources:`, then the `Credentials` and `Secrets` lines the result prints (`app-dev (local)`), what the workload sees, and "Apply these sources? [y/N]" | The same, `cloud VM`, `app-dev (cloud)` | Same in both now (#6182); was R4 and A1: "native", "platform", raw IDs and the organization ID |
 | `--policy P` | Selected and enforced | Refused on Dev | P1, P4 |
 | `run --in ENV -- CMD` | The output, then `✓ Started session ENV/echo · local VM` | The same, then `via direct UDP` | same; the transport line is intended: only the cloud has a network path |
 | `run --detach --name S`; a name in use; `--output json` | The same results and refusal; JSON the same fields | Same | same (`working_dir` is `/workspace/workspace` locally and `/workspace` in the cloud: intended, a local create mounts the folder at `/workspace/NAME`) |
 | `run` with no command; an option after the command; a missing ENV | The same sentences | Same | same |
-| `run --agent claude` with no credential profile | "Managed VM agents require a selected credential profile" | "Selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE … and check `cw agent info ENV`" | **Gap R5** |
+| `run --agent claude` with no credential profile | "N has no credential profile for this agent; select one with `cw --local update N --profile PROFILE`", `→ cw --local agent info N` | The same, `--cloud` | Same in both now (#6182); was R5: "Managed VM agents require a selected credential profile", "Selected agent has no qualified provider proxy …" |
 | `run` at a terminal, nothing named | The agent picker ("Open an agent in a new or existing environment") | Same | same |
 | `run --name S -- sh` at a terminal | Attaches, with the detach and reconnect hints | The same, plus an OSC 7501 session-state sequence | **Gap R6** |
 | `init` | `--local` and `--cloud` refused ("does not apply to `cw init`"). Writes the same file signed in or not | Same | same |
-| `preset` | `--local` and `--cloud` refused. Signed out, every subcommand fails: "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')" | Presets live on the server: `list`, `create`, `info` work. `rm` takes only the ID; `rm SLUG` says "preset not found" though `info SLUG` finds it | **Gap R7** |
+| `preset` | `--local` and `--cloud` refused. Signed out, every subcommand fails: "Not signed in", `→ cw login` (was H2's "No server configured (…)") | Presets live on the server: `list`, `create`, `info` work. `rm` takes only the ID; `rm SLUG` says "preset not found" though `info SLUG` finds it | **Gap R7** |
 | `update --idle-stop` | "--idle-stop applies to cloud sandboxes; a local VM is never stopped for being idle" | Sets it, without a restart | intended: idle stop saves cloud compute; plain |
-| `update --secrets`, `--clear-secrets` | `Update native environment "N" ("ID"), generation 1.`, Current and Replacement, a managed restart, then the whole `info`. With nothing selected, `--clear-secrets` fails: "Update native sources; conflicts require a fresh exact preview: native environment request is invalid" | `Update environment Some("N") ("ID") on platform "URL", organization "ORG_ID", operation 1.`, Current and Replacement, then the restart's progress, as `cw start` shows a start's, and "Environment source selection stored; the environment restarted with it." | **Gap R4**; the wait is the same in both now (b5078084f3); was R8: it returned at once, and the next `update` failed ("Source updates require a running or stopped environment; wait for the current operation to finish") until the restart ended |
+| `update --secrets`, `--clear-secrets` | "Change the sources of environment N · local VM", Now and Then in the result's lines, what happens ("This restarts the environment; its workspace is kept"), then "Sources changed for environment N; it restarted with them." and `→ cw --local info N`. With nothing to change: "Environment N already has these sources; nothing changed.", exit 0 | The same, `cloud VM`, after the restart's progress, as `cw start` shows a start's | Same in both now (#6182); was R4: "native", "platform", the organization ID and `Some("N")`, and a clear with nothing selected failed locally. The wait is the same in both since b5078084f3 (was R8) |
 | `update` with no change; a missing ENV | The same sentences | Same | same |
 | `export ENV` | `✓ Exported local VM N to codewire.yaml`, then "! Not exported: the local workspace's host folder …" and "! Local only: secret and credential references are exact IDs as saved …" | `✓ Exported cloud environment N …`, then "! Not exported: environment values …" | intended: each names what its placement can't carry ("cloud environment" here, "cloud VM" in `create`: A1) |
 | `export` over an existing file; a missing ENV | The same sentences | Same | same |
@@ -645,7 +649,7 @@ once after a restart had ended them.
 | `inbox` of a terminal session | "ENV/S is a terminal session; it has no structured inbox." and the logs and attach commands; JSON the same fields | Same | same |
 | `wait --session` | The output, then "Session exited with code 3", exit 1; `--timeout 3s`: "Wait timed out; no completion confirmed: deadline has elapsed" | Same | same |
 | A session ended by an environment restart (`update`, `resize`) | `Exited`, exit code 143: `wait` says "Session exited with code 143"; `msg` "ENV/S is exited; …" | `Stopped`: "Session reached terminal state Stopped without an exit code: stopped with the environment"; `msg` "ENV/S is stopped; …" | **Gap N3** |
-| `interrupt` a terminal session | "Session is not a managed agent conversation" | "Original platform agent operation is unavailable" | **Gap N5** |
+| `interrupt` a terminal session | "ENV/S is a terminal session, not a managed agent conversation; interrupting applies only to managed conversations. …", `steer`'s sentence | Same | Same in both now (#6182); was N5: "Session is not a managed agent conversation", "Original platform agent operation is unavailable" |
 | `steer` a terminal session | "ENV/S is a terminal session, not a managed agent conversation; …" | Same | same |
 | `stop --session`, `restart --session` | The session table | Same | same |
 | `resize` without a size, without `--yes` | "Non-interactive resize requires at least one of --cpu, --memory, or --disk and --yes"; "… requires --yes after explicit resource validation" | Same | same |
@@ -682,7 +686,7 @@ results.
 | `ports ENV`, none | "N publishes no host ports" | "No ports registered." | **Gap W1** (neither names `--publish`) |
 | `ports --publish P` | `Published http://127.0.0.1:8080 -> N:8080`, a note that nothing listens there yet, then the list | `* Port 8080 registered as port-8080`, `URL: …`, `Access: creator` | intended: a host binding against a preview URL. The format is **W1** |
 | `ports ENV`, with ports | `127.0.0.1:8080 -> 8080` | Tab-separated PORT, LABEL, ACCESS, PREVIEW URL | **Gap W1** |
-| `--publish` a port already published | "host port 8080 is already published; withdraw it first" | "create port: port or label already registered for this environment" | **Gap W2** |
+| `--publish` a port already published | "N already publishes port 8080; withdraw it first", `→ cw --local ports N --unpublish 8080` | The same, `--cloud`; a label already in use keeps the service's words | Same in both now (#6182); was W2: "host port 8080 is already published; withdraw it first", "create port: port or label already registered for this environment" |
 | `--host-port` in the cloud; `--label` or `--access` locally | "--label and --access apply to cloud preview ports; a local port is published on 127.0.0.1 only" | "--host-port applies to local environments; a cloud port is published as a preview URL" | intended; plain |
 | `--unpublish` | `Withdrew 127.0.0.1:8080 -> N:8080`; not published: "N does not publish guest port 8080" | `* Port 8080 (port-8080) removed`; not published: "No preview publishes port 8080" | **W1** for the result; the refusals mean the same |
 | `--publish` in a stopped environment | "N is not running; start it with `cw start N`, then publish the port" | "N is stopped; start it with `cw start N`, then publish the port" | same |
@@ -692,8 +696,8 @@ results.
 | `desktop ENV` | Starts the desktop through the supervisor and forwards it through `cw-local-ID` | Starts it through the control plane and forwards it through `cw-cloud-ID` | same: one command over one desktop service, walked from Linux in both on 2026-11-22 (#3223) |
 | `desktop ENV` with no desktop service | "your local VMs run on an older cw's supervisor, which has no desktop service; `cw upgrade --vms` moves them to this cw once they are idle" | "this Codewire server has no desktop service yet; it needs an update" | intended: each names the update its placement needs |
 | `cp` to and from `/workspace` | `Uploaded FILE -> N:/workspace/FILE`; `Downloaded … (10 bytes)`; makes missing folders | The same, naming the environment by ID (A2) | same |
-| `cp` a remote file that isn't there | "Download: not_found: local file was not found" | "Download: file not found" | **Gap W4** |
-| `cp` to `/tmp` or `/proc` | "Upload: invalid_argument: local file path is invalid or denied" | "Upload: file path is invalid or denied" | same rule; wording **W4** |
+| `cp` a remote file that isn't there | "Download: there is no file N:/workspace/missing" | Same | Same in both now (#6182); was W4: "Download: not_found: local file was not found", "Download: file not found" |
+| `cp` to `/tmp` or `/proc` | "Upload: cw can't copy N:/proc/x: the path is invalid or not allowed" | Same | Same in both now (#6182); was W4: the raw `invalid_argument` code locally |
 
 ### The gaps
 
@@ -715,12 +719,12 @@ results.
 | --- | --- | --- | --- |
 | `snapshot ls`, none | "No snapshots. Make one from a stopped local VM with `cw snapshot create ENV`." | "No snapshots. Create one with: cw --cloud snapshot create ENV" | same |
 | `snapshot create ENV --name S` | `Snapshot S of N: mode=reflink consistency=clean disks=3 apparent=60.0 GiB in 0.26 s`, and a note on shared space | `Created snapshot S.`, and "It is kept on the storage node that holds this environment's disk and is not backed up …" | **Gap K1** |
-| `snapshot create` a running environment | "N is running; stop it first (`cw stop N`), or snapshot it later with a VM checkpoint" | "Snapshot create: environment must be stopped to snapshot it" | **Gap K2** |
-| `snapshot create` a name in use; a missing environment | "a snapshot named S already exists; choose another name or remove it first (`cw snapshot rm S`)"; "no local environment is named X; list them with `cw ls --local`" | "Snapshot create: you already have a snapshot with this name"; `Environment "X" not found` | **Gap K2** |
+| `snapshot create` a running environment | "N is running; stop it first (`cw stop N`), or snapshot it later with a VM checkpoint" | "N is running; stop it first (`cw --cloud stop N`), then snapshot it" | Same in both now (#6182), but for the checkpoint, which only a local VM has; was K2: "Snapshot create: environment must be stopped to snapshot it" |
+| `snapshot create` a name in use; a missing environment | "a snapshot named S already exists; choose another name or remove it first (`cw snapshot rm S`)"; "no local environment is named X; list them with `cw ls --local`" | The same sentences, `--cloud`; a missing environment: "No cloud environment is named "X"", `→ cw --cloud ls` | Same in both now (#6182); was K2: "Snapshot create: you already have a snapshot with this name", `Environment "X" not found` |
 | `snapshot create` at a terminal, no ENV | A picker of stopped environments; none: "No eligible stopped environments; …" | The same picker | same |
 | `snapshot ls` | NAME, SOURCE, CREATED (RFC 3339), DISKS, IMAGE, MODE | ID, STATE, SIZE, NAME | **Gap K1** |
 | `snapshot inspect`, text and JSON | Source by name, created, consistency, resources, each disk, what it holds, direct mounts, removed sign-ins; JSON the same | ID, State, Source (an ID), Size; JSON id, name, source_environment_id, state, size_bytes, location | **Gap K1**, A2 |
-| `snapshot inspect`, `rm` of a missing snapshot | "no local snapshot is named S; list them with `cw snapshot ls`" | "No snapshot named S" | **Gap K2** |
+| `snapshot inspect`, `rm` of a missing snapshot | "no local snapshot is named S; list them with `cw snapshot ls`" | "no cloud snapshot is named S; list them with `cw --cloud snapshot ls`" | Same in both now (#6182); was K2: "No snapshot named S" |
 | `snapshot rm S` | `Removed snapshot S; …`; again: "no local snapshot is named S; list them with `cw snapshot ls`" | `Removing snapshot S; …`; again, while it is still being deleted: "no cloud snapshot is named S; list them with `cw --cloud snapshot ls`", exit 1 | Same in both now (2e2960920c); was K3: the cloud's second `rm` printed the same line and exited 0 |
 | `create --snapshot S` | Refuses `--no-file` and `--no-profile`; a snapshot of a VM that mounted a folder needs `--share-mounts` | Takes both flags; the new environment gets the default size, not the source's | **Gap K4**; `--share-mounts` is intended: only a local VM mounts this computer's folders |
 | `checkpoint create`, `ls`, `inspect`, `restore`, `rm` | Work on Linux and on a Mac (#4654). `restore` of a running VM without `--yes` refuses and names it | "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet", exit 1, `ls` included | intended: a feature only local VMs have; plain. An empty `ls` should still exit 0 |
@@ -749,7 +753,7 @@ key.
 | `setup` | `--local`: "Downloading the local VM runtime (6 files, 219 MiB)...", `Local VM runtime installed (ID).`; again: "Local VM runtime is installed and intact (ID)." | `--cloud`: a device sign-in. With no terminal it prints the link and the code and waits, and opens no browser; at a terminal it shows the link, the code, the copy key and the waiting line. With `CODEWIRE_API_KEY` set: "Using the API key in CODEWIRE_API_KEY, so there is nothing to sign in to.", no request, then the SSH section and "Setup complete." | intended: each sets up its own placement. The sign-in is fixed (643b739dbc); was H1: "Opening browser" with no terminal, and a sign-in with an API key set |
 | `setup --local --skip-ssh` (or `--org`, `--create-org`) | "--org, --create-org, --org-slug and --skip-ssh apply to sign-in, not to `cw setup --local`" | Taken | intended; plain |
 | `setup ssh --dry-run` | The same section, with `cw-local-*` and `cw-cloud-*` hosts | Same | same |
-| `whoami`, signed out | "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')", exit 1 | Signed in: User and Server; JSON the user record | **Gap H2** for the signed-out words |
+| `whoami`, signed out | "Not signed in", `→ cw login`, exit 1 | Signed in: User and Server; JSON the user record | Same signed-out words as every command now (#6182); was H2: "No server configured (…)" |
 | `doctor`, `--output json`, `doctor local` | One report: cw, platform, org, completion, ssh config, local VM egress, local credential store | Same | same |
 | `login` | Refuses both flags | Same; the sign-in itself is the one `setup --cloud` starts | same |
 | `logout` | "No sign-in was saved on this machine; removed the saved configuration." | The same, after "CODEWIRE_API_KEY is set: cw logout does not end API keys. …" | same |
@@ -769,7 +773,7 @@ key.
 | Command | Local | Cloud | Same or gap |
 | --- | --- | --- | --- |
 | `cost --local`, `cost --cloud` | "--local does not apply to `cw cost`" | Same | same: `cost` is the account's |
-| `cost` | Signed out: the "No server configured" error, exit 1 (H2) | The organization's balance, this month's cost and usage; JSON the billing record | intended: local VMs aren't billed, and `cost` doesn't count them |
+| `cost` | Signed out: "Not signed in", `→ cw login`, exit 1 (was H2's "No server configured") | The organization's balance, this month's cost and usage; JSON the billing record | intended: local VMs aren't billed, and `cost` doesn't count them |
 | `cost --org` an organization that doesn't exist | — | `Organization "X" not found`, `→ cw org list`, exit 1 | fixed (a5a66569a6); was B1: printed nothing, exit 0 |
 
 ### The gaps

@@ -127,10 +127,11 @@ pub(crate) enum SourcePlacement {
 }
 
 impl SourcePlacement {
-    fn prefix(self) -> &'static str {
+    /// The placement noun the flags and help use: `local` or `cloud`.
+    fn noun(self) -> &'static str {
         match self {
             SourcePlacement::Local => "local",
-            SourcePlacement::Platform => "platform",
+            SourcePlacement::Platform => "cloud",
         }
     }
 }
@@ -141,7 +142,7 @@ impl SourcePlacement {
 pub(crate) enum SourceRef {
     /// Nothing selected.
     None,
-    /// A resolved name: `platform:work`.
+    /// A resolved name: `work (cloud)`.
     Named {
         placement: SourcePlacement,
         name: String,
@@ -149,7 +150,7 @@ pub(crate) enum SourceRef {
     /// A canonical reference whose name could not be resolved, shown as is.
     Unresolved(String),
     /// A whole store scope rather than one named source, such as the
-    /// organization's application secrets: `organization secrets (platform)`.
+    /// organization's application secrets: `organization secrets (cloud)`.
     Scope {
         placement: SourcePlacement,
         scope: &'static str,
@@ -182,17 +183,17 @@ impl SourceRef {
         }
     }
 
-    /// `platform:work`, `local:app-dev`, the unresolved reference, a scope
-    /// such as `organization secrets (platform)`, several of these joined by
+    /// `work (cloud)`, `app-dev (local)`, the unresolved reference, a scope
+    /// such as `organization secrets (cloud)`, several of these joined by
     /// commas, or `none`.
     pub(crate) fn text(&self) -> String {
         match self {
             SourceRef::None => "none".to_owned(),
             SourceRef::Named { placement, name } => {
-                format!("{}:{}", placement.prefix(), terminal_text(name))
+                format!("{} ({})", terminal_text(name), placement.noun())
             }
             SourceRef::Unresolved(reference) => terminal_text(reference),
-            SourceRef::Scope { placement, scope } => format!("{scope} ({})", placement.prefix()),
+            SourceRef::Scope { placement, scope } => format!("{scope} ({})", placement.noun()),
             SourceRef::Several(references) => {
                 let parts: Vec<String> = references
                     .iter()
@@ -385,8 +386,8 @@ impl LifecycleSummary {
     /// ✓ Environment app started · local VM
     ///   2 vCPU · 4 GiB RAM · 40 GiB disk
     ///
-    ///   Credentials: platform:work
-    ///   Secrets:     platform:app-dev
+    ///   Credentials: work (cloud)
+    ///   Secrets:     app-dev (cloud)
     ///   Network:     cloud:work
     ///
     /// → cw --local run claude --in app
@@ -606,7 +607,7 @@ mod tests {
     fn started_summary_matches_the_design() {
         assert_eq!(
             summary().render(PLAIN),
-            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev\n  Network:     cloud:work\n\n→ cw --local run claude --in app\n"
+            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: work (cloud)\n  Secrets:     app-dev (cloud)\n  Network:     cloud:work\n\n→ cw --local run claude --in app\n"
         );
     }
 
@@ -622,13 +623,13 @@ mod tests {
             "placeholders only: agents never hold your tokens".to_owned(),
         ));
         assert!(plain.render(PLAIN).contains(
-            "  Credentials: platform:work\n               placeholders only: agents never hold your tokens\n  Secrets:"
+            "  Credentials: work (cloud)\n               placeholders only: agents never hold your tokens\n  Secrets:"
         ));
         let attention = note(CredentialsNote::attention(
             "agents can't reach their providers; restart the VM".to_owned(),
         ));
         assert!(attention.render(PLAIN).contains(
-            "  Credentials: platform:work\n               ! agents can't reach their providers; restart the VM\n"
+            "  Credentials: work (cloud)\n               ! agents can't reach their providers; restart the VM\n"
         ));
     }
 
@@ -671,7 +672,7 @@ mod tests {
         let text = summary.render(PLAIN);
         assert!(text.starts_with("✓ Environment app restarted · local VM\n"));
         assert!(text.contains("  Credentials: platform:id:856b6b9e-a520-48c7-aab1-8ac915465f28\n"));
-        assert!(text.contains("  Secrets:     local:app-dev\n"));
+        assert!(text.contains("  Secrets:     app-dev (local)\n"));
         assert!(text.contains("  Network:     local:lab\n"));
     }
 
@@ -682,7 +683,7 @@ mod tests {
         assert!(!text.contains('\x1b'));
         assert_eq!(
             text,
-            "+ Environment app started - local VM\n  2 vCPU - 4 GiB RAM - 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev\n  Network:     cloud:work\n\n-> cw --local run claude --in app\n"
+            "+ Environment app started - local VM\n  2 vCPU - 4 GiB RAM - 40 GiB disk\n\n  Credentials: work (cloud)\n  Secrets:     app-dev (cloud)\n  Network:     cloud:work\n\n-> cw --local run claude --in app\n"
         );
     }
 
@@ -698,7 +699,7 @@ mod tests {
         );
         assert!(text.contains("  \x1b[2m2 vCPU · 4 GiB RAM · 40 GiB disk\x1b[0m\n"));
         assert!(text.contains("  Network:     \x1b[2mnot attached\x1b[0m\n"));
-        assert!(text.contains("  Credentials: platform:work\n"));
+        assert!(text.contains("  Credentials: work (cloud)\n"));
         assert!(text.ends_with("\x1b[36m→\x1b[0m cw --local run claude --in app\n"));
     }
 
@@ -727,7 +728,7 @@ mod tests {
         }
         let text = summary.render(PLAIN);
         assert!(text.starts_with("✓ Environment app [2J started"));
-        assert!(text.contains("Credentials: platform:wo ]52;c;cHduZWQ= rk\n"));
+        assert!(text.contains("Credentials: wo ]52;c;cHduZWQ= rk (cloud)\n"));
         assert!(text.contains("Secrets:     platform:id: x\n"));
         assert!(text.contains("Network:     cloud:lab 31m\n"));
         assert!(text.contains("→ cw run [A claude\n"));
@@ -752,7 +753,7 @@ mod tests {
         ]);
         assert_eq!(
             secrets.text(),
-            "platform:app-dev, organization secrets (platform), personal secrets (local)"
+            "app-dev (cloud), organization secrets (cloud), personal secrets (local)"
         );
         assert!(!secrets.is_none());
         assert_eq!(
@@ -785,7 +786,7 @@ mod tests {
     fn context_shows_the_same_sources_while_working() {
         assert_eq!(
             summary().render_context(PLAIN),
-            "app · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev\n  Network:     cloud:work\n\n"
+            "app · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: work (cloud)\n  Secrets:     app-dev (cloud)\n  Network:     cloud:work\n\n"
         );
         let colour = summary().render_context(Style::new(true, Charset::Unicode));
         assert!(colour.starts_with("\x1b[1mapp\x1b[0m\x1b[2m · local VM\x1b[0m\n"));

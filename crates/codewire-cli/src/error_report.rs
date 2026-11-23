@@ -111,6 +111,19 @@ pub(crate) fn next_step(error: &anyhow::Error) -> Option<String> {
                 .downcast_ref::<CredentialRefused>()
                 .map(|refused| refused.step().to_owned())
         })
+        .or_else(|| error.chain().find_map(signed_out_step).map(str::to_owned))
+}
+
+/// `cw login` for a signed-out user, who has no server or no sign-in: one
+/// signed-out state everywhere (docs/dev/CLI-PARITY.md, H2). Inside a
+/// sandbox the sentence itself says what works there.
+fn signed_out_step(cause: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    use crate::config::ConfigError;
+    match cause.downcast_ref::<ConfigError>()? {
+        ConfigError::NoPlatformServer { .. }
+        | ConfigError::NoPlatformToken { sandbox: None, .. } => Some("cw login"),
+        _ => None,
+    }
 }
 
 /// The id of the trace the server's answer named, when `error` came from

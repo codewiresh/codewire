@@ -1599,7 +1599,7 @@ clear_application_all_scope_residue() {
       [[ "$name" =~ $APP_SYNTHETIC_KEY_PATTERN ]] || continue
       cleanup_cw 30 "$classification" "residue-delete-$label-key" "$index" \
         "$TMPDIR_SMOKE/app-residue-$scope-$index.out" "$TMPDIR_SMOKE/app-residue-$scope-$index.err" \
-        'secret not found' secrets --cloud "--$scope" delete "$name" ||
+        'so nothing was deleted' secrets --cloud "--$scope" delete "$name" ||
         die 'all-scope start could not remove its own synthetic residue'
       log "removed own synthetic residue: $label key $name"
       index=$((index + 1))
@@ -1617,7 +1617,7 @@ clear_application_all_scope_residue() {
        "$id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
     cleanup_cw 30 "$classification" residue-delete-project "$index" \
       "$TMPDIR_SMOKE/app-residue-project-$index.out" "$TMPDIR_SMOKE/app-residue-project-$index.err" \
-      'platform secret project was not found' secrets --cloud projects delete "id:$id" --yes ||
+      'no cloud secret project' secrets --cloud projects delete "id:$id" --yes ||
       die 'all-scope start could not remove its own synthetic residue'
     log "removed own synthetic residue: secret project $name"
     index=$((index + 1))
@@ -2183,7 +2183,7 @@ run_application_secrets_smoke() {
             >"$TMPDIR_SMOKE/app-unconfirmed.out" 2>"$TMPDIR_SMOKE/app-unconfirmed.err"; then
           die 'unconfirmed application source replacement unexpectedly succeeded'
         fi
-        grep -Fq 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted' \
+        grep -Fq 'needs --yes outside an interactive terminal or with JSON output; nothing was changed' \
           "$TMPDIR_SMOKE/app-unconfirmed.err" || die 'unconfirmed source edit failed for an unexpected reason; output suppressed'
         application_environment_ready "platform:id:${APP_SECRET_IDS[0]}" 0 || die 'unconfirmed source edit changed selection'
         [[ "$(jq -r .operation_generation "$TMPDIR_SMOKE/app-environment.json")" == "$generation" ]] ||
@@ -2282,7 +2282,7 @@ cleanup_application_shared_scope() {
     key="${attempts[$index]}"
     cleanup_cw 30 "$classification" "cleanup-delete-$label-key" "$index" \
       "$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" "$TMPDIR_SMOKE/app-cleanup-$scope-$index.err" \
-      'secret not found' secrets --cloud "--$scope" delete "$key" || true
+      'so nothing was deleted' secrets --cloud "--$scope" delete "$key" || true
   done
   if ! cleanup_cw 30 "$classification" "cleanup-list-$label-keys" final "$metadata" \
       "$TMPDIR_SMOKE/app-cleanup-$scope-list-final.err" '' secrets --cloud "--$scope" list --output json; then
@@ -2330,7 +2330,7 @@ cleanup_application_secrets() {
     selector="$project"
     [[ -z "$project_id" ]] || selector="id:$project_id"
     cleanup_cw 30 "$classification" cleanup-delete-project "$index" "$TMPDIR_SMOKE/app-cleanup-project-$index.out" \
-      "$TMPDIR_SMOKE/app-cleanup-project-$index.err" 'platform secret project was not found' \
+      "$TMPDIR_SMOKE/app-cleanup-project-$index.err" 'no cloud secret project' \
       secrets --cloud projects delete "$selector" --yes || true
   done
   if ((${#APP_SECRET_PROJECTS[@]} > 0)); then

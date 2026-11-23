@@ -118,7 +118,7 @@ pub(crate) async fn resolve_named_execution_target(
 
     if placement == Some(EnvironmentPlacement::Platform) {
         let Some((environment_id, _)) = platform_match else {
-            anyhow::bail!("platform environment {target_ref:?} not found");
+            return Err(super::lifecycle_output::no_cloud_environment(target_ref));
         };
         let environment = environment_client
             .get_environment(&org_id, &environment_id)
@@ -276,7 +276,7 @@ pub(crate) fn resolve_environment_id_from_list(
     let target_ref = trimmed_required(target_ref, "environment reference")?;
     find_environment_match(environments, target_ref)?
         .map(|(id, _)| id)
-        .ok_or_else(|| anyhow::anyhow!("environment {target_ref:?} not found"))
+        .ok_or_else(|| super::lifecycle_output::no_cloud_environment(target_ref))
 }
 
 pub(crate) fn environment_display_name(environment: &Environment) -> &str {
@@ -865,15 +865,15 @@ pub(crate) async fn handle_platform_secrets_command(
                             .context("secret project name is required")?,
                         "secret project name",
                     )?;
-                    let project = client
+                    let created = client
                         .create_secret_project(
                             &org_id,
                             &CreateSecretProjectRequest {
                                 name: name.to_string(),
                             },
                         )
-                        .await
-                        .context("create secret project")?;
+                        .await;
+                    let project = cloud_project_created(created, name)?;
                     eprintln!(
                         "Secret project {:?} created. (id: {})",
                         project.name, project.id
@@ -890,10 +890,8 @@ pub(crate) async fn handle_platform_secrets_command(
                     let project_name = trimmed_required(&args.name, "secret project")?;
                     let project =
                         load_secret_project_by_name(&client, &org_id, project_name).await?;
-                    let target = format!(
-                        "platform secret project {:?} ({}) in organization {}",
-                        project.name, project.id, org_id
-                    );
+                    let target =
+                        format!("cloud secret project {:?} ({})", project.name, project.id);
                     if !confirm_secret_project_delete(&target, args.yes)? {
                         eprintln!("Canceled.");
                         return Ok(());
@@ -922,15 +920,15 @@ async fn handle_project_secret_command(
     {
         let key = args.key.as_deref().context("secret key is required")?;
         let value = prompt_platform_workload_secret_value()?;
-        let project = client
+        let created = client
             .create_secret_project(
                 org_id,
                 &CreateSecretProjectRequest {
                     name: project_name.to_owned(),
                 },
             )
-            .await
-            .context("create secret project")?;
+            .await;
+        let project = cloud_project_created(created, project_name)?;
         client.set_project_secret(org_id, &project.id, key, &value).await.with_context(|| format!("secret project {project_name:?} created; setting its first secret failed, inspect the project before retrying"))?;
         eprintln!("Created secret project {project_name:?} and set {key}.");
         return Ok(());
@@ -979,10 +977,15 @@ async fn handle_project_secret_command(
         ScopedSecretCommand::Rename(args) => {
             let old_key = trimmed_required(&args.old_key, "old secret key")?;
             let new_key = trimmed_required(&args.new_key, "new secret key")?;
-            client
+            let renamed = client
                 .rename_project_secret(org_id, &project.id, old_key, new_key)
-                .await
-                .context("rename secret")?;
+                .await;
+            cloud_renamed(
+                renamed,
+                SecretScope::Project(project_name),
+                old_key,
+                new_key,
+            )?;
             eprintln!("Secret {old_key} renamed to {new_key} in project {project_name:?}.");
         }
     }
@@ -1032,10 +1035,8 @@ pub(crate) async fn handle_user_secret_command(
         ScopedSecretCommand::Rename(args) => {
             let old_key = trimmed_required(&args.old_key, "old secret key")?;
             let new_key = trimmed_required(&args.new_key, "new secret key")?;
-            client
-                .rename_user_secret(old_key, new_key)
-                .await
-                .context("rename user secret")?;
+            let renamed = client.rename_user_secret(old_key, new_key).await;
+            cloud_renamed(renamed, SecretScope::User, old_key, new_key)?;
             eprintln!("Secret {old_key} renamed to {new_key}.");
         }
     }
@@ -1087,10 +1088,8 @@ pub(crate) async fn handle_org_secret_command(
         ScopedSecretCommand::Rename(args) => {
             let old_key = trimmed_required(&args.old_key, "old secret key")?;
             let new_key = trimmed_required(&args.new_key, "new secret key")?;
-            client
-                .rename_org_secret(org_id, old_key, new_key)
-                .await
-                .context("rename org secret")?;
+            let renamed = client.rename_org_secret(org_id, old_key, new_key).await;
+            cloud_renamed(renamed, SecretScope::Organization, old_key, new_key)?;
             eprintln!("Secret {old_key} renamed to {new_key}.");
         }
     }
@@ -1124,13 +1123,13 @@ fn resolve_platform_secret_project<'a>(
             Some(id) => project.id == id,
             None => project.name.eq_ignore_ascii_case(selector),
         });
+    let cloud = super::storage_placement::StoragePlacement::Platform;
     let project = matches
         .next()
-        .context("platform secret project was not found in the selected organization")?;
-    anyhow::ensure!(
-        matches.next().is_none(),
-        "platform secret project name is ambiguous; select an exact id"
-    );
+        .ok_or_else(|| no_such_project(cloud, selector))?;
+    if matches.next().is_some() {
+        return Err(ambiguous_project(cloud, selector));
+    }
     Ok(project)
 }
 
@@ -3048,10 +3047,7 @@ mod tests {
         let missing = anyhow::Error::from(config::ConfigError::NoPlatformServer {
             cause: read_error(std::io::ErrorKind::NotFound),
         });
-        assert_eq!(
-            format!("{missing:#}"),
-            "no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')"
-        );
+        assert_eq!(format!("{missing:#}"), "not signed in");
         let unreadable = anyhow::Error::from(config::ConfigError::NoPlatformServer {
             cause: read_error(std::io::ErrorKind::PermissionDenied),
         });

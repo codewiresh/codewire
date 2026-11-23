@@ -39,6 +39,18 @@ pub(crate) async fn handle_native_environment_port(
                 "{name} is not running; start it with `cw start {name}`, then publish the port"
             );
             let host_port = host_port.unwrap_or(guest_port);
+            if let Some(bound) = environment
+                .host_ports
+                .iter()
+                .find(|binding| binding.host_port == u32::from(host_port))
+            {
+                return Err(crate::commands::lifecycle_output::port_already_published(
+                    crate::output::VmLocation::Local,
+                    name,
+                    u16::try_from(bound.guest_port).unwrap_or(guest_port),
+                    None,
+                ));
+            }
             let environment = client
                 .update_host_ports(
                     name,

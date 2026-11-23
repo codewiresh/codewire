@@ -227,7 +227,7 @@ impl EnvironmentClient {
         let reference = codewire_project::StorageReference::profile(selector)?;
         anyhow::ensure!(
             reference.placement != Some(codewire_project::StoragePlacement::Local),
-            "platform environments cannot select local credential profiles"
+            "cloud environments cannot use local credential profiles"
         );
         let selector = if let Some(id) = reference.selector.strip_prefix("id:") {
             canonical_selection_id(id)?;

@@ -1,6 +1,5 @@
 //! Value-free source resolution for the native CLI. Stored origin descriptors
 //! are identity constraints, never credentials or launch authorizations.
-use std::io::BufRead;
 
 use codewire_access::{AccessProfileScope, Owner};
 use codewire_project::{
@@ -8,6 +7,8 @@ use codewire_project::{
 };
 
 use super::*;
+use crate::commands::lifecycle_output::source_preview::{self, SourceRows, UpdateEffect};
+use crate::output::VmLocation;
 use std::collections::BTreeSet;
 
 const SOURCE_METADATA_PAGE_SIZE: i32 = 100;
@@ -566,9 +567,18 @@ async fn project_candidates(
     Ok(candidates)
 }
 
+/// What a source reference names, for the refusal when it names nothing,
+/// and the command that lists them.
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Project,
+    Profile,
+}
+
 fn select_candidate(
     candidates: Vec<Candidate>,
     reference: StorageReference<'_>,
+    kind: SourceKind,
 ) -> anyhow::Result<Candidate> {
     let selector = reference
         .selector
@@ -585,12 +595,40 @@ fn select_candidate(
     });
     let selected = matches
         .next()
-        .context("source was not found in the eligible authenticated stores")?;
+        .ok_or_else(|| no_such_source(kind, reference.placement, selector))?;
     anyhow::ensure!(
         matches.next().is_none(),
         "source name or ID is ambiguous; qualify it with local: or platform: and, if needed, an exact id:"
     );
     Ok(selected)
+}
+
+/// That no `kind` is named `selector` where `placement` looks (both stores
+/// when it names neither), and the command that lists them, in the words
+/// a cloud create uses (docs/dev/CLI-PARITY.md, R4).
+fn no_such_source(
+    kind: SourceKind,
+    placement: Option<StoragePlacement>,
+    selector: &str,
+) -> anyhow::Error {
+    let (what, list) = match kind {
+        SourceKind::Project => ("secret project", "secrets projects list"),
+        SourceKind::Profile => ("credential profile", "credentials profiles list"),
+    };
+    let (place, flag) = match placement {
+        Some(StoragePlacement::Local) => ("local ", "--local"),
+        Some(StoragePlacement::Platform) => ("cloud ", "--cloud"),
+        None => ("", "--local"),
+    };
+    let anywhere = if placement.is_none() {
+        ", local or cloud"
+    } else {
+        ""
+    };
+    crate::error_report::with_next_step(
+        anyhow::anyhow!("there is no {place}{what} {selector:?}{anywhere}"),
+        format!("cw {flag} {list}"),
+    )
 }
 
 fn canonical_reference(candidate: &Candidate) -> String {
@@ -648,14 +686,14 @@ pub(super) async fn resolve_requested_sources(
     if let Some(reference) = project {
         let candidates =
             project_candidates(local.as_deref_mut(), platform.as_ref(), reference).await?;
-        let candidate = select_candidate(candidates, reference)?;
+        let candidate = select_candidate(candidates, reference, SourceKind::Project)?;
         used_platform |= candidate.placement == StoragePlacement::Platform;
         spec.secrets.project = canonical_reference(&candidate);
         selected.project_name = Some(candidate.name);
     }
     if let Some(reference) = profile {
         let candidates = profile_candidates(local, platform.as_ref(), reference).await?;
-        let mut candidate = select_candidate(candidates, reference)?;
+        let mut candidate = select_candidate(candidates, reference, SourceKind::Profile)?;
         used_platform |= candidate.placement == StoragePlacement::Platform;
         spec.credentials = Some(CredentialBinding {
             profile: canonical_reference(&candidate),
@@ -1018,9 +1056,7 @@ pub(super) fn update_request(
         "native source update configuration exceeds the bounded project document size"
     );
     let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
-    let changed = current != *target
-        || profile_from_environment(environment).as_ref() != profile
-        || environment.platform_source_authority.as_ref() != platform;
+    let changed = sources_changed(environment, &current, target, profile, platform);
     Ok(v1::UpdateEnvironmentSourcesRequest {
         name: environment.name.clone(),
         request_id: Uuid::new_v4().to_string(),
@@ -1040,44 +1076,24 @@ pub(super) fn update_request(
     })
 }
 
-fn source_preview(
+/// The preview's rows for `spec`, with the selected project's name when it
+/// is known, its profile and the cloud it reads cloud sources from.
+fn preview_rows(
     spec: &ProjectSpec,
+    project_name: Option<&str>,
     profile: Option<&ResolvedProfile>,
     platform: Option<&v1::PlatformSourceAuthority>,
-) -> String {
-    let mut output = format!(
-        "  Secret project: {:?}\n  User secrets: {}\n  Organization secrets: {}\n",
-        if spec.secrets.project.is_empty() {
-            "none"
-        } else {
-            &spec.secrets.project
-        },
-        match spec.secrets.user {
-            None => "none",
-            Some(codewire_project::StoragePlacement::Local) => "local",
-            Some(codewire_project::StoragePlacement::Platform) => "platform",
-        },
-        if spec.secrets.organization {
-            "selected platform organization"
-        } else {
-            "none"
-        }
-    );
-    if let (Some(binding), Some(profile)) = (&spec.credentials, profile) {
-        output.push_str(&format!(
-            "  Credential profile: {:?} ({:?}, revision {})\n",
-            binding.profile, profile.reference, profile.revision
-        ));
-    } else {
-        output.push_str("  Credential profile: none\n");
-    }
-    if let Some(platform) = platform {
-        output.push_str(&format!(
-            "  Platform origin: {:?}, organization {:?}, account {:?}\n",
-            platform.server_url, platform.organization_id, platform.user_id
-        ));
-    }
-    output
+) -> SourceRows {
+    SourceRows::new(
+        &spec.secrets,
+        project_name,
+        spec.credentials
+            .as_ref()
+            .map(|binding| binding.profile.as_str()),
+        profile.map(|profile| profile.reference.as_str()),
+        profile.map(|profile| profile.revision),
+    )
+    .with_cloud_server(platform.map(|platform| platform.server_url.as_str()))
 }
 
 pub(super) fn confirm_create_sources(
@@ -1088,65 +1104,104 @@ pub(super) fn confirm_create_sources(
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     validate_exact_sources(spec, selected.profile.as_ref(), selected.platform.as_ref())?;
-    eprintln!(
-        "Create native environment {name:?} with these exact sources:\n{}Application secrets are visible to the workload. Credential profiles use only their supported handlers.",
-        source_preview(spec, selected.profile.as_ref(), selected.platform.as_ref())
+    let rows = preview_rows(
+        spec,
+        selected.project_name.as_deref(),
+        selected.profile.as_ref(),
+        selected.platform.as_ref(),
     );
-    confirm(yes, output)
+    eprint!(
+        "{}",
+        source_preview::create_preview(name, VmLocation::Local, &rows)
+    );
+    source_preview::confirm(yes, output)
 }
 
-pub(super) fn confirm_update_sources(
+/// Whether `target`, `profile` and `platform` change what `environment`
+/// has selected now.
+pub(super) fn sources_changed(
     environment: &v1::Environment,
     current: &ProjectSpec,
     target: &ProjectSpec,
     profile: Option<&ResolvedProfile>,
     platform: Option<&v1::PlatformSourceAuthority>,
-    restart: bool,
+) -> bool {
+    current != target
+        || profile_from_environment(environment).as_ref() != profile
+        || environment.platform_source_authority.as_ref() != platform
+}
+
+/// The request for `update`, once its preview is confirmed, or `None` when
+/// it changes nothing, which is said and neither asked nor sent.
+pub(super) fn reviewed_update(
+    environment: &v1::Environment,
+    current: &ProjectSpec,
+    target: &ProjectSpec,
+    resolved: ResolvedSources,
     args: &EnvUpdateArgs,
-) -> anyhow::Result<()> {
-    eprintln!(
-        "Update native environment {:?} ({:?}), generation {}.\nCurrent:\n{}Replacement:\n{}{}",
-        environment.name,
-        environment.id,
-        environment.generation,
-        source_preview(
-            current,
-            profile_from_environment(environment).as_ref(),
-            environment.platform_source_authority.as_ref()
-        ),
-        source_preview(target, profile, platform),
-        if restart {
-            "A managed restart is required; workspace contents are preserved."
-        } else {
-            "The selection is stored for the next managed launch."
-        }
-    );
-    confirm(args.yes, args.output)
-}
-
-fn confirm(yes: bool, output: OutputFormat) -> anyhow::Result<()> {
-    if yes {
-        return Ok(());
+) -> anyhow::Result<Option<v1::UpdateEnvironmentSourcesRequest>> {
+    let profile = if args.clear_profile {
+        None
+    } else if args.profile.is_some() {
+        resolved.profile
+    } else {
+        profile_from_environment(environment)
+    };
+    let platform = select_platform_authority(
+        environment.platform_source_authority.as_ref(),
+        resolved.platform,
+        retained_platform_source(current, args),
+        target,
+        profile.as_ref(),
+    )?;
+    let (profile, platform) = (profile.as_ref(), platform.as_ref());
+    if !sources_changed(environment, current, target, profile, platform) {
+        source_preview::report_unchanged(&environment.name, args.output);
+        return Ok(None);
     }
-    anyhow::ensure!(
-        !matches!(output, OutputFormat::Json)
-            && std::io::stdin().is_terminal()
-            && std::io::stderr().is_terminal(),
-        "native source selection requires --yes in noninteractive or JSON commands; no source change was submitted"
+    let request = update_request(environment, target, profile, platform)?;
+    let now = preview_rows(
+        current,
+        None,
+        profile_from_environment(environment).as_ref(),
+        environment.platform_source_authority.as_ref(),
     );
-    eprint!("Apply this exact source selection? [y/N]: ");
-    std::io::stderr().flush()?;
-    anyhow::ensure!(
-        read_confirmation(std::io::stdin().lock())?,
-        "source selection canceled; no source change was submitted"
+    let then = preview_rows(target, resolved.project_name.as_deref(), profile, platform);
+    eprint!(
+        "{}",
+        source_preview::update_preview(
+            &environment.name,
+            VmLocation::Local,
+            &now,
+            &then,
+            effect(request.allow_restart),
+        )
     );
-    Ok(())
+    source_preview::confirm(args.yes, args.output)?;
+    Ok(Some(request))
 }
 
-fn read_confirmation(reader: impl BufRead) -> anyhow::Result<bool> {
-    let mut input = String::new();
-    let count = reader.take(65).read_line(&mut input)?;
-    Ok(count > 0 && count < 65 && matches!(input.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
+fn effect(restarts: bool) -> UpdateEffect {
+    if restarts {
+        UpdateEffect::Restart
+    } else {
+        UpdateEffect::NextStart
+    }
+}
+
+/// After a source update: the environment in JSON, or the one result line.
+pub(super) fn print_update_result(
+    updated: &v1::Environment,
+    restarts: bool,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => super::print_native_environment(updated, output),
+        OutputFormat::Text => {
+            source_preview::print_result(&updated.name, VmLocation::Local, effect(restarts));
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1222,11 +1277,11 @@ pub(super) fn format_source_view(view: Option<&SourceView>, credentials_note: &[
     if let Some(placement) = secrets.user {
         output.push_str(match placement {
             StoragePlacement::Local => "User secrets: local\n",
-            StoragePlacement::Platform => "User secrets: platform\n",
+            StoragePlacement::Platform => "User secrets: cloud\n",
         });
     }
     if secrets.organization {
-        output.push_str("Org secrets: platform organization\n");
+        output.push_str("Org secrets: cloud organization\n");
     }
     if let Some(profile) = &view.credentials {
         output.push_str(&format!(

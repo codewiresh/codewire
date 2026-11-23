@@ -1499,7 +1499,7 @@ mod tests {
                 Some("80 GiB".into())
             ]
         );
-        assert_eq!(row.credentials.text(), "platform:work");
+        assert_eq!(row.credentials.text(), "work (cloud)");
         assert_eq!(row.network, NetworkRef::NotAttached);
         assert_eq!(row.selection().organization_id.as_deref(), Some("org-1"));
 
@@ -1653,7 +1653,7 @@ mod tests {
                     "review",
                     "stopped",
                     false,
-                    "platform:work".into(),
+                    "work (cloud)".into(),
                     "not attached".into()
                 ),
                 ("app", "running", true, "none".into(), "cloud:team".into()),
@@ -1866,7 +1866,7 @@ mod tests {
             picker.render(PLAIN, 100, 10)[3..6],
             [
                 "  NAME  LOCATION  STATE    vCPU  RAM    DISK    CREDENTIALS",
-                "› app   local     running  2     4 GiB  40 GiB  platform:work",
+                "› app   local     running  2     4 GiB  40 GiB  work (cloud)",
                 "  app   cloud     stopped  4     8 GiB  80 GiB  none",
             ]
         );

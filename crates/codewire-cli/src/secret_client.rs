@@ -203,7 +203,7 @@ impl SecretClient {
                 .map_err(display_client_error)?;
             anyhow::ensure!(
                 response.secret_projects.len() <= SECRET_LIST_PAGE_SIZE as usize,
-                "platform secret-project metadata exceeded its requested page bound"
+                "the cloud secret-project list exceeded its requested page bound"
             );
             projects.extend(
                 response
@@ -216,12 +216,12 @@ impl SecretClient {
             }
             anyhow::ensure!(
                 cursors.insert(response.next_page_token.clone()),
-                "platform secret-project metadata repeated a page cursor"
+                "the cloud secret-project list repeated a page cursor"
             );
             page_token = response.next_page_token;
         }
         anyhow::bail!(
-            "platform secret-project metadata exceeded the complete-list page bound; no selection was made"
+            "the cloud secret-project list exceeded the complete-list page bound; no selection was made"
         )
     }
 

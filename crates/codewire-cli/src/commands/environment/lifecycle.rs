@@ -477,7 +477,7 @@ mod tests {
         };
         assert_eq!(
             cloud_summary(&environment(), Outcome::Started, &names).render(PLAIN),
-            "✓ Environment app started · cloud VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev, organization secrets (platform)\n  Network:     not attached\n\n→ cw --cloud shell app\n"
+            "✓ Environment app started · cloud VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: work (cloud)\n  Secrets:     app-dev (cloud), organization secrets (cloud)\n  Network:     not attached\n\n→ cw --cloud shell app\n"
         );
     }
 
@@ -487,7 +487,7 @@ mod tests {
             cloud_summary(&environment(), Outcome::Created, &SourceNames::default()).render(PLAIN);
         assert!(text.contains("  Credentials: platform:id:856b6b9e-a520-48c7-aab1-8ac915465f28\n"));
         assert!(text.contains(
-            "  Secrets:     platform:id:a6249c2e-2fa4-473b-b41a-8d0f08f39e51, organization secrets (platform)\n"
+            "  Secrets:     platform:id:a6249c2e-2fa4-473b-b41a-8d0f08f39e51, organization secrets (cloud)\n"
         ));
         let mut bare = environment();
         bare.source_selection = None;

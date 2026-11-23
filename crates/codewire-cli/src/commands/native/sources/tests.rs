@@ -103,14 +103,16 @@ fn source_selectors_prove_unique_origin_and_never_pick_the_first_match() {
     assert!(
         select_candidate(
             candidates.clone(),
-            StorageReference::project("development").unwrap()
+            StorageReference::project("development").unwrap(),
+            SourceKind::Project
         )
         .is_err()
     );
     assert_eq!(
         select_candidate(
             candidates.clone(),
-            StorageReference::project("local:development").unwrap()
+            StorageReference::project("local:development").unwrap(),
+            SourceKind::Project
         )
         .unwrap()
         .placement,
@@ -119,7 +121,8 @@ fn source_selectors_prove_unique_origin_and_never_pick_the_first_match() {
     assert_eq!(
         select_candidate(
             candidates,
-            StorageReference::project(&format!("platform:id:{PROJECT_ID}")).unwrap()
+            StorageReference::project(&format!("platform:id:{PROJECT_ID}")).unwrap(),
+            SourceKind::Project
         )
         .unwrap()
         .placement,
@@ -131,11 +134,47 @@ fn source_selectors_prove_unique_origin_and_never_pick_the_first_match() {
                 candidate(StoragePlacement::Local, "work"),
                 candidate(StoragePlacement::Local, "WORK")
             ],
-            StorageReference::project("local:work").unwrap()
+            StorageReference::project("local:work").unwrap(),
+            SourceKind::Project
         )
         .is_err()
     );
-    assert!(select_candidate(vec![], StorageReference::project("work").unwrap()).is_err());
+    assert!(
+        select_candidate(
+            vec![],
+            StorageReference::project("work").unwrap(),
+            SourceKind::Project
+        )
+        .is_err()
+    );
+}
+
+/// A missing source is named, with where it was looked for and the command
+/// that lists them, in the words a cloud create uses (CLI-PARITY.md, R4).
+#[test]
+fn a_missing_source_is_named_with_the_command_that_lists_them() {
+    let said = |reference: &str, kind| {
+        let error = select_candidate(vec![], StorageReference::project(reference).unwrap(), kind)
+            .unwrap_err();
+        (
+            crate::error_report::sentence(&error),
+            crate::error_report::next_step(&error),
+        )
+    };
+    assert_eq!(
+        said("local:web", SourceKind::Project),
+        (
+            "there is no local secret project \"web\"".to_owned(),
+            Some("cw --local secrets projects list".to_owned())
+        )
+    );
+    assert_eq!(
+        said("work", SourceKind::Profile),
+        (
+            "there is no credential profile \"work\", local or cloud".to_owned(),
+            Some("cw --local credentials profiles list".to_owned())
+        )
+    );
 }
 
 #[test]
@@ -514,7 +553,7 @@ fn source_inspection_prints_plain_values() {
     };
     assert_eq!(
         format_source_view(Some(&selected), &[]),
-        "Secrets:     platform:id:app\nUser secrets: local\nOrg secrets: platform organization\n\
+        "Secrets:     platform:id:app\nUser secrets: local\nOrg secrets: cloud organization\n\
          Credentials: work (local:work, revision 3)\n"
     );
 }
@@ -540,15 +579,6 @@ fn the_credentials_note_goes_under_its_row() {
         format_source_view(None, &note),
         "Sources:     metadata unavailable\nCredentials: ! agents can't reach their providers; restart the VM\n             → cw --local restart app\n"
     );
-}
-
-#[test]
-fn confirmation_is_bounded_default_no_and_eof_safe() {
-    for input in ["", "\n", "no\n", "yesterday\n"] {
-        assert!(!read_confirmation(input.as_bytes()).unwrap());
-    }
-    assert!(read_confirmation("yes\n".as_bytes()).unwrap());
-    assert!(!read_confirmation(format!("yes{}", " ".repeat(100)).as_bytes()).unwrap());
 }
 
 #[test]

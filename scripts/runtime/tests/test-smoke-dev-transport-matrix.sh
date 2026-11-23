@@ -112,7 +112,7 @@ case "$1" in
     ;;
   info)
     if [[ -s "$state/cw-rm" ]]; then
-      printf 'platform environment "%s" not found\n' "$2" >&2
+      printf 'No cloud environment is named "%s"\n' "$2" >&2
       exit 1
     fi
     printf '{"state":"running","desired_state":"running"}\n'

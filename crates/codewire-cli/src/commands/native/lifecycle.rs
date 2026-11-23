@@ -1220,7 +1220,7 @@ mod tests {
         );
         assert_eq!(
             summary.render(PLAIN),
-            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: local:work\n  Secrets:     local:id:x\n  Network:     cloud:work\n\n→ cw --local shell app\n"
+            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: work (local)\n  Secrets:     local:id:x\n  Network:     cloud:work\n\n→ cw --local shell app\n"
         );
     }
 

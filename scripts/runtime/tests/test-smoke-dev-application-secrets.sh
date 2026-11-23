@@ -114,7 +114,7 @@ cw() {
       fi
       if [[ "$scope" == user && "$APP_FAILURE" == cleanup-user-not-found ]] &&
          ! jq -e --arg key "$key" 'any(.[]; .key == $key)' "$db" >/dev/null; then
-        printf 'delete user secret: secret not found\n' >&2; return 1
+        printf 'There is no cloud user secret %s, so nothing was deleted\n' "$key" >&2; return 1
       fi
       jq --arg key "$key" 'map(select(.key != $key))' "$db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$db"
@@ -181,7 +181,7 @@ cw() {
       jq '.[0]' "$TMPDIR_SMOKE/environments.db" ;;
     '--cloud update '*)
       if [[ " $* " != *' --yes '* ]]; then
-        printf 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted\n' >&2
+        printf 'Applying sources needs --yes outside an interactive terminal or with JSON output; nothing was changed\n' >&2
         return 2
       fi
       local project='' before user='' organization=false

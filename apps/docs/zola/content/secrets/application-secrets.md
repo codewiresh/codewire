@@ -1,7 +1,7 @@
 ---
 title: Application secrets
 description: Store values such as DATABASE_URL in organization, personal or project scope, and select which ones an environment's processes receive.
-updated: 2026-11-14
+updated: 2026-11-23
 weight: 2
 aliases: ["/guides/application-secrets"]
 ---
@@ -37,15 +37,15 @@ cw create --name app --image workspace --secrets docs-demo
 ```
 
 ```text
-  Application-secret project: "platform:id:8b9c5a2d-ea91-402e-9cff-69b4961960aa"
-  Organization application secrets: none
-  Personal application secrets: none
-  Credential profile: none
-Application secrets are visible to the managed workload; provider credentials remain behind their supported handlers.
+Create environment app · cloud VM with these sources:
+  Credentials: none
+  Secrets:     docs-demo (cloud)
+Application secrets are visible to the workload. Credential profiles reach providers only through their handlers.
+Apply these sources? [y/N]: y
 app · cloud VM
   2 vCPU · 8 GiB RAM · 80 GiB disk
   Credentials: none
-  Secrets:     platform:docs-demo
+  Secrets:     docs-demo (cloud)
 ```
 
 Every process in the sandbox gets it under its own name:

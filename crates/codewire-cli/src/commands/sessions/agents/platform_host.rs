@@ -572,7 +572,12 @@ pub(super) async fn run(
     let provider = support
         .iter()
         .find(|a| a.agent.as_known() == Some(kind) && a.proxy_only_qualified)
-        .context("selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE for a credential profile that includes this provider, and check `cw agent info ENV`")?;
+        .ok_or_else(|| {
+            crate::commands::lifecycle_output::no_agent_profile(
+                crate::output::VmLocation::Cloud,
+                &super::dispatch::environment_name(&target),
+            )
+        })?;
     let (parent, parent_generation) = match args.parent.as_deref() {
         Some(reference) => {
             let parent = endpoint.find(reference).await?;

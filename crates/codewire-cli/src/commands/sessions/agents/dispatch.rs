@@ -104,7 +104,7 @@ fn conversation_label(target: &EnvironmentSessionTarget, view: &EnvironmentSessi
     )
 }
 
-fn environment_name(target: &EnvironmentSessionTarget) -> String {
+pub(super) fn environment_name(target: &EnvironmentSessionTarget) -> String {
     let current = target.current_target();
     terminal_text(if current.name.trim().is_empty() {
         &current.target_ref
@@ -115,6 +115,46 @@ fn environment_name(target: &EnvironmentSessionTarget) -> String {
 
 fn session_name(view: &EnvironmentSessionView) -> String {
     terminal_text(short_id::session_display(view))
+}
+
+/// That `doing` (steering, interrupting) applies only to managed agent
+/// conversations, and how to reach the terminal session instead. `steer`
+/// and `interrupt` say it in the same words, in both placements
+/// (docs/dev/CLI-PARITY.md, N5).
+fn terminal_session_refusal(
+    target: &EnvironmentSessionTarget,
+    view: &EnvironmentSessionView,
+    doing: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is a terminal session, not a managed agent conversation; {doing} applies only to managed conversations. Type into it with `cw msg {} --session {} TEXT`, or send raw input with `cw send`",
+        conversation_label(target, view),
+        environment_name(target),
+        session_name(view)
+    )
+}
+
+/// Refuses `interrupt` for a terminal session of a local or cloud
+/// environment, before either placement's agent path is asked.
+pub(super) async fn refuse_terminal_interrupt(
+    target: &EnvironmentSessionTarget,
+    session: &str,
+) -> anyhow::Result<()> {
+    let agent_path = match target {
+        EnvironmentSessionTarget::Platform { .. } => true,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        EnvironmentSessionTarget::NativeLocal { .. } => true,
+        _ => false,
+    };
+    if !agent_path {
+        return Ok(());
+    }
+    match select_environment_session(target, Some(session)).await? {
+        SessionSelection::Select(view) if !is_managed_session(&view) => {
+            Err(terminal_session_refusal(target, &view, "interrupting"))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn resolve_session(
@@ -162,16 +202,12 @@ async fn message_command(
     let message = args.target();
     let (target, view) = message_session(globals, command, &message, args.output).await?;
     let text = message.text.as_str();
-    let environment = environment_name(&target);
     let label = conversation_label(&target, &view);
     if is_managed_session(&view) {
         return deliver_managed(target, view, &args, text, steer, &label).await;
     }
     if steer {
-        anyhow::bail!(
-            "{label} is a terminal session, not a managed agent conversation; steering applies only to managed conversations. Type into it with `cw msg {environment} --session {} TEXT`, or send raw input with `cw send`",
-            session_name(&view)
-        );
+        return Err(terminal_session_refusal(&target, &view, "steering"));
     }
     anyhow::ensure!(
         args.reply_to.is_none(),

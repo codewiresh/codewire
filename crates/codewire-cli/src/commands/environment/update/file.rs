@@ -521,7 +521,9 @@ fn confirm(assume_yes: bool, output: OutputFormat) -> anyhow::Result<()> {
         std::io::stderr()
             .flush()
             .context("flush the confirmation")?;
-        sources::read_confirmation(std::io::stdin().lock())
+        crate::commands::lifecycle_output::source_preview::read_confirmation(
+            std::io::stdin().lock(),
+        )
     })
 }
 

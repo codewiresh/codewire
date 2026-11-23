@@ -20,6 +20,8 @@ use crate::output::{
     VmLocation,
 };
 
+pub(crate) mod source_preview;
+
 /// The longest a best-effort name lookup may delay a lifecycle result. A
 /// lookup that fails or runs out shows the canonical reference instead.
 pub(crate) const NAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +50,48 @@ pub(crate) fn next_shell_command(location: VmLocation, name: &str) -> String {
 /// A command that names the environment, such as `cw --local start app`.
 pub(crate) fn environment_command(location: VmLocation, command: &str, name: &str) -> String {
     format!("cw {} {command} {name}", placement_flag(location))
+}
+
+/// That no cloud environment is named `target_ref`, and the command that
+/// lists them.
+pub(crate) fn no_cloud_environment(target_ref: &str) -> anyhow::Error {
+    crate::error_report::with_next_step(
+        anyhow::anyhow!("no cloud environment is named {target_ref:?}"),
+        "cw --cloud ls",
+    )
+}
+
+/// That `name` has no credential profile its agent can use, and how to see
+/// and select one: `run` says it the same way in both placements
+/// (docs/dev/CLI-PARITY.md, R5).
+pub(crate) fn no_agent_profile(location: VmLocation, name: &str) -> anyhow::Error {
+    crate::error_report::with_next_step(
+        anyhow::anyhow!(
+            "{name} has no credential profile for this agent; select one with `{} --profile PROFILE`",
+            environment_command(location, "update", name)
+        ),
+        environment_command(location, "agent info", name),
+    )
+}
+
+/// That `name` already publishes `port`, and the command that withdraws
+/// it: one refusal in both placements (docs/dev/CLI-PARITY.md, W2).
+pub(crate) fn port_already_published(
+    location: VmLocation,
+    name: &str,
+    port: u16,
+    trace_id: Option<&str>,
+) -> anyhow::Error {
+    crate::error_report::with_next_step(
+        crate::reworded::reworded(
+            format!("{name} already publishes port {port}; withdraw it first"),
+            trace_id,
+        ),
+        format!(
+            "{} --unpublish {port}",
+            environment_command(location, "ports", name)
+        ),
+    )
 }
 
 pub(crate) fn source_placement(placement: StoragePlacement) -> SourcePlacement {
@@ -548,11 +592,11 @@ mod tests {
         let stored = format!("platform:id:{id}");
         assert_eq!(
             credential_ref(Some(&stored), Some("user/work")).text(),
-            "platform:work"
+            "work (cloud)"
         );
         assert_eq!(
             credential_ref(Some(&format!("local:id:{id}")), Some("work")).text(),
-            "local:work"
+            "work (local)"
         );
         assert_eq!(credential_ref(Some(&stored), None).text(), stored);
         assert_eq!(credential_ref(Some(&stored), Some("  ")).text(), stored);
@@ -561,7 +605,7 @@ mod tests {
         // A reference that already names its profile needs no lookup.
         assert_eq!(
             credential_ref(Some("local:work"), None).text(),
-            "local:work"
+            "work (local)"
         );
         assert_eq!(
             credential_ref(Some("not a reference!"), None).text(),
@@ -579,7 +623,7 @@ mod tests {
         };
         assert_eq!(
             secret_refs(&secrets, Some("app-dev")).text(),
-            "platform:app-dev"
+            "app-dev (cloud)"
         );
         assert_eq!(
             secret_refs(&secrets, None).text(),
@@ -589,12 +633,12 @@ mod tests {
         secrets.user = Some(StoragePlacement::Local);
         assert_eq!(
             secret_refs(&secrets, Some("app-dev")).text(),
-            "platform:app-dev, organization secrets (platform), personal secrets (local)"
+            "app-dev (cloud), organization secrets (cloud), personal secrets (local)"
         );
         secrets.project.clear();
         assert_eq!(
             secret_refs(&secrets, None).text(),
-            "organization secrets (platform), personal secrets (local)"
+            "organization secrets (cloud), personal secrets (local)"
         );
         assert!(secret_refs(&SecretBindings::default(), None).is_none());
     }

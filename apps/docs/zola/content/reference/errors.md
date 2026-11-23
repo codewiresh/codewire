@@ -1,13 +1,12 @@
 ---
 title: Errors
 description: The error codes the Codewire platform returns, what each one means, and what to do next.
-updated: 2026-11-21
+updated: 2026-11-23
 weight: 10
 ---
 
-When the platform refuses a request, `cw` prints the platform's message and
-exits with status 1. The output below is from a real run on a Codewire
-platform:
+When the platform refuses a request, `cw` says why in a sentence, with the
+command that helps on a `→` line, and exits with status 1:
 
 ```sh
 cw create --name err-demo --preset no-such-preset
@@ -15,8 +14,9 @@ cw info no-such-sandbox
 ```
 
 ```text
-create environment: preset not found: no-such-preset
-platform environment "no-such-sandbox" not found
+✗ Create environment: preset not found: no-such-preset
+✗ No cloud environment is named "no-such-sandbox"
+→ cw --cloud ls
 ```
 
 Behind each message the platform's API returns a stable code, listed below

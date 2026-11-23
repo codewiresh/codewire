@@ -238,11 +238,12 @@ fn returned(policy: Option<NetworkPolicy>) -> anyhow::Result<NetworkPolicy> {
 /// The server's message, in the user's terms where the server says why. It
 /// keeps the id of the trace the answer named.
 fn failed(action: &str, error: ClientError) -> anyhow::Error {
-    let text = match error.reason() {
-        Some("NETWORK_POLICIES_DISABLED") => "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`".to_owned(),
-        _ => format!("couldn't {action}: {}", error.message()),
-    };
-    crate::reworded::reworded(text, error.trace_id())
+    super::policies_disabled(&error).unwrap_or_else(|| {
+        crate::reworded::reworded(
+            format!("couldn't {action}: {}", error.message()),
+            error.trace_id(),
+        )
+    })
 }
 
 fn rules_proto(rules: Vec<AllowRule>) -> Vec<NetworkPolicyRule> {
@@ -303,6 +304,22 @@ fn require_platform(store: Option<PolicyStore>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sentence and the `→` step an error carries.
+    fn said(error: &anyhow::Error) -> (String, Option<String>) {
+        (
+            crate::error_report::sentence(error),
+            crate::error_report::next_step(error),
+        )
+    }
+
+    fn turned_off() -> (String, Option<String>) {
+        (
+            "network policies are turned off on this Codewire server; a local VM can still use one"
+                .to_owned(),
+            Some("cw --local policy".to_owned()),
+        )
+    }
 
     #[test]
     fn a_platform_command_names_only_platform_policies() {
@@ -373,8 +390,8 @@ mod tests {
             },
         ));
         assert_eq!(
-            failed("list network policies", ClientError::from(error)).to_string(),
-            "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`"
+            said(&failed("list network policies", ClientError::from(error))),
+            turned_off()
         );
     }
 
@@ -426,10 +443,7 @@ mod tests {
                 "NETWORK_POLICIES_DISABLED",
             ),
         );
-        assert_eq!(
-            disabled.to_string(),
-            "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`"
-        );
+        assert_eq!(said(&disabled), turned_off());
         assert_eq!(trace_id(&disabled), Some(TRACE_FOR_TESTS));
         let other = failed(
             "change the network policy",

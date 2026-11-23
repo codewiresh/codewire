@@ -29,9 +29,12 @@ pub(crate) async fn require_native_agent_profile(
         .find(|environment| environment.id == environment_id)
         .context("the managed native environment no longer exists")?;
     let spec = sources::project_from_environment(&environment)?;
-    let selected = spec
-        .credentials
-        .context("managed VM agents require a selected credential profile")?;
+    let selected = spec.credentials.ok_or_else(|| {
+        crate::commands::lifecycle_output::no_agent_profile(
+            crate::output::VmLocation::Local,
+            &environment.name,
+        )
+    })?;
     let clients = if selected.profile.starts_with("platform:") {
         pinned_platform_clients(&environment)?
     } else {

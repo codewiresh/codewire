@@ -20,7 +20,10 @@ use std::io::{BufRead as _, Read as _};
 use zeroize::Zeroizing;
 
 mod missing;
-pub(crate) use missing::{SecretScope, cloud_deleted};
+pub(crate) use missing::{
+    KeyChange, SecretScope, ambiguous_project, cloud_deleted, cloud_project_created, cloud_renamed,
+    no_such_project,
+};
 #[cfg(test)]
 mod project_name_tests;
 
@@ -502,10 +505,10 @@ async fn local_user_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
-            missing::local_deleted(
+            missing::local_changed(
                 client.delete_user_workload_secret(key.clone()).await,
                 SecretScope::User,
-                &key,
+                KeyChange::Delete(&key),
             )?;
             eprintln!("Local user secret {key} deleted.");
             Ok(())
@@ -513,10 +516,16 @@ async fn local_user_command(
         ScopedSecretCommand::Rename(args) => {
             let key = trimmed_required(&args.old_key, "old secret key")?.to_owned();
             let new_key = trimmed_required(&args.new_key, "new secret key")?.to_owned();
-            client
-                .rename_user_workload_secret(key.clone(), new_key.clone())
-                .await
-                .context("rename local user secret")?;
+            missing::local_changed(
+                client
+                    .rename_user_workload_secret(key.clone(), new_key.clone())
+                    .await,
+                SecretScope::User,
+                KeyChange::Rename {
+                    key: &key,
+                    new_key: &new_key,
+                },
+            )?;
             eprintln!("Local user secret {key} renamed to {new_key}.");
             Ok(())
         }
@@ -537,10 +546,10 @@ async fn local_project_command(
                 "secret project name",
             )?
             .to_owned();
-            let project = client
-                .create_secret_project(name)
-                .await
-                .context("create local secret project")?;
+            let project = missing::local_project_created(
+                client.create_secret_project(name.clone()).await,
+                &name,
+            )?;
             eprintln!(
                 "Local secret project {:?} created ({}).",
                 project.name, project.id
@@ -629,12 +638,12 @@ async fn local_project_key_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
-            missing::local_deleted(
+            missing::local_changed(
                 client
                     .delete_project_workload_secret(project.id, key.clone())
                     .await,
                 SecretScope::Project(&project.name),
-                &key,
+                KeyChange::Delete(&key),
             )?;
             eprintln!(
                 "Local secret {key} deleted from project {:?}.",
@@ -645,10 +654,16 @@ async fn local_project_key_command(
         ScopedSecretCommand::Rename(args) => {
             let key = trimmed_required(&args.old_key, "old secret key")?.to_owned();
             let new_key = trimmed_required(&args.new_key, "new secret key")?.to_owned();
-            client
-                .rename_project_workload_secret(project.id, key.clone(), new_key.clone())
-                .await
-                .context("rename local project secret")?;
+            missing::local_changed(
+                client
+                    .rename_project_workload_secret(project.id, key.clone(), new_key.clone())
+                    .await,
+                SecretScope::Project(&project.name),
+                KeyChange::Rename {
+                    key: &key,
+                    new_key: &new_key,
+                },
+            )?;
             eprintln!(
                 "Local secret {key} renamed to {new_key} in project {:?}.",
                 project.name
@@ -718,11 +733,10 @@ fn resolve_local_project<'a>(
         });
     let project = matches
         .next()
-        .context("local secret project was not found")?;
-    anyhow::ensure!(
-        matches.next().is_none(),
-        "local secret project name is ambiguous; select an exact id"
-    );
+        .ok_or_else(|| no_such_project(StoragePlacement::Local, selector))?;
+    if matches.next().is_some() {
+        return Err(ambiguous_project(StoragePlacement::Local, selector));
+    }
     Ok(project)
 }
 

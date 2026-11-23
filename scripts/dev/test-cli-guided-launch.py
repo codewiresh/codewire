@@ -591,7 +591,7 @@ s = Session(
     fixture,
     malformed_selection,
 )
-s.expect('platform environment "missing" not found')
+s.expect('cloud environment is named "missing"')
 s.finish(1)
 assert b"parse mesh config" not in s.buf
 assert any(path.endswith("/ListEnvironments") for path, _ in Handler.calls[before:])

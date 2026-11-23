@@ -61,7 +61,7 @@ pub(crate) async fn name_hint_after(
 
 fn hint_for(error: anyhow::Error, named: &NamedEnvironment) -> anyhow::Error {
     let text = format!("{error:#}");
-    let not_found = ["not found", "no environment is named", "matches"]
+    let not_found = ["not found", "environment is named", "matches"]
         .iter()
         .any(|said| text.contains(said));
     if !not_found || !text.contains(&format!("{:?}", named.name)) {
@@ -376,7 +376,7 @@ mod tests {
         };
         assert_eq!(
             hint_for(
-                anyhow::anyhow!("platform environment \"ls\" not found"),
+                anyhow::anyhow!("no cloud environment is named \"ls\""),
                 &named
             )
             .to_string(),
@@ -397,7 +397,7 @@ mod tests {
         };
         assert_eq!(
             hint_for(
-                anyhow::anyhow!("platform environment \"make\" not found"),
+                anyhow::anyhow!("no cloud environment is named \"make\""),
                 &make
             )
             .to_string(),
@@ -411,7 +411,7 @@ mod tests {
         };
         assert_eq!(
             hint_for(
-                anyhow::anyhow!("platform environment \"grep\" not found"),
+                anyhow::anyhow!("no cloud environment is named \"grep\""),
                 &grep
             )
             .to_string(),
@@ -424,11 +424,11 @@ mod tests {
         );
         assert_eq!(
             hint_for(
-                anyhow::anyhow!("platform environment \"web\" not found"),
+                anyhow::anyhow!("no cloud environment is named \"web\""),
                 &named
             )
             .to_string(),
-            "platform environment \"web\" not found"
+            "no cloud environment is named \"web\""
         );
     }
 

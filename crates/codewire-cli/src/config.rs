@@ -456,10 +456,7 @@ fn sandbox_signed_out(server: &str) -> String {
 fn no_platform_token(cause: Option<&ConfigError>, sandbox: Option<&str>) -> String {
     match sandbox {
         Some(server) => format!("not signed in: {}", sandbox_signed_out(server)),
-        None => format!(
-            "not signed in (run `cw login`, or set CODEWIRE_API_KEY){}",
-            config_note(cause)
-        ),
+        None => format!("not signed in{}", config_note(cause)),
     }
 }
 
@@ -1470,7 +1467,7 @@ pub enum ConfigError {
     DeploymentCa(#[from] DeploymentCaFileError),
     // `cause` is printed at most once, here; as a `source` the error chain
     // would print it again.
-    #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
+    #[error("not signed in{}", config_note(cause.as_deref()))]
     NoPlatformServer { cause: Option<Box<ConfigError>> },
     // The wording every command shares for a signed-out user (#4626, #4643).
     // Inside a sandbox, `sandbox` is its server and the wording says what
@@ -2047,7 +2044,7 @@ mod tests {
                 sandbox: None
             }
             .to_string(),
-            "not signed in (run `cw login`, or set CODEWIRE_API_KEY)"
+            "not signed in"
         );
     }
 

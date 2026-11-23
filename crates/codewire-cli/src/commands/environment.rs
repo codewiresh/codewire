@@ -368,7 +368,7 @@ async fn handle_unified_environment_port(
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if placement == Some(EnvironmentPlacement::Local) {
-        anyhow::bail!("native local environments currently require Linux or macOS");
+        anyhow::bail!("local environments need Linux or macOS");
     }
     handle_platform_env_command(globals, EnvCommand::Port(args)).await
 }
@@ -408,7 +408,7 @@ async fn handle_unified_environment_access(
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = args;
-                anyhow::bail!("native local environment access currently requires Linux or macOS")
+                anyhow::bail!("local environments need Linux or macOS")
             }
         }
         Some(EnvironmentPlacement::Platform) | None => {
@@ -549,7 +549,7 @@ pub(crate) async fn create_in_organization(
         return client
             .create_environment(org_id, request)
             .await
-            .context("create environment");
+            .map_err(server_errors::create_failed);
     }
     let selector = org.requested.or_else(|| configured_org(org.platform));
     match client
@@ -560,14 +560,14 @@ pub(crate) async fn create_in_organization(
         Err(ResolvingCreateError::OlderServer) => client
             .create_environment(org.id().await?, request)
             .await
-            .context("create environment"),
+            .map_err(server_errors::create_failed),
         Err(ResolvingCreateError::NoOrganizations) => Err(no_organizations_found()),
         Err(ResolvingCreateError::NoOrganizationSelected) => Err(no_org_selected()),
         Err(ResolvingCreateError::OrganizationNotAvailable) => Err(match org.requested {
             Some(requested) => organization_not_found(requested),
             None => configured_org_unavailable(selector.unwrap_or_default()),
         }),
-        Err(ResolvingCreateError::Other(error)) => Err(error.context("create environment")),
+        Err(ResolvingCreateError::Other(error)) => Err(server_errors::create_failed(error)),
     }
 }
 
@@ -669,10 +669,10 @@ async fn handle_platform_env_command_with_created(
             stop_start::start(&platform, &environment_client, &org_id, args).await?;
         }
         EnvCommand::Restart(_) => {
-            anyhow::bail!("restart is supported only for native local environments");
+            anyhow::bail!("restart is supported only for local environments");
         }
         EnvCommand::RefreshSkills(_) => {
-            anyhow::bail!("refresh-skills is supported only for native local environments");
+            anyhow::bail!("refresh-skills is supported only for local environments");
         }
         EnvCommand::Rm(args) => {
             let environment_id =
@@ -856,7 +856,7 @@ async fn handle_platform_env_command_with_created(
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
         EnvCommand::Access(_) => anyhow::bail!(
-            "environment credential-profile inspection is not yet available for platform environments"
+            "environment credential-profile inspection is not yet available for cloud environments"
         ),
         EnvCommand::Share(args) => {
             handle_env_share_command(&environment_client, &org_id, args.command).await?;
@@ -1056,7 +1056,7 @@ pub(crate) fn resolve_native_resize_plan(
         disk_bytes,
     };
     if desired == current {
-        anyhow::bail!("the requested resources already match the native local environment");
+        anyhow::bail!("the environment already has the requested resources");
     }
     Ok(NativeResizePlan {
         current,
@@ -1140,7 +1140,7 @@ pub(crate) fn resolve_platform_resize_plan(
         );
     }
     if desired == current {
-        anyhow::bail!("the requested resources already match the current platform environment");
+        anyhow::bail!("the environment already has the requested resources");
     }
     Ok(PlatformResizePlan {
         current,
@@ -1154,7 +1154,7 @@ pub(crate) fn resolve_platform_resize_plan(
 
 pub(crate) fn format_platform_resize_plan(name: &str, plan: &PlatformResizePlan) -> String {
     let mut output = format!(
-        "Environment: {name} (platform)\n\n              Current   Requested\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
+        "Environment: {name} (cloud)\n\n              Current   Requested\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
         format_resize_cpu(plan.current.cpu_millicores),
         format_resize_cpu(plan.desired.cpu_millicores),
         format_resize_memory(plan.current.memory_mb),
@@ -1353,7 +1353,7 @@ async fn handle_unified_environment_create(
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = (globals, output, args);
-                anyhow::bail!("native local environments currently require Linux or macOS")
+                anyhow::bail!("local environments need Linux or macOS")
             }
         }
         Some(EnvironmentPlacement::Platform) | None => {
@@ -1480,9 +1480,7 @@ async fn handle_native_environment_resize(
     let active_sessions = active_native_resize_sessions(&environment).await?;
     let plan = resolve_native_resize_plan(&args, current, active_sessions)?;
     if !plan.active_sessions.is_empty() && !args.force && !interactive {
-        anyhow::bail!(
-            "active sessions would be terminated; non-interactive native resize requires --force"
-        );
+        anyhow::bail!("active sessions would be terminated; pass --force to resize without asking");
     }
     if matches!(args.output, OutputFormat::Text) {
         print!("{}", format_native_resize_plan(&name, &plan));
@@ -1807,7 +1805,7 @@ async fn handle_unified_environment_lifecycle(
             .await
         }
         (UnifiedEnvironmentTarget::Platform(_), UnifiedEnvironmentLifecycle::Restart(_)) => {
-            anyhow::bail!("restart is supported only for native local environments")
+            anyhow::bail!("restart is supported only for local environments")
         }
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Remove(args)) => {
             handle_platform_env_command(
@@ -1869,7 +1867,7 @@ async fn handle_unified_environment_refresh_skills(
             print_native_environment(&environment, args.output)
         }
         UnifiedEnvironmentTarget::Platform(_) => {
-            anyhow::bail!("refresh-skills is supported only for native local environments")
+            anyhow::bail!("refresh-skills is supported only for local environments")
         }
     }
 }
@@ -1905,7 +1903,7 @@ pub(crate) async fn resolve_unified_environment_target(
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if placement == Some(EnvironmentPlacement::Local) {
-        anyhow::bail!("native local environments currently require Linux or macOS");
+        anyhow::bail!("local environments need Linux or macOS");
     }
 
     let platform = match resolve_platform(globals, &paths, &env) {
@@ -1949,7 +1947,7 @@ pub(crate) async fn resolve_unified_environment_target(
 
     if placement == Some(EnvironmentPlacement::Platform) {
         let Some((id, _)) = platform_match else {
-            anyhow::bail!("platform environment {target_ref:?} not found");
+            return Err(super::lifecycle_output::no_cloud_environment(target_ref));
         };
         return Ok(UnifiedEnvironmentTarget::Platform(id));
     }
@@ -2882,6 +2880,7 @@ pub(crate) async fn handle_env_port_command(
                 host_port.is_none(),
                 "--host-port applies to local environments; a cloud port is published as a preview URL"
             );
+            let labelled = label.as_deref().and_then(trimmed_str).is_some();
             let label = label
                 .as_deref()
                 .and_then(trimmed_str)
@@ -2913,7 +2912,7 @@ pub(crate) async fn handle_env_port_command(
                     },
                 )
                 .await
-                .context("create port")?;
+                .map_err(|error| server_errors::port_create_failed(&name, port, labelled, error))?;
             print_env_port_add(&result, args.output)?;
         }
         PortOperation::Unpublish {
