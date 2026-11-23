@@ -270,9 +270,9 @@ pub struct SandboxWorkerCfg {
     pub api_base_url: String,
     pub coordinator_url: String,
     pub derp_host: String,
-    /// What a broker-mode template renders, read at startup while hosted
-    /// egress is on; `None` off (#4000).
-    pub hosted_egress: Option<crate::sandbox::template::HostedEgressTemplate>,
+    /// The hosted egress switch and the broker settings, read at startup
+    /// (#4000, #6070).
+    pub hosted_egress: crate::egress::own_mode::HostedEgress,
     /// What a `standard` workspace runs, read at startup; `None` where none
     /// is configured (#5602).
     pub standard_runtime: Option<crate::sandbox::template::StandardRuntime>,
@@ -481,7 +481,7 @@ impl SandboxWorkerCfg {
             coordinator_url: getenv("CODEWIRE_COORDINATOR_URL", ""),
             derp_host: getenv("DERP_HOST", ""),
             // Read by main, which can fail startup on a malformed value.
-            hosted_egress: None,
+            hosted_egress: Default::default(),
             standard_runtime: None,
             derp_port: getenv("DERP_PORT", ""),
             stun_host: getenv("STUN_HOST", ""),

@@ -1446,10 +1446,21 @@ enforcement status, `FAILED_CLOSED` with `lockdown_not_applied` (below;
 #5068). Two limits remain. A policy changed later
 under an already bound sandbox is not checked again, and neither is anything
 checked on a timer; both are tracked follow-ups, and the static floor stays
-the boundary that does not depend on this check. And after a release changes
-what orchestration renders, a running sandbox's next admission is refused
-until its policy has been applied again, so a rollout applies the policies
-again before the new orchestration compares them. A deployment that does not
+the boundary that does not depend on this check. A release can change what
+a broker Sandbox's environment policy renders (the gateway, the UDP relay,
+the server namespace, the key broker), and the check would then refuse a
+running Sandbox until its policy was applied again. So at startup each
+orchestration process applies the environment policy of every bound
+environment whose Sandbox is whole broker again, rendered in that Sandbox's
+own mode by the access stack's writer, replacing only a policy that exists
+and differs (#6070). Until that sweep has finished, its egress service
+answers each lockdown decision, at admission and before a first bound
+assignment, with a retryable `UNAVAILABLE`, so cw-egress keeps a running
+Sandbox's last assignment and asks again. The sweep is bounded at 60 seconds
+(`SWEEP_BOUND`): past it, or for an environment whose re-apply failed, which
+is logged, the service decides anyway, and a policy that still differs is
+refused, never admitted. Admission itself never applies a policy. A
+deployment that does not
 let orchestration manage the workspace `NetworkPolicy` has no rendering to
 compare, and every bound guest is refused there. Kubernetes adds together
 every NetworkPolicy that selects a Pod, so the check reads every one in the
@@ -1504,6 +1515,39 @@ one: a snapshot's clearing template, which runs one container on the
 restored disk, is never a workspace, and has a network policy with no
 ingress and no egress. A restore makes a new environment through create,
 so it is broker-mode.
+
+Target, not shipped (#6070): turning hosted egress off affects new creates
+only. The switch (`CODEWIRE_HOSTED_EGRESS_ENABLED`) decides what a create
+renders and whether a start moves a Sandbox made before it. It never relaxes
+or strands a Sandbox already in broker mode, and a start never moves one
+back to direct. Whenever the broker settings are configured (the fence
+revision, the cluster DNS address, the gateway and the in-namespace
+Services), orchestration serves broker Sandboxes with the switch on or off.
+Its egress service admits and follows them, and it authorizes each caller by
+its Sandbox's whole broker shape and token audience, exactly as with the
+switch on. Every policy orchestration writes for an existing environment,
+and every bind check, decides from the whole broker shape of the Sandbox
+object orchestration wrote, never from the switch, the Pod, its status or
+anything the guest can influence. So a broker Sandbox keeps its broker rules,
+a direct one keeps its direct rules (as does one with the broker label
+alone), and turning the switch back on finds nothing to re-apply. A pool
+member's first bind admits the broker additions (the TUN init and its volume,
+and the egress token) only when the member's own shape is whole broker and
+its pool's template at that revision was broker. A direct member with any of
+them is refused, with the switch on or off. With the switch on, a direct
+member's first bind is refused, the member is deleted by its exact UID, and
+its create is claimed again cold, so it ends up broker. A broker member's
+first bind without the broker settings is handled the same way, and its cold
+claim renders direct. Neither member has ever served, so the cold claim is a
+new create, which the switch decides. The emergency stop for broker egress is
+removing the broker settings, not turning the switch off. Each broker Sandbox
+is then refused with a named reason, nothing is written, and it is never
+given direct rules. Startup logs and counts those Sandboxes. The stop fails
+closed. With the switch off, the template admission policy refuses any update
+of a broker environment's own template, so a start that needs that template
+changed is refused and fails closed, and nothing is relaxed (#6121 would
+allow it). A deployment on the `standard` runtime profile still can't turn
+the switch off.
 
 Target, not shipped (#4000): with hosted egress on, a confidential guest
 can't boot yet, because broker mode leaves it no way to reach the key broker

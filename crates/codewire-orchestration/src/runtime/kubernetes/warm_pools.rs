@@ -104,10 +104,19 @@ pub(crate) fn render_pool(
     namespace: &str,
     wanted: &WantedPool,
 ) -> anyhow::Result<DesiredPool> {
+    render_pool_from(namespace, &config.pool(wanted.configured.shape)?, wanted)
+}
+
+/// Render one wanted pool from the options `opts` of its shape.
+pub(crate) fn render_pool_from(
+    namespace: &str,
+    opts: &crate::sandbox::template::TemplateOpts,
+    wanted: &WantedPool,
+) -> anyhow::Result<DesiredPool> {
     Ok(DesiredPool {
         objects: crate::sandbox::warm_pool::render_warm_pool(
             namespace,
-            &config.pool(wanted.configured.shape)?,
+            opts,
             wanted.configured.members,
             wanted.allow_unpinned_images,
         )?,

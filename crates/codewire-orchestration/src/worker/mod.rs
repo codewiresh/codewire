@@ -21,6 +21,7 @@ pub mod confidential_slots;
 pub mod create;
 pub mod credential_relay;
 pub mod credit_stop;
+pub mod egress_reapply;
 pub mod env_data;
 pub mod env_log;
 pub mod environment_auth;

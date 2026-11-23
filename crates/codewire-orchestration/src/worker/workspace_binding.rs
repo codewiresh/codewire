@@ -22,7 +22,6 @@
 //! `workspace_pvc_uid` the first time it resolves the PVC of any environment
 //! that has a Sandbox, stopped ones included.
 
-use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -41,7 +40,7 @@ use super::start_timing::{
     with_since_accepted,
 };
 use crate::runtime::{
-    ClaimRef, Placement, RuntimeDriver, RuntimeObservation, VerifiedChain, VolumeRef, WantedPool,
+    ClaimRef, Placement, RuntimeDriver, RuntimeObservation, VerifiedChain, VolumeRef,
 };
 use crate::sandbox::client::{WorkspacePodIdentity, WorkspacePvc};
 use crate::sandbox::warm_pool::{LAUNCH_TYPE_LABEL, is_warm_pool_name};
@@ -743,34 +742,6 @@ pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> an
     .await?)
 }
 
-/// The expected pool of a pool-born environment (Program #2238 C3): the
-/// identity-free pool of its exact shape on this replica, whose template
-/// carries the pool revision marker, and the options it renders from, which
-/// the member's isolation is checked against. Routing sends an environment to
-/// a pool only when its own rendering equals this one's, less the marker.
-fn pool_born_rendering(
-    cfg: &SandboxWorkerCfg,
-    env: &EnvironmentRow,
-) -> anyhow::Result<(WantedPool, crate::sandbox::template::TemplateOpts)> {
-    anyhow::ensure!(
-        env.isolation_tier == "standard",
-        "only standard environments are pool-born"
-    );
-    let shape = crate::sandbox::warm_pool::WorkspaceShape {
-        cpu_millicores: i64::from(env.cpu_millicores),
-        memory_mib: i64::from(env.memory_mb),
-        disk_gib: i64::from(env.disk_gb),
-    };
-    let rendering = KubernetesRenderConfig::from(cfg).pool(shape)?;
-    Ok((
-        WantedPool {
-            configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
-            allow_unpinned_images: cfg.allow_diagnostic_runtime,
-        },
-        rendering,
-    ))
-}
-
 /// What one checked attempt would record, before the fenced write.
 struct CheckedBinding {
     record: BindingRecord,
@@ -854,39 +825,15 @@ async fn check_bindable_runtime(
         return refuse(BindRefused::Denied(DENIED_IMAGES), scope, true);
     }
     // Program #2238 C3: the first bind of a pool-born Sandbox (its Claim
-    // selects a shared `cw-pool-` pool) requires the Claim to name this
-    // environment's own pool, the Sandbox's spec to be exactly that pool's
-    // rendering, and the Pod to have booted from that pool revision, read
-    // from its immutable spec (review M1), so a stale, foreign or altered
-    // member never binds. Without the configuration to render it, refuse
-    // without deleting.
-    if pool_born && !ever_bound? {
-        let Some(cfg) = cfg else {
-            return refuse(
-                BindRefused::Denied("pool rendering unverified"),
-                scope,
-                false,
-            );
-        };
-        // The driver renders the pool, so only it can say whether this
-        // runtime was born of it; the decision stays here. The member's own
-        // isolation is checked here too, over its Pod spec, whatever the
-        // driver says (#3628 PR 5c, cw-confidential's condition 3).
-        let matched = match pool_born_rendering(cfg, env) {
-            Ok((wanted, rendering)) => match pool_member_isolated(&member.spec_json, &rendering) {
-                Ok(()) => {
-                    runtime
-                        .pool_birth(&claim.placement, &wanted, observation)
-                        .await
-                }
-                Err(path) => Err(format!("isolation {path}")),
-            },
-            Err(error) => Err(format!("{error:#}")),
-        };
-        if let Err(path) = matched {
-            tracing::warn!(env = %env.id, %path, "pool-born Sandbox differs from the expected rendering");
-            return refuse(BindRefused::Denied(DENIED_POOL_RENDERING), scope, true);
-        }
+    // selects a shared `cw-pool-` pool) requires it born of this
+    // environment's own pool ([`pool_born`]).
+    if pool_born
+        && !ever_bound?
+        && let Err((reason, definitive)) =
+            pool_born::born_of_its_pool(runtime, cfg, env, &claim.placement, observation, &member)
+                .await
+    {
+        return refuse(BindRefused::Denied(reason), scope, definitive);
     }
     // §5.4: the workspace PVC, by UID. A resolution error may be an API
     // failure, so it refuses without deleting; the Pod mounting another claim
@@ -1970,9 +1917,10 @@ pub(crate) use bootstrap::workspace_bootstrap_current;
 #[cfg(test)]
 pub(crate) use bootstrap::{BootstrapCheck, binding_bootstrap_check, binding_bootstrap_current};
 pub(crate) mod checks;
+mod pool_born;
 pub(crate) use checks::{
     credential_scope, environment_scope_capture, images_match, member_still_observed,
-    pool_member_isolated, volume_matches,
+    volume_matches,
 };
 
 #[cfg(test)]

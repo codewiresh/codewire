@@ -2,6 +2,7 @@
 //! templates render from (#3628 PR 8b). The intent is the environment's; every
 //! deployment-wide setting is this driver's own [`KubernetesRenderConfig`].
 
+use crate::egress::own_mode::{HostedEgress, SandboxMode};
 use crate::runtime::{Isolation, RenderingIntent, WorkspaceShape};
 use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
@@ -47,9 +48,10 @@ pub struct KubernetesRenderConfig {
     pub ingress_pod_name: String,
     pub egress_bandwidth: String,
     pub derp_host: String,
-    /// What a broker-mode template renders, read at startup while hosted
-    /// egress is on (`egress::settings::startup`); `None` off.
-    pub hosted_egress: Option<HostedEgressTemplate>,
+    /// The hosted egress switch, which decides what a create renders, and
+    /// the broker settings every broker Sandbox renders from whatever the
+    /// switch says (`egress::settings::startup`, #6070).
+    pub hosted_egress: HostedEgress,
     /// What a `standard` workspace runs; `None` where none is configured.
     pub standard_runtime: Option<StandardRuntime>,
     pub derp_port: i64,
@@ -78,6 +80,19 @@ pub struct KubernetesRenderConfig {
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
     pub debug_tailnet: bool,
+}
+
+/// `egress` on a VM runtime profile, the only ones broker mode runs on; none
+/// on another profile.
+fn on_vm(profile: &str, egress: Option<&HostedEgressTemplate>) -> Option<HostedEgressTemplate> {
+    egress
+        .filter(|_| {
+            matches!(
+                profile,
+                RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL | RUNTIME_PROFILE_STANDARD
+            )
+        })
+        .cloned()
 }
 
 /// Codewire base images supervise the daemon beneath PID 1.
@@ -241,9 +256,48 @@ impl KubernetesRenderConfig {
         Ok(opts)
     }
 
-    /// The NetworkPolicy an environment's access stack applies, as the egress
-    /// lockdown check expects to read it back (#4000 P6), or `None` when this
-    /// deployment leaves workspace NetworkPolicies to someone else. Of an
+    /// [`Self::environment`] for a write to an environment whose Sandbox is
+    /// `sandbox`: its hosted egress follows that Sandbox's own mode, never the
+    /// switch (#6070). A broker Sandbox renders broker mode from the broker
+    /// settings, or is refused without them; any other renders direct. With
+    /// no Sandbox it is a create's.
+    pub fn existing(
+        &self,
+        intent: &RenderingIntent,
+        sandbox: Option<&SandboxMode>,
+    ) -> anyhow::Result<TemplateOpts> {
+        self.as_sandbox(self.environment(intent)?, sandbox)
+    }
+
+    /// [`Self::pool`] as the pool `member` was born of rendered it: in the
+    /// member's own egress mode, so a member claimed before a switch and
+    /// bound after it is judged by its own pool revision (#6070). A broker
+    /// member without the broker settings is refused.
+    pub fn pool_of(
+        &self,
+        shape: WorkspaceShape,
+        member: &SandboxMode,
+    ) -> anyhow::Result<TemplateOpts> {
+        self.as_sandbox(self.pool(shape)?, Some(member))
+    }
+
+    fn as_sandbox(
+        &self,
+        opts: TemplateOpts,
+        sandbox: Option<&SandboxMode>,
+    ) -> anyhow::Result<TemplateOpts> {
+        let Some(sandbox) = sandbox else {
+            return Ok(opts);
+        };
+        Ok(TemplateOpts {
+            hosted_egress: self.hosted_egress.existing(sandbox)?.cloned(),
+            ..opts
+        })
+    }
+
+    /// The NetworkPolicy a broker Sandbox's access stack applies, as the
+    /// egress lockdown check expects to read it back (#4000 P6), or `None`
+    /// when this deployment leaves workspace NetworkPolicies to someone else. Of an
     /// environment's own inputs the policy reads only its ID and isolation,
     /// so it renders from those; a new per-environment input must be added
     /// here too, which the test beside this file holds.
@@ -278,7 +332,7 @@ impl KubernetesRenderConfig {
             .transpose()
     }
 
-    /// The options an environment's own NetworkPolicies render from, or
+    /// The options a broker Sandbox's own NetworkPolicies render from, or
     /// `None` when this deployment leaves them to someone else.
     fn workspace_policy_opts(
         &self,
@@ -289,16 +343,7 @@ impl KubernetesRenderConfig {
         {
             return None;
         }
-        let shape = WorkspaceShape {
-            cpu_millicores: 0,
-            memory_mib: 0,
-            disk_gib: 0,
-        };
-        let opts = self.shape(
-            canonical_workspace_runtime_image(),
-            &self.runtime_spec(isolation),
-            shape,
-        );
+        let opts = self.broker_shape(isolation);
         Some(TemplateOpts {
             environment_id: environment_id.to_owned(),
             // The policies read whether a direct UDP port is allocated, never
@@ -309,7 +354,7 @@ impl KubernetesRenderConfig {
         })
     }
 
-    /// The NetworkPolicy the sandbox controller makes from a workspace
+    /// The NetworkPolicy the sandbox controller makes from a broker workspace
     /// template of `isolation`, selecting the Sandboxes whose template hash is
     /// `template_ref_hash`, as the egress lockdown check expects to read it
     /// back (#4964), or `None` when this deployment leaves workspace
@@ -325,17 +370,31 @@ impl KubernetesRenderConfig {
         {
             return None;
         }
-        let shape = WorkspaceShape {
-            cpu_millicores: 0,
-            memory_mib: 0,
-            disk_gib: 0,
-        };
+        Some(render_template_network_policy(
+            &self.broker_shape(isolation),
+            template_ref_hash,
+        ))
+    }
+
+    /// The shape inputs a broker guest's policies render from, as the egress
+    /// lockdown check expects them: broker mode from the broker settings,
+    /// whatever the switch says (#6070), since only a guest whose Sandbox is
+    /// whole broker is ever checked. No shape or environment is read.
+    fn broker_shape(&self, isolation: Isolation) -> TemplateOpts {
+        let runtime_spec = self.runtime_spec(isolation);
         let opts = self.shape(
             canonical_workspace_runtime_image(),
-            &self.runtime_spec(isolation),
-            shape,
+            &runtime_spec,
+            WorkspaceShape {
+                cpu_millicores: 0,
+                memory_mib: 0,
+                disk_gib: 0,
+            },
         );
-        Some(render_template_network_policy(&opts, template_ref_hash))
+        TemplateOpts {
+            hosted_egress: on_vm(&runtime_spec.profile, self.hosted_egress.broker.as_ref()),
+            ..opts
+        }
     }
 
     /// The identity-free inputs of one warm-pool shape (Program #2238 C1): the
@@ -413,16 +472,9 @@ impl KubernetesRenderConfig {
             systemd_workspace: false,
             support_image: self.daemon_image.clone(),
             dind_image: self.dind_image.clone(),
-            // Hosted egress (#4000): with the switch on, every template on a
-            // VM runtime profile is broker-mode. Another profile never is.
-            hosted_egress: self.hosted_egress.clone().filter(|_| {
-                matches!(
-                    runtime_spec.profile.as_str(),
-                    RUNTIME_PROFILE_COMMODITY
-                        | RUNTIME_PROFILE_CONFIDENTIAL
-                        | RUNTIME_PROFILE_STANDARD
-                )
-            }),
+            // Hosted egress (#4000): with the switch on, every template a
+            // create renders on a VM runtime profile is broker-mode.
+            hosted_egress: on_vm(&runtime_spec.profile, self.hosted_egress.create()),
             standard_runtime: self
                 .standard_runtime
                 .clone()

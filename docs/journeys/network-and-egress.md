@@ -1870,6 +1870,21 @@ Issue: #4000.
     refused a host its policy doesn't allow. A Pod the controller rebuilt
     from a Sandbox not yet moved is refused its bind, so its daemon never
     serves (not yet observed);
+  - an environment in broker mode while the switch is turned off and on
+    again, with the broker settings kept: it keeps its egress the whole
+    time. Its own `NetworkPolicy` reads the same before, during and after.
+    A restart while the switch is off comes back broker-mode, passes the
+    self-check and reaches an allowed host through `cw-egress`. Turning the
+    switch back on refuses nothing. A new create while the switch is off is
+    direct. With the broker settings removed instead, the broker
+    environment is refused with a named reason and is never given direct
+    egress (not yet observed);
+  - an environment in broker mode running across an orchestration release
+    that changes what its policy renders (the gateway, the UDP relay, the
+    server namespace or the key broker): it keeps its egress, its first
+    admission after the rollout is accepted with no `policy_differs`, and
+    its `NetworkPolicy` reads as the new release renders it (not yet
+    observed);
   - with the switch on, a confidential create, a confidential create from a
     snapshot, and a stopped confidential environment's start each fail at
     once with "Confidential sandboxes are unavailable on this deployment

@@ -3259,3 +3259,70 @@ fn a_block_workspace_is_recognized_by_its_current_and_legacy_volume_name() {
     assert!(!mounts_block_workspace(&filesystem));
     assert!(!mounts_block_workspace(&serde_json::json!({})));
 }
+
+/// A broker-mode environment's Sandbox and template, whole broker shape and
+/// all, before a start's refresh (#6070).
+fn broker_fixture() -> Fixture {
+    let mut before = fixture();
+    for object in [&mut before.template, &mut before.sandbox] {
+        let template = &mut object["spec"]["podTemplate"];
+        template["metadata"]["labels"]["codewire.sh/egress"] = json!("broker");
+        template["metadata"]["annotations"]["codewire.sh/egress-fence-revision"] = json!("4");
+        template["spec"]["initContainers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": super::super::template::HOSTED_EGRESS_TUN_CONTAINER}));
+    }
+    before
+}
+
+/// #6070: a start never gives a broker Sandbox a direct rendering under its
+/// broker label, which would leave it hollow. Refused before any write; its
+/// own broker rendering goes ahead and leaves it whole.
+#[tokio::test]
+async fn a_broker_sandbox_is_never_refreshed_with_a_direct_rendering() {
+    let (sandboxes, state) = client(broker_fixture());
+    let error = sandboxes
+        .reconcile_workspace_bootstrap(
+            &binding_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &expected_sandbox(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("never refreshed with a direct rendering"),
+        "{error:#}"
+    );
+    assert!(patches(&state.lock().unwrap()).is_empty());
+
+    let broker = TemplateOpts {
+        hosted_egress: Some(super::super::template::HostedEgressTemplate {
+            stream_addr: "10.44.0.89:8089".into(),
+            binding_addr: "10.44.0.87:8087".into(),
+            fence_revision: "4".into(),
+            gateway: super::super::template::GatewayPeer {
+                namespace: "gateway-proxies".into(),
+                gateway_name: "public".into(),
+                gateway_namespace: "gateway".into(),
+                port: 10443,
+            },
+            derp_tls_port: 8443,
+            gateway_addr: "10.44.0.43:443".into(),
+            derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+            cluster_dns_ip: "10.44.0.10".into(),
+        }),
+        ..binding_opts()
+    };
+    let (sandboxes, state) = client(broker_fixture());
+    sandboxes
+        .reconcile_workspace_bootstrap(&broker, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    assert!(!patches(&state).is_empty());
+    assert!(crate::egress::pre_switch::template_whole_broker(
+        state.sandbox.pointer("/spec/podTemplate")
+    ));
+}

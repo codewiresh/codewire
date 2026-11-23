@@ -1264,7 +1264,7 @@ fn sandbox_suspension_observed(sandbox: &DynamicObject) -> bool {
 }
 
 /// The Sandbox a Claim's status names, if it names one.
-fn claim_bound_sandbox_name(claim: &DynamicObject) -> Option<&str> {
+pub(crate) fn claim_bound_sandbox_name(claim: &DynamicObject) -> Option<&str> {
     claim
         .data
         .pointer("/status/sandbox/name")

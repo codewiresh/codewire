@@ -160,6 +160,15 @@ impl SandboxClient {
             sandbox_suspension_observed(&before.sandbox),
             "workspace bootstrap refresh requires current controller-completed suspension"
         );
+        // A broker Sandbox keeps its mode (#6070): a direct render under its
+        // broker label would leave it hollow, so nothing is written.
+        anyhow::ensure!(
+            opts.hosted_egress.is_some()
+                || !crate::egress::pre_switch::template_whole_broker(
+                    before.sandbox.data.pointer("/spec/podTemplate")
+                ),
+            "a broker-mode workspace is never refreshed with a direct rendering"
+        );
         let rendered = render_sandbox_template(&self.namespace, opts);
         let pod_spec = rendered
             .pointer("/spec/podTemplate/spec")

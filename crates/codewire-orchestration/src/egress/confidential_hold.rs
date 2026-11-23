@@ -48,7 +48,7 @@ impl From<ConfidentialHeld> for AppError {
 
 /// Refuses a confidential environment while `cfg` has hosted egress on.
 pub fn check(cfg: &SandboxWorkerCfg, isolation: Isolation) -> Result<(), ConfidentialHeld> {
-    if cfg.hosted_egress.is_some() && isolation == Isolation::Confidential {
+    if cfg.hosted_egress.enabled && isolation == Isolation::Confidential {
         return Err(ConfidentialHeld);
     }
     Ok(())
@@ -61,7 +61,7 @@ pub fn check(cfg: &SandboxWorkerCfg, isolation: Isolation) -> Result<(), Confide
 pub fn check_tier(cfg: &SandboxWorkerCfg, tier: &str) -> Result<(), ConfidentialHeld> {
     match Isolation::of_tier(tier) {
         Ok(isolation) => check(cfg, isolation),
-        Err(_) if cfg.hosted_egress.is_some() => Err(ConfidentialHeld),
+        Err(_) if cfg.hosted_egress.enabled => Err(ConfidentialHeld),
         Err(_) => Ok(()),
     }
 }
@@ -70,22 +70,28 @@ pub fn check_tier(cfg: &SandboxWorkerCfg, tier: &str) -> Result<(), Confidential
 #[cfg(test)]
 pub(crate) fn test_cfg(hosted_egress: bool) -> SandboxWorkerCfg {
     use crate::sandbox::template::{GatewayPeer, HostedEgressTemplate};
+    let broker = HostedEgressTemplate {
+        stream_addr: "10.44.0.89:8089".into(),
+        binding_addr: "10.44.0.87:8087".into(),
+        fence_revision: "4".into(),
+        gateway: GatewayPeer {
+            namespace: "gateway-proxies".into(),
+            gateway_name: "public".into(),
+            gateway_namespace: "gateway".into(),
+            port: 10443,
+        },
+        derp_tls_port: 8443,
+        gateway_addr: "10.44.0.43:443".into(),
+        derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+        cluster_dns_ip: "10.44.0.10".into(),
+    };
     SandboxWorkerCfg {
-        hosted_egress: hosted_egress.then(|| HostedEgressTemplate {
-            stream_addr: "10.44.0.89:8089".into(),
-            binding_addr: "10.44.0.87:8087".into(),
-            fence_revision: "4".into(),
-            gateway: GatewayPeer {
-                namespace: "gateway-proxies".into(),
-                gateway_name: "public".into(),
-                gateway_namespace: "gateway".into(),
-                port: 10443,
-            },
-            derp_tls_port: 8443,
-            gateway_addr: "10.44.0.43:443".into(),
-            derp_addr: "derp.example.test=10.44.0.84:8443".into(),
-            cluster_dns_ip: "10.44.0.10".into(),
-        }),
+        // Off keeps the broker settings, as a deployment that serves the
+        // broker Sandboxes it already has does (#6070).
+        hosted_egress: crate::egress::own_mode::HostedEgress {
+            enabled: hosted_egress,
+            broker: Some(broker),
+        },
         ..Default::default()
     }
 }

@@ -670,42 +670,9 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
 
     let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
-    // Hosted egress is read here, once and only here (#4000): with it on, every
-    // template on a VM runtime is broker-mode, and a missing or malformed
-    // setting stops startup.
-    let hosted_egress = egress::settings::startup(&sandbox_cfg.derp_host)
-        .context("read the hosted egress settings")?;
-    sandbox_cfg.hosted_egress = hosted_egress.template;
-    // The standard runtime profile (#5602) runs only with its runtime, its
-    // image disk and hosted egress, its VM's only network.
-    sandbox_cfg.standard_runtime =
-        codewire_orchestration::sandbox::template::StandardRuntime::from_env()
-            .map_err(anyhow::Error::msg)
-            .context("read the standard runtime settings")?;
-    if sandbox_cfg.runtime_profile.trim()
-        == codewire_orchestration::sandbox::template::RUNTIME_PROFILE_STANDARD
-    {
-        anyhow::ensure!(
-            sandbox_cfg.standard_runtime.is_some() && sandbox_cfg.hosted_egress.is_some(),
-            "the standard runtime profile needs {} and {}, and hosted egress on; see docs/CONFIGURATION.md",
-            codewire_orchestration::sandbox::template::STANDARD_RUNTIME_IMAGE_ENV,
-            codewire_orchestration::sandbox::template::STANDARD_IMAGE_DISK_ENV,
-        );
-    }
-    // While hosted egress is on, the gateway address it renders is held to the
-    // gateway Service's ClusterIP; a broker-mode render refuses until it is.
-    if let Some(gateway) = hosted_egress.gateway {
-        match kube.as_ref() {
-            Some(kube) => {
-                codewire_orchestration::egress::gateway_check::start(kube.clone(), gateway)
-                    .await
-                    .context("start the gateway check")?
-            }
-            None => {
-                tracing::warn!("hosted egress is on without a cluster; broker-mode renders refuse")
-            }
-        }
-    }
+    // Hosted egress and the standard runtime, read once and only here
+    // (`egress::startup`, #4000, #6070).
+    let egress_settings = egress::startup::configure(&mut sandbox_cfg, kube.as_ref()).await?;
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {
@@ -762,7 +729,6 @@ async fn main() -> anyhow::Result<()> {
     let idle_stop = worker::idle_stop::IdleStop::from_env()?;
     // Read once: the relay and EgressService share one front-door registry,
     // which exists only while hosted interception is on (#4001).
-    let egress_settings = hosted_egress.settings;
     let front_doors = egress_settings
         .interception
         .then(Arc::<codewire_orchestration::front_door::FrontDoorEpochs>::default);
@@ -783,6 +749,10 @@ async fn main() -> anyhow::Result<()> {
         unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge::from_env()?,
         front_doors: front_doors.clone(),
     });
+    // Before its egress service decides any lockdown, this process applies
+    // every bound broker Sandbox's policy again as it now renders it, so a
+    // release that changed the rendering refuses no running Sandbox (#6070).
+    let policies_reapplied = worker::egress_reapply::start(&ctx);
 
     // #4426: SIGTERM, which a rollout sends only after the preStop delay has
     // taken this replica out of the gateway, begins the drain. The listeners
@@ -994,6 +964,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.database_url,
         egress_settings,
         front_doors,
+        policies_reapplied,
     )?;
 
     // The Transit canary costs OpenBao round trips, so a background loop

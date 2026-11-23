@@ -3,11 +3,16 @@
 use kube::api::DynamicObject;
 use serde_json::Value;
 
-use super::super::PoolState;
-use super::warm_pools::{pool_observed_by_capable_controller, template_spec_current};
+use super::super::{PoolState, RuntimeObservation, WantedPool};
+use super::rendering::KubernetesRenderConfig;
+use super::warm_pools::{
+    pool_observed_by_capable_controller, render_pool_from, template_spec_current,
+};
+use crate::egress::own_mode::SandboxMode;
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::warm_pool::{
     POOL_REVISION_ANNOTATION, WarmPoolObjects, has_pool_labels, pod_spec_pool_revision,
+    sandbox_matches_rendering,
 };
 
 /// Claim only on a capable controller, a current pool and template, and
@@ -85,4 +90,35 @@ pub(crate) fn members_current(members: &[DynamicObject], revision: &str) -> bool
                 .and_then(pod_spec_pool_revision)
                 == Some(revision)
         })
+}
+
+/// Whether `observation` is a member born of `pool` as this replica renders
+/// it (Program #2238 C3): the Claim names the pool, the Sandbox is exactly
+/// its template, and the Pod booted from its revision. The pool is rendered
+/// in the member's own egress mode, read from its Sandbox, so a member
+/// claimed before a switch is judged by its own pool revision and a broker
+/// one by a broker pool's (#6070). `Err` names the first path that differs.
+pub(super) fn pool_birth(
+    config: &KubernetesRenderConfig,
+    namespace: &str,
+    pool: &WantedPool,
+    observation: &RuntimeObservation,
+) -> Result<(), String> {
+    let member = SandboxMode::of(
+        observation.runtime.name.as_deref().unwrap_or_default(),
+        &observation.runtime.json,
+    );
+    let expected = config
+        .pool_of(pool.configured.shape, &member)
+        .and_then(|opts| render_pool_from(namespace, &opts, pool))
+        .map_err(|error| format!("pool rendering: {error:#}"))?
+        .objects;
+    if observation.pool != expected.name {
+        return Err("/spec/warmPoolRef/name".to_owned());
+    }
+    sandbox_matches_rendering(&observation.runtime.json, &expected.template)?;
+    if pod_spec_pool_revision(&observation.member.spec_json) != Some(expected.revision.as_str()) {
+        return Err("pod /spec/containers/workspace/env".to_owned());
+    }
+    Ok(())
 }

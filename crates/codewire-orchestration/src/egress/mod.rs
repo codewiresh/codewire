@@ -20,10 +20,13 @@ pub mod confidential_hold;
 pub mod gateway_check;
 pub mod interception_ca;
 pub mod lockdown;
+pub mod own_mode;
 pub mod pre_switch;
+pub mod reapply;
 pub mod reports;
 pub mod service;
 pub mod settings;
+pub mod startup;
 
 /// What hosted interception takes from the rest of orchestration (#4001).
 #[derive(Default)]
@@ -34,25 +37,28 @@ pub struct InterceptionInputs {
     pub credential_broker: Option<String>,
 }
 
-/// The service's state when hosted egress is on; `None` when it is off, and
-/// then nothing serves `EgressService`. cw-egress runs in orchestration's own
-/// namespace (`POD_NAMESPACE`), and its callers are accepted only from there.
+/// The service's state with `settings` whenever the broker settings are read,
+/// with the switch on or off (#6070), so a broker Sandbox is served whatever
+/// the switch says; `None` without them (`settings` is `None` then too), and
+/// nothing serves `EgressService`. It authorizes each caller the same way either way.
+/// cw-egress runs in orchestration's own namespace (`POD_NAMESPACE`), and its
+/// callers are accepted only from there.
 pub fn service_state(
-    settings: settings::EgressSettings,
+    settings: Option<settings::EgressSettings>,
     runtime: Option<Arc<dyn RuntimeDriver>>,
     database_url: &str,
     pool: PgPool,
     server_namespace: &str,
     sandbox_namespace: &str,
     interception: InterceptionInputs,
-) -> anyhow::Result<Option<Arc<service::EgressServiceState>>> {
+) -> anyhow::Result<Option<service::EgressServiceState>> {
     let InterceptionInputs {
         front_doors,
         credential_broker,
     } = interception;
-    if !settings.enabled {
+    let Some(settings) = settings else {
         return Ok(None);
-    }
+    };
     let runtime =
         runtime.ok_or_else(|| anyhow::anyhow!("hosted egress needs the Kubernetes runtime"))?;
     anyhow::ensure!(
@@ -77,7 +83,7 @@ pub fn service_state(
             ),
         }) as Arc<dyn interception_ca::InterceptionCaSource>),
     };
-    Ok(Some(Arc::new(service::EgressServiceState {
+    Ok(Some(service::EgressServiceState {
         attestation,
         bindings: Arc::new(PgBindingStore::connect_lazy(database_url)?),
         pool,
@@ -92,22 +98,30 @@ pub fn service_state(
         starts: Default::default(),
         front_doors,
         interception_cas,
-    })))
+        // No startup sweep to wait for unless the caller gives one ([`mount`]).
+        reapplied: reapply::PoliciesReapplied::finished(),
+    }))
 }
 
-/// The internal listener's router, with `EgressService` mounted when the
-/// deployment turns hosted egress on. Every method authenticates cw-egress by
+/// The internal listener's router, with `EgressService` mounted whenever the
+/// deployment has the broker settings. Every method authenticates cw-egress by
 /// TokenReview of its own token, so the mount carries no layer;
-/// WatchAssignment streams.
+/// WatchAssignment streams. It decides no lockdown until `reapplied`, the
+/// startup re-apply of broker policies, has finished ([`reapply`]).
 pub fn mount(
     app: codewire_server_core::http::AppBuilder,
     api: &crate::api::ApiState,
     database_url: &str,
     settings: settings::EgressSettings,
     front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+    reapplied: Arc<reapply::PoliciesReapplied>,
 ) -> anyhow::Result<axum::Router> {
     let state = service_state(
-        settings,
+        api.sandbox_cfg
+            .hosted_egress
+            .broker
+            .is_some()
+            .then_some(settings),
         api.runtime.clone(),
         database_url,
         api.pool.clone(),
@@ -124,6 +138,7 @@ pub fn mount(
     )?;
     Ok(match state {
         Some(state) => {
+            let state = Arc::new(service::EgressServiceState { reapplied, ..state });
             spawn_report_sweep(state.pool.clone());
             app.with_connect_routes(service::egress_router(state))
         }
@@ -160,10 +175,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nothing_is_served_while_hosted_egress_is_off() {
-        // Off needs nothing else: no runtime, no namespace.
+    async fn nothing_is_served_without_the_broker_settings() {
+        // Without them nothing else is needed: no runtime, no namespace.
         let state = service_state(
-            settings::EgressSettings::default(),
+            None,
             None,
             "postgres://unused",
             pool(),
@@ -175,6 +190,37 @@ mod tests {
         assert!(state.is_none());
     }
 
+    /// #6070: with the switch off and the broker settings kept, the service
+    /// is mounted, so broker Sandboxes are still served.
+    #[tokio::test]
+    async fn the_switch_off_with_the_broker_settings_still_serves() {
+        let client = kube::Client::new(
+            tower::service_fn(|_: axum::http::Request<kube::client::Body>| async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::http::Response::builder()
+                        .status(404)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+            }),
+            "dev",
+        );
+        let runtime =
+            crate::runtime::kubernetes::KubernetesDriver::shared(client, Default::default());
+        let state = service_state(
+            Some(settings::EgressSettings::default()),
+            Some(runtime),
+            "postgres://unused",
+            pool(),
+            "dev",
+            "sb",
+            InterceptionInputs::default(),
+        )
+        .unwrap()
+        .expect("mounted with the switch off");
+        assert!(!state.interception && state.interception_cas.is_none());
+    }
+
     #[tokio::test]
     async fn on_without_a_runtime_or_a_namespace_fails_startup() {
         let on = || settings::EgressSettings {
@@ -183,7 +229,7 @@ mod tests {
         };
         assert!(
             service_state(
-                on(),
+                Some(on()),
                 None,
                 "postgres://unused",
                 pool(),
@@ -209,7 +255,7 @@ mod tests {
             crate::runtime::kubernetes::KubernetesDriver::shared(client, Default::default());
         assert!(
             service_state(
-                on(),
+                Some(on()),
                 Some(runtime.clone()),
                 "postgres://unused",
                 pool(),
@@ -221,7 +267,7 @@ mod tests {
         );
         assert!(
             service_state(
-                on(),
+                Some(on()),
                 Some(runtime.clone()),
                 "postgres://unused",
                 pool(),
@@ -240,7 +286,7 @@ mod tests {
         // can make, so interception needs its runtime.
         assert!(
             service_state(
-                intercepting(),
+                Some(intercepting()),
                 Some(runtime.clone()),
                 "postgres://unused",
                 pool(),
@@ -251,7 +297,7 @@ mod tests {
             .is_err()
         );
         let state = service_state(
-            intercepting(),
+            Some(intercepting()),
             Some(runtime),
             "postgres://unused",
             pool(),

@@ -78,6 +78,9 @@ pub struct EgressServiceState {
     /// The CA certificates of intercepting sandboxes, when interception is
     /// on (#4001).
     pub interception_cas: Option<Arc<dyn super::interception_ca::InterceptionCaSource>>,
+    /// The startup re-apply of broker policies (`super::reapply`): until it
+    /// has finished, no lockdown is decided.
+    pub reapplied: Arc<super::reapply::PoliciesReapplied>,
 }
 
 mod front_door;
@@ -291,6 +294,16 @@ impl EgressServiceState {
         facts: &crate::runtime::MemberFacts,
         binding: &LiveBinding,
     ) -> Result<Option<lockdown::LockdownRefusal>, ConnectError> {
+        // Until the startup sweep has applied each broker policy again, a
+        // difference may be a release's, not a tamper: retryable, not decided.
+        if !self.reapplied.is_finished() {
+            return Err(ConnectError::unavailable(
+                "egress assignment is unavailable while policies are applied again",
+            ));
+        }
+        if !self.sandbox_whole_broker(guest, facts, binding).await? {
+            return Ok(Some(lockdown::LockdownRefusal::NotBrokerMode));
+        }
         let isolation = Isolation::of_tier(&binding.isolation_tier)
             .map_err(|error| unavailable("read the environment's isolation", error))?;
         let rendered = self
@@ -333,6 +346,39 @@ impl EgressServiceState {
             tracing::warn!(%error, pod = %guest.name, "clearing a passed lockdown's refusal failed");
         }
         Ok(refusal)
+    }
+
+    /// Whether the Sandbox the binding recorded has the whole broker shape, as
+    /// orchestration wrote it (#6070): a bound guest is authorized by its
+    /// Sandbox's mode, never the switch or the Pod's own labels, so a direct
+    /// or hollow Sandbox's Pod is refused with the switch on or off. The
+    /// Pod's controller reference only names the Sandbox; its UID must be the
+    /// one the binding recorded.
+    async fn sandbox_whole_broker(
+        &self,
+        guest: &GuestPod,
+        facts: &crate::runtime::MemberFacts,
+        binding: &LiveBinding,
+    ) -> Result<bool, ConnectError> {
+        let Some(controller) = facts.controllers.iter().find(|controller| {
+            controller.kind == "Sandbox" && controller.uid == binding.sandbox_uid
+        }) else {
+            return Ok(false);
+        };
+        let sandbox = self
+            .attestation
+            .attested_runtime(
+                &crate::runtime::Placement::new(&guest.namespace),
+                &controller.name,
+            )
+            .await
+            .map_err(|error| unavailable("read the guest's Sandbox", error))?;
+        Ok(sandbox.is_some_and(|sandbox| {
+            sandbox.uid.as_deref() == Some(binding.sandbox_uid.as_str())
+                && super::pre_switch::template_whole_broker(
+                    sandbox.json.pointer("/spec/podTemplate"),
+                )
+        }))
     }
 
     /// The guest fails closed for `refusal`, as it does for a failed probe:

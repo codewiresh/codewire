@@ -1097,6 +1097,110 @@ fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
     );
 }
 
+/// #6070, cw-security's amendment 1: a pool member's first bind admits the
+/// broker additions only when its own Sandbox is whole broker, judged by the
+/// pool rendered in that mode, with the switch on or off. A direct or hollow
+/// member with any one of them is refused either way.
+#[test]
+fn a_members_broker_additions_follow_its_own_mode_whatever_the_switch_says() {
+    use crate::egress::own_mode::{HostedEgress, SandboxMode};
+    use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
+    use crate::sandbox::template::{
+        HOSTED_EGRESS_DEVNET_VOLUME, HOSTED_EGRESS_TUN_CONTAINER, render_sandbox_template,
+    };
+    use crate::worker::workspace_binding::checks::pool_member_isolated;
+    use serde_json::json;
+
+    let shape = shapes()[0];
+    let config = |enabled| KubernetesRenderConfig {
+        hosted_egress: HostedEgress {
+            enabled,
+            broker: Some(broker_egress()),
+        },
+        ..KubernetesRenderConfig::from(&dev_cfg())
+    };
+    let member_spec = |opts: &TemplateOpts| {
+        let mut spec =
+            render_sandbox_template(SANDBOX_NAMESPACE, opts)["spec"]["podTemplate"]["spec"].clone();
+        spec["volumes"].as_array_mut().unwrap().push(json!({
+            "name": "workspace",
+            "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
+        }));
+        spec
+    };
+    let broker_spec = member_spec(&config(true).pool(shape).unwrap());
+    let direct_spec = member_spec(&config(false).pool(shape).unwrap());
+    let mode = |broker| SandboxMode {
+        name: "cw-pool-member".into(),
+        broker,
+    };
+    // Each broker addition alone, on a direct member's spec.
+    let tun = container_index(&broker_spec, "initContainers", HOSTED_EGRESS_TUN_CONTAINER);
+    let mut with_tun = direct_spec.clone();
+    with_tun["initContainers"]
+        .as_array_mut()
+        .unwrap()
+        .push(broker_spec["initContainers"][tun].clone());
+    let mut with_devnet = direct_spec.clone();
+    with_devnet["volumes"].as_array_mut().unwrap().push(
+        broker_spec["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == HOSTED_EGRESS_DEVNET_VOLUME)
+            .unwrap()
+            .clone(),
+    );
+    let mut with_token = direct_spec.clone();
+    with_token["volumes"].as_array_mut().unwrap().push(json!({
+        "name": "egress-token",
+        "projected": { "sources": [{ "serviceAccountToken": {
+            "audience": codewire_daemon_proto::EGRESS_TOKEN_AUDIENCE,
+            "expirationSeconds": 3600,
+            "path": "token",
+        }}]},
+    }));
+    for enabled in [true, false] {
+        let config = config(enabled);
+        let whole = config.pool_of(shape, &mode(true)).unwrap();
+        assert_eq!(whole.hosted_egress, Some(broker_egress()), "{enabled}");
+        assert_eq!(
+            pool_member_isolated(&broker_spec, &whole),
+            Ok(()),
+            "{enabled}"
+        );
+        let direct = config.pool_of(shape, &mode(false)).unwrap();
+        assert_eq!(direct.hosted_egress, None, "{enabled}");
+        assert_eq!(
+            pool_member_isolated(&direct_spec, &direct),
+            Ok(()),
+            "{enabled}"
+        );
+        for (what, spec) in [
+            ("every addition", &broker_spec),
+            ("the TUN init", &with_tun),
+            ("the TUN volume", &with_devnet),
+            ("the egress token", &with_token),
+        ] {
+            assert!(
+                pool_member_isolated(spec, &direct).is_err(),
+                "{enabled}: a direct member with {what} was admitted"
+            );
+        }
+    }
+    // Without the broker settings a broker member is refused, never judged
+    // direct.
+    let error = KubernetesRenderConfig::from(&dev_cfg())
+        .pool_of(shape, &mode(true))
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<crate::egress::own_mode::BrokerSettingsAbsent>()
+            .is_some(),
+        "{error:#}"
+    );
+}
+
 /// A Dev-shaped `standard` configuration whose disk boots the canonical
 /// workspace image (#5602).
 fn standard_cfg() -> SandboxWorkerCfg {
@@ -1105,7 +1209,7 @@ fn standard_cfg() -> SandboxWorkerCfg {
         .unwrap();
     SandboxWorkerCfg {
         runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_STANDARD.into(),
-        hosted_egress: Some(broker_egress()),
+        hosted_egress: crate::egress::own_mode::HostedEgress::on(broker_egress()),
         standard_runtime: crate::sandbox::template::StandardRuntime::parse(
             "registry.example.invalid/codewire/pod-runtime@sha256:4444444444444444444444444444444444444444444444444444444444444444",
             &format!(

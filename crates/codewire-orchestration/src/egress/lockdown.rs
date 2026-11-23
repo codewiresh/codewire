@@ -33,6 +33,10 @@
 //! is not an input: a guest that reports its probes passed is still refused
 //! here.
 //!
+//! The guest's Sandbox must have the whole broker shape too, read from the
+//! Sandbox object its binding recorded, and the policies it expects are the
+//! broker ones from the broker settings, whatever the switch says (#6070).
+//!
 //! When it runs: at Admit for a guest that is already bound, and on its
 //! assignment watch before the first bound assignment for a member admitted
 //! unbound, which is how a warm-pool member is claimed. A policy changed
@@ -53,6 +57,8 @@ use super::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LockdownRefusal {
+    /// The Pod has no broker label, or the Sandbox its binding recorded is
+    /// not whole broker as orchestration wrote it (#6070).
     NotBrokerMode,
     /// The Pod's environment label is absent, or names another environment
     /// than the one its live binding records.
@@ -68,9 +74,7 @@ pub enum LockdownRefusal {
     /// orchestration renders, such as one made before hosted egress; or any
     /// other policy with a rule. `policy` names it for the operator's log; the
     /// stored and counted reason is the same for each.
-    PolicyDiffers {
-        policy: String,
-    },
+    PolicyDiffers { policy: String },
     /// It is the rendered policy but does not select this Pod.
     PolicyDoesNotSelect,
 }

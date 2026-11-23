@@ -41,6 +41,9 @@ pub const CLUSTER_DNS_IP: &str = "CODEWIRE_CLUSTER_DNS_IP";
 /// read this list from the source it delivers and refuse a switch-on whose
 /// ConfigMap lacks one (#4000: a switch-on with two missing crash-looped
 /// orchestration). The test below holds it to [`startup`], the one read.
+/// With the switch off, these are the broker settings: read only when every
+/// one is set (#6070), so a deployment that keeps them serves its broker
+/// Sandboxes, and one without any of them serves none.
 pub const REQUIRED_WHEN_ON: [&str; 8] = [
     GATEWAY_NAMESPACE,
     GATEWAY_NAME,
@@ -67,9 +70,9 @@ const DERP_LINK: (&str, &str) = ("CODEWIRE_DERP", "HTTPS");
 #[derive(Debug)]
 pub struct Startup {
     pub settings: EgressSettings,
-    /// `None` while hosted egress is off.
+    /// `None` while the broker settings are not read ([`broker_configured`]).
     pub template: Option<HostedEgressTemplate>,
-    /// `None` while hosted egress is off.
+    /// `None` while the broker settings are not read.
     pub gateway: Option<crate::egress::gateway_check::GatewayService>,
 }
 
@@ -83,6 +86,13 @@ pub fn startup(derp_host: &str) -> anyhow::Result<Startup> {
 }
 
 fn startup_from(get: impl Fn(&str) -> Option<String>, derp_host: &str) -> anyhow::Result<Startup> {
+    let missing = missing_broker_settings(&get);
+    if !broker_configured(&get)? && missing.len() < REQUIRED_WHEN_ON.len() {
+        tracing::info!(
+            ?missing,
+            "hosted egress is off and its broker settings are set only in part: broker-mode Sandboxes are not served"
+        );
+    }
     Ok(Startup {
         settings: EgressSettings::from_values(
             get(SWITCH).as_deref(),
@@ -94,18 +104,41 @@ fn startup_from(get: impl Fn(&str) -> Option<String>, derp_host: &str) -> anyhow
     })
 }
 
+/// A setting's value, trimmed; an empty one is unset.
+fn set(get: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    get(key)
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// The keys of [`REQUIRED_WHEN_ON`] that are not set.
+fn missing_broker_settings(get: &impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    REQUIRED_WHEN_ON
+        .into_iter()
+        .filter(|key| set(get, key).is_none())
+        .collect()
+}
+
+/// Whether the broker settings are read (#6070): always with the switch on,
+/// where each is required, and with it off only when every one is set. Then
+/// they are read and checked exactly as with it on, so a broker Sandbox is
+/// rendered and served from them whatever the switch says. Removing any of
+/// them with the switch off stops broker egress (`own_mode`).
+fn broker_configured(get: &impl Fn(&str) -> Option<String>) -> anyhow::Result<bool> {
+    Ok(
+        crate::confidential_storage::parse_bool(SWITCH, set(get, SWITCH).as_deref(), false)?
+            || missing_broker_settings(get).is_empty(),
+    )
+}
+
 /// The gateway Service and its configured address, which
-/// `egress::gateway_check` holds equal while hosted egress is on; `None`
-/// while it is off.
+/// `egress::gateway_check` holds equal while the broker settings are read;
+/// `None` while they are not.
 fn gateway_service_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Option<crate::egress::gateway_check::GatewayService>> {
-    let value = |key: &str| {
-        get(key)
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-    };
-    if !crate::confidential_storage::parse_bool(SWITCH, value(SWITCH).as_deref(), false)? {
+    let value = |key: &str| set(&get, key);
+    if !broker_configured(&get)? {
         return Ok(None);
     }
     let required = |key: &str| {
@@ -121,9 +154,9 @@ fn gateway_service_from(
     }))
 }
 
-/// What every broker-mode template renders, or `None` while hosted egress is
-/// off (#4000, item 3). With the switch on, a missing or malformed setting
-/// fails startup, named. The three in-namespace Services come from the Service
+/// What every broker-mode template renders, or `None` while the broker
+/// settings are not read (#4000, item 3; [`broker_configured`]). Once they
+/// are, a missing or malformed setting fails startup, named. The three in-namespace Services come from the Service
 /// links Kubernetes gives orchestration's Pod when it starts, so no Service is
 /// read through the API. A link that is absent leaves its address empty, and
 /// every broker-mode render then fails naming the Service
@@ -134,13 +167,8 @@ fn template_from(
     get: impl Fn(&str) -> Option<String>,
     derp_host: &str,
 ) -> anyhow::Result<Option<HostedEgressTemplate>> {
-    let value = |key: &str| {
-        get(key)
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-    };
-    let enabled = crate::confidential_storage::parse_bool(SWITCH, value(SWITCH).as_deref(), false)?;
-    if !enabled {
+    let value = |key: &str| set(&get, key);
+    if !broker_configured(&get)? {
         return Ok(None);
     }
     let required = |key: &str| {
@@ -164,7 +192,7 @@ fn template_from(
     );
     anyhow::ensure!(
         !derp_host.is_empty(),
-        "{SWITCH} is on but DERP_HOST is not set"
+        "the hosted egress broker settings are read but DERP_HOST is not set"
     );
     let gateway = GatewayPeer {
         namespace: required(GATEWAY_NAMESPACE)?,
@@ -318,6 +346,50 @@ mod tests {
             read(&HashMap::from([(SWITCH, "false"), (CLUSTER_DNS_IP, "::1")])).unwrap(),
             None
         );
+    }
+
+    /// #6070: with the switch off, the broker settings are read exactly as
+    /// with it on once every one is set, and not at all while any is missing,
+    /// whatever the others hold.
+    #[test]
+    fn off_reads_the_broker_settings_only_when_every_one_is_set() {
+        let mut off = on();
+        off.insert(SWITCH, "false");
+        off.insert(GATEWAY_SERVICE, "envoy-codewire-public");
+        let gateway = |values: &HashMap<&'static str, &'static str>| {
+            let values = values.clone();
+            gateway_service_from(move |key: &str| values.get(key).map(|v| (*v).to_owned()))
+        };
+        assert_eq!(read(&off).unwrap(), read(&on()).unwrap());
+        assert!(read(&off).unwrap().is_some());
+        assert!(gateway(&off).unwrap().is_some());
+        for key in REQUIRED_WHEN_ON {
+            let mut partial = off.clone();
+            partial.remove(key);
+            if key != CLUSTER_DNS_IP {
+                partial.insert(CLUSTER_DNS_IP, "fd00::a");
+            }
+            assert_eq!(read(&partial).unwrap(), None, "{key}");
+            assert_eq!(gateway(&partial).unwrap(), None, "{key}");
+        }
+        // Every one set and one malformed fails startup by name, as on.
+        let mut malformed = off.clone();
+        malformed.insert(CLUSTER_DNS_IP, "fd00::a");
+        let error = read(&malformed).unwrap_err().to_string();
+        assert!(error.contains(CLUSTER_DNS_IP), "{error}");
+        // The settings a deployment has with the switch off and the fence
+        // revision and cluster DNS address not set start with none read.
+        let mut gateway_only = off.clone();
+        gateway_only.remove(FENCE_REVISION);
+        gateway_only.remove(CLUSTER_DNS_IP);
+        let started = startup_from(
+            |key| gateway_only.get(key).map(|v| (*v).to_owned()),
+            DERP_HOST,
+        )
+        .unwrap();
+        assert_eq!(started.template, None);
+        assert_eq!(started.gateway, None);
+        assert!(!started.settings.enabled);
     }
 
     #[test]

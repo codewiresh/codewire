@@ -40,6 +40,36 @@ const CALLER_UID: &str = "0b8f6a52-0f6c-4a59-9f43-1b1f0c3a9e01";
 const GUEST: &str = "workspace-1";
 const GUEST_UID: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const GUEST_IP: &str = "10.92.4.7";
+/// The guest's Sandbox, whose UID the binding records.
+const GUEST_SANDBOX: &str = "sandbox-workspace-1";
+const GUEST_SANDBOX_UID: &str = "5a4db0c5-0bd2-4f11-8b16-9c239851eb52";
+
+fn sandbox_path(name: &str) -> String {
+    format!("/apis/agents.x-k8s.io/v1beta1/namespaces/{SANDBOXES}/sandboxes/{name}")
+}
+
+/// The guest's Sandbox with the broker label, the fence revision and the TUN
+/// init as asked: all three are the whole broker shape.
+fn guest_sandbox(label: bool, fence: bool, tun: bool) -> Value {
+    let mut template = json!({
+        "metadata": {"labels": {LABEL_TYPE: "workspace"}},
+        "spec": {"runtimeClassName": "commodity", "containers": []},
+    });
+    if label {
+        template["metadata"]["labels"][EGRESS_MODE_LABEL] = json!(EGRESS_MODE_BROKER);
+    }
+    if fence {
+        template["metadata"]["annotations"] = json!({"codewire.sh/egress-fence-revision": "4"});
+    }
+    if tun {
+        template["spec"]["initContainers"] = json!([{"name": "hosted-egress-tun"}]);
+    }
+    json!({
+        "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+        "metadata": {"name": GUEST_SANDBOX, "namespace": SANDBOXES, "uid": GUEST_SANDBOX_UID},
+        "spec": {"podTemplate": template},
+    })
+}
 
 fn token() -> String {
     let exp = SystemTime::now()
@@ -130,6 +160,11 @@ struct Cluster {
     guest_reviews_down: std::sync::atomic::AtomicBool,
     /// NetworkPolicies by path, for the lockdown check.
     policies: Mutex<HashMap<String, Value>>,
+    /// Sandboxes and Claims by path, for the lockdown check's read of the
+    /// guest's own and the startup re-apply's.
+    sandboxes: Mutex<HashMap<String, Value>>,
+    /// NetworkPolicies replaced.
+    replaced: AtomicUsize,
 }
 
 impl Cluster {
@@ -142,7 +177,7 @@ impl Cluster {
             NODE,
             &[],
         );
-        let guest = pod(
+        let mut guest = pod(
             SANDBOXES,
             GUEST,
             GUEST_UID,
@@ -153,6 +188,16 @@ impl Cluster {
                 (EGRESS_MODE_LABEL, EGRESS_MODE_BROKER),
             ],
         );
+        guest.metadata.owner_references = Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                api_version: "agents.x-k8s.io/v1beta1".into(),
+                kind: "Sandbox".into(),
+                name: GUEST_SANDBOX.into(),
+                uid: GUEST_SANDBOX_UID.into(),
+                controller: Some(true),
+                ..Default::default()
+            },
+        ]);
         Arc::new(Self {
             reviews: HashMap::from([
                 (
@@ -188,6 +233,11 @@ impl Cluster {
             guest_reviews: AtomicUsize::new(0),
             guest_reviews_down: std::sync::atomic::AtomicBool::new(false),
             policies: Mutex::new(HashMap::new()),
+            sandboxes: Mutex::new(HashMap::from([(
+                sandbox_path(GUEST_SANDBOX),
+                guest_sandbox(true, true, true),
+            )])),
+            replaced: AtomicUsize::new(0),
         })
     }
 
@@ -208,6 +258,7 @@ impl Cluster {
             let cluster = cluster.clone();
             async move {
                 let path = request.uri().path().to_owned();
+                let replaces = request.method() == axum::http::Method::PUT;
                 let response = if path == "/apis/authentication.k8s.io/v1/tokenreviews" {
                     let body = request.into_body().collect().await.unwrap().to_bytes();
                     let asked: TokenReview = serde_json::from_slice(&body).unwrap();
@@ -261,6 +312,24 @@ impl Cluster {
                         StatusCode::OK,
                         json!({"kind": "NetworkPolicyList", "apiVersion": "networking.k8s.io/v1", "metadata": {}, "items": items}),
                     )
+                } else if path.contains("/networkpolicies/") && replaces {
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let policy: Value = serde_json::from_slice(&body).unwrap();
+                    cluster.replaced.fetch_add(1, Ordering::SeqCst);
+                    cluster
+                        .policies
+                        .lock()
+                        .unwrap()
+                        .insert(path, policy.clone());
+                    json_response(StatusCode::OK, policy)
+                } else if path.contains("/sandboxes/") || path.contains("/sandboxclaims/") {
+                    match cluster.sandboxes.lock().unwrap().get(&path) {
+                        Some(sandbox) => json_response(StatusCode::OK, sandbox.clone()),
+                        None => json_response(
+                            StatusCode::NOT_FOUND,
+                            json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404}),
+                        ),
+                    }
                 } else if path.contains("/networkpolicies/") {
                     match cluster.policies.lock().unwrap().get(&path) {
                         Some(policy) => json_response(StatusCode::OK, policy.clone()),
@@ -340,6 +409,7 @@ fn state(
         starts: Default::default(),
         front_doors,
         interception_cas: None,
+        reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
     }
 }
 
@@ -737,6 +807,7 @@ rules:
         starts: Default::default(),
         front_doors: None,
         interception_cas: None,
+        reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
     };
     let bound = Assignment::Bound {
         environment_id: "env".into(),
@@ -785,6 +856,7 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             starts: Default::default(),
             front_doors: None,
             interception_cas: None,
+            reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
         }
     };
     let bound = |interception| Assignment::Bound {
@@ -924,6 +996,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             starts: Default::default(),
             front_doors: None,
             interception_cas: None,
+            reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
         }),
         caller: Caller {
             namespace: SERVER.into(),
@@ -1130,7 +1203,7 @@ fn binding() -> LiveBinding {
         namespace: SANDBOXES.into(),
         pod_name: GUEST.into(),
         claim_uid: "c0ffee00-0bd2-4f11-8b16-9c239851eb52".into(),
-        sandbox_uid: "5a4db0c5-0bd2-4f11-8b16-9c239851eb52".into(),
+        sandbox_uid: GUEST_SANDBOX_UID.into(),
         operation_generation: 3,
         projection_selection_sha256: None,
         managed_credential_clients: String::new(),
@@ -1295,6 +1368,61 @@ async fn lockdown(cluster: &Arc<Cluster>) -> Result<(), connectrpc::ErrorCode> {
         .lockdown_applied(&guest, &facts, &binding())
         .await
         .map_err(|error| error.code)
+}
+
+/// What a deployment with the switch off and the broker settings kept
+/// renders with (#6070).
+fn kept() -> KubernetesRenderConfig {
+    crate::egress::gateway_check::assume_verified();
+    KubernetesRenderConfig {
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
+        hosted_egress: crate::egress::own_mode::HostedEgress {
+            enabled: false,
+            broker: Some(crate::sandbox::template::HostedEgressTemplate {
+                stream_addr: "10.44.0.89:8089".into(),
+                binding_addr: "10.44.0.87:8087".into(),
+                fence_revision: "4".into(),
+                gateway: crate::sandbox::template::GatewayPeer {
+                    namespace: "gateway-proxies".into(),
+                    gateway_name: "public".into(),
+                    gateway_namespace: "gateway".into(),
+                    port: 10443,
+                },
+                derp_tls_port: 8443,
+                gateway_addr: "10.44.0.43:443".into(),
+                derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+                cluster_dns_ip: "10.44.0.10".into(),
+            }),
+        },
+        ..rendering()
+    }
+}
+
+/// The lockdown refusal, if any, of a service whose driver renders with
+/// `rendering`. Read without failing the guest closed, so no refusal is
+/// counted.
+async fn lockdown_rendered(
+    cluster: &Arc<Cluster>,
+    rendering: KubernetesRenderConfig,
+) -> Option<lockdown::LockdownRefusal> {
+    let state = EgressServiceState {
+        attestation: crate::runtime::kubernetes::KubernetesDriver::shared(
+            cluster.client(),
+            rendering,
+        ),
+        ..state(cluster, Arc::new(Bound), None)
+    };
+    let guest = state.named_guest(GUEST, GUEST_UID);
+    let facts = state
+        .attestation
+        .attested_pod(SANDBOXES, GUEST)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .lockdown_refusal(&guest, &facts, &binding())
+        .await
+        .unwrap()
 }
 
 async fn admit_bound(cluster: &Arc<Cluster>) -> StatusCode {
@@ -1934,4 +2062,244 @@ fn a_bindings_clients_are_read_only_while_intercepting() {
             .iter()
             .any(|host| host == codewire_access::CLAUDE_TOKEN_HOST)
     );
+}
+
+/// #6070, cw-security's amendment 3: with the switch off and the broker
+/// settings kept, a bound guest whose Sandbox is whole broker passes the
+/// lockdown check under the broker policy, exactly as with the switch on.
+#[tokio::test]
+async fn with_the_switch_off_a_whole_broker_guest_passes_under_its_broker_policy() {
+    let broker = kept()
+        .workspace_network_policy(
+            SANDBOXES,
+            BOUND_ENVIRONMENT,
+            crate::runtime::Isolation::Standard,
+        )
+        .unwrap();
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), Some(broker.clone()));
+    assert_eq!(lockdown_rendered(&cluster, kept()).await, None);
+    let on = KubernetesRenderConfig {
+        hosted_egress: crate::egress::own_mode::HostedEgress {
+            enabled: true,
+            ..kept().hosted_egress
+        },
+        ..kept()
+    };
+    assert_eq!(lockdown_rendered(&cluster, on).await, None);
+    // A direct policy under a broker guest still differs, and is refused.
+    let direct = bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy()));
+    assert!(matches!(
+        lockdown_rendered(&direct, kept()).await,
+        Some(lockdown::LockdownRefusal::PolicyDiffers { .. })
+    ));
+}
+
+/// #6070, cw-security's amendment 3: a bound guest whose Sandbox is direct
+/// or hollow is refused with the switch off, whatever its Pod's labels and
+/// whatever policy is in place; so is one whose Sandbox is not the one its
+/// binding recorded, or is gone.
+#[tokio::test]
+async fn with_the_switch_off_a_direct_or_hollow_sandboxs_guest_is_refused() {
+    let broker = kept()
+        .workspace_network_policy(
+            SANDBOXES,
+            BOUND_ENVIRONMENT,
+            crate::runtime::Isolation::Standard,
+        )
+        .unwrap();
+    let sandboxes = [
+        ("direct", Some(guest_sandbox(false, false, false))),
+        ("label alone", Some(guest_sandbox(true, false, false))),
+        ("no fence", Some(guest_sandbox(true, false, true))),
+        ("no TUN", Some(guest_sandbox(true, true, false))),
+        ("no label", Some(guest_sandbox(false, true, true))),
+        ("another Sandbox's UID", {
+            let mut other = guest_sandbox(true, true, true);
+            other["metadata"]["uid"] = json!("0e6ac1b5-8d1e-4a7c-9b0d-6c3f2a1e4b59");
+            Some(other)
+        }),
+        ("gone", None),
+    ];
+    for (what, sandbox) in sandboxes {
+        for policy in [broker.clone(), rendered_policy()] {
+            let cluster = bound_guest(Some(BOUND_ENVIRONMENT), Some(policy)).with(|cluster| {
+                let mut sandboxes = cluster.sandboxes.lock().unwrap();
+                sandboxes.clear();
+                if let Some(sandbox) = sandbox.clone() {
+                    sandboxes.insert(sandbox_path(GUEST_SANDBOX), sandbox);
+                }
+            });
+            assert_eq!(
+                lockdown_rendered(&cluster, kept()).await,
+                Some(lockdown::LockdownRefusal::NotBrokerMode),
+                "{what}"
+            );
+        }
+    }
+    // A Pod whose controller is not the Sandbox its binding recorded.
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), Some(broker)).with(|cluster| {
+        cluster.edit_guest(|pod| {
+            pod.metadata.owner_references.as_mut().unwrap()[0].uid =
+                "0e6ac1b5-8d1e-4a7c-9b0d-6c3f2a1e4b59".into();
+        });
+    });
+    assert_eq!(
+        lockdown_rendered(&cluster, kept()).await,
+        Some(lockdown::LockdownRefusal::NotBrokerMode)
+    );
+}
+
+/// [`kept`] after a release that moved the gateway's listener port, which
+/// every broker Sandbox's policy names (#6070).
+fn released() -> KubernetesRenderConfig {
+    let mut config = kept();
+    if let Some(broker) = config.hosted_egress.broker.as_mut() {
+        broker.gateway.port = 10444;
+    }
+    config
+}
+
+fn broker_policy(config: &KubernetesRenderConfig) -> Value {
+    config
+        .workspace_network_policy(
+            SANDBOXES,
+            BOUND_ENVIRONMENT,
+            crate::runtime::Isolation::Standard,
+        )
+        .unwrap()
+}
+
+/// The bound guest's environment as its access stack renders it.
+fn bound_intent() -> crate::runtime::RenderingIntent {
+    crate::runtime::RenderingIntent {
+        image: crate::sandbox::canonical_workspace_runtime_image().into(),
+        template_base: "workspace".into(),
+        isolation: crate::runtime::Isolation::Standard,
+        dedicated_cpu: false,
+        systemd_workspace: false,
+        systemd_opted_in: false,
+        systemd_runtime_profile: None,
+        shape: crate::runtime::WorkspaceShape {
+            cpu_millicores: 1000,
+            memory_mib: 4096,
+            disk_gib: 10,
+        },
+        identity: crate::runtime::RenderingIdentity {
+            environment_id: BOUND_ENVIRONMENT.into(),
+            organization_id: "org-1".into(),
+            operation_generation: 3,
+            projection_selection_sha256: None,
+            earlier_projection_selection_sha256: Vec::new(),
+            managed_credential_clients: Default::default(),
+            source_snapshot_id: None,
+            confidential_storage_manifest_uri: String::new(),
+        },
+    }
+}
+
+/// A running broker guest whose policy the release before rendered, its
+/// Claim bound to its whole broker Sandbox.
+fn running_before_the_release() -> Arc<Cluster> {
+    bound_guest(Some(BOUND_ENVIRONMENT), Some(broker_policy(&kept()))).with(|cluster| {
+        cluster.sandboxes.get_mut().unwrap().insert(
+            format!(
+                "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{SANDBOXES}/sandboxclaims/{}",
+                crate::sandbox::claim_name(BOUND_ENVIRONMENT)
+            ),
+            json!({
+                "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                "metadata": {"name": crate::sandbox::claim_name(BOUND_ENVIRONMENT), "namespace": SANDBOXES},
+                "status": {"sandbox": {"name": GUEST_SANDBOX}},
+            }),
+        );
+    })
+}
+
+/// #6070 (N3): after a release changes what a broker policy renders, the
+/// startup re-apply writes it again through the access stack's writer, so a
+/// running broker Sandbox is admitted at once rather than refused as
+/// `policy_differs`. A policy tampered with after the sweep is still
+/// refused, and Admit never applies it again.
+#[tokio::test]
+async fn after_a_release_the_startup_reapply_admits_a_running_broker_sandbox_at_once() {
+    let cluster = running_before_the_release();
+    // Without the re-apply, the first admission after the release refuses.
+    assert!(matches!(
+        lockdown_rendered(&cluster, released()).await,
+        Some(lockdown::LockdownRefusal::PolicyDiffers { .. })
+    ));
+    let driver = crate::runtime::kubernetes::KubernetesDriver::shared(cluster.client(), released());
+    let placement = crate::runtime::Placement::new(SANDBOXES);
+    assert_eq!(
+        driver
+            .reapply_broker_policy(&placement, &bound_intent())
+            .await
+            .unwrap(),
+        crate::egress::reapply::PolicyReapply::Applied
+    );
+    assert_eq!(lockdown_rendered(&cluster, released()).await, None);
+    // Applied once: the next sweep finds it current and writes nothing.
+    assert_eq!(
+        driver
+            .reapply_broker_policy(&placement, &bound_intent())
+            .await
+            .unwrap(),
+        crate::egress::reapply::PolicyReapply::Current
+    );
+    assert_eq!(cluster.replaced.load(Ordering::SeqCst), 1);
+
+    // Tampered with after the sweep: refused, and not applied again.
+    cluster
+        .policies
+        .lock()
+        .unwrap()
+        .get_mut(&policy_path(BOUND_ENVIRONMENT))
+        .unwrap()["spec"]["egress"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}));
+    assert!(matches!(
+        lockdown_rendered(&cluster, released()).await,
+        Some(lockdown::LockdownRefusal::PolicyDiffers { .. })
+    ));
+    let state = EgressServiceState {
+        attestation: crate::runtime::kubernetes::KubernetesDriver::shared(
+            cluster.client(),
+            released(),
+        ),
+        ..state(&cluster, Arc::new(Bound), None)
+    };
+    let (status, _) = call_app(
+        codewire_server_core::connect::connect_router(egress_router(Arc::new(state))),
+        "Admit",
+        admit_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(cluster.replaced.load(Ordering::SeqCst), 1);
+}
+
+/// #6070 (N3): until the startup sweep has finished, a bound guest's
+/// admission is a retryable UNAVAILABLE, never a refusal, even under a
+/// policy that differs; once it has, the difference is refused.
+#[tokio::test]
+async fn while_the_sweep_runs_admit_is_unavailable_not_a_refusal() {
+    let cluster = running_before_the_release();
+    let reapplied = crate::egress::reapply::PoliciesReapplied::pending();
+    let app = || {
+        codewire_server_core::connect::connect_router(egress_router(Arc::new(EgressServiceState {
+            attestation: crate::runtime::kubernetes::KubernetesDriver::shared(
+                cluster.client(),
+                released(),
+            ),
+            reapplied: reapplied.clone(),
+            ..state(&cluster, Arc::new(Bound), None)
+        })))
+    };
+    let (status, body) = call_app(app(), "Admit", admit_body()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "unavailable", "{body}");
+    reapplied.finish();
+    let (status, _) = call_app(app(), "Admit", admit_body()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

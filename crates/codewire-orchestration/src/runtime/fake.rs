@@ -71,6 +71,12 @@ pub(crate) struct FakeRuntimeDriver {
     pub pool_passes: Mutex<VecDeque<Result<PoolPass, String>>>,
     /// How many times pool memory was forgotten.
     pub pool_memory_forgotten: Mutex<usize>,
+    /// Each environment whose broker policy was applied again, in order.
+    pub reapplied: Mutex<Vec<String>>,
+    /// Environments whose re-apply fails.
+    pub reapply_fails: Mutex<Vec<String>>,
+    /// Environments whose re-apply never answers.
+    pub reapply_hangs: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -864,6 +870,24 @@ impl RuntimeAccess for FakeRuntimeDriver {
         _intent: &RenderingIntent,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
+    }
+
+    async fn reapply_broker_policy(
+        &self,
+        placement: &Placement,
+        intent: &RenderingIntent,
+    ) -> anyhow::Result<crate::egress::reapply::PolicyReapply> {
+        self.placements.lock().unwrap().push(placement.clone());
+        let environment = intent.identity.environment_id.clone();
+        self.reapplied.lock().unwrap().push(environment.clone());
+        if self.reapply_hangs.lock().unwrap().contains(&environment) {
+            return std::future::pending().await;
+        }
+        anyhow::ensure!(
+            !self.reapply_fails.lock().unwrap().contains(&environment),
+            "not scripted"
+        );
+        Ok(crate::egress::reapply::PolicyReapply::Applied)
     }
 
     async fn delete_access(

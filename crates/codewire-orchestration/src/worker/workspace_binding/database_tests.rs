@@ -801,7 +801,15 @@ fn pool_rendering(
     Ok(crate::runtime::kubernetes::warm_pools::render_pool(
         &cfg.into(),
         NAMESPACE,
-        &pool_born_rendering(cfg, env)?.0,
+        &pool_born::pool_born_rendering(
+            cfg,
+            env,
+            &crate::egress::own_mode::SandboxMode {
+                name: String::new(),
+                broker: false,
+            },
+        )?
+        .0,
     )?
     .objects)
 }
@@ -2915,6 +2923,299 @@ async fn a_pool_birth_is_ok_only_for_the_pools_own_rendering() {
         .await
         .unwrap_err();
     assert!(refused.starts_with("pool rendering"), "{refused}");
+}
+
+/// [`pool_cfg`] with the hosted egress switch as given and the broker
+/// settings kept (#6070).
+fn pool_cfg_egress(enabled: bool) -> SandboxWorkerCfg {
+    crate::egress::gateway_check::assume_verified();
+    SandboxWorkerCfg {
+        hosted_egress: crate::egress::own_mode::HostedEgress {
+            enabled,
+            broker: Some(crate::sandbox::template::HostedEgressTemplate {
+                stream_addr: "10.44.0.89:8089".into(),
+                binding_addr: "10.44.0.87:8087".into(),
+                fence_revision: "4".into(),
+                gateway: crate::sandbox::template::GatewayPeer {
+                    namespace: "gateway-proxies".into(),
+                    gateway_name: "public".into(),
+                    gateway_namespace: "gateway".into(),
+                    port: 10443,
+                },
+                derp_tls_port: 8443,
+                gateway_addr: "10.44.0.43:443".into(),
+                derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+                cluster_dns_ip: "10.44.0.10".into(),
+            }),
+        },
+        ..pool_cfg()
+    }
+}
+
+/// #6070, cw-security's amendment 1: the driver judges a member claimed
+/// before a switch and bound after it by its own pool revision, in its own
+/// mode, both ways (the worker then refuses a direct one while the switch is
+/// on, as the test below shows). A whole broker member whose pool
+/// revision wasn't broker is refused, and so is a broker member without the
+/// broker settings.
+#[tokio::test]
+async fn a_pool_birth_is_judged_by_the_members_own_pool_revision_across_a_switch() {
+    let wanted = wanted_pool();
+    let placement = Placement::new(NAMESPACE);
+    let objects = |enabled| {
+        crate::runtime::kubernetes::warm_pools::render_pool(
+            &(&pool_cfg_egress(enabled)).into(),
+            NAMESPACE,
+            &wanted,
+        )
+        .unwrap()
+        .objects
+    };
+    let birth = |fake: FakeKube, cfg: SandboxWorkerCfg| {
+        let wanted = wanted.clone();
+        let placement = placement.clone();
+        async move {
+            let driver =
+                crate::runtime::kubernetes::KubernetesDriver::shared(fake.client(), (&cfg).into());
+            let observation = driver.observe(&bind_claim(ENV_A)).await.unwrap();
+            driver.pool_birth(&placement, &wanted, &observation).await
+        }
+    };
+    let (broker, direct) = (objects(true), objects(false));
+    assert_ne!(broker.name, direct.name);
+    for (born_on, pool) in [(true, &broker), (false, &direct)] {
+        for now_on in [true, false] {
+            assert_eq!(
+                birth(pool_born(ENV_A, POD_1, pool, true), pool_cfg_egress(now_on)).await,
+                Ok(()),
+                "born with the switch {born_on}, bound with it {now_on}"
+            );
+        }
+    }
+    // A whole broker Sandbox in a pool whose template was direct.
+    let mismatched = pool_born(ENV_A, POD_1, &direct, true);
+    mismatched.update(&runtime_path(ENV_A), |sandbox| {
+        let template = &mut sandbox["spec"]["podTemplate"];
+        template["metadata"]["labels"]["codewire.sh/egress"] = json!("broker");
+        template["metadata"]["annotations"]["codewire.sh/egress-fence-revision"] = json!("4");
+        template["spec"]["initContainers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "hosted-egress-tun"}));
+    });
+    for now_on in [true, false] {
+        assert_eq!(
+            birth(mismatched.clone(), pool_cfg_egress(now_on)).await,
+            Err("/spec/warmPoolRef/name".to_owned()),
+            "{now_on}"
+        );
+    }
+    // A broker member without the broker settings vouches for nothing.
+    let refused = birth(pool_born(ENV_A, POD_1, &broker, true), pool_cfg())
+        .await
+        .unwrap_err();
+    assert!(refused.starts_with("pool rendering"), "{refused}");
+}
+
+/// A standard environment of [`wanted_pool`]'s shape, as its row reads.
+fn pool_env() -> EnvironmentRow {
+    EnvironmentRow {
+        id: ENV_A.into(),
+        org_id: "76169e1f-3bbf-46be-96e0-cac68e0ac910".into(),
+        preset_id: None,
+        env_type: "sandbox".into(),
+        state: "creating".into(),
+        desired_state: "started".into(),
+        isolation_tier: "standard".into(),
+        dedicated_cpu: false,
+        systemd_workspace: false,
+        systemd_environments_enabled: false,
+        systemd_runtime_profile: None,
+        never_ran: false,
+        external_cleanup_completed_at: None,
+        cpu_millicores: 1000,
+        memory_mb: 4096,
+        disk_gb: 10,
+        source_snapshot_id: None,
+        ttl_seconds: None,
+        project_spec: Default::default(),
+        operation_generation: GENERATION,
+        projection_selection: Ok(None),
+        managed_credential_clients: Ok(Default::default()),
+    }
+}
+
+/// #6070: a pool-born member's first bind, as the worker judges it. A broker
+/// member binds with the switch on, and with it off while the broker
+/// settings are kept. A direct member binds with the switch off, but with it
+/// on, as after a switch-on, it is refused definitively, so it is deleted and
+/// the create claimed again cold, which renders broker. A broker member
+/// without the broker settings is refused definitively too: it has never
+/// served, and the cold claim is a new create.
+#[tokio::test]
+async fn a_pool_born_first_bind_is_refused_definitively_where_the_create_must_be_claimed_again() {
+    let objects = |cfg: &SandboxWorkerCfg| {
+        crate::runtime::kubernetes::warm_pools::render_pool(&cfg.into(), NAMESPACE, &wanted_pool())
+            .unwrap()
+            .objects
+    };
+    let broker = objects(&pool_cfg_egress(true));
+    let direct = objects(&pool_cfg_egress(false));
+    for (what, pool, cfg, expected) in [
+        ("broker, on", &broker, pool_cfg_egress(true), Ok(())),
+        (
+            "broker, off with the settings",
+            &broker,
+            pool_cfg_egress(false),
+            Ok(()),
+        ),
+        ("direct, off", &direct, pool_cfg_egress(false), Ok(())),
+        (
+            "direct, off without the settings",
+            &direct,
+            pool_cfg(),
+            Ok(()),
+        ),
+        (
+            "direct, on",
+            &direct,
+            pool_cfg_egress(true),
+            Err((DENIED_POOL_RENDERING, true)),
+        ),
+        (
+            "broker, without the settings",
+            &broker,
+            pool_cfg(),
+            Err((DENIED_POOL_RENDERING, true)),
+        ),
+    ] {
+        let fake = pool_born(ENV_A, POD_1, pool, true);
+        let driver =
+            crate::runtime::kubernetes::KubernetesDriver::shared(fake.client(), (&cfg).into());
+        let observation = driver.observe(&bind_claim(ENV_A)).await.unwrap();
+        let verdict = pool_born::born_of_its_pool(
+            driver.as_ref(),
+            Some(&cfg),
+            &pool_env(),
+            &Placement::new(NAMESPACE),
+            &observation,
+            &observation.member,
+        )
+        .await;
+        assert_eq!(verdict, expected, "{what}");
+        if let Err((reason, true)) = verdict {
+            // A definitive refusal is what deletes the member and claims the
+            // create again cold.
+            assert!(
+                definitive_refusal(&anyhow::Error::new(BindRefused::Denied(reason))),
+                "{what}"
+            );
+        }
+    }
+}
+
+/// #6070, a create-path refusal of a pool-born member's first bind: the
+/// refusal is definitive, the member's Pod is deleted by its exact UID, and
+/// the create's cold re-claim then withdraws the Claim and the Sandbox, each
+/// by its exact UID, as `create::try_reclaim_cold` does through the driver.
+async fn refused_and_reclaimed_cold(
+    db: &TestDatabase,
+    member: &FakeKube,
+    cfg: &SandboxWorkerCfg,
+) -> Result<()> {
+    let error = enforced_with(&db.pool, member, Some(cfg), ENV_A, POD_1, &["creating"])
+        .await
+        .expect_err("the member was bound");
+    ensure!(
+        bind_refused(&error) == Some(BindRefused::Denied(DENIED_POOL_RENDERING)),
+        "{error:#}"
+    );
+    ensure!(definitive_refusal(&error), "{error:#}");
+    let deletes = member.deletes();
+    ensure!(
+        deletes.len() == 1 && deletes[0].0 == pod_path(ENV_A),
+        "{deletes:?}"
+    );
+    ensure!(deletes[0].1["preconditions"]["uid"] == POD_1, "{deletes:?}");
+
+    // The cold re-claim, as the create runs it on that refusal.
+    let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+    let driver = member.driver();
+    let placement = Placement::new(NAMESPACE);
+    let observed = driver
+        .pool_born_claim(&placement, ENV_A, &backend.claim_uid)
+        .await?
+        .expect("the pool-born Claim");
+    let (_, sandbox_uid) = observed.sandbox.clone().expect("its Sandbox");
+    ensure!(!sandbox_bound_by_any(&db.pool, &sandbox_uid).await?);
+    driver
+        .withdraw_pool_born_claim(&placement, ENV_A, &observed, Duration::from_secs(5))
+        .await?;
+    let deletes = member.deletes();
+    let by_uid = |path: &str, uid: &str| {
+        deletes
+            .iter()
+            .any(|(at, body)| at == path && body["preconditions"]["uid"] == uid)
+    };
+    ensure!(
+        by_uid(&claim_path(ENV_A), &backend.claim_uid),
+        "{deletes:?}"
+    );
+    ensure!(by_uid(&runtime_path(ENV_A), &sandbox_uid), "{deletes:?}");
+    Ok(())
+}
+
+/// #6070: with the switch on, a direct pool-born member, claimed before the
+/// switch, is refused at its first bind and deleted by UID, and its create
+/// is claimed again cold, so it ends up broker.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_direct_member_bound_with_the_switch_on_is_deleted_and_reclaimed_cold() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let direct = crate::runtime::kubernetes::warm_pools::render_pool(
+            &(&pool_cfg_egress(false)).into(),
+            NAMESPACE,
+            &wanted_pool(),
+        )?
+        .objects;
+        refused_and_reclaimed_cold(
+            &db,
+            &pool_born(ENV_A, POD_1, &direct, true),
+            &pool_cfg_egress(true),
+        )
+        .await
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// #6070: a broker pool-born member whose first bind finds no broker
+/// settings is refused and deleted by UID, and its create is claimed again
+/// cold, which then renders direct: it never served, so that is a new
+/// create.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_broker_member_bound_without_the_settings_is_deleted_and_reclaimed_cold() -> Result<()>
+{
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let broker = crate::runtime::kubernetes::warm_pools::render_pool(
+            &(&pool_cfg_egress(true)).into(),
+            NAMESPACE,
+            &wanted_pool(),
+        )?
+        .objects;
+        refused_and_reclaimed_cold(&db, &pool_born(ENV_A, POD_1, &broker, true), &pool_cfg()).await
+    }
+    .await;
+    db.finish(result).await
 }
 
 /// #3628 PR 5c, cw-billing's condition 1: a driver without pools routes every

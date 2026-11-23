@@ -7,6 +7,7 @@ mod confidential_hosts;
 mod evidence;
 pub(crate) mod members;
 pub(crate) mod observation;
+mod own_mode;
 pub(crate) mod pools;
 pub mod rendering;
 mod suspension;
@@ -23,7 +24,7 @@ use codewire_server_core::pod_identity::{
 };
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, LogParams};
+use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, ExecTarget,
@@ -45,8 +46,8 @@ use crate::sandbox::template::{
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_STANDARD,
     TemplateOpts, confidential_init_data,
 };
-use crate::sandbox::warm_pool::{pod_spec_pool_revision, pool_revision, sandbox_matches_rendering};
-use crate::sandbox::{CRD_VERSION, ClaimOpts, SANDBOX_GROUP, shadow_warm_pool_name};
+use crate::sandbox::warm_pool::pool_revision;
+use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
 use rendering::KubernetesRenderConfig;
 use sha2::{Digest as _, Sha256};
 
@@ -101,43 +102,6 @@ impl KubernetesDriver {
     /// The options `intent` renders from here.
     fn render(&self, intent: &RenderingIntent) -> anyhow::Result<TemplateOpts> {
         self.rendering.environment(intent)
-    }
-
-    /// Refuses, before anything is patched, a resume, repair or replacement
-    /// whose next Pod hosted egress would leave direct: the bound Sandbox was
-    /// made before the switch and no start has moved it yet
-    /// ([`crate::egress::pre_switch`], #4000). A start's bootstrap refresh
-    /// moves it first, so its resume passes.
-    async fn check_made_before_hosted_egress(
-        &self,
-        placement: &Placement,
-        environment_id: &str,
-    ) -> anyhow::Result<()> {
-        if self.rendering.hosted_egress.is_none() {
-            return Ok(());
-        }
-        let name = self
-            .sandbox_client(placement)
-            .bound_sandbox_name(environment_id)
-            .await?;
-        let gvk = GroupVersionKind::gvk(SANDBOX_GROUP, CRD_VERSION, "Sandbox");
-        let sandboxes: Api<DynamicObject> = Api::namespaced_with(
-            self.client.clone(),
-            &placement.namespace,
-            &ApiResource::from_gvk_with_plural(&gvk, "sandboxes"),
-        );
-        let sandbox = sandboxes
-            .get(&name)
-            .await
-            .map_err(|error| anyhow::anyhow!("get Sandbox {name}: {error}"))?;
-        crate::egress::pre_switch::check_sandbox(true, &name, &sandbox.data).inspect_err(|_| {
-            tracing::warn!(
-                environment_id,
-                sandbox = name,
-                "refused a Sandbox made before hosted egress"
-            );
-        })?;
-        Ok(())
     }
 }
 
@@ -199,18 +163,7 @@ impl RuntimePools for KubernetesDriver {
         pool: &WantedPool,
         observation: &RuntimeObservation,
     ) -> Result<(), String> {
-        let expected = warm_pools::render_pool(&self.rendering, &placement.namespace, pool)
-            .map_err(|error| format!("pool rendering: {error:#}"))?
-            .objects;
-        if observation.pool != expected.name {
-            return Err("/spec/warmPoolRef/name".to_owned());
-        }
-        sandbox_matches_rendering(&observation.runtime.json, &expected.template)?;
-        if pod_spec_pool_revision(&observation.member.spec_json) != Some(expected.revision.as_str())
-        {
-            return Err("pod /spec/containers/workspace/env".to_owned());
-        }
-        Ok(())
+        pools::pool_birth(&self.rendering, &placement.namespace, pool, observation)
     }
 
     async fn confidential_hosts(&self, _placement: &Placement) -> Option<u32> {
@@ -915,8 +868,9 @@ impl RuntimeLifecycle for KubernetesDriver {
         suspended: &SuspendedRuntime,
         authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
-        let rendering = self.render(intent)?;
-        check_authorized(&rendering, authorized)?;
+        let rendering = self
+            .render_start(&claim.placement, intent, authorized)
+            .await?;
         self.sandbox_client(&claim.placement)
             .reconcile_workspace_bootstrap(&rendering, &claim.name, &claim.uid, suspended)
             .await
@@ -1186,10 +1140,18 @@ impl RuntimeAccess for KubernetesDriver {
         placement: &Placement,
         intent: &RenderingIntent,
     ) -> anyhow::Result<()> {
-        let rendering = self.render(intent)?;
+        let rendering = self.render_existing(placement, intent).await?;
         self.sandbox_client(placement)
             .ensure_access_stack(&rendering)
             .await
+    }
+
+    async fn reapply_broker_policy(
+        &self,
+        placement: &Placement,
+        intent: &RenderingIntent,
+    ) -> anyhow::Result<crate::egress::reapply::PolicyReapply> {
+        self.reapply_policy(placement, intent).await
     }
 
     async fn delete_access(
@@ -1440,22 +1402,26 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
+        let broker = crate::sandbox::template::HostedEgressTemplate {
+            stream_addr: "10.44.0.89:8089".into(),
+            binding_addr: "10.44.0.87:8087".into(),
+            fence_revision: "4".into(),
+            gateway: crate::sandbox::template::GatewayPeer {
+                namespace: "gateway-proxies".into(),
+                gateway_name: "public".into(),
+                gateway_namespace: "gateway".into(),
+                port: 10443,
+            },
+            derp_tls_port: 8443,
+            gateway_addr: "10.44.0.43:443".into(),
+            derp_addr: "derp.example.test=10.44.0.84:8443".into(),
+            cluster_dns_ip: "10.44.0.10".into(),
+        };
         let rendering = KubernetesRenderConfig {
-            hosted_egress: hosted_egress.then(|| crate::sandbox::template::HostedEgressTemplate {
-                stream_addr: "10.44.0.89:8089".into(),
-                binding_addr: "10.44.0.87:8087".into(),
-                fence_revision: "4".into(),
-                gateway: crate::sandbox::template::GatewayPeer {
-                    namespace: "gateway-proxies".into(),
-                    gateway_name: "public".into(),
-                    gateway_namespace: "gateway".into(),
-                    port: 10443,
-                },
-                derp_tls_port: 8443,
-                gateway_addr: "10.44.0.43:443".into(),
-                derp_addr: "derp.example.test=10.44.0.84:8443".into(),
-                cluster_dns_ip: "10.44.0.10".into(),
-            }),
+            hosted_egress: crate::egress::own_mode::HostedEgress {
+                enabled: hosted_egress,
+                broker: Some(broker),
+            },
             ..Default::default()
         };
         (KubernetesDriver::shared(client, rendering), requests)

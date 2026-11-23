@@ -989,6 +989,16 @@ pub trait RuntimeAccess: Send + Sync {
         environment_id: &str,
     ) -> anyhow::Result<()>;
 
+    /// Apply the environment's own NetworkPolicy again, as its access stack
+    /// renders it, when its bound Sandbox is whole broker and the policy
+    /// exists (#6070, the startup re-apply, `egress::reapply`). It never
+    /// makes a policy, and writes only one that differs.
+    async fn reapply_broker_policy(
+        &self,
+        placement: &Placement,
+        intent: &RenderingIntent,
+    ) -> anyhow::Result<crate::egress::reapply::PolicyReapply>;
+
     /// Wait until the environment answers a connection with a host key the
     /// store accepts.
     async fn wait_access_ready(

@@ -23,6 +23,9 @@
 //! the old template's policy none after it. The environment's NetworkPolicy
 //! follows the patch, before the start creates the Pod, so the lockdown check
 //! reads what it reads for a created Sandbox.
+//!
+//! The startup re-apply of a broker environment's NetworkPolicy (#6070,
+//! `egress::reapply`) is here too.
 
 use serde_json::json;
 
@@ -30,6 +33,7 @@ use super::*;
 use crate::egress::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
 use crate::egress::confidential_hold::ConfidentialHeld;
 use crate::egress::pre_switch::{self, MoveOutcome};
+use crate::egress::reapply::PolicyReapply;
 use crate::sandbox::warm_pool::{MEMBER_POOL_LABEL, TEMPLATE_REF_HASH_LABEL};
 
 /// Why a start did not move a Sandbox made before hosted egress. Nothing was
@@ -86,6 +90,39 @@ fn hollow_broker_mode(object: &DynamicObject) -> bool {
 }
 
 impl SandboxClient {
+    /// Apply the environment's NetworkPolicy again where it exists, rendered
+    /// as [`Self::ensure_access_stack`] renders it, with the same writer
+    /// (#6070, the startup re-apply, `egress::reapply`). One that is absent
+    /// stays absent: a stopped environment's went with its access stack, and
+    /// its start makes it again.
+    pub(crate) async fn reapply_workspace_network_policy(
+        &self,
+        opts: &TemplateOpts,
+    ) -> anyhow::Result<PolicyReapply> {
+        if !(opts.network_policy_management.is_empty()
+            || opts.network_policy_management == "Managed")
+        {
+            return Ok(PolicyReapply::Absent);
+        }
+        let opts = self.resolve_direct_udp_service_opts(opts).await?;
+        let name = workspace_daemon_network_policy_name(&opts.environment_id);
+        let rendered = render_workspace_daemon_network_policy(&self.namespace, &opts);
+        let Some(live) = self
+            .network_policies()
+            .get_opt(&name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get NetworkPolicy {name}: {error}"))?
+        else {
+            return Ok(PolicyReapply::Absent);
+        };
+        if live.data.get("spec") == rendered.get("spec") {
+            return Ok(PolicyReapply::Current);
+        }
+        self.ensure_dynamic(self.network_policies(), &name, rendered)
+            .await?;
+        Ok(PolicyReapply::Applied)
+    }
+
     /// With hosted egress on, bring a suspended environment made before it to
     /// create's render. True when the Sandbox moved: its whole pod template
     /// is then the render, so the bootstrap refresh has nothing left to
