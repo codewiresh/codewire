@@ -362,6 +362,9 @@
         source = null;
         failedRunIn = true;
         if (retryReported) resume();
+      } else if (resumed) {
+        // The Retry's run has all its rows: the next status may end the list.
+        source = null;
       }
     });
     // This account already follows as many live logs as orchestration allows.
@@ -428,6 +431,10 @@
       return;
     }
     if (detail.running !== true || detail.setupComplete !== true || failure?.hidden === false) return;
+    // A quick Retry is complete before its run's rows arrive: its open
+    // stream's end, not the status, ends the list (#4767). A refused stream
+    // ends nothing, so the status does.
+    if (resumed && source && source.readyState !== EventSource.CLOSED) return;
     done = true;
     progress();
     finish();

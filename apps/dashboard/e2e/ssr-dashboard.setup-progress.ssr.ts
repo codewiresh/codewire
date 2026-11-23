@@ -236,6 +236,68 @@ test("a page returning from a Retry that already completed shows it after the fa
   expect(urls[1]).toContain("run=next&since=");
 });
 
+test("a quick Retry's run still fills the list when its status says complete first (#4767)", async ({ page }) => {
+  // Dev's Retry finishes in about a second, so the Sandbox reports setup
+  // complete before the Retry's run reaches the page; the list follows that
+  // run to its end, not to the next status.
+  let releaseRetryRun = () => {};
+  const retryRunHeld = new Promise<void>((resolve) => { releaseRetryRun = resolve; });
+  const answers = [
+    frame(1, { phase: "health_check", status: "completed", label: "Checking sidecar readiness", durationMs: 1200 })
+      + frame(2, { phase: "install", status: "started", label: "Running install command" })
+      + frame(3, { phase: "install", status: "failed", label: "workspace exec exited 1" })
+      + end("failed"),
+    frame(4, { phase: "install", status: "started", label: "Running install command" })
+      + frame(5, { phase: "install", status: "completed", label: "Running install command", durationMs: 900 })
+      + frame(6, { phase: "complete", status: "completed", label: "" })
+      + end("completed"),
+  ];
+  const urls: string[] = [];
+  await page.route(eventsPath, async (route) => {
+    urls.push(route.request().url());
+    const body = answers.shift();
+    if (body === undefined) return route.fulfill({ status: 204 });
+    if (urls.length === 2) await retryRunHeld;
+    await fulfill(route, body);
+  });
+  await page.goto(fixtureUrl("setup-retry"));
+  const setup = page.locator("[data-setup-progress]");
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "failed");
+  const complete = { available: true, running: true, setupComplete: true, setupFailed: false, setupRunning: false };
+  await status(page, complete);
+  await expect(setup.locator("h2")).toHaveText("Retrying setup");
+  await expect.poll(() => urls.length).toBe(2);
+  // The next poll says complete again while the Retry's rows are on the way.
+  await status(page, complete);
+  releaseRetryRun();
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "completed");
+  await expect(stages.nth(0)).toHaveAttribute("data-instant", "");
+});
+
+test("a Retry whose run's stream is refused still ends the list when setup completes (#4767)", async ({ page }) => {
+  let calls = 0;
+  await page.route(eventsPath, async (route) => {
+    calls += 1;
+    if (calls > 1) return route.fulfill({ status: 401, body: "" });
+    await fulfill(route,
+      frame(1, { phase: "install", status: "started", label: "Running install command" })
+      + frame(2, { phase: "install", status: "failed", label: "workspace exec exited 1" })
+      + end("failed"));
+  });
+  await page.goto(fixtureUrl("setup-retry"));
+  const setup = page.locator("[data-setup-progress]");
+  await expect(setup.locator("[data-setup-stages] > .cw-setup-stage").first()).toHaveAttribute("data-state", "failed");
+  const complete = { available: true, running: true, setupComplete: true, setupFailed: false, setupRunning: false };
+  await status(page, complete);
+  await expect(setup.locator("h2")).toHaveText("Retrying setup");
+  await expect(setup.locator("[data-setup-status]"))
+    .toHaveText("Live setup progress is unavailable. Sandbox status below still updates.");
+  await status(page, complete);
+  // The list ended: its bar is full. (The fixture's section starts hidden.)
+  await expect(setup.locator("[data-setup-bar]")).toHaveAttribute("aria-valuenow", "100");
+});
+
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {
   const hostile = "<img src=x onerror=\"document.body.dataset.injected='yes'\">";
   await streams(page, [
