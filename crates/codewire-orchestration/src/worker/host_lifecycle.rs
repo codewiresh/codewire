@@ -570,9 +570,9 @@ async fn finished(
         if left.is_zero() {
             return Ok(Finish::Unanswered);
         }
-        // TODO(#4762): `wait_finished` re-reads the row. It moves to the
-        // live-state change notice once that trigger is on main, rather than
-        // gaining a second notification mechanism of its own.
+        // TODO(#6090): `wait_finished` re-reads the row. It moves to the
+        // live-state change notice, now on main, rather than gaining a
+        // second notification mechanism of its own.
         match host_operations::wait_finished(pool, operation_id, ANSWER_SLICE.min(left)).await {
             Ok(operation) => {
                 // An answer that can't be acted on never will be: the
