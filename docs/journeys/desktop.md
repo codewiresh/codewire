@@ -31,7 +31,7 @@ panel comment.
 | ID | Kind | Local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
 | `desktop-image-inert` | not yet observed | observed on Linux | observed | not yet observed |
-| `desktop-cli` | not yet observed | observed on Linux; macOS not yet observed | observed from Linux; macOS not yet observed | not yet observed |
+| `desktop-cli` | not yet observed | observed on Linux; macOS not yet observed | observed from Linux and macOS | not yet observed |
 | `desktop-agent` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-look` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-browser` | not yet observed | not yet observed | not yet observed | not yet observed |
@@ -143,7 +143,10 @@ panel comment.
   name the desktop's terminal prints with `cw info desk-walk`. The password
   searches need the password: take it from `--no-open`, and search for the
   exact eight characters. On the owner's Mac the viewer is opened in a
-  session the owner can watch, never over a bare remote command.
+  session the owner can watch, never over a bare remote command. A refusal
+  that blames display :1 or port 5901 can be a denied launch (#6133); the
+  session's status in the daemon says which, and a second start went
+  through.
 - **Observed:** from Linux, in the 2026-11-22 walks on Dev and a Linux local
   VM, with TigerVNC on a private X server as the viewer: every proof but the
   Mac's and a registered Linux viewer asking for the password. The forward's
@@ -155,8 +158,17 @@ panel comment.
   `--no-open`. The password was not in `--status`, the desktop's log, `ps -eo
   args` or a command's environment in the environment, about 340,000 sampled
   lines of `ps -eo args` on the computer, or a file written during the run.
-  The Mac's built-in viewer, and a Linux viewer opened by `cw desktop` itself,
-  are not yet observed.
+  From macOS, on Dev on 2026-11-23, on the owner's Mac with its own login
+  and keychain, `cw` built from 42306388f8 against Dev at the same source
+  (recorded on #3223 in the macOS comment): the forward's first bytes were
+  `RFB 003.008`; plain `cw desktop` opened Screen Sharing on the XFCE desktop
+  without asking for anything and printed no password, and the VNC server
+  accepted its authentication; a second `cw desktop` started nothing; the
+  name Screen Sharing saved was the environment's host. The password was
+  not in about 369,000 sampled lines of `ps -eo args`, the unified log,
+  files written during the open, Screen Sharing's saved connections or a
+  keychain password item for 127.0.0.1. A Linux viewer opened by `cw desktop` itself, and typing through
+  the Mac's viewer, are not yet observed.
 
 ## `desktop-agent`: an agent draws on the desktop and reads it
 
