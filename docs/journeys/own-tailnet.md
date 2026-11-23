@@ -12,7 +12,8 @@ journey was written before the code. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21. Written first; every step is not yet observed.
+Updated 2026-11-23. Written first; every step is not yet observed. #6085 adds
+the binaries to the image.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -26,13 +27,16 @@ Updated 2026-11-21. Written first; every step is not yet observed.
 
 ## Before the walk
 
-- **A walk tailnet.** It holds one tag for the sandbox and one tag for the
-  target, and its ACL admits only the sandbox tag to the target tag on 443.
-  It must never be a tailnet whose ACL reaches shared services. The maintainers
-  hold its control URL and how keys are minted.
-- **A target.** A small HTTPS service on an ephemeral node with the target
-  tag. It answers one fixed body at `/`. Start it for the walk and remove it
-  by name afterwards.
+- **A walk tailnet and tag.** The sandbox's tag is the trust boundary: its
+  ACL admits it only to the target on 443, and to nothing else on the tailnet.
+  Either a tailnet of its own, or the maintainers' own tailnet with their
+  sandbox tag, whose one rule reaches only the tailnet's front door on 443,
+  where every service has its own sign-in. The maintainers hold its control
+  URL and how keys are minted.
+- **A target.** One HTTPS service the tag reaches, by its tailnet name, with
+  an answer that needs no sign-in and is the same every time (on the
+  maintainers' front door, the registry's `/v2/` refusal). A target started
+  for the walk is removed by name afterwards.
 - **An auth key.** One-use, ephemeral, tagged with the sandbox tag, and
   expiring in 10 minutes. Mint it just before the create and store it as an
   application secret:
@@ -72,7 +76,8 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   printf '%s' "$TS_AUTHKEY" >"$key"
   tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" up \
     --login-server=CONTROL_URL --auth-key="file:$key" \
-    --advertise-tags=SANDBOX_TAG --shields-up --hostname=tailnet-walk
+    --advertise-tags=SANDBOX_TAG --shields-up --accept-routes \
+    --hostname=tailnet-walk
   rm -f "$key"
   tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" status
   tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" debug prefs
@@ -81,7 +86,8 @@ Updated 2026-11-21. Written first; every step is not yet observed.
 - **Proof:**
   - `$XDG_RUNTIME_DIR` is a tmpfs, and the key file is gone after `up`,
     whether `up` succeeded or not.
-  - `status` lists this node with the sandbox tag, and the target.
+  - `status` lists this node with the sandbox tag, and the target or the
+    subnet router that carries it.
   - The control server lists the node as ephemeral.
   - `tailscaled` runs as the workspace user, not root.
   - The prefs show shields up, no Tailscale SSH, no exit node advertised, no
@@ -91,24 +97,31 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   - `ip route` and `/etc/resolv.conf` are byte-for-byte what they were before.
 - **Gotchas:**
   - `--state=mem:` keeps the node key in memory only, so a restart of the
-    sandbox needs a new key. That is intended.
+    sandbox needs a new key. That is intended. Without it, `tailscaled` keeps
+    the node key under `~/.local/share/tailscale`, in the persistent home,
+    where snapshots and copies of the home carry it.
   - Under a restrictive policy, the control server and the tailnet's DERP
     hosts must be allowed on 443, and the control server on 80 too, because the
     client may use it.
+  - `--accept-routes` lets the userspace stack reach a target behind a subnet
+    router, such as a front door. The routes stay inside `tailscaled`; the
+    sandbox's route table doesn't change.
   - Check every flag here against `--help` of the version the image pins, and
     correct this file if one differs.
 
 ## `own-tailnet-reach`: a tailnet service through the local proxy
 
 - **Driving it:**
-  1. `curl -sS --proxy http://127.0.0.1:1056 https://TARGET_NAME/`, where
-     `TARGET_NAME` is the target's MagicDNS name.
+  1. `curl -sS --proxy http://127.0.0.1:1056 https://TARGET_NAME/TARGET_PATH`,
+     where `TARGET_NAME` is the target's tailnet name and `TARGET_PATH` the
+     path of its fixed answer.
   2. The same with `--socks5-hostname 127.0.0.1:1055`.
-  3. `curl -sS -m 5 https://TARGET_NAME/` with no proxy.
+  3. `curl -sS -m 5 https://TARGET_NAME/TARGET_PATH` with no proxy.
 - **Proof:**
-  - Steps 1 and 2 return the target's fixed body. The proxy resolves the
+  - Steps 1 and 2 return the target's fixed answer. The proxy resolves the
     MagicDNS name, so the sandbox's own resolver never sees it.
-  - Step 3 fails at name resolution: nothing outside the proxy uses the tailnet.
+  - Step 3 fails: nothing outside the proxy uses the tailnet, so the name
+    doesn't resolve, or resolves to an address the sandbox can't reach.
 
 ## `own-tailnet-relay`: no direct UDP, still connected
 
@@ -137,7 +150,7 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   1. `tailscale --socket="$XDG_RUNTIME_DIR/tailscaled.sock" logout`.
   2. Kill `tailscaled` by its PID.
   3. `cw --cloud rm tailnet-walk --yes`.
-  4. Delete `TS_AUTHKEY`, the target node and the target.
+  4. Delete `TS_AUTHKEY`, and any target started for the walk with its node.
 - **Proof:**
   - The control server no longer lists the sandbox's node, at once after
     `logout`, or after its ephemeral timeout if the sandbox was removed first.
