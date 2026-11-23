@@ -388,12 +388,38 @@ fn clone_disk(source: &Path, destination: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// How long a stop waits for the VMM to exit by itself before it signals
+/// it. A restore's stop discards the guest's state: on Linux Cloud
+/// Hypervisor is told to end at once (`vm.shutdown` would leave it up until
+/// the bound), and a Mac's helper has no such call, so there it is
+/// signalled at once rather than after the bound (#6124).
+pub(super) fn vmm_exit_wait(discard_guest_state: bool) -> Duration {
+    if discard_guest_state && cfg!(target_os = "macos") {
+        Duration::ZERO
+    } else {
+        GRACEFUL_STOP_TIMEOUT
+    }
+}
+
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Mac's restore stop never waits out the graceful bound: it took
+    /// 5.0 s of every Mac restore (#6124).
+    #[test]
+    fn a_restores_stop_signals_a_macs_helper_at_once() {
+        assert_eq!(vmm_exit_wait(false), GRACEFUL_STOP_TIMEOUT);
+        let discarding = if cfg!(target_os = "macos") {
+            Duration::ZERO
+        } else {
+            GRACEFUL_STOP_TIMEOUT
+        };
+        assert_eq!(vmm_exit_wait(true), discarding);
+    }
 
     #[test]
     fn memory_writes_get_more_time_for_more_memory() {

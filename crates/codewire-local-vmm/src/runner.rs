@@ -1867,15 +1867,15 @@ impl RunningVm {
         {
             return self.wait_reaped().await;
         }
-        // A restore's stop ends the VMM itself: `vm.shutdown` would leave the
-        // process up until GRACEFUL_STOP_TIMEOUT. The disks close as it exits.
+        // A restore's stop ends the VMM at once; the disks close as it exits.
         #[cfg(target_os = "linux")]
         let _ = if discard_guest_state {
             self.api.shutdown_vmm().await
         } else {
             self.api.shutdown().await
         };
-        if self.process.wait_exited(GRACEFUL_STOP_TIMEOUT).await? {
+        let wait = checkpoint::vmm_exit_wait(discard_guest_state);
+        if self.process.wait_exited(wait).await? {
             return self.wait_reaped().await;
         }
         if signal_or_observe_exit(&self.process, Signal::TERM)?
