@@ -12,7 +12,14 @@ readonly EMAIL="success+codewire-dev-invitee@simulator.amazonses.com"
 # shellcheck disable=SC2016 # A literal PHC string, not an expansion.
 readonly HASH='$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g'
 
-cleanup() { rm -rf -- "$TEST_TMP"; }
+# The provisioner refuses a runtime directory that is not on tmpfs, so each
+# case's stands in under /dev/shm. Its TMPDIR stays on disk, and must stay empty.
+[[ "$(stat -f -c %T /dev/shm 2>/dev/null)" == tmpfs ]] ||
+  { printf 'dev invitee provisioning tests: /dev/shm is not tmpfs\n' >&2; exit 1; }
+SHM_TMP="$(mktemp -d /dev/shm/codewire-invitee-provision-tests.XXXXXX)"
+chmod 0700 "$SHM_TMP"
+
+cleanup() { rm -rf -- "$TEST_TMP" "$SHM_TMP"; }
 trap cleanup EXIT
 fail() { printf 'dev invitee provisioning tests: %s\n' "$*" >&2; exit 1; }
 
@@ -97,10 +104,12 @@ run_case() {
   local name="$1" mode="$2" expect="$3"; shift 3
   CASE="$TEST_TMP/$name"
   mkdir -p "$CASE/state" "$CASE/kube" "$CASE/tmp"
+  local runtime="${CASE_RUNTIME:-$SHM_TMP/$name}"
+  [[ -n "${CASE_RUNTIME:-}" ]] || mkdir -m 0700 "$runtime"
   : >"$CASE/state/events"
   make_fake_tools "$CASE/bin"
   local status=0
-  env -i PATH="$CASE/bin:$PATH" HOME="$CASE" TMPDIR="$CASE/tmp" MOCK_STATE="$CASE/state" \
+  env -i PATH="$CASE/bin:$PATH" HOME="$CASE" TMPDIR="$CASE/tmp" XDG_RUNTIME_DIR="$runtime" MOCK_STATE="$CASE/state" \
     MOCK_MODE="$mode" INFRA_KUBECONFIG_DIR="${KUBE_DIR-$CASE/kube}" KUBECONFIG="$CASE/kube/scoped.yaml" \
     bash "$PROVISIONER" "$@" >"$CASE/out" 2>&1 || status=$?
   if [[ "$expect" == pass ]]; then
@@ -114,7 +123,8 @@ run_case() {
     ! grep -qF -- "$password" "$CASE/out" || fail "$name: the password reached output"
     ! grep -qF -- "$password" "$CASE/state/psql.sql" 2>/dev/null || fail "$name: the password reached the database"
   fi
-  [[ -z "$(find "$CASE/tmp" -mindepth 1 -print -quit)" ]] || fail "$name: left temporary files"
+  [[ -z "$(find "$CASE/tmp" -mindepth 1 -print -quit)" ]] || fail "$name: wrote to the disk TMPDIR"
+  [[ -z "$(find "$runtime" -mindepth 1 -print -quit)" ]] || fail "$name: left temporary files"
 }
 
 expect_events() {
@@ -174,5 +184,16 @@ expect_output 'answered HTTP 401'
 KUBE_DIR="" run_case no_kube_access absent fail --create-document
 expect_events ''
 expect_output 'scoped Infra kube-access wrapper'
+
+# The runtime directory must be the caller's own 0700 tmpfs directory; a
+# disk one is refused before anything is read or written.
+mkdir -m 0700 "$TEST_TMP/disk-runtime"
+CASE_RUNTIME="$TEST_TMP/disk-runtime" run_case disk_runtime absent fail --create-document
+expect_events ''
+expect_output 'XDG_RUNTIME_DIR is not on tmpfs'
+mkdir -m 0755 "$SHM_TMP/open-runtime"
+CASE_RUNTIME="$SHM_TMP/open-runtime" run_case open_runtime absent fail --create-document
+expect_events ''
+expect_output 'your own 0700 runtime directory'
 
 printf 'dev invitee provisioning tests: PASS\n'

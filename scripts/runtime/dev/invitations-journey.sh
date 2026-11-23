@@ -47,13 +47,20 @@ trap 'exit 130' HUP INT TERM
 
 case "${1:-}" in -h|--help) usage; exit 0 ;; "") ;; *) die "unknown option: $1" ;; esac
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
-for command in curl jq shred; do
+for command in curl jq shred stat; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 [[ -x "$CW_BIN" ]] || die "Codewire CLI is unavailable: $CW_BIN (set CW_BIN)"
 
+[[ "${XDG_RUNTIME_DIR:-}" == /* && -d "$XDG_RUNTIME_DIR" && ! -L "$XDG_RUNTIME_DIR" &&
+  "$(stat -c '%a:%u' "$XDG_RUNTIME_DIR")" == "700:$(id -u)" ]] ||
+  die 'XDG_RUNTIME_DIR must be your own 0700 runtime directory'
+case "$(stat -f -c %T "$XDG_RUNTIME_DIR")" in
+  tmpfs|ramfs) ;;
+  *) die 'XDG_RUNTIME_DIR is not on tmpfs; the password must never reach a disk' ;;
+esac
 umask 077
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/codewire-invitations-journey.XXXXXX")"
+WORK="$(mktemp -d "$XDG_RUNTIME_DIR/codewire-invitations-journey.XXXXXX")"
 mkdir -m 0700 "$WORK/bin" "$WORK/inviter" "$WORK/invitee"
 # cw opens the device page with xdg-open; this walk approves it itself, so the
 # workstation's browser must never open.
@@ -132,6 +139,9 @@ grep -q 'a pending invitation already exists for this email' <<<"$out" || die 'i
 # invite-accept: the invitee signs in through device sign-in, approving the
 # code itself with a password session that skips second-factor setup.
 printf '\n$ cw login   # invitee\n'
+# The background job opens its redirect after the fork; the file exists first
+# so the poll below never reads a missing file.
+: >"$WORK/login.out"
 HOME="$WORK/invitee" PATH="$WORK/bin:$PATH" CODEWIRE_NATIVE_STATE_ROOT="$WORK/no-local-vm-state" \
   "$CW_BIN" --server "$SERVER" login </dev/null >"$WORK/login.out" 2>&1 &
 LOGIN_PID=$!

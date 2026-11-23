@@ -99,8 +99,15 @@ done
   die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
 export BAO_ADDR="$OPENBAO_ADDR"
 
+[[ "${XDG_RUNTIME_DIR:-}" == /* && -d "$XDG_RUNTIME_DIR" && ! -L "$XDG_RUNTIME_DIR" &&
+  "$(stat -c '%a:%u' "$XDG_RUNTIME_DIR")" == "700:$(id -u)" ]] ||
+  die 'XDG_RUNTIME_DIR must be your own 0700 runtime directory'
+case "$(stat -f -c %T "$XDG_RUNTIME_DIR")" in
+  tmpfs|ramfs) ;;
+  *) die 'XDG_RUNTIME_DIR is not on tmpfs; the password must never reach a disk' ;;
+esac
 umask 077
-TMPDIR_INVITEE="$(mktemp -d "${TMPDIR:-/tmp}/codewire-invitee-provision.XXXXXX")"
+TMPDIR_INVITEE="$(mktemp -d "$XDG_RUNTIME_DIR/codewire-invitee-provision.XXXXXX")"
 chmod 0700 "$TMPDIR_INVITEE"
 PASSWORD_FILE="$TMPDIR_INVITEE/password"
 HASH_FILE="$TMPDIR_INVITEE/hash"

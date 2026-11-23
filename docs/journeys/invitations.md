@@ -50,6 +50,9 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   So the invitee signs in through `cw login`'s device sign-in. The script
   approves the device code itself, with a password session that skips
   second-factor setup.
+- Both scripts keep the invitee's password in a private folder under your
+  own 0700 `XDG_RUNTIME_DIR`, and refuse to run unless it is on tmpfs, so
+  the password never reaches a disk.
 - The invitee's address is a mail provider simulator address, so the
   invitation email is accepted without reaching anyone and nothing bounces.
   The email's arrival still needs an address a person reads; see
