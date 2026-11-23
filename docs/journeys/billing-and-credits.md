@@ -76,7 +76,11 @@ the first Production release after codewire/deploy#245.
   and the balance moves by the amount paid.
 - **Too many tries** (#4874, against card testing): an organization starts at
   most 10 card setups an hour, and a user at most 20 a day across all their
-  organizations; every save counts, accepted or not, and opening the form
+  organizations. One client address starts at most 60 an hour, across every
+  account and organization on it (`card_setup_address`, #4901, not yet
+  built): enough for a class or an office on one network to each save a card,
+  not enough for one machine with many accounts to test cards. Every save
+  counts, accepted or not, and opening the form
   counts nothing. The next try is refused
   before Stripe is called, so nothing is saved or charged; the dashboard
   says there were too many tries and to try again later, and the form opens

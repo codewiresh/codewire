@@ -301,6 +301,58 @@ check it never fails readiness or liveness. With no sentinel customer, or
 without Stripe, the report says `disabled`. `BILLING_LOOPS` without
 `stripe-delivery-check` turns it off.
 
+### Card setup limits
+
+Saving a card on the Billing page starts a card setup, one Stripe
+SetupIntent per try. Testing stolen cards takes many tries, so billing
+refuses a card setup, before it calls Stripe, past any of three counts:
+- 10 an hour for one organization;
+- 20 a day for one user, across all their organizations;
+- 60 an hour from one client address: an IPv4 address, or an IPv6 /64
+  (`card_setup_address`, #4901). That lets an office or a class on one
+  network, signing up together as the sign-up limits allow, each save a
+  card in one or two tries. One machine with many accounts still can't try
+  cards without bound.
+
+The address count, and everything below about the client address, is not
+yet built (#4901); today only the first two counts apply.
+
+Every try counts, accepted or not; opening the form counts nothing. A refusal
+is 429 `rate_limited`, saying when to try again. Billing counts it in
+`codewire_rate_limit_refusals_total`, labelled with the limit's name, and logs
+the organization and user, never the address. No setting changes the
+organization and user counts.
+
+**The client address** is the last `X-Forwarded-For` hop, as for sign-up. A
+card setup from the dashboard carries the hop the dashboard's own request
+arrived with, which replaces whatever `X-Forwarded-For` the browser sent; one
+through the public API carries the edge's hop. That hop can be trusted only
+because nobody can choose it. The hosted edge takes the address from its
+CDN's `CF-Connecting-IP`, refuses a request without one, and accepts only
+connections that present the CDN's origin-pull client certificate, so no one
+can reach it around the CDN. Behind the bundled Caddy alone it is the address
+Caddy connected from. A self-hosted deployment with another proxy in front of
+its edge, and nothing equivalent stopping clients from bypassing that proxy or
+setting the address, must not rely on the address count. Only the card setup
+reads the address. A card setup with no address is refused, so a proxy in front of
+billing must send one, as the bundled edge does. Billing's API port admits
+only the edge and the dashboard (a NetworkPolicy, as on the IdP), so nothing
+else in the cluster can write the hop billing counts. Its metrics port is open
+to Prometheus.
+
+**A larger group behind one shared address** can raise the address count
+with SQL against the application database, as for `signup_address`:
+
+```sql
+INSERT INTO rate_limit_settings (name, max_requests, updated_by)
+VALUES ('card_setup_address', 120, 'operator')
+ON CONFLICT (name) DO UPDATE
+   SET max_requests = EXCLUDED.max_requests, updated_by = EXCLUDED.updated_by,
+       updated_at = now();
+```
+
+Deleting the row returns the default.
+
 ## Workspace storage
 
 | Variable | Required | Meaning | Example |
