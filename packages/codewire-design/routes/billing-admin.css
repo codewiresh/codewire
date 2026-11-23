@@ -1,7 +1,8 @@
 /* Billing and Admin: stat grids, the usage chart, filters and the catalog
    editor. Primitives own the visuals; every value is a design token. */
 [data-route="admin"] .cw-page { max-width: var(--content-wide); }
-.cw-billing-stack, .cw-admin-stack { display: grid; min-width: 0; gap: var(--space-3); }
+/* One column no wider than the page, so a wide table scrolls in its wrap. */
+.cw-billing-stack, .cw-admin-stack { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: var(--space-3); }
 
 /* Payment methods: a row of the method and its pills (a badge row, so a wrapped pill starts on the left line), its expiry under it and its action on the right. No method is the same row with the add action. */
 .cw-payment-method { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3) var(--space-4); }
@@ -29,7 +30,8 @@ dl.cw-stat-grid { margin: 0; }
 .cw-chart-grid { fill: none; stroke: var(--border-subtle); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .cw-chart-bar { fill: var(--accent); rx: 2; }
 .cw-chart-bar:is(:hover, :focus-visible) { fill: var(--fg-primary); }
-.cw-table-wrap { max-width: 100%; overflow-x: auto; }
+/* Positioned, so a row's screen-reader text scrolls with the table instead of widening the page. */
+.cw-table-wrap { position: relative; max-width: 100%; overflow-x: auto; }
 
 .cw-admin-stat { padding: var(--space-4); }
 .cw-admin-stat > span, .cw-admin-stat > strong, .cw-admin-stat > p { display: block; margin: 0; }
