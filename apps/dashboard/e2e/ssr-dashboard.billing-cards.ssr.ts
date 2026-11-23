@@ -38,6 +38,30 @@ test("Billing reads balance, payment methods, top-up, Add credit, invoices", { t
   await artifactScreenshot(page, "billing-v4.png");
 });
 
+test("Pay still names the amount after a live refresh swaps the stack in (#6159)", async ({ page }) => {
+  await open(page);
+  // The refresh fetches the stack's own fragment: answer it with the stack as
+  // served, before any script named the amount.
+  const [fragment, servedLabel] = await page.evaluate(async () => {
+    const html = await (await fetch(location.href)).text();
+    const stack = new DOMParser().parseFromString(html, "text/html").getElementById("billing-stack")!;
+    return [stack.outerHTML, stack.querySelector("form[data-add-credit] [data-add-credit-submit]")?.textContent];
+  });
+  expect(servedLabel).toBe("Pay");
+  let served = 0;
+  await page.route("**/example-org/_fragments/billing", (route) => {
+    served += 1;
+    return route.fulfill({ contentType: "text/html", body: fragment });
+  });
+  const pay = page.locator("#billing-stack form[data-add-credit] [data-add-credit-submit]");
+  await expect(pay).toHaveText("Pay €100");
+  await page.locator("#billing-stack").evaluate((stack) => { stack.dataset.beforeRefresh = "true"; });
+  await page.evaluate(() => document.body.dispatchEvent(new CustomEvent("codewire:live:credit")));
+  await expect.poll(() => served).toBe(1);
+  await expect(page.locator("#billing-stack:not([data-before-refresh])")).toHaveCount(1);
+  await expect(pay).toHaveText("Pay €100");
+});
+
 test("Pay names the amount a chip or Other chooses", async ({ page }) => {
   await open(page);
   const form = page.locator("#billing-stack form[data-add-credit]");

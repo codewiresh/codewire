@@ -102,6 +102,9 @@ const app = document.querySelector("[data-dashboard-app]");
   };
   const addCreditForms = () => document.querySelectorAll("form[data-add-credit]");
   addCreditForms().forEach(syncAddCredit);
+  // A live refresh swaps the Billing stack in with the button's no-script
+  // text, so the button names the amount again (#6159).
+  document.addEventListener("htmx:afterSwap", () => addCreditForms().forEach((form) => syncAddCredit(form)));
   for (const type of ["change", "input"]) {
     document.addEventListener(type, (event) => {
       const form = event.target instanceof Element ? event.target.closest("form[data-add-credit]") : null;
