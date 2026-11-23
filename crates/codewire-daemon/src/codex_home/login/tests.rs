@@ -1283,6 +1283,57 @@ async fn eventually(condition: impl Fn() -> bool) {
     panic!("condition not reached");
 }
 
+/// A local VM's start waits on the writer's readiness (#6123): it stays
+/// pending while nothing is delivered, and settles with the first decided
+/// outcome, here the written login.
+#[tokio::test]
+async fn the_writer_settles_on_its_first_decided_outcome_only() {
+    let fixture = Fixture::new();
+    let readiness = crate::login_readiness::LoginReadiness::default();
+    let script = std::sync::Arc::new(Script {
+        answers: std::sync::Mutex::new(Vec::new()),
+        fallback: LoginFailure::Unavailable,
+        calls: Default::default(),
+    });
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(run_codex_login_writer(
+        fixture.writer(),
+        script.clone(),
+        CODEX_LOGIN_CHECK_PERIOD,
+        stopped,
+        Some(readiness.track("codex")),
+    ));
+    eventually(|| script.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!readiness.diagnostic().healthy);
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let script = std::sync::Arc::new(Script {
+        answers: std::sync::Mutex::new(vec![Ok(opened(CREDENTIAL, 1, unix_now() + 86_400))]),
+        fallback: LoginFailure::Unavailable,
+        calls: Default::default(),
+    });
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(run_codex_login_writer(
+        fixture.writer(),
+        script.clone(),
+        CODEX_LOGIN_CHECK_PERIOD,
+        stopped,
+        Some(readiness.track("codex")),
+    ));
+    eventually(|| readiness.diagnostic().healthy).await;
+    assert!(fixture.auth().exists());
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_stops() {
     let fixture = Fixture::new();
@@ -1297,6 +1348,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
         script.clone(),
         CODEX_LOGIN_CHECK_PERIOD,
         stopped,
+        None,
     ));
     eventually(|| script.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1322,6 +1374,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
         script.clone(),
         CODEX_LOGIN_CHECK_PERIOD,
         stopped,
+        None,
     ));
     eventually(|| fixture.auth().exists()).await;
     eventually(|| fixture.config() == Some(signed_in_config())).await;

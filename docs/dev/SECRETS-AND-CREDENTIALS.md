@@ -2857,6 +2857,16 @@ it. Each removal recognises only a file Codewire wrote; the user's own logins
 stay. Whoever holds the creator's saved `cw` login on the host
 can obtain the token, as they already can by creating a hosted Sandbox.
 
+A local VM's start returns once each agent login its profile delivers is in
+the guest, or the guest has settled without it (not selected, the user's own
+login, or refused), waiting at most 10 s; past that the start still returns,
+and the login lands when it arrives (#6123). The guest daemon reports this as
+the `agent-logins` health diagnostic: healthy once each of its login writers
+has had a first outcome that doesn't retry soon. The supervisor asks for it
+every 100 ms after the VM is running, so a settled login adds no visible
+delay, and `cw` prints one note only when the bound was reached. A daemon from
+before this reports no such diagnostic and isn't waited for.
+
 A local disk snapshot (`cw snapshot create`, on Linux or a Mac) is a durable
 copy of a stopped VM's disks, so it must never hold a delivered login. It holds
 copies of the VM's state disk (`/workspace`, the workload user's home,

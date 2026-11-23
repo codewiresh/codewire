@@ -28,6 +28,10 @@ const SOURCES: (&str, &str) = ("cli:sources", "Preparing sources");
 /// its content store with no registry round trip (#4968).
 const IMAGE: (&str, &str) = ("image", "Preparing the image");
 const CACHED_IMAGE: &str = "Using the cached image";
+/// After a start whose wait for the guest's agent logins reached its bound
+/// (#6123); a start that waited less says nothing.
+const AGENT_LOGINS_ARRIVING: &str =
+    "Agent sign-ins are still arriving; wait a few seconds before starting an agent";
 
 /// Redraws at least this often while waiting, so elapsed time keeps counting.
 const MAX_TICK: Duration = Duration::from_secs(1);
@@ -39,6 +43,8 @@ pub(crate) struct NativeProgress {
     /// The supervisor reported the operation, so it runs whatever the CLI
     /// does next.
     confirmed: Arc<AtomicBool>,
+    /// The operation's agent logins were still arriving when it ended.
+    logins_arriving: Arc<AtomicBool>,
     interrupt: Option<InterruptNotice>,
 }
 
@@ -48,6 +54,7 @@ impl NativeProgress {
             line: Arc::new(Mutex::new(StatusLine::new(std::io::stderr(), caps))),
             current: Arc::new(Mutex::new(None)),
             confirmed: Arc::new(AtomicBool::new(false)),
+            logins_arriving: Arc::new(AtomicBool::new(false)),
             interrupt: None,
         }
     }
@@ -78,6 +85,9 @@ impl NativeProgress {
         if operation.workspace_image_cached {
             self.relabel(IMAGE.0, CACHED_IMAGE);
         }
+        if operation.agent_logins_arriving {
+            self.logins_arriving.store(true, Ordering::Relaxed);
+        }
         match stage_of(operation) {
             Some((key, label)) => self.enter(key, label, guest_detail(operation)),
             None => {
@@ -92,7 +102,12 @@ impl NativeProgress {
     /// Closes the last open stage once the operation has succeeded.
     pub(crate) fn complete(&self) {
         self.close_current();
-        let _ = self.line.lock().map(|mut line| line.clear());
+        let _ = self.line.lock().map(|mut line| {
+            if self.logins_arriving.load(Ordering::Relaxed) {
+                let _ = line.note(crate::output::Status::Attention, AGENT_LOGINS_ARRIVING);
+            }
+            line.clear()
+        });
     }
 
     /// Ends the open stage with a failure line and returns its label, or
@@ -473,5 +488,25 @@ mod tests {
             progress.observe(&stage(open, cached));
             assert_eq!(progress.fail(), Some(expected), "{open:?} {cached}");
         }
+    }
+
+    /// A start whose agent logins were still arriving at the wait's bound
+    /// ends with the quiet note (#6123); any other says nothing more.
+    #[test]
+    fn only_a_start_whose_logins_are_still_arriving_notes_it() {
+        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Machine);
+        for arriving in [false, true] {
+            let progress = NativeProgress::new(&caps);
+            progress.observe(&v1::Operation {
+                agent_logins_arriving: arriving,
+                ..operation(v1::OperationStage::StartVm, v1::RunnerStage::DaemonReady)
+            });
+            assert_eq!(progress.logins_arriving.load(Ordering::Relaxed), arriving);
+            progress.complete();
+        }
+        assert_eq!(
+            AGENT_LOGINS_ARRIVING,
+            "Agent sign-ins are still arriving; wait a few seconds before starting an agent"
+        );
     }
 }

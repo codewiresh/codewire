@@ -1163,6 +1163,7 @@ fn the_task_writes_at_start_logs_only_states_and_stops() {
             script.clone(),
             crate::config::CODEX_LOGIN_CHECK_PERIOD,
             stopped,
+            None,
         ));
         eventually(|| script.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1188,6 +1189,7 @@ fn the_task_writes_at_start_logs_only_states_and_stops() {
             script.clone(),
             Duration::from_millis(50),
             stopped,
+            None,
         ));
         eventually(|| fixture.credentials().exists()).await;
         eventually(|| !fixture.credentials().exists()).await;
@@ -1257,6 +1259,7 @@ fn the_recent_log_a_host_reads_holds_states_and_no_seeded_token() {
             script.clone(),
             Duration::from_millis(50),
             stopped,
+            None,
         ));
         eventually(|| fixture.credentials().exists()).await;
         eventually(|| !fixture.credentials().exists()).await;

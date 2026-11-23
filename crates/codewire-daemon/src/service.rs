@@ -67,6 +67,8 @@ pub struct DaemonRuntimeState {
     diagnostics: Vec<v1::HealthDiagnostic>,
     /// A broker-mode daemon's live platform refusal (#4000).
     platform: crate::platform_refusal::PlatformRefusal,
+    /// A local VM daemon's agent logins, until they settle (#6123).
+    logins: Option<crate::login_readiness::LoginReadiness>,
 }
 
 impl DaemonRuntimeState {
@@ -80,6 +82,7 @@ impl DaemonRuntimeState {
             message: message.into(),
             diagnostics,
             platform: Default::default(),
+            logins: None,
         }
     }
 
@@ -90,6 +93,17 @@ impl DaemonRuntimeState {
     ) -> Self {
         self.platform = platform;
         self
+    }
+
+    /// Also report whether the agent logins have settled (#6123).
+    pub fn with_login_readiness(mut self, logins: crate::login_readiness::LoginReadiness) -> Self {
+        self.logins = Some(logins);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn login_readiness(&self) -> Option<crate::login_readiness::LoginReadiness> {
+        self.logins.clone()
     }
 
     pub fn ready() -> Self {
@@ -256,6 +270,12 @@ impl DaemonService for DaemonServiceImpl {
         let mut diagnostics = self.runtime_state.diagnostics.clone();
         diagnostics.extend(self.session_engine.store_diagnostic());
         diagnostics.extend(self.runtime_state.platform.diagnostics());
+        diagnostics.extend(
+            self.runtime_state
+                .logins
+                .as_ref()
+                .map(|logins| logins.diagnostic()),
+        );
         Ok(Response::new(v1::GetHealthResponse {
             state: self.runtime_state.state as i32,
             message: self.runtime_state.message.clone(),

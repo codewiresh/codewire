@@ -428,7 +428,8 @@ where
     );
     serve(
         config,
-        DaemonRuntimeState::ready(),
+        // Its start waits for the agent logins to settle (#6123).
+        DaemonRuntimeState::ready().with_login_readiness(Default::default()),
         Some(HostedLogins {
             codex_home,
             check_period: crate::config::CODEX_LOGIN_CHECK_PERIOD,
@@ -475,6 +476,49 @@ type AgentLogins = std::convert::Infallible;
 type HostControlBinding = crate::host_control::HostControlBinding;
 #[cfg(not(target_os = "linux"))]
 type HostControlBinding = std::convert::Infallible;
+
+/// The agents' own logins, beside gRPC and the guest ingress. Each asks only
+/// over an admitted epoch and stops with the daemon; a local VM's `readiness`
+/// settles on each one's first decided outcome (#6123).
+#[cfg(target_os = "linux")]
+fn spawn_login_writers(
+    codex: Option<(
+        crate::codex_home::login::CodexLoginWriter,
+        std::time::Duration,
+    )>,
+    claude: Option<(
+        crate::claude_home::login::ClaudeLoginWriter,
+        std::time::Duration,
+    )>,
+    bridge: Option<codewire_credential_bridge::CredentialBridge>,
+    readiness: Option<&crate::login_readiness::LoginReadiness>,
+    shutdown: &watch::Receiver<bool>,
+) -> [Option<AbortOnDropHandle<()>>; 2] {
+    let track = |agent| readiness.map(|readiness| readiness.track(agent));
+    let codex = codex.zip(bridge.clone()).map(|((writer, period), bridge)| {
+        AbortOnDropHandle::new(tokio::spawn(
+            crate::codex_home::login::run_codex_login_writer(
+                writer,
+                bridge,
+                period,
+                shutdown.clone(),
+                track("codex"),
+            ),
+        ))
+    });
+    let claude = claude.zip(bridge).map(|((writer, period), bridge)| {
+        AbortOnDropHandle::new(tokio::spawn(
+            crate::claude_home::login::run_claude_login_writer(
+                writer,
+                bridge,
+                period,
+                shutdown.clone(),
+                track("claude"),
+            ),
+        ))
+    });
+    [codex, claude]
+}
 
 #[allow(clippy::too_many_arguments)] // Each entry point passes its own subset.
 async fn serve<I, IO, IE, F>(
@@ -541,6 +585,8 @@ where
     }
     #[cfg(target_os = "linux")]
     let startup_config = config.clone();
+    #[cfg(target_os = "linux")]
+    let login_readiness = runtime_state.login_readiness();
     let mut implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
     if let Some((_, bounds)) = &host_control_binding {
         implementation = implementation.with_host_bounds(*bounds);
@@ -615,36 +661,14 @@ where
         result.map(|io| auth.bind_connection(ShutdownIo::new(io, Arc::clone(&incoming_shutdown))))
     });
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    // The agents' own logins, beside gRPC and the guest ingress. Each asks
-    // only over an admitted epoch and stops with the daemon.
     #[cfg(target_os = "linux")]
-    let _codex_login =
-        codex_login
-            .zip(bridge_owner.shared_bridge())
-            .map(|((writer, check_period), bridge)| {
-                AbortOnDropHandle::new(tokio::spawn(
-                    crate::codex_home::login::run_codex_login_writer(
-                        writer,
-                        bridge,
-                        check_period,
-                        shutdown_rx.clone(),
-                    ),
-                ))
-            });
-    #[cfg(target_os = "linux")]
-    let _claude_login =
-        claude_login
-            .zip(bridge_owner.shared_bridge())
-            .map(|((writer, check_period), bridge)| {
-                AbortOnDropHandle::new(tokio::spawn(
-                    crate::claude_home::login::run_claude_login_writer(
-                        writer,
-                        bridge,
-                        check_period,
-                        shutdown_rx.clone(),
-                    ),
-                ))
-            });
+    let _login_writers = spawn_login_writers(
+        codex_login,
+        claude_login,
+        bridge_owner.shared_bridge(),
+        login_readiness.as_ref(),
+        &shutdown_rx,
+    );
     let observer_tx = shutdown_tx.clone();
     #[cfg(target_os = "linux")]
     let observer_control = control_owner.clone();

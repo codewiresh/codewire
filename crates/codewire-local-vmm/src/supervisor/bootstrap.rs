@@ -112,11 +112,271 @@ fn broker_bootstrap_ready(
     }
 }
 
+/// Whether a runner event only restates the state before this start: the
+/// prior generation, stopped or failed, with no guest progress.
+pub(super) fn runner_event_is_prior_baseline(
+    generation: u64,
+    state: StoredEnvironmentState,
+    stage: v1::RunnerStage,
+    guest_sequence: u64,
+    guest_stage: v1::GuestBootStage,
+    error_code_valid: bool,
+    prior: (u64, StoredEnvironmentState),
+) -> bool {
+    generation == prior.0
+        && state == prior.1
+        && guest_sequence == 0
+        && guest_stage == v1::GuestBootStage::Unspecified
+        && match state {
+            StoredEnvironmentState::Stopped => {
+                matches!(stage, v1::RunnerStage::Ready | v1::RunnerStage::Stopped)
+                    && !error_code_valid
+            }
+            StoredEnvironmentState::Error => stage == v1::RunnerStage::Error && error_code_valid,
+            StoredEnvironmentState::Starting
+            | StoredEnvironmentState::Running
+            | StoredEnvironmentState::Orphaned => false,
+        }
+}
+
+/// How long a start waits for the guest's agent logins to settle, and how
+/// often it asks: often enough that a settled login adds no visible delay
+/// (#6123).
+const AGENT_LOGINS_BOUND: Duration = Duration::from_secs(10);
+const AGENT_LOGINS_POLL: Duration = Duration::from_millis(100);
+
+/// What a start's wait for the guest's agent logins ended with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentLogins {
+    /// Each login its profile delivers is written, the user's own was kept,
+    /// or delivery was refused.
+    Settled,
+    /// The daemon doesn't report them, being from before #6123, or couldn't
+    /// be asked: nothing to wait for.
+    NotReported,
+    /// Still arriving at the bound; they land when they come.
+    StillArriving,
+}
+
+/// Reaches the guest daemon with `connect`, then asks `health` every
+/// [`AGENT_LOGINS_POLL`] until it reports its agent logins settled, all
+/// within `bound`: a runner or daemon that never answers holds a start no
+/// longer than that.
+pub(super) async fn wait_for_agent_logins<D, C, A, F>(
+    connect: C,
+    mut health: A,
+    bound: Duration,
+) -> AgentLogins
+where
+    D: Clone,
+    C: Future<Output = Option<D>>,
+    A: FnMut(D) -> F,
+    F: Future<Output = Option<codewire_daemon_proto::daemon::v1::GetHealthResponse>>,
+{
+    use codewire_daemon::login_readiness::AGENT_LOGINS_DIAGNOSTIC;
+    let deadline = tokio::time::Instant::now() + bound;
+    let daemon = match tokio::time::timeout_at(deadline, connect).await {
+        Err(_) => return AgentLogins::StillArriving,
+        Ok(None) => return AgentLogins::NotReported,
+        Ok(Some(daemon)) => daemon,
+    };
+    loop {
+        let Ok(answer) = tokio::time::timeout_at(deadline, health(daemon.clone())).await else {
+            return AgentLogins::StillArriving;
+        };
+        let Some(answer) = answer else {
+            return AgentLogins::NotReported;
+        };
+        match answer
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.name == AGENT_LOGINS_DIAGNOSTIC)
+        {
+            None => return AgentLogins::NotReported,
+            Some(diagnostic) if diagnostic.healthy => return AgentLogins::Settled,
+            Some(_) => {}
+        }
+        if tokio::time::Instant::now() + AGENT_LOGINS_POLL >= deadline {
+            return AgentLogins::StillArriving;
+        }
+        tokio::time::sleep(AGENT_LOGINS_POLL).await;
+    }
+}
+
+impl Supervisor {
+    /// The end of a VM start once the runner reports it running: the in-guest
+    /// cw runtime's boot is confirmed, the guest's agent logins are waited
+    /// for (#6123), and the environment records the runtime catalog it
+    /// booted.
+    pub(super) async fn finish_started_vm(
+        &self,
+        name: &str,
+        generation: u64,
+        operation_id: Uuid,
+        environment: &EnvironmentRecord,
+        mut client: RunnerClient,
+        cw_runtime: Option<String>,
+    ) -> Result<(), SupervisorError> {
+        if cw_runtime.is_some() {
+            let confirmation = match client.daemon_access().await {
+                Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
+                Err(_) => Err(Status::unavailable("runtime startup endpoint unavailable")),
+            };
+            if let Err(status) = confirmation {
+                let _ = client.stop().await;
+                let mut failed_generation = environment.clone();
+                failed_generation.generation = generation;
+                self.stop_environment_broker_if_present(&failed_generation)
+                    .await?;
+                return Err(SupervisorError::VmStart(status.message().to_owned()));
+            }
+        }
+        self.wait_for_started_agent_logins(&mut client, operation_id)
+            .await;
+        self.update_environment(name, |environment| {
+            environment
+                .runner
+                .as_mut()
+                .ok_or(SupervisorError::InvalidState)?
+                .cw_runtime_catalog_generation = cw_runtime;
+            Ok(())
+        })
+    }
+}
+
+impl Supervisor {
+    /// A started VM's [`wait_for_agent_logins`], through its runner's daemon
+    /// access, so the first agent command after the start finds its login.
+    /// Logins still arriving at the bound are noted on `operation_id`, and
+    /// `cw` says so.
+    async fn wait_for_started_agent_logins(&self, client: &mut RunnerClient, operation_id: Uuid) {
+        let connect = async {
+            let access = client.daemon_access().await.ok()?;
+            let capability = zeroize::Zeroizing::new(access.generation_capability);
+            crate::hybrid_vsock::connect_daemon(
+                std::path::Path::new(&access.hybrid_socket),
+                access.guest_port,
+                capability.as_str(),
+            )
+            .await
+            .ok()
+        };
+        let waited = wait_for_agent_logins(
+            connect,
+            |daemon: codewire_daemon::client::SessionClient| async move {
+                daemon.get_health().await.ok()
+            },
+            AGENT_LOGINS_BOUND,
+        )
+        .await;
+        if waited == AgentLogins::StillArriving {
+            self.core()
+                .operation_notes
+                .agent_logins_arriving(operation_id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    fn health(logins: Option<bool>) -> codewire_daemon_proto::daemon::v1::GetHealthResponse {
+        codewire_daemon_proto::daemon::v1::GetHealthResponse {
+            diagnostics: logins
+                .map(
+                    |healthy| codewire_daemon_proto::daemon::v1::HealthDiagnostic {
+                        name: codewire_daemon::login_readiness::AGENT_LOGINS_DIAGNOSTIC.to_owned(),
+                        healthy,
+                        message: String::new(),
+                    },
+                )
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// #6123: a start waits for the guest's agent logins, asking every
+    /// 100 ms, so a login that lands a moment later holds it only that long;
+    /// one that never settles, or a daemon that never answers, holds it for
+    /// the bound only; a daemon that doesn't report them, or can't answer,
+    /// isn't waited for.
+    #[tokio::test(start_paused = true)]
+    async fn a_start_waits_for_the_agent_logins_at_most_its_bound() {
+        let bound = Duration::from_secs(10);
+        let reached = || std::future::ready(Some(()));
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let waited = wait_for_agent_logins(
+            reached(),
+            |()| {
+                let call = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { Some(health(Some(call >= 3))) }
+            },
+            bound,
+        )
+        .await;
+        assert_eq!(waited, AgentLogins::Settled);
+        assert_eq!(started.elapsed(), Duration::from_millis(300));
+
+        let started = tokio::time::Instant::now();
+        let waited =
+            wait_for_agent_logins(reached(), |()| async { Some(health(Some(false))) }, bound).await;
+        assert_eq!(waited, AgentLogins::StillArriving);
+        assert!(started.elapsed() <= bound, "{:?}", started.elapsed());
+        assert!(started.elapsed() >= bound - Duration::from_millis(100));
+
+        let started = tokio::time::Instant::now();
+        let waited = wait_for_agent_logins(reached(), |()| std::future::pending(), bound).await;
+        assert_eq!(waited, AgentLogins::StillArriving);
+        assert_eq!(started.elapsed(), bound);
+
+        for answer in [Some(health(None)), None] {
+            let started = tokio::time::Instant::now();
+            let waited =
+                wait_for_agent_logins(reached(), |()| std::future::ready(answer.clone()), bound)
+                    .await;
+            assert_eq!(waited, AgentLogins::NotReported);
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
+    }
+
+    /// A runner that never answers the daemon access, or a daemon that never
+    /// accepts, holds the start for the bound only; one that refuses holds it
+    /// not at all (#6123).
+    #[tokio::test(start_paused = true)]
+    async fn reaching_the_daemon_is_inside_the_bound() {
+        let bound = Duration::from_secs(10);
+        let never_asked = |()| async { unreachable!("the daemon was never reached") };
+        let started = tokio::time::Instant::now();
+        let waited =
+            wait_for_agent_logins(std::future::pending::<Option<()>>(), never_asked, bound).await;
+        assert_eq!(waited, AgentLogins::StillArriving);
+        assert_eq!(started.elapsed(), bound);
+
+        let started = tokio::time::Instant::now();
+        let waited =
+            wait_for_agent_logins(std::future::ready(None::<()>), never_asked, bound).await;
+        assert_eq!(waited, AgentLogins::NotReported);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        // Reached late, the daemon has only what is left of the bound.
+        let started = tokio::time::Instant::now();
+        let waited = wait_for_agent_logins(
+            async {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+                Some(())
+            },
+            |()| async { Some(health(Some(false))) },
+            bound,
+        )
+        .await;
+        assert_eq!(waited, AgentLogins::StillArriving);
+        assert!(started.elapsed() <= bound, "{:?}", started.elapsed());
+    }
 
     /// #4953: a runner that refuses the start, as one still holding a failed
     /// VM does, ends a bootstrap wait that would otherwise never finish, and

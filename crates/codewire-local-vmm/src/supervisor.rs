@@ -545,7 +545,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images,
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -806,8 +806,8 @@ struct SupervisorCore {
     // The newest pulled image of each repository, kept after its last
     // environment is removed (#4262; see `retained_images`).
     retained_images: retained_images::RetainedImages,
-    /// The recent creates whose image came from the content store (#4968).
-    cached_image_operations: std::collections::VecDeque<Uuid>,
+    /// What recent operations' watchers are told (#4968, #6123).
+    operation_notes: cached_image::OperationNotes,
     // Content and artifact writers in flight, and whether a collection is
     // wanted or running (#2978). A collection runs only with no writer in
     // flight, and a writer waits only while one runs.
@@ -4626,28 +4626,15 @@ impl Supervisor {
             .network_policies
             .record_enforced(environment.id, &egress.network_policy)
             .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
-        if cw_runtime.is_some() {
-            let confirmation = match client.daemon_access().await {
-                Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
-                Err(_) => Err(Status::unavailable("runtime startup endpoint unavailable")),
-            };
-            if let Err(status) = confirmation {
-                let _ = client.stop().await;
-                let mut failed_generation = environment.clone();
-                failed_generation.generation = generation;
-                self.stop_environment_broker_if_present(&failed_generation)
-                    .await?;
-                return Err(SupervisorError::VmStart(status.message().to_owned()));
-            }
-        }
-        self.update_environment(name, |environment| {
-            environment
-                .runner
-                .as_mut()
-                .ok_or(SupervisorError::InvalidState)?
-                .cw_runtime_catalog_generation = cw_runtime;
-            Ok(())
-        })
+        self.finish_started_vm(
+            name,
+            generation,
+            operation_id,
+            &environment,
+            client,
+            cw_runtime,
+        )
+        .await
     }
 }
 
@@ -7443,7 +7430,7 @@ async fn relay_runner_start_events(
         let error_code_valid = runner_event_error_code_valid(&event.error_code);
         if !target_started
             && !accepted_prior_baseline
-            && runner_event_is_prior_baseline(
+            && bootstrap::runner_event_is_prior_baseline(
                 runner.generation,
                 runner_state,
                 stage,
@@ -7515,31 +7502,6 @@ async fn relay_runner_start_events(
     Err(SupervisorError::InvalidRunnerResponse)
 }
 
-fn runner_event_is_prior_baseline(
-    generation: u64,
-    state: StoredEnvironmentState,
-    stage: v1::RunnerStage,
-    guest_sequence: u64,
-    guest_stage: v1::GuestBootStage,
-    error_code_valid: bool,
-    prior: (u64, StoredEnvironmentState),
-) -> bool {
-    generation == prior.0
-        && state == prior.1
-        && guest_sequence == 0
-        && guest_stage == v1::GuestBootStage::Unspecified
-        && match state {
-            StoredEnvironmentState::Stopped => {
-                matches!(stage, v1::RunnerStage::Ready | v1::RunnerStage::Stopped)
-                    && !error_code_valid
-            }
-            StoredEnvironmentState::Error => stage == v1::RunnerStage::Error && error_code_valid,
-            StoredEnvironmentState::Starting
-            | StoredEnvironmentState::Running
-            | StoredEnvironmentState::Orphaned => false,
-        }
-}
-
 fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status> {
     let kind = match operation.kind {
         OperationKind::Create => v1::OperationKind::Create,
@@ -7590,6 +7552,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         guest_stage: v1::GuestBootStage::Unspecified as i32,
         runner_error_code: String::new(),
         workspace_image_cached: false,
+        agent_logins_arriving: false,
     })
 }
 

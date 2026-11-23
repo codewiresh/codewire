@@ -1,11 +1,36 @@
 //! Where a create's workspace image comes from: a pinned synthetic image, the
 //! content store for a digest already cached (#4968), or the registry.
 
+use std::collections::VecDeque;
+
 use super::*;
 
-/// How many operations' cached-image notes the supervisor keeps for their
+/// How many operations' notes of each kind the supervisor keeps for their
 /// watchers: far more than run at once.
-const CACHED_IMAGE_NOTES: usize = 64;
+const OPERATION_NOTES: usize = 64;
+
+/// What recent operations' watchers are told beside the operation itself.
+#[derive(Debug, Default)]
+pub(super) struct OperationNotes {
+    /// Creates whose image came from the content store (#4968).
+    cached_image: VecDeque<Uuid>,
+    /// Starts whose agent logins were still arriving at the wait's bound
+    /// (#6123).
+    agent_logins_arriving: VecDeque<Uuid>,
+}
+
+impl OperationNotes {
+    fn note(notes: &mut VecDeque<Uuid>, operation_id: Uuid) {
+        if notes.len() == OPERATION_NOTES {
+            notes.pop_front();
+        }
+        notes.push_back(operation_id);
+    }
+
+    pub(super) fn agent_logins_arriving(&mut self, operation_id: Uuid) {
+        Self::note(&mut self.agent_logins_arriving, operation_id);
+    }
+}
 
 impl Supervisor {
     pub(super) async fn resolve_workspace_image(
@@ -75,18 +100,18 @@ impl SupervisorCore {
     }
 
     fn note_cached_operation(&mut self, operation_id: Uuid) {
-        if self.cached_image_operations.len() == CACHED_IMAGE_NOTES {
-            self.cached_image_operations.pop_front();
-        }
-        self.cached_image_operations.push_back(operation_id);
+        OperationNotes::note(&mut self.operation_notes.cached_image, operation_id);
     }
 }
 
 /// `operation` as its watchers see it, saying whether its image came from the
-/// content store.
+/// content store and whether its agent logins were still arriving.
 pub(super) fn noted(supervisor: &Supervisor, mut operation: v1::Operation) -> v1::Operation {
-    operation.workspace_image_cached = Uuid::parse_str(&operation.operation_id)
-        .is_ok_and(|id| supervisor.core().cached_image_operations.contains(&id));
+    if let Ok(id) = Uuid::parse_str(&operation.operation_id) {
+        let core = supervisor.core();
+        operation.workspace_image_cached = core.operation_notes.cached_image.contains(&id);
+        operation.agent_logins_arriving = core.operation_notes.agent_logins_arriving.contains(&id);
+    }
     operation
 }
 
@@ -188,16 +213,46 @@ mod tests {
         assert_eq!(supervisor.core().recorded_size(&tag).unwrap(), None);
     }
 
-    /// The notes stay bounded: the oldest goes first.
+    /// The notes stay bounded: the oldest goes first, for each kind.
     #[test]
-    fn the_cached_image_notes_keep_the_newest() {
+    fn the_operation_notes_keep_the_newest() {
         let (_parent, mut core) = test_supervisor_core(project_environment());
         let first = Uuid::new_v4();
         core.note_cached_operation(first);
-        for _ in 0..CACHED_IMAGE_NOTES {
+        core.operation_notes.agent_logins_arriving(first);
+        for _ in 0..OPERATION_NOTES {
             core.note_cached_operation(Uuid::new_v4());
+            core.operation_notes.agent_logins_arriving(Uuid::new_v4());
         }
-        assert_eq!(core.cached_image_operations.len(), CACHED_IMAGE_NOTES);
-        assert!(!core.cached_image_operations.contains(&first));
+        let notes = &core.operation_notes;
+        assert_eq!(notes.cached_image.len(), OPERATION_NOTES);
+        assert_eq!(notes.agent_logins_arriving.len(), OPERATION_NOTES);
+        assert!(!notes.cached_image.contains(&first));
+        assert!(!notes.agent_logins_arriving.contains(&first));
+    }
+
+    /// A start whose agent logins were still arriving at the wait's bound is
+    /// shown so to its watchers, and only that one (#6123).
+    #[test]
+    fn a_start_with_its_logins_still_arriving_is_noted() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let supervisor = test_supervisor(core);
+        let arriving = Uuid::new_v4();
+        supervisor
+            .core()
+            .operation_notes
+            .agent_logins_arriving(arriving);
+        let watched = |id: Uuid| {
+            noted(
+                &supervisor,
+                v1::Operation {
+                    operation_id: id.to_string(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(watched(arriving).agent_logins_arriving);
+        assert!(!watched(arriving).workspace_image_cached);
+        assert!(!watched(Uuid::new_v4()).agent_logins_arriving);
     }
 }

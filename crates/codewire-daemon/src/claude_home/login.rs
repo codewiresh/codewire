@@ -725,12 +725,13 @@ pub(crate) async fn run_claude_login_writer(
     source: impl ClaudeLoginSource,
     check_period: Duration,
     shutdown: watch::Receiver<bool>,
+    settle: Option<crate::login_readiness::Settle>,
 ) {
     let ask = || {
         let login = source.claude_login();
         async move { ClaudeLoginDelivery::from(login.await) }
     };
-    run_login_writer(writer, ask, check_period, shutdown).await;
+    run_login_writer(writer, ask, check_period, shutdown, settle).await;
 }
 
 #[cfg(test)]

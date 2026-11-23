@@ -702,6 +702,9 @@ message Operation {
   // The create's workspace image came from the content store, with no
   // registry round trip (#4968).
   bool workspace_image_cached = 17;
+  // The start's wait for the guest's agent logins reached its bound before
+  // they settled; they land when they arrive (#6123).
+  bool agent_logins_arriving = 18;
 }
 
 message OperationResult {

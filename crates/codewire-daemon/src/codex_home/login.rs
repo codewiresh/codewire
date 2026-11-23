@@ -732,12 +732,13 @@ pub(crate) async fn run_codex_login_writer(
     source: impl CodexLoginSource,
     check_period: Duration,
     shutdown: watch::Receiver<bool>,
+    settle: Option<crate::login_readiness::Settle>,
 ) {
     let ask = || {
         let login = source.codex_login();
         async move { CodexLoginDelivery::from(login.await) }
     };
-    run_login_writer(writer, ask, check_period, shutdown).await;
+    run_login_writer(writer, ask, check_period, shutdown, settle).await;
 }
 
 #[cfg(test)]

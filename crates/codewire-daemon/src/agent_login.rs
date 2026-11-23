@@ -236,12 +236,14 @@ pub(crate) trait LoginWriter: Send + 'static {
 
 /// The hosted daemon's login task: ask at start, then every `check_period`,
 /// retrying sooner with jittered backoff while nothing is delivered. Stops
-/// when `shutdown` turns true.
+/// when `shutdown` turns true. `settle`, a local VM's, settles on the first
+/// decided outcome: one that doesn't retry soon (#6123).
 pub(crate) async fn run_login_writer<W, F, A>(
     mut writer: W,
     mut ask: A,
     check_period: Duration,
     mut shutdown: watch::Receiver<bool>,
+    mut settle: Option<crate::login_readiness::Settle>,
 ) where
     W: LoginWriter,
     F: Future<Output = W::Delivery> + Send,
@@ -270,6 +272,11 @@ pub(crate) async fn run_login_writer<W, F, A>(
                 if previous != Some(outcome) {
                     W::checked(outcome);
                     previous = Some(outcome);
+                }
+                if !outcome.retries_soon()
+                    && let Some(settle) = settle.take()
+                {
+                    settle.settled();
                 }
                 retry.after(outcome)
             }

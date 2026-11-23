@@ -1412,6 +1412,18 @@ require_intercepted_request_served() {
     die "$label: the intercepted request was not served with the stored key: $(head -c 600 "$LAST_STDOUT")"
 }
 
+# A start returns once the guest holds the agent logins its profile delivers
+# (#6123): the first command after it, with no wait, finds Codex's login.
+require_agent_login_after_start() {
+  local label="$1"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --no-tty -- /bin/sh -c '
+    if [ -s "${CODEX_HOME-/nonexistent}/auth.json" ]; then printf "codex-login=present\n"; fi
+  ' agent-login-after-start
+  grep -Fxq 'codex-login=present' "$LAST_STDOUT" ||
+    die "the first command after the $label start found no Codex login"
+}
+
 guest_interception_environment() {
   # shellcheck disable=SC2016 # Expanded by the guest shell.
   run_cw run --no-tty -- /bin/sh -c '
@@ -1476,8 +1488,8 @@ run_egress_interception_smoke() {
   require_info_interception 'front door killed' lost \
     "! agents can't reach their providers; restart the VM"
 
-  log 'interception: a stop and start brings it back with the same placeholder'
-  restart_failed_environment 'front door'
+  log 'interception: a stop and start brings it back with the same placeholder and its login'
+  restart_failed_environment 'front door' login
   require_boot_intercepts 'second boot'
   guest_interception_environment
   restored="$(sed -n 's/^token=//p' "$LAST_STDOUT")"
@@ -1908,6 +1920,7 @@ require_guest_egress_restored() {
 
 restart_failed_environment() {
   local label="$1"
+  local check_login="${2:-}"
   run_cw stop --local "$NAME" --output json
   jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die "environment did not stop after the $label kill"
@@ -1916,6 +1929,7 @@ restart_failed_environment() {
   run_cw start --local "$NAME" --output json
   jq -e '.state == "running" and (has("error_code") | not)' "$LAST_STDOUT" >/dev/null ||
     die "environment did not restart cleanly after the $label kill"
+  [[ -z "$check_login" ]] || require_agent_login_after_start "$label"
   wait_for_journal_complete || die "start after the $label kill left a partial journal"
   RUNNER_PID="$(native_database_value runner_pid)"
   [[ -d "/proc/$RUNNER_PID" ]] || die "restarted runner is not live after the $label kill"

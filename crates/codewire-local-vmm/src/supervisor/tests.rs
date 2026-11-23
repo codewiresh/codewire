@@ -628,7 +628,7 @@ pub(super) fn test_supervisor_core(
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images: retained_images::RetainedImages::default(),
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -1559,7 +1559,7 @@ fn test_supervisor_core_after_host_reboot(
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images: retained_images::RetainedImages::default(),
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -5561,7 +5561,7 @@ async fn staging_boundary_collects_only_unreferenced_root_and_content_storage() 
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images: retained_images::RetainedImages::default(),
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -9751,7 +9751,7 @@ fn failed_create_never_marks_a_different_environment_error() {
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images: retained_images::RetainedImages::default(),
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -9833,7 +9833,7 @@ fn replay_failure_uses_the_latest_checkpoint_and_unwedges_the_environment() {
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images: retained_images::RetainedImages::default(),
-        cached_image_operations: Default::default(),
+        operation_notes: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -9934,7 +9934,7 @@ fn managed_cw_runtime_binds_selected_uuid_and_active_runner_artifacts() {
 #[test]
 fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
     let prior = (3, StoredEnvironmentState::Error);
-    assert!(runner_event_is_prior_baseline(
+    assert!(bootstrap::runner_event_is_prior_baseline(
         3,
         StoredEnvironmentState::Error,
         v1::RunnerStage::Error,
@@ -9944,7 +9944,7 @@ fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
         prior,
     ));
     for generation in [2, 4] {
-        assert!(!runner_event_is_prior_baseline(
+        assert!(!bootstrap::runner_event_is_prior_baseline(
             generation,
             StoredEnvironmentState::Error,
             v1::RunnerStage::Error,
@@ -9954,7 +9954,7 @@ fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
             prior,
         ));
     }
-    assert!(!runner_event_is_prior_baseline(
+    assert!(!bootstrap::runner_event_is_prior_baseline(
         3,
         StoredEnvironmentState::Error,
         v1::RunnerStage::Error,
@@ -9963,7 +9963,7 @@ fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
         true,
         prior,
     ));
-    assert!(!runner_event_is_prior_baseline(
+    assert!(!bootstrap::runner_event_is_prior_baseline(
         3,
         StoredEnvironmentState::Error,
         v1::RunnerStage::Error,
@@ -9973,7 +9973,7 @@ fn runner_start_accepts_only_the_exact_queried_prior_baseline() {
         prior,
     ));
     for stage in [v1::RunnerStage::Ready, v1::RunnerStage::Stopped] {
-        assert!(runner_event_is_prior_baseline(
+        assert!(bootstrap::runner_event_is_prior_baseline(
             3,
             StoredEnvironmentState::Stopped,
             stage,
