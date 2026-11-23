@@ -2022,7 +2022,7 @@ test("a session list refused because the organization is being deleted says so, 
   expect(state.launches).toBe(0);
 });
 
-test("an open terminal whose organization starts being deleted says why and stops reconnecting", async ({ page }) => {
+test("an open terminal whose organization starts being deleted says why, offers no Reconnect and stops reconnecting", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
@@ -2034,6 +2034,7 @@ test("an open terminal whose organization starts being deleted says why and stop
   state.listError = "organization-deleting";
   await (await terminalAction(page, "Refresh sessions")).click();
   await expect(connectionStatus(page, sessionId(1))).toHaveText(organizationDeleting);
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
   await expect.poll(() => state.connections[0].closed).toBe(true);
   // No automatic reconnect follows.
   await advance(page, 30_000);
@@ -2071,6 +2072,7 @@ test("a reconnecting terminal whose organization is being deleted says why at it
   await advance(page, 4000);
   await expect(status).toHaveText(organizationDeleting);
   await expect(page.locator("[data-terminal-message]")).toHaveText(organizationDeleting);
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
   await advance(page, 60_000);
   expect(state.connections).toHaveLength(3);
   expect(state.launches).toBe(0);
@@ -2088,7 +2090,36 @@ test("an open terminal whose organization is being deleted says why when the pag
   state.listError = "organization-deleting";
   await page.evaluate(() => dispatchEvent(new Event("focus")));
   await expect(connectionStatus(page, sessionId(1))).toHaveText(organizationDeleting);
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
   await expect.poll(() => state.connections[0].closed).toBe(true);
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.launches).toBe(0);
+});
+
+// The deletion then stops the Sandbox, or the status feed reports it running
+// again: neither replaces the organization line or brings Reconnect back.
+test("an open terminal keeps the organization line when the Sandbox then stops or runs again", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.listStatus = 409;
+  state.listError = "organization-deleting";
+  await page.evaluate(() => dispatchEvent(new Event("focus")));
+  const status = connectionStatus(page, sessionId(1));
+  await expect(status).toHaveText(organizationDeleting);
+  const sandbox = (running: boolean) => page.evaluate((detail) => {
+    document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail }));
+  }, { environmentId: environment, available: true, running, setupComplete: true });
+  for (const running of [false, true]) {
+    await sandbox(running);
+    await expect(status).toHaveText(organizationDeleting);
+    await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  }
   await advance(page, 30_000);
   expect(state.connections).toHaveLength(1);
   expect(state.launches).toBe(0);

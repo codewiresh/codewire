@@ -9,14 +9,14 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-22.
+Updated 2026-11-23.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, with a status line that replaces it after about a second | not yet observed |
-| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd (Refresh sessions, a reconnect's check and a return to the page on an open terminal not yet observed; the preview pages not walkable on Kind); not on Dev | not yet observed |
+| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80) | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -228,6 +228,14 @@ Kind; the SSH proxy is not yet observed.
   Reconnect link replaced that line until the page reached sign-in, 7 s and
   36 s later on the two runs.
 
+  Since #5946 that line holds, on a local Kind cluster, 2026-11-23, main
+  4b20950d80, in Chromium, as a scratch owner; recorded on #3586. Signed out
+  in a second tab at 05:44:10.844Z, the terminal's socket closed with 1008
+  "access revoked", and within 0.1 s its footer said "Access revoked. Sign in
+  again to continue." with no Reconnect. Read every 0.2 s, nothing replaced it
+  until the page reached sign-in 8.8 s after the sign-out, later than the
+  proof's about five seconds.
+
 ## `access-org-deleting`: no new stream into an organization being deleted
 
 Issue: #3586, ahead of the `membership` step (cw-security, 2026-11-20,
@@ -264,9 +272,10 @@ comment 123530). Not yet observed.
   its Sandboxes can't open terminals." with no Retry; an open terminal
   keeps printing, and while the Sandbox still runs, Refresh sessions, a
   dropped socket's check at every third retry or a return to the page shows
-  the same line and stops reconnecting; once the deletion stops the Sandbox
-  the page says "This Sandbox is being deleted." and shows no terminal, as
-  for any Sandbox being deleted (#5944); a member opening a shared
+  the same line with no Reconnect and stops reconnecting; once the deletion
+  stops the Sandbox the page says "This Sandbox is being deleted." and shows
+  no terminal, as for any Sandbox being deleted (#5944); a member opening a
+  shared
   preview sees "Preview unavailable" and "This organization is being
   deleted, so its Sandboxes' previews can't open."; a non-member still sees
   "Preview access denied".
@@ -307,7 +316,31 @@ comment 123530). Not yet observed.
   and stopped reconnecting. The proof first said it would show the
   organization line; that held only for Refresh sessions while the Sandbox
   still runs, and a reconnect's check and a return to the page now say it
-  too (#5944). None of the three is yet observed on Kind inside a deletion.
+  too (#5944).
+  The three, on a local Kind cluster, 2026-11-23, main 4b20950d80, in
+  Chromium, as a scratch owner, in three scratch organizations of one running
+  Sandbox each, each deleted with `cw org delete`; recorded on #3586. Refresh
+  sessions 0.36 s into a deletion showed the organization line 0.57 s in and
+  opened no new socket; the Sandbox reached "This Sandbox is being deleted" 23
+  s in. A socket dropped 0.31 s in was refused twice on reconnect, and the
+  third retry's check showed the line 7.5 s in, opening no socket; the Sandbox
+  was being deleted 0.9 s later. A focus event, as a return to the page sends,
+  0.31 s in showed the line 0.53 s in, closed the socket and opened none; the
+  Sandbox was being deleted 5.9 s in. After Refresh sessions the terminal list
+  emptied and offered no Reconnect, but after the reconnect check and the
+  return the terminal kept its tab and output and offered Reconnect beside the
+  line, which cannot succeed; the proof now says there is none.
+  With the change's first commit, the branch's `durable-terminal.js` served in
+  place of the cluster's otherwise identical copy, the same three on the same
+  cluster (05:58 to 05:59Z, three more scratch organizations) showed the line
+  with no Reconnect 0.62 s, 7.5 s and 0.54 s into each deletion, and opened no
+  new socket. The line held for 7.9 s, 10.7 s and 10.3 s, read every 0.2 s; in
+  the same reading in which the page said "This Sandbox is being deleted", the
+  terminal's status line had become "Start this Sandbox to use its
+  terminals.", the readiness line that replaced it. The second commit keeps
+  the organization line and its missing Reconnect through such a status
+  change, as for a revoked terminal; a design fixture proves it, and it was
+  not walked on Kind.
   The preview pages were not walked: the preview proxy builds them only for an
   https dashboard origin and Kind's is http, so a preview navigation gets 503
   "preview authorization unavailable"; their database tests and fixtures hold

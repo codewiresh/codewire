@@ -298,9 +298,14 @@
     // A refusal no retry can change (#3586): no Retry and no reconnect.
     const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
     // However the page learns of it (Refresh sessions, a reconnect's check or a
-    // return to the page), every open terminal says so and stops (#5944).
+    // return to the page), every open terminal says so and stops. As for a
+    // revoked tab, nothing later replaces that line or offers Reconnect, which
+    // could not succeed (#5944).
     function organizationDeleted() {
-      for (const tab of tabs.values()) detach(tab, organizationDeleting, false, "warning");
+      for (const tab of tabs.values()) {
+        tab.organizationDeleting = true;
+        detach(tab);
+      }
     }
     // Once the server revoked a tab's access, nothing later on the page, such
     // as the status feed failing with the same sign-in, replaces that line or
@@ -324,10 +329,11 @@
       tab.queuedBytes = 0;
       discardInput(tab);
       if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) socket.close(1000, "browser detached");
-      tab.toggle.hidden = tab.revoked === true;
+      tab.toggle.hidden = tab.revoked === true || tab.organizationDeleting === true;
       tab.root.dataset.terminalSettled = String(tab.pendingFrames === 0);
       tab.presentation.terminal.options.disableStdin = true;
       if (tab.revoked) connectionText(tab, accessRevoked, "warning");
+      else if (tab.organizationDeleting) connectionText(tab, organizationDeleting, "warning");
       else connectionText(tab, text, tone);
     }
     // Transport loss is not a decision to stop. Re-attach the same wanted
@@ -1188,7 +1194,7 @@
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
-        if (tab.revoked) continue;
+        if (tab.revoked || tab.organizationDeleting) continue;
         // Readiness loss pauses the transport without withdrawing intent. An
         // unknown status leaves an open terminal attached; a tab without a
         // socket says why it waits.
