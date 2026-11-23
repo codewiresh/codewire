@@ -30,6 +30,7 @@ use super::environment_daemon::environment_daemon_bridge_client_core;
 use super::prepare::plain_error;
 use super::proxy::resolve_running_sandbox_target;
 use super::socket_fence::{SocketAdmission, SocketRevoked, site};
+use super::socket_keepalive::{ping, pings};
 use crate::runtime::{ClaimReadiness, Placement, RuntimeDriver};
 
 const MSG_TYPE_STDIN: u8 = 0x00;
@@ -583,12 +584,14 @@ where
         }
     };
     let (input, mut output) = session.into_parts();
+    let mut keepalive = pings();
     let (end, exit, valid) = loop {
         enum Event<E> {
             Browser(Option<Result<Message, E>>),
             Input(Result<Result<(), DaemonClientError>, tokio::time::error::Elapsed>),
             Output(Result<Option<DaemonRunOutput>, DaemonClientError>),
             Revoked,
+            Ping,
         }
         let event = tokio::select! {
             message = browser_input.next() => Event::Browser(message),
@@ -598,8 +601,13 @@ where
             }, if !pending.frames.is_empty() => Event::Input(sent),
             message = output.next_output() => Event::Output(message),
             () = &mut revoked => Event::Revoked,
+            _ = keepalive.tick() => Event::Ping,
         };
         match event {
+            Event::Ping if !ping_browser(browser_output, limits.io).await => {
+                break (TerminalEnd::TransportClosed, None, true);
+            }
+            Event::Ping => {}
             Event::Browser(message) => {
                 if let Err(end) = browser_message(message, &mut pending) {
                     break (end, None, true);
@@ -665,6 +673,15 @@ where
         .await;
     }
     proven
+}
+
+/// Pings the browser, so a terminal with no output is never silent on the
+/// wire (#6100); false when the ping could not be sent within `io`.
+async fn ping_browser<Tx: Sink<Message> + Unpin>(browser_output: &mut Tx, io: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(io, browser_output.send(ping())).await,
+        Ok(Ok(()))
+    )
 }
 
 async fn forward_output<Tx, Rx, E>(

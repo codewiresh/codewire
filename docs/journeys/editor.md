@@ -9,7 +9,7 @@ two entry points: `cw vscode`, and the editor's own Remote-SSH reaching a
 
 ## Where the journey stands
 
-Updated 2026-11-14.
+Updated 2026-11-23.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -84,7 +84,9 @@ the line.
 ## `editor-reconnect`: a session that died ends, and the editor reconnects
 
 **States to exercise:** the computer sleeps, or its network changes, while the
-editor is connected and idle.
+editor is connected and idle. Over the WebSocket fallback
+(`CW_SSH_TRANSPORT=websocket`), also: the connection sits idle for 90 minutes;
+and Codewire's server restarts, as at a Dev rollout (#6100).
 
 **Driving it:** connect, leave the editor idle, put the computer to sleep for
 five minutes, and wake it.
@@ -102,6 +104,15 @@ terminal stand-in, run on Dev:
 1. `ssh -T cw-cloud-editor-walk 'sleep 900'`;
 2. freeze the ProxyCommand with `kill -STOP`, so no bytes cross;
 3. time how long ssh takes to give up.
+
+Over the WebSocket fallback:
+
+- An idle `ssh -T cw-cloud-editor-walk` with no output for 90 minutes still
+  answers its next command (infra#2986).
+- At a rollout, `ssh -T cw-cloud-editor-walk 'sleep 900'` ends within about
+  270 s of the orchestration replica's SIGTERM, and its terminal shows
+  `the connection ended: server restarting; connect again`. The editor then
+  reconnects.
 
 **Gotchas:** a keepalive in the user's own `Host *` entry doesn't apply to
 `cw-*` hosts, because the managed section comes first. Set one with

@@ -135,6 +135,29 @@ fn browser(
     (Browser { sent, receive }, output, input)
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_still_desktop_is_pinged_every_30_seconds() {
+    let (mut browser, mut output, mut input) = browser(8);
+    let (desktop, _server) = duplex(1024);
+    let _relay =
+        tokio::spawn(async move { relay(&mut output, &mut input, desktop, TEST_STALL).await });
+    let started = tokio::time::Instant::now();
+    for n in 1..=2 {
+        let message = timeout(
+            crate::api::socket_keepalive::PING_EVERY + TEST_WAIT,
+            browser.sent.next(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(message, Message::Ping(_)), "{message:?}");
+        assert_eq!(
+            started.elapsed(),
+            n * crate::api::socket_keepalive::PING_EVERY
+        );
+    }
+}
+
 #[tokio::test]
 async fn desktop_bytes_cross_unchanged_both_ways_and_the_viewer_leaving_ends_with_1000() {
     let (mut browser, mut output, mut input) = browser(8);

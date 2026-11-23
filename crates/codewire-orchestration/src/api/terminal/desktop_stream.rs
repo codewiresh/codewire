@@ -35,6 +35,7 @@ use super::{ApiState, require_sandbox_claim_ready, terminal_error};
 use crate::api::environment_daemon::streaming_daemon_client;
 use crate::api::proxy::resolve_running_sandbox_target;
 use crate::api::socket_fence::{SocketAdmission, access_revoked_close, site};
+use crate::api::socket_keepalive::{ping, pings};
 use crate::runtime::Placement;
 
 const PROTOCOL: &str = "codewire.desktop-stream.v1";
@@ -332,14 +333,23 @@ where
             }
         }
     };
+    // A still desktop sends nothing, so this side also pings the browser
+    // (#6100).
     let to_browser = async {
         let mut buffer = vec![0; CHUNK_BYTES];
+        let mut pings = pings();
         loop {
-            let read = match from_desktop.read(&mut buffer).await {
-                Ok(0) | Err(_) => return End::DesktopEnded,
-                Ok(read) => read,
+            let read = tokio::select! {
+                read = from_desktop.read(&mut buffer) => match read {
+                    Ok(0) | Err(_) => return End::DesktopEnded,
+                    Ok(read) => Some(read),
+                },
+                _ = pings.tick() => None,
             };
-            let message = Message::Binary(buffer[..read].to_vec().into());
+            let message = match read {
+                Some(read) => Message::Binary(buffer[..read].to_vec().into()),
+                None => ping(),
+            };
             match timeout(stall, browser_output.send(message)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => return End::ViewerLeft,

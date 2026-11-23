@@ -19,6 +19,17 @@ access, locked-down networks, and compatibility. DERP may still bootstrap
 discovery while magicsock selects a better packet path, but it is not the
 preferred local CLI/VS Code SSH path.
 
+The WebSocket proxy pings its client every 30 s, and the workspace SSH server
+sends a keepalive every 15 s, so a quiet shell is never silent on the wire and
+no proxy's idle timeout closes it. When a rollout replaces the orchestration
+replica holding a connection, the replica keeps it until its drain deadline,
+270 s after SIGTERM, then closes it with WebSocket code 1012, "server
+restarting; connect again". The SSH connection lives in that replica and
+cannot move, so the session ends there, and `cw shell --stdio` prints
+`the connection ended: server restarting; connect again` before OpenSSH's own
+disconnect. A revoked credential closes with 1008, "access revoked", printed
+the same way (#6100, #3586).
+
 1. **Direct UDP** (preferred fast path): each peer advertises candidate
    endpoints. A hosted daemon advertises the direct-UDP endpoint the platform
    publishes for it; a client, or a daemon with no published endpoint, learns

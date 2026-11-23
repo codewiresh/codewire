@@ -1189,6 +1189,18 @@ where
             stdout.flush().await?;
             Ok(WebsocketFrameDisposition::Data)
         }
+        // A close other than the end of the session says why, so the user
+        // sees it in place of OpenSSH's bare disconnect: "server restarting;
+        // connect again" at a rollout, "access revoked" (#6100, #3586).
+        Message::Close(Some(frame))
+            if frame.code
+                != tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal =>
+        {
+            Err(match frame.reason.as_str() {
+                "" => anyhow!("the connection ended with code {}", u16::from(frame.code)),
+                reason => anyhow!("the connection ended: {reason}"),
+            })
+        }
         Message::Close(_) => Ok(WebsocketFrameDisposition::Closed),
         Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
             Ok(WebsocketFrameDisposition::Skip)
@@ -1495,6 +1507,43 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_websocket_close_other_than_the_session_ending_says_why() {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        let mut stdout = Vec::new();
+        let ended = Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "ssh session ended".into(),
+        }));
+        assert_eq!(
+            write_websocket_ssh_frame(&mut stdout, ended).await.unwrap(),
+            WebsocketFrameDisposition::Closed
+        );
+        for (code, reason) in [
+            (1012, "server restarting; connect again"),
+            (1008, "access revoked"),
+        ] {
+            let close = Message::Close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: reason.into(),
+            }));
+            let error = write_websocket_ssh_frame(&mut stdout, close)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("the connection ended: {reason}"));
+        }
+        let unexplained = Message::Close(Some(CloseFrame {
+            code: CloseCode::from(1011),
+            reason: "".into(),
+        }));
+        let error = write_websocket_ssh_frame(&mut stdout, unexplained)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the connection ended with code 1011");
+        assert!(stdout.is_empty());
+    }
 
     #[tokio::test]
     async fn a_derp_relay_that_never_answers_fails_within_the_timeout() {

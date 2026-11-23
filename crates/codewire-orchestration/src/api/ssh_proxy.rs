@@ -6,12 +6,13 @@ use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use codewire_daemon_bridge::client::DaemonClient;
+use codewire_daemon_bridge::drain::{Restart, RestartSignal};
 use codewire_daemon_proto::daemon::v1::DaemonState;
 use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{
     RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -28,6 +29,7 @@ use super::ApiState;
 use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
 use super::socket_fence::{SocketRevoked, access_revoked_close, site};
+use super::socket_keepalive::{ping, pings};
 use super::terminal::{
     admit_socket_request, authenticate_socket_request, require_sandbox_claim_ready,
 };
@@ -133,8 +135,16 @@ pub async fn ssh_proxy_websocket(
         "ssh-proxy: connected"
     );
 
+    let restart = state.drain.signal(Restart::Deadline);
     ws.protocols(["ssh"]).on_upgrade(move |socket| {
-        ssh_proxy_session(socket, stream, attempt_id, target.environment_id, revoked)
+        ssh_proxy_session(
+            socket,
+            stream,
+            attempt_id,
+            target.environment_id,
+            revoked,
+            restart,
+        )
     })
 }
 
@@ -246,44 +256,75 @@ pub async fn ssh_proxy_check(
     check_response(true, shim_healthy, &shim_error)
 }
 
+/// The SSH server's bytes to the client until they end, then a 1000 close.
+/// The client is pinged every 30 s, so a quiet shell is never silent on the
+/// wire (#6100). A revocation closes with 1008 (#3586), and this replica's
+/// drain deadline with 1012, so the client knows to connect again (#6100):
+/// the SSH connection lives in this replica and cannot move.
+async fn to_client<Tx>(
+    mut ws_tx: Tx,
+    mut tcp_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    revoked: impl Future<Output = ()>,
+    restart: RestartSignal,
+) where
+    Tx: Sink<Message> + Unpin,
+{
+    tokio::pin!(revoked);
+    let mut restart = restart;
+    let mut keepalive = pings();
+    loop {
+        // The client may already be gone when a close is sent; the session
+        // ends either way.
+        tokio::select! {
+            biased;
+            () = &mut revoked => {
+                let _ = ws_tx.send(access_revoked_close()).await;
+                return;
+            }
+            () = &mut restart => {
+                let _ = ws_tx.send(Message::Close(Some(CloseFrame {
+                    code: 1012,
+                    reason: "server restarting; connect again".into(),
+                }))).await;
+                return;
+            }
+            next = tcp_rx.recv() => {
+                let Some(bytes) = next else { break };
+                if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                    return;
+                }
+            }
+            _ = keepalive.tick() => {
+                if ws_tx.send(ping()).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = ws_tx
+        .send(Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: "ssh session ended".into(),
+        })))
+        .await;
+}
+
 async fn ssh_proxy_session(
     socket: WebSocket,
     stream: RuntimeStream,
     attempt_id: String,
     env_id: String,
     revoked: SocketRevoked,
+    restart: RestartSignal,
 ) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (tcp_tx, mut tcp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (ws_tx, mut ws_rx) = socket.split();
+    let (tcp_tx, tcp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (ws_to_tcp_tx, mut ws_to_tcp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
     // This task owns the socket's sink, so it sends the close on a
-    // revocation; its end then ends the session and drops the SSH stream.
-    let mut tcp_read_task = tokio::spawn(async move {
-        let mut revoked = revoked.into_future();
-        loop {
-            tokio::select! {
-                biased;
-                () = &mut revoked => {
-                    // The client may already be gone; the session ends either way.
-                    let _ = ws_tx.send(access_revoked_close()).await;
-                    return;
-                }
-                next = tcp_rx.recv() => {
-                    let Some(bytes) = next else { break };
-                    if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-        let _ = ws_tx
-            .send(Message::Close(Some(CloseFrame {
-                code: 1000,
-                reason: "ssh session ended".into(),
-            })))
-            .await;
-    });
+    // revocation or at the drain deadline; its end then ends the session and
+    // drops the SSH stream.
+    let mut tcp_read_task = tokio::spawn(to_client(ws_tx, tcp_rx, revoked.into_future(), restart));
 
     let mut ws_read_task = tokio::spawn(async move {
         while let Some(next) = ws_rx.next().await {
@@ -510,5 +551,74 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    /// `to_client` against a client whose received messages land on the
+    /// returned receiver; the SSH server's bytes go in on the sender.
+    fn client(
+        restart: tokio::sync::oneshot::Receiver<()>,
+    ) -> (
+        tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        futures::channel::mpsc::Receiver<super::Message>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (to_client_tx, received) = futures::channel::mpsc::channel(8);
+        let (bytes, tcp_rx) = tokio::sync::mpsc::unbounded_channel();
+        let restart: super::RestartSignal = Box::pin(async move {
+            let _ = restart.await;
+        });
+        let task = tokio::spawn(super::to_client(
+            to_client_tx,
+            tcp_rx,
+            std::future::pending(),
+            restart,
+        ));
+        (bytes, received, task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_ssh_session_is_pinged_every_30_seconds() {
+        use futures_util::StreamExt as _;
+        let (_restart, restarted) = tokio::sync::oneshot::channel();
+        let (_bytes, mut received, _task) = client(restarted);
+        let started = tokio::time::Instant::now();
+        let every = crate::api::socket_keepalive::PING_EVERY;
+        for n in 1..=2 {
+            let message =
+                tokio::time::timeout(every + std::time::Duration::from_secs(1), received.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(message, super::Message::Ping(_)), "{message:?}");
+            assert_eq!(started.elapsed(), n * every);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_drain_deadline_closes_with_1012_and_says_to_connect_again() {
+        use futures_util::StreamExt as _;
+        let (restart, restarted) = tokio::sync::oneshot::channel();
+        let (bytes, mut received, task) = client(restarted);
+        bytes.send(b"SSH-2.0-test".to_vec()).unwrap();
+        let wait = std::time::Duration::from_secs(10);
+        let first = tokio::time::timeout(wait, received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            super::Message::Binary(b"SSH-2.0-test".to_vec().into())
+        );
+        restart.send(()).unwrap();
+        let close = tokio::time::timeout(wait, received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let super::Message::Close(Some(frame)) = close else {
+            panic!("expected a close, got {close:?}");
+        };
+        assert_eq!(frame.code, 1012);
+        assert_eq!(frame.reason.as_str(), "server restarting; connect again");
+        tokio::time::timeout(wait, task).await.unwrap().unwrap();
     }
 }

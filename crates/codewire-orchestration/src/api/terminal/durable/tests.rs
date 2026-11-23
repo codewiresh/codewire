@@ -485,6 +485,26 @@ async fn rendered(harness: &mut Harness) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_terminal_with_no_output_is_pinged_every_30_seconds() {
+    let mut h = harness(false, Duration::from_secs(1));
+    let started = Instant::now();
+    for n in 1..=2 {
+        let message = timeout(
+            crate::api::socket_keepalive::PING_EVERY + Duration::from_secs(1),
+            h.rendered.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(message, Message::Ping(_)), "{message:?}");
+        assert_eq!(
+            started.elapsed(),
+            n * crate::api::socket_keepalive::PING_EVERY
+        );
+    }
+}
+
 #[tokio::test]
 async fn full_output_window_still_services_input_resize_and_render_acks() {
     let mut h = harness(false, Duration::from_secs(1));

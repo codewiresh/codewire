@@ -49,6 +49,7 @@ pub mod secret_projects;
 pub mod secrets;
 pub mod snapshots;
 pub(crate) mod socket_fence;
+pub(crate) mod socket_keepalive;
 pub mod ssh_proxy;
 pub mod terminal;
 #[cfg(test)]

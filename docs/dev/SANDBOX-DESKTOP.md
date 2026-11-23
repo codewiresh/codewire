@@ -441,6 +441,7 @@ the page can say why; the first dials nothing.
 | Queues | bounded in both directions; a full queue waits, it never grows |
 | Stall | 5 seconds without progress on a write, either way, ends the stream |
 | Viewers | 4 streams per environment in one orchestration process; the next is refused and the page names the limit |
+| Pings | The server pings the browser every 30 seconds, so a still desktop is never silent on the wire and no proxy's idle timeout closes it (#6100) |
 
 An open stream ends when:
 

@@ -31,6 +31,7 @@ use crate::api::environment_daemon::{
 };
 use crate::api::proxy::resolve_running_sandbox_target;
 use crate::api::socket_fence::{SocketAdmission, access_revoked_close, site};
+use crate::api::socket_keepalive::{ping, pings};
 use crate::runtime::Placement;
 
 const PROTOCOL: &str = "codewire.durable-terminal.v1";
@@ -613,8 +614,18 @@ where
     };
     // One persistent writer owns SinkExt::send through completion. Polling
     // input/ACKs must not cancel a partially flushed WebSocket send and retry it.
+    // It also pings the browser, so a terminal with no output is never silent
+    // on the wire (#6100).
     let writer = async {
-        while let Some(frame) = frames.recv().await {
+        let mut pings = pings();
+        loop {
+            let frame = tokio::select! {
+                frame = frames.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+                _ = pings.tick() => ping(),
+            };
             match timeout(io_timeout, browser_output.send(frame)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => return End::BrowserClosed,

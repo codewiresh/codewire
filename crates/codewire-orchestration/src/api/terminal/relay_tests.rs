@@ -303,6 +303,40 @@ async fn natural_exit_drops_input_before_clean_eof_and_closes_normally() {
     assert!(daemon.input.recv().await.is_none());
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_terminal_with_no_output_is_pinged_every_30_seconds() {
+    let daemon = daemon();
+    let (_browser, mut input, mut output, probe) = browser();
+    let pings = || {
+        probe
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|message| matches!(message, Message::Ping(_)))
+            .count()
+    };
+    let every = crate::api::socket_keepalive::PING_EVERY;
+    let relay = relay_terminal(
+        &mut output,
+        &mut input,
+        async { Ok(daemon.session) },
+        limits(),
+    );
+    tokio::select! {
+        _ = relay => panic!("the relay ended"),
+        () = async {
+            tokio::time::sleep(every - Duration::from_millis(1)).await;
+            assert_eq!(pings(), 0);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            assert_eq!(pings(), 1);
+            tokio::time::sleep(every).await;
+            assert_eq!(pings(), 2);
+        } => {}
+    }
+}
+
 #[tokio::test]
 async fn remote_error_is_redacted_diagnostic_not_exit_proof() {
     let daemon = daemon();

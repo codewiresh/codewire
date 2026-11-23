@@ -80,6 +80,10 @@ Copy selection and Ctrl+Shift+C copy without sending input.
 
 ## Automatic reconnection
 
+The server pings an open terminal's WebSocket every 30 seconds, and the
+browser answers by itself, so a terminal with no output is never silent on the
+wire and no proxy's idle timeout closes it (#6100).
+
 A tab that is still wanted re-attaches its existing session automatically when
 the WebSocket closes or errors without a final status, input delivery stalls,
 or a send fails. Attempts wait 1, 2, 4 and 8 seconds, then every 15 seconds,
