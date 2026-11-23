@@ -30,7 +30,7 @@ Updated 2026-11-23.
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-row-menu` | cw-web | not yet observed | not yet observed |
-| `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-21 (CLI, all but the 2-minute note; the dashboard waits on #5065) | not yet observed |
+| `sandbox-setup-retry` | cw-hosted-runtime | observed 2026-11-23 (the dashboard on every delivery; the CLI on 2026-11-21, all but the 2-minute note) | not yet observed |
 | `sandbox-unplanned-restart` | cw-hosted-runtime | not yet observed | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
@@ -962,7 +962,7 @@ Issues: #4767, and #5050 for the clone's reason.
   - one whose install is `test -f /tmp/dev-ux-setup-fixed`;
   - one that clones `https://codewire-dev.sh/_dev-ux/no-repository.git`, an address where Dev has no repository.
 
-  Their setup fails while the walk goes on. After the walk's own Sandbox is deleted, the stages run in order: `setup-retry-banner`, then `setup-retry-resume`, which fixes it in the terminal and retries, then `setup-retry-resume-list`, then `setup-retry-reclone`, which retries the clone and cancels "Retry cloning?". Last, `setup-retry-delete` deletes both. Each check runs only if the one it depends on held. A check that holds prints `stage NAME duration_ms=N`, and one that fails prints `stage NAME not-held expectation=LABEL class=CLASS`. Like the `sandbox-start-list` checks, a failed check does not fail the acceptance yet: these could not be run against Dev before they merged, and a Retry that finishes before the page follows it leaves no list to read. They become failing in a change of their own, once Dev deliveries show them holding.
+  Their setup fails while the walk goes on. After the walk's own Sandbox is deleted, the stages run in order: `setup-retry-banner`, then `setup-retry-resume`, which fixes it in the terminal and retries, then `setup-retry-resume-list`, then `setup-retry-reclone`, which retries the clone and cancels "Retry cloning?". Last, `setup-retry-delete` deletes both. Each check runs only if the one it depends on held. A check that holds prints `stage NAME duration_ms=N`, and one that fails prints `stage NAME not-held expectation=LABEL class=CLASS`. A failed check fails the acceptance, naming the first that failed, once both Sandboxes are deleted (#4767).
 - **Proof:**
   - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
   - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
@@ -998,7 +998,8 @@ Issues: #4767, and #5050 for the clone's reason.
     - Once the retry had failed, `cw run --in NAME -- touch /workspace/ok` printed `! Setup failed at …` and `→ cw retry NAME`, then ran, exit 0. `cw retry` then ran install only and ended with `✓ Setup complete for NAME`, exit 0; once more, the service refused with `This Sandbox's setup completed`.
     - A create cloning `https://git.example.invalid/none/none.git` failed at "Cloning repositories: … git.example.invalid couldn't be reached from the Sandbox", exit 1. `cw retry` without a terminal refused with "Retrying setup clones the repositories again, which deletes /workspace/none and any edits made there" and `→ cw retry NAME --yes`. At a terminal it asked `… Retry? [y/N]:`, and `n` ended with `✗ Cancelled; setup was not retried`. `cw retry NAME --yes` cloned again and failed the same way, exit 1.
     - Both Sandboxes were removed by name, and `cw ls --cloud` then listed neither.
-  - Not yet observed: `cw retry`'s 2-minute note, "The retry hasn't started yet; it runs after the Sandbox's current operation"; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
+  - Dev, 2026-11-23, the dashboard, in every delivery's walk as the Dev smoke browser identity: promote-dev 73120, 73147 and 73181 (source 18ca1cb222, with #6003 and #6034) held all six checks. The banner read "Setup failed at Running install command: …"; after the fix in its terminal, Retry setup showed "Retrying setup" with the earlier steps done instantly and install completed; the clone case asked "Retry cloning?" and Cancel kept the failure; both Sandboxes were deleted. In one of those walks, the one whose retried Sandbox completed at 07:58:38Z, the TTL checkpoint written with `complete` sorted after it: the order that left the list on the failed run before #6034. Evidence: #4767's comments of that date.
+  - Not yet observed: `cw retry`'s 2-minute note, "The retry hasn't started yet; it runs after the Sandbox's current operation".
   - Production: not yet; v0.4.21 lacks Retry setup.
 
 ## `sandbox-unplanned-restart`: a restart nobody asked for is shown, and the owners are emailed

@@ -1087,11 +1087,19 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const cloning = own();
   let installPath = "";
   let clonePath = "";
-  // These checks could not run against Dev before they merged, so one that
-  // fails is reported by `holds` and does not fail the walk yet (#5065).
+  // These checks held on Dev deliveries once a quick Retry's list was fixed
+  // (#4767), so a miss now fails the walk. Each is still reported by `holds`
+  // and the rest still run, so both Sandboxes are deleted and every miss is
+  // named; the walk fails at the end with the first.
+  const missed: string[] = [];
+  const retryHolds = async (name: string, expectations: Expectation[]) => {
+    const held = await holds(name, expectations);
+    if (!held) missed.push(name);
+    return held;
+  };
   await failing.setViewportSize({ width: 1440, height: 900 });
   const retryCreated = Date.now();
-  if (await holds("setup-retry-create", [
+  if (await retryHolds("setup-retry-create", [
     ["install-created", async () => {
       installPath = await createFailingSetup(failing, slug, installing, deadline, { install: `test -f ${SETUP_FIXED}` });
     }],
@@ -1404,10 +1412,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
   // the failed Sandbox, and the list needs the Retry.
   let started = Date.now();
   const install = !!installPath
-    && await holds("setup-retry-banner", failedOpen(failing, installPath, "Running install command"));
+    && await retryHolds("setup-retry-banner", failedOpen(failing, installPath, "Running install command"));
   if (install) passed("setup-retry-banner", started);
   started = Date.now();
-  const resumed = install && await holds("setup-retry-resume", [
+  const resumed = install && await retryHolds("setup-retry-resume", [
     ["fixed", async () => {
       await typeLine(failing, `touch ${SETUP_FIXED} && printf '__UX_%s__\\n' FIXED`);
       await expect(failing.locator("[data-terminal-tab-panel]:not([hidden]) .xterm-rows")).toContainText("__UX_FIXED__");
@@ -1429,11 +1437,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
     }],
   ]);
   if (resumed) passed("setup-retry-resume", started);
-  // The list keeps its rows once the Sandbox is ready. A Retry fast enough to
-  // finish before the page follows it shows no list.
+  // The list keeps its rows once the Sandbox is ready, a Retry that ends
+  // before the page follows it included (#6034).
   started = Date.now();
   let labels: string[] = [];
-  if (resumed && await holds("setup-retry-resume-list", [
+  if (resumed && await retryHolds("setup-retry-resume-list", [
     ["retry-heading", () => expect(failing.locator("[data-setup-progress] h2")).toHaveText("Retrying setup")],
     ["install-ran", async () => {
       labels = await setupRows(failing).locator(":scope > .cw-setup-row > .cw-setup-stage-label").allTextContents();
@@ -1459,7 +1467,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   }
   started = Date.now();
   const reclone = dialog(failing, "Retry cloning?");
-  if (clonePath && await holds("setup-retry-reclone", [
+  if (clonePath && await retryHolds("setup-retry-reclone", [
     ...failedOpen(failing, clonePath, "Cloning repositories"),
     // The reason is ours and names the project's host (#5053).
     ["host-named", () => expect(noticeText(failing)).toContainText(`: ${new URL(ORIGIN).host} `)],
@@ -1487,6 +1495,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const deletions: Expectation[] = [];
   if (clonePath) deletions.push(["clone-deleted", remove(clonePath, cloning.name)]);
   if (installPath) deletions.push(["install-deleted", remove(installPath, installing.name)]);
-  if (deletions.length && await holds("setup-retry-delete", deletions)) passed("setup-retry-delete", started);
+  if (deletions.length && await retryHolds("setup-retry-delete", deletions)) passed("setup-retry-delete", started);
   await failing.close();
+  if (missed.length) throw new DevUxError(missed[0]);
 }
