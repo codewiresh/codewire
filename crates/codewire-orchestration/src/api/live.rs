@@ -34,6 +34,10 @@ pub(crate) const CREDIT_CHANGES_CHANNEL: &str = "credit_changes";
 /// Watches one account may hold at once in this process: about one per open
 /// signed-in tab.
 pub const MAX_WATCHES_PER_ACCOUNT: usize = 16;
+/// Watches this process holds for every account together. Each one holds a
+/// task and a bounded queue, so this bounds what many accounts can add up to;
+/// over it a page is told busy and falls back, as over its own limit.
+pub const MAX_WATCHES_PER_PROCESS: usize = 4096;
 /// How long one watch lasts before its caller opens a new one, which bounds
 /// how long a removed member's cached organizations stay in use.
 pub(crate) const WATCH_LIFETIME: Duration = Duration::from_secs(10 * 60);
@@ -125,20 +129,33 @@ pub(crate) enum LiveEvent {
 
 pub struct LiveNotifications {
     signals: broadcast::Sender<LiveSignal>,
-    watches: Mutex<HashMap<String, usize>>,
+    watches: Mutex<Watches>,
     watches_per_account: usize,
+    watches_per_process: usize,
+}
+
+/// The watches held now: per account, and in all.
+#[derive(Default)]
+struct Watches {
+    per_account: HashMap<String, usize>,
+    total: usize,
 }
 
 impl LiveNotifications {
-    pub fn new(watches_per_account: usize) -> Arc<Self> {
-        Self::with_capacity(watches_per_account, SIGNAL_CAPACITY)
+    pub fn new(watches_per_account: usize, watches_per_process: usize) -> Arc<Self> {
+        Self::with_capacity(watches_per_account, watches_per_process, SIGNAL_CAPACITY)
     }
 
-    pub(crate) fn with_capacity(watches_per_account: usize, capacity: usize) -> Arc<Self> {
+    pub(crate) fn with_capacity(
+        watches_per_account: usize,
+        watches_per_process: usize,
+        capacity: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             signals: broadcast::channel(capacity).0,
             watches: Mutex::default(),
             watches_per_account,
+            watches_per_process,
         })
     }
 
@@ -153,17 +170,19 @@ impl LiveNotifications {
         let _ = self.signals.send(LiveSignal::Resync);
     }
 
-    /// One watch for `account_id`, or `None` at the account's limit.
+    /// One watch for `account_id`, or `None` at the account's or the
+    /// process's limit.
     pub(crate) fn acquire_watch(self: &Arc<Self>, account_id: &str) -> Option<WatchPermit> {
         let mut watches = self
             .watches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let held = watches.get(account_id).copied().unwrap_or(0);
-        if held >= self.watches_per_account {
+        let held = watches.per_account.get(account_id).copied().unwrap_or(0);
+        if held >= self.watches_per_account || watches.total >= self.watches_per_process {
             return None;
         }
-        watches.insert(account_id.to_owned(), held + 1);
+        watches.per_account.insert(account_id.to_owned(), held + 1);
+        watches.total += 1;
         Some(WatchPermit {
             notifications: self.clone(),
             account_id: account_id.to_owned(),
@@ -175,6 +194,7 @@ impl LiveNotifications {
         self.watches
             .lock()
             .unwrap()
+            .per_account
             .get(account_id)
             .copied()
             .unwrap_or(0)
@@ -201,10 +221,11 @@ impl Drop for WatchPermit {
             .watches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match watches.get_mut(&self.account_id) {
+        watches.total = watches.total.saturating_sub(1);
+        match watches.per_account.get_mut(&self.account_id) {
             Some(held) if *held > 1 => *held -= 1,
             _ => {
-                watches.remove(&self.account_id);
+                watches.per_account.remove(&self.account_id);
             }
         }
     }
@@ -212,7 +233,7 @@ impl Drop for WatchPermit {
 
 /// The process's live notifications, with their listener running on `pool`.
 pub fn start(pool: PgPool) -> Arc<LiveNotifications> {
-    let notifications = LiveNotifications::new(MAX_WATCHES_PER_ACCOUNT);
+    let notifications = LiveNotifications::new(MAX_WATCHES_PER_ACCOUNT, MAX_WATCHES_PER_PROCESS);
     spawn_live_listener(pool, notifications.clone());
     notifications
 }

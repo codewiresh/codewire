@@ -41,7 +41,10 @@ pub(crate) async fn offline(pool: PgPool) -> ApiState {
         confidential_storage_flags: crate::confidential_storage::FeatureFlags { enabled: false },
         network_policy_flags: Default::default(),
         environment_logs: super::log_notifications::EnvironmentLogNotifications::new(1),
-        live: super::live::LiveNotifications::new(super::live::MAX_WATCHES_PER_ACCOUNT),
+        live: super::live::LiveNotifications::new(
+            super::live::MAX_WATCHES_PER_ACCOUNT,
+            super::live::MAX_WATCHES_PER_PROCESS,
+        ),
         drain: Default::default(),
         cw_runtime_staging: super::cw_runtime::staging::Staging::removed(),
         revocation: codewire_server_core::revocation::Fence::new(),

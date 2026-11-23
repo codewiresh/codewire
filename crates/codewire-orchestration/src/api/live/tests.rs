@@ -61,7 +61,7 @@ fn only_notices_shaped_like_the_triggers_become_signals() {
 
 #[test]
 fn an_account_holds_at_most_its_limit_of_watches_and_frees_them_on_drop() {
-    let notifications = LiveNotifications::new(2);
+    let notifications = LiveNotifications::new(2, MAX_WATCHES_PER_PROCESS);
     let first = notifications.acquire_watch("account").unwrap();
     let second = notifications.acquire_watch("account").unwrap();
     assert!(notifications.acquire_watch("account").is_none());
@@ -73,9 +73,20 @@ fn an_account_holds_at_most_its_limit_of_watches_and_frees_them_on_drop() {
     assert_eq!(notifications.watches("account"), 1);
 }
 
+#[test]
+fn the_process_holds_at_most_its_limit_of_watches_across_accounts() {
+    let notifications = LiveNotifications::new(2, 3);
+    let first = notifications.acquire_watch("one").unwrap();
+    let _second = notifications.acquire_watch("one").unwrap();
+    let _third = notifications.acquire_watch("two").unwrap();
+    assert!(notifications.acquire_watch("three").is_none());
+    drop(first);
+    assert!(notifications.acquire_watch("three").is_some());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_watch_starts_with_a_resync_and_passes_on_only_its_organizations() {
-    let notifications = LiveNotifications::new(4);
+    let notifications = LiveNotifications::new(4, MAX_WATCHES_PER_PROCESS);
     let permit = notifications.acquire_watch("account").unwrap();
     let mut events = start_live_watch(
         organizations(&[ORG]),
@@ -115,7 +126,7 @@ async fn a_watch_starts_with_a_resync_and_passes_on_only_its_organizations() {
 
 #[tokio::test(start_paused = true)]
 async fn a_watch_that_fell_behind_resyncs_instead_of_losing_changes() {
-    let notifications = LiveNotifications::with_capacity(4, 2);
+    let notifications = LiveNotifications::with_capacity(4, MAX_WATCHES_PER_PROCESS, 2);
     let permit = notifications.acquire_watch("account").unwrap();
     let mut events = start_live_watch(
         organizations(&[ORG]),
@@ -133,7 +144,7 @@ async fn a_watch_that_fell_behind_resyncs_instead_of_losing_changes() {
 
 #[tokio::test(start_paused = true)]
 async fn a_watch_beats_every_interval_and_ends_after_its_lifetime() {
-    let notifications = LiveNotifications::new(4);
+    let notifications = LiveNotifications::new(4, MAX_WATCHES_PER_PROCESS);
     let permit = notifications.acquire_watch("account").unwrap();
     let mut events = start_live_watch(
         organizations(&[ORG]),
@@ -163,7 +174,7 @@ async fn a_watch_beats_every_interval_and_ends_after_its_lifetime() {
 /// re-fetch they lead to is authorized again (designs/live-updates.md).
 #[tokio::test(start_paused = true)]
 async fn a_removed_members_organization_leaves_their_next_watch() {
-    let notifications = LiveNotifications::new(4);
+    let notifications = LiveNotifications::new(4, MAX_WATCHES_PER_PROCESS);
     let before = start_live_watch(
         organizations(&[ORG]),
         notifications.acquire_watch("account").unwrap(),
@@ -198,7 +209,7 @@ async fn a_removed_members_organization_leaves_their_next_watch() {
 /// capacity are dropped, and one resync waits for the reader instead.
 #[tokio::test(start_paused = true)]
 async fn a_reader_that_stops_reading_gets_a_bounded_queue_and_one_resync() {
-    let notifications = LiveNotifications::new(4);
+    let notifications = LiveNotifications::new(4, MAX_WATCHES_PER_PROCESS);
     let mut events = start_live_watch(
         organizations(&[ORG]),
         notifications.acquire_watch("account").unwrap(),

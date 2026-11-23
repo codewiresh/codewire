@@ -26,6 +26,7 @@ mod environment_sources;
 mod error;
 mod github_check;
 mod hosts_connect;
+mod live_connect;
 mod mailto;
 mod network_policies_connect;
 mod organization_connect;

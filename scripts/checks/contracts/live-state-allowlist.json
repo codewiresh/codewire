@@ -16,6 +16,13 @@
       "step": "Sandboxes list and rail: subscribe to codewire:live:sandbox"
     },
     {
+      "path": "packages/codewire-design/live.js",
+      "pattern": "setInterval",
+      "count": 1,
+      "issue": "#4762",
+      "step": "live.js's own fallback while the stream answers busy or keeps failing: a resync once a minute while visible, the one timer for server state the design allows (live-updates.md, Fallback)"
+    },
+    {
       "path": "crates/codewire-dashboard-web/templates/environment-resize-operation.html",
       "pattern": "hx-every",
       "count": 1,

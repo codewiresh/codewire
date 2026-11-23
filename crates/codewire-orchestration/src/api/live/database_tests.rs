@@ -66,7 +66,8 @@ async fn db_a_watch_passes_on_only_its_callers_organizations() -> anyhow::Result
         }
         member(&db, "live-user", "live-org-a").await?;
         member(&db, "live-user", "live-org-c").await?;
-        let notifications = LiveNotifications::new(MAX_WATCHES_PER_ACCOUNT);
+        let notifications =
+            LiveNotifications::new(MAX_WATCHES_PER_ACCOUNT, MAX_WATCHES_PER_PROCESS);
         // The listener sends a resync once it is listening; wait for that
         // rather than a fixed delay.
         let mut probe = notifications.signals.subscribe();

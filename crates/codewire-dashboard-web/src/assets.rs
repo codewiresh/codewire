@@ -21,6 +21,7 @@ pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard
 pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v2.css";
 pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
+pub(crate) const LIVE_SCRIPT_PATH: &str = "/assets/codewire/live-v1.js";
 pub(crate) const ACCEPT_INVITE_SCRIPT_PATH: &str = "/assets/codewire/accept-invite-v1.js";
 pub(crate) const SIGNUP_SCRIPT_PATH: &str = "/assets/codewire/signup-v1.js";
 pub(crate) const RECOVERY_CODES_SCRIPT_PATH: &str = "/assets/codewire/recovery-codes-v1.js";
@@ -79,6 +80,7 @@ const DASHBOARD_STYLES: &str =
 const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes/auth.css");
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
 const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
+const LIVE_SCRIPT: &str = include_str!("../../../packages/codewire-design/live.js");
 const ACCEPT_INVITE_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/accept-invite.js");
 const SIGNUP_SCRIPT: &str = include_str!("../../../packages/codewire-design/signup.js");
@@ -163,6 +165,7 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (HTMX_PATH, JS, HTMX.as_bytes()),
     (STYLE_PATH, CSS, STYLES.as_bytes()),
     (DEVICE_SCRIPT_PATH, JS, DEVICE_SCRIPT.as_bytes()),
+    (LIVE_SCRIPT_PATH, JS, LIVE_SCRIPT.as_bytes()),
     (
         ACCEPT_INVITE_SCRIPT_PATH,
         JS,
@@ -549,6 +552,23 @@ mod tests {
             assert!(!template.contains("/assets/codewire/routes/auth-v1.css"));
         }
         assert!(fixture.contains("../../device.js"));
+    }
+
+    #[test]
+    fn every_signed_in_page_opens_the_live_stream() {
+        // A signed-in page loads the dashboard script; each one also loads
+        // live.js, or its billing banner and lists never update (#5874).
+        let templates = concat!(env!("CARGO_MANIFEST_DIR"), "/templates");
+        let mut pages = 0;
+        for entry in std::fs::read_dir(templates).unwrap() {
+            let path = entry.unwrap().path();
+            let html = std::fs::read_to_string(&path).unwrap();
+            if html.contains(SCRIPT_PATH) {
+                pages += 1;
+                assert!(html.contains(LIVE_SCRIPT_PATH), "{}", path.display());
+            }
+        }
+        assert!(pages > 20, "{pages} signed-in pages");
     }
 
     #[test]

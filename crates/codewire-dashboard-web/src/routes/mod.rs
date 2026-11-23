@@ -20,6 +20,7 @@ mod github_notice;
 mod github_repositories;
 mod hosts;
 mod invitations;
+mod live_events;
 mod my_invitations;
 pub(crate) mod network_policies;
 mod organization_context;
@@ -680,6 +681,9 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/{environment_id}/_events/setup-progress",
             get(setup_progress::events),
         )
+        // The page's one live stream, for every organization the viewer is in
+        // (#4762); a static path, so no organization slug can shadow it.
+        .route("/_events/live", get(live_events::events))
         .route(
             "/{slug}/{environment_id}/_fragments/terminal-sessions",
             get(terminal_sessions::list),

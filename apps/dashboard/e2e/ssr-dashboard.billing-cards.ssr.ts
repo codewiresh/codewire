@@ -134,6 +134,44 @@ test("a live credit refresh waits while a dialog is open, then runs once", async
   await expect.poll(() => refreshes.length).toBe(2);
 });
 
+// The page's live stream (#4762, #5874): live.js turns /_events/live into
+// codewire:live:* events, and the stack re-fetches itself on them. The
+// stream is answered by the test; a body that ends is a stream that closed.
+const openLive = async (page: Page, stream: { status: number; events: string[] }) => {
+  await open(page);
+  const refreshes: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/_fragments/billing")) refreshes.push(request.url());
+  });
+  await page.route("**/_events/live", (route) => route.fulfill({
+    status: stream.status,
+    contentType: "text/event-stream",
+    // A long retry keeps EventSource from reopening within the test.
+    body: `retry: 600000\n\n${stream.events.map((event) => `event: ${event}\ndata: {}\n\n`).join("")}`,
+  }));
+  await page.addScriptTag({ url: `${process.env.CODEWIRE_DESIGN_ORIGIN}/live.js` });
+  return refreshes;
+};
+
+test("a credit change on the live stream re-fetches the stack", async ({ page }) => {
+  const refreshes = await openLive(page, { status: 200, events: ["credit"] });
+  await expect.poll(() => refreshes.length).toBe(1);
+});
+
+test("resyncs from the live stream wait a moment and re-fetch the stack once", async ({ page }) => {
+  const refreshes = await openLive(page, { status: 200, events: ["resync", "resync"] });
+  await expect.poll(() => refreshes.length, { timeout: 2_000 }).toBe(1);
+  await page.waitForTimeout(1_200);
+  expect(refreshes).toHaveLength(1);
+});
+
+test("a refused live stream falls back to one resync, not a retry loop", async ({ page }) => {
+  const refreshes = await openLive(page, { status: 401, events: [] });
+  await expect.poll(() => refreshes.length).toBe(1);
+  await page.waitForTimeout(1_200);
+  expect(refreshes).toHaveLength(1);
+});
+
 test("a bank's return cleans the address before any request and finishes with only the SetupIntent", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
