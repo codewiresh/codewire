@@ -32,6 +32,9 @@ use super::access::{
     self, AccessSettings, HttpRelayAllocator, RelayAllocationRequest, RelayAllocator, RelayError,
 };
 use super::authorize::{self, canonical_uid};
+use super::disco_admission::{
+    AdmissionUnavailable, DiscoKeyAdmission, DiscoKeySeen, HttpDiscoKeyAdmission,
+};
 use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
 use super::self_check;
@@ -121,6 +124,8 @@ pub struct WorkspaceBindingState {
     /// The origin `cw` inside the sandbox uses as its server, or empty.
     server_url: String,
     relay: Arc<dyn RelayAllocator>,
+    /// The coordinator's lookup of a relay allocation's disco keys (#5962).
+    disco_admission: Arc<dyn DiscoKeyAdmission>,
     max_wait: Duration,
     requery_interval: Duration,
     /// The deployment's hosted interception setting (#4001).
@@ -162,6 +167,7 @@ impl WorkspaceBindingState {
             access: AccessSettings::default(),
             server_url: String::new(),
             relay: Arc::new(HttpRelayAllocator::new()),
+            disco_admission: Arc::new(HttpDiscoKeyAdmission::default()),
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
             interception: false,
@@ -189,6 +195,13 @@ impl WorkspaceBindingState {
     pub fn with_access(mut self, access: AccessSettings, relay: Arc<dyn RelayAllocator>) -> Self {
         self.access = access;
         self.relay = relay;
+        self
+    }
+
+    /// The coordinator's lookup that every relay allocation's disco keys
+    /// must pass (#5962). Without one, no relay is allocated.
+    pub fn with_disco_admission(mut self, admission: Arc<dyn DiscoKeyAdmission>) -> Self {
+        self.disco_admission = admission;
         self
     }
 
@@ -514,8 +527,22 @@ impl WorkspaceBindingState {
             .map(|relay| relay.allocator_url.trim().to_owned())
             .filter(|url| !url.is_empty())
             .ok_or(BindError::FailedPrecondition)?;
-        // A pair past the environment's cap takes no relay slot (#5962).
+        // The first key must be the calling environment's own daemon's and
+        // the second must be bound; the coordinator says which (#5962).
         let [first, second] = &client_disco;
+        let environment = bound.binding.environment_id.as_str();
+        let (own, peer) = tokio::join!(
+            self.disco_admission.check(first, environment),
+            self.disco_admission.check(second, environment),
+        );
+        match (own, peer) {
+            (Ok(DiscoKeySeen::Here), Ok(DiscoKeySeen::Here | DiscoKeySeen::Elsewhere)) => {}
+            (Err(AdmissionUnavailable), _) | (_, Err(AdmissionUnavailable)) => {
+                return Err(BindError::Unavailable);
+            }
+            _ => return Err(BindError::PermissionDenied),
+        }
+        // A pair past the environment's cap takes no relay slot (#5962).
         if !self.limits.take_relay_pair(
             &bound.binding.environment_id,
             [first.as_str(), second.as_str()],

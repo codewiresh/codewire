@@ -24,6 +24,7 @@ mod access;
 pub(crate) mod authorize;
 #[cfg(test)]
 mod authorize_reference;
+mod disco_admission;
 pub mod limits;
 mod metrics;
 mod self_check;
@@ -37,6 +38,9 @@ use codewire_tls::{ServerTlsFiles, ServerTlsStream};
 
 pub use access::{AccessSettings, HttpRelayAllocator, RelayAllocator, RelayAllocatorTls};
 pub(crate) use authorize::canonical_uid;
+pub use disco_admission::{
+    AdmissionUnavailable, DiscoKeyAdmission, DiscoKeySeen, HttpDiscoKeyAdmission,
+};
 pub use service::{WorkspaceBindingState, workspace_binding_router};
 pub use store::{
     BindingNotifications, BindingStore, HostKeyRecord, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL,

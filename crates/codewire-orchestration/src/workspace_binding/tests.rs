@@ -27,6 +27,7 @@ use super::access::{
     AccessSettings, RelayAllocation, RelayAllocationRequest, RelayAllocator, RelayEndpoint,
     RelayError,
 };
+use super::disco_admission::{AdmissionUnavailable, DiscoKeyAdmission, DiscoKeySeen};
 use super::limits::RequestLimits;
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{
@@ -628,6 +629,43 @@ impl BindingStore for FakeStore {
     }
 }
 
+/// The coordinator's disco key lookup: `disco(1)` is the environment's own
+/// daemon's, any other key is bound elsewhere, unless `answers` says
+/// otherwise (#5962).
+#[derive(Default)]
+struct FakeAdmission {
+    answers: HashMap<String, Result<DiscoKeySeen, AdmissionUnavailable>>,
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeAdmission {
+    fn answering(answers: &[(String, Result<DiscoKeySeen, AdmissionUnavailable>)]) -> Self {
+        Self {
+            answers: answers.iter().cloned().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+#[async_trait]
+impl DiscoKeyAdmission for FakeAdmission {
+    async fn check(
+        &self,
+        disco_key: &str,
+        environment_id: &str,
+    ) -> Result<DiscoKeySeen, AdmissionUnavailable> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((disco_key.to_owned(), environment_id.to_owned()));
+        match self.answers.get(disco_key) {
+            Some(answer) => *answer,
+            None if disco_key == disco(1) => Ok(DiscoKeySeen::Here),
+            None => Ok(DiscoKeySeen::Elsewhere),
+        }
+    }
+}
+
 /// Records allocator calls and answers like the UDP relay allocator.
 #[derive(Default)]
 struct FakeAllocator {
@@ -714,6 +752,7 @@ fn fixture_allocating(
             },
             allocator.clone(),
         )
+        .with_disco_admission(Arc::new(FakeAdmission::default()))
         .with_timing(Duration::from_millis(300), Duration::from_millis(50)),
     ));
     Fixture {
@@ -1876,6 +1915,106 @@ async fn an_environment_holds_relay_slots_for_at_most_32_pairs() {
     assert_eq!(allocate(34).await, Err(BindError::ResourceExhausted));
     assert!(allocate(2).await.is_ok());
     assert_eq!(fixture.allocator.calls.lock().unwrap().len(), 33);
+}
+
+/// #5962: the coordinator decides each key. The first must be the calling
+/// environment's own daemon's, the second bound to someone; anything else is
+/// refused before the allocator or the cap, and a lookup the coordinator
+/// can't answer is unavailable. Both are asked as the binding's environment.
+#[tokio::test]
+async fn a_relay_names_only_the_callers_own_key_and_a_bound_peer() {
+    let keys = [disco(1), disco(2)];
+    for (answers, expected) in [
+        (
+            vec![(disco(1), Ok(DiscoKeySeen::Elsewhere))],
+            Err(BindError::PermissionDenied),
+        ),
+        (
+            vec![(disco(1), Ok(DiscoKeySeen::Unbound))],
+            Err(BindError::PermissionDenied),
+        ),
+        (
+            vec![(disco(2), Ok(DiscoKeySeen::Unbound))],
+            Err(BindError::PermissionDenied),
+        ),
+        (
+            vec![(disco(1), Err(AdmissionUnavailable))],
+            Err(BindError::Unavailable),
+        ),
+        (
+            vec![(disco(2), Err(AdmissionUnavailable))],
+            Err(BindError::Unavailable),
+        ),
+        (vec![(disco(2), Ok(DiscoKeySeen::Here))], Ok(())),
+        (vec![], Ok(())),
+    ] {
+        let admission = Arc::new(FakeAdmission::answering(&answers));
+        let fixture = fixture_allocating(
+            FakeCluster::placed(),
+            FakeStore::bound(WorkspaceCredentialScope::Pod),
+            Arc::new(FakeAllocator::default()),
+            |state| {
+                state
+                    .with_disco_admission(admission.clone())
+                    .with_limits(RequestLimits::with_peer_burst(64.0))
+            },
+        );
+        let result = fixture
+            .state
+            .allocate_peer_relay(&valid_bearer(), Some(PEER), &relay_request(&keys))
+            .await
+            .map(|_| ());
+        assert_eq!(result, expected, "{answers:?}");
+        let calls = fixture.allocator.calls.lock().unwrap().len();
+        assert_eq!(calls, usize::from(expected.is_ok()), "{answers:?}");
+        let mut asked = admission.calls.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(
+            asked,
+            vec![
+                (disco(1), ENVIRONMENT_ID.to_owned()),
+                (disco(2), ENVIRONMENT_ID.to_owned()),
+            ]
+        );
+    }
+}
+
+/// #5962: a refused pair takes nothing from the environment's cap.
+#[tokio::test]
+async fn a_refused_pair_takes_nothing_from_the_cap() {
+    let admission = Arc::new(FakeAdmission::answering(&[(
+        disco(99),
+        Ok(DiscoKeySeen::Unbound),
+    )]));
+    let fixture = fixture_allocating(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+        Arc::new(FakeAllocator::default()),
+        |state| {
+            state
+                .with_disco_admission(admission)
+                .with_limits(RequestLimits::with_peer_burst(128.0))
+        },
+    );
+    let allocate = |peer: u8| {
+        let state = fixture.state.clone();
+        async move {
+            state
+                .allocate_peer_relay(
+                    &valid_bearer(),
+                    Some(PEER),
+                    &relay_request(&[disco(1), disco(peer)]),
+                )
+                .await
+                .map(|_| ())
+        }
+    };
+    for _ in 0..40 {
+        assert_eq!(allocate(99).await, Err(BindError::PermissionDenied));
+    }
+    for peer in 2..=33 {
+        assert_eq!(allocate(peer).await, Ok(()), "pair {peer}");
+    }
 }
 
 #[tokio::test]

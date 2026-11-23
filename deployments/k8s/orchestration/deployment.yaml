@@ -120,6 +120,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # The coordinator's closed 8097 lookup of a relay allocation's disco
+            # keys (#5962). Without it no relay is allocated.
+            - name: CODEWIRE_PEER_RELAY_ADMISSION_URL
+              value: http://codewire-coordinator.$(POD_NAMESPACE).svc.cluster.local:8097
             - name: POD_NAME
               valueFrom:
                 fieldRef:

@@ -106,20 +106,21 @@ traffic. It could still take slots, so:
   `resource_exhausted`.
   - The count is kept per orchestration replica, so the effective bound is
     replicas × 32. That's well under the relay's VNI pool.
-- **Keys checked against the coordinator (not yet built, #5962).**
-  Orchestration will ask the coordinator's `CheckDiscoKey` before it
-  allocates:
+- **Keys checked against the coordinator.** Before it counts a pair or
+  calls the allocator, orchestration asks the coordinator's `CheckDiscoKey`
+  about both keys, as the calling environment:
   - `disco_keys[0]` must be `BOUND_HERE`, the calling environment's own
     daemon;
   - `disco_keys[1]` must be bound (`BOUND_ELSEWHERE` or `BOUND_HERE`);
   - any other answer is `permission_denied`, and an unreachable coordinator is
     `unavailable`.
 
-  That waits on the site's policy for the coordinator's 8097, which today
-  admits DERP alone. The policy will admit orchestration too, matched by
-  namespace and service account. DERP runs as its own service account,
-  `codewire-derp`, with no API token, so it can be matched the same way.
-  Until then, the per-environment cap is the only limit.
+  Orchestration reaches the lookup at `CODEWIRE_PEER_RELAY_ADMISSION_URL`, the
+  coordinator's 8097 origin; without it, no relay is allocated. Each lookup is
+  bounded at 2 s. The site's policy admits orchestration to that port,
+  matched by namespace and service account. DERP runs as its own service
+  account, `codewire-derp`, with no API token, so it can be matched the same
+  way.
 - **A refused allocation costs only the relay path.** The daemon keeps the
   peer on direct UDP or DERP.
 

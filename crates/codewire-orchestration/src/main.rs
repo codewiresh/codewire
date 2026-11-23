@@ -66,6 +66,9 @@ const UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV: &str =
     "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE";
 const UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV: &str =
     "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE";
+/// The coordinator's closed 8097 origin, where every relay allocation's disco
+/// keys are checked (#5962). Without it no relay is allocated.
+const PEER_RELAY_ADMISSION_URL_ENV: &str = "CODEWIRE_PEER_RELAY_ADMISSION_URL";
 
 /// The relay allocator client. With none of the TLS files named it allocates
 /// nothing; with some but not all it refuses to start, so a half-configured
@@ -107,6 +110,17 @@ fn relay_allocator(
              {UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV} must be set together"
         ),
     }
+}
+
+/// The coordinator's lookup of a relay allocation's disco keys (#5962). With
+/// no URL every allocation is refused; a malformed URL refuses to start.
+fn disco_admission()
+-> anyhow::Result<Arc<codewire_orchestration::workspace_binding::HttpDiscoKeyAdmission>> {
+    Ok(Arc::new(
+        codewire_orchestration::workspace_binding::HttpDiscoKeyAdmission::new(
+            std::env::var(PEER_RELAY_ADMISSION_URL_ENV).ok().as_deref(),
+        )?,
+    ))
 }
 
 fn sandbox_public_coordinator_url(configured: Option<&str>, api_base_url: &str) -> String {
@@ -913,6 +927,7 @@ async fn main() -> anyhow::Result<()> {
             },
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         )
+        .with_disco_admission(disco_admission()?)
         .with_interception(egress_settings.interception)
         .with_hosted_egress(egress_settings.enabled)
         .with_server_url(&api_state.frontend_url),
