@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-21. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-23. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -36,7 +36,7 @@ separately.
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
-| `refusal-log` | #5058, #4000 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; the credential broker's rows, slice 2, not yet built) | not yet observed | no command yet (#4000) | no command yet (#4000) |
+| `refusal-log` | #5058, #4000 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet built) | not yet observed | no command yet (#4000) | no command yet (#4000) |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
@@ -514,11 +514,10 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     lease, and a connection to an intercepted host whose front door is gone
     (`intercept_unavailable`);
   - a VM in learn mode (#4015, once it exists), which shows only refusals;
-  - a request the credential broker refuses on an intercepted host: no
-    credential selected for the provider, a path the route doesn't serve,
-    and a request without the placeholder that the policy refuses
-    (`name_not_allowed`), and a host the credential broker was given no
-    answer for;
+  - a request refused on an intercepted host: no credential selected for
+    the provider (the credential broker's), a path the route doesn't serve
+    (the front door's own), and a request without the placeholder that the
+    policy refuses (`name_not_allowed`);
   - the same destination refused many times, and more destinations than
     the log keeps;
   - a name the workload builds to carry a terminal escape sequence;
@@ -539,12 +538,12 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
   cw --local info walk-log
   ```
 
-  Then follow the log's `→` line and run the refused request again. For the
-  credential broker's rows, use a VM with interception on, as in
+  Then follow the log's `→` line and run the refused request again. For an
+  intercepted host's rows, use a VM with interception on, as in
   `agent-claude`, and send a request without the placeholder and one to a
   path the route doesn't serve. Stop and start the VM and read the log again.
-  The interception smoke (#5046) asserts an `intercept_unavailable` row and a
-  credential broker's row through `--output json`.
+  The interception smoke (#5046) asserts an `intercept_unavailable` row and an
+  intercepted host's row through `--output json`.
 - **Proof:**
   - nothing refused: `Nothing refused since walk-log started.`, exit 0;
   - each refusal is one row, `DESTINATION PROTOCOL PORT REASON POLICY COUNT
@@ -552,10 +551,11 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     refused lookup reads `dns` with `-` for the port; the reason in words,
     the raw reason, so a protected address reads `protected address`; the
     policy it was last refused under as `cw info` names it (`walk-log · rev
-    1`), or `-` for a credential reason the policy didn't decide, including
-    a host given no answer, which reads `unavailable`; relative times;
-  - a credential broker's row names the intercepted host, even when the
-    request's `Host` header named another;
+    1`), or `-` for a reason on an intercepted host the policy didn't
+    decide; relative times;
+  - an intercepted host's row names the route's bound host, even when the
+    request's `Host` header named another, and a path the route doesn't
+    serve is a row with no path in it;
   - five refusals of one destination are one row with a count of 5 (6 with
     the first);
   - the rows are most recently seen first; at a terminal the table fits its
@@ -575,7 +575,8 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     the raw reason code, `source` (`network` or `credentials`), the policy's
     name and revision, the first and last time in RFC 3339, and the count;
     beside the rows, `dropped`, the number of rows dropped since the VM
-    started; and nothing on stdout but that;
+    started, and `rejected`, the number of the front door's reports or
+    rows the runner rejected; and nothing on stdout but that;
   - `cw --local info walk-log` shows how many requests were refused since
     it started and when the last was, naming `cw --local policy log
     walk-log` in the same line;
@@ -623,7 +624,7 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     was offered;
   - stopped: `✗ There's no refusal log while walk-log isn't running` and
     `→ cw --local start walk-log`, exit 1; after a start, empty again.
-  - Not walked here: the credential broker's rows (slice 2), more than
+  - Not walked here: an intercepted host's rows (slice 2), more than
     1,000 rows, an older supervisor, learn mode (#4015), and the interception
     smoke's assertion (#5046).
 

@@ -762,24 +762,36 @@ the reason codes of "Refusals an agent or a person can read" in
   unavailable. Its record log (`crates/codewire-egress-policy/src/record.rs`)
   also keeps passes while learn mode runs (#4015); the broker sends only
   refusals, so the owner's log never shows a pass;
-- the credential broker's refusals of a request on an intercepted host, with
-  the reason the agent received. A row names the route's bound host and its
-  port, never the request's `Host` header, path, other headers, body or
-  credential, so a crafted request can't put another name in the log. A
-  request refused by the network policy carries the label of the answer the
-  supervisor gave the broker for that host, which names the policy and
-  revision it was decided under; a host the broker was given no answer for
-  reads `unavailable`, with `-` for the policy.
+- an intercepted host's front door's refusals, with the reason the agent
+  received: its own (a path the route doesn't serve, a request it doesn't
+  forward) and each refusal the credential broker answers with. The front
+  door reports them, not the broker, which keeps its confinement and gains
+  no output. A row holds only the route's bound host and its port, the
+  reason, a count and the times, never the request's method, `Host` header,
+  path, query, other headers, body, credential or placeholder, nor any text
+  of the response, so a crafted request can't put another name or any of its
+  content in the log. A
+  request refused by the network policy (`name_not_allowed`) carries the
+  policy and revision the supervisor recorded when it last sent that
+  environment's allowed hosts to the credential authority, taken only from
+  that record and never from the front door; any other reason here has `-`
+  for the policy.
 
-The workload chooses the hosts and the volume, so each broker folds its
-refusals before it reports and sends the rows that changed at most once a
-second: the egress broker on its control channel to the runner, the
-credential broker over the connection to the runner it already holds. A
-host hammered with refused requests raises a count, never the size of the
-log or the rate of frames. That connection is paired with this boot's runner
-by the secret the runner minted for it, so the runner files every report
-under the boot it serves and never under an environment a report names; a
-report naming another environment is refused. The runner keeps the
+The workload chooses the hosts and the volume, so the egress broker and the
+front door each fold their refusals before they report, and send the rows
+that changed at most once a second, each on its existing control channel to
+the runner, with no new socket, peer or capability. A host hammered with
+refused requests raises a count, never the size of the log or the rate of
+frames. The runner files every report under the boot it serves and never
+under an environment a report names; a report naming another environment is
+refused. The front door terminates the guest's traffic, so the runner takes
+its reports as untrusted: it parses them strictly within fixed bounds,
+accepts only the fixed reasons, keeps a row only for a host on the routes it
+bound for this boot, and enforces its own rate and row cap for them, so a
+flood can't evict the egress broker's rows. A report or row it rejects is
+dropped and counted, never stored in part: `--output json` gives `rejected`,
+the number rejected since the VM started, and the log adds one line saying
+how many when it isn't 0. The runner keeps the
 environment's one merged log, bounded at 1,000 rows with the row seen least
 recently dropped, and the log says when it dropped rows (`--output json`
 gives `dropped`, the number of rows dropped since the VM started). Every
