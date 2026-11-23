@@ -260,3 +260,125 @@ test("a row menu's actions open dialogs, with no caret, and Cancel returns to th
     await expect(item).toBeFocused();
   }
 });
+
+// Live updates (#4762; private-docs designs/live-updates.md §3a). The list
+// makes no request of its own: a live change re-fetches only that row, and an
+// open row menu or dialog is never replaced. The row fragment is answered by
+// the test; the list refresh is the event htmx would answer.
+async function openLiveInventory(page: Page) {
+  await openInventory(page);
+  const asked: string[] = [];
+  const rows = new Map<string, { status: number; body?: string }>();
+  await page.route("**/reference/fixtures/sandbox-row/*", (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").pop() ?? "";
+    asked.push(id);
+    const answer = rows.get(id) ?? { status: 204 };
+    return route.fulfill({ status: answer.status, contentType: "text/html", body: answer.body ?? "" });
+  });
+  await page.locator("#environment-list").evaluate((list) => {
+    const refreshes: number[] = [];
+    list.addEventListener("codewire:sandbox-list-refresh", () => refreshes.push(Date.now()));
+    Object.assign(window, { listRefreshes: refreshes });
+  });
+  return { asked, rows };
+}
+
+const listRefreshes = (page: Page) => page.evaluate(() =>
+  (window as unknown as { listRefreshes: number[] }).listRefreshes.length);
+
+const live = (page: Page, kind: "sandbox" | "resync", environment = "", organization = "org_fixture") =>
+  page.evaluate(({ kind, environment, organization }) => document.body.dispatchEvent(
+    new CustomEvent(`codewire:live:${kind}`, { detail: { organization, environment } })), { kind, environment, organization });
+
+// The row as the server would render it after the Sandbox stopped.
+const stoppedRow = (page: Page, id: string) => page.locator(`tr[data-environment-id="${id}"]`).evaluate((row) =>
+  row.outerHTML.replace('data-environment-state="running"', 'data-environment-state="stopped"'));
+
+test("a live change re-fetches only that row, replaces it, and announces it", async ({ page }) => {
+  const { asked, rows } = await openLiveInventory(page);
+  rows.set(quietMesa, { status: 200, body: await stoppedRow(page, quietMesa) });
+  await live(page, "sandbox", quietMesa);
+  await live(page, "sandbox", quietMesa);
+  await page.clock.runFor(300);
+  // Two events within 250 ms are one request, for that row only.
+  await expect.poll(() => asked).toEqual([quietMesa]);
+  await expect(page.locator(`tr[data-environment-id="${quietMesa}"]`)).toHaveAttribute("data-environment-state", "stopped");
+  await expect.poll(() => announcements(page)).toContain("quiet-mesa stopped.");
+  expect(await listRefreshes(page)).toBe(0);
+  // Without an event, nothing is asked for.
+  await page.clock.runFor(60_000);
+  expect(asked).toEqual([quietMesa]);
+});
+
+test("a replaced row's menu works as the first one did: Stop and its dialogs open and close", async ({ page }) => {
+  const { rows } = await openLiveInventory(page);
+  // The row as the server sends it: Stop hidden behind its no-script fallback.
+  const served = await page.locator(`tr[data-environment-id="${quietMesa}"]`).evaluate((row) => {
+    const copy = row.cloneNode(true) as HTMLElement;
+    copy.querySelector("[data-inventory-stop]")?.setAttribute("hidden", "");
+    copy.querySelector("[data-inventory-stop-fallback]")?.removeAttribute("hidden");
+    copy.setAttribute("data-live-replaced", "");
+    return copy.outerHTML;
+  });
+  rows.set(quietMesa, { status: 200, body: served });
+  await live(page, "sandbox", quietMesa);
+  await page.clock.runFor(300);
+  const row = page.locator(`tr[data-environment-id="${quietMesa}"][data-live-replaced]`);
+  await expect(row).toHaveCount(1);
+  await row.getByLabel("Actions for quiet-mesa", { exact: true }).click();
+  await expect(row.locator("[data-inventory-stop-fallback]")).toBeHidden();
+  await row.getByRole("button", { name: "Stop", exact: true }).click();
+  const stop = page.getByRole("dialog", { name: "Stop quiet-mesa?", exact: true });
+  await expect(stop).toBeVisible();
+  await stop.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(stop).toBeHidden();
+  // Cancel returns to the open menu. The row's own dialog closes from its
+  // backdrop, as before the update.
+  await expect(row.locator("details.cw-row-menu")).toHaveJSProperty("open", true);
+  await row.getByRole("button", { name: "Secrets and credentials", exact: true }).click();
+  const sources = page.getByRole("dialog", { name: "Secrets and credentials of quiet-mesa", exact: true });
+  await expect(sources).toBeVisible();
+  await page.mouse.click(4, 4);
+  await expect(sources).toBeHidden();
+});
+
+test("an open row menu holds its row's update until it closes, then runs it once", async ({ page }) => {
+  const { asked, rows } = await openLiveInventory(page);
+  rows.set(quietMesa, { status: 200, body: await stoppedRow(page, quietMesa) });
+  const menu = page.locator(`tr[data-environment-id="${quietMesa}"] details.cw-row-menu`);
+  await page.getByLabel("Actions for quiet-mesa", { exact: true }).click();
+  await expect(menu).toHaveAttribute("open", "");
+  await live(page, "sandbox", quietMesa);
+  await page.clock.runFor(300);
+  expect(asked).toEqual([]);
+  await expect(menu).toHaveAttribute("open", "");
+  // A whole-list update waits for it too.
+  await live(page, "resync");
+  expect(await listRefreshes(page)).toBe(0);
+  await page.getByLabel("Actions for quiet-mesa", { exact: true }).click();
+  // Closing runs what waited: the list, once, which covers the row.
+  await expect.poll(() => listRefreshes(page)).toBe(1);
+});
+
+test("a Sandbox with no row, a row that left the view, and a resync re-fetch the list", async ({ page }) => {
+  const { asked } = await openLiveInventory(page);
+  await live(page, "sandbox", "00000000-0000-0000-0000-0000000000aa");
+  await page.clock.runFor(300);
+  await expect.poll(() => listRefreshes(page)).toBe(1);
+  expect(asked).toEqual([]);
+  // The row fragment answers 204: the Sandbox left this view.
+  await live(page, "sandbox", dryHarbor);
+  await page.clock.runFor(300);
+  await expect.poll(() => asked).toEqual([dryHarbor]);
+  await expect.poll(() => listRefreshes(page)).toBe(2);
+  await live(page, "resync");
+  await expect.poll(() => listRefreshes(page)).toBe(3);
+});
+
+test("another organization's change touches nothing", async ({ page }) => {
+  const { asked } = await openLiveInventory(page);
+  await live(page, "sandbox", quietMesa, "org_other");
+  await page.clock.runFor(300);
+  expect(asked).toEqual([]);
+  expect(await listRefreshes(page)).toBe(0);
+});

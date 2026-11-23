@@ -574,6 +574,12 @@ const app = document.querySelector("[data-dashboard-app]");
     initializeDialogs(root);
     initializeStopButtons(root);
   });
+  // A live update replaces one Sandboxes row outside htmx's swap (#4762).
+  document.addEventListener("codewire:row-replaced", (event) => {
+    if (!(event.target instanceof Element)) return;
+    initializeDialogs(event.target);
+    initializeStopButtons(event.target);
+  });
 })();
 
 const nameToSlug = (name) => name
@@ -610,46 +616,46 @@ document.addEventListener("htmx:afterSwap", (event) => {
 });
 
 // The Sandbox rail is rendered twice, in the desktop sidebar and in the
-// mobile drawer, and CSS shows at most one. Only the copy on screen refreshes,
-// every 10 seconds while the tab is visible, so a page makes one rail request
-// per interval instead of one per copy. A copy that is still loading, or out
-// of date when the drawer opens or the tab returns, refreshes at once.
+// mobile drawer, and CSS shows at most one. It makes no request of its own:
+// the copy on screen refreshes when the live stream says a Sandbox changed or
+// asks for a resync (#4762; private-docs designs/live-updates.md §3a),
+// coalesced over a second. A copy that is still loading, or that missed an
+// update while hidden, refreshes when the drawer opens or the tab returns.
 (() => {
   "use strict";
-  const RAIL_INTERVAL_MS = 10000;
+  const COALESCE_MS = 1000;
   const rails = () => Array.from(document.querySelectorAll("[data-sandbox-rail]"));
-  // A copy rendered loading has no refresh time, so it is due at once.
-  const due = (rail) => Date.now() - Number(rail.dataset.railRefreshedAt || 0) >= RAIL_INTERVAL_MS - 250;
-  let timer = 0;
-  const refreshShown = () => {
+  const stale = (rail) => rail.dataset.railLoading === "true" || rail.dataset.railStale === "true";
+  let pending = 0;
+  const refresh = (rail) => {
+    rail.dataset.railStale = "false";
+    rail.dataset.railLoading = "false";
+    rail.dispatchEvent(new CustomEvent("sandbox-rail-refresh"));
+  };
+  // Every copy is out of date; the one on screen refreshes now, the other
+  // when it is shown.
+  const changed = () => {
+    window.clearTimeout(pending);
+    pending = window.setTimeout(() => {
+      for (const rail of rails()) {
+        if (!document.hidden && rail.getClientRects().length > 0) refresh(rail);
+        else rail.dataset.railStale = "true";
+      }
+    }, COALESCE_MS);
+  };
+  const refreshShownStale = () => {
     if (document.hidden) return;
-    let refreshed = false;
     for (const rail of rails()) {
-      if (rail.getClientRects().length === 0 || !due(rail)) continue;
-      rail.dataset.railRefreshedAt = String(Date.now());
-      rail.dispatchEvent(new CustomEvent("sandbox-rail-refresh"));
-      refreshed = true;
-    }
-    // A refresh restarts the interval, so a copy refreshed when the drawer
-    // opens or the tab returns refreshes again a whole interval later, not at
-    // the next tick of the old schedule, which it would skip as not yet due.
-    if (refreshed) {
-      window.clearInterval(timer);
-      timer = window.setInterval(refreshShown, RAIL_INTERVAL_MS);
+      if (rail.getClientRects().length > 0 && stale(rail)) refresh(rail);
     }
   };
   // htmx binds the rail's trigger on DOMContentLoaded before this listener runs.
-  document.addEventListener("DOMContentLoaded", () => {
-    const now = String(Date.now());
-    for (const rail of rails()) {
-      if (rail.dataset.railLoading !== "true") rail.dataset.railRefreshedAt = now;
-    }
-    refreshShown();
-    if (!timer) timer = window.setInterval(refreshShown, RAIL_INTERVAL_MS);
-  });
-  document.addEventListener("visibilitychange", refreshShown);
+  document.addEventListener("DOMContentLoaded", refreshShownStale);
+  document.addEventListener("visibilitychange", refreshShownStale);
+  document.body.addEventListener("codewire:live:sandbox", changed);
+  document.body.addEventListener("codewire:live:resync", changed);
   if (app) {
-    new MutationObserver(refreshShown).observe(app, { attributes: true, attributeFilter: ["data-mobile-open", "data-sidebar-collapsed"] });
+    new MutationObserver(refreshShownStale).observe(app, { attributes: true, attributeFilter: ["data-mobile-open", "data-sidebar-collapsed"] });
   }
 })();
 

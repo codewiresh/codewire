@@ -63,13 +63,13 @@ const PROJECT_FEATURE_UNAVAILABLE: &str =
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct EnvironmentsQuery {
     #[serde(default)]
-    search: String,
+    pub(super) search: String,
     /// `start` when the list on screen is the empty organization's start
     /// panel, sent back by its refresh.
     #[serde(default)]
     showing: String,
     #[serde(default)]
-    state: String,
+    pub(super) state: String,
     #[serde(default)]
     destroyed: bool,
     #[serde(default)]
@@ -688,22 +688,7 @@ pub(super) async fn list_fragment(
         None
     };
     environment_connect::mark_credential_attention(&state, cookie, &mut environments).await;
-    let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
-    let page = EnvironmentsPageView {
-        environments,
-        environments_loading: false,
-        create_form: default_create_form(token, false),
-        source_editor: None,
-        port_panel: None,
-        trust_summary: None,
-        resize_confirmation: None,
-        resize_operation: None,
-        search: bounded_query(&query.search),
-        state: allowlisted_state(&query.state).to_owned(),
-        message: String::new(),
-        error: String::new(),
-        start,
-    };
+    let page = super::sandbox_rows::list_page(environments, &query, &headers, start);
     render_template(
         StatusCode::OK,
         EnvironmentListTemplate {
@@ -1843,7 +1828,7 @@ fn deletion_outcome(environment: codewire_proto::codewire::v1::Environment) -> S
     }
 }
 
-async fn filtered_environments(
+pub(super) async fn filtered_environments(
     state: &AppState,
     cookie: HeaderValue,
     org_id: &str,
@@ -2130,11 +2115,11 @@ fn port_access(value: &str) -> PortAccess {
     }
 }
 
-fn bounded_query(value: &str) -> String {
+pub(super) fn bounded_query(value: &str) -> String {
     SandboxListContext::new(value, "all").list_search
 }
 
-fn allowlisted_state(value: &str) -> &'static str {
+pub(super) fn allowlisted_state(value: &str) -> &'static str {
     SandboxListContext::state(value)
 }
 
@@ -2287,7 +2272,7 @@ fn ports_redirect(headers: &HeaderMap, slug: &str, environment_id: &str, result:
     mutation_redirect(target, "", "", headers)
 }
 
-fn environments_path(slug: &str) -> String {
+pub(super) fn environments_path(slug: &str) -> String {
     format!("/{slug}/")
 }
 
@@ -3751,7 +3736,7 @@ mod tests {
         assert!(!html.contains("cw-alert--success"));
         assert!(html.contains(&format!("<tr data-environment-id=\"{id}\"")));
         // Background refreshes stay quiet; the status speaks for transitions.
-        assert!(html.contains("<div id=\"environment-list\" aria-live=\"off\" hx-get="));
+        assert!(html.contains("<div id=\"environment-list\" aria-live=\"off\" "));
         page.message.clear();
         assert!(
             render(&page)

@@ -2,20 +2,6 @@
   "$comment": "Polling sites repo_checks.py live-state allows (codewire#4762; private-docs designs/live-updates.md). A poll names the issue and the migration step that removes it; a client-only timer fetches nothing and says why; a bounded retry that reschedules itself says retry and why. count is the exact number of sites of that pattern in the file. The list only shrinks.",
   "entries": [
     {
-      "path": "crates/codewire-dashboard-web/templates/organization-environments-content.html",
-      "pattern": "hx-every",
-      "count": 1,
-      "issue": "#4762",
-      "step": "Sandboxes list and rail: subscribe to codewire:live:sandbox"
-    },
-    {
-      "path": "packages/codewire-design/dashboard.js",
-      "pattern": "setInterval",
-      "count": 2,
-      "issue": "#4762",
-      "step": "Sandboxes list and rail: subscribe to codewire:live:sandbox"
-    },
-    {
       "path": "packages/codewire-design/live.js",
       "pattern": "setInterval",
       "count": 1,

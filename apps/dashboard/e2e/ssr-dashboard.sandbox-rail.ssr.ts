@@ -1,9 +1,10 @@
 import { expect, test, type Page } from "./helpers/fixture-test";
 
 // The Sandbox rail is rendered in the desktop sidebar and again in the mobile
-// drawer. Only the copy on screen refreshes, so one page load makes one rail
-// request and each 10-second interval one more (#3395). Each refresh is the
-// `sandbox-rail-refresh` event htmx answers with one request.
+// drawer. Only the copy on screen refreshes (#3395), and only when the live
+// stream says a Sandbox changed or asks for a resync, coalesced over a second
+// (#4762). Each refresh is the `sandbox-rail-refresh` event htmx answers with
+// one request.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
 
 async function openRails(page: Page, viewport: { width: number; height: number }, loading: boolean) {
@@ -35,18 +36,30 @@ async function openRails(page: Page, viewport: { width: number; height: number }
 const refreshes = (page: Page) =>
   page.evaluate(() => (window as unknown as { railRefreshes: string[] }).railRefreshes.slice());
 
-test("a desktop page load refreshes only the sidebar rail, once per interval", async ({ page }) => {
+const live = (page: Page, kind: "sandbox" | "resync") =>
+  page.evaluate((kind) => document.body.dispatchEvent(new CustomEvent(`codewire:live:${kind}`, {
+    detail: kind === "sandbox" ? { organization: "org_fixture", environment: "00000000-0000-0000-0000-000000000001" } : {},
+  })), kind);
+
+test("a loading rail refreshes once, then only when a Sandbox changes", async ({ page }) => {
   await openRails(page, { width: 1440, height: 900 }, true);
   await expect.poll(() => refreshes(page)).toEqual(["sidebar"]);
-  await page.clock.runFor(10_000);
+  // No timer: a minute passes without a request.
+  await page.clock.runFor(60_000);
+  expect(await refreshes(page)).toEqual(["sidebar"]);
+  await live(page, "sandbox");
+  await live(page, "sandbox");
+  await page.clock.runFor(1_000);
+  // Two events within the second are one refresh.
   await expect.poll(() => refreshes(page)).toEqual(["sidebar", "sidebar"]);
 });
 
-test("a rendered rail waits for its interval before refreshing", async ({ page }) => {
+test("a rendered rail makes no request until the stream asks", async ({ page }) => {
   await openRails(page, { width: 1440, height: 900 }, false);
-  await page.clock.runFor(5_000);
+  await page.clock.runFor(60_000);
   expect(await refreshes(page)).toEqual([]);
-  await page.clock.runFor(5_000);
+  await live(page, "resync");
+  await page.clock.runFor(1_000);
   await expect.poll(() => refreshes(page)).toEqual(["sidebar"]);
 });
 
@@ -54,18 +67,18 @@ test("on a phone only the open drawer's rail refreshes", async ({ page }) => {
   await openRails(page, { width: 390, height: 844 }, true);
   await page.clock.runFor(10_000);
   expect(await refreshes(page)).toEqual([]);
-  // Open the drawer between ticks: its next refresh is a whole interval after
-  // this one, not skipped at the old schedule's next tick (#3648).
-  await page.clock.runFor(2_000);
   await page.getByRole("button", { name: "Toggle sidebar" }).click();
   await expect.poll(() => refreshes(page)).toEqual(["drawer"]);
-  await page.clock.runFor(10_000);
-  await expect.poll(() => refreshes(page)).toEqual(["drawer", "drawer"]);
   // The overlay shows beside the drawer; click the part the drawer leaves uncovered.
   await page.locator(".cw-mobile-overlay").click({ position: { x: 385, y: 400 } });
   await expect(page.locator(".cw-mobile-drawer")).toBeHidden();
-  await page.clock.runFor(20_000);
-  expect(await refreshes(page)).toEqual(["drawer", "drawer"]);
+  // A change while the drawer is closed refreshes nothing now, and the
+  // drawer catches up when it opens.
+  await live(page, "sandbox");
+  await page.clock.runFor(1_000);
+  expect(await refreshes(page)).toEqual(["drawer"]);
+  await page.getByRole("button", { name: "Toggle sidebar" }).click();
+  await expect.poll(() => refreshes(page)).toEqual(["drawer", "drawer"]);
 });
 
 // The rail's tools (owner, 2026-11-10): sort newest or oldest first and show

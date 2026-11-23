@@ -11,11 +11,11 @@ use crate::view::EnvironmentCreateFormView;
 use crate::view::InvitationState;
 use crate::view::{
     AccountAccessView, AccountDeletionPageView, AdminAccountDeletionView, ApiKeysPageView,
-    AuthFormView, CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
-    GithubAcceptView, InvitationPageView, MembersPageView, OrganizationContext,
-    OrganizationFormView, OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView,
-    PresetsPageView, SecretBucketPageView, SecretProjectsPageView, SettingsPageView,
-    SetupTwoFactorView, TerminalPageView, TwoFactorRecoveryView,
+    AuthFormView, CredentialSettingsView, DashboardView, DevicePageView, EnvironmentRow,
+    EnvironmentsPageView, GithubAcceptView, InvitationPageView, MembersPageView,
+    OrganizationContext, OrganizationFormView, OrganizationRow, PersonalApiKeysPageView,
+    PersonalSecretsPageView, PresetsPageView, SecretBucketPageView, SecretProjectsPageView,
+    SettingsPageView, SetupTwoFactorView, TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -412,6 +412,15 @@ pub(crate) struct EnvironmentCreateFormTemplate<'a> {
 pub(crate) struct EnvironmentListTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a EnvironmentsPageView,
+}
+
+/// One row of the Sandboxes list, for a live update of that row (#4762).
+#[derive(Template)]
+#[template(path = "environment-row.html")]
+pub(crate) struct EnvironmentRowTemplate<'a> {
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) page: &'a EnvironmentsPageView,
+    pub(crate) sandbox: &'a EnvironmentRow,
 }
 
 /// The billing banner fragment: one `.cw-banner`, or a hidden placeholder.

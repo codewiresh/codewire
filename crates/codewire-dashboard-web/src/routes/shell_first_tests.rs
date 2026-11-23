@@ -159,7 +159,7 @@ async fn the_organization_page_renders_its_shell_before_any_inventory() {
         assert_eq!(calls.len(), 2, "{path} {calls:?}");
         assert!(
             html.contains(
-                r#"hx-get="/synthetic/_fragments/sandboxes" hx-trigger="load, every 5s""#
+                r#"hx-get="/synthetic/_fragments/sandboxes" hx-trigger="load, codewire:sandbox-list-refresh""#
             ),
             "{path} loads the Sandbox list"
         );

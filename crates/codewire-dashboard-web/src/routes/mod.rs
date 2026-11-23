@@ -31,6 +31,7 @@ mod personal_api_keys;
 mod personal_secrets;
 mod public;
 mod sandbox_resize;
+mod sandbox_rows;
 mod secrets_presets;
 mod settings;
 mod setup_progress;
@@ -428,6 +429,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/_fragments/sandboxes",
             get(environments::list_fragment),
+        )
+        .route(
+            "/{slug}/_fragments/sandboxes/{environment_id}",
+            get(sandbox_rows::row_fragment),
         )
         .route(
             "/{slug}/_fragments/sandbox-rail",

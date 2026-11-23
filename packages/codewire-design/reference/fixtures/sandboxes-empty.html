@@ -68,7 +68,7 @@
     <section class="cw-org-content" id="sandbox-inventory" aria-labelledby="sandbox-inventory-title">
       <form class="cw-environment-toolbar" role="search"><div class="cw-environment-filters"><label class="cw-sr-only" for="sandbox-search">Search sandboxes</label><input class="cw-input" id="sandbox-search" type="search" placeholder="Search by name"><button class="cw-button cw-button--outline cw-button--small cw-button--pill" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg><span>Filter</span></button></div><a class="cw-button cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></a></form>
       <p class="cw-toast" role="status" data-inventory-status></p>
-      <div id="environment-list" aria-live="off">
+      <div id="environment-list" aria-live="off" data-organization-id="org_fixture" data-row-url="sandbox-row/">
       <section class="cw-start" aria-labelledby="start-title">
         <input type="hidden" name="showing" value="start" data-sandbox-start-state>
         <header class="cw-start-header"><h1 id="start-title">Start your first sandbox</h1><p>Run one free on your own machine, or in the cloud so it keeps working when your laptop sleeps.</p></header>

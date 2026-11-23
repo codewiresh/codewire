@@ -333,3 +333,64 @@ async fn the_list_marks_only_the_current_revision_and_the_page_its_exact_one() {
     assert!(!list.contains("cw-credential-attention"));
     assert_eq!(page.matches(NOTICE).count(), 1);
 }
+
+/// A live update re-fetches one row (#4762): the same row the list renders,
+/// with the same notice, or 204 when the list has no such row.
+#[tokio::test]
+async fn one_rows_fragment_is_the_lists_row_or_204() {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap();
+    let fetch = |path: String| {
+        let client = client.clone();
+        async move {
+            let (upstream, _calls) = fixture("reconnect").await;
+            let dashboard = serve(crate::app(config(&upstream.origin))).await;
+            let response = client
+                .get(format!("{}{path}", dashboard.origin))
+                .headers(session())
+                .send()
+                .await
+                .unwrap();
+            (response.status(), response.text().await.unwrap())
+        }
+    };
+    let (status, row) = fetch(format!("/synthetic/_fragments/sandboxes/{SANDBOX}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        row.trim_start()
+            .starts_with(&format!(r#"<tr data-environment-id="{SANDBOX}""#)),
+        "{row}"
+    );
+    assert_eq!(row.matches("<tr").count(), 1, "{row}");
+    assert_eq!(row.matches(NOTICE).count(), 1, "{row}");
+    assert!(!row.contains(CANARY));
+    let (_, list) = fetch("/synthetic/_fragments/sandboxes".to_owned()).await;
+    // The same row, up to the indentation the list's include adds and the
+    // CSRF token, which each request here mints anew (no cookie is sent).
+    let words = |html: &str| {
+        let marker = r#"name="_csrf" value=""#;
+        let (mut kept, mut rest) = (String::new(), html);
+        while let Some(at) = rest.find(marker) {
+            kept.push_str(&rest[..at + marker.len()]);
+            rest = &rest[at + marker.len()..];
+            rest = &rest[rest.find('"').unwrap_or(rest.len())..];
+        }
+        kept.push_str(rest);
+        kept.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    assert!(
+        words(&list).contains(&words(&row)),
+        "the list renders the same row:\n{row}\n---\n{list}"
+    );
+
+    let (status, body) =
+        fetch("/synthetic/_fragments/sandboxes/0b8f31a2-6c1e-4d55-9a7e-2f4c9d1e8a60".to_owned())
+            .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    let (status, _) = fetch("/synthetic/_fragments/sandboxes/not-an-id".to_owned()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

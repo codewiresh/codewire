@@ -643,6 +643,90 @@
     observeInventory(list);
   });
 
+  // Live updates (#4762; private-docs designs/live-updates.md §3a). The list
+  // makes no request of its own: when the live stream says one of its
+  // organization's Sandboxes changed, only that row is re-fetched and
+  // replaced; a Sandbox it has no row for, or a row that left the view, or a
+  // resync, re-fetches the list once. An open row menu or row dialog is never
+  // replaced: that row's update, or a whole-list update, waits until it
+  // closes and then runs once.
+  const liveRowDelayMs = 250;
+  const owedRows = new Set();
+  const rowTimers = new Map();
+  let owedList = false;
+  const anyOpen = (node) => Boolean(node.querySelector("details[open], dialog[open]"));
+  const liveRow = (list, id) => list.querySelector(`tr[data-environment-id="${CSS.escape(id)}"]`);
+  const refreshList = (list) => {
+    if (anyOpen(list)) { owedList = true; return; }
+    owedList = false;
+    owedRows.clear();
+    list.dispatchEvent(new CustomEvent("codewire:sandbox-list-refresh"));
+  };
+  const refreshRow = async (list, id) => {
+    const row = liveRow(list, id);
+    if (!row) { refreshList(list); return; }
+    if (anyOpen(row)) { owedRows.add(id); return; }
+    owedRows.delete(id);
+    const filters = document.getElementById("environment-filters");
+    const query = new URLSearchParams(filters instanceof HTMLFormElement ? new FormData(filters) : undefined);
+    let response;
+    try {
+      response = await fetch(`${list.dataset.rowUrl}${encodeURIComponent(id)}?${query}`, {
+        credentials: "same-origin", cache: "no-store", redirect: "error", headers: { Accept: "text/html" },
+      });
+    } catch {
+      return;
+    }
+    // Gone from this view, or never in it: the list decides.
+    if (response.status === 204) { refreshList(list); return; }
+    if (!response.ok) return;
+    const html = await response.text();
+    const current = liveRow(list, id);
+    // A menu opened while the row was on its way: keep it, and owe the update.
+    if (!current) return;
+    if (anyOpen(current)) { owedRows.add(id); return; }
+    const template = document.createElement("template");
+    template.innerHTML = html.trim();
+    const next = template.content.firstElementChild;
+    if (!(next instanceof HTMLTableRowElement) || next.dataset.environmentId !== id) return;
+    current.replaceWith(next);
+    if (window.htmx) window.htmx.process(next);
+    // Outside htmx's swap, so the row's menu and dialogs are set up on this.
+    next.dispatchEvent(new CustomEvent("codewire:row-replaced", { bubbles: true }));
+    observeInventory(list);
+  };
+  document.body.addEventListener("codewire:live:sandbox", (event) => {
+    const list = document.getElementById("environment-list");
+    const { organization, environment } = event.detail || {};
+    if (!list || organization !== list.dataset.organizationId || !canonicalId(environment)) return;
+    window.clearTimeout(rowTimers.get(environment));
+    rowTimers.set(environment, window.setTimeout(() => {
+      rowTimers.delete(environment);
+      void refreshRow(list, environment);
+    }, liveRowDelayMs));
+  });
+  document.body.addEventListener("codewire:live:resync", () => {
+    const list = document.getElementById("environment-list");
+    if (list) refreshList(list);
+  });
+  // A menu or dialog closing runs what waited for it, once.
+  const settleLive = () => {
+    const list = document.getElementById("environment-list");
+    if (!list) return;
+    if (owedList) { refreshList(list); return; }
+    [...owedRows].forEach((id) => {
+      const row = liveRow(list, id);
+      if (!row) owedRows.delete(id);
+      else if (!anyOpen(row)) void refreshRow(list, id);
+    });
+  };
+  document.addEventListener("toggle", (event) => {
+    if (event.target instanceof HTMLDetailsElement && !event.target.open) settleLive();
+  }, true);
+  document.addEventListener("close", (event) => {
+    if (event.target instanceof HTMLDialogElement) settleLive();
+  }, true);
+
   const nextIndex = (container, selector, minimum = 0) => {
     let highest = minimum - 1;
     container.querySelectorAll(selector).forEach((row) => {
