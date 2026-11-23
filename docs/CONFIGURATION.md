@@ -734,6 +734,10 @@ starting it. A span carries `environment_id` at most: never a command, its
 directory or its variables, a path inside the environment, or an SSH user or
 key. The relay that follows the setup is in no span.
 
+No log line or span carries a person's name or email address: a user, an
+organization or an environment is named by its id. Setup logs that it set a
+Sandbox's Git author, never the author itself (#6006).
+
 A snapshot is traced from its request to the kept disk. The handler
 (`create_snapshot`, or `delete_snapshot` for a deletion) starts the capture or
 delete workflow (`temporal.start_workflow`, a producer span), and each of the

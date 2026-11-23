@@ -32,11 +32,7 @@ impl WorkerSetupOps<'_> {
             .await;
         match configure_environment_outcome(result, identity.is_some())? {
             GitIdentityOutcome::Unresolved => {}
-            GitIdentityOutcome::Configured => {
-                if let Some((email, name)) = &identity {
-                    log_git_identity_configured(&self.env.id, email, name);
-                }
-            }
+            GitIdentityOutcome::Configured => log_git_identity_configured(&self.env.id),
             GitIdentityOutcome::Failed(error) => log_git_identity_failed(&self.env.id, &error),
         }
         Ok(())
@@ -102,7 +98,7 @@ impl WorkerSetupOps<'_> {
                 return Err(error);
             }
             Err(error) => log_git_identity_failed(env_id, &error),
-            Ok(()) => log_git_identity_configured(env_id, &resolved_email, &resolved_name),
+            Ok(()) => log_git_identity_configured(env_id),
         }
 
         Ok(())
@@ -148,9 +144,63 @@ fn log_git_identity_failed(environment_id: &str, error: &anyhow::Error) {
     );
 }
 
-fn log_git_identity_configured(environment_id: &str, email: &str, name: &str) {
-    tracing::info!(environment_id, name, email, "git-identity: configured");
+/// The author's name and email are the user's personal data and stay out of
+/// the logs (#6006).
+fn log_git_identity_configured(environment_id: &str) {
+    tracing::info!(environment_id, "git-identity: configured");
 }
 
 /// Row shape for the git-identity lookup: (git_name, git_email, name, email).
 type GitIdentityRow = (Option<String>, Option<String>, Option<String>, String);
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn the_configured_line_names_the_environment_and_not_the_author() {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            super::log_git_identity_configured("env-6006");
+        });
+
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let line: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        let fields: BTreeSet<&str> = line["fields"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(fields, BTreeSet::from(["environment_id", "message"]));
+        assert_eq!(line["fields"]["environment_id"], "env-6006");
+        assert_eq!(line["fields"]["message"], "git-identity: configured");
+    }
+}
