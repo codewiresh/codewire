@@ -38,6 +38,12 @@ NONCE = re.compile(r"[0-9a-f]{32}")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 DAEMON_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 PORT_NAMES = ("http", "tls", "orchestration", "coordinator", "temporal", "postgres", "watch")
+# New leases come from below the kernel's ephemeral range, which every outgoing
+# connection takes its local port from: a lease inside it can be taken by any
+# short connection between allocation and bring-up (#6046). Saved leases keep
+# their ports, wherever they are.
+LEASE_LOW, LEASE_HIGH = 20000, 32767
+EPHEMERAL_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 NODE_PORTS = {"http": 80, "tls": 443, "orchestration": 30084,
               "coordinator": 30090, "temporal": 30733, "postgres": 30432}
 DEFAULT_PORTS = {"http": 8090, "tls": 10443, "orchestration": 8084,
@@ -65,6 +71,16 @@ class ProfileError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ProfileError(message)
+
+
+def lease_ports(path: Path = EPHEMERAL_RANGE) -> range:
+    try:
+        ephemeral_low = int(path.read_text(encoding="ascii").split()[0])
+    except (OSError, ValueError, IndexError):
+        ephemeral_low = LEASE_HIGH + 1
+    ports = range(LEASE_LOW, min(LEASE_HIGH, ephemeral_low - 1) + 1)
+    require(len(ports) >= 1024, "the ephemeral port range leaves too few profile ports below it")
+    return ports
 
 
 def render_host_ports(text: str, replacements: dict[int, int], *, bind_loopback: bool = False) -> str:
@@ -634,24 +650,33 @@ class Profiles:
     @staticmethod
     @contextmanager
     def free_ports(ports: dict[str, int] | None = None, *, excluded: set[int] | None = None) -> Iterator[dict]:
+        # A saved port is checked with SO_REUSEADDR, so a TIME-WAIT left by a
+        # socket that also set it (as Go and Docker listeners do) does not hold
+        # it; Linux still lets any other TIME-WAIT hold a port for up to a
+        # minute. A new lease binds without it, so two allocations at once
+        # never hold the same port, and a port held for any reason is skipped.
         sockets = []
         result = {}
+        candidates = lease_ports() if ports is None else range(0)
+        pick = secrets.SystemRandom()
         try:
             for name in PORT_NAMES:
                 for _ in range(256):
+                    port = ports[name] if ports else pick.choice(candidates)
+                    if not ports and (port in result.values() or (excluded and port in excluded)):
+                        continue
                     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     try:
-                        listener.bind(("127.0.0.1", ports[name] if ports else 0))
+                        if ports:
+                            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        listener.bind(("127.0.0.1", port))
                     except OSError as error:
                         listener.close()
-                        message = (f"saved {name} loopback port {ports[name]} is occupied; "
-                                   "free that port or select another profile" if ports else
-                                   "cannot allocate a free unprivileged profile port")
-                        raise ProfileError(message) from error
-                    port = listener.getsockname()[1]
-                    if port < 1024 or (excluded and port in excluded):
-                        listener.close()
-                        continue
+                        if not ports:
+                            continue
+                        raise ProfileError(f"saved {name} loopback port {port} is occupied; free that port "
+                                           "or select another profile (a closed connection's TIME-WAIT "
+                                           "clears within a minute)") from error
                     sockets.append(listener)
                     result[name] = port
                     break

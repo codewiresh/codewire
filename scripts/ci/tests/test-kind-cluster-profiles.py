@@ -64,6 +64,24 @@ def allocate_child(root: str, cluster: str, results) -> None:
         results.put((cluster, None, repr(error)))
 
 
+# The real lease range, kept before a test patches it.
+LEASES = profile.lease_ports
+
+
+def time_wait(port: int, *, reuse: bool) -> None:
+    # An outgoing connection from this local port that closes first.
+    with bind_port(0) as server:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if reuse:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        client.bind(("127.0.0.1", port))
+        client.connect(server.getsockname())
+        accepted, _ = server.accept()
+        client.close()
+        accepted.recv(1)
+        accepted.close()
+
+
 @contextmanager
 def bind_port(port: int):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -273,6 +291,67 @@ class ProfileTests(unittest.TestCase):
                 with self.assertRaises(profile.ProfileError):
                     self.profiles.ensure("alpha")
                 self.assertEqual((self.path() / "profile.json").read_bytes(), before)
+        self.assertEqual(self.profiles.ensure("alpha"), value)
+
+    def test_saved_port_in_time_wait_is_not_occupied_and_a_new_lease_skips_one(self):
+        # A closed outgoing connection leaves its local port in TIME-WAIT
+        # (#6046). Linux lets a SO_REUSEADDR bind past it only when that
+        # socket set SO_REUSEADDR too, as Go and Docker listeners do.
+        value = self.profiles.ensure("alpha")
+        port = value["ports"]["watch"]
+        time_wait(port, reuse=True)
+        self.assertEqual(self.profiles.ensure("alpha"), value)
+        # Any other TIME-WAIT holds the port, so a new lease passes it by.
+        candidates = []
+        for _ in range(len(profile.PORT_NAMES) + 1):
+            with bind_port(0) as listener:
+                candidates.append(listener.getsockname()[1])
+        held = candidates[0]
+        time_wait(held, reuse=False)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with self.assertRaises(OSError):
+            probe.bind(("127.0.0.1", held))
+        probe.close()
+        with patch.object(profile, "lease_ports", lambda: candidates):
+            leased = self.profiles.ensure("beta")["ports"].values()
+        self.assertEqual(set(leased), set(candidates[1:]))
+
+    def test_new_leases_come_from_below_the_ephemeral_range(self):
+        leases = set()
+        for cluster in ("alpha", "beta", "gamma"):
+            leases.update(self.profiles.ensure(cluster)["ports"].values())
+        self.assertEqual(len(leases), 3 * len(profile.PORT_NAMES))
+        self.assertTrue(leases <= set(profile.lease_ports()))
+        ephemeral = Path(self.scratch.name) / "ip_local_port_range"
+        ephemeral.write_text("24000\t60999\n", encoding="ascii")
+        with patch.object(profile, "lease_ports", lambda: LEASES(ephemeral)):
+            value = self.profiles.ensure("delta")
+        self.assertTrue(all(profile.LEASE_LOW <= port < 24000 for port in value["ports"].values()))
+
+    def test_lease_range_follows_the_kernel_ephemeral_floor(self):
+        ephemeral = Path(self.scratch.name) / "ip_local_port_range"
+        for text, expected in (("32768 60999", range(20000, 32768)), ("25000\t60999\n", range(20000, 25000)),
+                               ("40000 60999", range(20000, 32768)), ("garbage", range(20000, 32768))):
+            with self.subTest(text=text):
+                ephemeral.write_text(text, encoding="ascii")
+                self.assertEqual(LEASES(ephemeral), expected)
+        self.assertEqual(LEASES(ephemeral.with_name("absent")), range(20000, 32768))
+        ephemeral.write_text("20500 60999", encoding="ascii")
+        with self.assertRaises(profile.ProfileError):
+            LEASES(ephemeral)
+
+    def test_saved_ports_in_the_ephemeral_range_keep_working(self):
+        # A profile leased before #6046 keeps its ports; nothing re-leases it.
+        original = self.profiles.ensure("alpha")
+        ports = {}
+        for name in profile.PORT_NAMES:
+            with bind_port(0) as listener:
+                ports[name] = listener.getsockname()[1]
+        value = copy.deepcopy(original)
+        value["ports"] = ports
+        value["origins"] = profile.own_origins(ports)
+        self.save_unvalidated(value)
         self.assertEqual(self.profiles.ensure("alpha"), value)
 
     def test_invalid_names_origins_and_conflicting_saved_origins_fail(self):
