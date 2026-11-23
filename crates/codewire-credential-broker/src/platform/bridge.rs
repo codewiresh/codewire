@@ -1069,7 +1069,11 @@ fn seals_placeholders(scope: Option<&FrontDoorScope>) -> bool {
 /// whose Open declared a front door (#4909), whatever that switch says. A
 /// broker paired with a front door seals only placeholder logins, so a
 /// delegation epoch without them would refuse every login.
-fn lease_placeholders(hosted: bool, hosted_placeholders: bool, delegated_front_door: bool) -> bool {
+pub(super) fn lease_placeholders(
+    hosted: bool,
+    hosted_placeholders: bool,
+    delegated_front_door: bool,
+) -> bool {
     (hosted && hosted_placeholders) || delegated_front_door
 }
 

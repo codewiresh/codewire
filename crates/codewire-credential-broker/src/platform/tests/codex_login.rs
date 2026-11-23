@@ -763,3 +763,94 @@ async fn a_delegated_epoch_with_a_front_door_leases_its_environments_placeholder
     .await;
     f.finish(result).await
 }
+
+/// A hosted Sandbox's login follows its stored interception decision, not
+/// either service's switch alone (#4001, the switch-on's mixed states). Its
+/// broker is paired with the front door exactly when the relay says the Pod
+/// is intercepted, and its leases carry placeholders exactly while the
+/// credential service's hosted placeholders are on, as the bridge composes
+/// them. An intercepted Pod never gets the sign-in's token: with placeholders
+/// on its login carries its placeholder, and with them off (orchestration on
+/// before the credential service, or the credential service alone reverted)
+/// its login is refused. A Pod that isn't intercepted gets the sign-in's own
+/// login, as before, whichever way the credential service's switch is.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_hosted_login_follows_the_stored_decision_whatever_either_switch_says() -> Result<()> {
+    let f = Fixture::create_for_bridge().await?;
+    let result = async {
+        let rotated = token(serde_json::json!({
+            "exp": unix_now()? + 7_200,
+            "synthetic": "rotated",
+        }));
+        let provider = Provider {
+            exchanges: Arc::new(AtomicUsize::new(0)),
+            responses: Arc::new(AtomicUsize::new(0)),
+            rotated: rotated.clone(),
+            held: None,
+        };
+        for (intercepted, hosted_placeholders) in
+            [(false, false), (false, true), (true, true), (true, false)]
+        {
+            let adapter = f.second().await?.1;
+            let adapter = Adapter {
+                placeholders: crate::platform::bridge::lease_placeholders(
+                    true,
+                    hosted_placeholders,
+                    false,
+                )
+                .then(EpochPlaceholders::default),
+                ..adapter
+            };
+            let broker = OpenAiBroker::new(adapter, provider.clone())?;
+            let broker = if intercepted {
+                broker.paired_with_front_door()
+            } else {
+                broker
+            };
+            let recipient = ProjectionRecipient::new();
+            let request = codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: recipient.public_key().to_vec(),
+                deadline_unix_ms: unix_now()? * 1_000 + 25_000,
+            };
+            let case = format!("intercepted={intercepted} placeholders={hosted_placeholders}");
+            let sealed = match broker.codex_login(request.clone()).await {
+                Ok(sealed) => sealed,
+                Err(crate::BrokerRequestError::Denied) if intercepted && !hosted_placeholders => {
+                    continue;
+                }
+                Err(error) => anyhow::bail!("{case}: {error:?}"),
+            };
+            ensure!(
+                !(intercepted && !hosted_placeholders),
+                "{case}: an intercepted Pod without placeholders got a login"
+            );
+            let opened = recipient.open_codex_login(
+                &sealed,
+                &CodexLoginContext {
+                    environment_id: *Uuid::parse_str(f.context.environment_id.as_str())?.as_bytes(),
+                    environment_generation: f.context.environment_generation,
+                    request_id: *Uuid::parse_str(&request.request_id)?.as_bytes(),
+                    deadline_unix_ms: request.deadline_unix_ms,
+                },
+                unix_now()? * 1_000,
+            )?;
+            let access = opened.login.access_token();
+            if intercepted {
+                ensure!(
+                    access != rotated && codewire_access::CredentialPlaceholder::looks_like(access),
+                    "{case}: an intercepted Pod's login carries its placeholder, never the token"
+                );
+            } else {
+                ensure!(
+                    access == rotated,
+                    "{case}: the sign-in's own login, as before"
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
