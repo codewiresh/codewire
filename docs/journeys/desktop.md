@@ -23,8 +23,10 @@ a4a20f9d16e9, on the default workspace image, whose digest was not recorded.
 They are recorded on #3223 in that day's Dev and local VM walk comments, and
 in the comment after them with the look and the listeners. The Desktop panel
 was walked on Kind the same day, before review, at `43f5c10850`; that walk
-is recorded on #3223 in its Kind walk comment. The panel is not yet observed
-on Dev.
+is recorded on #3223 in its Kind walk comment. On Dev, the delivery walk
+observed the panel's steps 1 to 3, all but "Release keyboard", in promote-dev
+run 73498 at source 0b68dec2aa69 on 2026-11-23, recorded on #3223 in its Dev
+panel comment.
 
 | ID | Kind | Local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
@@ -37,7 +39,7 @@ on Dev.
 | `desktop-cli-refusals` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-loopback-only` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-access` | not yet observed | does not apply: one owner | not yet observed | not yet observed |
-| `desktop-dashboard` | partly | does not apply: no dashboard | not yet observed | not yet observed |
+| `desktop-dashboard` | partly | does not apply: no dashboard | partly | not yet observed |
 | `desktop-dashboard-ends` | partly | does not apply: no dashboard | not yet observed | not yet observed |
 
 ## Before the walk
@@ -511,10 +513,18 @@ on Dev.
   unavailable state with the recreate hint and no Start, and a stopped
   Sandbox asked for the Sandbox and showed no viewer; at 390 px there was no
   sideways scroll; no page checked had a content-security-policy violation.
+  Partly, on Dev, in the delivery walk of promote-dev run 73498 (source
+  0b68dec2aa69, 2026-11-23, as the Dev smoke browser identity, recorded on
+  #3223 in the Dev panel comment): all five checks held. The panel went from
+  stopped to the desktop's picture, filling the panel, in 4.9 s with no
+  reload; typed keys and the pasted text reached the desktop's terminal, and
+  Copy from desktop brought the terminal's printed line to the page; tabs 2
+  to 4 connected and the fifth was refused with the limit of four named; Stop
+  desktop left the panel stopped. Dev ran one orchestration replica.
   Not yet observed: step 4, `--status` and its start time, typing seen in a
-  second tab, and anything on Dev. The viewer's following of the Sandbox's
-  readiness and of the tab's visibility came in review and is proven by the
-  browser fixture spec only.
+  second tab, and, on Dev, "Release keyboard" and steps 4 to 6. The viewer's
+  following of the Sandbox's readiness and of the tab's visibility came in
+  review and is proven by the browser fixture spec only.
 
 ## `desktop-dashboard-ends`: the viewer ends when it should
 
