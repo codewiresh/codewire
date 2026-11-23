@@ -169,8 +169,10 @@ A started desktop looks like Codewire: the wordmark on a dark background as
 the wallpaper; one dark panel along the top with the applications menu, a
 terminal, Chromium, the file manager, the open windows and a clock; dark
 window frames and controls; and one terminal already open, in `/workspace`,
-in the dashboard terminal's colours. There are no desktop icons, no second
-panel and no log-out or workspace buttons.
+in the dashboard terminal's colours, titled "Terminal". There are no desktop
+icons, no second panel and no log-out or workspace buttons. The wallpaper
+fills the screen at any size, and the wordmark on it stays whole at every
+shape from 4:3 to 21:9 (#6161).
 
 These are defaults the image ships and the launcher puts first, not a
 locked configuration. XFCE copies some of them into the home the first time
