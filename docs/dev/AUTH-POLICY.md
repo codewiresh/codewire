@@ -951,6 +951,78 @@ the profile's revision itself. Before creating anything, the SDK refuses an
 API key asked for a profile, or a missing confirmation, and names the user
 token as the way.
 
+## Native sign-in lifetimes (approved, not yet shipped)
+
+These are the numbers set on #4786 for the three native clients,
+`codewire-cli`, `codewire-desktop` and `codewire-ios`; #6145 builds them.
+Until it ships, each client is registered with a 720-hour access token, and
+`cw` and the desktop app refresh only within 60 seconds of expiry. The iOS app
+refreshes only at launch. The change that ships this moves it into
+[Client use](#client-use).
+
+**Lifetimes.** The IdP registers each native client on startup, so a release
+changes them for tokens issued after it.
+- **Access token: 1 hour.** It bounds how long a leaked access token works
+  when nothing revokes it. A sign-out, a password reset, an account disable
+  or refresh-token reuse still ends it at once
+  ([Account access revocation](#account-access-revocation)).
+- **Refresh token: 2160 hours (90 days), unchanged.** It carries the sign-in.
+  Every refresh consumes it and issues a new pair, whose refresh token has 90
+  days of its own, so a sign-in ends after 90 days unused. A rotated refresh
+  token presented again is refused and, with `IDP_REFRESH_REUSE_REVOKES` on,
+  revokes the grant ([OIDC-PROVIDER-THREAT-MODEL.md](OIDC-PROVIDER-THREAT-MODEL.md), T4).
+- **ID token: 1 hour, unchanged.**
+- **Tokens already issued** keep the expiry they were issued with, up to 30
+  days. Nothing deletes them unless the owner chooses that on #6145.
+
+**Refreshing.** `cw` and the desktop app share this through
+`codewire-client`, and the iOS app does the same:
+- **Ahead of expiry.** Before a request, a client refreshes when less than
+  10 minutes of its access token remain, measured from the `expires_in` it
+  was given.
+- **One refresh at a time.** Every client refreshes under a lock shared by
+  everything that uses its credential store: `cw`'s credentials file, and
+  the desktop app's keyring entry through a lock file beside it. A provider
+  that finds a newer saved pair adopts it instead of refreshing. Two
+  refreshes of one refresh token would be a reuse, and with
+  `IDP_REFRESH_REUSE_REVOKES` on, a reuse signs the user out. Today only
+  `cw`'s file has that lock. The desktop app builds a provider per call,
+  across threads and instances, with nothing shared between them.
+- **Once on a refused bearer.** The shared Connect auth layer
+  (`ConnectAuthLayer`) marks its own refusal of a bearer it doesn't accept
+  (unknown, expired or revoked) with a `google.rpc.ErrorInfo` of domain
+  `codewire.sh` and reason `BEARER_REFUSED`. It refuses before any handler
+  runs. Nothing else produces that reason: a repository check refuses it
+  anywhere outside the auth layer and tests.
+  - A unary call refused `Unauthenticated` with that reason gets one more
+    try. Holding the same locks, the client adopts a saved token that differs
+    from the refused one, or else refreshes once, then sends the call once
+    more with the new token.
+  - Any other `Unauthenticated`, without the reason, is never retried. A
+    handler may return one after it has acted, so sending the call again
+    could repeat a write.
+  - A second refusal, or a refresh the IdP refuses, ends there: `cw` says it
+    is not signed in and to run `cw login`, as it does today, and the apps
+    ask the user to sign in again.
+  - A streaming call is never sent twice. It starts with a token at least 10
+    minutes from expiry.
+- **The iOS app** refreshes on the same rules while it is open, not only at
+  launch.
+- **API keys** and user tokens are never refreshed. A client given one sends
+  it as it is.
+
+**Streams.** Expiry never ends an admitted stream (#3827): a `cw logs
+--follow` started before its access token expired keeps running.
+
+**Order.** The client change ships first, or in the same release as the IdP
+change. A `cw` or desktop app from before it already refreshes within 60
+seconds of the `expires_in` it is given, so it keeps working with a 1-hour
+token. The iOS app from before it refreshes only at launch, so the IdP
+change waits for the iOS change to be what people run. If no build of the
+app has gone out to users, nobody runs the old one and nothing waits.
+A client retries only on `BEARER_REFUSED`, so against a server from before
+the reason it never retries, and only refreshes ahead of expiry.
+
 ## Protocol and error boundaries
 
 ### Long-running credential publication
