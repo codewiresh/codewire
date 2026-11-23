@@ -768,20 +768,83 @@ fn the_node_cap_uses_the_configured_percentage_of_the_smallest_schedulable_node(
         node("cordoned", "2", "8Gi", true, true),
         node("not-ready", "1", "4Gi", false, false),
     ];
-    let budget = node_budget(&nodes, 25);
+    let budget = node_budget(&nodes, 25, false);
     assert_eq!(budget.cpu_millis, 1950);
     assert_eq!(budget.memory_bytes, 8 << 30);
-    let dev_budget = node_budget(&nodes, 50);
+    let dev_budget = node_budget(&nodes, 50, false);
     assert_eq!(dev_budget.cpu_millis, 3900);
     assert_eq!(dev_budget.memory_bytes, 16 << 30);
-    assert_eq!(node_budget(&[], 50), Budget::default());
-    assert_eq!(node_budget(&nodes[2..], 25), Budget::default());
+    assert_eq!(node_budget(&[], 50, false), Budget::default());
+    assert_eq!(node_budget(&nodes[2..], 25, false), Budget::default());
     let unreadable = node("odd", "lots", "64Gi", true, false);
     assert_eq!(
-        node_budget(&[nodes[0].clone(), unreadable], 50),
+        node_budget(&[nodes[0].clone(), unreadable], 50, false),
         Budget::default()
     );
     assert!(node_unfit(Some(&nodes[2]), &[]) && !node_unfit(Some(&nodes[0]), &[]));
+}
+
+/// #5602: a `standard` member takes a `/dev/kvm` device, so its budget counts
+/// only the nodes that advertise one, and caps the devices too.
+#[test]
+fn a_kvm_budget_counts_only_nodes_with_the_device_and_caps_it() {
+    let with_kvm = |name: &str, cpu: &str, memory: &str, devices: &str| {
+        let mut node = node(name, cpu, memory, true, false);
+        node.status
+            .as_mut()
+            .unwrap()
+            .allocatable
+            .as_mut()
+            .unwrap()
+            .insert(
+                "codewire.sh/kvm".into(),
+                k8s_openapi::apimachinery::pkg::api::resource::Quantity(devices.into()),
+            );
+        node
+    };
+    let nodes = [
+        with_kvm("kvm-large", "16", "64Gi", "110"),
+        with_kvm("kvm-medium", "8", "32Gi", "40"),
+        // Smaller than both, but it has no device: a member never lands here.
+        node("plain", "2", "8Gi", true, false),
+    ];
+    let budget = node_budget(&nodes, 50, true);
+    assert_eq!(
+        budget,
+        Budget {
+            cpu_millis: 4000,
+            memory_bytes: 16 << 30,
+            kvm_devices: 20,
+        }
+    );
+    // Without devices the plain node is the smallest, and no device counts.
+    let plain = node_budget(&nodes, 50, false);
+    assert_eq!((plain.cpu_millis, plain.kvm_devices), (1000, 0));
+    // No node advertises a device: nothing fits.
+    assert_eq!(node_budget(&nodes[2..], 50, true), Budget::default());
+}
+
+/// #5602: members that take a device are clamped by the device budget as
+/// well as CPU and memory.
+#[test]
+fn kvm_members_are_clamped_by_the_device_budget() {
+    let pools = desired();
+    let member = Reservation {
+        cpu_millis: 100,
+        memory_bytes: 1 << 20,
+        kvm_devices: 1,
+    };
+    let budget = Budget {
+        cpu_millis: 1_000_000,
+        memory_bytes: 1 << 40,
+        kvm_devices: 3,
+    };
+    // Two shapes of two members each, three devices: the first shape gets
+    // both, the second one.
+    assert_eq!(
+        clamp_members(&pools, &[Some(member), Some(member)], budget),
+        [2, 1]
+    );
 }
 
 #[test]
@@ -813,6 +876,20 @@ fn member_reservations_count_requests_sidecars_and_runtime_overhead() {
     assert_eq!(reservation.memory_bytes, (1024 + 64) << 20);
     let unparsable = json!({ "containers": [{ "resources": { "requests": { "cpu": "fast" } } }] });
     assert_eq!(member_reservation(&unparsable, &BTreeMap::new()), None);
+    // A `standard` member's device is its container's limit (#5602).
+    let standard = json!({ "containers": [{ "resources": {
+        "requests": { "cpu": "2", "memory": "4Gi" },
+        "limits": { "cpu": "2250m", "memory": "4352Mi", "codewire.sh/kvm": "1" },
+    } }] });
+    let reservation = member_reservation(&standard, &BTreeMap::new()).unwrap();
+    assert_eq!((reservation.cpu_millis, reservation.kvm_devices), (2000, 1));
+    assert_eq!(reservation.memory_bytes, 4 << 30);
+    assert_eq!(
+        member_reservation(&spec, &BTreeMap::new())
+            .unwrap()
+            .kvm_devices,
+        0
+    );
 }
 
 #[test]
@@ -843,14 +920,17 @@ fn members_are_clamped_in_configuration_order() {
     let small = Reservation {
         cpu_millis: 1750,
         memory_bytes: 5250 << 20,
+        kvm_devices: 0,
     };
     let large = Reservation {
         cpu_millis: 2750,
         memory_bytes: 9346 << 20,
+        kvm_devices: 0,
     };
     let budget = |cpu: i128, memory_gib: i128| Budget {
         cpu_millis: cpu,
         memory_bytes: memory_gib << 30,
+        kvm_devices: 0,
     };
     let reservations = [Some(small), Some(large)];
     assert_eq!(
@@ -1060,10 +1140,12 @@ fn a_lower_budget_applies_only_after_it_holds() {
     let high = Budget {
         cpu_millis: 8000,
         memory_bytes: 32 << 30,
+        kvm_devices: 0,
     };
     let low = Budget {
         cpu_millis: 2000,
         memory_bytes: 32 << 30,
+        kvm_devices: 0,
     };
     assert_eq!(settle_budget(None, low), (low, 0));
     let mut state = settle_budget(None, high);
@@ -1109,10 +1191,12 @@ fn another_revisions_members_count_against_the_node_cap() {
         Some(Reservation {
             cpu_millis: 1_500,
             memory_bytes: 5 << 30,
+            kvm_devices: 0,
         }),
         Some(Reservation {
             cpu_millis: 2_500,
             memory_bytes: 9 << 30,
+            kvm_devices: 0,
         }),
     ];
     let mut pools = fixture.pools.clone();
@@ -1131,11 +1215,13 @@ fn another_revisions_members_count_against_the_node_cap() {
         Reservation {
             cpu_millis: 3_000,
             memory_bytes: 10 << 30,
+            kvm_devices: 0,
         }
     );
     let budget = Budget {
         cpu_millis: 5_000,
         memory_bytes: 64 << 30,
+        kvm_devices: 0,
     };
     let left = budget_after(budget, held);
     assert_eq!((left.cpu_millis, left.memory_bytes), (2_000, 54 << 30));
@@ -1149,6 +1235,7 @@ fn another_revisions_members_count_against_the_node_cap() {
         Budget {
             cpu_millis: 1_000,
             memory_bytes: 1 << 30,
+            kvm_devices: 0,
         },
         held,
     );

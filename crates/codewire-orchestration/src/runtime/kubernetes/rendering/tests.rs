@@ -293,8 +293,22 @@ fn a_runtime_that_is_not_a_vm_never_renders_broker_mode() {
 
 /// `SPEC.md` section 4: a deployment on `standard` runs the workspace image
 /// its disk was built from in its own VM runtime; an environment that names
-/// any other image is created on `commodity`; and `standard` renders no warm
-/// pool yet.
+/// any other image is created on `commodity`; and its warm pool renders the
+/// standard Pod its canonical creates adopt, but none on a disk that does
+/// not boot the canonical image (#5602).
+/// A standard runtime whose disk was built from a workspace image other than
+/// the canonical one.
+fn stale_disk_runtime() -> Option<crate::sandbox::template::StandardRuntime> {
+    crate::sandbox::template::StandardRuntime::parse(
+        "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+         3333333333333333333333333333333333333333333333333333333333333333 \
+         44444444444444444444444444444444 \
+         registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    )
+    .unwrap()
+}
+
 #[test]
 fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_other_on_commodity() {
     let canonical = crate::sandbox::canonical_workspace_runtime_image();
@@ -337,14 +351,7 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
     // A workspace pin moved on without the disk republished: the VM would
     // boot the old image, so the environment goes to commodity.
     let stale_disk = KubernetesRenderConfig {
-        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
-            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
-             3333333333333333333333333333333333333333333333333333333333333333 \
-             44444444444444444444444444444444 \
-             registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555",
-        )
-        .unwrap(),
+        standard_runtime: stale_disk_runtime(),
         ..config.clone()
     }
     .environment(&RenderingIntent {
@@ -366,15 +373,34 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
     assert_eq!(own_image.standard_runtime, None);
     assert!(own_image.hosted_egress.is_some());
 
-    assert!(
-        config
-            .pool(WorkspaceShape {
-                cpu_millicores: 2000,
-                memory_mib: 4096,
-                disk_gib: 20,
-            })
-            .is_err()
+    let shape = WorkspaceShape {
+        cpu_millicores: 2000,
+        memory_mib: 4096,
+        disk_gib: 20,
+    };
+    let member = config.pool(shape).unwrap();
+    let adopter = config
+        .environment(&RenderingIntent {
+            image: canonical.into(),
+            shape,
+            ..intent(Isolation::Standard)
+        })
+        .unwrap();
+    assert_eq!(
+        member.runtime_profile_spec(),
+        adopter.runtime_profile_spec()
     );
+    assert_eq!(member.runtime_profile_spec().runtime_class_name, "standard");
+    assert_eq!(member.standard_runtime, runtime);
+    assert_eq!(member.image, adopter.image);
+    // A disk that boots another image: canonical creates go to `commodity`,
+    // so a standard member would never be adopted.
+    let stale = KubernetesRenderConfig {
+        standard_runtime: stale_disk_runtime(),
+        ..config.clone()
+    };
+    let refused = stale.pool(shape).unwrap_err().to_string();
+    assert!(refused.contains("does not boot the canonical"), "{refused}");
     // Without hosted egress, a standard environment is refused, never
     // rendered without a network.
     assert!(

@@ -249,6 +249,79 @@ fn tun_init_pinned(container: &Value) -> bool {
             .all(|key| absent_or_empty(container.get(*key)))
 }
 
+/// [`pool_member_isolated`]'s third part: the member's volumes, one source
+/// each, of the kinds the rendering uses. Returns the volumes that carry a
+/// projected token. With `standard_disk`, a `standard` member's workspace
+/// disk as rendered, that disk is the one image volume admitted, once.
+fn pool_member_volumes<'a>(
+    spec: &'a Value,
+    hosted_egress: bool,
+    support_image: &str,
+    standard_disk: Option<&Value>,
+) -> Result<std::collections::BTreeSet<&'a str>, String> {
+    use codewire_daemon_proto::{CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, EGRESS_TOKEN_AUDIENCE};
+
+    let mut disks = 0;
+    let mut token_volumes = std::collections::BTreeSet::new();
+    for (index, volume) in spec
+        .get("volumes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("/volumes/{index}");
+        let name = volume.get("name").and_then(Value::as_str);
+        let Some((kind, source)) = single_source(volume) else {
+            return Err(at);
+        };
+        // The TUN device's volume is memory-backed, exactly as rendered: a
+        // device node must never be written to the node's own disk.
+        if name == Some(crate::sandbox::template::HOSTED_EGRESS_DEVNET_VOLUME)
+            && (!hosted_egress
+                || volume != &crate::sandbox::template::hosted_egress_devnet_volume())
+        {
+            return Err(at);
+        }
+        match kind {
+            "emptyDir" | "configMap" => {}
+            // The workspace claim, which `volume_matches` resolves by UID.
+            "persistentVolumeClaim" if name == Some("workspace") => {}
+            "image" if standard_disk == Some(volume) => {
+                disks += 1;
+                if disks > 1 {
+                    return Err(at);
+                }
+            }
+            "image"
+                if standard_disk.is_none()
+                    && source.get("reference").and_then(Value::as_str) == Some(support_image) => {}
+            "projected" => {
+                let sources = source.get("sources").and_then(Value::as_array);
+                for (position, projection) in sources.into_iter().flatten().enumerate() {
+                    match single_source(projection) {
+                        Some(("serviceAccountToken", token))
+                            if matches!(
+                                token.get("audience").and_then(Value::as_str),
+                                Some(WORKSPACE_BINDING_TOKEN_AUDIENCE)
+                                    | Some(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
+                            ) || (hosted_egress
+                                && token.get("audience").and_then(Value::as_str)
+                                    == Some(EGRESS_TOKEN_AUDIENCE)) =>
+                        {
+                            token_volumes.extend(name);
+                        }
+                        Some(("configMap" | "downwardAPI", _)) => {}
+                        _ => return Err(format!("{at}/projected/sources/{position}")),
+                    }
+                }
+            }
+            other => return Err(format!("{at}/{other}")),
+        }
+    }
+    Ok(token_volumes)
+}
+
 /// Program #2238 C3, cw-confidential's #3628 PR 5c condition 3: the
 /// isolation of a pool-born member, checked over its own Pod spec on its
 /// first bind whatever the driver says of its pool. Every property here is
@@ -258,8 +331,6 @@ pub(crate) fn pool_member_isolated(
     spec: &Value,
     opts: &crate::sandbox::template::TemplateOpts,
 ) -> Result<(), String> {
-    use codewire_daemon_proto::{CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, EGRESS_TOKEN_AUDIENCE};
-
     // Hosted egress (#4000) adds the egress token and the TUN init container,
     // and nothing else; neither is admitted while it is off.
     let hosted_egress = opts.hosted_egress.is_some();
@@ -309,57 +380,17 @@ pub(crate) fn pool_member_isolated(
             return Err(format!("/securityContext/{key}"));
         }
     }
-    // 3. Volumes, one source each, of the kinds the rendering uses.
+    // 3. Volumes, one source each, of the kinds the rendering uses. A
+    // `standard` Pod's one image volume is its workspace disk, exactly as
+    // configured (#5602); any other Pod's are the support image's.
     let support_image = opts.effective_support_image();
-    let mut token_volumes = std::collections::BTreeSet::new();
-    for (index, volume) in spec
-        .get("volumes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        let at = format!("/volumes/{index}");
-        let name = volume.get("name").and_then(Value::as_str);
-        let Some((kind, source)) = single_source(volume) else {
-            return Err(at);
-        };
-        // The TUN device's volume is memory-backed, exactly as rendered: a
-        // device node must never be written to the node's own disk.
-        if name == Some(crate::sandbox::template::HOSTED_EGRESS_DEVNET_VOLUME)
-            && (!hosted_egress
-                || volume != &crate::sandbox::template::hosted_egress_devnet_volume())
-        {
-            return Err(at);
-        }
-        match kind {
-            "emptyDir" | "configMap" => {}
-            // The workspace claim, which `volume_matches` resolves by UID.
-            "persistentVolumeClaim" if name == Some("workspace") => {}
-            "image" if source.get("reference").and_then(Value::as_str) == Some(support_image) => {}
-            "projected" => {
-                let sources = source.get("sources").and_then(Value::as_array);
-                for (position, projection) in sources.into_iter().flatten().enumerate() {
-                    match single_source(projection) {
-                        Some(("serviceAccountToken", token))
-                            if matches!(
-                                token.get("audience").and_then(Value::as_str),
-                                Some(WORKSPACE_BINDING_TOKEN_AUDIENCE)
-                                    | Some(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
-                            ) || (hosted_egress
-                                && token.get("audience").and_then(Value::as_str)
-                                    == Some(EGRESS_TOKEN_AUDIENCE)) =>
-                        {
-                            token_volumes.extend(name);
-                        }
-                        Some(("configMap" | "downwardAPI", _)) => {}
-                        _ => return Err(format!("{at}/projected/sources/{position}")),
-                    }
-                }
-            }
-            other => return Err(format!("{at}/{other}")),
-        }
-    }
+    let standard_disk = opts
+        .standard_runtime
+        .as_ref()
+        .filter(|_| profile.profile == crate::sandbox::template::RUNTIME_PROFILE_STANDARD)
+        .map(crate::sandbox::template::StandardRuntime::image_disk_volume);
+    let token_volumes =
+        pool_member_volumes(spec, hosted_egress, support_image, standard_disk.as_ref())?;
     // 4. Containers: root only where the rendering grants it, with its image.
     for field in ["initContainers", "containers"] {
         for (index, container) in spec

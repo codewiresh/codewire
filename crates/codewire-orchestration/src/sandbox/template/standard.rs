@@ -38,7 +38,7 @@ pub const STANDARD_RUNTIME_IMAGE_ENV: &str = "SANDBOX_STANDARD_RUNTIME_IMAGE";
 /// from this one value.
 pub const STANDARD_IMAGE_DISK_ENV: &str = "SANDBOX_STANDARD_IMAGE_DISK";
 /// The one device a `standard` Pod is given, by the node's device plugin.
-const KVM_DEVICE_RESOURCE: &str = "codewire.sh/kvm";
+pub(crate) const KVM_DEVICE_RESOURCE: &str = "codewire.sh/kvm";
 /// The runtime bounds the guest's power-off at 45 s, inside this.
 const TERMINATION_GRACE_SECONDS: i64 = 60;
 const IMAGE_DISK_VOLUME: &str = "image-disk";
@@ -134,6 +134,26 @@ impl StandardRuntime {
         } else {
             POD_RUNTIME_WORKSPACE_INIT_IMAGE
         }
+    }
+
+    /// The runtime image the Pod's one container runs, by digest.
+    pub fn runtime_image(&self) -> &str {
+        &self.runtime_image
+    }
+
+    /// The published workspace disk the Pod mounts read-only, by digest.
+    pub fn image_disk(&self) -> &str {
+        &self.image_disk
+    }
+
+    /// The Pod's one image volume, its workspace disk, exactly as rendered.
+    /// A warm member's first bind admits this volume and no other image
+    /// volume (#5602).
+    pub fn image_disk_volume(&self) -> Value {
+        json!({
+            "name": IMAGE_DISK_VOLUME,
+            "image": { "reference": self.image_disk, "pullPolicy": "IfNotPresent" },
+        })
     }
 
     /// Whether the VM boots `image`: it has the manifest digest of the
@@ -324,10 +344,7 @@ pub(super) fn pod_spec(
         ],
     });
     let mut volumes = vec![
-        json!({
-            "name": IMAGE_DISK_VOLUME,
-            "image": { "reference": runtime.image_disk, "pullPolicy": "IfNotPresent" },
-        }),
+        runtime.image_disk_volume(),
         json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory" } }),
     ];
     identity::mount_identity(opts, &mut ws, &mut volumes, hosted_egress::mount_identity);

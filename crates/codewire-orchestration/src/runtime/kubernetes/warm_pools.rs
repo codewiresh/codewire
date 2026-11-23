@@ -364,6 +364,55 @@ pub(crate) fn selector_of(labels: &BTreeMap<String, String>) -> String {
         .join(",")
 }
 
+/// The node cap a pass applies, the runtime nodes by name, and each wanted
+/// pool's member reservation.
+struct NodeCap {
+    budget: Budget,
+    nodes: BTreeMap<String, Node>,
+    reservations: Vec<Option<Reservation>>,
+}
+
+/// The node cap, from the RuntimeClasses the pools render.
+async fn node_cap(
+    client: &kube::Client,
+    wanted: &RenderedPools,
+    state: &mut LoopState,
+) -> kube::Result<NodeCap> {
+    let (overheads, node_selector) = read_runtime_classes(client, &runtime_classes(wanted)).await?;
+    let nodes = Api::<Node>::all(client.clone())
+        .list(&ListParams::default().labels(&selector_of(&node_selector)))
+        .await?
+        .items;
+    let reservations: Vec<Option<Reservation>> = wanted
+        .pools
+        .iter()
+        .map(|pool| {
+            let pod_spec = &pool.objects.template["spec"]["podTemplate"]["spec"];
+            member_reservation(pod_spec, pod_overhead(pod_spec, &overheads)?)
+        })
+        .collect();
+    // `standard` members take a `/dev/kvm` device, so only the nodes that
+    // advertise one count (#5602).
+    let kvm = reservations
+        .iter()
+        .flatten()
+        .any(|reservation| reservation.kvm_devices > 0);
+    let (budget, lower) = settle_budget(
+        state.budget,
+        node_budget(&nodes, wanted.max_node_percent, kvm),
+    );
+    state.budget = Some((budget, lower));
+    let nodes: BTreeMap<String, Node> = nodes
+        .into_iter()
+        .filter_map(|node| Some((node.metadata.name.clone()?, node)))
+        .collect();
+    Ok(NodeCap {
+        budget,
+        nodes,
+        reservations,
+    })
+}
+
 pub(super) async fn reconcile_once(
     client: &kube::Client,
     namespace: &str,
@@ -462,26 +511,11 @@ pub(super) async fn reconcile_once(
 
     let cache_warm = image_cache_gate(client, namespace, wanted).await?;
 
-    // The node cap, from the RuntimeClasses the pools render.
-    let (overheads, node_selector) = read_runtime_classes(client, &runtime_classes(wanted)).await?;
-    let nodes = Api::<Node>::all(client.clone())
-        .list(&ListParams::default().labels(&selector_of(&node_selector)))
-        .await?
-        .items;
-    let (budget, lower) = settle_budget(state.budget, node_budget(&nodes, wanted.max_node_percent));
-    state.budget = Some((budget, lower));
-    let nodes: BTreeMap<String, Node> = nodes
-        .into_iter()
-        .filter_map(|node| Some((node.metadata.name.clone()?, node)))
-        .collect();
-    let reservations: Vec<Option<Reservation>> = wanted
-        .pools
-        .iter()
-        .map(|pool| {
-            let pod_spec = &pool.objects.template["spec"]["podTemplate"]["spec"];
-            member_reservation(pod_spec, pod_overhead(pod_spec, &overheads)?)
-        })
-        .collect();
+    let NodeCap {
+        budget,
+        nodes,
+        reservations,
+    } = node_cap(client, wanted, state).await?;
     // #3572: another revision's pools of the same shapes count against the
     // cap while they hold members.
     let budget = budget_after(
@@ -514,6 +548,7 @@ pub(super) async fn reconcile_once(
                 member_memory_bytes = reservation.map(|r| r.memory_bytes as i64),
                 budget_cpu_millis = budget.cpu_millis as i64,
                 budget_memory_bytes = budget.memory_bytes as i64,
+                budget_kvm_devices = i64::try_from(budget.kvm_devices).unwrap_or(i64::MAX),
                 max_node_percent = wanted.max_node_percent,
                 "warm pools: members clamped to the configured share of the smallest runtime node"
             );

@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::sandbox::client::{parse_quantity_ratio, sandbox_name_hash};
 use crate::sandbox::image_cache::{CacheState, cached_images, is_approved_image, rollout};
+use crate::sandbox::template::KVM_DEVICE_RESOURCE;
 use crate::sandbox::warm_pool::{
     DesiredPool, MEMBER_POOL_LABEL, POOL_REVISION_ANNOTATION, TEMPLATE_REF_HASH_LABEL,
     has_pool_labels, is_warm_pool_name, shape_label, spec_equivalent, warm_pool_name_shape,
@@ -39,18 +40,22 @@ pub const SUPERSEDED_GRACE: Duration = Duration::from_secs(15 * 60);
 const SAFE_TO_EVICT_ANNOTATION: &str = "cluster-autoscaler.kubernetes.io/safe-to-evict";
 
 /// What one member reserves on its node: its effective Pod requests plus the
-/// RuntimeClass overhead, as the scheduler counts them.
+/// RuntimeClass overhead, as the scheduler counts them, and the `/dev/kvm`
+/// devices a `standard` member takes (#5602).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Reservation {
     pub cpu_millis: i128,
     pub memory_bytes: i128,
+    pub kvm_devices: i128,
 }
 
-/// What all pools together may reserve.
+/// What all pools together may reserve. `kvm_devices` bounds only members
+/// that take a device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Budget {
     pub cpu_millis: i128,
     pub memory_bytes: i128,
+    pub kvm_devices: i128,
 }
 
 /// A quantity in thousandths of its unit (CPU millicores), rounded up.
@@ -77,9 +82,19 @@ fn container_requests(container: &Value) -> Option<Reservation> {
             Some(value) => parse(value.as_str()?),
         }
     };
+    // An extended resource is requested at its limit, and the template sets
+    // only the limit.
+    let kvm_devices = match container
+        .pointer("/resources/limits")
+        .and_then(|limits| limits.get(KVM_DEVICE_RESOURCE))
+    {
+        None => 0,
+        Some(value) => quantity_units(value.as_str()?)?,
+    };
     Some(Reservation {
         cpu_millis: read("cpu", quantity_millis)?,
         memory_bytes: read("memory", quantity_units)?,
+        kvm_devices,
     })
 }
 
@@ -112,6 +127,7 @@ pub fn member_reservation(
         let requests = container_requests(&container)?;
         running.cpu_millis += requests.cpu_millis;
         running.memory_bytes += requests.memory_bytes;
+        running.kvm_devices += requests.kvm_devices;
     }
     let mut sidecars = Reservation::default();
     let mut init_peak = Reservation::default();
@@ -142,6 +158,7 @@ pub fn member_reservation(
             + overhead_cpu,
         memory_bytes: (running.memory_bytes + sidecars.memory_bytes).max(init_peak.memory_bytes)
             + overhead_memory,
+        kvm_devices: running.kvm_devices,
     })
 }
 
@@ -214,7 +231,8 @@ pub fn settle_budget(previous: Option<(Budget, u8)>, observed: Budget) -> (Budge
     match previous {
         Some((applied, lower))
             if observed.cpu_millis < applied.cpu_millis
-                || observed.memory_bytes < applied.memory_bytes =>
+                || observed.memory_bytes < applied.memory_bytes
+                || observed.kvm_devices < applied.kvm_devices =>
         {
             if lower + 1 >= BUDGET_DECREASE_PASSES {
                 (observed, 0)
@@ -303,33 +321,45 @@ pub fn template_spec_current(live: &DynamicObject, rendered: &Value) -> bool {
 /// The configured percentage (validated by `WarmPoolConfig`) of the smallest
 /// schedulable runtime node, per resource. Members may all land on one node,
 /// so the cap bounds the total against a single node. No schedulable node,
-/// or an unreadable allocatable, is a zero budget.
-pub fn node_budget(runtime_nodes: &[Node], max_node_percent: u8) -> Budget {
-    let mut smallest: Option<(i128, i128)> = None;
+/// or an unreadable allocatable, is a zero budget. Members that take a
+/// `/dev/kvm` device (`kvm`) run only on nodes that advertise one, so only
+/// those count, and their device count is capped the same way (#5602).
+pub fn node_budget(runtime_nodes: &[Node], max_node_percent: u8, kvm: bool) -> Budget {
+    let mut smallest: Option<(i128, i128, i128)> = None;
     for node in runtime_nodes.iter().filter(|node| node_schedulable(node)) {
         let allocatable = node
             .status
             .as_ref()
             .and_then(|status| status.allocatable.as_ref());
-        let cpu = allocatable
-            .and_then(|allocatable| allocatable.get("cpu"))
-            .and_then(|quantity| quantity_millis(&quantity.0));
-        let memory = allocatable
-            .and_then(|allocatable| allocatable.get("memory"))
-            .and_then(|quantity| quantity_units(&quantity.0));
-        let (Some(cpu), Some(memory)) = (cpu, memory) else {
+        let read = |name: &str, parse: fn(&str) -> Option<i128>| {
+            allocatable
+                .and_then(|allocatable| allocatable.get(name))
+                .and_then(|quantity| parse(&quantity.0))
+        };
+        let devices = read(KVM_DEVICE_RESOURCE, quantity_units).unwrap_or(0);
+        if kvm && devices <= 0 {
+            continue;
+        }
+        let (Some(cpu), Some(memory)) =
+            (read("cpu", quantity_millis), read("memory", quantity_units))
+        else {
             return Budget::default();
         };
         smallest = Some(match smallest {
-            None => (cpu, memory),
-            Some((low_cpu, low_memory)) => (low_cpu.min(cpu), low_memory.min(memory)),
+            None => (cpu, memory, devices),
+            Some((low_cpu, low_memory, low_devices)) => (
+                low_cpu.min(cpu),
+                low_memory.min(memory),
+                low_devices.min(devices),
+            ),
         });
     }
-    let (cpu, memory) = smallest.unwrap_or_default();
+    let (cpu, memory, devices) = smallest.unwrap_or_default();
     let percent = i128::from(max_node_percent);
     Budget {
         cpu_millis: cpu * percent / 100,
         memory_bytes: memory * percent / 100,
+        kvm_devices: if kvm { devices * percent / 100 } else { 0 },
     }
 }
 
@@ -351,12 +381,15 @@ pub fn clamp_members(
             else {
                 return 0;
             };
-            let fit = (remaining.cpu_millis / reservation.cpu_millis)
-                .min(remaining.memory_bytes / reservation.memory_bytes)
-                .max(0);
-            let allowed = i128::from(pool.configured.members).min(fit);
+            let mut fit = (remaining.cpu_millis / reservation.cpu_millis)
+                .min(remaining.memory_bytes / reservation.memory_bytes);
+            if reservation.kvm_devices > 0 {
+                fit = fit.min(remaining.kvm_devices / reservation.kvm_devices);
+            }
+            let allowed = i128::from(pool.configured.members).min(fit.max(0));
             remaining.cpu_millis -= allowed * reservation.cpu_millis;
             remaining.memory_bytes -= allowed * reservation.memory_bytes;
+            remaining.kvm_devices -= allowed * reservation.kvm_devices;
             i32::try_from(allowed).unwrap_or(0)
         })
         .collect()
@@ -407,6 +440,7 @@ pub fn superseded_reservation(
         );
         held.cpu_millis += members * reservation.cpu_millis;
         held.memory_bytes += members * reservation.memory_bytes;
+        held.kvm_devices += members * reservation.kvm_devices;
     }
     held
 }
@@ -416,6 +450,7 @@ pub fn budget_after(budget: Budget, held: Reservation) -> Budget {
     Budget {
         cpu_millis: (budget.cpu_millis - held.cpu_millis).max(0),
         memory_bytes: (budget.memory_bytes - held.memory_bytes).max(0),
+        kvm_devices: (budget.kvm_devices - held.kvm_devices).max(0),
     }
 }
 

@@ -1096,3 +1096,120 @@ fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
         Err(format!("/containers/{dind}/volumeMounts/{position}"))
     );
 }
+
+/// A Dev-shaped `standard` configuration whose disk boots the canonical
+/// workspace image (#5602).
+fn standard_cfg() -> SandboxWorkerCfg {
+    let (_, digest) = canonical_workspace_runtime_image()
+        .rsplit_once('@')
+        .unwrap();
+    SandboxWorkerCfg {
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_STANDARD.into(),
+        hosted_egress: Some(broker_egress()),
+        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            &format!(
+                "registry.example.invalid/codewire/workspace-disk@sha256:5555555555555555555555555555555555555555555555555555555555555555 \
+                 6666666666666666666666666666666666666666666666666666666666666666 \
+                 77777777777777777777777777777777 \
+                 registry.example.invalid/codewire/workspace@{digest}"
+            ),
+        )
+        .unwrap(),
+        ..dev_cfg()
+    }
+}
+
+/// #5602, cw-security's conditions on a `standard` member's first bind: it
+/// is admitted exactly as its pool renders it, with its workspace disk as its
+/// one image volume; a disk of another reference, a second disk, a support
+/// image volume, or the same member against a `commodity` rendering is
+/// refused.
+#[test]
+fn a_standard_pool_member_is_admitted_only_with_its_exact_disk() {
+    use crate::worker::workspace_binding::checks::pool_member_isolated;
+    use serde_json::json;
+
+    let cfg = standard_cfg();
+    let wanted = warm_pool_template_opts(&cfg, shapes()[0]).unwrap();
+    assert_eq!(wanted.runtime_profile_spec().runtime_class_name, "standard");
+    let template = render_sandbox_template(SANDBOX_NAMESPACE, &wanted);
+    let mut spec = template["spec"]["podTemplate"]["spec"].clone();
+    spec["volumes"].as_array_mut().unwrap().push(json!({
+        "name": "workspace",
+        "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
+    }));
+    assert_eq!(pool_member_isolated(&spec, &wanted), Ok(()));
+
+    let volumes = spec["volumes"].as_array().unwrap().clone();
+    let disk = volumes
+        .iter()
+        .position(|volume| volume.get("image").is_some())
+        .expect("the workspace disk");
+    // Exactly the configured reference, and only as rendered.
+    for (pointer, value) in [
+        (
+            "/image/reference",
+            json!(
+                "registry.example.invalid/codewire/workspace-disk@sha256:8888888888888888888888888888888888888888888888888888888888888888"
+            ),
+        ),
+        ("/image/pullPolicy", json!("Always")),
+        ("/name", json!("other-disk")),
+    ] {
+        let mut changed = spec.clone();
+        *changed["volumes"][disk].pointer_mut(pointer).unwrap() = value;
+        assert_eq!(
+            pool_member_isolated(&changed, &wanted),
+            Err(format!("/volumes/{disk}/image")),
+            "{pointer}"
+        );
+    }
+    // It is the only image volume: neither a second copy of it nor the
+    // support image's volume, which other profiles mount, is admitted.
+    let mut twice = spec.clone();
+    twice["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .push(volumes[disk].clone());
+    assert_eq!(
+        pool_member_isolated(&twice, &wanted),
+        Err(format!("/volumes/{}", volumes.len()))
+    );
+    let mut support = spec.clone();
+    support["volumes"].as_array_mut().unwrap().push(json!({
+        "name": "codewire-bin",
+        "image": { "reference": wanted.effective_support_image(), "pullPolicy": "IfNotPresent" },
+    }));
+    assert_eq!(
+        pool_member_isolated(&support, &wanted),
+        Err(format!("/volumes/{}/image", volumes.len()))
+    );
+    // Against a `commodity` rendering, its class is the first refusal.
+    let commodity = warm_pool_template_opts(&dev_cfg(), shapes()[0]).unwrap();
+    assert_eq!(
+        pool_member_isolated(&spec, &commodity),
+        Err("/runtimeClassName".to_owned())
+    );
+}
+
+/// #5602: a `standard` deployment pools only while its disk boots the
+/// canonical image, since otherwise its canonical creates go to `commodity`
+/// and adopt no member.
+#[test]
+fn a_standard_pool_needs_a_disk_of_the_canonical_image() {
+    let mut cfg = standard_cfg();
+    assert!(warm_pool_template_opts(&cfg, shapes()[0]).is_ok());
+    cfg.standard_runtime = crate::sandbox::template::StandardRuntime::parse(
+        "registry.example.invalid/codewire/pod-runtime@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "registry.example.invalid/codewire/workspace-disk@sha256:5555555555555555555555555555555555555555555555555555555555555555 \
+         6666666666666666666666666666666666666666666666666666666666666666 \
+         77777777777777777777777777777777 \
+         registry.example.invalid/codewire/workspace@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    )
+    .unwrap();
+    let refused = warm_pool_template_opts(&cfg, shapes()[0])
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("does not boot the canonical"), "{refused}");
+}

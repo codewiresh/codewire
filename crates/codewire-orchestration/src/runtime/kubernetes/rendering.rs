@@ -341,27 +341,35 @@ impl KubernetesRenderConfig {
     /// The identity-free inputs of one warm-pool shape (Program #2238 C1): the
     /// canonical workspace image on the standard tier, from the shape and this
     /// configuration alone. A confidential runtime, a diagnostic runtime
-    /// outside diagnostic clusters and a configuration that cannot render
+    /// outside diagnostic clusters, a `standard` runtime whose disk does not
+    /// boot the canonical image and a configuration that cannot render
     /// identity-free workspaces render no pool.
     pub fn pool(&self, shape: WorkspaceShape) -> anyhow::Result<TemplateOpts> {
-        let runtime_spec = self.runtime_spec(Isolation::Standard);
+        let configured = self.runtime_spec(Isolation::Standard);
         anyhow::ensure!(
-            runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL,
+            configured.profile != RUNTIME_PROFILE_CONFIDENTIAL,
             "confidential workspaces are never pooled"
         );
         // A pool member must render exactly as the environment that adopts
-        // it, and its first-bind checks know only the Kata classes (#5602).
+        // it: the canonical image's own runtime, as `environment` picks it.
+        // On a `standard` deployment whose disk does not boot that image the
+        // environment goes to `commodity`, so no member would ever be
+        // adopted (#5602).
+        let image = canonical_workspace_runtime_image();
+        let runtime_spec = self.image_runtime_spec(Isolation::Standard, image);
         anyhow::ensure!(
-            runtime_spec.profile != RUNTIME_PROFILE_STANDARD,
-            "standard workspaces are not pooled yet"
+            runtime_spec.profile == configured.profile,
+            "the standard disk does not boot the canonical workspace image, so no standard member could be adopted"
         );
         validate_managed_runtime_profile(&runtime_spec, self.allow_diagnostic_runtime)
             .map_err(|error| anyhow::anyhow!("warm pool runtime profile: {error}"))?;
-        let opts = self.shape(canonical_workspace_runtime_image(), &runtime_spec, shape);
+        let opts = self.shape(image, &runtime_spec, shape);
         anyhow::ensure!(
             !opts.workspace_binding_url.is_empty(),
             "warm pools require identity-free workspaces (POD_NAMESPACE and a coordinator)"
         );
+        // A pool never renders what a create would refuse.
+        opts.validate_standard_runtime()?;
         Ok(opts)
     }
 

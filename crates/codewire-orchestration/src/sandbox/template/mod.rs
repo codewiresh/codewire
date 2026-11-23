@@ -59,7 +59,7 @@ pub use runtime_policy::{
     validate_managed_runtime_profile,
 };
 pub(crate) use runtime_policy::{dind_image, docker_data_size_gib};
-pub(crate) use standard::vm_state_existing;
+pub(crate) use standard::{KVM_DEVICE_RESOURCE, vm_state_existing};
 pub use standard::{
     STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime, runtime_profile_of,
 };

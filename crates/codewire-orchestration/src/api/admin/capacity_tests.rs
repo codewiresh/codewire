@@ -18,6 +18,7 @@ fn reservation(cpu_millis: i128, memory_gib: f64) -> Reservation {
     Reservation {
         cpu_millis,
         memory_bytes: (memory_gib * GIB as f64) as i128,
+        kvm_devices: 0,
     }
 }
 

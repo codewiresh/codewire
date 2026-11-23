@@ -53,7 +53,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::canonical_workspace_runtime_image;
-use super::template::DEFAULT_DIND_IMAGE;
+use super::template::{DEFAULT_DIND_IMAGE, StandardRuntime};
 
 /// The one DaemonSet orchestration may manage (the admission policy binds
 /// this exact name).
@@ -195,19 +195,35 @@ pub struct DesiredSet {
 
 impl DesiredSet {
     /// Workspace default, daemon (also the daemon-init source) and DinD, in
-    /// that order. An empty `dind_image` means the template default.
-    pub fn from_rendered(daemon_image: &str, dind_image: &str) -> Self {
+    /// that order. An empty `dind_image` means the template default. On a
+    /// `standard` deployment the workspace and DinD images give way to its
+    /// runtime image and workspace disk, which its Pods and warm members pull
+    /// instead (#5602); the daemon stays for the `commodity` creates of other
+    /// images, and the set keeps its three-image bound.
+    pub fn from_rendered(
+        daemon_image: &str,
+        dind_image: &str,
+        standard: Option<&StandardRuntime>,
+    ) -> Self {
         let dind = match dind_image.trim() {
             "" => DEFAULT_DIND_IMAGE,
             image => image,
         };
+        let rendered = match standard {
+            Some(runtime) => [
+                runtime.runtime_image(),
+                runtime.image_disk(),
+                daemon_image.trim(),
+            ],
+            None => [
+                canonical_workspace_runtime_image(),
+                daemon_image.trim(),
+                dind,
+            ],
+        };
         let mut images = Vec::new();
         let mut skipped = 0;
-        for image in [
-            canonical_workspace_runtime_image(),
-            daemon_image.trim(),
-            dind,
-        ] {
+        for image in rendered {
             if !is_approved_image(image) {
                 skipped += 1;
             } else if !images.iter().any(|held| held == image) {
@@ -755,7 +771,7 @@ mod tests {
     #[test]
     fn desired_set_is_workspace_daemon_and_dind() {
         let daemon = crate::sandbox::template::TEST_SUPPORT_IMAGE;
-        let set = DesiredSet::from_rendered(daemon, "");
+        let set = DesiredSet::from_rendered(daemon, "", None);
         assert_eq!(
             set.images,
             [
@@ -768,12 +784,36 @@ mod tests {
         assert!(set.images.len() <= MAX_SET_IMAGES);
     }
 
+    /// #5602: a `standard` deployment caches the runtime image and the
+    /// workspace disk its Pods mount, and the daemon, in three images.
+    #[test]
+    fn a_standard_set_is_runtime_disk_and_daemon() {
+        let daemon = crate::sandbox::template::TEST_SUPPORT_IMAGE;
+        let runtime = StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "registry.example.invalid/codewire/workspace-disk@sha256:5555555555555555555555555555555555555555555555555555555555555555 \
+             6666666666666666666666666666666666666666666666666666666666666666 \
+             77777777777777777777777777777777 \
+             registry.example.invalid/codewire/workspace@sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        )
+        .unwrap()
+        .unwrap();
+        let set = DesiredSet::from_rendered(daemon, "", Some(&runtime));
+        assert_eq!(
+            set.images,
+            [runtime.runtime_image(), runtime.image_disk(), daemon]
+        );
+        assert_eq!(set.skipped, 0);
+        assert!(set.images.len() <= MAX_SET_IMAGES);
+    }
+
     #[test]
     fn unpinned_or_unapproved_references_are_skipped() {
         // Kind renders a side-loaded daemon tag and a local DinD alias.
         let set = DesiredSet::from_rendered(
             "codewire-daemon:e2e",
             "localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e",
+            None,
         );
         assert_eq!(set.images, [canonical_workspace_runtime_image()]);
         assert_eq!(set.skipped, 2);

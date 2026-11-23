@@ -65,7 +65,14 @@ impl ImageCacheConfig {
             render: RenderConfig {
                 namespace: namespace.to_owned(),
             },
-            desired: DesiredSet::from_rendered(&sandbox.daemon_image, &sandbox.dind_image),
+            desired: DesiredSet::from_rendered(
+                &sandbox.daemon_image,
+                &sandbox.dind_image,
+                sandbox.standard_runtime.as_ref().filter(|_| {
+                    sandbox.runtime_profile.trim()
+                        == crate::sandbox::template::RUNTIME_PROFILE_STANDARD
+                }),
+            ),
         }))
     }
 }
