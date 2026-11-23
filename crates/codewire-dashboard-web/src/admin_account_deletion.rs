@@ -43,6 +43,62 @@ pub(crate) enum Refusal {
     Unavailable,
 }
 
+impl Refusal {
+    /// A fixed name for the log, never the IdP's sentence.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::NotFound => "not_found",
+            Self::ProofRejected => "proof_rejected",
+            Self::Locked => "locked",
+            Self::RateLimited(_) => "rate_limited",
+            Self::Refused => "refused",
+            Self::Unavailable => "identity_unavailable",
+        }
+    }
+}
+
+/// Where an admin deletion that did not start was stopped.
+#[derive(Clone, Copy)]
+pub(crate) enum Stage {
+    /// The dashboard's own checks, before any call to the IdP.
+    Dashboard,
+    /// The IdP's answer.
+    IdentityService,
+}
+
+/// Logs an admin deletion that did not start (#5770), so a refusal leaves a
+/// trace even where the IdP counts and audits nothing: where it stopped, a
+/// fixed reason, and the target account's id when the form named a valid
+/// one. Never the typed address, the password or the code.
+pub(crate) fn log_refused(stage: Stage, reason: &'static str, target_user_id: Option<&str>) {
+    let stage = match stage {
+        Stage::Dashboard => "dashboard",
+        Stage::IdentityService => "identity_service",
+    };
+    tracing::warn!(
+        stage,
+        reason,
+        target_user_id = target_user_id.unwrap_or(""),
+        "admin account deletion not started"
+    );
+    #[cfg(test)]
+    REFUSALS_LOGGED.with(|logged| {
+        logged
+            .borrow_mut()
+            .push((stage, reason, target_user_id.unwrap_or("").to_owned()));
+    });
+}
+
+// What `log_refused` logged on this thread, for tests: a test's handlers run
+// on its own thread, so this reads only that test's refusals.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REFUSALS_LOGGED: std::cell::RefCell<Vec<(&'static str, &'static str, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[derive(Serialize)]
 struct DeleteRequest<'a> {
     confirm_email: &'a str,
@@ -90,13 +146,16 @@ pub(crate) async fn delete_account(
     confirmation: &Confirmation<'_>,
 ) -> Result<(), Refusal> {
     if !valid_id(user_id) {
+        log_refused(Stage::Dashboard, "invalid_account_id", None);
         return Err(Refusal::NotFound);
     }
     let email = confirmation.email.trim();
     if email.is_empty() || email.len() > MAX_EMAIL_BYTES {
+        log_refused(Stage::Dashboard, "confirm_email_unusable", Some(user_id));
         return Err(Refusal::Refused);
     }
     if !confirmation.proof_is_well_formed() {
+        log_refused(Stage::Dashboard, "proof_unusable", Some(user_id));
         return Err(Refusal::ProofRejected);
     }
     let response = post(
@@ -111,22 +170,38 @@ pub(crate) async fn delete_account(
         },
     )
     .await
-    .map_err(|()| Refusal::Unavailable)?;
+    .map_err(|()| {
+        log_refused(
+            Stage::IdentityService,
+            "identity_unreachable",
+            Some(user_id),
+        );
+        Refusal::Unavailable
+    })?;
     let status = response.status();
     if status == StatusCode::OK {
-        let started: Started = bounded_json(response)
+        let started = bounded_json::<Started>(response)
             .await
-            .map_err(|()| Refusal::Unavailable)?;
-        return if started.operation_id.starts_with("account-deletion/")
-            && started.operation_id.len() <= 128
-        {
-            Ok(())
-        } else {
-            Err(Refusal::Unavailable)
-        };
+            .ok()
+            .filter(|started| {
+                started.operation_id.starts_with("account-deletion/")
+                    && started.operation_id.len() <= 128
+            });
+        if started.is_none() {
+            log_refused(
+                Stage::IdentityService,
+                "identity_answer_unreadable",
+                Some(user_id),
+            );
+            return Err(Refusal::Unavailable);
+        }
+        tracing::info!(target_user_id = user_id, "admin account deletion started");
+        return Ok(());
     }
     let body = bounded_json::<ErrorBody>(response).await.ok();
-    Err(refusal(status, body))
+    let refused = refusal(status, body);
+    log_refused(Stage::IdentityService, refused.code(), Some(user_id));
+    Err(refused)
 }
 
 fn refusal(status: StatusCode, body: Option<ErrorBody>) -> Refusal {

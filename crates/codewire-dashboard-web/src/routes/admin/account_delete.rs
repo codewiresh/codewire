@@ -15,7 +15,7 @@ use super::{ACCOUNTS_PATH, AdminQuery, account_redirect, admin_context};
 use crate::{
     account_sessions::valid_id,
     account_two_factor::browser_user_agent,
-    admin_account_deletion::{Confirmation, Refusal, delete_account},
+    admin_account_deletion::{Confirmation, Refusal, Stage, delete_account, log_refused},
     error::WebError,
     raw_auth::{append_session_cookies, get_json},
     response::{error_page, login_redirect, redirect, render_template},
@@ -96,24 +96,37 @@ pub(in crate::routes) async fn delete(
     headers: HeaderMap,
     form: Result<Form<DeleteSubmission>, FormRejection>,
 ) -> Response {
+    // Every refusal here leaves a log line with a fixed reason (#5770);
+    // delete_account logs its own and the IdP's.
     let Ok(Form(form)) = form else {
+        log_refused(Stage::Dashboard, "form_rejected", None);
         return error_page(WebError::Forbidden);
     };
     if !request_has_same_origin(&headers, &state.public_origin)
         || !valid_csrf_token(&headers, &form.csrf)
     {
+        log_refused(
+            Stage::Dashboard,
+            "origin_or_csrf",
+            valid_id(&form.user_id).then_some(form.user_id.as_str()),
+        );
         return error_page(WebError::CsrfRejected);
     }
     if !valid_id(&form.user_id) {
+        log_refused(Stage::Dashboard, "invalid_account_id", None);
         return account_redirect("", "not-found", &headers);
     }
     let continuation = page_path(&form.user_id);
     let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
     {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => {
+            log_refused(Stage::Dashboard, "no_admin_session", Some(&form.user_id));
+            return response;
+        }
     };
     if dashboard.account_id == form.user_id {
+        log_refused(Stage::Dashboard, "own_account", Some(&form.user_id));
         return redirect(SETTINGS_DELETE_PATH.to_owned(), &headers);
     }
     let confirmation = Confirmation {

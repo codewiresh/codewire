@@ -519,3 +519,95 @@ async fn a_request_without_same_origin_authority_never_reaches_the_idp() {
         "a refused request reached the IdP"
     );
 }
+
+/// Every admin deletion that does not start leaves a log line with where it
+/// stopped and a fixed reason, before the IdP or at it (#5770). The line has
+/// only those and the target's id, so it never holds the typed address, the
+/// password or the code.
+#[tokio::test]
+async fn every_deletion_that_does_not_start_is_logged() {
+    use crate::admin_account_deletion::REFUSALS_LOGGED;
+    let take = || REFUSALS_LOGGED.with(|logged| std::mem::take(&mut *logged.borrow_mut()));
+    take();
+    let csrf = crate::security::new_csrf_token();
+    let with = |field: &'static str, value: &'static str| {
+        let mut form = form(&csrf);
+        match form.iter_mut().find(|(name, _)| *name == field) {
+            Some(entry) => entry.1 = value,
+            None => form.push((field, value)),
+        }
+        form
+    };
+    let mut foreign = authority(&csrf);
+    foreign.insert(header::ORIGIN, "https://foreign.invalid".parse().unwrap());
+
+    let (services, calls) = upstream("success").await;
+    let dashboard = serve(crate::app(config(&services.origin))).await;
+    for (case, headers, form, reason, target) in [
+        (
+            "foreign origin",
+            foreign,
+            form(&csrf),
+            "origin_or_csrf",
+            MEMBER,
+        ),
+        (
+            "wrong token",
+            authority(&csrf),
+            with("_csrf", "wrong-csrf"),
+            "origin_or_csrf",
+            MEMBER,
+        ),
+        (
+            "unknown field",
+            authority(&csrf),
+            with("organization", "org-team"),
+            "form_rejected",
+            "",
+        ),
+        (
+            "not an id",
+            authority(&csrf),
+            with("user_id", "not an id"),
+            "invalid_account_id",
+            "",
+        ),
+        (
+            "own account",
+            authority(&csrf),
+            with("user_id", ADMIN),
+            "own_account",
+            ADMIN,
+        ),
+        (
+            "no address",
+            authority(&csrf),
+            with("confirm_email", " "),
+            "confirm_email_unusable",
+            MEMBER,
+        ),
+        (
+            "no code",
+            authority(&csrf),
+            with("proof", " "),
+            "proof_unusable",
+            MEMBER,
+        ),
+    ] {
+        post(&dashboard, headers, &form).await;
+        assert_eq!(take(), [("dashboard", reason, target.to_owned())], "{case}");
+    }
+    assert!(
+        delete_calls(&calls).is_empty(),
+        "a refused request reached the IdP"
+    );
+
+    // The IdP's refusal is logged as the IdP's.
+    let (services, _) = upstream("proof").await;
+    let dashboard = serve(crate::app(config(&services.origin))).await;
+    post(&dashboard, authority(&csrf), &form(&csrf)).await;
+    assert_eq!(
+        take(),
+        [("identity_service", "proof_rejected", MEMBER.to_owned())]
+    );
+}
