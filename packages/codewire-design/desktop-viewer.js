@@ -158,7 +158,8 @@
       clearTimeout(retry);
       show("connecting");
       const RFB = await viewerReady();
-      if (rfb || !visible()) return;
+      // The Sandbox may have stopped, or Stop been pressed, while the viewer loaded.
+      if (rfb || !password || !sandboxRunning || !visible()) return;
       let socket;
       try {
         socket = new WebSocket(streamUrl(), protocol);

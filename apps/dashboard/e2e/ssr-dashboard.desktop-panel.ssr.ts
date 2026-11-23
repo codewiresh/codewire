@@ -263,6 +263,37 @@ test("a Sandbox that stops pauses the viewer, and one that runs again reconnects
   expect(state.streams).toHaveLength(2);
 });
 
+test("a Sandbox that stops while the viewer loads opens no stream", async ({ page }) => {
+  const state = await transport(page);
+  state.desktop = "running";
+  // The bundle announces itself through a global and an event; both are held
+  // until the test lets the viewer finish loading.
+  await page.addInitScript(() => {
+    const held = { on: true, value: undefined as unknown };
+    Object.defineProperty(globalThis, "CodewireNoVNC", {
+      configurable: true,
+      get: () => (held.on ? undefined : held.value),
+      set: (value) => { held.value = value; },
+    });
+    globalThis.addEventListener("codewire:novnc-ready", (event) => { if (held.on) event.stopImmediatePropagation(); }, true);
+    (globalThis as unknown as { releaseViewer: () => void }).releaseViewer = () => {
+      held.on = false;
+      globalThis.dispatchEvent(new Event("codewire:novnc-ready"));
+    };
+  });
+  await openFixture(page);
+  await showDesktop(page);
+  await expect(panel(page)).toHaveAttribute("data-desktop-state", "connecting");
+  state.sandboxRunning = false;
+  await checkReadinessNow(page);
+  await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox");
+  await page.evaluate(() => (globalThis as unknown as { releaseViewer: () => void }).releaseViewer());
+  await page.waitForTimeout(500);
+  expect(state.streams).toHaveLength(0);
+  await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox");
+  await expect(panel(page).locator("[data-desktop-screen]")).toBeHidden();
+});
+
 test("a Sandbox started from the page reads its desktop without a reload", async ({ page }) => {
   const state = await transport(page);
   state.sandboxRunning = false;
