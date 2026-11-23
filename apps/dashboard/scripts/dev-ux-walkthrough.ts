@@ -725,6 +725,133 @@ const failedOpen = (page: Page, path: string, step: string): Expectation[] => [
   ["terminal-open", () => attachedTerminal(page, 60_000)],
 ];
 
+// The Desktop panel (docs/journeys/desktop.md, `desktop-dashboard`): Start,
+// typing, Paste and Copy through the viewer, a fifth viewer refused, and Stop.
+// The page's own terminal opens a terminal on the desktop and reads back what
+// reached it. These checks could not run against Dev before they merged, so
+// one that fails is reported by `holds` and does not fail the walk (#3223).
+// They share one budget, so a slow Dev adds at most about that much.
+const DESKTOP_BUDGET_MS = 150_000;
+const DESKTOP_START_MS = 90_000;
+const DESKTOP_CONNECT_MS = 30_000;
+async function desktop(page: Page, detailPath: string, rows: Locator, send: (command: string) => Promise<void>): Promise<void> {
+  const panelOf = (owner: Page) => owner.locator("[data-desktop-panel]");
+  const show = (owner: Page, view: "Terminal" | "Desktop") =>
+    owner.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: view, exact: true }).click();
+  const reaches = (owner: Page, state: string, timeout = DESKTOP_CONNECT_MS) =>
+    expect(panelOf(owner)).toHaveAttribute("data-desktop-state", state, { timeout });
+  const panel = panelOf(page);
+  const canvas = panel.locator("canvas");
+  // Keys reach the desktop only while the viewer's canvas has focus.
+  const keys = async (text: string) => {
+    await canvas.focus();
+    await page.keyboard.type(text, { delay: 30 });
+  };
+  const ends = Date.now() + DESKTOP_BUDGET_MS;
+  const inTime: Expectation = ["in-time", async () => {
+    if (Date.now() > ends) throw new DevUxError("desktop", "timeout");
+  }];
+  const viewers: Page[] = [];
+  const viewer = async () => {
+    const other = await page.context().newPage();
+    viewers.push(other);
+    await other.setViewportSize({ width: 1440, height: 900 });
+    await visit(other, detailPath);
+    await show(other, "Desktop");
+    return other;
+  };
+  try {
+    let started = Date.now();
+    if (!(await holds("desktop-start", [
+      inTime,
+      ["started", async () => {
+        await show(page, "Desktop");
+        await reaches(page, "stopped");
+        await button(panel, "Start desktop").click();
+      }],
+      ["connected", () => reaches(page, "connected", DESKTOP_START_MS)],
+      ["fills", async () => expect((await canvas.boundingBox())?.width ?? 0).toBeGreaterThan(200)],
+    ]))) return;
+    passed("desktop-start", started);
+    started = Date.now();
+    if (await holds("desktop-input", [
+      inTime,
+      // Printed in two parts, so the command's own echo is not the marker.
+      ["terminal-opened", async () => {
+        await show(page, "Terminal");
+        await send("DISPLAY=:1 setsid xfce4-terminal --disable-server >/dev/null 2>&1 </dev/null & " +
+          "DISPLAY=:1 timeout 20 xdotool search --sync --class xfce4-terminal windowactivate --sync && " +
+          "printf '__UX_DESKTOP_%s__\\n' RAISED");
+        await expect(rows).toContainText("__UX_DESKTOP_RAISED__", { timeout: DESKTOP_CONNECT_MS });
+      }],
+      ["reconnected", async () => {
+        await show(page, "Desktop");
+        await reaches(page, "connected");
+      }],
+      ["typed", async () => {
+        await keys("echo __UX_DESKTOP_TYPED__ > /tmp/ux-desktop-typed");
+        await page.keyboard.press("Enter");
+      }],
+      ["paste-note", async () => {
+        await page.evaluate(() => navigator.clipboard.writeText("__UX_DESKTOP_PASTED__"));
+        await button(panel, "Paste to desktop").click();
+        await expect(panel.locator("[data-desktop-note]")).toHaveText("Pasted to the desktop.");
+      }],
+      ["pasted", async () => {
+        await keys("echo ");
+        await page.keyboard.press("Control+Shift+V");
+        await keys(" > /tmp/ux-desktop-pasted");
+        await page.keyboard.press("Enter");
+      }],
+      ["copy-enabled", async () => {
+        await keys("clear; printf '__UX_DESKTOP_%s__\\n' COPIED");
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Control+Shift+A");
+        await page.keyboard.press("Control+Shift+C");
+        await expect(button(panel, "Copy from desktop")).toBeEnabled({ timeout: 10_000 });
+      }],
+      // The desktop's clipboard reaches the page a moment after it changes.
+      ["copied", () => expect.poll(async () => {
+        await button(panel, "Copy from desktop").click();
+        return page.evaluate(() => navigator.clipboard.readText());
+      }, { timeout: 10_000 }).toContain("__UX_DESKTOP_COPIED__")],
+    ])) passed("desktop-input", started);
+    started = Date.now();
+    if (await holds("desktop-viewers", [
+      inTime,
+      ["second", async () => reaches(await viewer(), "connected")],
+      ["third", async () => reaches(await viewer(), "connected")],
+      ["fourth", async () => reaches(await viewer(), "connected")],
+      ["fifth-refused", async () => reaches(await viewer(), "lost")],
+      ["limit-named", () => expect(viewers[3].locator("[data-desktop-status]"))
+        .toHaveText(/^4 viewers already watch this desktop/)],
+    ])) passed("desktop-viewers", started);
+    for (const other of viewers.splice(0)) await other.close();
+    started = Date.now();
+    if (await holds("desktop-stop", [
+      inTime,
+      ["stopped", async () => {
+        await button(panel, "Stop desktop").click();
+        await reaches(page, "stopped", 60_000);
+      }],
+    ])) passed("desktop-stop", started);
+    started = Date.now();
+    if (await holds("desktop-reached", [
+      inTime,
+      ["typed", async () => {
+        await show(page, "Terminal");
+        await send("cat /tmp/ux-desktop-typed /tmp/ux-desktop-pasted");
+        await expect(rows).toContainText("__UX_DESKTOP_TYPED__");
+      }],
+      ["pasted", () => expect(rows).toContainText("__UX_DESKTOP_PASTED__")],
+    ])) passed("desktop-reached", started);
+  } finally {
+    for (const other of viewers) await other.close().catch(() => {});
+    // The stages after these use the terminal.
+    await show(page, "Terminal").catch(() => {});
+  }
+}
+
 export async function runDevUxWalkthrough(page: Page, options: {
   slug: string; userId: string; orgId: string; owned: OwnedUxSandbox; deadline: number;
   own: () => OwnedUxSandbox;
@@ -1114,6 +1241,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(resize).not.toBeVisible();
     await expect(button(sandboxMenu, "Resize")).toBeFocused();
   });
+  await desktop(page, detailPath, rows, send);
   await stage("lifecycle-live-state", async () => {
     await button(page, "Stop").click();
     const stop = dialog(page, `Stop ${owned.name}?`);

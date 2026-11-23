@@ -460,6 +460,19 @@ in the comment after them with the look and the listeners.
   4. Go to another dashboard page and come back.
   5. Open the page of a Sandbox on the previous image, and of a stopped one.
   6. Set the browser to 390 px wide.
+
+  On Dev every delivery walks steps 1 to 3 as the Dev smoke browser
+  identity, on the walk's own Sandbox, in
+  `apps/dashboard/scripts/dev-ux-walkthrough.ts`. Its dashboard terminal
+  opens a terminal on the desktop and raises it, and afterwards reads back
+  the files the viewer's typing and paste wrote there. The other pages are
+  closed before it presses Stop desktop. The checks, in order, are
+  `desktop-start`, `desktop-input`, `desktop-viewers`, `desktop-stop` and
+  `desktop-reached`. Like the walk's other new checks, one that fails prints
+  a `not-held` line and does not fail the acceptance. The five checks share
+  a budget of 150 s; a check that begins after it prints `not-held
+  expectation=in-time`. Dev runs one orchestration replica, so the fifth
+  viewer is always refused there.
 - **Proof:**
   - the panel goes from stopped to starting to the desktop's picture, with
     no reload, and `cw desktop desk-walk --status` agrees it is running;
