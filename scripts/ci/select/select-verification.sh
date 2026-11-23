@@ -2349,6 +2349,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/cw-image-consumer.sh|\
       scripts/ci/images/cw-image-source.py|\
       scripts/ci/images/build-product-images.sh|\
+      scripts/ci/images/pod-runtime-context.py|\
+      scripts/ci/images/workspace-disk.sh|\
+      scripts/ci/tests/test-pod-runtime-context.py|\
       scripts/ci/tests/test-cw-image-context.py|\
       scripts/ci/tests/test-cw-runtime-source.py|\
       scripts/ci/tests/test-cw-image-consumer.py|\

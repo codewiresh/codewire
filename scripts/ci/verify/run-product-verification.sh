@@ -852,6 +852,7 @@ run_ci_script_tests() {
   python3 -I -B scripts/ci/tests/test-proto-breaking-base.py ResolverTests
   python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
+  python3 -I -B scripts/ci/tests/test-pod-runtime-context.py
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-build-local-image.sh
   python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
