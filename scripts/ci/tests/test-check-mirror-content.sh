@@ -484,21 +484,33 @@ if merge_pr 42 'fix: safe title' >"$work/merge-refused.out" 2>&1; then
 fi
 grep -qF 'queue it: scripts/dev/queue-pr.sh 42 "fix: safe title"' "$work/merge-refused.out" ||
   fail "a refused merge did not name the queue: $(cat "$work/merge-refused.out")"
-# queue-pr.sh: the same checks, then the title and the label, one call each,
-# then the label read back (fj can print nothing and change nothing).
+# queue-pr.sh: the same checks, the description read, then the title and the
+# label, one call each, then the label read back (fj can print nothing and
+# change nothing).
 cat >"$work/merge-bin/fj" <<'SH'
 #!/usr/bin/env bash
 { printf '%s\0' "$@"; printf '\n'; } >>"${MERGE_TEST_ARGS:?}"
-case "$*" in *' view '*' labels') printf '%s\n' "${FAKE_LABELS-merge-queue}" ;; esac
+case "$*" in
+  *' view '*' labels') printf '%s\n' "${FAKE_LABELS-merge-queue}" ;;
+  *' view '*' body') printf 'fix: safe title #42\n\n> %s\n' "${FAKE_BODY-For #7, once it is seen on Dev.}" ;;
+esac
 SH
 mkdir "$work/queue-tmp"
 queue_pr() { TMPDIR="$work/queue-tmp" PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/queue-pr.sh" "$@"; }
+# A run refused after the description is read has only read the forge.
+pr_unchanged() {
+  local status=0
+  ! grep -qaF edit "$MERGE_TEST_ARGS" 2>/dev/null || status=1
+  rm -f "$MERGE_TEST_ARGS"
+  return "$status"
+}
 queue_pr 42 'fix: safe title (#42)' >"$work/queue.out"
 python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
 import sys
 from pathlib import Path
 calls = [line.split(b'\0')[:-1] for line in Path(sys.argv[1]).read_bytes().split(b'\n')[:-1]]
-assert calls == [[b'pr', b'-R', b'origin', b'edit', b'42', b'title', b'fix: safe title'],
+assert calls == [[b'pr', b'-R', b'origin', b'view', b'42', b'body'],
+                 [b'pr', b'-R', b'origin', b'edit', b'42', b'title', b'fix: safe title'],
                  [b'pr', b'-R', b'origin', b'edit', b'42', b'labels', b'-a', b'merge-queue'],
                  [b'pr', b'-R', b'origin', b'view', b'42', b'labels']], calls
 PYTEST
@@ -516,6 +528,20 @@ if queue_pr 42 wip >/dev/null 2>&1 || queue_pr 43 'feat: access' >/dev/null 2>&1
   fail 'queue-pr.sh queued a placeholder title or a merge Cargo refuses'
 fi
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused queue contacted the forge'
+# A closing keyword closes its issue on merge, whatever follows it, so one
+# followed by a condition is refused, and the forge is only read.
+for body in 'Closes #7 once observed on Dev.' 'fixes codewire/codewire#7 after the walk' 'Resolves: #7 when Dev has it' \
+  'Closes #7, once observed on Dev.' 'Closes #7 (once observed on Dev)' 'Fixes #7 until the walk'; do
+  FAKE_BODY="$body" queue_pr 42 'fix: safe title' >"$work/queue-closes.out" 2>&1 &&
+    fail "queue-pr.sh queued a description that closes an issue on a condition: $body"
+  grep -qF '#42 closes an issue on merge, not once a condition holds; write "For #N" there instead' \
+    "$work/queue-closes.out" || fail "a conditional close did not say why: $(cat "$work/queue-closes.out")"
+  grep -qF "$body" "$work/queue-closes.out" || fail "a conditional close did not name the line: $(cat "$work/queue-closes.out")"
+  pr_unchanged || fail 'a conditional close changed the pull request'
+done
+FAKE_BODY='Closes #7. It shows once Dev has it.' queue_pr 42 'fix: safe title' >/dev/null ||
+  fail 'queue-pr.sh refused an unconditional close'
+rm "$MERGE_TEST_ARGS"
 # The compile check (#5664): a stub cargo and a codewire-cpu with a free slot,
 # which prints no wait line; the cache stays in this test's own directory.
 cat >"$work/merge-bin/cargo" <<'SH'
@@ -549,7 +575,7 @@ FAKE_CARGO_ERROR='missing field `pinned`' rust_queue 44 'feat: a demo crate' >"$
 grep -qF 'error[E0063]: missing field `pinned`' "$work/queue-rust-red.out" ||
   fail "queue-pr.sh did not show the compiler's error: $(cat "$work/queue-rust-red.out")"
 grep -qF '#44 does not compile merged with main' "$work/queue-rust-red.out" || fail 'queue-pr.sh did not say why it refused'
-[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request that does not compile reached the forge'
+pr_unchanged || fail 'a pull request that does not compile changed on the forge'
 # A check that runs out of time says so, not that the code is wrong.
 if command -v timeout >/dev/null; then
   FAKE_CARGO_HANG=1 QUEUE_PR_CHECK_TIMEOUT=1 rust_queue 44 'feat: a demo crate' >"$work/queue-rust-slow.out" 2>&1 &&
@@ -557,7 +583,7 @@ if command -v timeout >/dev/null; then
   grep -qF 'the compile check of #44 timed out after 1s' "$work/queue-rust-slow.out" ||
     fail "a timed-out check did not say so: $(cat "$work/queue-rust-slow.out")"
   ! grep -qF 'does not compile' "$work/queue-rust-slow.out" || fail 'a timed-out check was reported as a compile error'
-  [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request whose check timed out reached the forge'
+  pr_unchanged || fail 'a pull request whose check timed out changed on the forge'
 fi
 # A build slot codewire-cpu refuses says so: the check never ran.
 FAKE_CPU_REFUSE='only 54 GB free on /var/build, below the floor of 60 GB' rust_queue 44 'feat: a demo crate' \
@@ -565,7 +591,7 @@ FAKE_CPU_REFUSE='only 54 GB free on /var/build, below the floor of 60 GB' rust_q
 grep -qF '#44 not checked: build slot refused (only 54 GB free on /var/build, below the floor of 60 GB)' \
   "$work/queue-rust-refused.out" || fail "a refused slot did not say so: $(cat "$work/queue-rust-refused.out")"
 ! grep -qF 'does not compile' "$work/queue-rust-refused.out" || fail 'a refused slot was reported as a compile error'
-[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request whose check was refused a slot reached the forge'
+pr_unchanged || fail 'a pull request whose check was refused a slot changed on the forge'
 rust_queue 44 'feat: a demo crate' >"$work/queue-rust.out" 2>&1 ||
   fail "queue-pr.sh refused a merge that compiles, with a free slot: $(cat "$work/queue-rust.out")"
 grep -qF '#44 is queued as "feat: a demo crate (#44)"' "$work/queue-rust.out" || fail 'queue-pr.sh did not queue #44'
@@ -586,6 +612,20 @@ grep -qF "QUEUE_PR_COPY is not this run's copy" "$work/queue-copy.out" ||
   fail "queue-pr.sh did not say why it refused the copy: $(cat "$work/queue-copy.out")"
 [[ -f "$work/precious/file" ]] || fail 'queue-pr.sh removed a QUEUE_PR_COPY that was not its own copy'
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a run with a foreign QUEUE_PR_COPY reached the forge'
+# The copy is checked and removed by one path with symlinks resolved: through
+# a link, "link/.." names the temporary directory to the check but the link's
+# parent to rm, which would remove another queue-pr.* directory.
+mkdir -p "$work/elsewhere/inner" "$work/elsewhere/queue-pr.copy" "$work/queue-tmp/queue-pr.copy"
+printf 'keep\n' >"$work/elsewhere/queue-pr.copy/file"
+ln -s "$work/elsewhere/inner" "$work/queue-tmp/link"
+git -C "$merge_repo" archive HEAD scripts | tar -x -C "$work/queue-tmp/queue-pr.copy"
+TMPDIR="$work/queue-tmp" PATH="$work/merge-bin:$PATH" QUEUE_PR_CALLER="$merge_repo" \
+  QUEUE_PR_COPY="$work/queue-tmp/link/../queue-pr.copy" \
+  bash "$work/queue-tmp/queue-pr.copy/scripts/dev/queue-pr.sh" 42 'fix: safe title' >"$work/queue-link.out" 2>&1 ||
+  fail "queue-pr.sh refused its own copy named through a link: $(cat "$work/queue-link.out")"
+[[ -f "$work/elsewhere/queue-pr.copy/file" ]] || fail 'queue-pr.sh removed a directory its copy path only named through a link'
+[[ ! -e "$work/queue-tmp/queue-pr.copy" ]] || fail 'queue-pr.sh left its copy behind'
+rm "$work/queue-tmp/link"
 mv "$work/merge.args.before" "$MERGE_TEST_ARGS"
 # The caller's own copy hands over to main's, whatever the caller's branch
 # carries: here main's is a stub that says it ran.
@@ -609,6 +649,6 @@ rendered=Template(Path(sys.argv[1]).read_text()).substitute(
     PullRequestTitle='fix: safe title', PullRequestIndex='42')
 assert rendered == 'fix: safe title (#42)\n\nReviewed-on: #42\n', rendered
 PYTEST
-printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 12 cases passed\n'
+printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 14 cases passed\n'
 
 printf '[test-check-mirror-content] mirror content gate contract passed\n'

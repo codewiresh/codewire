@@ -20,7 +20,7 @@ fi
 # would otherwise queue without it (#5664's compile check was skipped by every
 # PR worktree older than it). The copy runs with the caller's checkout as its
 # repository, for its git objects and its warm target.
-here="$(cd "$(dirname "$0")/../.." && pwd)"
+here="$(cd "$(dirname "$0")/../.." && pwd -P)"
 if [[ -z "${QUEUE_PR_CALLER-}" ]]; then
   git -C "$here" fetch -q --no-write-fetch-head origin "+refs/heads/main:refs/queue-pr/$$/self"
   copy="$(mktemp -d "${TMPDIR:-/tmp}/queue-pr.XXXXXX")"
@@ -34,18 +34,22 @@ if [[ -z "${QUEUE_PR_CALLER-}" ]]; then
   git -C "$here" update-ref -d "refs/queue-pr/$$/self"
   QUEUE_PR_CALLER="$here" QUEUE_PR_COPY="$copy" exec bash "$copy/scripts/dev/queue-pr.sh" "$@"
 fi
+copy_root=''
 if [[ -n "${QUEUE_PR_COPY-}" ]]; then
   # The copy's path comes in through the environment, and it is removed on
   # exit: it must be this very run's copy, a queue-pr.* directory directly
   # under the temporary directory, or nothing is removed and nothing queued.
-  copy_root="$(cd "$QUEUE_PR_COPY" 2>/dev/null && pwd)" || copy_root=''
-  tmp_root="$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd)" || tmp_root=''
+  # Paths are compared with symlinks resolved, and only the resolved path is
+  # removed, so a link can't make the check and the removal see different
+  # directories.
+  copy_root="$(cd "$QUEUE_PR_COPY" 2>/dev/null && pwd -P)" || copy_root=''
+  tmp_root="$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)" || tmp_root=''
   if [[ -z "$copy_root" || "$copy_root" != "$here" || "${copy_root%/*}" != "$tmp_root" ||
     "${copy_root##*/}" != queue-pr.* ]]; then
     printf "queue-pr.sh: QUEUE_PR_COPY is not this run's copy of main's queue-pr.sh; nothing was queued\n" >&2
     exit 1
   fi
-  trap 'rm -rf -- "$QUEUE_PR_COPY"' EXIT
+  trap 'rm -rf -- "$copy_root"' EXIT
 fi
 pr="$1" title="$2"
 # The title becomes a commit on main and on the public mirror, and it cannot be
@@ -72,7 +76,7 @@ refs="refs/queue-pr/$$"
 cleanup() {
   git -C "$root" update-ref -d "$refs/head" 2>/dev/null || true
   git -C "$root" update-ref -d "$refs/main" 2>/dev/null || true
-  [[ -z "${QUEUE_PR_COPY-}" ]] || rm -rf -- "$QUEUE_PR_COPY"
+  [[ -z "$copy_root" ]] || rm -rf -- "$copy_root"
 }
 trap cleanup EXIT
 git -C "$root" fetch -q --no-write-fetch-head origin "+refs/pull/$pr/head:$refs/head" "+refs/heads/main:$refs/main"
@@ -90,6 +94,20 @@ while IFS= read -r lock; do
     exit 1
   fi
 done < <(git -C "$root" ls-tree -r --name-only "$tree" | grep -E '(^|/)([A-Za-z0-9_-]+\.)?Cargo\.lock$')
+
+# A closing keyword closes its issue when the pull request merges, whatever
+# follows it: "Closes #5949 once observed on Dev" closed #5949 the moment #5970
+# landed. A condition after it is refused before any build slot is spent.
+if ! body="$(fj pr -R origin view "$pr" body)"; then
+  printf 'queue-pr.sh: could not read #%s description; nothing was queued\n' "$pr" >&2
+  exit 1
+fi
+if conditional="$(grep -inP '(?<![\w-])(close[sd]?|fix(es|ed)?|resolve[sd]?):?\s+([\w.-]+/[\w.-]+)?#[0-9]+[,(]?\s*\(?(once|after|when|until)\b' <<<"$body")"; then
+  printf '%s\n' "$conditional" >&2
+  printf 'queue-pr.sh: #%s closes an issue on merge, not once a condition holds; write "For #N" there instead and close the issue yourself\n' \
+    "$pr" >&2
+  exit 1
+fi
 
 # The merge must also compile. A pull request's CI builds its own head, and a
 # change that landed since can break it on main's tree: #5512 met main's new
