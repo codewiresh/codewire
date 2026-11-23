@@ -7,6 +7,7 @@
 
 use sqlx::PgPool;
 
+use crate::api::log_notifications::ENVIRONMENT_LOGS_CHANNEL;
 use crate::worker::activity_authority::ActivityAuthority;
 
 /// Mirrors `environmentlifecycle.Snapshot`.
@@ -837,6 +838,13 @@ impl PgLifecycleStore {
         .bind(&entry.metadata)
         .execute(&mut **tx)
         .await?;
+        // Log followers wake on this at commit, as for the worker's logs;
+        // without it they saw a transition only at their 15 s heartbeat.
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(ENVIRONMENT_LOGS_CHANNEL)
+            .bind(env_id)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
 }

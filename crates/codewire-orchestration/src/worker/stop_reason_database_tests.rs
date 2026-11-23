@@ -1,11 +1,16 @@
 //! Disposable-PostgreSQL proof that a stop records why it happened and a start
-//! clears it (#3384).
+//! clears it (#3384), and that its lifecycle log wakes log followers at commit
+//! (#4762).
+
+use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use serde_json::to_value;
 use sqlx::PgPool;
+use sqlx::postgres::PgListener;
 
 use crate::api::environments::OrgQuota;
+use crate::api::log_notifications::ENVIRONMENT_LOGS_CHANNEL;
 use crate::lifecycle::{PgLifecycleStore, Service, StartQuota, StopReason};
 use crate::test_database_support::TestDatabase;
 
@@ -128,6 +133,29 @@ async fn db_retrying_a_failed_confidential_start_clears_the_reason() -> Result<(
         let (desired, cleared) = row(pool).await?;
         ensure!(desired == "started", "{desired}");
         ensure!(cleared.is_none(), "{cleared:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_stop_wakes_log_followers_at_commit() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        let mut listener = PgListener::connect_with(pool).await?;
+        listener.listen(ENVIRONMENT_LOGS_CHANNEL).await?;
+        let svc = Service::for_pool(pool.clone());
+        svc.request_stop(ENVIRONMENT, StopReason::User).await?;
+        let notification = tokio::time::timeout(Duration::from_secs(10), listener.recv()).await??;
+        ensure!(
+            notification.payload() == ENVIRONMENT,
+            "{}",
+            notification.payload()
+        );
         Ok(())
     }
     .await;
