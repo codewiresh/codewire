@@ -117,11 +117,15 @@ pub(crate) fn next_step(error: &anyhow::Error) -> Option<String> {
 /// that answer (docs/CONFIGURATION.md, "Tracing"). The refusals the CLI
 /// replaces with its own sentence (a refused sign-in, exhausted credit, an
 /// environment that isn't running) keep none: their error says what to do.
-fn trace_id(error: &anyhow::Error) -> Option<&str> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<codewire_client::ClientError>())
-        .and_then(codewire_client::ClientError::trace_id)
+pub(crate) fn trace_id(error: &anyhow::Error) -> Option<&str> {
+    error.chain().find_map(|cause| {
+        if let Some(reworded) = cause.downcast_ref::<crate::reworded::Reworded>() {
+            return reworded.trace_id();
+        }
+        cause
+            .downcast_ref::<codewire_client::ClientError>()
+            .and_then(codewire_client::ClientError::trace_id)
+    })
 }
 
 /// `error`'s chain as one sentence, joined by ": ", without its next step.

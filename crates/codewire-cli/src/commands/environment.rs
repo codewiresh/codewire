@@ -12,6 +12,7 @@ pub(crate) mod lifecycle;
 mod platform_create;
 pub(crate) mod progress;
 mod runtime;
+mod server_errors;
 mod sources;
 mod stop_start;
 mod transfer;
@@ -23,6 +24,7 @@ pub(crate) use idle_stop::format_env_idle_stop_text;
 pub(crate) use idle_stop::print_env_idle_stop_status;
 pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
 use platform_create::handle_platform_env_create;
+pub(crate) use server_errors::map_env_delete_error;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
@@ -1372,8 +1374,8 @@ async fn handle_unified_environment_list(
         &inventory::InventoryOptions::listing(&args),
     )
     .await?;
-    if let Some((location, error)) = inventory.unavailable().first() {
-        anyhow::bail!("{} could not be listed: {error}", location.listing());
+    if let Some(error) = inventory.listing_failure() {
+        return Err(error);
     }
     let entries: Vec<UnifiedEnvironmentListEntry> = inventory
         .entries
@@ -2089,12 +2091,7 @@ async fn update_platform_network_policy(
             ..Default::default()
         })
         .await
-        .map_err(|error| match error.reason() {
-            Some("NETWORK_POLICIES_DISABLED") => {
-                anyhow::anyhow!("organization network policies are not enabled on this deployment")
-            }
-            _ => anyhow::anyhow!("select the network policy: {}", error.message()),
-        })?;
+        .map_err(server_errors::network_policy_selection)?;
     let selected = response
         .network_policy
         .as_option()
@@ -3524,20 +3521,6 @@ pub(crate) fn print_env_delete_result(
         })?
     );
     Ok(())
-}
-
-/// A delete refusal or failure, with its repair. A scheduled deletion is
-/// not an error; [`lifecycle::delete_was_scheduled`] recognises it first.
-pub(crate) fn map_env_delete_error(environment_ref: &str, err: anyhow::Error) -> anyhow::Error {
-    if lifecycle::error_has_reason(&err, "environment_protected") {
-        return anyhow::anyhow!(
-            "environment {environment_ref} is protected, so nothing was removed; remove the protection first with `cw --cloud unprotect {environment_ref}`"
-        );
-    }
-    if lifecycle::error_has_reason(&err, "access_denied") {
-        return anyhow::anyhow!("access denied: only the environment owner can delete it");
-    }
-    anyhow::anyhow!("delete environment: {err:#}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

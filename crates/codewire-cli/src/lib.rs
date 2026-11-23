@@ -37,6 +37,7 @@ mod output;
 mod platform_cw_runtime;
 mod presentation;
 mod public_fetch;
+mod reworded;
 mod secret_client;
 #[cfg(target_os = "linux")]
 mod snapshot_clear;

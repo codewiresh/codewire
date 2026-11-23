@@ -263,6 +263,18 @@ fn not_signed_in(error: &anyhow::Error) -> bool {
     )
 }
 
+/// A send the server refused or failed. A refused sign-in prints no trace
+/// line (docs/CONFIGURATION.md, "Tracing"); a limit keeps its id.
+fn send_failed(error: codewire_client::ClientError) -> anyhow::Error {
+    match error.code() {
+        ErrorCode::ResourceExhausted => {
+            crate::reworded::reworded(format!("not sent: {}", error.message()), error.trace_id())
+        }
+        ErrorCode::Unauthenticated => sign_in_unconfirmed(error.message()),
+        _ => anyhow::Error::from(error).context("send feedback"),
+    }
+}
+
 fn sign_in_unconfirmed(error: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!(
         "could not confirm your sign-in ({error}); nothing was sent. Run `cw login`, or send it anonymously with --anonymous"
@@ -470,14 +482,7 @@ pub(crate) async fn handle_feedback_command(
         }
         Sender::Anonymous { .. } => FeedbackClient::anonymous(config)?,
     };
-    let response = client
-        .submit_feedback(request)
-        .await
-        .map_err(|error| match error.code() {
-            ErrorCode::ResourceExhausted => anyhow::anyhow!("not sent: {}", error.message()),
-            ErrorCode::Unauthenticated => sign_in_unconfirmed(error.message()),
-            _ => anyhow::Error::from(error).context("send feedback"),
-        })?;
+    let response = client.submit_feedback(request).await.map_err(send_failed)?;
     match args.output {
         OutputFormat::Json => println!(
             "{}",
@@ -494,6 +499,24 @@ pub(crate) async fn handle_feedback_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_send_keeps_the_trace_id_its_answer_named() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-codewire-trace-id",
+            "4bf92f3577b34da6a3ce929d0e0e4736".parse().unwrap(),
+        );
+        let limited = send_failed(codewire_client::ClientError::from(
+            connectrpc::ConnectError::resource_exhausted("too many reports today")
+                .with_headers(headers),
+        ));
+        assert_eq!(limited.to_string(), "not sent: too many reports today");
+        assert_eq!(
+            crate::error_report::trace_id(&limited),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
+        );
+    }
 
     fn words(text: &[&str]) -> Vec<String> {
         text.iter().map(|word| (*word).to_owned()).collect()

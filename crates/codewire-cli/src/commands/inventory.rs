@@ -148,6 +148,9 @@ pub(crate) struct EnvironmentInventory {
     /// The steps that recover a location a retry alone cannot list, shown
     /// in place of the retry (#3548).
     pub(crate) recoveries: Vec<(Location, String)>,
+    /// The id of the trace each failed listing's answer named
+    /// (docs/CONFIGURATION.md, "Tracing").
+    pub(crate) trace_ids: Vec<(Location, String)>,
 }
 
 impl EnvironmentInventory {
@@ -1327,6 +1330,7 @@ mod tests {
                 })
                 .collect(),
             recoveries: Vec::new(),
+            trace_ids: Vec::new(),
         }
         .finish(None)
     }
@@ -2233,6 +2237,7 @@ mod tests {
             ],
             locations: Vec::new(),
             recoveries: Vec::new(),
+            trace_ids: Vec::new(),
         }
         .finish(Some("running"));
         let order: Vec<(&str, Location)> = inventory

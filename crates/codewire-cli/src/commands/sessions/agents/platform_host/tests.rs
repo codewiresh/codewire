@@ -194,6 +194,45 @@ fn platform_refusals_are_definite_only_with_their_exact_reason() {
     }
 }
 
+#[test]
+fn a_request_the_platform_did_not_complete_keeps_its_trace_id() {
+    use crate::error_report::trace_id;
+    use crate::reworded::{TRACE_FOR_TESTS, answered_for_tests};
+    use connectrpc::ConnectError;
+    let id = "11111111-1111-4111-8111-111111111111";
+    let failed = |source| codewire_client::platform_agents::PlatformAgentMutationError {
+        request_id: id.into(),
+        source: Box::new(source),
+    };
+    let cases = [
+        (
+            answered_for_tests(
+                ConnectError::failed_precondition("the previous Pod is still stopping"),
+                "PLATFORM_AGENT_RESUME_REFUSED",
+            ),
+            "the conversation cannot continue: the previous Pod is still stopping".to_owned(),
+        ),
+        (
+            answered_for_tests(
+                ConnectError::failed_precondition("message x is still in progress"),
+                "PLATFORM_AGENT_REQUEST_REFUSED",
+            ),
+            format!("request {id} was refused: message x is still in progress; nothing was sent"),
+        ),
+        (
+            answered_for_tests(ConnectError::internal("lost"), "OTHER"),
+            format!(
+                "request {id} has an unknown outcome: agent outcome is uncertain; observe the original request {id}; use cw agent observe app --request-id {id}; no retry was sent"
+            ),
+        ),
+    ];
+    for (source, text) in cases {
+        let error = mutation_failed(id, "app", &failed(source));
+        assert_eq!(error.to_string(), text);
+        assert_eq!(trace_id(&error), Some(TRACE_FOR_TESTS), "{text}");
+    }
+}
+
 const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
 const MESSAGE: &str = "dff2f8e1-1788-454e-94a9-f4dc6d4b057e";
 const INFO: &str = "/codewire.v1.EnvironmentAgentService/GetEnvironmentAgentInfo";

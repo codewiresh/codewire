@@ -17,7 +17,7 @@ Updated 2026-11-23.
 | --- | --- | --- | --- |
 | `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
-| `sandbox-failure-trace-id` | cw-tracing | not yet observed | not yet observed |
+| `sandbox-failure-trace-id` | cw-tracing | a server error's id observed 2026-11-22 (#5633); a reworded refusal not yet | not yet observed |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
@@ -194,18 +194,24 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
 Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
 
 - **Entry points:** any `cw` command whose request the platform answers with
-  an error. Here, `cw --cloud info` and `cw --cloud rm` with a name that
-  doesn't exist.
+  an error. Here, `cw --cloud credentials get` and `cw --cloud policy check`
+  with a name that doesn't exist: both send the name to the server, which
+  refuses it.
 - **States to exercise:**
   - an error the server answered, with text output and with `--output json`;
+  - a server error that `cw` puts in its own words (`policy check` on a
+    deployment without organization network policies);
+  - a "not found" that `cw` concludes itself from a list the server answered
+    (`cw --cloud info` with a missing name);
   - a failure with no server answer: a server URL whose host doesn't resolve;
   - a command that succeeds.
 - **Driving it:**
 
   ```sh
+  cw --cloud credentials get walk-missing-YYYYMMDD
+  cw --cloud credentials get walk-missing-YYYYMMDD --output json
+  cw --cloud policy check walk-missing-YYYYMMDD example.com
   cw --cloud info walk-missing-YYYYMMDD
-  cw --cloud info walk-missing-YYYYMMDD --output json
-  cw --cloud rm walk-missing-YYYYMMDD --yes
   cw --server https://unresolvable.invalid --cloud ls
   cw --cloud ls
   ```
@@ -215,14 +221,24 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
     line `trace ` followed by 32 lowercase hex digits;
   - an operator's ranged read of the trace store for that id, over the minute
     of the command, returns a trace whose root is that request
-    (`POST /codewire.v1.EnvironmentService/…`) on `codewire-orchestration`;
-  - the unresolvable server and the successful `cw ls` print no `trace` line.
+    (`POST /codewire.v1.…`) on the service that answered it;
+  - `cw --cloud info` with a missing name, the unresolvable server and the
+    successful `cw ls` print no `trace` line.
 - **Gotchas:**
   - Dev keeps every trace. A deployment whose sampler drops a request sends no
     header, so `cw` prints no line, and that is not a failure.
   - Only an operator can read the trace store, one ranged request at a time.
 - **Observed:**
-  - not yet observed.
+  - Dev, 2026-11-22 (#5633), as the Dev smoke identity, with a `cw` built from
+    main: `cw --cloud credentials get walk-missing-20261122` exited 1 with
+    the server's refusal, then `trace d7140724d2e705d80c910abe56c926b9`. The
+    trace store holds that trace, rooted at `POST
+    /codewire.v1.CredentialService/GetCredential` on `codewire-orchestration`.
+    The unresolvable server and a successful `cw --cloud ls` printed no line,
+    and neither did `cw --cloud info` with a missing name, as above.
+  - Not yet observed: the `--output json` form and `policy check`. Until the
+    change that keeps the id on a reworded error is on Dev, `policy check`
+    prints no line.
 
 ## `sandbox-run-exec`: run a command in a sandbox
 

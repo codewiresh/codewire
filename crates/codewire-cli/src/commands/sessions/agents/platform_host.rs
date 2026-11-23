@@ -308,24 +308,7 @@ impl Endpoint {
             &request,
         )?;
         let result = self.client.mutate_environment_agent(request).await;
-        let response = result.map_err(|e| {
-            // Refused before admission: nothing was saved or started.
-            if resume_refused(&e.source) {
-                return anyhow::anyhow!("the conversation cannot continue: {}", e.source.message());
-            }
-            // Refused at admission, before anything was sent: a definite
-            // answer, never an uncertain outcome to observe (#2782).
-            if request_refused(&e.source) {
-                return anyhow::anyhow!(
-                    "request {id} was refused: {}; nothing was sent",
-                    e.source.message()
-                );
-            }
-            anyhow::anyhow!(
-                "{e}; use cw agent observe {} --request-id {id}; no retry was sent",
-                self.environment_id
-            )
-        })?;
+        let response = result.map_err(|error| mutation_failed(id, &self.environment_id, &error))?;
         let operation = response
             .operation
             .into_option()
@@ -439,6 +422,33 @@ impl Conversation {
             ..Default::default()
         }
     }
+}
+/// A request the platform did not complete, in `cw`'s words. It keeps the
+/// id of the trace the answer named.
+fn mutation_failed(
+    id: &str,
+    environment_id: &str,
+    error: &codewire_client::platform_agents::PlatformAgentMutationError,
+) -> anyhow::Error {
+    let text = if resume_refused(&error.source) {
+        // Refused before admission: nothing was saved or started.
+        format!(
+            "the conversation cannot continue: {}",
+            error.source.message()
+        )
+    } else if request_refused(&error.source) {
+        // Refused at admission, before anything was sent: a definite
+        // answer, never an uncertain outcome to observe (#2782).
+        format!(
+            "request {id} was refused: {}; nothing was sent",
+            error.source.message()
+        )
+    } else {
+        format!(
+            "request {id} has an unknown outcome: {error}; use cw agent observe {environment_id} --request-id {id}; no retry was sent"
+        )
+    };
+    crate::reworded::reworded(text, error.source.trace_id())
 }
 /// A Resume the platform refused before admitting it, with its reason.
 fn resume_refused(error: &codewire_client::ClientError) -> bool {

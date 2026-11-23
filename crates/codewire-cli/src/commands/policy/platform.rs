@@ -235,14 +235,14 @@ fn returned(policy: Option<NetworkPolicy>) -> anyhow::Result<NetworkPolicy> {
     policy.context("the platform returned no network policy")
 }
 
-/// The server's message, in the user's terms where the server says why.
+/// The server's message, in the user's terms where the server says why. It
+/// keeps the id of the trace the answer named.
 fn failed(action: &str, error: ClientError) -> anyhow::Error {
-    match error.reason() {
-        Some("NETWORK_POLICIES_DISABLED") => anyhow::anyhow!(
-            "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`"
-        ),
-        _ => anyhow::anyhow!("{action}: {}", error.message()),
-    }
+    let text = match error.reason() {
+        Some("NETWORK_POLICIES_DISABLED") => "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`".to_owned(),
+        _ => format!("couldn't {action}: {}", error.message()),
+    };
+    crate::reworded::reworded(text, error.trace_id())
 }
 
 fn rules_proto(rules: Vec<AllowRule>) -> Vec<NetworkPolicyRule> {
@@ -411,7 +411,37 @@ mod tests {
         // Without the server's reason the action and message show.
         assert_eq!(
             failed("list network policies", error).to_string(),
-            "list network policies: platform network policies are not enabled on this deployment"
+            "couldn't list network policies: platform network policies are not enabled on this deployment"
         );
+    }
+
+    #[test]
+    fn a_refusal_in_cws_words_keeps_its_trace_id() {
+        use crate::error_report::trace_id;
+        use crate::reworded::{TRACE_FOR_TESTS, answered_for_tests};
+        let disabled = failed(
+            "list network policies",
+            answered_for_tests(
+                connectrpc::ConnectError::failed_precondition("disabled"),
+                "NETWORK_POLICIES_DISABLED",
+            ),
+        );
+        assert_eq!(
+            disabled.to_string(),
+            "organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`"
+        );
+        assert_eq!(trace_id(&disabled), Some(TRACE_FOR_TESTS));
+        let other = failed(
+            "change the network policy",
+            answered_for_tests(
+                connectrpc::ConnectError::not_found("no such policy"),
+                "OTHER",
+            ),
+        );
+        assert_eq!(
+            other.to_string(),
+            "couldn't change the network policy: no such policy"
+        );
+        assert_eq!(trace_id(&other), Some(TRACE_FOR_TESTS));
     }
 }

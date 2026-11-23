@@ -866,11 +866,14 @@ The line comes after the error and its next step, reads `trace
 4bf92f3577b34da6a3ce929d0e0e4736`, and is dim at a terminal. It is printed with
 `--local` and `--cloud` alike, and with `--output json`. A failure with no
 answer has no id and prints none, such as a host name that doesn't resolve or a
-timeout before any response. Three refusals print none either, because their
-error already says what to do: a sign-in that is no longer accepted, exhausted
-credit, and an environment that isn't running. Nothing is exported from the
-user's machine. `cw`
-sends no `traceparent`, and the edge would remove one.
+timeout before any response. A "not found" that `cw` concludes itself prints
+none either: `cw` looks a cloud name up in the environment list, and the
+server answered that list. Three refusals print none, because their error
+already says what to do: a sign-in that is no longer accepted, exhausted
+credit, and an environment that isn't running. When `cw` puts a server's error
+in its own words, such as a refusal it explains in the user's terms, it keeps
+that answer's id and prints the line. Nothing is exported from the user's
+machine. `cw` sends no `traceparent`, and the edge would remove one.
 
 The workspace daemon calls `BindWorkspace` and `RefreshAccess` on
 orchestration's workspace-binding listener, port 8087. The daemon runs inside
