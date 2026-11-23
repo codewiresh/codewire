@@ -149,6 +149,7 @@ test.describe.serial("server-rendered organization governance", () => {
     await keyRow.locator("details.cw-menu > summary").click();
     await keyRow.getByRole("button", { name: "Delete", exact: true }).click();
     const deletion = page.getByRole("dialog", { name: `Delete ${keyName}?`, exact: true });
+    await expect(deletion).toContainText("All connections using this key are dropped when it is deleted.");
     await deletion.getByRole("button", { name: "Delete key", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("API key deleted");
     await expect(page.getByRole("row").filter({ hasText: keyName })).toHaveCount(0);

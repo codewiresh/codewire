@@ -178,7 +178,6 @@ async function personalApiKeys(page: Page): Promise<void> {
   await expect(organization.locator("option").filter({ hasText: /^(?:null|undefined)$|null · null/ })).toHaveCount(0);
   await expect(page.getByRole("search", { name: "Filter API keys", exact: true })).toBeVisible();
   await apiKeyTable(page, ["Name", "Organization", "Status", "Last used", "Expires"], "You have no API keys yet. Create one to use the Codewire CLI or SDK.");
-  await apiKeyDeleteWording(page, "api-key-delete-wording-personal");
   const owners = await page.locator(".cw-table tbody tr").evaluateAll((rows) => rows.map((row) => row.querySelector(":scope > td:nth-child(2) > a")?.getAttribute("href") ?? ""));
   for (const owner of owners) expect(owner).toMatch(/^\/[a-z0-9]+(?:-[a-z0-9]+)*\/api-keys\/$/);
 }
@@ -193,7 +192,6 @@ async function organizationApiKeys(page: Page, slug: string): Promise<void> {
   await settingsShell(page, "organization", `/${slug}/api-keys/`);
   await expect(page.locator("#settings-organization-title")).toHaveText(/^Organization · \S/);
   await apiKeyTable(page, ["Name", "Created by", "Status", "Last used", "Created"], "No API keys yet. Create one for programmatic access.");
-  await apiKeyDeleteWording(page, "api-key-delete-wording-organization");
   await noUnsetValues(page);
   await fits(page);
 }
@@ -237,20 +235,6 @@ async function networkPolicies(page: Page, slug: string): Promise<void> {
       await expect(page.locator(".cw-network-policy-list .cw-network-policy-copy > strong")).toHaveText(["open", "locked"]);
     }],
   ])) passed("network-policies", started);
-}
-
-// Each key a member may delete has a Delete dialog that says what deleting does
-// in one sentence (#3586). The dialog is read as rendered, never opened, and no
-// key is deleted; with no such key there is nothing to read. A miss prints
-// not-held and does not fail the walk yet: it could not run on Dev first.
-const API_KEY_DELETED = "All connections using this key are dropped when it is deleted.";
-async function apiKeyDeleteWording(page: Page, name: string): Promise<void> {
-  const bodies = page.locator('dialog[id^="api-key-"][id$="-delete"] .cw-dialog-body');
-  if (!(await bodies.count())) return;
-  const started = Date.now();
-  if (await holds(name, [["delete-wording", async () => {
-    for (const body of await bodies.all()) await expect(body).toContainText(API_KEY_DELETED);
-  }]])) passed(name, started);
 }
 
 // A table with declared column headers when keys exist, else the empty state.

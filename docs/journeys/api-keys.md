@@ -9,7 +9,7 @@ and the flags in it are the ones that section proposes. The format is in
 
 ## Where it stands
 
-Updated 2026-11-21. Written first; every step is not yet observed.
+Updated 2026-11-23. Written first; every step is not yet observed.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -84,6 +84,10 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   - A disables M's key.
 - **Driving it:** no command yet (#5688).
 - **Proof:** the same call before and after each change, and its answer.
+- **What the page says:** a key's Delete dialog says "All connections using
+  this key are dropped when it is deleted." on both API key pages. Browser
+  tests hold it (`ssr-dashboard.personal-api-keys.ssr.ts` and
+  `ssr-dashboard.governance.ssr.ts`); the Dev walk does not read it (#3586).
 
 ## `key-audit`: every key change and refusal is recorded
 
