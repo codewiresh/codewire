@@ -45,6 +45,9 @@ pub enum DesktopRefusal {
     NoDesktopInImage,
     /// A held display or port, or a session in the way.
     DidNotStart,
+    /// The environment refused the launcher's launch, as it can for a moment
+    /// during a release; the launcher never ran (#6133).
+    LaunchDenied,
     NotReadyInTime,
     /// The daemon does not know the desktop calls. A backend names its own
     /// repair.
@@ -63,6 +66,10 @@ impl DesktopRefusal {
                 "the desktop did not start: another process in the environment may hold display \
                  :1 or port 5901, or a session named codewire-desktop is in the way; the \
                  codewire-desktop session's output says which"
+            }
+            Self::LaunchDenied => {
+                "the environment did not let the desktop launch just now, as can happen for a \
+                 moment while Codewire updates; start it again"
             }
             Self::NotReadyInTime => {
                 "the desktop was not ready in time; start it again, and read the \
@@ -237,6 +244,7 @@ where
 fn status_refusal(refusal: &tonic::Status) -> DesktopRefusal {
     match refusal.code() {
         tonic::Code::FailedPrecondition => DesktopRefusal::DidNotStart,
+        tonic::Code::Aborted => DesktopRefusal::LaunchDenied,
         tonic::Code::Unimplemented => DesktopRefusal::DaemonTooOld,
         tonic::Code::DeadlineExceeded => DesktopRefusal::NotReadyInTime,
         tonic::Code::Unavailable | tonic::Code::Cancelled => DesktopRefusal::TransportLost,

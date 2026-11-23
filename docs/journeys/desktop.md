@@ -143,9 +143,12 @@ panel comment.
   name the desktop's terminal prints with `cw info desk-walk`. The password
   searches need the password: take it from `--no-open`, and search for the
   exact eight characters. On the owner's Mac the viewer is opened in a
-  session the owner can watch, never over a bare remote command. A refusal
-  that blames display :1 or port 5901 can be a denied launch (#6133); the
-  session's status in the daemon says which, and a second start went
+  session the owner can watch, never over a bare remote command, and the
+  walk's teardown quits the viewer it opened before it ends the forward or
+  deletes the environment, so no viewer is left reconnecting to a desktop
+  that is gone. A start whose launch the environment denied, as it can for a
+  moment while orchestration hands over during a release, says so and not
+  that display :1 or port 5901 is taken (#6133); a second start went
   through.
 - **Observed:** from Linux, in the 2026-11-22 walks on Dev and a Linux local
   VM, with TigerVNC on a private X server as the viewer: every proof but the

@@ -104,7 +104,8 @@ fn local_desktop_refusal(refusal: DesktopRefusal) -> connectrpc::ConnectError {
         DesktopRefusal::DaemonTooOld => {
             connectrpc::ConnectError::failed_precondition(RUNTIME_PREDATES_THE_DESKTOP)
         }
-        DesktopRefusal::NotReadyInTime
+        DesktopRefusal::LaunchDenied
+        | DesktopRefusal::NotReadyInTime
         | DesktopRefusal::TransportLost
         | DesktopRefusal::InvalidAnswer => {
             connectrpc::ConnectError::unavailable(refusal.sentence())
@@ -180,6 +181,7 @@ mod tests {
                 ErrorCode::FailedPrecondition,
             ),
             (DesktopRefusal::DidNotStart, ErrorCode::FailedPrecondition),
+            (DesktopRefusal::LaunchDenied, ErrorCode::Unavailable),
             (DesktopRefusal::NotReadyInTime, ErrorCode::Unavailable),
             (DesktopRefusal::TransportLost, ErrorCode::Unavailable),
             (DesktopRefusal::InvalidAnswer, ErrorCode::Unavailable),

@@ -356,6 +356,25 @@ async fn a_launcher_that_ends_fails_the_start_naming_the_display_and_the_port() 
     fixture.finish().await;
 }
 
+#[test]
+fn a_launch_the_environment_denied_is_aborted_and_not_named_a_display_or_port_clash() {
+    let ended = |status_message: &str| v1::SessionRecord {
+        state: v1::SessionLifecycleState::Failed as i32,
+        status_message: status_message.into(),
+        ..Default::default()
+    };
+    let denied = ended_start(
+        &ended(crate::durable_session::LAUNCH_PROJECTION_DENIED),
+        5901,
+    );
+    assert_eq!(denied.code(), tonic::Code::Aborted, "{denied:?}");
+    assert!(!denied.message().contains("display"), "{denied:?}");
+    let exited = ended_start(&ended("exited with status 1"), 5901);
+    assert_eq!(exited.code(), tonic::Code::FailedPrecondition, "{exited:?}");
+    assert!(exited.message().contains("display :1"), "{exited:?}");
+    assert!(exited.message().contains("port 5901"), "{exited:?}");
+}
+
 #[tokio::test]
 async fn a_launcher_that_never_says_ready_is_ended_when_the_start_times_out() {
     let fixture = Fixture::build(

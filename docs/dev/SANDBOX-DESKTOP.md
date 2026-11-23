@@ -207,6 +207,10 @@ a desktop belongs to an environment.
   is what happens when another process already holds display `:1` or port
   5901: the refusal names both. A listener on the port that is not the
   launcher's never reads as a running desktop.
+- A start whose launch the environment refuses, as it can for a moment while
+  orchestration hands over during a release, says that, not that the display
+  or port is taken: the launcher never ran. A second start goes through
+  (#6133).
 - A start that is not ready within 10 seconds ends the launcher and fails.
 - The daemon stops the desktop as it stops any session, by ending its one
   process. The launcher starts each of its programs so that they end with

@@ -36,6 +36,7 @@ fn running() -> daemon::Desktop {
 fn a_refusal_is_read_by_its_code_alone_and_no_sentence_is_the_daemons() {
     for (code, refusal) in [
         (tonic::Code::FailedPrecondition, DesktopRefusal::DidNotStart),
+        (tonic::Code::Aborted, DesktopRefusal::LaunchDenied),
         (tonic::Code::Unimplemented, DesktopRefusal::DaemonTooOld),
         (
             tonic::Code::DeadlineExceeded,

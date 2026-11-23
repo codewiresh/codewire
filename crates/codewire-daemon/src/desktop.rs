@@ -333,11 +333,7 @@ impl Desktop {
         loop {
             let session = engine.get(&launched.session_id).await.map_err(status)?;
             if !is_live(&session) {
-                return Err(Status::failed_precondition(format!(
-                    "the desktop did not start ({}); another process may hold display \
-                     {DESKTOP_DISPLAY} or port {port}",
-                    session.status_message
-                )));
+                return Err(ended_start(&session, port));
             }
             if self.said_ready(&launched.session_id, output_start).await? && self.listens().await {
                 return Ok(session);
@@ -423,6 +419,23 @@ fn unavailable(reason: String) -> v1::Desktop {
 
 fn status(error: SessionError) -> Status {
     crate::durable_session::status_from_session_error(error)
+}
+
+/// Why a start whose launcher session ended is refused. A launch the
+/// environment denied never ran the launcher, so it is no display or port
+/// clash, and the code says so where the sentence is not read (#6133).
+fn ended_start(session: &v1::SessionRecord, port: u16) -> Status {
+    if session.status_message == crate::durable_session::LAUNCH_PROJECTION_DENIED {
+        return Status::aborted(format!(
+            "the desktop did not start: the environment denied its launch ({})",
+            session.status_message
+        ));
+    }
+    Status::failed_precondition(format!(
+        "the desktop did not start ({}); another process may hold display \
+         {DESKTOP_DISPLAY} or port {port}",
+        session.status_message
+    ))
 }
 
 fn is_live(session: &v1::SessionRecord) -> bool {

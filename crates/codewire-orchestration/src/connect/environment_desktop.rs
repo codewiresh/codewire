@@ -102,7 +102,8 @@ fn refusal_error(refusal: DesktopRefusal) -> AppError {
             AppError::Precondition(refusal.sentence().into())
         }
         DesktopRefusal::DaemonTooOld => AppError::Precondition(DAEMON_UPGRADE_REQUIRED.into()),
-        DesktopRefusal::NotReadyInTime
+        DesktopRefusal::LaunchDenied
+        | DesktopRefusal::NotReadyInTime
         | DesktopRefusal::TransportLost
         | DesktopRefusal::InvalidAnswer => AppError::Upstream(refusal.sentence().into()),
         DesktopRefusal::Failed => AppError::InternalMsg(refusal.sentence().into()),
@@ -141,6 +142,7 @@ mod tests {
             );
         }
         for refusal in [
+            DesktopRefusal::LaunchDenied,
             DesktopRefusal::NotReadyInTime,
             DesktopRefusal::TransportLost,
             DesktopRefusal::InvalidAnswer,
