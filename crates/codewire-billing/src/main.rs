@@ -72,6 +72,11 @@ async fn main() -> anyhow::Result<()> {
     let credit_enforcement =
         codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
     let receipts = codewire_billing::receipts::ReceiptSender::from_env()?;
+    let operator_email = codewire_email::parse_operator_email(
+        std::env::var(codewire_email::OPERATOR_EMAIL_ENV)
+            .ok()
+            .as_deref(),
+    )?;
 
     let state = BillingState {
         pool: pool.clone(),
@@ -83,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         credit_enforcement,
         receipts,
         frontend_origin,
+        operator_email,
     };
 
     // Every replica checks billing's own Stripe webhook endpoint at startup

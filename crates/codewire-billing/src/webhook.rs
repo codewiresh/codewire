@@ -561,6 +561,25 @@ async fn handle_invoice_paid(
     )
     .await;
 
+    // Last, so a delivery that fails above, and is redelivered, notifies once.
+    if let Some(kind) = crate::operator_notice::purchase_kind(inv.metadata.as_ref())
+        && !org_id.is_empty()
+    {
+        crate::operator_notice::notify(
+            pool,
+            &state.email,
+            &state.frontend_origin,
+            state.operator_email.as_deref(),
+            crate::operator_notice::CreditPurchase {
+                organization_id: org_id,
+                amount_cents: inv.amount_paid,
+                currency: inv.currency.to_string(),
+                kind,
+                at: chrono::Utc::now(),
+            },
+        );
+    }
+
     Ok(())
 }
 
@@ -909,6 +928,7 @@ mod tests {
             credit_enforcement: Default::default(),
             receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
+            operator_email: None,
         }
     }
 

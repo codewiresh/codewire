@@ -196,6 +196,16 @@ pub const OPERATOR_FEEDBACK_NOTICE: Limit = Limit {
     per_user: false,
 };
 
+/// Billing's credit purchase notices to the operator (#5358), counted like
+/// [`OPERATOR_NOTICE`] but apart from it and from feedback.
+pub const OPERATOR_PURCHASE_NOTICE: Limit = Limit {
+    name: "operator_purchase_notice",
+    key_prefix: "operator_purchase_notice",
+    window_secs: 3_600,
+    default_max: 10,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,

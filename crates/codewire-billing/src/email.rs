@@ -78,6 +78,11 @@ impl EmailClient {
         self.delivery.send(to, email).await
     }
 
+    /// Sends one of the operator's notices, built by its caller.
+    pub(crate) async fn send_to_operator(&self, to: &str, email: &Email) -> anyhow::Result<()> {
+        self.send(to, email).await
+    }
+
     /// The organization's Billing page.
     fn billing_url(&self, org_slug: Option<&str>) -> String {
         self.frontend_origin.billing_url(org_slug)

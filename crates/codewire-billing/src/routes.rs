@@ -23,6 +23,9 @@ pub struct BillingState {
     /// Who emails the receipt for a paid invoice (#4816).
     pub receipts: crate::receipts::ReceiptSender,
     pub frontend_origin: FrontendOrigin,
+    /// `CODEWIRE_OPERATOR_EMAIL`: where paid credit purchases are announced
+    /// (#5358), or `None` to send no notice.
+    pub operator_email: Option<String>,
 }
 
 /// Stripe owns webhook delivery and authenticates it by signature rather than

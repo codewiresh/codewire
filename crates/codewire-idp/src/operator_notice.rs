@@ -18,31 +18,10 @@ use sqlx::PgPool;
 
 use crate::oauth::Provider;
 
-pub const OPERATOR_EMAIL_ENV: &str = "CODEWIRE_OPERATOR_EMAIL";
+pub use codewire_email::{OPERATOR_EMAIL_ENV, parse_operator_email};
 
 /// The one subject the site-wide notice limit counts under.
 const SITE: &str = "all";
-
-/// `CODEWIRE_OPERATOR_EMAIL`: one email address, or `None` for an unset or
-/// empty value. Anything else stops the IdP, by the rule the dashboard
-/// applies to `CODEWIRE_SUPPORT_EMAIL`.
-pub fn parse_operator_email(value: Option<&str>) -> anyhow::Result<Option<String>> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    let valid = value.len() <= 254
-        && value
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-        && value.matches('@').count() == 1
-        && value.chars().all(|c| c.is_ascii_graphic());
-    if !valid {
-        anyhow::bail!(
-            "{OPERATOR_EMAIL_ENV} must be one email address, such as operator@example.com"
-        );
-    }
-    Ok(Some(value.to_owned()))
-}
 
 /// How a person signed up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,35 +183,6 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-11-18T17:05:09Z")
             .unwrap()
             .with_timezone(&Utc)
-    }
-
-    #[test]
-    fn the_address_is_one_email_address_or_nothing() {
-        for unset in [None, Some(""), Some("  ")] {
-            assert_eq!(parse_operator_email(unset).ok(), Some(None));
-        }
-        assert_eq!(
-            parse_operator_email(Some(" hello@codewire.sh ")).ok(),
-            Some(Some("hello@codewire.sh".to_owned()))
-        );
-        for invalid in [
-            "hello",
-            "@codewire.sh",
-            "hello@localhost",
-            "a@b.sh, c@d.sh",
-            "a@b@c.sh",
-            "hello@codewire.sh\nBcc: x@y.sh",
-        ] {
-            let error = parse_operator_email(Some(invalid))
-                .err()
-                .map(|e| e.to_string());
-            assert!(
-                error
-                    .as_deref()
-                    .is_some_and(|e| e.contains(OPERATOR_EMAIL_ENV)),
-                "{invalid:?}: {error:?}"
-            );
-        }
     }
 
     #[test]

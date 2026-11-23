@@ -61,6 +61,19 @@ impl FrontendOrigin {
         }
     }
 
+    /// Admin → Organizations, and one organization's page there, which the
+    /// operator's purchase notices link to (#5358).
+    pub fn admin_organizations_url(&self) -> String {
+        format!("{}/admin/organizations/", self.0.ascii_serialization())
+    }
+
+    pub fn admin_organization_url(&self, organization_id: &str) -> String {
+        format!(
+            "{}/admin/organizations/{organization_id}/",
+            self.0.ascii_serialization()
+        )
+    }
+
     pub(crate) fn validate_redirect(&self, field: &str, value: &str) -> Result<(), AppError> {
         let url = Url::parse(value).map_err(|_| {
             AppError::BadRequest(

@@ -18,8 +18,10 @@ use aws_smithy_runtime_api::client::identity::Identity;
 use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 
 mod layout;
+mod operator;
 
 pub use layout::{Block, Email, escape};
+pub use operator::{OPERATOR_EMAIL_ENV, parse_operator_email};
 
 /// Environment variable holding the exact SES From address approved for this
 /// workload: a single mailbox, bare or as `Name <address>` (#4553). The

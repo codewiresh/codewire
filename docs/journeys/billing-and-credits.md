@@ -23,7 +23,7 @@ the first Production release after codewire/deploy#245.
 | `billing-admin-adjust` | not yet observed | not yet observed |
 | `billing-banner` | not yet observed | not yet observed |
 | `billing-admin-prices` | not yet observed | not yet observed |
-| `billing-operator-notice` | not yet observed (not yet built, #5358) | not yet observed |
+| `billing-operator-notice` | not yet observed (#5358) | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
 
@@ -385,8 +385,7 @@ Issue: #5782. The rule is [`docs/dev/BILLING.md`](../dev/BILLING.md),
 
 Issue: #5358 (owner, 2026-11-18: "I would like to get a duplicate receipt
 myself if it's possible or at least a notice that somebody signed up.").
-Not yet built: these steps are what the code must make true. The rules are
-in `docs/CONFIGURATION.md`, "Operator notices".
+The rules are in `docs/CONFIGURATION.md`, "Operator notices".
 
 - **Entry points:** **Add credit** on the Billing page (saved card, and no
   card yet), an automatic top-up, and the operator's inbox

@@ -16,6 +16,7 @@ pub mod credit_changes;
 pub mod credit_purchase;
 pub mod email;
 pub mod metering;
+pub(crate) mod operator_notice;
 pub mod overview;
 pub mod stripe_client;
 pub mod stripe_delivery_check;

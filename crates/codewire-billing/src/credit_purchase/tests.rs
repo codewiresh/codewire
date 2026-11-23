@@ -368,6 +368,7 @@ impl Harness {
             credit_enforcement: Default::default(),
             receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
+            operator_email: None,
         };
         Self {
             state,
