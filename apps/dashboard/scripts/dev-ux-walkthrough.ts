@@ -813,18 +813,18 @@ async function desktop(page: Page, detailPath: string, rows: Locator, send: (com
         return page.evaluate(() => navigator.clipboard.readText());
       }, { timeout: 10_000 }).toContain("__UX_DESKTOP_COPIED__")],
       ["paste-note", async () => {
-        await page.evaluate(() => navigator.clipboard.writeText("__UX_DESKTOP_PASTED__."));
+        await page.evaluate(() => navigator.clipboard.writeText("__UX_DESKTOP_PASTED__"));
         await button(panel, "Paste to desktop").click();
         await expect(panel.locator("[data-desktop-note]")).toHaveText("Pasted to the desktop.");
       }],
-      // The viewer only announces a paste; the terminal fetches the text from
-      // the page when Ctrl+Shift+V asks for it, a round trip after the keys
-      // that follow. So a reader waits for it up to its final "." and nothing
-      // is typed after it.
+      // Typed straight after the paste, as a person types: the panel sends the
+      // text with its announcement, so the terminal's paste lands before the
+      // keys that follow (#6065).
       ["pasted", async () => {
-        await keys("bash -c 'IFS= read -r -t 20 -d . line; printf \"%s\\n\" \"$line\" > /tmp/ux-desktop-pasted'");
-        await page.keyboard.press("Enter");
+        await keys("echo ");
         await page.keyboard.press("Control+Shift+V");
+        await keys(" > /tmp/ux-desktop-pasted");
+        await page.keyboard.press("Enter");
       }],
     ])) passed("desktop-input", started);
     started = Date.now();

@@ -498,10 +498,9 @@ panel comment.
   Record how many replicas the surface ran: with more than one, a fifth
   viewer that lands on another replica is admitted, and that is correct.
   Nothing is copied from the desktop to the computer without the button:
-  check the clipboard before pressing it. The viewer only announces a
-  paste; the desktop's program fetches the text when Ctrl+Shift+V asks for
-  it, a round trip later than keys typed after it, so a walk waits for the
-  paste before typing on.
+  check the clipboard before pressing it. Keys typed straight after a paste
+  land after the pasted text: the panel sends the text with its
+  announcement, so the desktop's program has it at once.
 - **Observed:** partly, on Kind on 2026-11-22, before review, with the
   dashboard at `43f5c10850` and the default workspace image (recorded on
   #3223 in the Kind walk comment): steps 1, 2, 3, 5 and 6. The panel went from

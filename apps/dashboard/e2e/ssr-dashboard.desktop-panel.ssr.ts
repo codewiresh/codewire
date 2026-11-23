@@ -1,3 +1,4 @@
+import { constants as zlibConstants, inflateSync } from "node:zlib";
 import { artifactScreenshot, checkReadinessNow, expect, test, type Page, type WebSocketRoute } from "./helpers/fixture-test";
 
 // The Desktop panel (docs/dev/SANDBOX-DESKTOP.md, "The dashboard viewer") on
@@ -16,9 +17,20 @@ type Stream = { route: WebSocketRoute; url: URL; afterInit: Buffer; ready: boole
 
 const u32 = (value: number) => { const bytes = Buffer.alloc(4); bytes.writeUInt32BE(value); return bytes; };
 
-// RFB 3.8 with VNC authentication, up to ServerInit for an 800×600 desktop.
+// The extended clipboard's actions and its text format, as TigerVNC
+// advertises them after ServerInit.
+const clipboard = { caps: 1 << 24, request: 1 << 25, peek: 1 << 26, notify: 1 << 27, provide: 1 << 28, text: 1 };
+const clipboardMessage = (flags: number, payload = Buffer.alloc(0)) => {
+  const head = Buffer.alloc(8);
+  head.writeUInt8(3, 0);
+  head.writeInt32BE(-(4 + payload.length), 4);
+  return Buffer.concat([head, u32(flags), payload]);
+};
+
+// RFB 3.8 with VNC authentication, up to ServerInit for an 800×600 desktop,
+// then the extended clipboard's capabilities when the server has them.
 // The page's bytes after its ClientInit are kept for the test to read.
-function serveVnc(route: WebSocketRoute, stream: Stream) {
+function serveVnc(route: WebSocketRoute, stream: Stream, extendedClipboard: boolean) {
   let received = Buffer.alloc(0);
   const init = Buffer.alloc(24 + 4);
   init.writeUInt16BE(800, 0);
@@ -42,6 +54,11 @@ function serveVnc(route: WebSocketRoute, stream: Stream) {
       route.send(steps[step][1]);
       step += 1;
       stream.ready = step === steps.length;
+      // A message of its own: noVNC reads one message per step of its handshake.
+      if (stream.ready && extendedClipboard) {
+        const { caps, request, peek, notify, provide, text } = clipboard;
+        route.send(clipboardMessage(caps | request | peek | notify | provide | text, u32(1 << 20)));
+      }
     }
     if (stream.ready) stream.afterInit = received.subarray(consumed);
   });
@@ -51,6 +68,8 @@ function serveVnc(route: WebSocketRoute, stream: Stream) {
 async function transport(page: Page) {
   const state = {
     accountId: "account-a", desktop: "stopped" as DesktopState, sandboxRunning: true, gets: 0, starts: 0, stops: 0,
+    // Whether the server advertises the extended clipboard, as TigerVNC does.
+    extendedClipboard: false,
     forms: [] as string[][], streams: [] as Stream[],
     // How the next stream ends before its handshake: by a close code and reason.
     refuse: null as { code: number; reason: string } | null,
@@ -89,7 +108,7 @@ async function transport(page: Page) {
       route.close({ code, reason });
       return;
     }
-    serveVnc(route, stream);
+    serveVnc(route, stream, state.extendedClipboard);
   });
   return state;
 }
@@ -213,6 +232,50 @@ test("the clipboard moves only on its buttons, and Release keyboard stops the ke
   await page.keyboard.press("q");
   await page.waitForTimeout(500);
   expect(stream.afterInit.length).toBe(before);
+});
+
+// Where the page's bytes hold an extended clipboard Provide, and the text one
+// carries, each deflated on its own.
+function provides(bytes: Buffer): number[] {
+  const found: number[] = [];
+  for (let at = bytes.indexOf(u32(clipboard.provide | clipboard.text)); at >= 8; at = bytes.indexOf(u32(clipboard.provide | clipboard.text), at + 1)) {
+    if (bytes[at - 8] === 6 && bytes.readInt32BE(at - 4) < 0) found.push(at - 8);
+  }
+  return found;
+}
+function providedText(bytes: Buffer, at: number): string {
+  const payload = bytes.subarray(at + 12, at + 8 - bytes.readInt32BE(at + 4));
+  const data = inflateSync(payload, { finishFlush: zlibConstants.Z_SYNC_FLUSH });
+  return data.subarray(4, 4 + data.readUInt32BE(0)).toString("utf8");
+}
+
+// It also pins the noVNC internals the panel reads to send the text early
+// (_sock, _clipboardText, _clipboardServerCapabilitiesActions): a vendored
+// noVNC that renames one falls back to announcing only, and this fails.
+test("a paste reaches the desktop before the keys typed after it, though the desktop asks for it late", async ({ page, context }) => {
+  const state = await transport(page);
+  state.desktop = "running";
+  state.extendedClipboard = true;
+  await openFixture(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
+  await showDesktop(page);
+  await connected(page, state);
+  const stream = state.streams[0];
+
+  await page.evaluate(() => navigator.clipboard.writeText("pasted-é-中"));
+  await control(page, "Paste to desktop").click();
+  await expect(panel(page).locator("[data-desktop-note]")).toHaveText("Pasted to the desktop.");
+  await panel(page).locator("canvas").click();
+  await page.keyboard.press("q");
+  const key = Buffer.from([4, 1, 0, 0, 0, 0, 0, 0x71]);
+  await expect.poll(() => stream.afterInit.indexOf(key)).toBeGreaterThan(-1);
+  // The desktop's program asks for the text only after the key, as a round
+  // trip through the gateway lets it on Dev.
+  stream.route.send(clipboardMessage(clipboard.request | clipboard.text));
+  await expect.poll(() => provides(stream.afterInit).length).toBeGreaterThan(0);
+  const [first] = provides(stream.afterInit);
+  expect(first).toBeLessThan(stream.afterInit.indexOf(key));
+  expect(providedText(stream.afterInit, first)).toBe("pasted-é-中\0");
 });
 
 test("a refused viewer shows the stream's reason and can reconnect", async ({ page }) => {

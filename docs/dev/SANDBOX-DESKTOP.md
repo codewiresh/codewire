@@ -390,7 +390,9 @@ with the page's Terminal and Desktop switch: Start, the viewer, Stop, and
 the states unavailable (with the recreate hint and no Start), stopped,
 starting, running, disconnected (Reconnect) and ended. Paste and copy are
 explicit buttons, "Paste to desktop" and "Copy from desktop"; the clipboard
-never syncs by itself in either direction. "Release keyboard" returns the
+never syncs by itself in either direction. Paste to desktop sends the text
+with its announcement, so the desktop holds it and a program's paste takes
+it at once, ahead of any key typed after it. "Release keyboard" returns the
 keyboard to the page. Start and Stop pass the checks the terminal's New and
 Close pass: CSRF, the exact dashboard origin and two-factor eligibility.
 

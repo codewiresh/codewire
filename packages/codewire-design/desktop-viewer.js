@@ -8,6 +8,9 @@
   // clipboard moves only on the two buttons.
   const protocol = "codewire.desktop-stream.v1";
   const drainRetryMs = 2000;
+  // The extended clipboard's Notify and Provide actions (noVNC core/rfb.js).
+  const clipboardNotify = 1 << 27;
+  const clipboardProvide = 1 << 28;
   const messages = {
     loading: "Checking the desktop…",
     unavailable: "This Sandbox's image has no desktop. Create the Sandbox again to use one.",
@@ -195,6 +198,22 @@
       rfb = viewer;
     }
 
+    // noVNC only announces a paste and sends the text when the desktop asks
+    // for it, a round trip after the keys typed next, which then land first.
+    // Sending the text with the announcement, as the same message noVNC
+    // answers that request with, lets TigerVNC hand it to the desktop's paste
+    // at once (docs/dev/SANDBOX-DESKTOP.md, #6065).
+    function paste(text) {
+      const viewer = rfb;
+      if (!viewer) return;
+      viewer.clipboardPasteFrom(text);
+      // A noVNC without these fields falls back to announcing only.
+      const actions = viewer._clipboardServerCapabilitiesActions;
+      if (viewer._clipboardText === text && actions?.[clipboardNotify] && actions?.[clipboardProvide]) {
+        globalThis.CodewireNoVNC.RFB.messages.extendedClipboardProvide(viewer._sock, [1], [text]);
+      }
+    }
+
     function disconnect() {
       const viewer = rfb;
       rfb = null;
@@ -242,8 +261,7 @@
     });
     buttons.paste.addEventListener("click", async () => {
       try {
-        const text = await navigator.clipboard.readText();
-        rfb?.clipboardPasteFrom(text);
+        paste(await navigator.clipboard.readText());
         say(messages.pasted);
       } catch {
         say(messages.noClipboard);
