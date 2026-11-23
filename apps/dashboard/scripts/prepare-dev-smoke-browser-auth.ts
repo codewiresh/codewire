@@ -18,7 +18,7 @@ import { accessSync } from "node:fs";
 import { basename, join } from "node:path";
 import { userInfo } from "node:os";
 import {
-  DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, uxOrganizationSlug, type FailureClass,
+  DevUxError, OwnedUxApiKey, OwnedUxSandbox, cwFailureClass, failureClassOf, uxOrganizationSlug, type FailureClass,
 } from "./dev-ux-ownership";
 
 const DEV_ORIGIN = "https://codewire-dev.sh";
@@ -61,7 +61,8 @@ export type CredentialDocument = {
 export type DeviceChallenge = { verificationUrl: string; userCode: string };
 
 type CleanupOperation = "browser-sign-out" | "browser-context-close" | "browser-profile-remove"
-  | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear" | "ux-sandbox-remove";
+  | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear" | "ux-sandbox-remove"
+  | "ux-api-key-remove";
 
 // A stage this helper raises itself is an assertion, except its deadline,
 // its route checks, and what interrupts it rather than failing a check.
@@ -506,6 +507,8 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
   let originalFailure: FixedStageError | undefined;
   // Every Sandbox the walkthrough claimed, removed whatever happens to the browser.
   const uxSandboxes: OwnedUxSandbox[] = [];
+  // The walkthrough's own API key, deleted by its exact name likewise.
+  let uxKey: OwnedUxApiKey | undefined;
   let signalStage = "";
   const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as NodeJS.Signals[];
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
@@ -580,10 +583,12 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
         return owned;
       };
       const owned = own();
+      const key = new OwnedUxApiKey((args, limit) => runText(options.cwBin, env, args, Math.min(limit, Date.now() + 30_000)));
+      uxKey = key;
       const { runDevUxWalkthrough } = await import("./dev-ux-walkthrough");
       await withinDeadline(() => runDevUxWalkthrough(page!, {
         slug, userId: options.expectedUserId, orgId: options.expectedOrgId,
-        owned, deadline, own,
+        owned, deadline, own, key,
       }), deadline);
     }
     await withinDeadline(() => signOut(page!), deadline);
@@ -615,7 +620,9 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
         // One after another, so no two cw commands share the saved login at
         // once; the walkthrough deletes its Sandboxes itself, so their
         // destruction is under way together and the later reads are short.
+        // The API key goes first: it is a credential, and two short reads.
         const removeBy = Date.now() + 120_000;
+        if (uxKey) await cleanupAttempt("ux-api-key-remove", () => uxKey!.cleanup(removeBy));
         for (const owned of uxSandboxes) {
           await cleanupAttempt("ux-sandbox-remove", () => owned.cleanup(removeBy));
         }

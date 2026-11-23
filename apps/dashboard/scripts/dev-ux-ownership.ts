@@ -203,3 +203,77 @@ export class OwnedUxSandbox {
     }
   }
 }
+
+// The walk's own API key (#3586; `key-revoke` in docs/journeys/api-keys.md),
+// made on Settings → API keys under a pre-claimed random name and deleted by
+// that exact name whatever happened. `cw api-keys list` prints a fixed text
+// table (PREFIX NAME ID CREATED) of every key in the organization; this name
+// has no spaces, so a row is ours only when its second column is exactly it.
+const KEY_LIST_HEADER = /^PREFIX\s+NAME\s+ID\s+CREATED\s*$/;
+type TextCommand = (args: string[], deadline: number) => Promise<string>;
+
+export class OwnedUxApiKey {
+  readonly name = `dev-ux-key-${crypto.randomUUID()}`;
+  private admitted = false;
+  private attempted = false;
+  // The page answered Create, so a key absent from then on was never made.
+  private answered = false;
+  private id = "";
+  constructor(private readonly command: TextCommand) {}
+
+  private async lookup(deadline: number): Promise<string | undefined> {
+    const lines = (await this.command(["api-keys", "list"], deadline)).split("\n");
+    if (!KEY_LIST_HEADER.test(lines[0] ?? "")) throw new DevUxError("ux-owned-key-list");
+    const ids = lines.slice(1).map((line) => line.trim().split(/\s+/))
+      .filter((cells) => cells[1] === this.name).map((cells) => cells[2] ?? "");
+    if (ids.length > 1) throw new DevUxError("ux-owned-key-ambiguous");
+    if (!ids.length) return undefined;
+    if (!UUID.test(ids[0]) || (this.id && ids[0] !== this.id)) throw new DevUxError("ux-owned-key-mismatch");
+    return ids[0];
+  }
+
+  async admit(deadline: number): Promise<void> {
+    if (await this.lookup(deadline)) throw new DevUxError("ux-owned-name-collision");
+    this.admitted = true;
+  }
+
+  beforeCreate(): void {
+    if (!this.admitted || this.attempted) throw new DevUxError("ux-create-not-admitted");
+    this.attempted = true;
+  }
+
+  createAnswered(): void {
+    if (!this.attempted) throw new DevUxError("ux-create-not-admitted");
+    this.answered = true;
+  }
+
+  // The ID the page's Delete form carries for this name, checked against the
+  // organization's list, so cleanup deletes nothing else.
+  async bind(id: string, deadline: number): Promise<void> {
+    if (!this.answered || !UUID.test(id) || (await this.lookup(deadline)) !== id) {
+      throw new DevUxError("ux-owned-key-mismatch");
+    }
+    this.id = id;
+  }
+
+  get bound(): boolean {
+    return this.id !== "";
+  }
+
+  async absent(deadline: number): Promise<boolean> {
+    return (await this.lookup(deadline)) === undefined;
+  }
+
+  async cleanup(deadline: number): Promise<void> {
+    if (!this.attempted) return;
+    const id = await this.lookup(deadline);
+    if (!id) {
+      // A Create the page never answered may still land; its absence proves
+      // nothing, as for a Sandbox.
+      if (!this.answered) throw new DevUxError("ux-cleanup-create-unconfirmed");
+      return;
+    }
+    await this.command(["api-keys", "delete", id], deadline);
+    if (await this.lookup(deadline)) throw new DevUxError("ux-cleanup-unconfirmed");
+  }
+}

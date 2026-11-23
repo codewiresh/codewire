@@ -30,6 +30,7 @@ mock.module("./dev-ux-walkthrough", () => ({
   runDevUxWalkthrough: async (_page: unknown, options: {
     owned: import("./dev-ux-ownership").OwnedUxSandbox; deadline: number;
     own: () => import("./dev-ux-ownership").OwnedUxSandbox;
+    key: import("./dev-ux-ownership").OwnedUxApiKey;
   }) => {
     uxInvocations += 1;
     const history = redirectMode === "ux-large-history" ? LARGE_HISTORY : [];
@@ -46,11 +47,19 @@ mock.module("./dev-ux-walkthrough", () => ({
       }];
       await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify(rows));
     }
+    // The walk's own API key, made after its Sandboxes and bound by its ID.
+    const keyId = "00000000-0000-4000-8000-00000000000f";
+    await options.key.admit(options.deadline);
+    options.key.beforeCreate();
+    await writeFile(join(uxConfig, "ux-keys.json"), JSON.stringify([{ name: options.key.name, id: keyId }]));
+    options.key.createAnswered();
+    await options.key.bind(keyId, options.deadline);
     if (redirectMode === "ux-large-history") await options.owned.createdId(options.deadline);
     if (redirectMode === "ux-signal") process.emit("SIGTERM", "SIGTERM");
     if (redirectMode === "ux-timeout") await new Promise(() => {});
     if (redirectMode === "ux-stage-timeout") throw new DevUxError("terminal-attach", "timeout");
-    if (!["ux-success", "ux-large-history", "ux-cleanup-failure", "ux-several", "ux-several-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
+    if (!["ux-success", "ux-large-history", "ux-cleanup-failure", "ux-several", "ux-several-cleanup-failure",
+      "ux-key-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
   },
 }));
 
@@ -298,8 +307,14 @@ case " $* " in
     "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$5" ;;
   *" --cloud rm --yes "*)
     printf 'destroy\\n' >>"${directory}/audit"
-    ${mode.endsWith("cleanup-failure") ? "exit 96" : ":"}
+    ${mode.endsWith("cleanup-failure") && mode !== "ux-key-cleanup-failure" ? "exit 96" : ":"}
     "${process.execPath}" -e 'const fs=require("node:fs"); const path=process.env.CW_CONFIG_DIR+"/ux-resource.json"; fs.writeFileSync(path+".next", JSON.stringify(JSON.parse(fs.readFileSync(path,"utf8")).map(row=>row.id===process.argv[1]?{...row,state:"destroyed"}:row))); fs.renameSync(path+".next", path);' "$6" ;;
+  *" api-keys list "*)
+    "${process.execPath}" -e 'const fs=require("node:fs"); const path=process.env.CW_CONFIG_DIR+"/ux-keys.json"; const rows=fs.existsSync(path)?JSON.parse(fs.readFileSync(path,"utf8")):[]; console.log("PREFIX           NAME                     ID                                   CREATED"); for (const row of rows) console.log(["cw_test         ",row.name,row.id,"2026-11-23T00:00:00Z"].join(" "));' ;;
+  *" api-keys delete "*)
+    printf 'key-delete\\n' >>"${directory}/audit"
+    ${mode === "ux-key-cleanup-failure" ? "exit 96" : ":"}
+    "${process.execPath}" -e 'const fs=require("node:fs"); const path=process.env.CW_CONFIG_DIR+"/ux-keys.json"; fs.writeFileSync(path+".next", JSON.stringify(JSON.parse(fs.readFileSync(path,"utf8")).filter(row=>row.id!==process.argv[1]))); fs.renameSync(path+".next", path);' "$5" ;;
   *" logout "*) printf 'logout\\n' >>"${directory}/audit"; rm -f -- "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
   *) exit 92 ;;
 esac
@@ -407,10 +422,11 @@ test("wrong identity prevents all UX mutation and revokes the owned login", asyn
 const UX_FAILURE_CLASSES: Record<string, string> = {
   "ux-failure": "unexpected", "ux-signal": "unexpected", "ux-timeout": "timeout",
   "ux-stage-timeout": "timeout", "ux-cleanup-failure": "assertion", "ux-several-cleanup-failure": "assertion",
+  "ux-key-cleanup-failure": "assertion",
 };
 
 for (const mode of ["ux-success", "ux-large-history", "ux-several", "ux-failure", "ux-signal", "ux-timeout", "ux-stage-timeout",
-  "ux-cleanup-failure", "ux-several-cleanup-failure"]) {
+  "ux-cleanup-failure", "ux-several-cleanup-failure", "ux-key-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
     // In ux-timeout the walkthrough never resolves, so it waits out the whole
@@ -420,8 +436,9 @@ for (const mode of ["ux-success", "ux-large-history", "ux-several", "ux-failure"
       .catch((error) => error);
     expect(uxInvocations).toBe(1);
     const audit = await readFile(join(value.directory, "audit"), "utf8");
-    // Each claimed Sandbox is removed by its own ID, once, even when another's removal failed.
-    const removals = "destroy\n".repeat(mode.startsWith("ux-several") ? 3 : 1);
+    // The walk's key is deleted by its own ID first, then each claimed Sandbox
+    // by its own, once, even when another removal failed.
+    const removals = `key-delete\n${"destroy\n".repeat(mode.startsWith("ux-several") ? 3 : 1)}`;
     if (["ux-success", "ux-large-history", "ux-several"].includes(mode)) {
       expect(result).toBeUndefined();
       expect(audit).toBe(removals);
@@ -430,7 +447,10 @@ for (const mode of ["ux-success", "ux-large-history", "ux-several", "ux-failure"
       expect(`${result.message} ${result.cleanupFailures}`).not.toContain("hostile-ux-private-value-canary");
       expect(audit).toBe(`${removals}logout\n`);
       expect(await readdir(value.config)).toEqual([]);
-      if (mode.endsWith("cleanup-failure")) {
+      if (mode === "ux-key-cleanup-failure") {
+        expect(result.cleanupFailures).toEqual(["ux-api-key-remove:failed"]);
+        expect(result.stage).toBe("cleanup-incomplete");
+      } else if (mode.endsWith("cleanup-failure")) {
         expect(result.cleanupFailures.filter((failure: string) => failure === "ux-sandbox-remove:failed"))
           .toHaveLength(mode === "ux-several-cleanup-failure" ? 3 : 1);
         expect(result.stage).toBe("cleanup-incomplete");

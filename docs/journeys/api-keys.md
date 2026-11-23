@@ -9,7 +9,7 @@ and the flags in it are the ones that section proposes. The format is in
 
 ## Where it stands
 
-Updated 2026-11-21. Written first; every step is not yet observed.
+Updated 2026-11-23. Written first; every step is not yet observed.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -82,7 +82,19 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   - M's account is disabled: every key of M's stops;
   - M resets their password: every key keeps working;
   - A disables M's key.
-- **Driving it:** no command yet (#5688).
+- **Driving it:** no command yet (#5688). On Dev every delivery deletes a
+  key from the dashboard, as the Dev smoke browser identity, in
+  `apps/dashboard/scripts/dev-ux-walkthrough.ts` (#3586). The walk makes its
+  own key on Settings → API keys, in its organization, named `dev-ux-key-`
+  and a random ID, expiring in 30 days, and never reads the secret. At 1440
+  and 390 pixels it opens that key's Delete dialog on Settings → API keys
+  and on the organization's API keys page, reads "All connections using
+  this key are dropped when it is deleted.", and cancels. Then it deletes
+  the key from the dialog, and checks that the row is gone and that `cw
+  api-keys list` no longer names it. A key it couldn't make, or a step that
+  didn't hold, is reported as not held, never passed in silence. Whatever
+  happens, the walk's cleanup deletes that exact key with `cw api-keys
+  delete` before it ends, as it does its own Sandboxes.
 - **Proof:** the same call before and after each change, and its answer.
 
 ## `key-audit`: every key change and refusal is recorded
