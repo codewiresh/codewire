@@ -3,9 +3,9 @@
 
 use std::borrow::Cow;
 
-use super::{PersistedSession, SessionEngine, build_process_env};
+use super::{PersistedSession, SessionEngine};
 use crate::Config;
-use crate::env::ProcessEnvironment;
+use crate::launch::Launch;
 
 impl SessionEngine {
     /// [`CredentialBridge::launch_config`](crate::credential_bridge::CredentialBridge::launch_config)
@@ -16,17 +16,21 @@ impl SessionEngine {
             .launch_config(&self.inner.config)
             .await
     }
-}
 
-/// One PTY session's environment: the one shared builder under `config`,
-/// then the desktop's display, as a pipe session's.
-pub(super) fn pty_environment(
-    config: &Config,
-    snapshot: &PersistedSession,
-    display: &crate::desktop::Display,
-) -> Result<ProcessEnvironment, String> {
-    let mut environment = build_process_env(config, &snapshot.env, &snapshot.term)
-        .map_err(|error| format!("prepare session PTY environment: {error}"))?;
-    display.apply(&snapshot.env, &mut environment);
-    Ok(environment)
+    /// One PTY session's launch, through the one path `cw exec` and every
+    /// PTY take (#6179).
+    pub(super) async fn pty_launch(
+        &self,
+        snapshot: &PersistedSession,
+    ) -> Result<Launch<'_>, String> {
+        crate::launch::prepare(
+            &self.inner.credential_bridge,
+            &self.inner.config,
+            &snapshot.env,
+            &snapshot.term,
+            &self.inner.display,
+        )
+        .await
+        .map_err(|error| format!("prepare session PTY environment: {error}"))
+    }
 }

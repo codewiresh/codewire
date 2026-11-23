@@ -1655,7 +1655,7 @@ real token is inside the Sandbox. Each row below is walked on Dev:
 | Credential | Walked by | Proof inside the Sandbox |
 | --- | --- | --- |
 | Claude sign-in | a `claude -p` turn, then `/usage` and the plan display | the turn answers, `/usage` and the plan show; the login file's tokens are `sk-ant-oat01-cwp1_…` placeholders |
-| Claude subscription token | a `claude -p` turn | `CLAUDE_CODE_OAUTH_TOKEN` is an `sk-ant-oat01-cwp1_…` placeholder |
+| Claude subscription token | a `claude -p` turn, under `cw run` and under `cw exec` | `CLAUDE_CODE_OAUTH_TOKEN` is an `sk-ant-oat01-cwp1_…` placeholder in both (#6179) |
 | Anthropic API key | a `claude -p` turn | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is a placeholder in its placement's prefix |
 | Codex sign-in | a `codex exec` task, with account routing | `~/.codex/auth.json` holds placeholders in Codex's JWT shape |
 | OpenAI API key | a `codex exec` task on the key | as in a local VM, the key's variable holds Codewire's fixed managed value and its base URL is the loopback route |
@@ -1682,6 +1682,8 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - one Sandbox's front door session opened with another Sandbox's token;
   - a Claude turn with interception on, and the same turn on today's relay
     path;
+  - the same Claude credential under `cw run`, under `cw exec`, in a
+    `cw shell` and over SSH (#6179);
   - `cw-egress`'s logs and configuration after a session;
   - a `cw-egress` rollout, and a `cw-egress` restart, under a running
     Sandbox that has made intercepted calls;
@@ -1711,6 +1713,10 @@ arguments hold no real token, and the hosted sign-in exception is not used
     from orchestration through the Pod's relay epoch, and without them every
     intercepted handshake is dropped;
   - each row of the table above holds;
+  - `cw run`, `cw exec`, `cw shell` and SSH each name the same Anthropic
+    placeholder, and a `claude -p` turn answers from each; before #6179,
+    `cw exec` named none and Claude Code said it was not logged in (#4001,
+    not yet observed);
   - a Sandbox's front door delivers no real Claude or Codex login: an epoch
     that serves the front door delivers placeholder logins or none;
   - with the switch off, the Sandbox's logins, variables and requests are

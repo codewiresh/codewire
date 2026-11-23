@@ -13,7 +13,7 @@ use tonic::{Status, Streaming};
 
 use crate::config::Config;
 use crate::credential_bridge::CredentialBridge;
-use crate::env::{build_process_env, default_shell_for};
+use crate::env::default_shell_for;
 use crate::execution::{PreparedProcess, ProcessExecution};
 
 const BUFFER_SIZE: usize = 32 * 1024;
@@ -83,20 +83,19 @@ async fn run_exec_session(
 ) {
     let command = command_or_default(start.command, &config);
     let working_dir = normalize_working_dir(&config, &start.working_dir);
-    let mut env = match build_process_env(&config, &start.env, "") {
-        Ok(environment) => environment,
+    let launch = match crate::launch::prepare(&bridge, &config, &start.env, "", &display).await {
+        Ok(launch) => launch,
         Err(error) => {
             send_exec_startup_failure(&tx, error.to_string()).await;
             return;
         }
     };
-    display.apply(&start.env, &mut env);
 
     let mut prepared = match PreparedProcess::prepare_configured(
-        (&config, &bridge),
+        (&*launch.config, &bridge),
         &command,
         &working_dir,
-        &env,
+        &launch.environment,
         false,
         0,
         0,
@@ -259,14 +258,14 @@ async fn run_pty_session<S>(
         .await;
         return;
     }
-    let mut env = match build_process_env(&config, &start.env, &start.term) {
-        Ok(environment) => environment,
-        Err(error) => {
-            send_pty_startup_failure(&tx, error.to_string()).await;
-            return;
-        }
-    };
-    display.apply(&start.env, &mut env);
+    let launch =
+        match crate::launch::prepare(&bridge, &config, &start.env, &start.term, &display).await {
+            Ok(launch) => launch,
+            Err(error) => {
+                send_pty_startup_failure(&tx, error.to_string()).await;
+                return;
+            }
+        };
     let size = pty_size(start.width, start.height);
 
     let pty_system = native_pty_system();
@@ -279,10 +278,10 @@ async fn run_pty_session<S>(
     };
 
     let mut prepared = match PreparedProcess::prepare_configured(
-        (&config, &bridge),
+        (&*launch.config, &bridge),
         &command,
         &working_dir,
-        &env,
+        &launch.environment,
         true,
         size.cols,
         size.rows,

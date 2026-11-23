@@ -400,6 +400,104 @@ async fn a_launch_projects_the_active_epochs_placeholder() {
     bridge.shutdown().await;
 }
 
+/// An intercepted hosted daemon's configuration with an Anthropic credential
+/// selected and launch authority.
+fn anthropic_selected(bridge: &CredentialBridge) -> crate::Config {
+    let mut config = hosted_config(bridge, true);
+    config.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+    config.launch_projection = Some(crate::config::LaunchProjectionConfig {
+        selection_sha256: [7; 32],
+        native: None,
+    });
+    config
+}
+
+/// `cw exec`, every PTY and a durable session's PTY start from
+/// [`crate::launch::prepare`], so each names the active epoch's Anthropic
+/// placeholder (#6179). An environment built from the daemon's own
+/// configuration, as `cw exec` and a PTY built theirs before, names none.
+#[tokio::test]
+async fn every_launch_names_the_active_epochs_placeholder() {
+    use codewire_access::known_answer::PLACEHOLDER;
+    let (_temp, bridge, path) = fixture();
+    let bridge = bridge.intercepting(true);
+    let config = anthropic_selected(&bridge);
+    let names_placeholder = |entries: &[String]| {
+        entries.iter().any(|entry| {
+            entry
+                .split_once('=')
+                .is_some_and(|(_, value)| value.contains(PLACEHOLDER))
+        })
+    };
+
+    let (sender, mut epoch) = prepared(&bridge, &path).await;
+    epoch.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[("anthropic", PLACEHOLDER)])))
+        .await
+        .unwrap();
+    let display = crate::desktop::Display::default();
+    let launch = crate::launch::prepare(&bridge, &config, &[], "", &display)
+        .await
+        .unwrap();
+    assert!(
+        names_placeholder(&launch.environment.entries),
+        "the launch names no Anthropic placeholder"
+    );
+    assert!(
+        launch
+            .config
+            .interception
+            .as_ref()
+            .unwrap()
+            .anthropic()
+            .is_some()
+    );
+    let unprojected = crate::env::build_process_env(&config, &[], "").unwrap();
+    assert!(
+        !names_placeholder(&unprojected.entries),
+        "the daemon's own configuration names the placeholder"
+    );
+    bridge.shutdown().await;
+}
+
+/// A launch before the first epoch waits for it no longer than a launch
+/// waits for its host, then starts with no Anthropic bearer at all (#6179).
+#[tokio::test(start_paused = true)]
+async fn a_launch_before_the_first_epoch_waits_a_bounded_time() {
+    let (_temp, bridge, _path) = fixture();
+    let bridge = bridge.intercepting(true);
+    let config = anthropic_selected(&bridge);
+    let display = crate::desktop::Display::default();
+    let started = tokio::time::Instant::now();
+    let launch = tokio::time::timeout(
+        std::time::Duration::from_millis(
+            codewire_workload_secrets::PROJECTION_REQUEST_LIFETIME_MS + 1_000,
+        ),
+        crate::launch::prepare(&bridge, &config, &[], "", &display),
+    )
+    .await
+    .expect("the launch waited past its host's lifetime")
+    .unwrap();
+    assert!(
+        started.elapsed()
+            <= std::time::Duration::from_millis(
+                codewire_workload_secrets::PROJECTION_REQUEST_LIFETIME_MS
+            )
+    );
+    assert!(
+        launch
+            .config
+            .interception
+            .as_ref()
+            .unwrap()
+            .anthropic()
+            .is_none()
+    );
+    bridge.shutdown().await;
+}
+
 /// A daemon that isn't intercepted uses its configuration as it is, and a
 /// local one too.
 #[tokio::test]

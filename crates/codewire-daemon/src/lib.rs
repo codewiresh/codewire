@@ -30,6 +30,7 @@ pub mod host_control;
 mod host_process;
 #[cfg(unix)]
 pub mod hosted_state;
+mod launch;
 mod lifecycle;
 pub mod local_transport;
 #[cfg(target_os = "linux")]

@@ -2632,7 +2632,9 @@ which its first bind will store, decides its CA.
   Open, never a partial projection. With its bind's interception on, the
   daemon projects as a local guest does with its front door: no loopback
   base URL, and the form's variable holding the placeholder of the active
-  epoch. A launch waits for an active epoch, the first or the next after
+  epoch. Every process the daemon starts for a user gets this projection
+  from one path, whatever started it: a session (`cw run`), `cw exec`, a
+  PTY, and the shell SSH serves (#6179, not yet observed). A launch waits for an active epoch, the first or the next after
   one was lost, as long as it waits for its host, so a launch in that gap
   is delayed, never started without its placeholder. Every epoch of one binding gives the same placeholder,
   since no epoch is a derivation input; a rebind to another credential or

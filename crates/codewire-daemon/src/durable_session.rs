@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::Config;
 use crate::credential_bridge::CredentialBridge;
-use crate::env::{build_process_env, build_process_env_in, default_shell_for};
+use crate::env::{build_process_env_in, default_shell_for};
 use crate::execution::{PreparedProcess, ProcessExecution};
 
 const SESSION_DIRECTORY: &str = ".codewire/daemon/sessions";
@@ -2991,11 +2991,11 @@ impl SessionEngine {
         snapshot: PersistedSession,
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let config = self.launch_config().await;
-        let environment = match pty_environment(&config, &snapshot, &self.inner.display) {
-            Ok(environment) => environment,
+        let launch = match self.pty_launch(&snapshot).await {
+            Ok(launch) => launch,
             Err(message) => return self.record_unspawned_failure(handle, message).await,
         };
+        let (config, environment) = (launch.config, launch.environment);
         let size = pty_size(snapshot.width, snapshot.height);
         let pair = match native_pty_system().openpty(size) {
             Ok(pair) => pair,
@@ -7024,7 +7024,6 @@ mod input_streams;
 
 #[path = "durable_session/launch.rs"]
 mod launch;
-use launch::pty_environment;
 
 #[cfg(target_os = "linux")]
 #[path = "durable_session/platform_managed.rs"]
