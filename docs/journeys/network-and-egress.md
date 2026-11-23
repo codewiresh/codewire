@@ -1637,6 +1637,9 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a `cw-egress` rollout, and a `cw-egress` restart, under a running
     Sandbox that has made intercepted calls;
   - a Sandbox claimed from the warm pool;
+  - the Sandbox's trust before any agent runs: a new intercepted Sandbox,
+    one not intercepted, an image that sets its own
+    `NODE_EXTRA_CA_CERTS`, and an image with no system bundle (#6072);
   - the credential service unreachable for longer than a certificate's
     life;
   - a Sandbox's leaves (`SECRETS-AND-CREDENTIALS.md`, "Hosted interception
@@ -1678,6 +1681,14 @@ arguments hold no real token, and the hosted sign-in exception is not used
     process that was already running keeps working;
   - a Sandbox claimed from the warm pool serves an intercepted host under
     the CA it installed before it was claimed;
+  - a new intercepted Sandbox has its CA at
+    `/codewire/run/egress-trust/ca.pem` before anything runs, with the
+    same digest as the certificate its binding stores. A session, `cw exec`
+    and SSH all name it as `NODE_EXTRA_CA_CERTS`, and the bundle beside it
+    as `CODEX_CA_CERTIFICATE` while Codex is selected. Node reaches an
+    intercepted host with no extra flags, and that host's issuer is the
+    Sandbox's CA. A Sandbox that is not intercepted has a comment there and
+    names nothing. An image's own `NODE_EXTRA_CA_CERTS` is kept (#6072);
   - no CA key is on a node: `cw-egress` holds only certificates for the
     hosts the Sandbox's credentials bind, each valid for at most an hour;
   - with the credential service unreachable past a certificate's life,

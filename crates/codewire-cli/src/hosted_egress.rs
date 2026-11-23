@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 mod derp_roots;
 pub(crate) use derp_roots::derp_extra_roots;
+mod trust;
+pub(crate) use trust::install_trust;
 
 /// What the Pod template gives a broker-mode daemon: the Pod's egress and the
 /// address it reaches the binding at.

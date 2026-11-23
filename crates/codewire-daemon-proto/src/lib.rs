@@ -75,8 +75,12 @@ pub const MESH_ADDR_ENV: &str = "CODEWIRE_MESH_ADDR";
 pub const DERP_ADDR_ENV: &str = "CODEWIRE_DERP_ADDR";
 /// Where a hosted egress daemon installs the egress trust before it serves:
 /// the interception CA, or a comment-only file for none (#4001). The
-/// broker-mode Pod template points `NODE_EXTRA_CA_CERTS` here.
+/// daemon's launches name it as `NODE_EXTRA_CA_CERTS` while there is a CA.
 pub const HOSTED_EGRESS_TRUST_CA_PATH: &str = "/codewire/run/egress-trust/ca.pem";
+/// Beside [`HOSTED_EGRESS_TRUST_CA_PATH`] while there is a CA: the image's
+/// own system bundle followed by it, which a launch names as
+/// `CODEX_CA_CERTIFICATE` while the Codex client is selected (#6072).
+pub const HOSTED_EGRESS_TRUST_BUNDLE_PATH: &str = "/codewire/run/egress-trust/ca-certificates.crt";
 /// Exact projected-token purpose for cw-egress calling orchestration's
 /// `EgressService`. Orchestration accepts it only for
 /// [`EGRESS_NODE_SERVICE_ACCOUNT`] in its own (server) namespace, and reads
@@ -841,6 +845,10 @@ mod tests {
         assert_eq!(
             HOSTED_EGRESS_TRUST_CA_PATH,
             "/codewire/run/egress-trust/ca.pem"
+        );
+        assert_eq!(
+            HOSTED_EGRESS_TRUST_BUNDLE_PATH,
+            "/codewire/run/egress-trust/ca-certificates.crt"
         );
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
         assert_eq!(

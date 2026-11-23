@@ -122,6 +122,48 @@ pub(super) fn publish(certificate: Option<&EgressCaCertificate>, merged_root: &P
     .context("publish the workspace trust bundle")
 }
 
+/// The comment-only CA file of a hosted Sandbox without interception: a
+/// launch never names it, and Node loads it silently if a workload does.
+const HOSTED_NO_CA: &[u8] = b"# This Sandbox's egress is not intercepted; it has no egress CA.\n";
+
+/// Install a hosted daemon's trust from its first egress session (#6072),
+/// before the daemon serves: `ca_path` holds the CA alone, and `bundle_path`
+/// the image's own system bundle (this container's, read under `/`)
+/// followed by the CA. Without a CA, `ca_path` holds a comment and
+/// `bundle_path` is removed. An error means the daemon must not serve.
+pub fn publish_hosted(
+    certificate: Option<&EgressCaCertificate>,
+    ca_path: &Path,
+    bundle_path: &Path,
+) -> Result<()> {
+    for path in [ca_path, bundle_path] {
+        let parent = path
+            .parent()
+            .with_context(|| format!("{} has no parent", path.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let Some(certificate) = certificate else {
+        match std::fs::remove_file(bundle_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", bundle_path.display()));
+            }
+        }
+        return super::write_durable(ca_path, HOSTED_NO_CA, PUBLISHED_MODE)
+            .context("write the hosted egress trust");
+    };
+    let pem = certificate.to_pem();
+    super::write_durable(
+        bundle_path,
+        &bundle(image_bundle(Path::new("/")), &pem),
+        PUBLISHED_MODE,
+    )
+    .context("write the hosted trust bundle")?;
+    super::write_durable(ca_path, pem.as_bytes(), PUBLISHED_MODE)
+        .context("write the hosted egress CA")
+}
+
 /// The image's bundle, then the CA.
 fn bundle(image: Option<Vec<u8>>, ca_pem: &str) -> Vec<u8> {
     let mut bundle = image.unwrap_or_default();

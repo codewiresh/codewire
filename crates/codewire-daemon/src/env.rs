@@ -3,8 +3,10 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use codewire_access::ManagedCredentialClientPlacement;
-use codewire_daemon_proto::SANDBOX_SERVER_URL_ENV;
+use codewire_access::{ManagedCredentialClient, ManagedCredentialClientPlacement};
+use codewire_daemon_proto::{
+    HOSTED_EGRESS_TRUST_BUNDLE_PATH, HOSTED_EGRESS_TRUST_CA_PATH, SANDBOX_SERVER_URL_ENV,
+};
 
 use crate::config::{
     Config, CredentialBridgeTransport, DAEMON_AUTH_TOKEN_ENV, MANAGED_CREDENTIAL_CLIENTS_ENV,
@@ -151,6 +153,13 @@ fn build_managed_process_env_from(
         });
         persisted.push(format!("{SANDBOX_SERVER_URL_ENV}={origin}"));
     }
+    if config
+        .interception
+        .as_ref()
+        .is_some_and(codewire_access::Interception::hosted_ca_installed)
+    {
+        name_hosted_egress_ca(config, &persisted, &mut inherited);
+    }
     let mut entries =
         build_process_env_from(config, persisted, extra, term, inherited, fallback_shell);
     bypass_proxy_for_loopback(config.managed_credential_clients, &mut entries);
@@ -195,6 +204,32 @@ fn bypass_proxy_for_loopback(
         match current {
             Some(index) => entries[index] = format!("{prefix}{value}"),
             None => entries.push(format!("{prefix}{value}")),
+        }
+    }
+}
+
+/// An intercepted hosted Sandbox's launches trust its front door (#6072), as
+/// a local guest's workload does: `NODE_EXTRA_CA_CERTS` names the CA the
+/// daemon installed, and `CODEX_CA_CERTIFICATE` the bundle while the Codex
+/// client is selected. A name the image or the project already sets is
+/// kept, and that tool then does not trust the front door.
+fn name_hosted_egress_ca(
+    config: &Config,
+    persisted: &[String],
+    inherited: &mut Vec<(String, String)>,
+) {
+    let mut trust = vec![("NODE_EXTRA_CA_CERTS", HOSTED_EGRESS_TRUST_CA_PATH)];
+    if config
+        .managed_credential_clients
+        .contains(ManagedCredentialClient::Codex)
+    {
+        trust.push(("CODEX_CA_CERTIFICATE", HOSTED_EGRESS_TRUST_BUNDLE_PATH));
+    }
+    for (name, path) in trust {
+        let set = inherited.iter().any(|(inherited, _)| inherited == name)
+            || environment_names(persisted).any(|persisted| persisted == name);
+        if !set {
+            inherited.push((name.to_owned(), path.to_owned()));
         }
     }
 }
@@ -464,6 +499,66 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(others(&on), others(&off));
+    }
+
+    /// A hosted daemon that installed its egress CA (#6072) names it in
+    /// every launch, and the bundle while Codex is selected; one that did not
+    /// names neither; an image's or project's own value is kept.
+    #[test]
+    fn a_hosted_launch_names_the_installed_egress_ca_never_over_its_own() {
+        let value = |entries: &[String], name: &str| {
+            entries
+                .iter()
+                .find_map(|entry| entry.strip_prefix(&format!("{name}=")))
+                .map(str::to_owned)
+        };
+        let mut config = selected_config(
+            PathBuf::from("/home/codewire"),
+            &["codex", "anthropic"],
+            CredentialBridgeTransport::Hosted,
+        );
+        config.interception = Some(codewire_access::Interception::new(None));
+        let not_installed = managed_entries(&config);
+        assert_eq!(value(&not_installed, "NODE_EXTRA_CA_CERTS"), None);
+        assert_eq!(value(&not_installed, "CODEX_CA_CERTIFICATE"), None);
+
+        config.interception = config
+            .interception
+            .map(codewire_access::Interception::with_hosted_ca_installed);
+        let installed = managed_entries(&config);
+        assert_eq!(
+            value(&installed, "NODE_EXTRA_CA_CERTS").as_deref(),
+            Some(HOSTED_EGRESS_TRUST_CA_PATH)
+        );
+        assert_eq!(
+            value(&installed, "CODEX_CA_CERTIFICATE").as_deref(),
+            Some(HOSTED_EGRESS_TRUST_BUNDLE_PATH)
+        );
+
+        let image = vec![("NODE_EXTRA_CA_CERTS".to_owned(), "/opt/corp.pem".to_owned())];
+        let project = vec!["CODEX_CA_CERTIFICATE=/opt/project.crt".to_owned()];
+        let own = build_managed_process_env_from(&config, project, &[], "", image, "/bin/sh")
+            .unwrap()
+            .entries;
+        assert_eq!(
+            value(&own, "NODE_EXTRA_CA_CERTS").as_deref(),
+            Some("/opt/corp.pem")
+        );
+        assert_eq!(
+            value(&own, "CODEX_CA_CERTIFICATE").as_deref(),
+            Some("/opt/project.crt")
+        );
+
+        let mut claude_only = selected_config(
+            PathBuf::from("/home/codewire"),
+            &["anthropic"],
+            CredentialBridgeTransport::Hosted,
+        );
+        claude_only.interception =
+            Some(codewire_access::Interception::new(None).with_hosted_ca_installed());
+        let claude_only = managed_entries(&claude_only);
+        assert!(value(&claude_only, "NODE_EXTRA_CA_CERTS").is_some());
+        assert_eq!(value(&claude_only, "CODEX_CA_CERTIFICATE"), None);
     }
 
     fn selected_config(

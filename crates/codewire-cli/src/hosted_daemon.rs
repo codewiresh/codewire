@@ -231,10 +231,13 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         defaults,
     } = serve;
     #[cfg(target_os = "linux")]
+    let mut daemon_config = daemon_config;
+    #[cfg(target_os = "linux")]
     if let Some(egress) = egress {
-        // The egress trust is installed here, before serving (#4001).
+        // The egress trust is installed here, before serving (#4001, #6072).
         let health = refusal.as_ref().map(|refusal| refusal.egress());
-        let _trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
+        let trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
+        hosted_egress::install_trust(&trust, &mut daemon_config.interception)?;
     }
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
     // own gRPC service in-process, and the environment's application ports

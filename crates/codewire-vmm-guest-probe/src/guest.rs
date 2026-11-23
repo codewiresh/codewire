@@ -67,7 +67,7 @@ mod daemon_log;
 mod disks;
 use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
-mod egress_trust;
+pub mod egress_trust;
 mod hosted;
 mod hosted_ingress;
 mod image_attach;

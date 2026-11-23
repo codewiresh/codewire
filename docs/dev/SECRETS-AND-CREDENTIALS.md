@@ -2554,9 +2554,16 @@ which its first bind will store, decides its CA.
   carries the old one, which the front door then refuses with 401 until
   that process restarts. With no placeholder (none granted, or hosted
   placeholders off), it projects no Anthropic bearer at all, never the
-  loopback routes. `NODE_EXTRA_CA_CERTS` and `CODEX_CA_CERTIFICATE` point
-  at the bundle it installs from the egress trust, never over an image's
-  own value. No placeholder appears in a log.
+  loopback routes. Before it serves, the daemon installs
+  its first egress session's trust (#6072): the CA alone at
+  `/codewire/run/egress-trust/ca.pem`, and the container's own system
+  bundle followed by it at `/codewire/run/egress-trust/ca-certificates.crt`;
+  without a CA, the first file holds a comment and the bundle is absent. A
+  trust that is not a CA certificate, or a file it can't write, stops the
+  daemon before it serves. Every launch (a session, `cw exec`, the SSH it
+  serves) then names the CA as `NODE_EXTRA_CA_CERTS`, and the bundle as
+  `CODEX_CA_CERTIFICATE` while the Codex client is selected, never over an
+  image's or the project's own value. No placeholder appears in a log.
 - **Delivery follows the front door.** A hosted epoch that serves the
   Sandbox's front door delivers Claude and Codex logins with placeholders
   only, or refuses them; it never delivers a real login beside a front door,

@@ -680,26 +680,51 @@ pub struct ManagedCredentialClientProjection {
 #[derive(Clone, Debug)]
 pub struct Interception {
     anthropic: Option<CredentialPlaceholder>,
+    hosted_ca_installed: bool,
 }
 
 impl Interception {
     pub fn new(anthropic: Option<CredentialPlaceholder>) -> Self {
-        Self { anthropic }
+        Self {
+            anthropic,
+            hosted_ca_installed: false,
+        }
     }
 
     pub fn anthropic(&self) -> Option<&CredentialPlaceholder> {
         self.anthropic.as_ref()
+    }
+
+    /// The same interception with another Anthropic placeholder, as a
+    /// launch takes its active epoch's.
+    pub fn with_anthropic(&self, anthropic: Option<CredentialPlaceholder>) -> Self {
+        Self {
+            anthropic,
+            hosted_ca_installed: self.hosted_ca_installed,
+        }
+    }
+
+    /// A hosted daemon installed its egress CA before serving (#6072), so
+    /// its launches name it. A local guest's PID 1 names its own.
+    pub fn with_hosted_ca_installed(mut self) -> Self {
+        self.hosted_ca_installed = true;
+        self
+    }
+
+    pub fn hosted_ca_installed(&self) -> bool {
+        self.hosted_ca_installed
     }
 }
 
 /// Placeholders compare in constant time, never with `==` on their text.
 impl PartialEq for Interception {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.anthropic, &other.anthropic) {
-            (None, None) => true,
-            (Some(left), Some(right)) => left.ct_eq(right),
-            _ => false,
-        }
+        self.hosted_ca_installed == other.hosted_ca_installed
+            && match (&self.anthropic, &other.anthropic) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.ct_eq(right),
+                _ => false,
+            }
     }
 }
 
@@ -1069,6 +1094,24 @@ mod tests {
     use toml::Value;
 
     use super::*;
+
+    /// A launch that takes its epoch's placeholder keeps the hosted
+    /// daemon's installed CA (#6072), and the mark is part of equality.
+    #[test]
+    fn an_interception_keeps_its_installed_ca_across_placeholders() {
+        let placeholder =
+            CredentialPlaceholder::parse(&format!("cwp1_{}A", "C".repeat(42))).unwrap();
+        let installed = Interception::new(None).with_hosted_ca_installed();
+        let launch = installed.with_anthropic(Some(placeholder.clone()));
+        assert!(launch.hosted_ca_installed());
+        assert!(
+            launch
+                .anthropic()
+                .is_some_and(|kept| kept.ct_eq(&placeholder))
+        );
+        assert!(!Interception::new(None).hosted_ca_installed());
+        assert_ne!(Interception::new(None), installed);
+    }
 
     #[test]
     fn projects_one_credential_free_responses_provider() {

@@ -200,9 +200,10 @@ impl CredentialBridge {
             .await
             .unwrap_or_default();
         let mut launch = config.clone();
-        launch.interception = Some(codewire_access::Interception::new(
-            placeholders.anthropic().cloned(),
-        ));
+        launch.interception = config
+            .interception
+            .as_ref()
+            .map(|interception| interception.with_anthropic(placeholders.anthropic().cloned()));
         std::borrow::Cow::Owned(launch)
     }
 
