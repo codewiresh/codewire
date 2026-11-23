@@ -165,7 +165,7 @@ async fn reconcile_running_runtime_identity(
             }
         })
         .await?;
-    reconcile_or_refresh_runtime_identity(
+    let restarted = reconcile_or_refresh_runtime_identity(
         ctx,
         environment,
         &backend,
@@ -174,8 +174,17 @@ async fn reconcile_running_runtime_identity(
         &probe,
         true,
     )
-    .await
-    .map(|_| ())
+    .await?;
+    if restarted {
+        // Infra's unplanned-restart alert matches this line's text
+        // (docs/CONFIGURATION.md, "Unplanned restarts").
+        tracing::warn!(
+            environment_id = environment.id,
+            reason = "workspace bootstrap is stale",
+            "running bootstrap check: running sandbox's runtime was restarted"
+        );
+    }
+    Ok(())
 }
 
 /// The claim an environment's operation holds on its runtime.

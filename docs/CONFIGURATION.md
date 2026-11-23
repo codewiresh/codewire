@@ -558,6 +558,23 @@ In a cluster, orchestration reaches the Kubernetes API through the `kubernetes` 
 |---|---|---|---|
 | `CODEWIRE_KUBE_API_PREFERRED_ADDRS` | No | Comma-separated `ip:port` addresses of the near API servers, in order of preference. A new connection dials the first one that the `default/kubernetes` EndpointSlice lists as ready and that answered its last dial within 2 s; a server that did not is skipped for 10 s. With none left, it dials the Service. Unset or empty dials the Service only. A name, a missing port or a repeated address stops orchestration at startup. | `192.0.2.12:6443,192.0.2.11:6443` |
 
+## Unplanned restarts
+
+Orchestration writes one `WARN` line, with the environment's `environment_id`
+and a `reason`, each time a running Sandbox restarts without anyone asking:
+
+- `sandbox liveness: running sandbox's runtime is being replaced`, when its Pod
+  is deleted or replaced under it;
+- `sandbox liveness: running sandbox stopped unexpectedly`, when its Pod failed
+  on its node;
+- `running bootstrap check: running sandbox's runtime was restarted`, after the
+  running reconcile found its workspace bootstrap stale and started it again
+  cold (#5950).
+
+A requested start, stop, restart, resize or daemon repair writes none of them.
+Infra's unplanned-restart alert matches their text, so a change to the wording
+changes that rule too.
+
 ## Tracing
 
 Orchestration (its API and its Temporal worker), the dashboard server, the

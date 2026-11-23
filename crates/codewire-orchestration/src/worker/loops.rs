@@ -1342,6 +1342,8 @@ async fn mark_sandbox_stopped(pool: &PgPool, row: &LivenessRow, reason: &str) ->
             false
         }
         Ok(true) => {
+            // Infra's unplanned-restart alert matches this line's text
+            // (docs/CONFIGURATION.md, "Unplanned restarts").
             tracing::warn!(
                 environment_id = row.id,
                 reason,
@@ -1379,6 +1381,8 @@ async fn mark_sandbox_replacing(pool: &PgPool, row: &LivenessRow, reason: &str) 
             false
         }
         Ok(true) => {
+            // Infra's unplanned-restart alert matches this line's text
+            // (docs/CONFIGURATION.md, "Unplanned restarts").
             tracing::warn!(
                 environment_id = row.id,
                 reason,
