@@ -571,13 +571,112 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) name: String,
     pub(crate) revision: u64,
     pub(crate) entries: Vec<CredentialProfileEntryView>,
-    /// This revision's capabilities that the broker withholds now, in its
-    /// words: "Codex needs Reconnect", "OpenAI API key needs replacing".
-    pub(crate) attention: Vec<&'static str>,
+    /// This revision's capabilities that the broker withholds now.
+    pub(crate) attention: Vec<CredentialAttentionView>,
     pub(crate) codex: String,
     pub(crate) openai: String,
     pub(crate) anthropic: String,
     pub(crate) ssh: String,
+}
+
+/// One capability a credential withholds, and where it is put right.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CredentialAttentionView {
+    /// In the broker's words: "Codex needs Reconnect", "OpenAI API key needs
+    /// replacing".
+    pub(crate) notice: &'static str,
+    /// The Credentials page dialog that resolves it for this credential, or
+    /// empty when the page has none and the notice links to the list.
+    pub(crate) dialog: String,
+}
+
+impl CredentialAttentionView {
+    pub(crate) fn href(&self) -> String {
+        credential_settings_href("", &self.dialog)
+    }
+}
+
+/// The Credentials page, opening `dialog` on arrival, or the list when
+/// `dialog` is empty. `creation_draft_parameter` is a Create draft's
+/// `creation_draft=<id>` (see
+/// [`EnvironmentCreateFormView::creation_draft_parameter`]), kept so the page
+/// offers "Return to Create Sandbox". The page opens only a dialog its
+/// `approved_dialog` allows for the viewer's current credentials; any other
+/// id lands on the list.
+pub(crate) fn credential_settings_href(creation_draft_parameter: &str, dialog: &str) -> String {
+    // Dialog ids are fixed names or `credential-<uuid>-<action>`; anything
+    // else would need escaping in the query and the fragment, so it is dropped.
+    let dialog = if dialog
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        dialog
+    } else {
+        ""
+    };
+    let mut href = String::from("/settings/credentials/");
+    let mut separator = '?';
+    for (key, value) in [("", creation_draft_parameter), ("dialog=", dialog)] {
+        if !value.is_empty() {
+            href.push(separator);
+            href.push_str(key);
+            href.push_str(value);
+            separator = '&';
+        }
+    }
+    if !dialog.is_empty() {
+        href.push('#');
+        href.push_str(dialog);
+    }
+    href
+}
+
+#[cfg(test)]
+mod credential_settings_href_tests {
+    use super::{CredentialAttentionView, credential_settings_href};
+
+    const DRAFT: &str = "creation_draft=00000000-0000-4000-8000-000000000003";
+    const RECONNECT: &str = "credential-00000000-0000-4000-8000-000000000007-reconnect";
+
+    #[test]
+    fn names_the_dialog_in_the_query_and_the_fragment_and_keeps_the_draft() {
+        assert_eq!(credential_settings_href("", ""), "/settings/credentials/");
+        assert_eq!(
+            credential_settings_href(DRAFT, ""),
+            format!("/settings/credentials/?{DRAFT}")
+        );
+        assert_eq!(
+            credential_settings_href(DRAFT, "connect-github"),
+            format!("/settings/credentials/?{DRAFT}&dialog=connect-github#connect-github")
+        );
+        assert_eq!(
+            credential_settings_href("", RECONNECT),
+            format!("/settings/credentials/?dialog={RECONNECT}#{RECONNECT}")
+        );
+    }
+
+    #[test]
+    fn a_dialog_that_is_not_an_id_links_to_the_list() {
+        for dialog in ["connect-github&org=other", "x#y", "Connect-GitHub", "a b"] {
+            assert_eq!(
+                credential_settings_href(DRAFT, dialog),
+                format!("/settings/credentials/?{DRAFT}")
+            );
+        }
+    }
+
+    #[test]
+    fn an_attention_notice_links_to_its_dialog_or_the_list() {
+        let notice = |dialog: &str| CredentialAttentionView {
+            notice: "Codex needs Reconnect",
+            dialog: dialog.into(),
+        };
+        assert_eq!(
+            notice(RECONNECT).href(),
+            format!("/settings/credentials/?dialog={RECONNECT}#{RECONNECT}")
+        );
+        assert_eq!(notice("").href(), "/settings/credentials/");
+    }
 }
 
 pub(crate) struct CredentialSettingsView {
@@ -1090,7 +1189,7 @@ pub(crate) struct EnvironmentRow {
     /// Capabilities of the bound profile revision whose credential needs the
     /// viewer now, in the broker's words. Empty unless the viewer owns that
     /// profile and its credential metadata could be read for this render.
-    pub(crate) credential_attention: Vec<&'static str>,
+    pub(crate) credential_attention: Vec<CredentialAttentionView>,
 }
 
 impl EnvironmentRow {
@@ -1540,6 +1639,9 @@ pub(crate) struct EnvironmentCredentialProfileOption {
 
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentGithubConnectionOption {
+    /// The credential's id, which names its row dialogs on the Credentials
+    /// page.
+    pub(crate) credential_id: String,
     pub(crate) account: String,
     pub(crate) connection: GithubConnectionState,
 }
@@ -1577,6 +1679,23 @@ impl EnvironmentSourceFieldsView {
     pub(crate) fn github_connection_account(&self) -> &str {
         self.github_connection()
             .map_or("", |connection| connection.account.as_str())
+    }
+
+    /// The Credentials dialog behind the GitHub browser's setup link, chosen
+    /// as its label is: "Manage GitHub connection" opens the list, "Reconnect
+    /// GitHub" that connection's Reconnect, and "Connect GitHub" the Connect
+    /// dialog, which also says so when the account turns out to be connected.
+    pub(crate) fn github_setup_dialog(&self) -> String {
+        if self.has_connected_github() {
+            String::new()
+        } else if let Some(connection) = self
+            .github_connection()
+            .filter(|_| self.github_connection_state() == "inactive")
+        {
+            format!("credential-{}-reconnect", connection.credential_id)
+        } else {
+            "connect-github".to_owned()
+        }
     }
 }
 
@@ -1753,6 +1872,15 @@ impl EnvironmentCreateFormView {
         } else {
             String::new()
         }
+    }
+
+    /// The GitHub browser's setup link: the Credentials page with the dialog
+    /// its label names already open, keeping this draft.
+    pub(crate) fn github_setup_href(&self) -> String {
+        credential_settings_href(
+            &self.creation_draft_parameter(),
+            &self.sources.github_setup_dialog(),
+        )
     }
 
     pub(crate) fn cpu_choices(&self) -> Vec<ResourceChoice> {

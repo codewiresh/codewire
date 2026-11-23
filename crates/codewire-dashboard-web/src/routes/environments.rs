@@ -2326,6 +2326,8 @@ mod tests {
             let hrefs = setup_hrefs(&html);
             assert_eq!(hrefs.len(), 5);
             for href in hrefs {
+                // Only the GitHub setup link names a dialog after the draft.
+                let href = href.trim_end_matches("&#38;dialog=connect-github#connect-github");
                 assert!(href.ends_with("creation_draft=00000000-0000-4000-8000-000000000003"));
                 assert!(!href.contains("not-navigation"));
                 assert!(
@@ -2334,6 +2336,70 @@ mod tests {
                         || href.starts_with("/settings/credentials/?creation_draft=")
                 );
             }
+        }
+    }
+
+    /// #4905: the GitHub browser's setup link opens the Credentials dialog
+    /// its label names, keeping the draft, in every connection state.
+    #[test]
+    fn github_setup_link_opens_the_dialog_its_label_names() {
+        use crate::view::{EnvironmentGithubConnectionOption, GithubConnectionState};
+        const GITHUB: &str = "00000000-0000-4000-8000-000000000017";
+        let organization = test_organization();
+        let connection = |connection| EnvironmentGithubConnectionOption {
+            credential_id: GITHUB.into(),
+            account: "synthetic-user".into(),
+            connection,
+        };
+        let draft = "?creation_draft=00000000-0000-4000-8000-000000000003";
+        let reconnect = format!("credential-{GITHUB}-reconnect");
+        for (state, connections, error, label, href) in [
+            (
+                "not-configured",
+                vec![],
+                "",
+                "Connect GitHub",
+                format!("{draft}&dialog=connect-github#connect-github"),
+            ),
+            (
+                "inactive",
+                vec![connection(GithubConnectionState::Inactive)],
+                "",
+                "Reconnect GitHub",
+                format!("{draft}&dialog={reconnect}#{reconnect}"),
+            ),
+            (
+                "connected",
+                vec![connection(GithubConnectionState::Connected)],
+                "",
+                "Manage GitHub connection",
+                draft.to_owned(),
+            ),
+            // The Connect dialog says when the account is already connected.
+            (
+                "unavailable",
+                vec![],
+                "GitHub connections could not be loaded.",
+                "Connect GitHub",
+                format!("{draft}&dialog=connect-github#connect-github"),
+            ),
+        ] {
+            let mut form = default_create_form("csrf-token".into(), true);
+            form.draft_id = "00000000-0000-4000-8000-000000000003".into();
+            form.sources.github_connections = connections;
+            form.sources.github_connection_error = error.into();
+            assert_eq!(form.sources.github_connection_state(), state);
+            let html = EnvironmentCreateFormTemplate {
+                organization: &organization,
+                form: &form,
+            }
+            .render()
+            .unwrap();
+            let link = format!(
+                "<a href=\"/settings/credentials/{}\" data-github-setup-link data-create-draft-setup>{label}</a>",
+                href.replace('&', "&#38;")
+            );
+            assert_eq!(html.matches(&link).count(), 1, "{state}: {link}");
         }
     }
 
@@ -4678,7 +4744,7 @@ mod tests {
             }));
         }
         assert!(html.contains(&format!(
-            "<a href=\"/settings/credentials/?{}\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
+            "<a href=\"/settings/credentials/?{}&#38;dialog=connect-github#connect-github\" data-github-setup-link data-create-draft-setup>Connect GitHub</a>",
             form.creation_draft_parameter()
         )));
         assert!(html.contains("data-github-browser data-github-state=\"not-configured\""));

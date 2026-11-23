@@ -2,7 +2,8 @@
 
 This journey proves what a user does with a cloud sandbox, as `SPEC.md`
 describes it in "4. Hosted sandboxes" and "7. Access paths": creating one,
-what a create that fails leaves behind, running commands and shells in it,
+what a create that fails leaves behind, the dashboard links that open the
+credential dialog a sandbox needs, running commands and shells in it,
 stopping and starting it, what its page shows while it starts, copying files
 with `cw cp` ("File transfer" in section 7), what `cw` inside a sandbox
 knows (section 8), and what a user sees while a release replaces the orchestration
@@ -17,6 +18,7 @@ Updated 2026-11-23.
 | --- | --- | --- | --- |
 | `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
+| `sandbox-credential-links` | cw-accounts | not yet observed | not yet observed |
 | `sandbox-failure-trace-id` | cw-tracing | observed 2026-11-23 (#5633) | not yet observed |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
@@ -192,6 +194,53 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
     after 27 s with the reason; a container whose command could not start
     ended about 20 s after its create; a healthy create still succeeded.
     Evidence: #4431, closing comment.
+
+## `sandbox-credential-links`: a credential link opens the dialog it names
+
+Issue: #4905 (the link opened the credentials list).
+
+- **Entry points:** the dashboard only. Create Sandbox's "From GitHub"
+  heading link; the "Needs attention" notices in a Sandbox row's "Secrets and
+  credentials" menu and on the Sandbox page.
+- **States to exercise:**
+  - no GitHub connection: the link reads "Connect GitHub";
+  - an inactive connection (Reconnect needed or revoked): "Reconnect GitHub";
+  - a connected account: "Manage GitHub connection";
+  - a Sandbox bound to a profile whose credential needs action, such as
+    "Codex needs Reconnect" or "OpenAI API key needs replacing".
+- **Driving it:**
+  1. Signed in with no GitHub connection, open Create Sandbox, fill in a
+     field, and choose "Connect GitHub", then "Save draft and leave".
+  2. Connect GitHub from the open dialog, then choose "Return to Create
+     Sandbox".
+  3. With the GitHub connection marked Reconnect needed, open Create
+     Sandbox and choose "Reconnect GitHub".
+  4. With it connected, choose "Manage GitHub connection".
+  5. With a bound profile's Codex credential refresh failed, open the
+     Sandbox's row menu, then "Secrets and credentials", and choose "Codex
+     needs Reconnect"; then do the same from the Sandbox page's "Needs
+     attention" notice.
+
+  On Kind, `apps/dashboard/e2e/ssr-dashboard.credentials.ssr.ts` ("managed
+  provider credential browser journey") drives steps 1 and 2 with the
+  synthetic GitHub App.
+- **Proof:**
+  - step 1 lands on `/settings/credentials/?creation_draft=<draft>&dialog=connect-github#connect-github`
+    with the Connect GitHub dialog open and nothing else to click first;
+  - step 2 returns to Create Sandbox with the draft's values in place;
+  - step 3 opens "Reconnect <account>", that connection's own dialog;
+  - step 4 opens the credentials list, with no dialog open;
+  - step 5 opens that credential's own dialog: Reconnect for Codex and
+    GitHub, Rotate API key for an OpenAI or Anthropic key, Replace token for
+    a Claude subscription token. A Claude sign-in (reconnected from `cw`) and
+    an SSH key (replaced by adding another) open the list.
+- **Gotchas:**
+  - The page opens only a dialog it allows for the signed-in account's
+    current credentials. A stale link, such as one for a credential deleted
+    since, lands on the list; that is correct.
+  - Create shows no setup link until its choices load, because the
+    connection is not known before then.
+- **Observed:** not yet observed on Dev or Production.
 
 ## `sandbox-failure-trace-id`: a failed command prints the id of its trace
 

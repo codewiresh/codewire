@@ -274,7 +274,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("searchbox", { name: "Find a repository" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Add custom Git URL" })).toBeVisible();
     const draft = await page.locator("[data-environment-form]").getAttribute("data-create-draft-id");
-    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?creation_draft=${draft}`);
+    await expect(page.getByRole("link", { name: "Connect GitHub", exact: true })).toHaveAttribute("href", `/settings/credentials/?creation_draft=${draft}&dialog=connect-github#connect-github`);
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 

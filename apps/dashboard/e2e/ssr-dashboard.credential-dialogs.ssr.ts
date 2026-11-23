@@ -150,6 +150,21 @@ test("saved GitHub connection opens its exact reconnect dialog without submittin
   expect(posts).toBe(0);
 });
 
+// #4905: Create Sandbox's "Connect GitHub" link lands here with the dialog
+// already open, so there is no Add credential step to find.
+test("arriving from Connect GitHub opens its dialog with no Add credential step", async ({ page }) => {
+  let posts = 0;
+  page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-connect-github.html`);
+  const connect = dialog(page, "Connect GitHub");
+  await expect(connect).toBeVisible();
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  await expect(action(connect, "Continue to GitHub")).toBeFocused();
+  await expect(page.getByRole("link", { name: "Return to Create Sandbox", exact: true }))
+    .toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
+  expect(posts).toBe(0);
+});
+
 test("SSH chooses Generate or Import and Back clears private values only after discard", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });

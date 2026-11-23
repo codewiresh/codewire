@@ -30,7 +30,8 @@ const ANTHROPIC: &str = "00000000-0000-4000-8000-000000000008";
 const BOUND_REVISION: u64 = 7;
 /// Upstream text that must never reach the page: credential names and errors.
 const CANARY: &str = "upstream-canary";
-const NOTICE: &str = "<ul class=\"cw-credential-attention\"><li><a class=\"cw-link-button\" href=\"/settings/credentials/\">Codex needs Reconnect</a></li></ul>";
+/// The notice opens `CODEX`'s own Reconnect dialog on the Credentials page.
+const NOTICE: &str = "<ul class=\"cw-credential-attention\"><li><a class=\"cw-link-button\" href=\"/settings/credentials/?dialog=credential-00000000-0000-4000-8000-000000000007-reconnect#credential-00000000-0000-4000-8000-000000000007-reconnect\">Codex needs Reconnect</a></li></ul>";
 type Calls = Arc<Mutex<Vec<String>>>;
 
 struct TestServer {

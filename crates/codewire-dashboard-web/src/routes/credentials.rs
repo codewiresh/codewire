@@ -2980,4 +2980,195 @@ mod tests {
             .await
             .expect("response-body drop closes enrollment receiver");
     }
+
+    /// Where a Sandbox or Create link lands (#4905): its href parses back to
+    /// the dialog it names, the page approves that dialog for the viewer's
+    /// current credentials, and that one dialog renders open on arrival.
+    async fn arrival(
+        href: &str,
+        data: &credentials_connect::CredentialSettingsData,
+    ) -> (QueryParameters, String) {
+        use axum::http::Request;
+        let (path, fragment) = href.split_once('#').unwrap_or((href, ""));
+        let (mut parts, _) = Request::builder().uri(path).body(()).unwrap().into_parts();
+        let CredentialQuery(context) = CredentialQuery::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
+        assert_eq!(fragment, context.dialog, "{href}");
+        let approved = approved_dialog(&context.dialog, data);
+        (context, approved)
+    }
+
+    fn open_dialogs(html: &str) -> Vec<&str> {
+        html.split("<dialog ")
+            .skip(1)
+            .filter_map(|tag| tag.split('>').next())
+            .filter(|tag| tag.contains("data-dialog-auto-open"))
+            .filter_map(|tag| tag.split("id=\"").nth(1)?.split('"').next())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn create_and_attention_links_arrive_on_the_dialog_they_name() {
+        use codewire_proto::codewire::v1::{
+            AccessProfile, AccessProfileEntry, Credential, CredentialAuthenticationKind,
+            CredentialStatus, SshPublicKey,
+        };
+        const DRAFT: &str = "00000000-0000-4000-8000-000000000003";
+        let id = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+        let credential = |n: u8, provider: &str, kind, status: CredentialStatus| Credential {
+            id: id(n),
+            name: format!("credential-{n}"),
+            provider: provider.into(),
+            authentication_kind: kind,
+            status: status.into(),
+            revocation_generation: 1,
+            ..Default::default()
+        };
+        let codex = credential(
+            11,
+            "openai",
+            CredentialAuthenticationKind::Oauth.into(),
+            CredentialStatus::RefreshFailed,
+        );
+        let openai = credential(
+            12,
+            "openai",
+            CredentialAuthenticationKind::ApiKey.into(),
+            CredentialStatus::Revoked,
+        );
+        let anthropic = credential(
+            13,
+            "anthropic",
+            CredentialAuthenticationKind::ApiKey.into(),
+            CredentialStatus::Expired,
+        );
+        let mut ssh = credential(
+            14,
+            "ssh",
+            CredentialAuthenticationKind::SshKey.into(),
+            CredentialStatus::Revoked,
+        );
+        ssh.ssh_public_key = Some(SshPublicKey {
+            openssh: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKey".into(),
+            fingerprint: "SHA256:fixture".into(),
+            ..Default::default()
+        })
+        .into();
+        let claude_token = credential(
+            15,
+            "anthropic",
+            CredentialAuthenticationKind::Oauth.into(),
+            CredentialStatus::Expired,
+        );
+        let claude_sign_in = credential(
+            16,
+            "anthropic",
+            CredentialAuthenticationKind::ClaudeSignIn.into(),
+            CredentialStatus::RefreshFailed,
+        );
+        let mut github = credential(
+            17,
+            "github",
+            CredentialAuthenticationKind::Oauth.into(),
+            CredentialStatus::RefreshFailed,
+        );
+        github.account_hint = Some("synthetic-user".into());
+        let profile = |n: u8, entries: &[(&str, u8)]| AccessProfile {
+            id: id(n),
+            name: format!("profile-{n}"),
+            revision: 3,
+            entries: entries
+                .iter()
+                .map(|(slot, credential)| AccessProfileEntry {
+                    capability_slot: (*slot).into(),
+                    credential_id: id(*credential),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let credentials = vec![
+            codex,
+            openai,
+            anthropic,
+            ssh,
+            claude_token,
+            claude_sign_in,
+            github,
+        ];
+        let profiles = vec![
+            profile(
+                21,
+                &[
+                    ("codex", 11),
+                    ("openai", 12),
+                    ("anthropic", 13),
+                    ("ssh", 14),
+                ],
+            ),
+            profile(22, &[("anthropic", 15)]),
+            profile(23, &[("anthropic", 16)]),
+        ];
+        let data = || {
+            credentials_connect::build_settings_data(credentials.clone(), profiles.clone()).unwrap()
+        };
+        let notices = data()
+            .profiles
+            .iter()
+            .flat_map(|profile| profile.attention.iter())
+            .map(|attention| (attention.notice, attention.dialog.clone(), attention.href()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let list = "/settings/credentials/".to_owned();
+        let row = |n: u8, action: &str| format!("credential-{}-{action}", id(n));
+        let linked = |n: u8, action: &str| {
+            let dialog = row(n, action);
+            (dialog.clone(), format!("{list}?dialog={dialog}#{dialog}"))
+        };
+        let expected = [
+            ("Anthropic API key needs replacing", linked(13, "rotate")),
+            (
+                "Claude sign-in needs Reconnect",
+                (String::new(), list.clone()),
+            ),
+            (
+                "Claude subscription token needs replacing",
+                linked(15, "replace"),
+            ),
+            ("Codex needs Reconnect", linked(11, "reconnect")),
+            ("GitHub needs Reconnect", linked(17, "reconnect")),
+            ("OpenAI API key needs replacing", linked(12, "rotate")),
+            ("SSH key needs replacing", (String::new(), list.clone())),
+        ]
+        .into_iter()
+        .map(|(notice, (dialog, href))| (notice, dialog, href))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(notices, expected);
+
+        let create = |dialog: &str| {
+            crate::view::credential_settings_href(&format!("creation_draft={DRAFT}"), dialog)
+        };
+        let links = notices
+            .iter()
+            .map(|(_, dialog, href)| (dialog.clone(), href.clone()))
+            .chain([
+                ("connect-github".to_owned(), create("connect-github")),
+                (row(17, "reconnect"), create(&row(17, "reconnect"))),
+                (String::new(), create("")),
+            ]);
+        for (dialog, href) in links {
+            let (context, approved) = arrival(&href, &data()).await;
+            assert_eq!(approved, dialog, "{href}");
+            if href.contains("creation_draft=") {
+                assert!(matches!(context.draft, DraftReturn::Exact(ref draft) if draft == DRAFT));
+            }
+            let html = rendered_dialogs_with_data(&dialog, "", data());
+            let open = open_dialogs(&html);
+            if dialog.is_empty() {
+                assert!(open.is_empty(), "{href}: {open:?}");
+            } else {
+                assert_eq!(open, [dialog.as_str()], "{href}");
+            }
+        }
+    }
 }

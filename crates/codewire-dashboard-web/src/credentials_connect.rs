@@ -27,8 +27,8 @@ use crate::state::AppState;
 use crate::time_display::calendar_date;
 use crate::transport::BrowserTransport;
 use crate::view::{
-    CredentialChoiceView, CredentialChoicesView, CredentialProfileEntryView,
-    CredentialProfileRowView, CredentialRowView,
+    CredentialAttentionView, CredentialChoiceView, CredentialChoicesView,
+    CredentialProfileEntryView, CredentialProfileRowView, CredentialRowView,
 };
 
 mod lifecycle;
@@ -829,7 +829,7 @@ pub(crate) async fn settings_data(
 
 /// The settings inventory as of now: a Claude subscription token's recorded
 /// expiry is a wall-clock fact the service does not restate as a status.
-fn build_settings_data(
+pub(crate) fn build_settings_data(
     credentials: Vec<Credential>,
     profiles: Vec<AccessProfile>,
 ) -> Result<CredentialSettingsData, ConnectError> {
@@ -1179,9 +1179,11 @@ fn build_settings_data_at(
 
     let mut seen_profiles = BTreeSet::new();
     let github_connection = credential_index
-        .values()
-        .find(|(_, slot, _, _, _, _)| *slot == "github")
-        .map(|(name, _, _, status, tone, withheld)| (name.clone(), *status, *tone, *withheld));
+        .iter()
+        .find(|(_, (_, slot, _, _, _, _))| *slot == "github")
+        .map(|(id, (name, _, _, status, tone, withheld))| {
+            (id.clone(), name.clone(), *status, *tone, *withheld)
+        });
     let mut profile_rows = Vec::with_capacity(profiles.len());
     for profile in profiles {
         if exact_id(&profile.id).is_err()
@@ -1216,7 +1218,7 @@ fn build_settings_data_at(
                 status_tone,
             });
             if *withheld {
-                attention.push(attention_notice(form));
+                attention.push(attention_view(form, &entry.credential_id));
             }
         }
         // Every profile includes the account's one GitHub connection. Show it,
@@ -1224,9 +1226,9 @@ fn build_settings_data_at(
         // connection grants nothing, so only an unusable one needs Reconnect.
         let (credential, status, status_tone) = github_connection.as_ref().map_or_else(
             || ("missing".to_owned(), "Connect GitHub", "warning"),
-            |(account, status, status_tone, withheld)| {
+            |(id, account, status, status_tone, withheld)| {
                 if *withheld {
-                    attention.push(attention_notice("github"));
+                    attention.push(attention_view("github", id));
                 }
                 (format!("@{account}"), *status, *status_tone)
             },
@@ -1239,7 +1241,7 @@ fn build_settings_data_at(
         });
         entries.sort_by(|a, b| a.slot.cmp(b.slot));
         // Each notice starts with its capability, so this is the entry order.
-        attention.sort_unstable();
+        attention.sort_unstable_by_key(|attention| attention.notice);
         profile_rows.push(CredentialProfileRowView {
             id: profile.id,
             name: profile.name,
@@ -1500,6 +1502,29 @@ fn attention_notice(form: &str) -> &'static str {
         "claude-sign-in" => "Claude sign-in needs Reconnect",
         "ssh" => "SSH key needs replacing",
         _ => unreachable!("closed form"),
+    }
+}
+
+/// The notice for a withheld capability, linked to the Credentials page
+/// dialog that the page offers this credential for it (`approved_dialog` in
+/// `routes/credentials.rs` opens exactly these). A Claude sign-in reconnects
+/// from `cw`, and an SSH key is replaced by adding another and choosing it in
+/// the profile, so neither has a single dialog and both link to the list.
+fn attention_view(form: &str, credential_id: &str) -> CredentialAttentionView {
+    let action = match form {
+        "codex" | "github" => "reconnect",
+        "openai" | "anthropic" => "rotate",
+        "claude" => "replace",
+        "claude-sign-in" | "ssh" => "",
+        _ => unreachable!("closed form"),
+    };
+    CredentialAttentionView {
+        notice: attention_notice(form),
+        dialog: if action.is_empty() {
+            String::new()
+        } else {
+            format!("credential-{credential_id}-{action}")
+        },
     }
 }
 
@@ -1919,7 +1944,9 @@ mod tests {
                 .find(|profile| profile.id == id(n))
                 .unwrap()
                 .attention
-                .clone()
+                .iter()
+                .map(|attention| attention.notice)
+                .collect::<Vec<_>>()
         };
         let data = build_settings_data(
             vec![
@@ -2051,7 +2078,9 @@ mod tests {
                 .find(|profile| profile.id == id(10 + n))
                 .unwrap()
                 .attention
-                .clone()
+                .iter()
+                .map(|attention| attention.notice)
+                .collect::<Vec<_>>()
         };
         let notice = ["Claude subscription token needs replacing"];
         assert!(attention(1).is_empty());

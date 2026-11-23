@@ -116,6 +116,7 @@ fn github_connections(
             GithubConnectionState::Inactive
         };
         output.push(EnvironmentGithubConnectionOption {
+            credential_id: credential.id.clone(),
             account,
             connection,
         });
@@ -487,6 +488,7 @@ mod tests {
         let mut options = Vec::new();
         github_connections(vec![codex, github.clone()], &mut options).expect("metadata");
         assert_eq!(options.len(), 1);
+        assert_eq!(options[0].credential_id, github_id);
         assert_eq!(options[0].account, "verified-user");
         assert_eq!(options[0].connection, GithubConnectionState::Connected);
 

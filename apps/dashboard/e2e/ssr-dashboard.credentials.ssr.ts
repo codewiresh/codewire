@@ -220,8 +220,10 @@ test.describe("managed provider credential browser journey", () => {
       await page.getByRole("textbox", { name: "Name", exact: true }).fill("setup-name-not-persisted");
       await expect(page.locator("[data-create-draft-status]")).toContainText("Draft saved");
       const settingsPath = `/settings/credentials/?creation_draft=${draft}`;
+      // #4905: the link names the dialog it means, so Settings opens on it.
+      const arrivalPath = `${settingsPath}&dialog=connect-github#connect-github`;
       const setupLink = page.getByRole("link", { name: "Connect GitHub", exact: true });
-      await expect(setupLink).toHaveAttribute("href", settingsPath);
+      await expect(setupLink).toHaveAttribute("href", arrivalPath);
       await setupLink.click();
       // Leaving through the setup link keeps the draft, so the guard asks to
       // leave rather than to discard; identify it by behavior, not heading.
@@ -232,12 +234,13 @@ test.describe("managed provider credential browser journey", () => {
       await expect(draftForm).toHaveAttribute("data-create-draft-id", draft!);
       await setupLink.click();
       await leave.getByRole("button", { name: "Save draft and leave", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}${settingsPath}`);
+      await expect(page).toHaveURL(`${ssrUrl}${arrivalPath}`);
+      // Connect GitHub is open on arrival, with no Add credential step.
+      const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
+      await expect(connection).toBeVisible();
+      await expect(page.locator("dialog[open]")).toHaveCount(1);
       const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
       await expect(returnLink).toHaveAttribute("href", `/${slug}/new/?creation_draft=${draft}`);
-      await expect(page.locator("dialog[open]")).toHaveCount(0);
-      await openGithubConnection(page);
-      const connection = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
       const form = connection.locator("form:not(.cw-dialog-launcher)");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
       await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
