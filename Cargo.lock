@@ -1485,6 +1485,8 @@ dependencies = [
  "hmac 0.12.1",
  "miniserde",
  "prometheus",
+ "prost",
+ "prost-types",
  "reqwest",
  "serde",
  "serde_json",

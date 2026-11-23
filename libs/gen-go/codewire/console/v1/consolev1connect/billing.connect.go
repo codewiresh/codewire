@@ -42,6 +42,9 @@ const (
 	// BillingServiceGetSignupCreditProcedure is the fully-qualified name of the BillingService's
 	// GetSignupCredit RPC.
 	BillingServiceGetSignupCreditProcedure = "/codewire.console.v1.BillingService/GetSignupCredit"
+	// BillingServiceGetPublicRatesProcedure is the fully-qualified name of the BillingService's
+	// GetPublicRates RPC.
+	BillingServiceGetPublicRatesProcedure = "/codewire.console.v1.BillingService/GetPublicRates"
 	// BillingServiceGetBillingOverviewProcedure is the fully-qualified name of the BillingService's
 	// GetBillingOverview RPC.
 	BillingServiceGetBillingOverviewProcedure = "/codewire.console.v1.BillingService/GetBillingOverview"
@@ -96,6 +99,10 @@ type BillingServiceClient interface {
 	// GetSignupCredit returns the credit a new organization is granted now. It
 	// is public: the signed-out pricing page reads it.
 	GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error)
+	// GetPublicRates returns Regular's four rates, which the public pricing
+	// pages show. It is public, and fails rather than answer another rate
+	// card's rates.
+	GetPublicRates(context.Context, *connect.Request[v1.GetPublicRatesRequest]) (*connect.Response[v1.GetPublicRatesResponse], error)
 	// GetBillingOverview returns the caller's organization billing summary.
 	GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error)
 	// ListInvoices returns the most recent organization invoices.
@@ -176,6 +183,13 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			httpClient,
 			baseURL+BillingServiceGetSignupCreditProcedure,
 			connect.WithSchema(billingServiceMethods.ByName("GetSignupCredit")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		getPublicRates: connect.NewClient[v1.GetPublicRatesRequest, v1.GetPublicRatesResponse](
+			httpClient,
+			baseURL+BillingServiceGetPublicRatesProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("GetPublicRates")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -276,6 +290,7 @@ type billingServiceClient struct {
 	listOrgPlans            *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
 	listResourcePlans       *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
 	getSignupCredit         *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
+	getPublicRates          *connect.Client[v1.GetPublicRatesRequest, v1.GetPublicRatesResponse]
 	getBillingOverview      *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
 	listInvoices            *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
 	listBillingEvents       *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
@@ -305,6 +320,11 @@ func (c *billingServiceClient) ListResourcePlans(ctx context.Context, req *conne
 // GetSignupCredit calls codewire.console.v1.BillingService.GetSignupCredit.
 func (c *billingServiceClient) GetSignupCredit(ctx context.Context, req *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error) {
 	return c.getSignupCredit.CallUnary(ctx, req)
+}
+
+// GetPublicRates calls codewire.console.v1.BillingService.GetPublicRates.
+func (c *billingServiceClient) GetPublicRates(ctx context.Context, req *connect.Request[v1.GetPublicRatesRequest]) (*connect.Response[v1.GetPublicRatesResponse], error) {
+	return c.getPublicRates.CallUnary(ctx, req)
 }
 
 // GetBillingOverview calls codewire.console.v1.BillingService.GetBillingOverview.
@@ -387,6 +407,10 @@ type BillingServiceHandler interface {
 	// GetSignupCredit returns the credit a new organization is granted now. It
 	// is public: the signed-out pricing page reads it.
 	GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error)
+	// GetPublicRates returns Regular's four rates, which the public pricing
+	// pages show. It is public, and fails rather than answer another rate
+	// card's rates.
+	GetPublicRates(context.Context, *connect.Request[v1.GetPublicRatesRequest]) (*connect.Response[v1.GetPublicRatesResponse], error)
 	// GetBillingOverview returns the caller's organization billing summary.
 	GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error)
 	// ListInvoices returns the most recent organization invoices.
@@ -463,6 +487,13 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 		BillingServiceGetSignupCreditProcedure,
 		svc.GetSignupCredit,
 		connect.WithSchema(billingServiceMethods.ByName("GetSignupCredit")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceGetPublicRatesHandler := connect.NewUnaryHandler(
+		BillingServiceGetPublicRatesProcedure,
+		svc.GetPublicRates,
+		connect.WithSchema(billingServiceMethods.ByName("GetPublicRates")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -563,6 +594,8 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 			billingServiceListResourcePlansHandler.ServeHTTP(w, r)
 		case BillingServiceGetSignupCreditProcedure:
 			billingServiceGetSignupCreditHandler.ServeHTTP(w, r)
+		case BillingServiceGetPublicRatesProcedure:
+			billingServiceGetPublicRatesHandler.ServeHTTP(w, r)
 		case BillingServiceGetBillingOverviewProcedure:
 			billingServiceGetBillingOverviewHandler.ServeHTTP(w, r)
 		case BillingServiceListInvoicesProcedure:
@@ -610,6 +643,10 @@ func (UnimplementedBillingServiceHandler) ListResourcePlans(context.Context, *co
 
 func (UnimplementedBillingServiceHandler) GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.GetSignupCredit is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) GetPublicRates(context.Context, *connect.Request[v1.GetPublicRatesRequest]) (*connect.Response[v1.GetPublicRatesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.GetPublicRates is not implemented"))
 }
 
 func (UnimplementedBillingServiceHandler) GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error) {

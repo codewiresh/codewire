@@ -17,15 +17,16 @@ use codewire_proto::codewire::console::v1::{
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
     EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, FinishCardSetupRequest,
     FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse,
-    GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest,
-    GetSignupCreditResponse, Invoice as ProtoInvoice, ListBillingEventsRequest,
-    ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest,
-    ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse,
-    ListResourcePlansRequest, ListResourcePlansResponse, OrgPlan as ProtoOrgPlan,
-    PaymentCard as ProtoPaymentCard, RemovePaymentMethodRequest, RemovePaymentMethodResponse,
-    ResourcePlan as ProtoResourcePlan, SavedPaymentMethod as ProtoSavedPaymentMethod,
-    SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest,
-    UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
+    GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetPublicRatesRequest,
+    GetPublicRatesResponse, GetSignupCreditRequest, GetSignupCreditResponse,
+    Invoice as ProtoInvoice, ListBillingEventsRequest, ListBillingEventsResponse,
+    ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse,
+    ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest,
+    ListResourcePlansResponse, OrgPlan as ProtoOrgPlan, PaymentCard as ProtoPaymentCard,
+    RemovePaymentMethodRequest, RemovePaymentMethodResponse, ResourcePlan as ProtoResourcePlan,
+    SavedPaymentMethod as ProtoSavedPaymentMethod, SetDefaultPaymentMethodRequest,
+    SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse,
+    UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -105,6 +106,23 @@ impl BillingService for BillingConnectService {
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(GetSignupCreditResponse {
             amount_nano_eur,
+            ..Default::default()
+        })
+    }
+
+    async fn get_public_rates(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, GetPublicRatesRequest>,
+    ) -> ServiceResult<GetPublicRatesResponse> {
+        let rates = crate::catalog_admin::regular_rates_core(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(GetPublicRatesResponse {
+            cpu_nano_eur_per_vcpu_hour: rates.cpu_nano_eur_per_vcpu_hour,
+            memory_nano_eur_per_gib_hour: rates.memory_nano_eur_per_gib_hour,
+            disk_nano_eur_per_gib_hour: rates.disk_nano_eur_per_gib_hour,
+            parked_storage_nano_eur_per_gib_hour: rates.parked_storage_nano_eur_per_gib_hour,
             ..Default::default()
         })
     }

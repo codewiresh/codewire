@@ -59,9 +59,10 @@ workspace daemon uses to fetch its binding.
   never the default (cw-security ruling, 2026-11-18, #5054). The public and
   anonymous-allowed methods today are `GetInvitationByToken` (keyed by a
   secret token; it returns the invitee's address), `SubmitFeedback`
-  (varies by caller when one signs in) and `GetSignupCredit` (the same for
-  every caller). None is cached. A method whose answer is the same for every
-  caller may be cached only through an explicit per-method allowlist in the
+  (varies by caller when one signs in), `GetSignupCredit` and
+  `GetPublicRates` (both the same for every caller). None is cached. A
+  method whose answer is the same for every caller may be cached only
+  through an explicit per-method allowlist in the
   layer, added in a reviewed change that names its directive and tests that
   the response does not depend on credentials.
 - An OAuth credential without exact `codewire.api` may use the identity

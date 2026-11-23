@@ -25,6 +25,13 @@ service BillingService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // GetPublicRates returns Regular's four rates, which the public pricing
+  // pages show. It is public, and fails rather than answer another rate
+  // card's rates.
+  rpc GetPublicRates(GetPublicRatesRequest) returns (GetPublicRatesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // GetBillingOverview returns the caller's organization billing summary.
   rpc GetBillingOverview(GetBillingOverviewRequest) returns (GetBillingOverviewResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -153,6 +160,17 @@ message GetSignupCreditResponse {
   // The credit a new organization is granted once at creation, in
   // nano-euros. 0 means none.
   int64 amount_nano_eur = 1;
+}
+
+message GetPublicRatesRequest {}
+
+// Regular's rates, in whole nano-euros per unit-hour.
+message GetPublicRatesResponse {
+  int64 cpu_nano_eur_per_vcpu_hour = 1;
+  int64 memory_nano_eur_per_gib_hour = 2;
+  int64 disk_nano_eur_per_gib_hour = 3;
+  // Per GiB-hour of disk while a Sandbox is suspended or hibernated.
+  int64 parked_storage_nano_eur_per_gib_hour = 4;
 }
 
 message GetBillingOverviewRequest {

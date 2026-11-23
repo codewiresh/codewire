@@ -146,6 +146,22 @@ class GetSignupCreditResponse(_message.Message):
     amount_nano_eur: int
     def __init__(self, amount_nano_eur: _Optional[int] = ...) -> None: ...
 
+class GetPublicRatesRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetPublicRatesResponse(_message.Message):
+    __slots__ = ("cpu_nano_eur_per_vcpu_hour", "memory_nano_eur_per_gib_hour", "disk_nano_eur_per_gib_hour", "parked_storage_nano_eur_per_gib_hour")
+    CPU_NANO_EUR_PER_VCPU_HOUR_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    DISK_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    PARKED_STORAGE_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    cpu_nano_eur_per_vcpu_hour: int
+    memory_nano_eur_per_gib_hour: int
+    disk_nano_eur_per_gib_hour: int
+    parked_storage_nano_eur_per_gib_hour: int
+    def __init__(self, cpu_nano_eur_per_vcpu_hour: _Optional[int] = ..., memory_nano_eur_per_gib_hour: _Optional[int] = ..., disk_nano_eur_per_gib_hour: _Optional[int] = ..., parked_storage_nano_eur_per_gib_hour: _Optional[int] = ...) -> None: ...
+
 class GetBillingOverviewRequest(_message.Message):
     __slots__ = ("org_id",)
     ORG_ID_FIELD_NUMBER: _ClassVar[int]

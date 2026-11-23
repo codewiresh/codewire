@@ -11,7 +11,6 @@ use codewire_billing::email::EmailClient;
 use codewire_billing::routes::BillingState;
 use codewire_billing::stripe_client::StripeHandle;
 use codewire_server_core::auth::AuthState;
-use codewire_server_core::connect::ConnectAuthLayer;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 
 const DEFAULT_BILLING_LOOPS: &[&str] = &[
@@ -141,26 +140,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The signed-out pricing page reads the sign-up credit; nothing else on
-    // the billing mount is public.
-    let connect_auth = ConnectAuthLayer::authenticated(auth.clone())
-        .allow_public(["/codewire.console.v1.BillingService/GetSignupCredit"]);
-    let connect_admin_auth = ConnectAuthLayer::admin(auth.clone());
-    let app = AppBuilder::new("codewire-billing")
-        .with_health_and_db(pool.clone())
-        .with_unary_connect_routes_auth(
-            codewire_billing::connect::billing::router(state.clone()),
-            connect_auth,
-        )
-        .with_unary_connect_routes_auth(
-            codewire_billing::connect::catalog::router(state.clone()),
-            connect_admin_auth,
-        )
-        // Connect conformance probe (doc 03 D8) — no-op unless
-        // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
-        .with_connect_testing_surface(auth.clone())
-        .with_routes(codewire_billing::router(state))
-        .into_router();
+    let app = codewire_billing::connect::mount(
+        AppBuilder::new("codewire-billing").with_health_and_db(pool.clone()),
+        state.clone(),
+        auth.clone(),
+    )
+    // Connect conformance probe (doc 03 D8) — no-op unless
+    // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
+    .with_connect_testing_surface(auth.clone())
+    .with_routes(codewire_billing::router(state))
+    .into_router();
 
     let served = codewire_server_core::serve(app, cfg.bind_addr).await;
     // Flush queued spans before the process exits.

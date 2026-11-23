@@ -4,7 +4,11 @@
 //! binary, load the deterministic fixture, and drive its retained public
 //! surface through generated Connect clients. REST parity is intentionally not
 //! retained: the two representative former REST paths below must be absent.
+//!
+//! The no-credential test builds billing's mounts in process, as the binary
+//! does, and needs no fixture; with `DATABASE_URL` it also reads the rates.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::time::Duration;
 
@@ -14,15 +18,25 @@ use codewire_admin_proto::codewire::admin::v1::{
     ListSystemdOrganizationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
     SetOrganizationSystemdEnvironmentsRequest, UpdateRateCardRequest,
 };
+use codewire_billing::checkout_sessions::FrontendOrigin;
+use codewire_billing::email::EmailClient;
+use codewire_billing::routes::BillingState;
+use codewire_billing::stripe_client::StripeHandle;
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
-    ListBillingEventsRequest, ListInvoicesRequest, ListOrgPlansRequest, ListResourcePlansRequest,
-    UpdateAutoTopUpRequest,
+    GetPublicRatesRequest, ListBillingEventsRequest, ListInvoicesRequest, ListOrgPlansRequest,
+    ListResourcePlansRequest, UpdateAutoTopUpRequest,
 };
+use codewire_server_core::AppBuilder;
+use codewire_server_core::auth::AuthState;
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{CodecFormat, ErrorCode};
-use reqwest::header::COOKIE;
+use prost::Message as _;
+use prost_types::FileDescriptorSet;
+use reqwest::header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE};
 use reqwest::{Client, StatusCode};
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 /// How long these tests wait for the service under test: a hang guard, not a
 /// speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). The
@@ -455,4 +469,177 @@ async fn assert_organization_opt_ins(
         );
         listed_systemd(enabled).await;
     }
+}
+
+/// The only methods billing answers without a credential: the signed-out
+/// pricing page reads both. Any other is refused.
+const ANSWERED_WITHOUT_A_CREDENTIAL: [&str; 2] = [
+    "/codewire.console.v1.BillingService/GetSignupCredit",
+    "/codewire.console.v1.BillingService/GetPublicRates",
+];
+
+/// Every Connect service billing serves.
+const BILLING_SERVICES: [&str; 2] = [
+    "codewire.admin.v1.BillingCatalogService",
+    "codewire.console.v1.BillingService",
+];
+
+/// Each method of `BILLING_SERVICES` as its Connect path, read from the
+/// generated descriptor sets, so a method added later is covered too.
+fn billing_methods() -> BTreeSet<String> {
+    let mut methods = BTreeSet::new();
+    let mut found = BTreeSet::new();
+    for encoded in [
+        codewire_proto::FILE_DESCRIPTOR_SET,
+        codewire_admin_proto::FILE_DESCRIPTOR_SET,
+    ] {
+        let set = FileDescriptorSet::decode(encoded).expect("decode a descriptor set");
+        for file in &set.file {
+            for service in &file.service {
+                let name = format!("{}.{}", file.package(), service.name());
+                if BILLING_SERVICES.contains(&name.as_str()) {
+                    methods.extend(
+                        service
+                            .method
+                            .iter()
+                            .map(|method| format!("/{name}/{}", method.name())),
+                    );
+                    found.insert(name);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        found,
+        BILLING_SERVICES.map(String::from).into(),
+        "every billing service is described"
+    );
+    methods
+}
+
+/// Serves billing's Connect mounts and raw routes as the binary builds them,
+/// on a local port, and returns its base URL.
+async fn serve_billing(pool: PgPool) -> String {
+    let state = BillingState {
+        pool: pool.clone(),
+        stripe: StripeHandle::default(),
+        email: EmailClient::disabled(),
+        credit_enforcement: Default::default(),
+        receipts: Default::default(),
+        frontend_origin: FrontendOrigin::parse("https://app.codewire.test")
+            .expect("the test frontend origin"),
+        operator_email: None,
+    };
+    let app = codewire_billing::connect::mount(
+        AppBuilder::new("codewire-billing"),
+        state.clone(),
+        AuthState { pool },
+    )
+    .with_routes(codewire_billing::router(state))
+    .into_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a local port");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("the local address")
+    );
+    tokio::spawn(codewire_server_core::serve_with_listener(app, listener));
+    base_url
+}
+
+/// Without a credential billing answers `GetPublicRates` with Regular's rates
+/// and refuses every method of its Connect services but its two public reads,
+/// so its public allowlist makes nothing else public (#5782).
+#[tokio::test]
+async fn without_a_credential_billing_answers_only_its_public_reads() {
+    let database_url = env::var("DATABASE_URL").ok().filter(|url| !url.is_empty());
+    let pool = match &database_url {
+        Some(url) => PgPoolOptions::new()
+            .max_connections(2)
+            .connect(url)
+            .await
+            .expect("connect the billing test database"),
+        // Never connected: a refusal needs no database, and a method that
+        // reached its handler fails rather than answers.
+        None => PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://codewire@127.0.0.1:1/codewire")
+            .expect("a lazy pool"),
+    };
+    let base_url = serve_billing(pool.clone()).await;
+    let http = Client::builder()
+        .timeout(SERVICE_HANG_GUARD)
+        .build()
+        .expect("build billing mount HTTP client");
+
+    let methods = billing_methods();
+    for path in ANSWERED_WITHOUT_A_CREDENTIAL {
+        assert!(methods.contains(path), "{path} is a billing method");
+    }
+    for path in methods
+        .iter()
+        .filter(|path| !ANSWERED_WITHOUT_A_CREDENTIAL.contains(&path.as_str()))
+    {
+        let response = http
+            .post(format!("{base_url}{path}"))
+            .header(CONTENT_TYPE, "application/proto")
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("POST {path}: {error}"));
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_else(|error| {
+            panic!("{path} answered {status} without a Connect error: {error}")
+        });
+        assert!(
+            matches!(
+                body["code"].as_str(),
+                Some("unauthenticated" | "permission_denied" | "not_found")
+            ),
+            "{path} without a credential: {status} {body}"
+        );
+    }
+
+    if database_url.is_none() {
+        eprintln!("DATABASE_URL unset; skipping GetPublicRates' answer");
+        return;
+    }
+    let (cpu, memory, disk, parked): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT cpu_nano_eur_per_vcpu_hour, memory_nano_eur_per_gib_hour, \
+                disk_nano_eur_per_gib_hour, parked_storage_nano_eur_per_gib_hour \
+           FROM billing_rate_cards WHERE rate_card = 'regular'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read Regular's rates");
+    for codec in [CodecFormat::Proto, CodecFormat::Json] {
+        let config = ClientConfig::new(base_url.parse().expect("Connect base URI"))
+            .with_codec_format(codec)
+            .with_default_timeout(SERVICE_HANG_GUARD);
+        let rates = BillingServiceClient::new(HttpClient::plaintext(), config)
+            .get_public_rates(GetPublicRatesRequest::default())
+            .await
+            .expect("GetPublicRates without a credential")
+            .into_owned();
+        assert_eq!(
+            (
+                rates.cpu_nano_eur_per_vcpu_hour,
+                rates.memory_nano_eur_per_gib_hour,
+                rates.disk_nano_eur_per_gib_hour,
+                rates.parked_storage_nano_eur_per_gib_hour,
+            ),
+            (cpu, memory, disk, parked)
+        );
+    }
+    let response = http
+        .post(format!(
+            "{base_url}/codewire.console.v1.BillingService/GetPublicRates"
+        ))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("POST GetPublicRates");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-store, private");
 }

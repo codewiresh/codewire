@@ -448,6 +448,24 @@ pub async fn list_rate_cards_core(pool: &PgPool) -> AppResult<Vec<RateCard>> {
     .map_err(|_| AppError::InternalMsg("failed to list rate cards".into()))
 }
 
+/// Regular's rates, which the public pages show. Regular is chosen by its
+/// key, never by its display name, and a missing row is an error, never
+/// another card's rates.
+pub async fn regular_rates_core<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+) -> AppResult<RateCardRates> {
+    let rates: Option<RateCardRates> = sqlx::query_as(
+        r#"SELECT cpu_nano_eur_per_vcpu_hour, memory_nano_eur_per_gib_hour,
+                  disk_nano_eur_per_gib_hour, parked_storage_nano_eur_per_gib_hour
+             FROM billing_rate_cards
+            WHERE rate_card = 'regular'"#,
+    )
+    .fetch_optional(executor)
+    .await
+    .map_err(|_| AppError::InternalMsg("failed to read the regular rates".into()))?;
+    rates.ok_or_else(|| AppError::InternalMsg("the regular rate card is missing".into()))
+}
+
 /// The most a rate may be: EUR 10 per unit-hour, as the database checks
 /// (migration 0046), so a mistyped price can't reprice every organization.
 pub const MAX_RATE_NANO_EUR_PER_UNIT_HOUR: i64 = 10_000_000_000;
@@ -1235,5 +1253,71 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_the_public_rates_are_regulars_and_never_another_cards() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let cards = list_rate_cards_core(&pool).await.unwrap();
+        let rates = |key: &str| {
+            cards
+                .iter()
+                .find(|card| card.rate_card == key)
+                .unwrap()
+                .rates
+        };
+        assert_eq!(regular_rates_core(&pool).await.unwrap(), rates("regular"));
+        assert_ne!(rates("regular"), rates("discounted"));
+
+        // Every change below is rolled back, so no other test sees it.
+        let mut transaction = pool.begin().await.unwrap();
+        let changed = RateCardRates {
+            cpu_nano_eur_per_vcpu_hour: 1,
+            memory_nano_eur_per_gib_hour: 2,
+            disk_nano_eur_per_gib_hour: 3,
+            parked_storage_nano_eur_per_gib_hour: 4,
+        };
+        sqlx::query(
+            "UPDATE billing_rate_cards SET cpu_nano_eur_per_vcpu_hour = $1, \
+                    memory_nano_eur_per_gib_hour = $2, disk_nano_eur_per_gib_hour = $3, \
+                    parked_storage_nano_eur_per_gib_hour = $4 \
+              WHERE rate_card = 'regular'",
+        )
+        .bind(changed.cpu_nano_eur_per_vcpu_hour)
+        .bind(changed.memory_nano_eur_per_gib_hour)
+        .bind(changed.disk_nano_eur_per_gib_hour)
+        .bind(changed.parked_storage_nano_eur_per_gib_hour)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(
+            regular_rates_core(&mut *transaction).await.unwrap(),
+            changed
+        );
+
+        // Organizations and ledger rows may name Regular, so its row can't
+        // always be deleted. A temporary copy of the cards without it
+        // shadows the table for this transaction alone.
+        sqlx::query(
+            "CREATE TEMPORARY TABLE billing_rate_cards ON COMMIT DROP AS \
+             SELECT * FROM public.billing_rate_cards WHERE rate_card <> 'regular'",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_rate_cards")
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 2);
+        assert!(matches!(
+            regular_rates_core(&mut *transaction).await,
+            Err(AppError::InternalMsg(_))
+        ));
+        transaction.rollback().await.unwrap();
+
+        assert_eq!(regular_rates_core(&pool).await.unwrap(), rates("regular"));
     }
 }

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, FinishCardSetupRequest, FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest, ListResourcePlansResponse, RemovePaymentMethodRequest, RemovePaymentMethodResponse, SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
+from .billing_pb2 import AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, FinishCardSetupRequest, FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetPublicRatesRequest, GetPublicRatesResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest, ListResourcePlansResponse, RemovePaymentMethodRequest, RemovePaymentMethodResponse, SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -42,6 +42,9 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_signup_credit(self, request: GetSignupCreditRequest, ctx: RequestContext[GetSignupCreditRequest, GetSignupCreditResponse]) -> GetSignupCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_public_rates(self, request: GetPublicRatesRequest, ctx: RequestContext[GetPublicRatesRequest, GetPublicRatesResponse]) -> GetPublicRatesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_billing_overview(self, request: GetBillingOverviewRequest, ctx: RequestContext[GetBillingOverviewRequest, GetBillingOverviewResponse]) -> GetBillingOverviewResponse:
@@ -129,6 +132,16 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_signup_credit,
+                ),
+                "/codewire.console.v1.BillingService/GetPublicRates": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetPublicRates",
+                        service_name="codewire.console.v1.BillingService",
+                        input=GetPublicRatesRequest,
+                        output=GetPublicRatesResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_public_rates,
                 ),
                 "/codewire.console.v1.BillingService/GetBillingOverview": Endpoint.unary(
                     method=MethodInfo(
@@ -367,6 +380,28 @@ class BillingServiceClient(ConnectClient):
                 service_name="codewire.console.v1.BillingService",
                 input=GetSignupCreditRequest,
                 output=GetSignupCreditResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def get_public_rates(
+        self,
+        request: GetPublicRatesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetPublicRatesResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetPublicRates",
+                service_name="codewire.console.v1.BillingService",
+                input=GetPublicRatesRequest,
+                output=GetPublicRatesResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
@@ -674,6 +709,9 @@ class BillingServiceSync(Protocol):
     def get_signup_credit(self, request: GetSignupCreditRequest, ctx: RequestContext[GetSignupCreditRequest, GetSignupCreditResponse]) -> GetSignupCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def get_public_rates(self, request: GetPublicRatesRequest, ctx: RequestContext[GetPublicRatesRequest, GetPublicRatesResponse]) -> GetPublicRatesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def get_billing_overview(self, request: GetBillingOverviewRequest, ctx: RequestContext[GetBillingOverviewRequest, GetBillingOverviewResponse]) -> GetBillingOverviewResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -757,6 +795,16 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_signup_credit,
+                ),
+                "/codewire.console.v1.BillingService/GetPublicRates": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetPublicRates",
+                        service_name="codewire.console.v1.BillingService",
+                        input=GetPublicRatesRequest,
+                        output=GetPublicRatesResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_public_rates,
                 ),
                 "/codewire.console.v1.BillingService/GetBillingOverview": EndpointSync.unary(
                     method=MethodInfo(
@@ -993,6 +1041,27 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=GetSignupCreditRequest,
                 output=GetSignupCreditResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def get_public_rates(
+        self,
+        request: GetPublicRatesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetPublicRatesResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetPublicRates",
+                service_name="codewire.console.v1.BillingService",
+                input=GetPublicRatesRequest,
+                output=GetPublicRatesResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

@@ -72,6 +72,10 @@ codewire-email = { workspace = true, features = ["test-support"] }
 codewire-admin-proto = { workspace = true, features = ["client"] }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
+# The wire contract reads every billing method from the generated
+# descriptor sets.
+prost = { workspace = true }
+prost-types = { workspace = true }
 codewire-workspace-hack.workspace = true
 
 [lints]

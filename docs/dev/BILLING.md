@@ -89,5 +89,7 @@ Discounted and Unlimited (#5782).
   administrator, the card, the rate, and its old and new value.
 - **What shows a price:** the public pricing page, home, the Billing page
   and the Sandboxes menu's estimate read the live cards (the public pages
-  show Regular). The usage documentation points to the pricing page.
+  show Regular). The public pages read Regular's rates through billing's
+  unauthenticated `GetPublicRates`, which answers only those four rates.
+  The usage documentation points to the pricing page.
 
