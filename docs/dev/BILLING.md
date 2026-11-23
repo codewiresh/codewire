@@ -59,12 +59,12 @@ included. A start opens a new session.
 
 ## Prices
 
-**Not built yet (#5782).** Today the three cards' prices are fixed by
-migration `0006_billing_rate_cards.sql`. There's no storage rate, no Pricing
-page, no admin write and no audit entry for a price, and `pricing.html` and
-the usage documentation copy the numbers (€0.0438 a vCPU-hour, €0.0141 a
-GiB-hour of memory, €0.000087 a GiB-hour of disk). What follows is
-the rule #5782 builds.
+**Partly built (#5782).** The storage rate, the admin-only call
+(`UpdateRateCard` on the admin `BillingCatalogService`) and its audit entry
+exist. There's no Pricing page yet, and `pricing.html` and the usage
+documentation still copy the numbers (€0.0438 a vCPU-hour, €0.0141 a GiB-hour
+of memory, €0.000087 a GiB-hour of disk). What follows is the rule #5782
+builds.
 
 Every price is a row of `billing_rate_cards`, one per rate card: Regular,
 Discounted and Unlimited (#5782).
@@ -72,11 +72,14 @@ Discounted and Unlimited (#5782).
 - **What a card holds:** a vCPU-hour, a GiB-hour of memory and a GiB-hour of
   disk while a Sandbox runs, and a GiB-hour of storage while it is suspended
   or hibernated (#5484), in nano-euros. The storage rate starts at 0 on
-  every card. Unlimited's rates are all 0 and stay 0.
+  every card. Unlimited's rates are all 0 and stay 0. No rate is negative or
+  above €10 a unit-hour; the call and the database both refuse one, so a
+  price typed with extra zeros can't reach every organization.
 - **Who changes them:** a platform administrator, on the admin panel's
-  Pricing page, through an admin-only call. Nothing else writes a price. A
-  migration creates the rows and never sets a price again, and no template
-  or document repeats a number.
+  Pricing page, through an admin-only call. A change made from a stale read
+  of the card is refused, never applied over a newer one. Nothing else
+  writes a price. A migration creates the rows and never sets a price again,
+  and no template or document repeats a number.
 - **When a change applies:** each metering draw reads its organization's
   card when it runs, so a change applies from the next draw, within a
   minute. That draw prices the time since each session's last draw, which

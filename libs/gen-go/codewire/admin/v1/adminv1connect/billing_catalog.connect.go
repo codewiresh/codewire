@@ -84,6 +84,12 @@ const (
 	// BillingCatalogServiceGetOrganizationDefaultCardProcedure is the fully-qualified name of the
 	// BillingCatalogService's GetOrganizationDefaultCard RPC.
 	BillingCatalogServiceGetOrganizationDefaultCardProcedure = "/codewire.admin.v1.BillingCatalogService/GetOrganizationDefaultCard"
+	// BillingCatalogServiceListRateCardsProcedure is the fully-qualified name of the
+	// BillingCatalogService's ListRateCards RPC.
+	BillingCatalogServiceListRateCardsProcedure = "/codewire.admin.v1.BillingCatalogService/ListRateCards"
+	// BillingCatalogServiceUpdateRateCardProcedure is the fully-qualified name of the
+	// BillingCatalogService's UpdateRateCard RPC.
+	BillingCatalogServiceUpdateRateCardProcedure = "/codewire.admin.v1.BillingCatalogService/UpdateRateCard"
 )
 
 // BillingCatalogServiceClient is a client for the codewire.admin.v1.BillingCatalogService service.
@@ -135,6 +141,15 @@ type BillingCatalogServiceClient interface {
 	// Stripe, for the admin credit adjustment's question (#5094). It is
 	// global-admin only, needs no membership and writes nothing.
 	GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error)
+	// ListRateCards returns every rate card with its rates
+	// (docs/dev/BILLING.md "Prices"). It is global-admin only.
+	ListRateCards(context.Context, *connect.Request[v1.ListRateCardsRequest]) (*connect.Response[v1.ListRateCardsResponse], error)
+	// UpdateRateCard sets one rate card's four rates; metering charges them
+	// from its next draw. It is global-admin only and audited. A card changed
+	// since expected_updated_at is refused with failed_precondition, an
+	// unknown card with not_found, and a negative rate, or any rate above 0
+	// on unlimited, with invalid_argument.
+	UpdateRateCard(context.Context, *connect.Request[v1.UpdateRateCardRequest]) (*connect.Response[v1.UpdateRateCardResponse], error)
 }
 
 // NewBillingCatalogServiceClient constructs a client for the
@@ -255,6 +270,19 @@ func NewBillingCatalogServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		listRateCards: connect.NewClient[v1.ListRateCardsRequest, v1.ListRateCardsResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceListRateCardsProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("ListRateCards")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		updateRateCard: connect.NewClient[v1.UpdateRateCardRequest, v1.UpdateRateCardResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceUpdateRateCardProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("UpdateRateCard")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -277,6 +305,8 @@ type billingCatalogServiceClient struct {
 	listSystemdOrganizations                *connect.Client[v1.ListSystemdOrganizationsRequest, v1.ListSystemdOrganizationsResponse]
 	setOrganizationSystemdEnvironments      *connect.Client[v1.SetOrganizationSystemdEnvironmentsRequest, v1.SetOrganizationSystemdEnvironmentsResponse]
 	getOrganizationDefaultCard              *connect.Client[v1.GetOrganizationDefaultCardRequest, v1.GetOrganizationDefaultCardResponse]
+	listRateCards                           *connect.Client[v1.ListRateCardsRequest, v1.ListRateCardsResponse]
+	updateRateCard                          *connect.Client[v1.UpdateRateCardRequest, v1.UpdateRateCardResponse]
 }
 
 // GetCatalog calls codewire.admin.v1.BillingCatalogService.GetCatalog.
@@ -371,6 +401,16 @@ func (c *billingCatalogServiceClient) GetOrganizationDefaultCard(ctx context.Con
 	return c.getOrganizationDefaultCard.CallUnary(ctx, req)
 }
 
+// ListRateCards calls codewire.admin.v1.BillingCatalogService.ListRateCards.
+func (c *billingCatalogServiceClient) ListRateCards(ctx context.Context, req *connect.Request[v1.ListRateCardsRequest]) (*connect.Response[v1.ListRateCardsResponse], error) {
+	return c.listRateCards.CallUnary(ctx, req)
+}
+
+// UpdateRateCard calls codewire.admin.v1.BillingCatalogService.UpdateRateCard.
+func (c *billingCatalogServiceClient) UpdateRateCard(ctx context.Context, req *connect.Request[v1.UpdateRateCardRequest]) (*connect.Response[v1.UpdateRateCardResponse], error) {
+	return c.updateRateCard.CallUnary(ctx, req)
+}
+
 // BillingCatalogServiceHandler is an implementation of the codewire.admin.v1.BillingCatalogService
 // service.
 type BillingCatalogServiceHandler interface {
@@ -421,6 +461,15 @@ type BillingCatalogServiceHandler interface {
 	// Stripe, for the admin credit adjustment's question (#5094). It is
 	// global-admin only, needs no membership and writes nothing.
 	GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error)
+	// ListRateCards returns every rate card with its rates
+	// (docs/dev/BILLING.md "Prices"). It is global-admin only.
+	ListRateCards(context.Context, *connect.Request[v1.ListRateCardsRequest]) (*connect.Response[v1.ListRateCardsResponse], error)
+	// UpdateRateCard sets one rate card's four rates; metering charges them
+	// from its next draw. It is global-admin only and audited. A card changed
+	// since expected_updated_at is refused with failed_precondition, an
+	// unknown card with not_found, and a negative rate, or any rate above 0
+	// on unlimited, with invalid_argument.
+	UpdateRateCard(context.Context, *connect.Request[v1.UpdateRateCardRequest]) (*connect.Response[v1.UpdateRateCardResponse], error)
 }
 
 // NewBillingCatalogServiceHandler builds an HTTP handler from the service implementation. It
@@ -537,6 +586,19 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingCatalogServiceListRateCardsHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceListRateCardsProcedure,
+		svc.ListRateCards,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("ListRateCards")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingCatalogServiceUpdateRateCardHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceUpdateRateCardProcedure,
+		svc.UpdateRateCard,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("UpdateRateCard")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.BillingCatalogService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingCatalogServiceGetCatalogProcedure:
@@ -573,6 +635,10 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 			billingCatalogServiceSetOrganizationSystemdEnvironmentsHandler.ServeHTTP(w, r)
 		case BillingCatalogServiceGetOrganizationDefaultCardProcedure:
 			billingCatalogServiceGetOrganizationDefaultCardHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceListRateCardsProcedure:
+			billingCatalogServiceListRateCardsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceUpdateRateCardProcedure:
+			billingCatalogServiceUpdateRateCardHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -648,4 +714,12 @@ func (UnimplementedBillingCatalogServiceHandler) SetOrganizationSystemdEnvironme
 
 func (UnimplementedBillingCatalogServiceHandler) GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.GetOrganizationDefaultCard is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) ListRateCards(context.Context, *connect.Request[v1.ListRateCardsRequest]) (*connect.Response[v1.ListRateCardsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.ListRateCards is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) UpdateRateCard(context.Context, *connect.Request[v1.UpdateRateCardRequest]) (*connect.Response[v1.UpdateRateCardResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.UpdateRateCard is not implemented"))
 }

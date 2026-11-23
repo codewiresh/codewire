@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
+from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListRateCardsRequest, ListRateCardsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateRateCardRequest, UpdateRateCardResponse, UpdateSettingRequest, UpdateSettingResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -84,6 +84,12 @@ class BillingCatalogService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_organization_default_card(self, request: GetOrganizationDefaultCardRequest, ctx: RequestContext[GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse]) -> GetOrganizationDefaultCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_rate_cards(self, request: ListRateCardsRequest, ctx: RequestContext[ListRateCardsRequest, ListRateCardsResponse]) -> ListRateCardsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def update_rate_card(self, request: UpdateRateCardRequest, ctx: RequestContext[UpdateRateCardRequest, UpdateRateCardResponse]) -> UpdateRateCardResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -269,6 +275,26 @@ class BillingCatalogServiceASGIApplication(ConnectASGIApplication[BillingCatalog
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_organization_default_card,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/ListRateCards": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListRateCards",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=ListRateCardsRequest,
+                        output=ListRateCardsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_rate_cards,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/UpdateRateCard": Endpoint.unary(
+                    method=MethodInfo(
+                        name="UpdateRateCard",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=UpdateRateCardRequest,
+                        output=UpdateRateCardResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.update_rate_card,
                 ),
             },
             interceptors=interceptors,
@@ -658,6 +684,48 @@ class BillingCatalogServiceClient(ConnectClient):
             use_get=use_get,
         )
 
+    async def list_rate_cards(
+        self,
+        request: ListRateCardsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListRateCardsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListRateCards",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=ListRateCardsRequest,
+                output=ListRateCardsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def update_rate_card(
+        self,
+        request: UpdateRateCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateRateCardResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateRateCard",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=UpdateRateCardRequest,
+                output=UpdateRateCardResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingCatalogServiceSync(Protocol):
     def get_catalog(self, request: GetCatalogRequest, ctx: RequestContext[GetCatalogRequest, GetCatalogResponse]) -> GetCatalogResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -708,6 +776,12 @@ class BillingCatalogServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def get_organization_default_card(self, request: GetOrganizationDefaultCardRequest, ctx: RequestContext[GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse]) -> GetOrganizationDefaultCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_rate_cards(self, request: ListRateCardsRequest, ctx: RequestContext[ListRateCardsRequest, ListRateCardsResponse]) -> ListRateCardsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def update_rate_card(self, request: UpdateRateCardRequest, ctx: RequestContext[UpdateRateCardRequest, UpdateRateCardResponse]) -> UpdateRateCardResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -891,6 +965,26 @@ class BillingCatalogServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_organization_default_card,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/ListRateCards": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListRateCards",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=ListRateCardsRequest,
+                        output=ListRateCardsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_rate_cards,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/UpdateRateCard": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="UpdateRateCard",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=UpdateRateCardRequest,
+                        output=UpdateRateCardResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.update_rate_card,
                 ),
             },
             interceptors=interceptors,
@@ -1262,4 +1356,44 @@ class BillingCatalogServiceClientSync(ConnectClientSync):
             headers=headers,
             timeout_ms=timeout_ms,
             use_get=use_get,
+        )
+    def list_rate_cards(
+        self,
+        request: ListRateCardsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListRateCardsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListRateCards",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=ListRateCardsRequest,
+                output=ListRateCardsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def update_rate_card(
+        self,
+        request: UpdateRateCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateRateCardResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateRateCard",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=UpdateRateCardRequest,
+                output=UpdateRateCardResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
         )

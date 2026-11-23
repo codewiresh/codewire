@@ -92,6 +92,19 @@ service BillingCatalogService {
       returns (GetOrganizationDefaultCardResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // ListRateCards returns every rate card with its rates
+  // (docs/dev/BILLING.md "Prices"). It is global-admin only.
+  rpc ListRateCards(ListRateCardsRequest) returns (ListRateCardsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // UpdateRateCard sets one rate card's four rates; metering charges them
+  // from its next draw. It is global-admin only and audited. A card changed
+  // since expected_updated_at is refused with failed_precondition, an
+  // unknown card with not_found, and a negative rate, or any rate above 0
+  // on unlimited, with invalid_argument.
+  rpc UpdateRateCard(UpdateRateCardRequest) returns (UpdateRateCardResponse);
 }
 
 message GetCatalogRequest {}
@@ -336,3 +349,37 @@ message OrganizationDefaultCard {
   string last4 = 2;
 }
 
+
+message ListRateCardsRequest {}
+
+// RateCard is one price. Its rates are whole nano-euros per unit-hour.
+message RateCard {
+  // "regular", "discounted" or "unlimited".
+  string rate_card = 1;
+  string display_name = 2;
+  int64 cpu_nano_eur_per_vcpu_hour = 3;
+  int64 memory_nano_eur_per_gib_hour = 4;
+  int64 disk_nano_eur_per_gib_hour = 5;
+  // Per GiB-hour of disk while a Sandbox is suspended or hibernated.
+  int64 parked_storage_nano_eur_per_gib_hour = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message ListRateCardsResponse {
+  repeated RateCard rate_cards = 1;
+}
+
+message UpdateRateCardRequest {
+  string rate_card = 1;
+  int64 cpu_nano_eur_per_vcpu_hour = 2;
+  int64 memory_nano_eur_per_gib_hour = 3;
+  int64 disk_nano_eur_per_gib_hour = 4;
+  int64 parked_storage_nano_eur_per_gib_hour = 5;
+  // The card's updated_at as the caller last read it.
+  google.protobuf.Timestamp expected_updated_at = 6;
+}
+
+message UpdateRateCardResponse {
+  // The card as now stored.
+  RateCard rate_card = 1;
+}

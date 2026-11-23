@@ -13,18 +13,19 @@ use codewire_admin_proto::codewire::admin::v1::{
     CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest,
     GetCatalogResponse, GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse,
     ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse,
-    ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse,
-    ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse,
-    MigrationRun as ProtoMigrationRun, MigrationSample as ProtoMigrationSample,
-    OrganizationDefaultCard, PlanSpec as ProtoPlanSpec, PreviewSubscriptionMigrationRequest,
-    PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest,
-    RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest,
-    SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest,
+    ListRateCardsRequest, ListRateCardsResponse, ListSubscriptionMigrationsRequest,
+    ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest,
+    ListSystemdOrganizationsResponse, MigrationRun as ProtoMigrationRun,
+    MigrationSample as ProtoMigrationSample, OrganizationDefaultCard, PlanSpec as ProtoPlanSpec,
+    PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse,
+    RateCard as ProtoRateCard, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse,
+    SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse,
+    SetOrganizationConfidentialEnvironmentsRequest,
     SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest,
     SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
     SetPriceArchivedRequest, SetPriceArchivedResponse, SystemdOrganization, UpdatePlanRequest,
-    UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest,
-    UpdateSettingResponse,
+    UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateRateCardRequest,
+    UpdateRateCardResponse, UpdateSettingRequest, UpdateSettingResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -568,6 +569,58 @@ impl BillingCatalogService for BillingCatalogConnectService {
             ..Default::default()
         })
     }
+
+    async fn list_rate_cards(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListRateCardsRequest>,
+    ) -> ServiceResult<ListRateCardsResponse> {
+        let rate_cards = catalog_admin::list_rate_cards_core(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListRateCardsResponse {
+            rate_cards: rate_cards.into_iter().map(proto_rate_card).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Set one rate card's rates (docs/dev/BILLING.md "Prices"), unless it
+    /// changed since the caller read it; the change and its audit entry
+    /// commit together.
+    async fn update_rate_card(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, UpdateRateCardRequest>,
+    ) -> ServiceResult<UpdateRateCardResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.to_owned_message();
+        let rate_card = request.rate_card.trim();
+        validate_required(&[(rate_card, "/rate_card")])
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let expected_updated_at = date_time(
+            request.expected_updated_at.as_option(),
+            "/expected_updated_at",
+        )
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let updated = catalog_admin::update_rate_card_core(
+            &self.state.pool,
+            &actor.user_id,
+            rate_card,
+            catalog_admin::RateCardRates {
+                cpu_nano_eur_per_vcpu_hour: request.cpu_nano_eur_per_vcpu_hour,
+                memory_nano_eur_per_gib_hour: request.memory_nano_eur_per_gib_hour,
+                disk_nano_eur_per_gib_hour: request.disk_nano_eur_per_gib_hour,
+                parked_storage_nano_eur_per_gib_hour: request.parked_storage_nano_eur_per_gib_hour,
+            },
+            expected_updated_at,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(UpdateRateCardResponse {
+            rate_card: proto_rate_card(updated).into(),
+            ..Default::default()
+        })
+    }
 }
 
 fn plan_spec(plan: Option<&ProtoPlanSpec>) -> AppResult<PlanWriteBody> {
@@ -736,6 +789,40 @@ fn timestamp(value: &str) -> AppResult<Timestamp> {
         parsed.timestamp(),
         parsed.timestamp_subsec_nanos() as i32,
     ))
+}
+
+/// A required request time, refused as invalid when absent or out of range.
+fn date_time(
+    value: Option<&Timestamp>,
+    path: &'static str,
+) -> AppResult<chrono::DateTime<chrono::Utc>> {
+    value
+        .and_then(|value| {
+            chrono::DateTime::from_timestamp(value.seconds, u32::try_from(value.nanos).ok()?)
+        })
+        .ok_or_else(|| AppError::Validation {
+            errors: vec![ValidationIssue {
+                path: Cow::Borrowed(path),
+                message: Cow::Borrowed("must be a valid time"),
+            }],
+        })
+}
+
+fn proto_rate_card(card: catalog_admin::RateCard) -> ProtoRateCard {
+    ProtoRateCard {
+        rate_card: card.rate_card,
+        display_name: card.display_name,
+        cpu_nano_eur_per_vcpu_hour: card.rates.cpu_nano_eur_per_vcpu_hour,
+        memory_nano_eur_per_gib_hour: card.rates.memory_nano_eur_per_gib_hour,
+        disk_nano_eur_per_gib_hour: card.rates.disk_nano_eur_per_gib_hour,
+        parked_storage_nano_eur_per_gib_hour: card.rates.parked_storage_nano_eur_per_gib_hour,
+        updated_at: Some(Timestamp::from_unix(
+            card.updated_at.timestamp(),
+            card.updated_at.timestamp_subsec_nanos() as i32,
+        ))
+        .into(),
+        ..Default::default()
+    }
 }
 
 fn systemd_organization(organization: catalog_admin::OrganizationRef) -> SystemdOrganization {

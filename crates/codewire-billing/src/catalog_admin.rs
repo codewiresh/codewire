@@ -384,6 +384,185 @@ pub async fn update_setting_core(
     Ok(())
 }
 
+// ── Rate cards ──────────────────────────────────────────────────────
+
+/// The card that charges nothing: its rates are all 0 and stay 0.
+const UNLIMITED_RATE_CARD: &str = "unlimited";
+
+/// A rate card's four rates, in whole nano-euros per unit-hour
+/// (docs/dev/BILLING.md "Prices").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+pub struct RateCardRates {
+    pub cpu_nano_eur_per_vcpu_hour: i64,
+    pub memory_nano_eur_per_gib_hour: i64,
+    pub disk_nano_eur_per_gib_hour: i64,
+    /// Per GiB-hour of disk while a Sandbox is suspended or hibernated.
+    pub parked_storage_nano_eur_per_gib_hour: i64,
+}
+
+impl RateCardRates {
+    /// Each rate by its column name, which is also its request field.
+    fn named(self) -> [(&'static str, i64); 4] {
+        [
+            (
+                "cpu_nano_eur_per_vcpu_hour",
+                self.cpu_nano_eur_per_vcpu_hour,
+            ),
+            (
+                "memory_nano_eur_per_gib_hour",
+                self.memory_nano_eur_per_gib_hour,
+            ),
+            (
+                "disk_nano_eur_per_gib_hour",
+                self.disk_nano_eur_per_gib_hour,
+            ),
+            (
+                "parked_storage_nano_eur_per_gib_hour",
+                self.parked_storage_nano_eur_per_gib_hour,
+            ),
+        ]
+    }
+}
+
+/// One rate card as stored.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct RateCard {
+    pub rate_card: String,
+    pub display_name: String,
+    #[sqlx(flatten)]
+    pub rates: RateCardRates,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Every rate card, by key.
+pub async fn list_rate_cards_core(pool: &PgPool) -> AppResult<Vec<RateCard>> {
+    sqlx::query_as(
+        r#"SELECT rate_card, display_name, cpu_nano_eur_per_vcpu_hour,
+                  memory_nano_eur_per_gib_hour, disk_nano_eur_per_gib_hour,
+                  parked_storage_nano_eur_per_gib_hour, updated_at
+             FROM billing_rate_cards
+            ORDER BY rate_card"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalMsg("failed to list rate cards".into()))
+}
+
+/// The most a rate may be: EUR 10 per unit-hour, as the database checks
+/// (migration 0046), so a mistyped price can't reprice every organization.
+pub const MAX_RATE_NANO_EUR_PER_UNIT_HOUR: i64 = 10_000_000_000;
+
+/// A negative rate, one above [`MAX_RATE_NANO_EUR_PER_UNIT_HOUR`], and any
+/// rate above 0 on Unlimited, by request field.
+fn rate_card_rate_issues(rate_card: &str, rates: RateCardRates) -> Vec<ValidationIssue> {
+    rates
+        .named()
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let message = if value < 0 {
+                "must not be negative"
+            } else if value > MAX_RATE_NANO_EUR_PER_UNIT_HOUR {
+                "must be at most 10000000000 (EUR 10 per unit-hour)"
+            } else if rate_card == UNLIMITED_RATE_CARD && value != 0 {
+                "must be 0: unlimited charges nothing"
+            } else {
+                return None;
+            };
+            Some(ValidationIssue {
+                path: Cow::Owned(format!("/{name}")),
+                message: Cow::Borrowed(message),
+            })
+        })
+        .collect()
+}
+
+/// Set one rate card's four rates. A card changed since the caller read it at
+/// `expected_updated_at` is refused, so a page acting on a stale read never
+/// overwrites a newer price. The change and its audit entry, naming the
+/// actor, the card and each changed rate's previous and new value, commit
+/// together; metering reads the card inside each draw, so the next draw
+/// charges the new rates. Rates equal to the stored ones change nothing.
+pub async fn update_rate_card_core(
+    pool: &PgPool,
+    actor_user_id: &str,
+    rate_card: &str,
+    rates: RateCardRates,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+) -> AppResult<RateCard> {
+    let errors = rate_card_rate_issues(rate_card, rates);
+    if !errors.is_empty() {
+        return Err(AppError::Validation { errors });
+    }
+    let failed = |_| AppError::InternalMsg("failed to update the rate card".into());
+    let mut transaction = pool.begin().await.map_err(failed)?;
+    let previous: Option<RateCard> = sqlx::query_as(
+        r#"SELECT rate_card, display_name, cpu_nano_eur_per_vcpu_hour,
+                  memory_nano_eur_per_gib_hour, disk_nano_eur_per_gib_hour,
+                  parked_storage_nano_eur_per_gib_hour, updated_at
+             FROM billing_rate_cards
+            WHERE rate_card = $1
+              FOR UPDATE"#,
+    )
+    .bind(rate_card)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(failed)?;
+    let Some(previous) = previous else {
+        return Err(AppError::NotFound("rate card not found".into()));
+    };
+    if previous.updated_at != expected_updated_at {
+        return Err(AppError::Precondition(
+            "the rate card changed since it was read; reload it and try again".into(),
+        ));
+    }
+    let changed: serde_json::Map<String, serde_json::Value> = previous
+        .rates
+        .named()
+        .into_iter()
+        .zip(rates.named())
+        .filter(|((_, previous), (_, value))| previous != value)
+        .map(|((name, previous), (_, value))| {
+            (
+                name.to_owned(),
+                serde_json::json!({ "previous_value": previous, "value": value }),
+            )
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(previous);
+    }
+    let updated: RateCard = sqlx::query_as(
+        r#"UPDATE billing_rate_cards
+              SET cpu_nano_eur_per_vcpu_hour = $2, memory_nano_eur_per_gib_hour = $3,
+                  disk_nano_eur_per_gib_hour = $4, parked_storage_nano_eur_per_gib_hour = $5,
+                  updated_at = NOW()
+            WHERE rate_card = $1
+        RETURNING rate_card, display_name, cpu_nano_eur_per_vcpu_hour,
+                  memory_nano_eur_per_gib_hour, disk_nano_eur_per_gib_hour,
+                  parked_storage_nano_eur_per_gib_hour, updated_at"#,
+    )
+    .bind(rate_card)
+    .bind(rates.cpu_nano_eur_per_vcpu_hour)
+    .bind(rates.memory_nano_eur_per_gib_hour)
+    .bind(rates.disk_nano_eur_per_gib_hour)
+    .bind(rates.parked_storage_nano_eur_per_gib_hour)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(failed)?;
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+           VALUES (gen_random_uuid()::text, NOW(), 'admin.billing.rate_card_updated', $1, $2,
+                   'warn')"#,
+    )
+    .bind(actor_user_id)
+    .bind(serde_json::json!({ "rate_card": rate_card, "rates": changed }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(failed)?;
+    transaction.commit().await.map_err(failed)?;
+    Ok(updated)
+}
+
 // ── Subscription migrations ─────────────────────────────────────────
 
 /// Migration sample mapped into the Connect response.
@@ -858,6 +1037,194 @@ mod tests {
         update_setting_core(&pool, &actor, SIGNUP_CREDIT_SETTING, before)
             .await
             .unwrap();
+        sqlx::query("DELETE FROM audit_logs WHERE user_id = $1")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn a_rate_card_refuses_negative_rates_and_any_charge_on_unlimited() {
+        let rates = RateCardRates {
+            cpu_nano_eur_per_vcpu_hour: 1,
+            memory_nano_eur_per_gib_hour: 0,
+            disk_nano_eur_per_gib_hour: -1,
+            parked_storage_nano_eur_per_gib_hour: 0,
+        };
+        let issues = |rate_card| {
+            rate_card_rate_issues(rate_card, rates)
+                .into_iter()
+                .map(|issue| (issue.path.into_owned(), issue.message.into_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            issues("discounted"),
+            [(
+                "/disk_nano_eur_per_gib_hour".to_owned(),
+                "must not be negative".to_owned()
+            )]
+        );
+        assert_eq!(
+            issues("unlimited"),
+            [
+                (
+                    "/cpu_nano_eur_per_vcpu_hour".to_owned(),
+                    "must be 0: unlimited charges nothing".to_owned()
+                ),
+                (
+                    "/disk_nano_eur_per_gib_hour".to_owned(),
+                    "must not be negative".to_owned()
+                ),
+            ]
+        );
+        let free = RateCardRates {
+            cpu_nano_eur_per_vcpu_hour: 0,
+            disk_nano_eur_per_gib_hour: 0,
+            ..rates
+        };
+        assert!(rate_card_rate_issues("unlimited", free).is_empty());
+    }
+
+    async fn rate_card(pool: &PgPool, rate_card: &str) -> RateCard {
+        list_rate_cards_core(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|card| card.rate_card == rate_card)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn db_a_rate_card_change_is_audited_and_a_stale_or_invalid_one_writes_nothing() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let actor: String = sqlx::query_scalar("SELECT 'u_rate_cards_' || gen_random_uuid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id, email, name, is_admin) VALUES ($1, $1 || '@example.test', 'Admin', true)")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = rate_card(&pool, "discounted").await;
+        let audit = |pool: PgPool, actor: String| async move {
+            sqlx::query_as::<_, (String, serde_json::Value, String)>(
+                "SELECT action, metadata, severity FROM audit_logs WHERE user_id = $1",
+            )
+            .bind(&actor)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+
+        // A change writes all four rates and one audit entry naming each
+        // changed rate's previous and new value.
+        let rates = RateCardRates {
+            cpu_nano_eur_per_vcpu_hour: before.rates.cpu_nano_eur_per_vcpu_hour + 1,
+            parked_storage_nano_eur_per_gib_hour: before.rates.parked_storage_nano_eur_per_gib_hour
+                + 5,
+            ..before.rates
+        };
+        let updated = update_rate_card_core(&pool, &actor, "discounted", rates, before.updated_at)
+            .await
+            .unwrap();
+        assert_eq!(updated.rates, rates);
+        assert!(updated.updated_at > before.updated_at);
+        assert_eq!(rate_card(&pool, "discounted").await, updated);
+        let changed = vec![(
+            "admin.billing.rate_card_updated".to_string(),
+            serde_json::json!({
+                "rate_card": "discounted",
+                "rates": {
+                    "cpu_nano_eur_per_vcpu_hour": {
+                        "previous_value": before.rates.cpu_nano_eur_per_vcpu_hour,
+                        "value": rates.cpu_nano_eur_per_vcpu_hour,
+                    },
+                    "parked_storage_nano_eur_per_gib_hour": {
+                        "previous_value": before.rates.parked_storage_nano_eur_per_gib_hour,
+                        "value": rates.parked_storage_nano_eur_per_gib_hour,
+                    },
+                },
+            }),
+            "warn".to_string(),
+        )];
+        assert_eq!(audit(pool.clone(), actor.clone()).await, changed);
+
+        // A stale read, a negative rate, a charging Unlimited and an unknown
+        // card change nothing and audit nothing; nor do unchanged rates.
+        let unlimited = rate_card(&pool, "unlimited").await;
+        assert!(matches!(
+            update_rate_card_core(&pool, &actor, "discounted", before.rates, before.updated_at)
+                .await,
+            Err(AppError::Precondition(_))
+        ));
+        let negative = RateCardRates {
+            memory_nano_eur_per_gib_hour: -1,
+            ..rates
+        };
+        assert!(matches!(
+            update_rate_card_core(&pool, &actor, "discounted", negative, updated.updated_at).await,
+            Err(AppError::Validation { .. })
+        ));
+        // A rate past the bound, such as a price typed with extra zeros, is
+        // refused here, and the database refuses it too.
+        let excessive = RateCardRates {
+            cpu_nano_eur_per_vcpu_hour: MAX_RATE_NANO_EUR_PER_UNIT_HOUR + 1,
+            ..rates
+        };
+        assert!(matches!(
+            update_rate_card_core(&pool, &actor, "discounted", excessive, updated.updated_at).await,
+            Err(AppError::Validation { .. })
+        ));
+        assert!(
+            sqlx::query(
+                "UPDATE billing_rate_cards SET cpu_nano_eur_per_vcpu_hour = $1 \
+                  WHERE rate_card = 'discounted'"
+            )
+            .bind(MAX_RATE_NANO_EUR_PER_UNIT_HOUR + 1)
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+        let charging = RateCardRates {
+            parked_storage_nano_eur_per_gib_hour: 1,
+            ..unlimited.rates
+        };
+        assert!(matches!(
+            update_rate_card_core(&pool, &actor, "unlimited", charging, unlimited.updated_at).await,
+            Err(AppError::Validation { .. })
+        ));
+        assert!(matches!(
+            update_rate_card_core(&pool, &actor, "gold", rates, updated.updated_at).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(
+            update_rate_card_core(&pool, &actor, "discounted", rates, updated.updated_at)
+                .await
+                .unwrap(),
+            updated
+        );
+        assert_eq!(rate_card(&pool, "discounted").await, updated);
+        assert_eq!(rate_card(&pool, "unlimited").await, unlimited);
+        assert_eq!(audit(pool.clone(), actor.clone()).await, changed);
+
+        update_rate_card_core(
+            &pool,
+            &actor,
+            "discounted",
+            before.rates,
+            updated.updated_at,
+        )
+        .await
+        .unwrap();
         sqlx::query("DELETE FROM audit_logs WHERE user_id = $1")
             .bind(&actor)
             .execute(&pool)

@@ -415,3 +415,53 @@ class OrganizationDefaultCard(_message.Message):
     brand: str
     last4: str
     def __init__(self, brand: _Optional[str] = ..., last4: _Optional[str] = ...) -> None: ...
+
+class ListRateCardsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class RateCard(_message.Message):
+    __slots__ = ("rate_card", "display_name", "cpu_nano_eur_per_vcpu_hour", "memory_nano_eur_per_gib_hour", "disk_nano_eur_per_gib_hour", "parked_storage_nano_eur_per_gib_hour", "updated_at")
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    CPU_NANO_EUR_PER_VCPU_HOUR_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    DISK_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    PARKED_STORAGE_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    rate_card: str
+    display_name: str
+    cpu_nano_eur_per_vcpu_hour: int
+    memory_nano_eur_per_gib_hour: int
+    disk_nano_eur_per_gib_hour: int
+    parked_storage_nano_eur_per_gib_hour: int
+    updated_at: _timestamp_pb2.Timestamp
+    def __init__(self, rate_card: _Optional[str] = ..., display_name: _Optional[str] = ..., cpu_nano_eur_per_vcpu_hour: _Optional[int] = ..., memory_nano_eur_per_gib_hour: _Optional[int] = ..., disk_nano_eur_per_gib_hour: _Optional[int] = ..., parked_storage_nano_eur_per_gib_hour: _Optional[int] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class ListRateCardsResponse(_message.Message):
+    __slots__ = ("rate_cards",)
+    RATE_CARDS_FIELD_NUMBER: _ClassVar[int]
+    rate_cards: _containers.RepeatedCompositeFieldContainer[RateCard]
+    def __init__(self, rate_cards: _Optional[_Iterable[_Union[RateCard, _Mapping]]] = ...) -> None: ...
+
+class UpdateRateCardRequest(_message.Message):
+    __slots__ = ("rate_card", "cpu_nano_eur_per_vcpu_hour", "memory_nano_eur_per_gib_hour", "disk_nano_eur_per_gib_hour", "parked_storage_nano_eur_per_gib_hour", "expected_updated_at")
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    CPU_NANO_EUR_PER_VCPU_HOUR_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    DISK_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    PARKED_STORAGE_NANO_EUR_PER_GIB_HOUR_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    rate_card: str
+    cpu_nano_eur_per_vcpu_hour: int
+    memory_nano_eur_per_gib_hour: int
+    disk_nano_eur_per_gib_hour: int
+    parked_storage_nano_eur_per_gib_hour: int
+    expected_updated_at: _timestamp_pb2.Timestamp
+    def __init__(self, rate_card: _Optional[str] = ..., cpu_nano_eur_per_vcpu_hour: _Optional[int] = ..., memory_nano_eur_per_gib_hour: _Optional[int] = ..., disk_nano_eur_per_gib_hour: _Optional[int] = ..., parked_storage_nano_eur_per_gib_hour: _Optional[int] = ..., expected_updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class UpdateRateCardResponse(_message.Message):
+    __slots__ = ("rate_card",)
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    rate_card: RateCard
+    def __init__(self, rate_card: _Optional[_Union[RateCard, _Mapping]] = ...) -> None: ...

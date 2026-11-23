@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogServiceClient, GetCatalogRequest, GetOrganizationDefaultCardRequest,
-    ListConfidentialOrganizationsRequest, ListSubscriptionMigrationsRequest,
+    ListConfidentialOrganizationsRequest, ListRateCardsRequest, ListSubscriptionMigrationsRequest,
     ListSystemdOrganizationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
-    SetOrganizationSystemdEnvironmentsRequest,
+    SetOrganizationSystemdEnvironmentsRequest, UpdateRateCardRequest,
 };
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
@@ -280,140 +280,7 @@ async fn configured_billing_wire_contract() {
             .expect_err("oversized migration page must be invalid_argument");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
 
-        // Confidential environments opt-in (#2497): global-admin only, by
-        // slug, and the list shows exactly the opted-in organizations.
-        let error = catalog_as_user
-            .set_organization_confidential_environments(
-                SetOrganizationConfidentialEnvironmentsRequest {
-                    organization_slug: FIXTURE_ORG_SLUG.into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("a non-admin cannot opt an organization in");
-        assert_eq!(error.code, ErrorCode::PermissionDenied);
-        let error = catalog
-            .set_organization_confidential_environments(
-                SetOrganizationConfidentialEnvironmentsRequest {
-                    organization_slug: "no-such-organization".into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("an unknown organization is not found");
-        assert_eq!(error.code, ErrorCode::NotFound);
-        let listed = |enabled: bool| {
-            let catalog = &catalog;
-            async move {
-                let organizations =
-                    catalog
-                        .list_confidential_organizations(
-                            ListConfidentialOrganizationsRequest::default(),
-                        )
-                        .await
-                        .expect("ListConfidentialOrganizations Connect round trip")
-                        .into_owned()
-                        .organizations;
-                assert_eq!(
-                    organizations.iter().any(|organization| {
-                        organization.organization_id == FIXTURE_ORG
-                            && organization.slug == FIXTURE_ORG_SLUG
-                    }),
-                    enabled
-                );
-            }
-        };
-        listed(false).await;
-        for enabled in [true, false] {
-            let response = catalog
-                .set_organization_confidential_environments(
-                    SetOrganizationConfidentialEnvironmentsRequest {
-                        organization_slug: FIXTURE_ORG_SLUG.into(),
-                        enabled,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("SetOrganizationConfidentialEnvironments Connect round trip")
-                .into_owned();
-            assert_eq!(response.enabled, enabled);
-            assert_eq!(
-                response
-                    .organization
-                    .as_option()
-                    .map(|organization| organization.organization_id.as_str()),
-                Some(FIXTURE_ORG)
-            );
-            listed(enabled).await;
-        }
-
-        // Systemd environments opt-in (#5638): global-admin only for both
-        // calls, by slug, and the list shows exactly the opted-in
-        // organizations.
-        let error = catalog_as_user
-            .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
-                organization_slug: FIXTURE_ORG_SLUG.into(),
-                enabled: true,
-                ..Default::default()
-            })
-            .await
-            .expect_err("a non-admin cannot opt an organization in");
-        assert_eq!(error.code, ErrorCode::PermissionDenied);
-        let error = catalog_as_user
-            .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
-            .await
-            .expect_err("a non-admin cannot list the opted-in organizations");
-        assert_eq!(error.code, ErrorCode::PermissionDenied);
-        let error = catalog
-            .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
-                organization_slug: "no-such-organization".into(),
-                enabled: true,
-                ..Default::default()
-            })
-            .await
-            .expect_err("an unknown organization is not found");
-        assert_eq!(error.code, ErrorCode::NotFound);
-        let listed_systemd = |enabled: bool| {
-            let catalog = &catalog;
-            async move {
-                let organizations = catalog
-                    .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
-                    .await
-                    .expect("ListSystemdOrganizations Connect round trip")
-                    .into_owned()
-                    .organizations;
-                assert_eq!(
-                    organizations.iter().any(|organization| {
-                        organization.organization_id == FIXTURE_ORG
-                            && organization.slug == FIXTURE_ORG_SLUG
-                    }),
-                    enabled
-                );
-            }
-        };
-        listed_systemd(false).await;
-        for enabled in [true, false] {
-            let response = catalog
-                .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
-                    organization_slug: FIXTURE_ORG_SLUG.into(),
-                    enabled,
-                    ..Default::default()
-                })
-                .await
-                .expect("SetOrganizationSystemdEnvironments Connect round trip")
-                .into_owned();
-            assert_eq!(response.enabled, enabled);
-            assert_eq!(
-                response
-                    .organization
-                    .as_option()
-                    .map(|organization| organization.organization_id.as_str()),
-                Some(FIXTURE_ORG)
-            );
-            listed_systemd(enabled).await;
-        }
+        assert_organization_opt_ins(&catalog, &catalog_as_user).await;
 
         // An organization's default card, for the admin credit question
         // (#5094): global-admin only, and none for the fixture, which has no
@@ -433,5 +300,159 @@ async fn configured_billing_wire_contract() {
             .expect("GetOrganizationDefaultCard Connect round trip")
             .into_owned();
         assert!(card.card.as_option().is_none());
+
+        // Rate cards (#5782): only a global admin reads or changes a price.
+        let error = catalog_as_user
+            .list_rate_cards(ListRateCardsRequest::default())
+            .await
+            .expect_err("a non-admin cannot list the rate cards");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let error = catalog_as_user
+            .update_rate_card(UpdateRateCardRequest {
+                rate_card: "regular".into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("a non-admin cannot change a rate card");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+    }
+}
+
+/// The confidential (#2497) and systemd (#5638) environment opt-ins, through
+/// the global admin `catalog` and the member `catalog_as_user`.
+async fn assert_organization_opt_ins(
+    catalog: &BillingCatalogServiceClient<HttpClient>,
+    catalog_as_user: &BillingCatalogServiceClient<HttpClient>,
+) {
+    // Confidential environments opt-in (#2497): global-admin only, by
+    // slug, and the list shows exactly the opted-in organizations.
+    let error = catalog_as_user
+        .set_organization_confidential_environments(
+            SetOrganizationConfidentialEnvironmentsRequest {
+                organization_slug: FIXTURE_ORG_SLUG.into(),
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a non-admin cannot opt an organization in");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    let error = catalog
+        .set_organization_confidential_environments(
+            SetOrganizationConfidentialEnvironmentsRequest {
+                organization_slug: "no-such-organization".into(),
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an unknown organization is not found");
+    assert_eq!(error.code, ErrorCode::NotFound);
+    let listed = |enabled: bool| {
+        let catalog = &catalog;
+        async move {
+            let organizations = catalog
+                .list_confidential_organizations(ListConfidentialOrganizationsRequest::default())
+                .await
+                .expect("ListConfidentialOrganizations Connect round trip")
+                .into_owned()
+                .organizations;
+            assert_eq!(
+                organizations.iter().any(|organization| {
+                    organization.organization_id == FIXTURE_ORG
+                        && organization.slug == FIXTURE_ORG_SLUG
+                }),
+                enabled
+            );
+        }
+    };
+    listed(false).await;
+    for enabled in [true, false] {
+        let response = catalog
+            .set_organization_confidential_environments(
+                SetOrganizationConfidentialEnvironmentsRequest {
+                    organization_slug: FIXTURE_ORG_SLUG.into(),
+                    enabled,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("SetOrganizationConfidentialEnvironments Connect round trip")
+            .into_owned();
+        assert_eq!(response.enabled, enabled);
+        assert_eq!(
+            response
+                .organization
+                .as_option()
+                .map(|organization| organization.organization_id.as_str()),
+            Some(FIXTURE_ORG)
+        );
+        listed(enabled).await;
+    }
+
+    // Systemd environments opt-in (#5638): global-admin only for both
+    // calls, by slug, and the list shows exactly the opted-in
+    // organizations.
+    let error = catalog_as_user
+        .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+            organization_slug: FIXTURE_ORG_SLUG.into(),
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .expect_err("a non-admin cannot opt an organization in");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    let error = catalog_as_user
+        .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
+        .await
+        .expect_err("a non-admin cannot list the opted-in organizations");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    let error = catalog
+        .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+            organization_slug: "no-such-organization".into(),
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .expect_err("an unknown organization is not found");
+    assert_eq!(error.code, ErrorCode::NotFound);
+    let listed_systemd = |enabled: bool| {
+        let catalog = &catalog;
+        async move {
+            let organizations = catalog
+                .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
+                .await
+                .expect("ListSystemdOrganizations Connect round trip")
+                .into_owned()
+                .organizations;
+            assert_eq!(
+                organizations.iter().any(|organization| {
+                    organization.organization_id == FIXTURE_ORG
+                        && organization.slug == FIXTURE_ORG_SLUG
+                }),
+                enabled
+            );
+        }
+    };
+    listed_systemd(false).await;
+    for enabled in [true, false] {
+        let response = catalog
+            .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+                organization_slug: FIXTURE_ORG_SLUG.into(),
+                enabled,
+                ..Default::default()
+            })
+            .await
+            .expect("SetOrganizationSystemdEnvironments Connect round trip")
+            .into_owned();
+        assert_eq!(response.enabled, enabled);
+        assert_eq!(
+            response
+                .organization
+                .as_option()
+                .map(|organization| organization.organization_id.as_str()),
+            Some(FIXTURE_ORG)
+        );
+        listed_systemd(enabled).await;
     }
 }
