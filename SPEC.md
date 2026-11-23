@@ -567,6 +567,27 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   profile it was created on, and nothing is converted. Until `standard` can
   run a user's own image, an environment that names one is created on
   `commodity`.
+- **Moving one organization** (target, not built). The deployment's
+  `standard` settings make the profile available, and `SANDBOX_RUNTIME_PROFILE`
+  stays the default for every organization that is not moved. A global admin
+  moves an organization with its `standard_runtime_enabled` flag, set only
+  from a global admin's signed-in session and never from an API key, whoever
+  owns it; the method itself enforces that. The flag
+  refuses to turn on while the deployment has no `standard`, and each change
+  commits together with its audit entry. A create decides its profile once,
+  in this order:
+  1. the confidential tier is `confidential`;
+  2. a moved organization's create from the workspace image is `standard`;
+  3. anything else gets the default.
+
+  The environment records that profile, and a database trigger keeps the
+  record from changing. Every later render, start, restore and warm-pool
+  claim reads the record, never the flag or the current disk.
+  - Turning the flag on or off changes only new creates.
+  - Clone, fork and restore into a new environment decide again under the
+    destination organization's flag.
+  - An environment whose recorded profile the deployment no longer offers is
+    refused at start, never moved.
 - **Not on `standard` at first:** a user's own image, private images, and
   snapshots and forks.
 

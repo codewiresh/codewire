@@ -9,7 +9,7 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-22. Written first; every step is not yet observed.
+Updated 2026-11-23. Written first; every step is not yet observed.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
@@ -21,6 +21,7 @@ Updated 2026-11-22. Written first; every step is not yet observed.
 | `standard-stop-start` | not yet observed | not yet observed | not yet observed |
 | `standard-admission` | not yet observed | not yet observed | not yet observed |
 | `standard-beside-commodity` | not yet observed | not yet observed | not yet observed |
+| `standard-organization-move` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -180,4 +181,41 @@ Updated 2026-11-22. Written first; every step is not yet observed.
 - **Proof:** the two RuntimeClass names, and that the user sees no
   difference in either case: the create and the start print no warning,
   and `cw exec --in NAME -- true` exits 0.
+- **Observed:** not yet observed.
+
+## `standard-organization-move`: one organization moves, the others don't
+
+Target, not built (#5602): the per-organization selector.
+
+- **Entry points:** a global admin's `SetOrganizationStandardRuntime` and
+  `ListStandardRuntimeOrganizations`; `cw --cloud create` in a moved and in an
+  unmoved organization.
+- **States to exercise:**
+  - the flag turned on while the deployment offers `standard`, and again while
+    it doesn't, which is refused;
+  - a create in each organization;
+  - a sandbox created before the move, stopped and started after it;
+  - the flag turned off again;
+  - an organization admin or an API key trying to set the flag, which is refused.
+- **Driving it:** as the global admin, set the flag for the walking
+  organization and list the moved organizations. Then:
+  1. `cw --cloud create --name std-m` in it, and `--name std-u` in an unmoved
+     organization; the operator reads each Pod's RuntimeClass.
+  2. Stop and start a sandbox that existed before the move; the operator reads
+     its RuntimeClass.
+  3. Turn the flag off and start `std-m` again.
+  4. On a surface whose deployment has no `standard` settings (Kind with
+     both `SANDBOX_STANDARD_*` unset), the global admin's set of the flag is
+     refused, and the organization's flag reads unchanged.
+- **Proof:**
+  - `std-m` is `standard` and `std-u` is the default;
+  - the older sandbox keeps its profile across the move;
+  - `std-m` still starts on `standard` after the flag is turned off;
+  - on the surface without `standard`, the set is refused and the flag is
+    unchanged;
+  - each flag change has its audit entry, naming the admin, the organization
+    and the new value;
+  - the refused attempts change nothing and leave no change-audit entry,
+    but each emits the auth layer's denial log line, naming the caller, the
+    method and the reason.
 - **Observed:** not yet observed.
