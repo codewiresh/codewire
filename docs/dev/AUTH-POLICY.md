@@ -344,6 +344,52 @@ a URL. `POST /api/auth/resend-verification` claims the token and sends a new
 writes `user.verification.resent` to the audit log. Nobody can ask for a link
 by typing an email address.
 
+## An address SES won't deliver to
+
+SES keeps an account-level suppression list, on for bounces and complaints on
+Codewire's servers: once an address hard-bounces or its owner marks our mail as
+spam, SES drops every later send to it. The IdP asks that list about an
+address before it would send nothing useful, and tells the person and the
+admin (#4548). Not yet built.
+
+- **When it asks.** Only about an address the IdP already holds for its own
+  account, never one a request names:
+  - before **Resend verification email** on the sign-in page sends, about
+    the account that resend token belongs to;
+  - before an admin's **Resend verification email** sends, about that
+    account;
+  - for the accounts Admin → Manage account access lists, four at a time,
+    within one 3-second budget for the page.
+- **What it hears.** `ses:GetSuppressedDestination` for that one address. The
+  answer is suppressed for a bounce, suppressed for a complaint, not
+  suppressed (SES answers 404), or unknown: any other answer, a throttled one
+  (SES publishes no request rate for this call; 429 is unknown), no answer in 3
+  seconds, or a server without SES. Unknown never blocks a send or sign-in and
+  is never shown as a mark. Nothing else from SES's record is read out: no
+  time, feedback id or message.
+- **What the person sees.** A suppressed resend sends nothing, and the sign-in
+  page says "Email to that address can't be delivered. Check it, or sign up
+  with a different address." It is the same for a bounce and a complaint: the
+  fix is the same, and it doesn't tell anyone their complaint is on record. A
+  skipped resend isn't counted against the address's three verification emails
+  an hour.
+- **What the admin sees.** In the Email column, **Bounced** or **Marked as
+  spam** beside Verified or Unverified. The admin's own Resend says "Email to
+  that address bounced." or "Email to that address was marked as spam." and
+  sends nothing. Clearing a suppression stays in SES; Codewire doesn't remove
+  one.
+- **What is recorded.** `codewire_idp_mail_suppressed_total{reason}`, with
+  `bounce` or `complaint`, counts each skip. No log line or metric names the
+  address.
+- **Not covered:**
+  - Password reset. It is asked for anonymously, so it must answer the same
+    for every address. When its sends check the list later, a skip stays
+    silent: no message, only the count.
+  - Organization invitations.
+  - Changing an unverified account's address: the person signs up again
+    with the right one.
+  - Being told the moment SES records a bounce (SNS events).
+
 ## The operator's sign-up notice
 
 A server with mail can tell its operator about each new person

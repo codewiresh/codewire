@@ -111,6 +111,13 @@ losing its email silently.
 | `CODEWIRE_SES_FROM` | Required when SES is enabled | The SES sender: one mailbox, bare or as `Name <address>`, whose address is verified as an SES identity. Codewire's own servers use `Codewire <hello@codewire.sh>`. | `Codewire <hello@example.com>` |
 | `CODEWIRE_SES_REGION` | Required when SES is enabled | The AWS region of that SES identity. | `eu-west-1` |
 
+The IdP's SES identity may also read the account-level suppression list,
+`ses:GetSuppressedDestination` (#4548, not yet built). It asks about one
+address it holds before a verification resend and for the admin's account list
+(`docs/dev/AUTH-POLICY.md`, "An address SES won't deliver to"). Without the
+permission every answer is unknown, and the IdP sends as it would without the
+check. Billing needs only `ses:SendEmail`.
+
 The Kind overlays provide neither credential, so local email delivery stays
 disabled and needs no sender.
 

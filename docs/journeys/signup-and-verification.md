@@ -11,7 +11,7 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-22.
+Updated 2026-11-23.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -19,10 +19,11 @@ Updated 2026-11-22.
 | `signup-email-review` | not yet observed | the operator's notice for a GitHub access request observed 2026-11-21 at v0.4.26 (#5358); the email path not yet observed |
 | `signup-unverified-stranger` | observed 2026-11-16 at b183980df, stand-in (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
+| `signup-undeliverable` | not yet built (#4548) | not yet built (#4548) |
 | `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a GitHub sign-up through review, a second GitHub sign-in, and Disconnect and Connect Google observed 2026-11-21 at v0.4.26 (#5646) |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
-| `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed; an account with 2FA can't finish deleting until #5767 ships |
+| `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed; a self-service deletion of an account with 2FA completed 2026-11-21 at v0.4.27 (#5767) |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | Stripe's receipt for a real €5 purchase observed 2026-11-21 (#4816) |
 | `login-default-org` | observed on Kind 2026-11-22, a build of 167dda50a0 (#5873); not on Dev | not yet observed |
@@ -223,6 +224,43 @@ Issue: #4481.
   URL; nobody can ask for a link by typing an address. Repeating the same
   sign-up also resends the link, and counts toward the three.
 - **Observed:** not yet observed.
+
+## `signup-undeliverable`: an address SES won't deliver to
+
+Issue: #4548. Not yet built: these steps are what the code must make true.
+The rules are in `docs/dev/AUTH-POLICY.md`, "An address SES won't deliver
+to".
+
+- **Entry points:** the **Resend verification email** button on the sign-in
+  page; Admin → Manage account access, its Email column and its **Resend
+  verification email**.
+- **States to exercise:** an unverified account whose address SES suppressed
+  for a bounce; the same after the suppression is removed; an SES answer that
+  doesn't come in time.
+- **Driving it** (Dev; SES never adds its mailbox-simulator addresses to the
+  suppression list, so a test address is put on it by hand. Dev's SES is its
+  own AWS account, so its list is not Production's):
+  1. Sign up with a test address and leave it unverified. With Dev's SES
+     admin identity, put that exact address on Dev's account suppression list
+     with reason BOUNCE (`sesv2 put-suppressed-destination`).
+  2. Sign in and press **Resend verification email**. The page says "Email to
+     that address can't be delivered. Check it, or sign up with a different
+     address." No email is sent.
+  3. As an admin, open Admin → Manage account access. The account's Email
+     column shows **Bounced** beside Unverified. Its **Resend verification
+     email** says "Email to that address bounced."
+  4. Remove exactly that address from the list (`delete-suppressed-destination`,
+     then a `get-suppressed-destination` that finds nothing). Press **Resend
+     verification email** again: the page says "Sent." and one email arrives.
+     Delete the account.
+- **Proof:** nothing sent while suppressed. The `codewire_idp_mail_suppressed_total{reason="bounce"}`
+  count rises by one for step 2 and one for step 3. The address appears in no
+  log line. The admin badge and messages say nothing else from SES's record.
+- **Gotchas:** a complaint gives the person the same sentence, and the admin
+  "Marked as spam" and "Email to that address was marked as spam." An SES
+  answer that is late, throttled or refused shows no badge and blocks nothing:
+  Resend then sends as before.
+- **Observed:** not yet built.
 
 ## `signup-provider`: sign in with GitHub or Google
 
