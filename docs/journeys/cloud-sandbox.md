@@ -22,7 +22,7 @@ Updated 2026-11-23.
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
-| `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-update-startup` | cw-cli | observed 2026-11-23 (#5949); other members, admins, the audit row and the creator leaving not yet observed | not yet observed |
@@ -480,7 +480,8 @@ server it belongs to and says what it can do, instead of asking for a URL.
   cw --cloud exec --in walk -- sh -c 'echo "$CODEWIRE_SANDBOX_SERVER_URL"; cw whoami; echo "exit $?"'
   cw --cloud exec --in walk -- sh -c 'timeout 8 cw login </dev/null'
   cw --cloud exec --in walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
-  cw --cloud exec --in walk -- sh -lc 'command -v cw; cw --version; /codewire/bin/cw --version; cw ls; echo "exit $?"'
+  cw --cloud exec --in walk -- sh -lc 'command -v cw; cw ls; echo "exit $?"'
+  cw --cloud exec --in walk -- bash -c 'cw login </dev/null >/dev/null 2>&1 & p=$!; sleep 2; readlink /proc/$p/exe; kill $p'
   ```
 
   Then run an agent in `walk` and ask it to run `cw whoami` and `cw ls`, with
@@ -498,9 +499,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
     there; don't sign in.
   - With `CODEWIRE_SERVER_URL` set, that server wins: `cw` gives the plain
     not-signed-in message, not the sandbox's.
-  - `command -v cw` is `/usr/local/bin/cw`, yet `cw --version` prints the
-    same version as `/codewire/bin/cw --version`: the release's, not the
-    image's (#5202).
+  - `command -v cw` is `/usr/local/bin/cw`, yet the running `cw`'s
+    executable is `/codewire/bin/cw`: the release's, not the image's
+    (#5202). `cw --version` can't show this, because both builds can print
+    the same version.
   - `cw ls` says it isn't signed in, as `cw whoami` does. It never mentions a
     local VM store or a development build, on Dev too.
   - The agent's bare `cw` gives the same answers.
@@ -509,8 +511,9 @@ server it belongs to and says what it can do, instead of asking for a URL.
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
   - On Kind there is no `https` server origin, so the variable is absent and
     `cw` says "no server configured" there, as on any machine without one.
-  - Until #5202 ships, the `cw` on PATH can be the workspace image's own
-    build, older than the release; the `command -v cw` proof shows which.
+  - A workspace image older than #5202's launcher runs its own `cw` from
+    PATH, which can be older than the release. The `readlink` proof shows
+    which one ran.
 - **Observed:**
   - Dev, 2026-11-17 (cw-identity), source 4b9752e7, promote-dev 57727, host
     `cw` 0.4.21, as the Dev smoke identity. The session carries
@@ -522,6 +525,14 @@ server it belongs to and says what it can do, instead of asking for a URL.
     before it waits; `CODEWIRE_SERVER_URL` wins; an `http` value is ignored.
     Not observed with the `cw` on PATH: it is the image's 2026-11-13 build
     and still says "no server configured" (#5202). Evidence: #5100.
+  - Dev, 2026-11-23 (cw-sandbox-images), source 5221bbc23e, promote-dev
+    74351, host `cw` 0.4.26, as the Dev smoke identity, in two fresh
+    sandboxes. The bare `cw` on PATH (`/usr/local/bin/cw`) ran as
+    `/codewire/bin/cw`; with another `HOME` it ran itself, as the launcher
+    intends. `cw whoami` and `cw login` named the sandbox's server,
+    `CODEWIRE_SERVER_URL` won, and `cw ls` gave the not-signed-in sentence
+    with no local VM store, from a login and a non-login shell. A real
+    agent's `cw` was not walked. Evidence: #5202.
 
 ## `sandbox-attach-stays`: an attached session stays connected
 
