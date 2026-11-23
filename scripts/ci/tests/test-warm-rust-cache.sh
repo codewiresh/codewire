@@ -246,9 +246,10 @@ import yaml
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # Compile once (infra#1632): the compile job and Rust checks build in their
 # build runner's own warm folder, so they do not use it; the packages shard
-# does, for the build it falls back to when its test archive is missing.
-expected = {"contracts", "standard", "rust-packages", "rust-features", "rust-transport",
-            "database", "services-control", "services-runtime"}
+# does, for the build it falls back to when its test archive is missing. The
+# Rust SDK package job keeps its registry dependencies there (infra#1534).
+expected = {"contracts", "standard", "rust-sdk-package", "rust-packages", "rust-features",
+            "rust-transport", "database", "services-control", "services-runtime"}
 wired = set()
 for name, job in jobs.items():
     steps = job.get("steps") or []

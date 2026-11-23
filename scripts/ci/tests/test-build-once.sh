@@ -341,7 +341,7 @@ targets_prepare
 [ ! -e "$marker_root/targets/archive/debug/incremental" ] || fail 'prepare kept incremental sessions'
 [ -f "$marker_root/targets/archive/debug/deps/libkeep.rlib" ] || fail 'removing incremental sessions removed an artifact'
 # The Rust checks' own folders stay beside the legs'; any other folder goes.
-readonly CHECK_FOLDERS='clippy clippy_features darwin darwin_cw desktop sdk_package'
+readonly CHECK_FOLDERS='clippy clippy_features darwin darwin_cw desktop'
 for folder in $CHECK_FOLDERS stray; do mkdir -p "$marker_root/targets/$folder"; done
 targets_prepare
 for folder in $CHECK_FOLDERS; do
@@ -544,12 +544,12 @@ grep -q '::warning::build-once: disk too small' "$work/prepare.log" || fail 'a t
 # says so.
 rm -rf "$marker_root/targets"
 for folder in $CHECK_FOLDERS; do mark "$folder" 600 "$just_now"; done
-GITHUB_RUN_ID=601 PREPARE_JOB=checks FAKE_DF_PER_LEG=13 targets_prepare
+GITHUB_RUN_ID=601 PREPARE_JOB=checks FAKE_DF_PER_LEG=15 targets_prepare
 # shellcheck disable=SC2086 # Each check folder is one argument.
 kept $CHECK_FOLDERS
 [ "$(removals)" -eq 0 ] || fail 'the bound removed a folder this job is about to use'
-grep -q 'only this job.s folders left' "$work/prepare.log" && fail 'the bound removed one of this job folders at 88 %'
-grep -q 'disk 88% used with no target folder left that this job does not use' "$work/prepare.log" ||
+grep -q 'only this job.s folders left' "$work/prepare.log" && fail 'the bound removed one of this job folders at 85 %'
+grep -q 'disk 85% used with no target folder left that this job does not use' "$work/prepare.log" ||
   fail 'the bound did not say every folder left is in use'
 # Past 90 % with only this job's folders (pull request run 44254, 91 % before
 # its build, then "No space left on device"): its largest folder goes, and
@@ -557,23 +557,23 @@ grep -q 'disk 88% used with no target folder left that this job does not use' "$
 rm -rf "$marker_root/targets"
 for folder in $CHECK_FOLDERS; do mark "$folder" 700 "$just_now"; done
 head -c 4096 /dev/zero > "$marker_root/targets/darwin/big.rlib"
-GITHUB_RUN_ID=701 PREPARE_JOB=checks FAKE_DF_PER_LEG=14 targets_prepare
+GITHUB_RUN_ID=701 PREPARE_JOB=checks FAKE_DF_PER_LEG=17 targets_prepare
 [ ! -e "$marker_root/targets/darwin" ] || fail "this job's largest folder was kept past 90 %: $(cat "$work/prepare.log")"
-grep -q '^::warning::build-once: disk 94% used, over 90%, with only this job.s folders left; removing its largest, darwin, which builds cold$' \
+grep -q '^::warning::build-once: disk 95% used, over 90%, with only this job.s folders left; removing its largest, darwin, which builds cold$' \
   "$work/prepare.log" || fail "the full-disk removal gave no reason: $(cat "$work/prepare.log")"
 [ "$(grep -c 'only this job.s folders left' "$work/prepare.log")" -eq 1 ] || fail 'the bound removed more of this job folders than it needed'
-kept clippy clippy_features darwin_cw desktop sdk_package
+kept clippy clippy_features darwin_cw desktop
 # A main push's build runs the Rust checks beside its legs
 # (BUILD_ONCE_CHECKS): its prepare keeps their folders as its own, where a
 # build without them removes them first, as any live folder it does not use.
-# At 87 %: over the live limit, under the full-disk one.
+# At 88 %: over the live limit, under the full-disk one.
 rm -rf "$marker_root/targets"
 for folder in $CHECK_FOLDERS archive; do mark "$folder" 690 '1 hour ago'; done
-GITHUB_RUN_ID=700 PREPARE_JOB=build BUILD_ONCE_CHECKS=true FAKE_DF_PER_LEG=11 targets_prepare
+GITHUB_RUN_ID=700 PREPARE_JOB=build BUILD_ONCE_CHECKS=true FAKE_DF_PER_LEG=13 targets_prepare
 # shellcheck disable=SC2086 # Each check folder is one argument.
 kept $CHECK_FOLDERS archive
 [ "$(removals)" -eq 0 ] || fail 'a build with the Rust checks removed their folders'
-GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=11 targets_prepare
+GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=13 targets_prepare
 [ "$(removals)" -gt 0 ] || fail 'a build without the Rust checks kept their folders over 80 %'
 kept archive
 
@@ -759,7 +759,7 @@ if [ -n "${CHECKS_BESIDE:-}" ]; then
   n=0; until grep -q "^$CHECKS_BESIDE-start " "$LEGS_STATE/times" || [ "$n" -ge 6000 ]; do n=$((n + 1)); sleep 0.01; done
 fi
 echo "checks-end $(date +%s%N)" >> "$LEGS_STATE/times"
-echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_FEATURES_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $RUST_CHECKS_CW_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR $RUST_CHECKS_SDK_PACKAGE_TARGET_DIR" >> "$LEGS_STATE/checks"
+echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_FEATURES_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $RUST_CHECKS_CW_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
 echo "jobs ${CARGO_BUILD_JOBS:-} ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/jobserver"
 case "$CHECKS_MODE" in
   corrupt) broken="$CARGO_TARGET_DIR/broken" ;;
@@ -786,7 +786,7 @@ checks_run() {
 }
 checks_run corrupt || fail "a corrupt check output was not rerun: $(cat "$work/checks.log")"
 [ "$(wc -l < "$work/legs-state/checks")" -eq 2 ] || fail 'the corrupt checks did not run exactly twice'
-grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop $checks_root/sdk_package" \
+grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop" \
   "$work/legs-state/checks" || fail "the checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
 grep -q "the Rust checks read a corrupt output in $checks_root/clippy; it is wiped" "$work/checks.log" ||
   fail 'the checks rerun gave no reason'
@@ -838,7 +838,7 @@ legs_checks_build ok || fail "the build with the Rust checks failed: $(cat "$wor
 read -r _ jobs makeflags < "$work/legs-state/jobserver"
 [ "$jobs" = 4 ] && [ "$makeflags" = "$(at archive-makeflags)" ] && [[ "$makeflags" == '-j6 '* ]] ||
   fail "the Rust checks did not take the legs' jobserver: $jobs $makeflags, legs $(at archive-makeflags)"
-grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop $checks_root/sdk_package" \
+grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop" \
   "$work/legs-state/checks" || fail "the Rust checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
 grep -q '^build-once: legs archive and the Rust checks at once, 6 compilers in all$' "$work/legs-checks.log" ||
   fail "the build did not report the Rust checks beside its legs: $(cat "$work/legs-checks.log")"

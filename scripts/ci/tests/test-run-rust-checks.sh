@@ -15,8 +15,7 @@ readonly SCRIPT
 # so each case states its own.
 unset VERIFICATION_SELECTION BUILD_ONCE_LOCAL_VMM DESKTOP_PACKAGE_SELECTED CW_PACKAGE_SELECTED \
   RUST_CHECKS_FEATURES_TARGET_DIR RUST_CHECKS_DARWIN_TARGET_DIR RUST_CHECKS_CW_DARWIN_TARGET_DIR \
-  CODEWIRE_DESKTOP_CHECK_TARGET_DIR CARGO_ZIGBUILD_CACHE_DIR RUST_CHECKS_SDK_PACKAGE_TARGET_DIR \
-  CODEWIRE_SDK_PACKAGE_TARGET_DIR
+  CODEWIRE_DESKTOP_CHECK_TARGET_DIR CARGO_ZIGBUILD_CACHE_DIR
 
 fail() {
   echo "test-run-rust-checks: $*" >&2
@@ -98,9 +97,7 @@ exec "$work/check" cw-darwin
 STUB
 cat > "$src/scripts/ci/release/package-sdk-rust.sh" <<STUB
 #!/bin/sh
-echo "sdk-package target=\$CODEWIRE_SDK_PACKAGE_TARGET_DIR out=\$*" >> "\$CHECK_STATE/sdk-package"
-echo "sdk-package start \$(date +%s%N)" >> "\$CHECK_STATE/times"
-echo "sdk-package end \$(date +%s%N)" >> "\$CHECK_STATE/times"
+echo "sdk-package out=\$*" >> "\$CHECK_STATE/sdk-package"
 STUB
 chmod +x "$src/scripts/ci/verify/"*.sh "$src/scripts/ci/release/package-sdk-rust.sh"
 
@@ -119,7 +116,6 @@ checks() {
     RUST_CHECKS_DARWIN_TARGET_DIR="$target/darwin" \
     RUST_CHECKS_CW_DARWIN_TARGET_DIR="$target/darwin_cw" \
     CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$target/desktop" \
-    RUST_CHECKS_SDK_PACKAGE_TARGET_DIR="$target/sdk_package" \
     VERIFICATION_SELECTION="$selection" "$@" \
     "$src/scripts/ci/verify/run-rust-checks.sh" > "$work/out" 2>&1 < /dev/null || rc=$?
 }
@@ -243,13 +239,12 @@ selection_case '' 'compile-all-targets|desktop checks|' BUILD_ONCE_LOCAL_VMM=tru
 selection_case '|rust|transport|' 'compile-all-targets|feature-graph checks|' DESKTOP_PACKAGE_SELECTED=true
 selection_case '' 'compile-all-targets|cw Darwin cross-check|' CW_PACKAGE_SELECTED=true
 selection_case '' 'compile-all-targets|' CW_PACKAGE_SELECTED=false BUILD_ONCE_LOCAL_VMM=false
-# The Rust SDK packages in its own warm folder whenever either crate or the
-# whole workspace is selected, and writes its crates into the logs folder.
+# The Rust SDK packages in its own CI job (infra#1534), never here, whatever
+# the selection.
 for selection in '|rust|rust_pkg_codewire|' '|rust|rust_pkg_codewire_proto|' '|rust|rust_workspace|'; do
   rm -f "$work/state/sdk-package"
-  selection_case "$selection" 'compile-all-targets|feature-graph checks|Rust SDK package|'
-  grep -qE "^sdk-package target=$target/sdk_package out=$work/state/rust-checks\.[^/ ]+/sdk-package\$" \
-    "$work/state/sdk-package" || fail "the SDK packaged outside its folder: $(cat "$work/state/sdk-package")"
+  selection_case "$selection" 'compile-all-targets|feature-graph checks|'
+  [ ! -e "$work/state/sdk-package" ] || fail "the Rust checks packaged the SDK: $(cat "$work/state/sdk-package")"
 done
 
 echo 'test-run-rust-checks: the checks start at once in their own folders, print in a fixed order, fail on any failure without stopping the others, and keep their selection'

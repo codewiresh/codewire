@@ -22,8 +22,7 @@
 # check has its own: CARGO_TARGET_DIR for compile-all-targets,
 # RUST_CHECKS_FEATURES_TARGET_DIR for the feature graphs,
 # RUST_CHECKS_DARWIN_TARGET_DIR for the local-vmm checks and
-# RUST_CHECKS_CW_DARWIN_TARGET_DIR for the cw Darwin cross-check,
-# RUST_CHECKS_SDK_PACKAGE_TARGET_DIR for packaging the Rust SDK;
+# RUST_CHECKS_CW_DARWIN_TARGET_DIR for the cw Darwin cross-check;
 # CODEWIRE_DESKTOP_CHECK_TARGET_DIR holds the desktop builds of whichever
 # check builds the desktop (the local-vmm checks with
 # rust_pkg_codewire_desktop selected, the desktop checks without it, never
@@ -42,7 +41,6 @@ features_target="${RUST_CHECKS_FEATURES_TARGET_DIR:-$CARGO_TARGET_DIR/features-c
 darwin_target="${RUST_CHECKS_DARWIN_TARGET_DIR:-$CARGO_TARGET_DIR/darwin}"
 cw_darwin_target="${RUST_CHECKS_CW_DARWIN_TARGET_DIR:-$CARGO_TARGET_DIR/cw-darwin}"
 desktop_target="${CODEWIRE_DESKTOP_CHECK_TARGET_DIR:-$CARGO_TARGET_DIR/desktop}"
-sdk_package_target="${RUST_CHECKS_SDK_PACKAGE_TARGET_DIR:-$CARGO_TARGET_DIR/sdk-package}"
 readonly ARTIFACT_DESKTOP_SELECTION='|valid:v3|rust_pkg_codewire_desktop|complete|'
 logs="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-checks.XXXXXX")"
 names=()
@@ -96,13 +94,6 @@ if [ "${BUILD_ONCE_LOCAL_VMM:-}" = true ]; then
       VERIFICATION_SELECTION="$ARTIFACT_DESKTOP_SELECTION" \
       CARGO_TARGET_DIR="$desktop_target" CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$desktop_target"
   fi
-fi
-
-# The Rust SDK's two crates still package and build from their packaged
-# sources alone, as crates.io receives them (#3511).
-if selected rust_workspace || selected rust_pkg_codewire || selected rust_pkg_codewire_proto; then
-  phase 'Rust SDK package' env CODEWIRE_SDK_PACKAGE_TARGET_DIR="$sdk_package_target" \
-    scripts/ci/release/package-sdk-rust.sh "$logs/sdk-package"
 fi
 
 if [ "${CW_PACKAGE_SELECTED:-}" = true ]; then

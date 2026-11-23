@@ -46,6 +46,7 @@ declare -A expected=(
   [standard]=false
   [tooling]=false
   [rust_compile]=false
+  [rust_sdk_package]=false
   [rust_shards]=false
   [rust_features]=false
   [rust_transport]=false
@@ -100,6 +101,9 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       || { [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; }; then
     expected[rust_compile]=true
   fi
+  # The Rust SDK's two crates package in their own job (infra#1534).
+  selected_any rust_workspace rust_pkg_codewire rust_pkg_codewire_proto \
+    && expected[rust_sdk_package]=true
   # The packages and feature-graph shards run only selected Rust or transport.
   selected_any rust transport && expected[rust_shards]=true
   # The feature-graph shard runs only when it has a test to run: one of the
@@ -170,7 +174,8 @@ elif [ "$tested_tree_receipt" = fallback ]; then
 fi
 
 for group in \
-    policy contracts standard tooling rust_compile rust_shards rust_features rust_transport database \
+    policy contracts standard tooling rust_compile rust_sdk_package rust_shards rust_features \
+    rust_transport database \
     services_control services_runtime edge_kind; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"

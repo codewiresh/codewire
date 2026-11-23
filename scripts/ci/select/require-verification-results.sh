@@ -51,6 +51,9 @@ require_group_result rust-compile \
 require_group_result rust-checks \
   "${VERIFICATION_RUST_COMPILE_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_CHECKS_RESULT:-missing}"
+require_group_result rust-sdk-package \
+  "${VERIFICATION_RUST_SDK_PACKAGE_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_SDK_PACKAGE_RESULT:-missing}"
 require_group_result rust-packages \
   "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_PACKAGES_RESULT:-missing}"

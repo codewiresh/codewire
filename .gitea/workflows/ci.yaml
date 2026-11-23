@@ -135,6 +135,10 @@ jobs:
       # that predates the split runs it whenever it runs Standard; the job's
       # steps then do nothing unless Contracts is selected.
       contracts_expected: ${{ steps.dispatch.outputs.contracts_expected || steps.dispatch.outputs.standard_expected }}
+      # A pull request's trusted dispatcher from before the Rust SDK package job
+      # (infra#1534) emits no expectation for it; the job then runs wherever
+      # the build ran, as the check did inside it.
+      rust_sdk_package_expected: ${{ steps.dispatch.outputs.rust_sdk_package_expected || steps.dispatch.outputs.rust_compile_expected }}
       standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
       tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
       rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected }}
@@ -491,8 +495,8 @@ jobs:
               # Conservative bootstrap for a base predating dynamic dispatch:
               # run every group so candidate code cannot omit required work.
               for group in \
-                  policy contracts standard tooling rust_compile rust_shards rust_features rust_transport database \
-                  services_control services_runtime edge_kind; do
+                  policy contracts standard tooling rust_compile rust_sdk_package rust_shards rust_features \
+                  rust_transport database services_control services_runtime edge_kind; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
               done
               exit 0
@@ -612,6 +616,61 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
+
+
+  rust-sdk-package:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    # The Rust SDK's two crates, codewire-proto and codewire, packaged and
+    # built from their packaged sources alone, as crates.io receives them
+    # (#3511; package-sdk-rust.sh). In its own job, beside the build
+    # (infra#1534): inside Build test archives it rebuilt codewire-proto and
+    # codewire from nothing on every Rust run, 855 s in pull request run 72653
+    # and 1220 s in 72305, so the build job ended with it and its compilers
+    # came out of the legs' jobserver. Here it starts with the build, on a
+    # runner of its own, and Required verification waits for it as for any
+    # other group. It reads no shared compiler cache, so it has no OIDC
+    # identity: its own warm folder keeps the registry dependencies built,
+    # and the script rebuilds only the two SDK crates.
+    name: Rust SDK package
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM') }}
+    timeout-minutes: 30
+    needs: [verification-selection]
+    if: ${{ needs.verification-selection.outputs.rust_sdk_package_expected == 'true' }}
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'Rust SDK package verification inherited from the exact tested PR-head tree'
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Package the Rust SDK
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          # Its own warm folder: the script cleans the two SDK crates in it.
+          CODEWIRE_SDK_PACKAGE_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/sdk-package
+        run: scripts/ci/release/package-sdk-rust.sh "$RUNNER_TEMP/sdk-package"
 
       - name: Report the warm Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
@@ -2470,6 +2529,7 @@ jobs:
       - standard
       - tooling
       - rust-compile
+      - rust-sdk-package
       - rust-packages
       - rust-features
       - rust-transport
@@ -2505,6 +2565,8 @@ jobs:
           VERIFICATION_RUST_COMPILE_RESULT: ${{ needs.rust-compile.result }}
           # The Rust checks run in Build test archives.
           VERIFICATION_RUST_CHECKS_RESULT: ${{ needs.rust-compile.result }}
+          VERIFICATION_RUST_SDK_PACKAGE_EXPECTED: ${{ needs.verification-selection.outputs.rust_sdk_package_expected }}
+          VERIFICATION_RUST_SDK_PACKAGE_RESULT: ${{ needs.rust-sdk-package.result }}
           VERIFICATION_RUST_SHARDS_EXPECTED: ${{ needs.verification-selection.outputs.rust_shards_expected }}
           VERIFICATION_RUST_PACKAGES_RESULT: ${{ needs.rust-packages.result }}
           VERIFICATION_RUST_FEATURES_EXPECTED: ${{ needs.verification-selection.outputs.rust_features_expected }}

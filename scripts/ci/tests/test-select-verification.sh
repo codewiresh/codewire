@@ -5258,6 +5258,7 @@ WORK = {
     # below, as these steps' own conditions were).
     "tooling": {"Run the selected Tooling families side by side"},
     "rust-compile": {"Run the build legs"},
+    "rust-sdk-package": {"Package the Rust SDK"},
     "rust-packages": {"Run the Rust packages shard"},
     "rust-features": {"Run the Rust features shard"},
     "rust-transport": {

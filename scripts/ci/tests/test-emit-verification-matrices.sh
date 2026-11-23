@@ -57,6 +57,18 @@ for group in policy contracts standard tooling rust_compile rust_shards rust_tra
   assert_output "$selected_output" "$group" true
 done
 
+# The Rust SDK packages in its own job when either SDK crate or the whole
+# workspace is selected (infra#1534), and for no other Rust change.
+for token in rust_workspace rust_pkg_codewire rust_pkg_codewire_proto; do
+  assert_output "$(emit "|valid:v3|policy|rust|$token|complete|" fallback false false)" rust_sdk_package true
+done
+assert_output "$(emit '|valid:v3|policy|rust|rust_pkg_codewire_cli|complete|' fallback false false)" \
+  rust_sdk_package false
+assert_output "$docs_output" rust_sdk_package false
+assert_output "$selected_output" rust_sdk_package false
+assert_output "$(emit '|valid:v3|rust|rust_workspace|complete|' accepted false false)" rust_sdk_package false
+assert_output "$(emit '|valid:v3|future_capability|complete|' fallback false false)" rust_sdk_package true
+
 desktop_output="$(emit '|valid:v3|complete|' fallback false true)"
 assert_output "$desktop_output" rust_transport true
 assert_output "$desktop_output" rust_compile true

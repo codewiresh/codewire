@@ -134,8 +134,9 @@ sccache_on() { [ "${CODEWIRE_BUILD_ONCE_SCCACHE:-off}" = local ]; }
 # compile-all-targets, clippy_features for the feature-graph checks, darwin
 # for the local-vmm checks, darwin_cw for the cw Darwin cross-check, desktop
 # for the desktop check and package. A new folder is cold on its first run
-# on each build runner.
-readonly CHECK_FOLDERS=(clippy clippy_features darwin darwin_cw desktop sdk_package)
+# on each build runner. The Rust SDK packages in its own job (infra#1534), so
+# a build runner's old sdk_package folder is removed as any unlisted one.
+readonly CHECK_FOLDERS=(clippy clippy_features darwin darwin_cw desktop)
 # Each leg's epoch. Raising a leg's number wipes only that leg's target folder,
 # once on each build runner, through this reviewed code rather than a hand in
 # a guest. The number is kept in a file inside the leg's own folder, which a
@@ -1218,8 +1219,7 @@ run_checks() {
     RUST_CHECKS_FEATURES_TARGET_DIR="$work/targets/clippy_features"
     RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin"
     RUST_CHECKS_CW_DARWIN_TARGET_DIR="$work/targets/darwin_cw"
-    CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$work/targets/desktop"
-    RUST_CHECKS_SDK_PACKAGE_TARGET_DIR="$work/targets/sdk_package")
+    CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$work/targets/desktop")
   # Beside the legs (build), the checks take their compilers from the legs'
   # jobserver, which their Cargo finds in CARGO_MAKEFLAGS.
   if [ -n "${BUILD_ONCE_JOBSERVER:-}" ]; then

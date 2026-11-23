@@ -20,6 +20,8 @@ green_results=(
   VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
   VERIFICATION_RUST_CHECKS_RESULT=success
+  VERIFICATION_RUST_SDK_PACKAGE_EXPECTED=true
+  VERIFICATION_RUST_SDK_PACKAGE_RESULT=success
   VERIFICATION_RUST_SHARDS_EXPECTED=true
   VERIFICATION_RUST_PACKAGES_RESULT=success
   VERIFICATION_RUST_FEATURES_EXPECTED=true
@@ -48,6 +50,8 @@ unselected_results=(
   VERIFICATION_RUST_COMPILE_EXPECTED=false
   VERIFICATION_RUST_COMPILE_RESULT=skipped
   VERIFICATION_RUST_CHECKS_RESULT=skipped
+  VERIFICATION_RUST_SDK_PACKAGE_EXPECTED=false
+  VERIFICATION_RUST_SDK_PACKAGE_RESULT=skipped
   VERIFICATION_RUST_SHARDS_EXPECTED=false
   VERIFICATION_RUST_PACKAGES_RESULT=skipped
   VERIFICATION_RUST_FEATURES_EXPECTED=false
@@ -217,6 +221,28 @@ expect_failure rust_checks_failure \
   'rust-checks selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_RUST_CHECKS_RESULT=failure
+
+# The Rust SDK packages in its own job (infra#1534): Required verification
+# waits on it like every other group.
+expect_failure rust_sdk_package_failure \
+  'rust-sdk-package selected capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|rust_workspace|complete|' \
+  VERIFICATION_RUST_SDK_PACKAGE_RESULT=failure
+
+expect_failure rust_sdk_package_skipped \
+  'rust-sdk-package selected capability group concluded skipped' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|rust_workspace|complete|' \
+  VERIFICATION_RUST_SDK_PACKAGE_RESULT=skipped
+
+expect_failure missing_rust_sdk_package_expectation \
+  'rust-sdk-package capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|rust_workspace|complete|' \
+  VERIFICATION_RUST_SDK_PACKAGE_EXPECTED=
+
+expect_failure unselected_rust_sdk_package_ran \
+  'rust-sdk-package unselected capability group concluded success' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_SDK_PACKAGE_EXPECTED=false
 
 expect_failure rust_features_failure \
   'rust-features selected capability group concluded failure' \
