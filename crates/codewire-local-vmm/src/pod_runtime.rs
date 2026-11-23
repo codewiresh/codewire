@@ -96,6 +96,10 @@ pub enum PodRuntimeError {
     Path(#[from] crate::host::path::PathError),
     #[error("the boot counter is unreadable")]
     BootCounter,
+    #[error(
+        "the sandbox's state disk is missing from its volume, so its work is gone; refusing to boot it empty"
+    )]
+    StateDiskMissing,
     #[error("the guest did not finish booting: {0}")]
     GuestFailed(String),
     #[error(transparent)]
@@ -113,6 +117,19 @@ pub struct PodSettings {
     pub build_id: String,
     /// The platform peers the host end may dial for the hosted daemon.
     pub platform_peers: Vec<std::net::SocketAddrV4>,
+    /// `CODEWIRE_VM_STATE`: whether this sandbox's state disk may be made.
+    pub vm_state: VmState,
+}
+
+/// Orchestration renders `new` and sets `existing` once the sandbox's
+/// daemon has bound, so a later Pod never boots a fresh, empty disk where the
+/// sandbox's work was (change 7, #5602).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmState {
+    /// Made if absent; used if present.
+    New,
+    /// Must be present; a missing disk fails the boot.
+    Existing,
 }
 
 impl PodSettings {
@@ -148,6 +165,11 @@ impl PodSettings {
             platform_peers: match variable("CODEWIRE_POD_PLATFORM_PEERS") {
                 Some(peers) => hosted::parse_platform_peers(&peers)?,
                 None => Vec::new(),
+            },
+            vm_state: match read("CODEWIRE_VM_STATE")?.as_str() {
+                "new" => VmState::New,
+                "existing" => VmState::Existing,
+                _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_STATE")),
             },
         };
         if !settings
@@ -279,6 +301,23 @@ fn admit_image(settings: &PodSettings, paths: &PodPaths) -> Result<AdmittedImage
     })
 }
 
+/// Under `existing` the sandbox's state disk must already be on its volume:
+/// a missing one means the volume lost the sandbox's work, and the boot fails
+/// rather than starting the sandbox empty. Any other error reading it is that
+/// error, not a lost disk.
+fn admit_vm_state(engine_root: &Path, vm_state: VmState) -> Result<(), PodRuntimeError> {
+    if vm_state == VmState::Existing {
+        match fs::symlink_metadata(crate::state::state_disk_path(engine_root, POD_VM_ID)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(PodRuntimeError::StateDiskMissing);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 /// The VM's disks on the sandbox's volume, its one-boot setup pack on a new
 /// root, and the runner's request for this boot.
 fn boot_request(
@@ -288,6 +327,7 @@ fn boot_request(
     image: &AdmittedImage,
     cw_runtime_catalog_generation: String,
 ) -> Result<CreateVmRequest, PodRuntimeError> {
+    admit_vm_state(engine_root, settings.vm_state)?;
     ensure_empty_state_disk(engine_root, POD_VM_ID, settings.state_disk_bytes)?;
     // The root disk is named by the build it sits on, so a new image build
     // starts a new root over it.
@@ -562,6 +602,7 @@ mod tests {
             ("CODEWIRE_VM_VCPUS", "2"),
             ("CODEWIRE_VM_MEMORY_MIB", "4096"),
             ("CODEWIRE_VM_STATE_DISK_MIB", "20480"),
+            ("CODEWIRE_VM_STATE", "new"),
             ("CODEWIRE_WORKSPACE_IMAGE", "registry.example/workspace:1"),
             (
                 "CODEWIRE_IMAGE_DISK_ID",
@@ -587,6 +628,22 @@ mod tests {
                 .find(|(existing, _)| existing == name)
                 .map(|(_, value)| value.clone())
         }
+    }
+
+    /// Under `existing` a missing state disk fails the boot; under `new` it
+    /// is made. A disk already there is used either way.
+    #[test]
+    fn an_existing_sandbox_never_boots_without_its_state_disk() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            admit_vm_state(root.path(), VmState::Existing),
+            Err(PodRuntimeError::StateDiskMissing)
+        ));
+        admit_vm_state(root.path(), VmState::New).unwrap();
+        let disk = crate::state::state_disk_path(root.path(), POD_VM_ID);
+        fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        fs::write(&disk, b"").unwrap();
+        admit_vm_state(root.path(), VmState::Existing).unwrap();
     }
 
     #[test]
@@ -633,6 +690,11 @@ mod tests {
         assert_eq!(settings.vcpus, 2);
         assert_eq!(settings.memory_mib, 4096);
         assert_eq!(settings.state_disk_bytes, 20480 * 1024 * 1024);
+        assert_eq!(settings.vm_state, VmState::New);
+        let existing =
+            PodSettings::from_environment(environment(&[("CODEWIRE_VM_STATE", "existing")]))
+                .unwrap();
+        assert_eq!(existing.vm_state, VmState::Existing);
         for (name, value) in [
             ("CODEWIRE_VM_VCPUS", "0"),
             ("CODEWIRE_VM_VCPUS", "33"),
@@ -644,6 +706,9 @@ mod tests {
                 "ABCDEF0123456789abcdef0123456789",
             ),
             ("CODEWIRE_WORKSPACE_IMAGE", ""),
+            ("CODEWIRE_VM_STATE", ""),
+            ("CODEWIRE_VM_STATE", "New"),
+            ("CODEWIRE_VM_STATE", "fresh"),
         ] {
             assert!(
                 PodSettings::from_environment(environment(&[(name, value)])).is_err(),

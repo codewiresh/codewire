@@ -66,6 +66,20 @@ pub struct VmPaths {
     pub state_file: PathBuf,
 }
 
+/// A VM's state disk's file name, in its `disks` directory.
+const STATE_DISK_FILE: &str = "state.raw";
+
+/// Where [`VmPaths::create`] puts `vm_id`'s state disk under `state_root`,
+/// named without creating anything. Only the Linux Pod runtime asks.
+#[cfg(target_os = "linux")]
+pub(crate) fn state_disk_path(state_root: &Path, vm_id: Uuid) -> PathBuf {
+    state_root
+        .join("vms")
+        .join(vm_id.to_string())
+        .join("disks")
+        .join(STATE_DISK_FILE)
+}
+
 impl VmPaths {
     pub fn create(state_root: &PrivateRoot, vm_id: Uuid) -> Result<Self, StateError> {
         let vms_path = state_root.ensure_dir(Path::new("vms"), 0o700)?;
@@ -108,7 +122,7 @@ impl VmPaths {
             front_door_socket,
             virtiofs_dir,
             sockets_dir,
-            state_disk: disks_dir.join("state.raw"),
+            state_disk: disks_dir.join(STATE_DISK_FILE),
             docker_disk: disks_dir.join("docker.raw"),
             seed_disk: seed_dir.join("seed.raw"),
             serial_log: diagnostics_dir.join("serial.log"),
