@@ -18,6 +18,7 @@ use codewire_admin_proto::codewire::admin::v1::{
     ListSystemdOrganizationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
     SetOrganizationSystemdEnvironmentsRequest, UpdateRateCardRequest,
 };
+use codewire_billing::cards::CardSetupAddressKey;
 use codewire_billing::checkout_sessions::FrontendOrigin;
 use codewire_billing::email::EmailClient;
 use codewire_billing::routes::BillingState;
@@ -27,7 +28,6 @@ use codewire_proto::codewire::console::v1::{
     GetPublicRatesRequest, ListBillingEventsRequest, ListInvoicesRequest, ListOrgPlansRequest,
     ListResourcePlansRequest, UpdateAutoTopUpRequest,
 };
-use codewire_server_core::AppBuilder;
 use codewire_server_core::auth::AuthState;
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{CodecFormat, ErrorCode};
@@ -529,9 +529,10 @@ async fn serve_billing(pool: PgPool) -> String {
         frontend_origin: FrontendOrigin::parse("https://app.codewire.test")
             .expect("the test frontend origin"),
         operator_email: None,
+        card_setup_address_key: CardSetupAddressKey::for_test("wire-contract"),
     };
     let app = codewire_billing::connect::mount(
-        AppBuilder::new("codewire-billing"),
+        codewire_billing::routes::api_builder(),
         state.clone(),
         AuthState { pool },
     )

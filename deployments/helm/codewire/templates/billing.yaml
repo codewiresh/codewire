@@ -45,18 +45,23 @@ spec:
               drop: [ALL]
           {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
           ports:
+            # The API: the edge and the dashboard only (the NetworkPolicy below).
             - containerPort: 8081
+              name: api
+            # Metrics only, open to every source: Prometheus runs on host
+            # networking, which no NetworkPolicy peer can name (#4901, #4546).
+            - containerPort: 8083
               name: http
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: api
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: api
             initialDelaySeconds: 5
             periodSeconds: 5
 ---
@@ -75,5 +80,39 @@ spec:
     - port: 8081
       targetPort: 8081
       name: http
+---
+# Billing's API (8081) admits only the public edge and the dashboard (#4901).
+# Its per-address card-setup cap counts the last X-Forwarded-For hop, which the
+# edge writes from the client's address and the dashboard forwards from its own
+# request; no other Pod, Sandboxes included, can reach the API to write a hop of
+# its choosing. Stripe's webhook and the public BillingService reach billing
+# through the edge.
+#
+# Metrics (8083) admit any source: Prometheus runs on host networking, which
+# Cilium sees as a node and no NetworkPolicy peer can name (#4546), and the
+# port serves nothing but /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-billing
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "billing" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "codewire.edgePeers" $ | nindent 8 }}
+        {{- include "codewire.podPeer" (dict "labels" $.Values.dashboard.selectorLabels "from" "dashboard.selectorLabels") | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8081
+    - ports:
+        - protocol: TCP
+          port: 8083
 {{- end }}
 {{- end }}

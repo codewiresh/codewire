@@ -50,7 +50,12 @@ spec:
             capabilities:
               drop: [ALL]
           ports:
+            # The API: the edge and the dashboard only (network-policy.yaml).
             - containerPort: 8081
+              name: api
+            # Metrics only, scraped by the PodMonitor's port named http from
+            # any source: Prometheus runs on host networking (#4901, #4546).
+            - containerPort: 8083
               name: http
           envFrom:
             - configMapRef:
@@ -107,12 +112,12 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: api
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: api
             initialDelaySeconds: 5
             periodSeconds: 5

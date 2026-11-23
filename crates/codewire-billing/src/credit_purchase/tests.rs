@@ -369,6 +369,7 @@ impl Harness {
             receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
             operator_email: None,
+            card_setup_address_key: crate::cards::CardSetupAddressKey::for_test("unused"),
         };
         Self {
             state,

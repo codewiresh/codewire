@@ -22,13 +22,25 @@
 //!
 //! Every charge stays where it was: automatic top-up and Add credit. Saving a
 //! card charges nothing by itself.
+//!
+//! Begin is limited per organization, per user and per client address
+//! (docs/CONFIGURATION.md, "Card setup limits"). The address is the last
+//! `X-Forwarded-For` hop: the dashboard's own, which replaces the browser's,
+//! or the edge's on the public API. Billing's NetworkPolicy admits only those
+//! two, so nothing else can write it (#4901).
+
+use std::net::IpAddr;
 
 use codewire_server_core::auth::AuthUser;
+use codewire_server_core::client_address::unit_hash;
+use codewire_server_core::internal_hmac::derive_internal_hmac_secret;
 use codewire_server_core::org::require_org_member;
 use codewire_server_core::org_deletion::{
     OrganizationBillingMutationError, run_organization_billing_mutation,
 };
-use codewire_server_core::rate_limit::{CARD_SETUP_ORGANIZATION, CARD_SETUP_USER, take_fixed};
+use codewire_server_core::rate_limit::{
+    CARD_SETUP_ADDRESS, CARD_SETUP_ORGANIZATION, CARD_SETUP_USER, Limit, take, take_fixed,
+};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
 
 use crate::checkout_sessions::{billing_idempotency_key, org_identity, require_billing_admin};
@@ -37,6 +49,35 @@ use crate::credit_purchase::AddCreditOutcome;
 use crate::overview::AUTO_TOP_UP_CENTS;
 use crate::routes::BillingState;
 use crate::stripe_client::SavedCard;
+
+/// The label the card-setup address key is derived under from billing's
+/// session secret, so the key is never the secret itself nor another
+/// service's. Changing it restarts every address's count.
+const CLIENT_ADDRESS_KEY_LABEL: &str = "codewire/billing-card-setup-client-address/v1";
+
+/// The key of the client-address hash [`CARD_SETUP_ADDRESS`] counts under.
+#[derive(Clone)]
+pub struct CardSetupAddressKey(String);
+
+impl std::fmt::Debug for CardSetupAddressKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CardSetupAddressKey([redacted])")
+    }
+}
+
+impl CardSetupAddressKey {
+    pub fn derive(session_secret: &str) -> anyhow::Result<Self> {
+        derive_internal_hmac_secret(session_secret, CLIENT_ADDRESS_KEY_LABEL)
+            .map(Self)
+            .map_err(|_| anyhow::anyhow!("the session secret for card-setup limits is not set"))
+    }
+
+    /// A key of its own per `seed`, so tests sharing a database count apart.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(seed: &str) -> Self {
+        Self(format!("synthetic-card-setup-address-key-{seed}"))
+    }
+}
 
 /// An organization's saved cards, which is the default, and the publishable
 /// key Stripe's card form mounts with: `None` when the form is not
@@ -157,17 +198,19 @@ pub async fn list_cards(
 
 /// Starts adding a card once the customer saves it: the organization's
 /// Stripe customer (made if it has none) and a SetupIntent for one card,
-/// with `choices` in its metadata. Owners and admins only.
+/// with `choices` in its metadata. Owners and admins only. `address` is the
+/// request's client address, which the per-address cap counts.
 pub async fn begin_card_setup(
     state: &BillingState,
     user: &AuthUser,
     org_id: &str,
     choices: CardChoices,
+    address: Option<IpAddr>,
 ) -> AppResult<CardSetup> {
     require_billing_admin(state, user, org_id).await?;
     // Checked first: a request Finish would refuse takes no try from the caps.
     choices.check()?;
-    limit_card_setups(state, user, org_id).await?;
+    limit_card_setups(state, user, org_id, address).await?;
     if state.stripe.publishable_key().is_none() {
         return Err(AppError::NotFound("the card form is not configured".into()));
     }
@@ -218,17 +261,45 @@ pub struct CardSetupResult {
     pub auto_top_up_enabled: bool,
 }
 
-/// Bounds how many SetupIntents an organization and a user can start, so the
-/// card form can't be used to test stolen cards (#4750): every start counts,
-/// confirmed or not, organization first, as the shared counter asks. A
-/// refusal is counted in `codewire_rate_limit_refusals_total`.
-async fn limit_card_setups(state: &BillingState, user: &AuthUser, org_id: &str) -> AppResult<()> {
+/// Bounds how many SetupIntents an organization, a user and a client address
+/// can start, so the card form can't be used to test stolen cards (#4750,
+/// #4901): every start counts, confirmed or not, organization first, as the
+/// shared counter asks. A start with no address is refused before anything
+/// counts, never let through. A refusal is counted in
+/// `codewire_rate_limit_refusals_total`.
+async fn limit_card_setups(
+    state: &BillingState,
+    user: &AuthUser,
+    org_id: &str,
+    address: Option<IpAddr>,
+) -> AppResult<()> {
+    let Some(address) = unit_hash(&state.card_setup_address_key.0, address) else {
+        tracing::error!(
+            organization_id = org_id,
+            "card setup refused: the request named no client address"
+        );
+        return Err(AppError::Coded {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "client_address_required",
+            detail: "Codewire can't tell where this card setup came from, so it can't start it"
+                .into(),
+        });
+    };
     let mut connection = state.pool.acquire().await?;
-    for (limit, subject) in [
+    let limits: [(&'static Limit, &str); 3] = [
         (&CARD_SETUP_ORGANIZATION, org_id),
         (&CARD_SETUP_USER, user.user_id.as_str()),
-    ] {
-        let decision = take_fixed(&mut connection, limit, subject).await?;
+        (&CARD_SETUP_ADDRESS, &address),
+    ];
+    for (limit, subject) in limits {
+        // The organization and user caps are fixed; the address cap is the
+        // operator's count, else its default, so a larger group behind one
+        // address can be let through.
+        let decision = if limit.name == CARD_SETUP_ADDRESS.name {
+            take(&mut connection, limit, subject).await?
+        } else {
+            take_fixed(&mut connection, limit, subject).await?
+        };
         if !decision.allowed {
             // The refusal metric carries only the limit's name; this names
             // who reached it, for the card-testing alert that is #4750's

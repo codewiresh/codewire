@@ -105,6 +105,22 @@ pub const CARD_SETUP_USER: Limit = Limit {
     per_user: true,
 };
 
+/// Card setups started from one client address in an hour (#4901): an IPv4
+/// address or an IPv6 /64, counted under a keyed hash of it, across every
+/// account and organization on it, after [`CARD_SETUP_ORGANIZATION`] and
+/// [`CARD_SETUP_USER`]. Sixty lets an office or a class on one network, who
+/// may sign up together under [`SIGNUP_ADDRESS`], each save a card in one or
+/// two tries, while one machine with many accounts still can't test cards
+/// without bound. In [`LIMITS`], so an operator can raise it for a larger
+/// group behind one address.
+pub const CARD_SETUP_ADDRESS: Limit = Limit {
+    name: "card_setup_address",
+    key_prefix: "card_setup_address",
+    window_secs: 3_600,
+    default_max: 60,
+    per_user: false,
+};
+
 /// Email and provider sign-ups across the whole site (#3297), counted after
 /// [`SIGNUP_ADDRESS`] and before any account is looked up.
 pub const SIGNUP: Limit = Limit {
@@ -215,6 +231,7 @@ pub const LIMITS: &[Limit] = &[
     ORG_CREATE,
     SIGNUP,
     SIGNUP_ADDRESS,
+    CARD_SETUP_ADDRESS,
     MAIL_PASSWORD_RESET,
     MAIL_VERIFICATION,
     INVITATION_LOOKUP,
@@ -512,6 +529,7 @@ mod tests {
         assert_eq!(SNAPSHOT_CREATE.key("u1"), "snapshot_create:u1");
         assert_eq!(SIGNUP.key("all"), "signup:all");
         assert_eq!(SIGNUP_ADDRESS.key("ab12"), "signup_address:ab12");
+        assert_eq!(CARD_SETUP_ADDRESS.key("ab12"), "card_setup_address:ab12");
         assert_eq!(SANDBOX_CREATE_HOURLY.key("u1"), "env_create_hourly:u1");
         assert_eq!(ORG_CREATE.key("u1"), "org_create:u1");
         assert_eq!(MAIL_PASSWORD_RESET.key("ab"), "mail_password_reset:ab");

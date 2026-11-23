@@ -70,9 +70,12 @@
       ".with_routes(codewire_orchestration::api::router(api_state.clone(), auth))"
     ],
     "crates/codewire-billing/src/main.rs": [
-      "AppBuilder::new(\"codewire-billing\")",
+      "codewire_billing::routes::api_builder()",
       ".with_health_and_db(pool.clone())",
       ".with_routes(codewire_billing::router(state))"
+    ],
+    "crates/codewire-billing/src/routes.rs": [
+      "AppBuilder::new(\"codewire-billing\").without_metrics()"
     ],
     "crates/codewire-idp/src/main.rs": [
       "AppBuilder::new(\"codewire-idp\")",

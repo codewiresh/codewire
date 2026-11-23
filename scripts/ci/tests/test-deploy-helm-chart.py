@@ -51,6 +51,7 @@ _SERVICES = {
     ("NetworkPolicy", "codewire-idp"),
     ("Deployment", "codewire-billing"),
     ("Service", "codewire-billing"),
+    ("NetworkPolicy", "codewire-billing"),
     ("Deployment", "codewire-credential-service"),
     ("ServiceAccount", "codewire-credential-service"),
     ("Service", "codewire-credential-service"),

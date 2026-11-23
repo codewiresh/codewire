@@ -695,14 +695,31 @@ pub(crate) struct CardSetupChoice {
 }
 
 /// Starts adding a card once it is saved: the client secret the card form
-/// confirms with.
+/// confirms with. `client_hop` is the last `X-Forwarded-For` hop of the page
+/// request, which the edge wrote; it is sent as the call's only
+/// `X-Forwarded-For`, so billing counts its per-address cap under it and a
+/// browser's own entries never reach billing (#4901). No other billing call
+/// sends one.
 pub(crate) async fn begin_card_setup(
     state: &AppState,
     cookie: HeaderValue,
+    client_hop: Option<&str>,
     org_id: String,
     choice: CardSetupChoice,
 ) -> Result<String, ConnectError> {
-    let response = client(state, cookie)
+    let transport = crate::transport::ForwardingTransport {
+        inner: BrowserTransport {
+            http: state.http.clone(),
+            cookie: Some(cookie),
+            origin: None,
+        },
+        forwarded_for: client_hop.and_then(|hop| HeaderValue::from_str(hop).ok()),
+    };
+    let client = BillingServiceClient::new(
+        transport,
+        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(CLIENT_TIMEOUT),
+    );
+    let response = client
         .begin_card_setup(BeginCardSetupRequest {
             org_id,
             auto_top_up_enabled: choice.auto_top_up_enabled,
@@ -1461,5 +1478,108 @@ mod tests {
             assert!(body.contains("/test/billing/_actions/card-setup"), "{name}");
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
         }
+    }
+
+    /// Billing's per-address card-setup cap counts the hop the dashboard sends
+    /// (#4901): the page request's last hop, which the edge wrote, as the
+    /// call's only `X-Forwarded-For`, on BeginCardSetup and no other call.
+    #[tokio::test]
+    async fn only_begin_card_setup_carries_the_edge_hop_never_the_browser_chain() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Router, body::Body, http::header, response::Response, routing::any};
+        use buffa::Message as _;
+        use codewire_proto::codewire::console::v1::BeginCardSetupResponse;
+
+        type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+        let seen: Seen = Arc::default();
+        let captured = seen.clone();
+        let router = Router::new().fallback(any(move |request: axum::extract::Request| {
+            let captured = captured.clone();
+            async move {
+                let path = request.uri().path().to_owned();
+                let forwarded = request
+                    .headers()
+                    .get_all("x-forwarded-for")
+                    .iter()
+                    .map(|value| value.to_str().unwrap().to_owned())
+                    .reduce(|all, next| format!("{all} | {next}"));
+                captured.lock().unwrap().push((path.clone(), forwarded));
+                let body = if path.ends_with("/BeginCardSetup") {
+                    BeginCardSetupResponse {
+                        client_secret: "seti_synthetic_secret".into(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                } else {
+                    Vec::new()
+                };
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "application/proto")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let state = AppState::new(crate::Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            runtime_mode: crate::RuntimeMode::CurrentThread,
+            public_origin: "https://app.example.test".into(),
+            api_origin: origin.parse().unwrap(),
+            credential_origin: origin.parse().unwrap(),
+            identity_origin_string: origin.clone(),
+            browser_api_origin: origin.clone(),
+            billing_origin: origin.parse().unwrap(),
+            docs_root: Default::default(),
+            confidential_storage_enabled: false,
+            turnstile_site_key: String::new(),
+            github_app_slug: String::new(),
+            github_app_client_id: String::new(),
+            support_email: None,
+            updates_site: None,
+        });
+        let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
+        // The browser wrote its own entries; the edge appended the last one.
+        let mut page = axum::http::HeaderMap::new();
+        page.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.66, 192.0.2.1, 203.0.113.7"),
+        );
+        let hop = codewire_server_core::client_address::forwarded_client_hop(&page);
+        let choice = || CardSetupChoice {
+            auto_top_up_enabled: true,
+            auto_top_up_cents: 2_000,
+            credit_cents: None,
+        };
+        let secret = begin_card_setup(&state, cookie.clone(), hop, "org-1".into(), choice())
+            .await
+            .unwrap();
+        assert_eq!(secret, "seti_synthetic_secret");
+        // No hop at all sends none, for billing to refuse.
+        begin_card_setup(&state, cookie.clone(), None, "org-1".into(), choice())
+            .await
+            .unwrap();
+        set_default_card(&state, cookie, "org-1".into(), "pm_1".into())
+            .await
+            .unwrap();
+        server.abort();
+
+        let seen = seen.lock().unwrap();
+        let begin = "/codewire.console.v1.BillingService/BeginCardSetup";
+        assert_eq!(
+            *seen,
+            [
+                (begin.to_owned(), Some("203.0.113.7".to_owned())),
+                (begin.to_owned(), None),
+                (
+                    "/codewire.console.v1.BillingService/SetDefaultPaymentMethod".to_owned(),
+                    None
+                ),
+            ]
+        );
     }
 }

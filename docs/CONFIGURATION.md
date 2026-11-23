@@ -273,6 +273,7 @@ Billing is disabled unless `STRIPE_SECRET_KEY` is set.
 | `CODEWIRE_STRIPE_REQUIRE_TEST_KEY` | No | `on` makes billing refuse to start with anything but a test key, so a test environment can never charge a real card. Unset, empty or `off` accepts any key. Any other value stops billing. | `on` |
 | `CODEWIRE_CREDIT_ENFORCEMENT` | No | Set on billing and orchestration. `on` enforces prepaid compute credit: an empty balance charges the card, creates, starts and snapshot captures are refused without credit, and running sandboxes stop 24 hours after credit runs out, shown as `stopped (credit)`. Unset, empty or `off` does none of these, and metering still draws usage from the balance. Any other value stops the service. | `on` |
 | `CODEWIRE_IDLE_STOP` | No | Set on orchestration. `on` stops a running cloud Sandbox that has an idle timeout (`idle_stop` in codewire.yaml, `cw create --idle-stop`, `cw update --idle-stop`) once it has had no activity for that long, keeping its disk; it then shows as `stopped (idle)` ([docs/dev/IDLE-STOP.md](dev/IDLE-STOP.md)). Unset, empty or `off` stops nothing; the timeouts are still recorded. Any other value stops the service. | `on` |
+| `BILLING_METRICS_ADDR` | No | Where billing serves `/metrics` on its own, default `0.0.0.0:8083`. The port Prometheus scrapes is named `http` and serves nothing but `/metrics`; the API port is `api` (8081) and serves no metrics. A NetworkPolicy admits the metrics port from every source, because Prometheus runs on host networking, and the API port only from the edge and the dashboard (#4901). | `0.0.0.0:8083` |
 | `CODEWIRE_BILLING_RECEIPTS` | No | Who emails the receipt for a paid invoice. Unset, empty or `codewire`: billing sends its own receipt to the organization's owner. `stripe`: billing sends none, for an account whose Stripe "Successful payments" customer email is on, so nobody gets two. Either way billing keeps the Stripe customer's email set to the current owner's before each purchase. Low-credit, payment-failed and the other billing emails are always billing's. Any other value stops billing. | `stripe` |
 
 The sign-up credit is not a deployment setting. A platform admin sets it on
@@ -339,9 +340,6 @@ refuses a card setup, before it calls Stripe, past any of three counts:
   card in one or two tries. One machine with many accounts still can't try
   cards without bound.
 
-The address count, and everything below about the client address, is not
-yet built (#4901); today only the first two counts apply.
-
 Every try counts, accepted or not; opening the form counts nothing. A refusal
 is 429 `rate_limited`, saying when to try again. Billing counts it in
 `codewire_rate_limit_refusals_total`, labelled with the limit's name, and logs
@@ -359,7 +357,8 @@ can reach it around the CDN. Behind the bundled Caddy alone it is the address
 Caddy connected from. A self-hosted deployment with another proxy in front of
 its edge, and nothing equivalent stopping clients from bypassing that proxy or
 setting the address, must not rely on the address count. Only the card setup
-reads the address. A card setup with no address is refused, so a proxy in front of
+reads the address. A card setup with no address is refused with 400
+`client_address_required` before anything is counted, so a proxy in front of
 billing must send one, as the bundled edge does. Billing's API port admits
 only the edge and the dashboard (a NetworkPolicy, as on the IdP), so nothing
 else in the cluster can write the hop billing counts. Its metrics port is open

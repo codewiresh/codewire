@@ -69,3 +69,28 @@ async fn errors_and_the_404_fallback_are_never_shared_cached() {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     assert_never_shared_cached(&missing);
 }
+
+/// A service that serves `/metrics` on a listener of its own leaves it off
+/// the API router (#4901); every other service keeps it there.
+#[tokio::test]
+async fn without_metrics_leaves_metrics_off_the_router() {
+    let status = |app: Router, path: &'static str| async move {
+        app.oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    };
+    let api = super::AppBuilder::new("codewire-test-api")
+        .without_metrics()
+        .with_routes(Router::new().route("/api", get(|| async { "ok" })));
+    assert_eq!(
+        status(api.into_router(), "/metrics").await,
+        StatusCode::NOT_FOUND
+    );
+    let api = super::AppBuilder::new("codewire-test-api")
+        .without_metrics()
+        .with_routes(Router::new().route("/api", get(|| async { "ok" })));
+    assert_eq!(status(api.into_router(), "/api").await, StatusCode::OK);
+    let default = super::AppBuilder::new("codewire-test-default").into_router();
+    assert_eq!(status(default, "/metrics").await, StatusCode::OK);
+}

@@ -28,6 +28,8 @@ pub struct AppBuilder {
     user_routes: Router,
     connect_routes: Vec<Router>,
     cors_allowed_origins: Vec<http::HeaderValue>,
+    /// Whether the router also serves `/metrics`; see [`Self::without_metrics`].
+    metrics: bool,
 }
 
 /// Comma-separated browser origins (`scheme://host[:port]`, no path) allowed
@@ -81,7 +83,16 @@ impl AppBuilder {
             user_routes: Router::new(),
             connect_routes: Vec::new(),
             cors_allowed_origins: cors_allowed_origins_from_env(),
+            metrics: true,
         }
+    }
+
+    /// Leaves `/metrics` off this router, for a service that serves it on a
+    /// listener of its own, so the API port and the metrics port each serve
+    /// only their own routes (#4901).
+    pub fn without_metrics(mut self) -> Self {
+        self.metrics = false;
+        self
     }
 
     /// Replaces the CORS origin allowlist read from
@@ -307,7 +318,9 @@ impl AppBuilder {
         if let Some(health) = self.health {
             app = app.merge(health_router(health));
         }
-        app = app.merge(metrics_router(&self.service_name));
+        if self.metrics {
+            app = app.merge(metrics_router(&self.service_name));
+        }
         app.layer(middleware)
             .layer(axum::middleware::from_fn(move |req, next| {
                 let service = self.service_name.clone();

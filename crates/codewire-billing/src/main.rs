@@ -4,14 +4,34 @@
 //! (see [`codewire_billing::routes`]), and serves on the configured port
 //! (defaults to 8081 — see `ServiceConfig::from_env("billing")`).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use codewire_billing::checkout_sessions::FrontendOrigin;
 use codewire_billing::email::EmailClient;
 use codewire_billing::routes::BillingState;
 use codewire_billing::stripe_client::StripeHandle;
+use codewire_server_core::ServiceConfig;
 use codewire_server_core::auth::AuthState;
-use codewire_server_core::{AppBuilder, ServiceConfig};
+
+/// Where `/metrics` is served on its own (#4901, as the IdP's #4546).
+/// Prometheus runs on host networking, which no NetworkPolicy peer can name,
+/// so the port it scrapes admits any source and serves nothing but metrics,
+/// while the API port admits only the edge and the dashboard.
+const METRICS_ADDR_ENV: &str = "BILLING_METRICS_ADDR";
+const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:8083";
+
+fn metrics_addr(value: Option<&str>) -> anyhow::Result<SocketAddr> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_METRICS_ADDR)
+        .parse()
+        .with_context(|| {
+            format!("{METRICS_ADDR_ENV} must be a socket address such as {DEFAULT_METRICS_ADDR}")
+        })
+}
 
 const DEFAULT_BILLING_LOOPS: &[&str] = &[
     "env-usage-metering",
@@ -48,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     codewire_server_core::rate_limit::expose_limits(&[
         &codewire_server_core::rate_limit::CARD_SETUP_ORGANIZATION,
         &codewire_server_core::rate_limit::CARD_SETUP_USER,
+        &codewire_server_core::rate_limit::CARD_SETUP_ADDRESS,
     ]);
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
@@ -88,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
         receipts,
         frontend_origin,
         operator_email,
+        card_setup_address_key: codewire_billing::cards::CardSetupAddressKey::derive(
+            &cfg.session_secret,
+        )?,
     };
 
     // Every replica checks billing's own Stripe webhook endpoint at startup
@@ -141,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = codewire_billing::connect::mount(
-        AppBuilder::new("codewire-billing").with_health_and_db(pool.clone()),
+        codewire_billing::routes::api_builder().with_health_and_db(pool.clone()),
         state.clone(),
         auth.clone(),
     )
@@ -151,7 +175,13 @@ async fn main() -> anyhow::Result<()> {
     .with_routes(codewire_billing::router(state))
     .into_router();
 
-    let served = codewire_server_core::serve(app, cfg.bind_addr).await;
+    let metrics_bind = metrics_addr(std::env::var(METRICS_ADDR_ENV).ok().as_deref())?;
+    let metrics = codewire_server_core::metrics::router("codewire-billing");
+    let served = tokio::try_join!(
+        codewire_server_core::serve(app, cfg.bind_addr),
+        codewire_server_core::serve(metrics, metrics_bind),
+    )
+    .map(|_| ());
     // Flush queued spans before the process exits.
     tracing_guard.shutdown().await;
     served
@@ -160,6 +190,75 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The metrics port is open to every source, so it serves `/metrics` and
+    /// nothing else: no Connect API, no health, no webhook (#4901).
+    #[tokio::test]
+    async fn the_metrics_port_serves_only_metrics() {
+        // Every series billing exposes from startup, the card caps' included.
+        codewire_server_core::rate_limit::expose_limits(&[
+            &codewire_server_core::rate_limit::CARD_SETUP_ORGANIZATION,
+            &codewire_server_core::rate_limit::CARD_SETUP_USER,
+            &codewire_server_core::rate_limit::CARD_SETUP_ADDRESS,
+        ]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let metrics = codewire_server_core::metrics::router("codewire-billing");
+        let server = tokio::spawn(async move { axum::serve(listener, metrics).await.unwrap() });
+        let client = reqwest::Client::new();
+        for (method, path, expected) in [
+            (reqwest::Method::GET, "/metrics", 200),
+            (
+                reqwest::Method::POST,
+                "/codewire.console.v1.BillingService/BeginCardSetup",
+                404,
+            ),
+            (reqwest::Method::POST, "/api/webhooks/stripe", 404),
+            (reqwest::Method::GET, "/healthz", 404),
+        ] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client
+                    .request(method, format!("http://{address}{path}"))
+                    .send(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "{path}");
+            if path == "/metrics" {
+                // No series names an organization, user, address, customer,
+                // card or Stripe object: a refusal is labelled by its limit.
+                let body = response.text().await.unwrap();
+                assert!(body.contains("limit=\"card_setup_address\""), "{body}");
+                for line in body.lines().filter(|line| !line.starts_with('#')) {
+                    let Some((_, labels)) = line.split_once('{') else {
+                        continue;
+                    };
+                    let labels = labels.split_once('}').unwrap().0;
+                    for label in labels.split(',').filter(|label| !label.is_empty()) {
+                        let name = label.split_once('=').unwrap().0;
+                        assert!(["limit", "service"].contains(&name), "{name} in {line}");
+                    }
+                }
+            }
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn metrics_listen_on_their_own_port_unless_set() {
+        assert_eq!(metrics_addr(None).unwrap(), "0.0.0.0:8083".parse().unwrap());
+        assert_eq!(
+            metrics_addr(Some(" ")).unwrap(),
+            "0.0.0.0:8083".parse().unwrap()
+        );
+        assert_eq!(
+            metrics_addr(Some("127.0.0.1:9100")).unwrap(),
+            "127.0.0.1:9100".parse().unwrap()
+        );
+        assert!(metrics_addr(Some("8083")).is_err());
+    }
 
     #[test]
     fn billing_loops_default_to_rust_owned_set() {

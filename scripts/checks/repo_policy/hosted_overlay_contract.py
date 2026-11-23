@@ -197,6 +197,14 @@ HOSTED_PATCH_CONTRACT: tuple[tuple[str, str, tuple[dict[str, Any], ...]], ...] =
             "app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "dashboard",
         }}}),
     )),
+    # Billing's API admits the same two peers, retargeted the same way
+    # (codewire#4901).
+    ("NetworkPolicy", "codewire-billing", (
+        pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
+        pinned("/spec/ingress/0/from/1", {"podSelector": {"matchLabels": {
+            "app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "dashboard",
+        }}}),
+    )),
     ("NetworkPolicy", "codewire-dashboard", (
         pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
     )),

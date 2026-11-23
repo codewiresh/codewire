@@ -1,0 +1,39 @@
+# Billing's API (8081) admits only the public edge and the dashboard (#4901).
+# Its per-address card-setup cap counts the last X-Forwarded-For hop, which the
+# edge writes from the client's address and the dashboard forwards from its own
+# request; no other Pod, Sandboxes included, can reach the API to write a hop of
+# its choosing. Stripe's webhook and the public BillingService reach billing
+# through the edge. The hosted overlays name the Envoy Gateway as the edge.
+#
+# Metrics (8083) admit any source: Prometheus runs on host networking, which
+# Cilium sees as a node and no NetworkPolicy peer can name (#4546), and the
+# port serves nothing but /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-billing
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: billing
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rke2-ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: dashboard
+      ports:
+        - protocol: TCP
+          port: 8081
+    - ports:
+        - protocol: TCP
+          port: 8083

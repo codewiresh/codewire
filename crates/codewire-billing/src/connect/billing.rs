@@ -359,9 +359,13 @@ impl BillingService for BillingConnectService {
             auto_top_up_cents: request.auto_top_up_cents,
             credit_cents: (request.credit_cents != 0).then_some(request.credit_cents),
         };
-        let setup = crate::cards::begin_card_setup(&self.state, &user, request.org_id, choices)
-            .await
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        // Only Begin reads the client address (#4901): the last hop, which the
+        // edge or the dashboard wrote.
+        let address = codewire_server_core::client_address::forwarded_client_ip(ctx.headers());
+        let setup =
+            crate::cards::begin_card_setup(&self.state, &user, request.org_id, choices, address)
+                .await
+                .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(BeginCardSetupResponse {
             client_secret: setup.client_secret,
             ..Default::default()

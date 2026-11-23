@@ -21,6 +21,11 @@ use crate::stripe_client::StripeHandle;
 
 const CREATED: i64 = 1_781_100_000;
 
+/// The client address every setup comes from, unless a test says otherwise.
+/// Each harness hashes it under a key of its own fixture's user, so tests
+/// sharing a database don't share the address count.
+const ADDRESS: Option<IpAddr> = Some(IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7)));
+
 /// A SetupIntent the fake holds: what Begin wrote, and when.
 struct Intent {
     metadata: HashMap<String, String>,
@@ -262,6 +267,7 @@ impl Harness {
             receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
             operator_email: None,
+            card_setup_address_key: CardSetupAddressKey::for_test(&fixture.user_id),
         };
         Self {
             state,
@@ -533,7 +539,7 @@ async fn db_a_finished_setup_makes_its_card_the_default_and_saves_the_top_up_set
     let user = owner.user();
     let org = owner.organization_id.as_str();
 
-    let setup = begin_card_setup(state, &user, org, CARD_ONLY)
+    let setup = begin_card_setup(state, &user, org, CARD_ONLY, ADDRESS)
         .await
         .unwrap();
     let intent = begun(&setup);
@@ -651,7 +657,8 @@ async fn db_another_organizations_setup_and_a_member_are_refused() {
             member_state,
             &member.user(),
             &member.organization_id,
-            TOP_UP
+            TOP_UP,
+            ADDRESS
         )
         .await
         .is_err()
@@ -689,7 +696,11 @@ async fn db_a_new_card_with_no_credit_and_top_up_on_is_charged_the_top_up_once()
     let (state, user, org) = (&harness.state, owner.user(), owner.organization_id.as_str());
 
     // "Save card and pay €20": the balance is empty and top-up is on.
-    let intent = begun(&begin_card_setup(state, &user, org, TOP_UP).await.unwrap());
+    let intent = begun(
+        &begin_card_setup(state, &user, org, TOP_UP, ADDRESS)
+            .await
+            .unwrap(),
+    );
     let finished = finish_card_setup(state, &user, org, &intent).await.unwrap();
     assert_eq!(finished.settlement, Settlement::ToppedUp);
     assert_eq!(finished.credit, None);
@@ -716,7 +727,11 @@ async fn db_credit_bought_with_a_new_card_comes_first_so_top_up_charges_nothing_
         credit_cents: Some(10_000),
         ..TOP_UP
     };
-    let intent = begun(&begin_card_setup(state, &user, org, choices).await.unwrap());
+    let intent = begun(
+        &begin_card_setup(state, &user, org, choices, ADDRESS)
+            .await
+            .unwrap(),
+    );
     let finished = finish_card_setup(state, &user, org, &intent).await.unwrap();
     assert_eq!(
         finished.credit,
@@ -746,7 +761,11 @@ async fn db_two_finishes_at_once_make_one_purchase_and_one_charge() {
         credit_cents: Some(10_000),
         ..TOP_UP
     };
-    let intent = begun(&begin_card_setup(state, &user, org, choices).await.unwrap());
+    let intent = begun(
+        &begin_card_setup(state, &user, org, choices, ADDRESS)
+            .await
+            .unwrap(),
+    );
 
     // Neither finish sees the other's mark, so the ledger's key is all that
     // stands between them and a second charge.
@@ -818,7 +837,7 @@ async fn db_a_crafted_return_buys_nothing_and_changes_no_setting() {
     // The admin's own card setup, finished in the page, then the same
     // return replayed with a fresh link: it applies once, as chosen.
     let intent = begun(
-        &begin_card_setup(state, &user, org, CARD_ONLY)
+        &begin_card_setup(state, &user, org, CARD_ONLY, ADDRESS)
             .await
             .unwrap(),
     );
@@ -851,7 +870,7 @@ async fn db_bad_choices_are_refused_at_begin_and_another_customers_setup_changes
             ..TOP_UP
         }])
     {
-        let refused = begin_card_setup(state, &user, org, choices).await;
+        let refused = begin_card_setup(state, &user, org, choices, ADDRESS).await;
         assert!(
             matches!(refused, Err(AppError::Validation { .. })),
             "{choices:?}: {refused:?}"
@@ -860,7 +879,11 @@ async fn db_bad_choices_are_refused_at_begin_and_another_customers_setup_changes
     assert!(harness.fake.lock().unwrap().intents.is_empty());
 
     // The SetupIntent names this organization but another customer.
-    let intent = begun(&begin_card_setup(state, &user, org, TOP_UP).await.unwrap());
+    let intent = begun(
+        &begin_card_setup(state, &user, org, TOP_UP, ADDRESS)
+            .await
+            .unwrap(),
+    );
     harness.fake.lock().unwrap().setup_customer = Some("cus_someone_else".into());
     let refused = finish_card_setup(state, &user, org, &intent).await;
     assert!(matches!(refused, Err(AppError::NotFound(_))), "{refused:?}");
@@ -882,12 +905,12 @@ async fn db_an_organization_starts_at_most_ten_card_setups_an_hour() {
     let harness = Harness::new(pool.clone(), &owner).await;
     let (state, user, org) = (&harness.state, owner.user(), owner.organization_id.as_str());
     for attempt in 1..=10 {
-        begin_card_setup(state, &user, org, TOP_UP)
+        begin_card_setup(state, &user, org, TOP_UP, ADDRESS)
             .await
             .unwrap_or_else(|error| panic!("setup {attempt}: {error:?}"));
     }
     // The eleventh says what was limited and when to try again.
-    match begin_card_setup(state, &user, org, TOP_UP).await {
+    match begin_card_setup(state, &user, org, TOP_UP, ADDRESS).await {
         Err(AppError::Coded {
             code: "rate_limited",
             detail,
@@ -946,14 +969,28 @@ async fn db_a_user_starts_at_most_twenty_card_setups_a_day_across_organizations(
     for fixture in [&owner, &second] {
         let harness = Harness::new(pool.clone(), fixture).await;
         for attempt in 1..=10 {
-            begin_card_setup(&harness.state, &user, &fixture.organization_id, TOP_UP)
-                .await
-                .unwrap_or_else(|error| panic!("setup {attempt}: {error:?}"));
+            begin_card_setup(
+                &harness.state,
+                &user,
+                &fixture.organization_id,
+                TOP_UP,
+                ADDRESS,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("setup {attempt}: {error:?}"));
         }
     }
     // A third, fresh organization doesn't buy the user more tries.
     let harness = Harness::new(pool.clone(), &third).await;
-    match begin_card_setup(&harness.state, &user, &third.organization_id, TOP_UP).await {
+    match begin_card_setup(
+        &harness.state,
+        &user,
+        &third.organization_id,
+        TOP_UP,
+        ADDRESS,
+    )
+    .await
+    {
         Err(AppError::Coded {
             code: "rate_limited",
             detail,
@@ -966,4 +1003,102 @@ async fn db_a_user_starts_at_most_twenty_card_setups_a_day_across_organizations(
         }
         other => panic!("a twenty-first setup was not refused: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn db_a_setup_with_no_client_address_is_refused_before_anything_counts() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let owner = seed(&pool, "owner").await;
+    let harness = Harness::new(pool.clone(), &owner).await;
+    let (state, user, org) = (&harness.state, owner.user(), owner.organization_id.as_str());
+    match begin_card_setup(state, &user, org, TOP_UP, None).await {
+        Err(AppError::Coded {
+            code: "client_address_required",
+            ..
+        }) => {}
+        other => panic!("a setup with no address was not refused: {other:?}"),
+    }
+    assert!(harness.fake.lock().unwrap().intents.is_empty());
+    let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_limit WHERE key = ANY($1)")
+        .bind(vec![
+            CARD_SETUP_ORGANIZATION.key(org),
+            CARD_SETUP_USER.key(&owner.user_id),
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        counted, 0,
+        "a refused setup spent the organization's or user's tries"
+    );
+}
+
+#[tokio::test]
+async fn db_accounts_on_one_client_address_share_its_sixty_setups_an_hour() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let ada = seed(&pool, "owner").await;
+    let grace = seed(&pool, "owner").await;
+    let ada_harness = Harness::new(pool.clone(), &ada).await;
+    let mut grace_harness = Harness::new(pool.clone(), &grace).await;
+    // One billing deployment, so one key, as in production.
+    grace_harness.state.card_setup_address_key = ada_harness.state.card_setup_address_key.clone();
+    // Fifty-eight setups already started from the address this hour, by
+    // other accounts.
+    let address = unit_hash(&ada_harness.state.card_setup_address_key.0, ADDRESS).unwrap();
+    sqlx::query(
+        "INSERT INTO rate_limit (id, key, count, last_request) \
+         VALUES (gen_random_uuid()::text, $1, 58, \
+                 (extract(epoch FROM clock_timestamp()) * 1000)::bigint)",
+    )
+    .bind(CARD_SETUP_ADDRESS.key(&address))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (harness, fixture) in [(&ada_harness, &ada), (&grace_harness, &grace)] {
+        begin_card_setup(
+            &harness.state,
+            &fixture.user(),
+            &fixture.organization_id,
+            TOP_UP,
+            ADDRESS,
+        )
+        .await
+        .unwrap();
+    }
+    // The sixty-first from the address is refused, whoever starts it, while
+    // the same account from another address is not.
+    match begin_card_setup(
+        &ada_harness.state,
+        &ada.user(),
+        &ada.organization_id,
+        TOP_UP,
+        ADDRESS,
+    )
+    .await
+    {
+        Err(AppError::Coded {
+            code: "rate_limited",
+            detail,
+            ..
+        }) => assert!(
+            detail.starts_with("at most 60 card setups an hour"),
+            "{detail}"
+        ),
+        other => panic!("a sixty-first setup from one address was not refused: {other:?}"),
+    }
+    let elsewhere = Some(IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9)));
+    begin_card_setup(
+        &ada_harness.state,
+        &ada.user(),
+        &ada.organization_id,
+        TOP_UP,
+        elsewhere,
+    )
+    .await
+    .unwrap();
 }

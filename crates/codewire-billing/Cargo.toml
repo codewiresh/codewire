@@ -64,7 +64,13 @@ url = { workspace = true }
 # Required in scope by the temporalio workflow/activity attribute macros.
 futures = { workspace = true }
 
+[features]
+# A synthetic card-setup address key, for tests outside the crate.
+test-support = []
+
 [dev-dependencies]
+# The wire contract builds billing's state with a synthetic address key.
+codewire-billing = { path = ".", features = ["test-support"] }
 # Tests read what billing would have emailed.
 codewire-email = { workspace = true, features = ["test-support"] }
 # The wire contract drives generated BillingCatalogService clients over both

@@ -280,7 +280,12 @@ pub(super) async fn begin_card_setup(
         auto_top_up_cents: top_up_cents,
         credit_cents,
     };
-    match billing_connect::begin_card_setup(&state, cookie, organization.id, choice).await {
+    // The edge's hop of this request, never the browser's chain: billing's
+    // per-address cap counts it (#4901).
+    let client_hop = codewire_server_core::client_address::forwarded_client_hop(&headers);
+    match billing_connect::begin_card_setup(&state, cookie, client_hop, organization.id, choice)
+        .await
+    {
         Ok(client_secret) => Json(CardSetupAnswer {
             client_secret,
             ..Default::default()

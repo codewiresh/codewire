@@ -41,6 +41,37 @@ pub fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     forwarded_client_hop(headers)?.parse().ok()
 }
 
+/// Lowercase hex HMAC-SHA256, under `key`, of the address an abuser controls
+/// as one unit: an IPv4 address (also when IPv4-mapped) or an IPv6 /64, since
+/// one host usually holds a whole /64. A per-address limit counts under it,
+/// so no table keeps a client's address. `None` when there is no address.
+pub fn unit_hash(key: &str, address: Option<IpAddr>) -> Option<String> {
+    use hmac::Mac as _;
+    let unit = match address? {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let segments = v6.segments();
+                format!(
+                    "{:x}:{:x}:{:x}:{:x}::/64",
+                    segments[0], segments[1], segments[2], segments[3]
+                )
+            }
+        },
+    };
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(unit.as_bytes());
+    Some(
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
 /// Drop a trailing `:port` (or bracketed-IPv6 `]:port`) from one forwarded
 /// hop. `"http"`/`"https"` scheme suffixes from RFC 7239-style proxies are
 /// left in place and fail IP parsing, which is the conservative outcome for a
@@ -91,6 +122,27 @@ mod tests {
             forwarded_client_ip(&headers(Some("2001:db8::1")))
         );
         assert!(forwarded_client_ip(&headers(Some("2001:db8::1"))).is_some());
+    }
+
+    fn hash(address: &str) -> Option<String> {
+        unit_hash("synthetic-key", Some(address.parse().unwrap()))
+    }
+
+    #[test]
+    fn one_unit_is_one_hash_and_the_address_is_never_kept() {
+        // A host usually holds a whole IPv6 /64, so its addresses are one unit.
+        assert_eq!(hash("2001:db8:7:1::1"), hash("2001:db8:7:1:ffff::2"));
+        assert_ne!(hash("2001:db8:7:1::1"), hash("2001:db8:7:2::1"));
+        assert_eq!(hash("::ffff:203.0.113.7"), hash("203.0.113.7"));
+        assert_ne!(hash("203.0.113.7"), hash("203.0.113.8"));
+        let hashed = hash("203.0.113.7").unwrap();
+        assert!(!hashed.contains("203.0.113"), "{hashed}");
+        assert_eq!(hashed.len(), 64);
+        assert_ne!(
+            unit_hash("another-key", Some("203.0.113.7".parse().unwrap())),
+            Some(hashed)
+        );
+        assert_eq!(unit_hash("synthetic-key", None), None);
     }
 
     #[test]
