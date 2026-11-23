@@ -46,6 +46,8 @@ ALLOWED_ADDRESSES: dict[str, str] = {
     "2a01:4f8::1": "non-documentation global unicast example for endpoint filters",
     "2a09:8280:1::1111": "public anycast STUN result in upstream-derived tracker tests",
     "2a09:8280:1::2222": "public anycast STUN result in upstream-derived tracker tests",
+    "3.1.1.1": "UI Events key-value section number in vendored noVNC's core/input/fixedkeys.js and its bundle, kept byte for byte",
+    "3.1.1.2": "UI Events key-value section number in vendored noVNC's core/input/fixedkeys.js and its bundle, kept byte for byte",
 }
 
 def public_address(literal: str) -> bool:

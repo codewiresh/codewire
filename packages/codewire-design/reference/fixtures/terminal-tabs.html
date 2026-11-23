@@ -19,6 +19,8 @@
   <script src="../../durable-terminal.js" nonce="codewire-terminal-design-preview" defer></script>
   <script src="../../terminal-readiness.js" defer></script>
   <script src="../../sandbox-resize.js" defer></script>
+  <script type="module" src="/assets/codewire/novnc-1.7.0.js" integrity="sha384-5u/fHlJf6l6AxZ6y95MnDCv1kJZFhIyRS9G7UdQbwrHLrcW5c53rQuqdK3eI2its"></script>
+  <script src="../../desktop-viewer.js" defer></script>
 </head>
 <body class="cw-body cw-terminal-page" data-durable-terminal-page>
   <!-- Browser control fixture. Responses are synthetic; this page does not launch a real shell. -->
@@ -103,6 +105,7 @@
       <header class="cw-workspace-header">
         <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html?search=quiet-mesa&amp;state=running" aria-label="Back to Sandboxes"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-arrow-left"/></svg></a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-sandbox-state data-tone="success">running</span><span class="cw-workspace-resources" data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span></div>
         <div class="cw-workspace-actions" data-sandbox-actions>
+          <div class="cw-workspace-views" role="group" aria-label="Sandbox view" data-workspace-views><button class="cw-button cw-button--outline cw-button--small" type="button" data-workspace-view="terminal" aria-pressed="true">Terminal</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-workspace-view="desktop" aria-pressed="false">Desktop</button></div>
           <noscript><a class="cw-button cw-button--outline cw-button--small" href="/fixture-org/?ports=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">Manage Ports</a></noscript>
           <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-ports" data-sandbox-action="ports">Ports</button>
           <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-stop" data-sandbox-action="stop">Stop</button>
@@ -205,6 +208,15 @@
             <div class="cw-terminal-statuses" data-terminal-statuses></div>
             <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd data-sandbox-last-event>just now</dd></div><div><dt>Auto-delete</dt><dd data-sandbox-lifetime>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
           </footer>
+        </section>
+        <section class="cw-desktop" aria-label="Sandbox desktop" data-desktop-panel data-desktop-org-slug="fixture-org" data-desktop-org-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-desktop-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-desktop-sandbox-running="true" hidden>
+          <header class="cw-desktop-bar">
+            <p class="cw-desktop-status" role="status" data-desktop-status>Checking the desktop…</p>
+            <div class="cw-desktop-actions"><button class="cw-button cw-button--small" type="button" data-desktop-start hidden>Start desktop</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-desktop-reconnect hidden>Reconnect</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-desktop-paste hidden>Paste to desktop</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-desktop-copy hidden disabled>Copy from desktop</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-desktop-release hidden>Release keyboard</button><button class="cw-button cw-button--outline cw-button--small" type="button" data-desktop-stop hidden>Stop desktop</button></div>
+          </header>
+          <p class="cw-desktop-note" role="status" data-desktop-note hidden></p>
+          <div class="cw-desktop-screen" aria-label="Desktop" data-desktop-screen hidden></div>
+          <noscript><p class="cw-desktop-status">The desktop viewer needs JavaScript. Open it with <code>cw desktop bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</code>.</p></noscript>
         </section>
       </main>
     </div>

@@ -578,6 +578,12 @@
   background: var(--bg-surface-hover);
 }
 
+/* The chosen button of a group that shows one view at a time. */
+.cw-button[aria-pressed="true"] {
+  background: var(--bg-secondary);
+  color: var(--fg-primary);
+}
+
 .cw-button--ghost {
   background: transparent;
   color: var(--fg-secondary);

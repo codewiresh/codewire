@@ -162,8 +162,9 @@ if record['tool'] == 'cargo' and sys.argv[1:] == json.loads(os.environ.get('COMP
     sys.exit(46)
 ''')
 tool.chmod(0o755)
-# The fixture job can make a namespace (unshare -rn true succeeds).
-for name in ('zig', 'cargo-zigbuild', 'unshare'):
+# The fixture job can make a namespace (unshare -rn true succeeds), and a
+# selected JS security family installs its locked dependencies with bun.
+for name in ('zig', 'cargo-zigbuild', 'unshare', 'bun'):
     shutil.copy(tool, binary / name)
 shutil.copy(source_root / 'scripts/ci/verify/check-darwin-cross.sh',
             runner.parent / 'check-darwin-cross.sh')
@@ -346,10 +347,12 @@ image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
 assert set(image_guards) <= {Path(helper).name for helper in policy_helpers}
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 # Merge lanes run beside policy, so every selected family's terminal helper is
-# synthetic too (a selected security family audits the JS supply chain).
+# synthetic too (a selected security family audits the JS supply chain and
+# rebuilds the noVNC bundle).
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
                'scripts/ci/verify/compile-all-targets.sh',
-               'scripts/checks/security/audit-js-supply-chain.sh']:
+               'scripts/checks/security/audit-js-supply-chain.sh',
+               'scripts/checks/security/check-novnc-bundle.sh']:
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.suffix == '.sh':

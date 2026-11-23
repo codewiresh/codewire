@@ -126,6 +126,24 @@
       "integrity": "sha512-ndS6H/KICWANchlHF3q4UdZD+xrZ3Ji0rUobIuXlgvDUzDfqZDsVuXPXZb636nJZMHE9zZ9Fmwgqazm8hMB50Q==",
       "size": 4541,
       "sha384": "sha384-5i/Xtr2MZ9XJA72VthpWl2foV5KRKs0qlmCalXnrpAyKGPK/B2MxirDlytY6TEZ0"
+    },
+    {
+      "package": "@novnc/novnc",
+      "version": "1.7.0",
+      "member": "LICENSE.txt",
+      "path": "crates/codewire-dashboard-web/assets/novnc/LICENSE-novnc-1.7.0",
+      "integrity": "sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==",
+      "size": 2163,
+      "sha384": "sha384-Rig3YSwpIMMUF02arnr/xXJ5MBiGX5gTIzxOl8Lq0s5+KVP4Ix1lHc7b60EK5OPZ"
+    },
+    {
+      "package": "@novnc/novnc",
+      "version": "1.7.0",
+      "member": "vendor/pako/LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/novnc/LICENSE-pako-novnc-1.7.0",
+      "integrity": "sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==",
+      "size": 1084,
+      "sha384": "sha384-UEI1gah/tArjZ9Vouzsu4MGk+9GYPbrBlkmKvkfnPNzgKF0d2jVNMj00Ud30eT87"
     }
   ]
 }

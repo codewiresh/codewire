@@ -58,13 +58,13 @@ pub(super) struct StopForm {
     session_id: String,
 }
 
-struct Context {
-    account_id: String,
-    org_id: String,
-    cookie: HeaderValue,
+pub(super) struct Context {
+    pub(super) account_id: String,
+    pub(super) org_id: String,
+    pub(super) cookie: HeaderValue,
 }
 
-fn json(status: StatusCode, value: impl Serialize) -> Response {
+pub(super) fn json(status: StatusCode, value: impl Serialize) -> Response {
     let mut response = (status, Json(value)).into_response();
     response
         .headers_mut()
@@ -75,7 +75,7 @@ fn json(status: StatusCode, value: impl Serialize) -> Response {
     response
 }
 
-fn failure(status: StatusCode, code: &'static str) -> Response {
+pub(super) fn failure(status: StatusCode, code: &'static str) -> Response {
     #[derive(Serialize)]
     struct Failure {
         error: &'static str,
@@ -130,7 +130,7 @@ fn list_failure(error: ConnectError) -> Response {
 }
 
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
-async fn context(
+pub(super) async fn context(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,
@@ -273,7 +273,7 @@ pub(super) async fn list(
     }
 }
 
-fn valid_action(public_origin: &str, headers: &HeaderMap, csrf: &str) -> bool {
+pub(super) fn valid_action(public_origin: &str, headers: &HeaderMap, csrf: &str) -> bool {
     headers.get_all(header::ORIGIN).iter().count() == 1
         && request_has_same_origin(headers, public_origin)
         && valid_csrf_token(headers, csrf)

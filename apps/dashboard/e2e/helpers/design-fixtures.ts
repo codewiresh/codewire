@@ -13,6 +13,7 @@ export const designFixtureSpecs = [
   "ssr-dashboard.credential-dialogs.ssr.ts",
   "ssr-dashboard.date-picker.ssr.ts",
   "ssr-dashboard.design-system.ssr.ts",
+  "ssr-dashboard.desktop-panel.ssr.ts",
   "ssr-dashboard.durable-terminal.ssr.ts",
   "ssr-dashboard.legal-pages.ssr.ts",
   "ssr-dashboard.organization-layout.ssr.ts",

@@ -227,6 +227,7 @@ js_audit_paths=(
   "docs/homepage/**"
   "packages/codewire-design/**"
   "crates/codewire-dashboard-web/assets/**"
+  "crates/codewire-dashboard-web/vendor/**"
 )
 
 js_audit_scans() {
@@ -1416,11 +1417,12 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      .supplychain/vendor-artifacts.json)
+      .supplychain/vendor-artifacts.json|.supplychain/vendor-bundles.json)
         # The external instance-scoped scanner verifies the package registry
-        # signature, tarball, and exact local bytes. Repository CI still runs
-        # the focused JavaScript security policy without fanning a provenance-
-        # only edit out to unrelated product families.
+        # signature, tarball, and exact local bytes; the JavaScript security
+        # policy rebuilds the vendored bundles. Repository CI runs that focused
+        # policy without fanning a provenance-only edit out to unrelated
+        # product families.
         select_js_security
         recognized=true
         ;;
@@ -1560,6 +1562,7 @@ if [ "$event_selected" = false ]; then
       apps/dashboard/e2e/ssr-dashboard.credential-dialogs.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.date-picker.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.desktop-panel.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.durable-terminal.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.legal-pages.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.organization-layout.ssr.ts|\
@@ -2678,7 +2681,8 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      scripts/checks/security/audit-js-supply-chain.sh)
+      scripts/checks/security/audit-js-supply-chain.sh|\
+      scripts/checks/security/check-novnc-bundle.sh)
         select_token security
         select_token security_js
         recognized=true

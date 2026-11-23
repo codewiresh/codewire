@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "bundles": [
+    {
+      "package": "@novnc/novnc",
+      "version": "1.7.0",
+      "integrity": "sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==",
+      "path": "crates/codewire-dashboard-web/assets/novnc/novnc-1.7.0.js",
+      "size": 390167,
+      "sha384": "sha384-5u/fHlJf6l6AxZ6y95MnDCv1kJZFhIyRS9G7UdQbwrHLrcW5c53rQuqdK3eI2its",
+      "entry": {
+        "path": "crates/codewire-dashboard-web/vendor/novnc-entry.js",
+        "sha384": "sha384-tRIYhyy7P0sNRYTkL8B8aUAnDVLuiuwQGVVsraqNkLoPKnzKSxY8oV+0hhb2iY2q"
+      },
+      "inputs_root": "crates/codewire-dashboard-web/vendor/novnc-1.7.0",
+      "inputs": [
+        {
+          "member": "core/base64.js",
+          "size": 4182,
+          "sha384": "sha384-wnNRldeOdKDfLEpYtshEf96jNvFNA0aQUeeLtIe4jmDddk33Zh8stiG9zcZm3uuv"
+        },
+        {
+          "member": "core/crypto/aes.js",
+          "size": 5965,
+          "sha384": "sha384-Crw2BKhc97XbLptZtxwU8kH2VbKnBj1kpwh6cJ/OBRHiOWEgtfVBZA2ORrhtvm/U"
+        },
+        {
+          "member": "core/crypto/bigint.js",
+          "size": 825,
+          "sha384": "sha384-MaxGc4fHj+agCAh3pdbfaFfsDs4MKAFub8g/pIr7Bt/pztqioJonZfKXO4vWmSb7"
+        },
+        {
+          "member": "core/crypto/crypto.js",
+          "size": 3042,
+          "sha384": "sha384-g1TifhYgzyNfbtZwHjrSJpMVn4nT4VHUdvwtrNYEsMxmPW7NrXMqw3nyhdu4uLVo"
+        },
+        {
+          "member": "core/crypto/des.js",
+          "size": 12723,
+          "sha384": "sha384-iqinAFM4a4xnH5nHbAJgoKCkXnOxr/gfwvv2/MtNHjb2dNkWawPkyGuYxlpErP3c"
+        },
+        {
+          "member": "core/crypto/dh.js",
+          "size": 1612,
+          "sha384": "sha384-oLJQaqgEp/rnajHYq6C97ps21ONaurs+dOX0AU67Yk7J90tsoWnKqrGh84J+FRDK"
+        },
+        {
+          "member": "core/crypto/md5.js",
+          "size": 4686,
+          "sha384": "sha384-quZT1UykU1Pt95IineUZPOUqam38IvZeTa53O0Znl8TWJKlPo5Ka/7YJBzA62sn/"
+        },
+        {
+          "member": "core/crypto/rsa.js",
+          "size": 4493,
+          "sha384": "sha384-P9PmDQ4D+BPxNt5lV31Q+0N7GLnQx/9xKFTnT4r1KTVv7MwhBRqDEPfACI9YqH28"
+        },
+        {
+          "member": "core/decoders/copyrect.js",
+          "size": 616,
+          "sha384": "sha384-SosGsTuiwC1NPYazMk94vF7fDJ4oBiIe6YItafHSt/8xXfkDtshElsfZtAZqK6Hi"
+        },
+        {
+          "member": "core/decoders/h264.js",
+          "size": 9322,
+          "sha384": "sha384-C8z6GzdlWko44vJHT/XzZK1+C2oMjnqlMEZsYuLrKXKMH6fpB/my3FR9BhAG67R5"
+        },
+        {
+          "member": "core/decoders/hextile.js",
+          "size": 6060,
+          "sha384": "sha384-7YARNe609102pn/P2t2eiJeiZv5aiyzsAfd5APEBCQ6EiDnf9W3svRkdxqXKRFWI"
+        },
+        {
+          "member": "core/decoders/jpeg.js",
+          "size": 4557,
+          "sha384": "sha384-vJvknqFhrmuEZTLvz2JN89ry+9VWKYroL00lTAYY7RUBxtc+H9q1pzQ42C94eIde"
+        },
+        {
+          "member": "core/decoders/raw.js",
+          "size": 1622,
+          "sha384": "sha384-kcnJreB80OmKD6vlZtzRtbwuXdRI6Z6xv+1W44tVqyJrse9hrelUMSPiqqzWdsIe"
+        },
+        {
+          "member": "core/decoders/rre.js",
+          "size": 1114,
+          "sha384": "sha384-FooinChcLse9qHc0wZNKld6E1mZuVeHEjYajr2TIUMF7Fs4DiLtMCrbCPaMDfKnq"
+        },
+        {
+          "member": "core/decoders/tight.js",
+          "size": 11982,
+          "sha384": "sha384-xT1CPt06yZqKWTRe55549MwzErtz3hkJKTnZc3yZtOXzJhXtx9YCjCQ0uMCqSDN9"
+        },
+        {
+          "member": "core/decoders/tightpng.js",
+          "size": 687,
+          "sha384": "sha384-01RRCQPP0XXopZoc2NzTsnDTQrc1b/q8XCUljsgP06cXPQOiL7whZSzCakQF0Ui6"
+        },
+        {
+          "member": "core/decoders/zlib.js",
+          "size": 1211,
+          "sha384": "sha384-itOeqDCFAu2u8e+sxCLd4lJP6XIXgb2reeZp0Cw170WOEbHRas7gJCbDzL6M655R"
+        },
+        {
+          "member": "core/decoders/zrle.js",
+          "size": 6484,
+          "sha384": "sha384-rRVoF43wF222SvIGedenHOmoW8xz91SplwDRdheDGWkEnVWCMc9h4NBnCZdWwRJo"
+        },
+        {
+          "member": "core/deflator.js",
+          "size": 2589,
+          "sha384": "sha384-K17xKc24hWUaVVaHnVGXFAKwBYHHlZ3dxgQqrROpc20xb3DVl3uEWgfrx/vMNlXb"
+        },
+        {
+          "member": "core/display.js",
+          "size": 18386,
+          "sha384": "sha384-gzFH1NfOYPEc6LSxpKoOmEEaPJXohFLu++ihYOUGAnPBw6mha2v8e5L35rSvl61T"
+        },
+        {
+          "member": "core/encodings.js",
+          "size": 1819,
+          "sha384": "sha384-zpIlo/VphqBJvRbWI2e7RKZUDTpNHpMWQrmoDKtiVEWUU7VeCFi+hj+py7PtidTM"
+        },
+        {
+          "member": "core/inflator.js",
+          "size": 1913,
+          "sha384": "sha384-ZGxOkgVXTSY/OAqtUz6cWUDo4EtHZDx3lWMEVXwpkrrh17onmVo40esQcQ2xHYxt"
+        },
+        {
+          "member": "core/input/domkeytable.js",
+          "size": 11478,
+          "sha384": "sha384-Qugk4fZnVv9l0VYtZVamS/RMjkLhNrci3jnyKfyqF7B72jc224HSy5RclIT6rPzb"
+        },
+        {
+          "member": "core/input/fixedkeys.js",
+          "size": 3804,
+          "sha384": "sha384-+JUyB21c9EVQAkPb1dvtY2azR8gC65cmiusp+EOvHkryzK2u7/+bHpbvfsbg95hV"
+        },
+        {
+          "member": "core/input/gesturehandler.js",
+          "size": 18260,
+          "sha384": "sha384-33m8Jk+Asx0fJ/GMV4WJF+wjLn9ZAGKuBW6GPw5Mpvh55TSEyfLem5YAHVbvHF7t"
+        },
+        {
+          "member": "core/input/keyboard.js",
+          "size": 10849,
+          "sha384": "sha384-9nHEN+k1tzYFETQA1CTwmRy4/gUv/AayohTz/GnowyZNYj4r2450qVtc4lUsL0wa"
+        },
+        {
+          "member": "core/input/keysym.js",
+          "size": 34609,
+          "sha384": "sha384-bh0f8sdLtjZP25bD51JKOfuqxdom8Nef2W1sC4flhujLYnfYDGyg3naoUFxFFPJ7"
+        },
+        {
+          "member": "core/input/keysymdef.js",
+          "size": 25374,
+          "sha384": "sha384-Hoj8979+wX+tON5SQQXk4kyIkBRR8R+vxhJIC6Tdy9XVvM9n4WFFsFEUeqpqlX/I"
+        },
+        {
+          "member": "core/input/util.js",
+          "size": 6069,
+          "sha384": "sha384-lB7Rf8IXDwJAs7XMlHlUrDP0I6n08aU52AKroe3qe1pEVXQErV+wgvURyfsunhPE"
+        },
+        {
+          "member": "core/input/vkeys.js",
+          "size": 2509,
+          "sha384": "sha384-HV5BF3Se+EFGkPGxTsblU0ESPdhnr67IHMKb4E4+4CVP15U2r5LompwWhH97Zr36"
+        },
+        {
+          "member": "core/input/xtscancodes.js",
+          "size": 14400,
+          "sha384": "sha384-8C5+v1/6e2ilSRx6lBFyojOWeRuwb55xjRmpBPEdCUlO9gksMANyNklK8jRtVxZO"
+        },
+        {
+          "member": "core/ra2.js",
+          "size": 12474,
+          "sha384": "sha384-vq5URuVQ9hPs9zCe2V1++m4pLQeI7tc9QSAbTA5Vn2j9WF5WWES8+905cXZMmBon"
+        },
+        {
+          "member": "core/rfb.js",
+          "size": 122306,
+          "sha384": "sha384-V7gKNqsm1e9rl3OTz4WzglGogw8s16KnfgmTeSQM9VprnC7hGdee5gsLxgaL1iux"
+        },
+        {
+          "member": "core/util/browser.js",
+          "size": 7820,
+          "sha384": "sha384-xemLnSITMx8GAcJLLSDBQF1hM4sD5iQhwyeRBaW1PjMriTQ3J0nB3BN4l7Qu4mTt"
+        },
+        {
+          "member": "core/util/cursor.js",
+          "size": 8347,
+          "sha384": "sha384-3eDZrLoBmX8ZBTqblvNsasWdFKgREYY6a8V/x26AqkJ0hhU7/ImST+6UKvAqtV7g"
+        },
+        {
+          "member": "core/util/element.js",
+          "size": 729,
+          "sha384": "sha384-ag/6L6ZuwwAQkafiaqeu9NBM/6JebtuWkN9T93TvwAEddiCJVs1bS+pmrC7sQIGC"
+        },
+        {
+          "member": "core/util/events.js",
+          "size": 4327,
+          "sha384": "sha384-Xv9jJhnUB9mJ5zMbSVDVeP6qfIlQo+WlklMjMFh4YW5XKxmUWxCPzK1mfjcXuN2z"
+        },
+        {
+          "member": "core/util/eventtarget.js",
+          "size": 896,
+          "sha384": "sha384-c3/B/XnTaPOBdZeQ2QtPKCwaswqZ8jMZEcHNPhVmwPHrfIjmzQJkXw4rsTf/nFNH"
+        },
+        {
+          "member": "core/util/int.js",
+          "size": 326,
+          "sha384": "sha384-CwZS4SkfKzurejVCXsv2VwiIEoXB+rfCb3CBWxX97HOTVoEhEuMSk4bk1/0TbkzJ"
+        },
+        {
+          "member": "core/util/logging.js",
+          "size": 1351,
+          "sha384": "sha384-PSW8HPLN8LP37Q6o3z3UgsYV7ECmNzqDgEtHHzel85rwcQqYG8/nmMsdY05lpAPA"
+        },
+        {
+          "member": "core/util/strings.js",
+          "size": 745,
+          "sha384": "sha384-P+maNGJWgcJ2cT8n12U88H/uETpRDcePMS+AqN1x/udOyNiz9piQlr0iA5lwq7b/"
+        },
+        {
+          "member": "core/websock.js",
+          "size": 11258,
+          "sha384": "sha384-94KRbrnNFb1Tp/zBeB0qxfOhTV+o/YY5mNHJqQSvB3aQOxPiMiaKALCTsEoSn4qU"
+        },
+        {
+          "member": "vendor/pako/lib/utils/common.js",
+          "size": 1062,
+          "sha384": "sha384-G/Gr9pOmNszIbeMQVYIXnF/OSA3uXguaIqrCCr05iqgbGZi9Fh0/Sa1WbCQLjgbk"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/adler32.js",
+          "size": 666,
+          "sha384": "sha384-vEAzZBXmlXEVmIg2MrayFS/P5WAyTEdvtlnELXHYLHDHglkkc+VEETNorq9kEzp7"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/crc32.js",
+          "size": 764,
+          "sha384": "sha384-8aB+gaFx5AyeAFZsyugD7NfaJD/Kbm82r4K7vKFkN3p7P4Mk6AfFxxSRE5PGFKY3"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/deflate.js",
+          "size": 60286,
+          "sha384": "sha384-Pll4AS1IOU1HePm5R6Zk+4sGfA8wWxardzIcJvi7+9//JvQ/DvkZTsOCELBDTlVs"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/inffast.js",
+          "size": 11690,
+          "sha384": "sha384-7lhzwHAf8vZFOb5cOqCHDQOU5+hDGr843bw4PHWbGghdpoScoFgbMJOb30xgBr3i"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/inflate.js",
+          "size": 47281,
+          "sha384": "sha384-b4OC1pwVOJUIvyWLN3qIXpKj5kVZs1lQvquQ35OAO7yqJfLetZlDShnsbKcbaSSk"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/inftrees.js",
+          "size": 11527,
+          "sha384": "sha384-ZPrFvOxqijoEmvBDFI3fUZAUCGPUSwLEnXZuv1eQHSqrhGrlZqhv/YRd5aHQX13R"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/messages.js",
+          "size": 560,
+          "sha384": "sha384-EIlOW4mcj2svinxpku+8mu1NiFR7/gCtuQ3jJ9bLImgJC2ZZnL7pdkBGnygqD2cC"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/trees.js",
+          "size": 38767,
+          "sha384": "sha384-Qcg1yDANNY2TnI2EQ9x0vmRWc0vEWxSA44W6KyYZ+9WQPAvZdoGjtVwaqlp2x7nn"
+        },
+        {
+          "member": "vendor/pako/lib/zlib/zstream.js",
+          "size": 823,
+          "sha384": "sha384-yQJ6XHnKlzR6czOJHfIFUUKUs6c4wvc3MuJxvX8zQDkhgQQjT1JfsP+JUP2Ln8cT"
+        }
+      ],
+      "esbuild": {
+        "version": "0.28.2",
+        "package": "@esbuild/linux-x64",
+        "integrity": "sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ==",
+        "binary_sha256": "e1698a3d5c6c0798fee4fd3b5cc816651f460c63d390a7a26ea4beb0b1884100"
+      },
+      "image": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
+      "options": [
+        "--bundle",
+        "--format=esm",
+        "--target=es2022",
+        "--charset=utf8"
+      ]
+    }
+  ]
+}

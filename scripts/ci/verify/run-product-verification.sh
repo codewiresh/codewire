@@ -2112,6 +2112,10 @@ run_security() {
   fi
   if selected security_js; then
     scripts/checks/security/audit-js-supply-chain.sh
+    # The noVNC bundle rebuilt from its vendored sources with the locked
+    # esbuild; the self-test also proves a changed byte fails (#3223).
+    install_bun_dependencies
+    scripts/checks/security/check-novnc-bundle.sh --self-test
   fi
   if selected security_go; then
     local module

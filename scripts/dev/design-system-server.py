@@ -24,6 +24,7 @@ TERMINAL_ASSET_ROUTES = {
     )
 }
 HTMX_ASSET = REPOSITORY_ROOT / "crates" / "codewire-dashboard-web" / "assets" / "htmx-2.0.10.min.js"
+NOVNC_ASSET = REPOSITORY_ROOT / "crates" / "codewire-dashboard-web" / "assets" / "novnc" / "novnc-1.7.0.js"
 
 
 class DesignSystemHandler(SimpleHTTPRequestHandler):
@@ -32,6 +33,8 @@ class DesignSystemHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         if urlsplit(path).path == "/assets/codewire/htmx-2.0.10.min.js":
             return str(HTMX_ASSET)
+        if urlsplit(path).path == "/assets/codewire/novnc-1.7.0.js":
+            return str(NOVNC_ASSET)
         font_name = FONT_ROUTES.get(urlsplit(path).path)
         if font_name is not None:
             return str(FONT_ROOT / font_name)

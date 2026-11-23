@@ -452,7 +452,7 @@ in the comment after them with the look and the listeners.
   - phone width.
 - **Driving it:** on Kind, through the dashboard's own URL, signed in as the
   Sandbox's creator.
-  1. Open the Sandbox's page. Press Start in the Desktop panel.
+  1. Open the Sandbox's page, choose Desktop and press Start desktop.
   2. Click into the desktop, open its terminal and type. Copy a marker on
      the computer and press "Paste to desktop"; select text in the desktop's
      terminal and press "Copy from desktop"; press "Release keyboard".

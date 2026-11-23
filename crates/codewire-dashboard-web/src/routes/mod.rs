@@ -13,6 +13,7 @@ mod billing;
 mod cache_policy_tests;
 mod credentials;
 mod dashboard;
+mod desktop;
 mod device;
 mod environment_drafts;
 mod environments;
@@ -695,6 +696,18 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/{environment_id}/_actions/terminal-sessions/stop",
             post(terminal_sessions::stop).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_fragments/desktop",
+            get(desktop::get),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/desktop/start",
+            post(desktop::start).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/desktop/stop",
+            post(desktop::stop).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
             "/{slug}/{environment_id}/ports/",

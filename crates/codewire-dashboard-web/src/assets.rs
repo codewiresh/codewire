@@ -33,7 +33,7 @@ pub(crate) const NETWORK_POLICIES_STYLE_PATH: &str =
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v3.css";
-pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v6.css";
+pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v7.css";
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
 pub(crate) const OVERVIEW_STYLE_PATH: &str = "/assets/codewire/routes/overview-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
@@ -57,6 +57,10 @@ pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
 pub(crate) const XTERM_SCRIPT_PATH: &str = "/assets/codewire/xterm-6.0.0.js";
 pub(crate) const XTERM_FIT_SCRIPT_PATH: &str = "/assets/codewire/addon-fit-0.11.0.js";
 pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web-links-0.12.0.js";
+/// The vendored noVNC, one self-contained module (#3223).
+pub(crate) const NOVNC_SCRIPT_PATH: &str = "/assets/codewire/novnc-1.7.0.js";
+/// The Sandbox page's Desktop panel (#3223).
+pub(crate) const DESKTOP_VIEWER_SCRIPT_PATH: &str = "/assets/codewire/desktop-viewer-v1.js";
 pub(crate) const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
 pub(crate) const BRAND_WORDMARK_PATH: &str = "/assets/codewire/brand-wordmark-v1.svg";
 pub(crate) const BRAND_ICON_PATH: &str = "/assets/codewire/brand-icon-v1.svg";
@@ -132,6 +136,9 @@ const TERMINAL_PRESENTATION_SCRIPT: &str =
 const XTERM_SCRIPT: &str = include_str!("../assets/xterm/xterm-6.0.0.js");
 const XTERM_FIT_SCRIPT: &str = include_str!("../assets/xterm/addon-fit-0.11.0.js");
 const XTERM_WEB_LINKS_SCRIPT: &str = include_str!("../assets/xterm/addon-web-links-0.12.0.js");
+const NOVNC_SCRIPT: &str = include_str!("../assets/novnc/novnc-1.7.0.js");
+const DESKTOP_VIEWER_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/desktop-viewer.js");
 const LOGO: &str = include_str!("../../../packages/codewire-design/assets/logo.svg");
 const BRAND_WORDMARK: &str =
     include_str!("../../../packages/codewire-design/assets/brand-wordmark.svg");
@@ -263,6 +270,12 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         XTERM_WEB_LINKS_SCRIPT_PATH,
         JS,
         XTERM_WEB_LINKS_SCRIPT.as_bytes(),
+    ),
+    (NOVNC_SCRIPT_PATH, JS, NOVNC_SCRIPT.as_bytes()),
+    (
+        DESKTOP_VIEWER_SCRIPT_PATH,
+        JS,
+        DESKTOP_VIEWER_SCRIPT.as_bytes(),
     ),
     (LOGO_PATH, SVG, LOGO.as_bytes()),
     (BRAND_WORDMARK_PATH, SVG, BRAND_WORDMARK.as_bytes()),

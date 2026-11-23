@@ -104,6 +104,39 @@ if ! grep -Fq "readonly chromium_version='145.0.7632.6'" "$pinned_chromium_insta
 fi
 
 vendor_manifest=".supplychain/vendor-artifacts.json"
+# Bundles built from vendored upstream files, beside the npm entries rather than
+# in them: the sealed source scan reads vendor-artifacts.json with a fixed schema.
+# scripts/checks/security/check-novnc-bundle.sh holds each build to these pins;
+# here, the shape.
+bundle_manifest=".supplychain/vendor-bundles.json"
+if ! jq -e '
+  .schema_version == 1 and
+  ((keys_unsorted - ["schema_version", "bundles"]) | length == 0) and
+  (.bundles | type == "array" and length > 0) and
+  all(.bundles[];
+    ((keys_unsorted - ["package", "version", "integrity", "path", "size", "sha384", "entry",
+      "inputs_root", "inputs", "esbuild", "image", "options"]) | length == 0) and
+    (.package | type == "string" and length > 0) and
+    (.version | type == "string" and length > 0) and
+    (.integrity | startswith("sha512-")) and
+    (.path | type == "string" and length > 0) and
+    (.size | type == "number" and . > 0) and
+    (.sha384 | startswith("sha384-")) and
+    (.entry.path | type == "string" and length > 0) and
+    (.entry.sha384 | startswith("sha384-")) and
+    (.inputs_root | type == "string" and length > 0) and
+    (.inputs | type == "array" and length > 0) and
+    all(.inputs[]; (.member | type == "string" and length > 0) and
+      (.size | type == "number" and . > 0) and (.sha384 | startswith("sha384-"))) and
+    (.esbuild.version | type == "string" and length > 0) and
+    (.esbuild.integrity | startswith("sha512-")) and
+    (.esbuild.binary_sha256 | test("^[0-9a-f]{64}$")) and
+    (.image | test("@sha256:[0-9a-f]{64}$")) and
+    (.options | type == "array" and length > 0))
+' "$bundle_manifest" >/dev/null; then
+  echo "supply-chain audit: invalid vendored bundle manifest $bundle_manifest" >&2
+  exit 1
+fi
 if ! jq -e '
   .schema_version == 1 and
   (.npm | type == "array" and length > 0) and
@@ -137,10 +170,12 @@ while IFS=$'\t' read -r package version member path expected_size expected_sha38
     echo "supply-chain audit: SHA-384 mismatch for $path" >&2
     fail=1
   fi
-done < <(jq -r '.npm[] | [.package, .version, .member, .path, (.size | tostring), .sha384] | @tsv' "$vendor_manifest")
+done < <(jq -r --slurpfile built "$bundle_manifest" '(.npm[] | [.package, .version, .member, .path, (.size | tostring), .sha384]),
+  ($built[0].bundles[] | [.package, .version, "bundle", .path, (.size | tostring), .sha384]) | @tsv' "$vendor_manifest")
 
 while IFS= read -r asset; do
-  if ! jq -e --arg path "$asset" 'any(.npm[]; .path == $path)' "$vendor_manifest" >/dev/null; then
+  if ! jq -e --arg path "$asset" --slurpfile built "$bundle_manifest" \
+      'any(.npm[], $built[0].bundles[]; .path == $path)' "$vendor_manifest" >/dev/null; then
     echo "supply-chain audit: undeclared vendored browser asset $asset" >&2
     fail=1
   fi
@@ -168,7 +203,7 @@ while IFS=$'\t' read -r path expected_sha384; do
       fi
     done <<<"$matches"
   fi
-done < <(jq -r '.npm[] | [.path, .sha384] | @tsv' "$vendor_manifest")
+done < <(jq -r --slurpfile built "$bundle_manifest" '(.npm[], $built[0].bundles[]) | [.path, .sha384] | @tsv' "$vendor_manifest")
 
 # Match an attribute token, not the suffix of a BuildKit option or data attribute.
 # Keep the same scan paths and exercise the exact pattern used by the audit.

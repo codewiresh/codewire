@@ -57,8 +57,8 @@ The desktop is built on these, which are on `main`:
 - The same service on a local VM's supervisor, to the VM's owner over its
   owner-only socket (supervisor protocol 25).
 - `cw desktop` ("`cw desktop`", below).
-- Orchestration's desktop stream ("The desktop stream", below). The
-  dashboard's Desktop panel is not built.
+- Orchestration's desktop stream and the dashboard's Desktop panel ("The
+  dashboard viewer", below).
 
 ## In the image
 
@@ -385,7 +385,8 @@ started the desktop and printed it.
 
 ## The dashboard viewer
 
-A hosted Sandbox's page has a Desktop panel: Start, the viewer, Stop, and
+A hosted Sandbox's page has a Desktop panel beside its terminals, chosen
+with the page's Terminal and Desktop switch: Start, the viewer, Stop, and
 the states unavailable (with the recreate hint and no Start), stopped,
 starting, running, disconnected (Reconnect) and ended. Paste and copy are
 explicit buttons, "Paste to desktop" and "Copy from desktop"; the clipboard
@@ -397,12 +398,19 @@ The panel reads the desktop's state when the page loads, after its own Start
 and Stop, and from the reason a stream closed with. It polls nothing. Losing
 Sandbox readiness pauses the viewer as it pauses the terminals.
 
-The viewer is noVNC, vendored and served from the dashboard's own origin as
-the terminal renderer is: an exact version, every file's size and digest in
-the vendor manifest, its licence beside it, loaded with integrity
-attributes. No CDN, no worker, no `blob:` source; the page's content
-security policy changes only by the terminal page's existing `connect-src`
-entry for the WebSocket origin.
+The viewer is noVNC 1.7.0, vendored and served from the dashboard's own
+origin as one self-contained ES module. esbuild 0.28.2, pinned in the
+lockfile, builds it from upstream's files inside an image pinned by digest,
+with no network. Every input's size and digest, the bundle's, and every
+build pin are in `.supplychain/vendor-bundles.json`; the licences are npm
+entries in `.supplychain/vendor-artifacts.json`, beside the bundle. The page
+loads it with an integrity attribute. In CI,
+`scripts/checks/security/check-novnc-bundle.sh` rebuilds it and fails unless
+the result is byte-equal, or if the bundle holds an import, an export,
+`eval`, `Function`, a worker or a `blob:` URL. No CDN, no worker, no `blob:`
+source; the page's content security policy changes only by the terminal
+page's existing `connect-src` entry for the WebSocket origin, and
+`script-src` has neither `'unsafe-eval'` nor `'wasm-unsafe-eval'`.
 
 ### The desktop stream
 
