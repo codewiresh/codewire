@@ -498,6 +498,10 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   That record is the guest's own report, evidence that the daemon ran its
   check, not the boundary, since the whole guest is the Sandbox user's; its
   log names each probe, its target and its outcome either way.
+  The Pod's `CODEWIRE_VM_EGRESS_MODE`, fixed when it is created, waives
+  that check only for `broker`, hosted broker mode inside the VM, whose
+  stream cw-egress checks as on Kata. Until broker mode is built, every
+  `standard` Pod is `guest-carried`.
   The Pod's 7777 and 2222 reach the VM over two fixed guest-channel ports
   that exist only in such a boot and accept only the host; the guest joins
   each to one address in the workspace's network: the daemon's gRPC

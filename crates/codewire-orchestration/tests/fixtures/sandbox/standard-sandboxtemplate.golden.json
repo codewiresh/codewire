@@ -218,6 +218,10 @@
                 "value": "new"
               },
               {
+                "name": "CODEWIRE_VM_EGRESS_MODE",
+                "value": "guest-carried"
+              },
+              {
                 "name": "CODEWIRE_WORKSPACE_IMAGE",
                 "value": "registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555"
               },

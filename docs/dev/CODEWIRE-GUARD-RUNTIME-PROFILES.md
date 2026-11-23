@@ -378,6 +378,18 @@ network is its own netstack, so a `standard` template has neither, and the
 TUN rule still refuses a TUN init under `standard`. Only a per-environment
 template may run under `standard`; a pool template may not.
 
+The workspace container's `CODEWIRE_VM_EGRESS_MODE` says how the guest's
+workload reaches the network: `guest-carried`, its own network session with
+only the platform peers, or `broker`, hosted broker mode inside the VM.
+Orchestration renders `guest-carried` until broker mode runs inside the VM.
+The template policy and the class's Pod rule admit it only on a `standard`
+workspace, once, as one of those two literal values. The runtime refuses any
+other value. The binding listener waives the guest's own egress self-check
+only for `broker`, whose stream cw-egress's lockdown check covers as on Kata,
+and reads the value from the Pod spec the API server returns, never from the
+guest. The broker label alone never waives it: every `standard` Pod carries
+that label while hosted egress is on.
+
 **The claim.** Outside the VM are the supervisor and the VM process, with
 the Pod's address and the Sandbox's projected tokens. The boundary a
 workload has to cross is KVM, Cloud Hypervisor and the supervisor's own

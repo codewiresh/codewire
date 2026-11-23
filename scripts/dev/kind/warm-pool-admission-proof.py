@@ -60,6 +60,7 @@ PRIVILEGE = "with hosted egress on, the Pod runs as 1000:1000"
 TUN = "hosted-egress-tun runs only as an init container"
 DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memory"
 RUNTIME = "warm-pool members run under the commodity runtime"
+EGRESS_MODE = "CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container"
 KEEPS_BROKER = "orchestration never takes broker mode"
 ADDS_BROKER = "orchestration never adds broker mode to an existing Sandbox"
 PRE_SWITCH = "with hosted egress on, orchestration never starts or changes a Sandbox made before it"
@@ -312,7 +313,35 @@ def standard_cases(standard: dict, env_broker: dict,
          mutate(env_broker, without_tun), TUN),
         ("on, pool: the broker golden under standard without its TUN init", ON, "create",
          mutate(broker, setting(pod, "runtimeClassName", "standard"), without_tun), RUNTIME),
+        # The egress mode: the binding listener waives the guest's self-check
+        # only for `broker`, so only a standard template's workspace sets it,
+        # once, to one of its two values.
+        ("on, standard: broker mode", ON, "create", mutate(standard, egress_mode("broker")), None),
+        ("on, standard: no egress mode", ON, "create", mutate(standard, egress_mode(None)), EGRESS_MODE),
+        ("on, standard: another egress mode", ON, "create", mutate(standard, egress_mode("open")), EGRESS_MODE),
+        # A second entry of the same name never reaches this policy: the
+        # SandboxTemplate CRD's schema keys env by name, so the API server
+        # refuses it as a duplicate value first. (A core Pod only warns; the
+        # class's Kyverno rule refuses that one.)
+        ("on, standard: the egress mode from a source", ON, "create", mutate(standard, egress_mode(None), lambda t: env(t).append(
+            {"name": "CODEWIRE_VM_EGRESS_MODE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}})), EGRESS_MODE),
+        ("on, environment: a Kata broker template with an egress mode", ON, "create", mutate(env_broker, lambda t: env(t).append(
+            {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), EGRESS_MODE),
     ]
+
+
+def env(t: dict) -> list[dict]:
+    return container(t, "workspace")["env"]
+
+
+def egress_mode(value: str | None) -> Callable[[dict], object]:
+    """Sets the workspace container's egress mode, or removes it with None."""
+    def change(t: dict) -> None:
+        kept = [e for e in env(t) if e["name"] != "CODEWIRE_VM_EGRESS_MODE"]
+        if value is not None:
+            kept.append({"name": "CODEWIRE_VM_EGRESS_MODE", "value": value})
+        container(t, "workspace")["env"] = kept
+    return change
 
 
 def sandbox_update(cluster: "Cluster", before: dict[str, str], after: dict[str, str]) -> str | None:

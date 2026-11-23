@@ -104,6 +104,14 @@ pub const POD_RUNTIME_DOCKER_DISK_MIB_ENV: &str = "CODEWIRE_VM_DOCKER_DISK_MIB";
 pub const POD_RUNTIME_VM_STATE_ENV: &str = "CODEWIRE_VM_STATE";
 pub const POD_RUNTIME_VM_STATE_NEW: &str = "new";
 pub const POD_RUNTIME_VM_STATE_EXISTING: &str = "existing";
+/// How the guest's workload reaches the network (#5602): `guest-carried`, its
+/// own network session with only the platform peers and its daemon's
+/// self-check, or `broker`, hosted broker mode inside the VM. Fixed in the
+/// Pod spec at creation; the runtime refuses any other value, and the binding
+/// listener waives the self-check only for `broker`.
+pub const POD_RUNTIME_EGRESS_MODE_ENV: &str = "CODEWIRE_VM_EGRESS_MODE";
+pub const POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED: &str = "guest-carried";
+pub const POD_RUNTIME_EGRESS_MODE_BROKER: &str = "broker";
 /// What the workspace container's first process is (#5638): `systemd`, or
 /// `image` for the image's own entrypoint. Every `standard` Pod carries it,
 /// and the runtime refuses any other value, a missing or empty one included.

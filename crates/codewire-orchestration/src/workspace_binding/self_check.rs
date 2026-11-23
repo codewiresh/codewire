@@ -9,6 +9,8 @@ use std::net::SocketAddrV4;
 
 use serde_json::Value;
 
+use codewire_daemon_proto::{POD_RUNTIME_EGRESS_MODE_BROKER, POD_RUNTIME_EGRESS_MODE_ENV};
+
 use super::service::BindError;
 use crate::runtime::MemberFacts;
 use crate::sandbox::template::RUNTIME_CLASS_STANDARD;
@@ -27,34 +29,55 @@ pub(crate) struct Probe<'a> {
     pub refused: bool,
 }
 
-/// Whether `member` is a `standard` Pod, from its own spec. A Pod read
-/// without its spec can't show its class, so it is refused rather than taken
-/// for one that needs no check.
-pub(crate) fn standard_pod(member: &MemberFacts) -> Result<bool, BindError> {
+/// Whether `member` must carry a passing check: a `standard` Pod whose guest
+/// carries its own network session. Both come from the Pod's own spec as the
+/// API server returned it, never from the request: its runtime class, and its
+/// `workspace` container's literal [`POD_RUNTIME_EGRESS_MODE_ENV`]. Only
+/// `broker` waives the check, since broker mode's stream is checked by
+/// cw-egress's lockdown check (#5800) as on Kata; any other value, none, one
+/// from a source, or more than one entry needs it. A Pod read without its spec can't show either, so
+/// it is refused rather than taken for one that needs no check.
+pub(crate) fn needs_self_check(member: &MemberFacts) -> Result<bool, BindError> {
     if !member.has_spec {
         return Err(BindError::FailedPrecondition);
     }
-    Ok(member
+    if member
         .spec_json
         .get("runtimeClassName")
         .and_then(Value::as_str)
-        == Some(RUNTIME_CLASS_STANDARD))
+        != Some(RUNTIME_CLASS_STANDARD)
+    {
+        return Ok(false);
+    }
+    // A container gets the last of duplicate entries, so only one entry can
+    // say which mode runs; admission refuses duplicates, but this does not
+    // rest on it.
+    let modes: Vec<_> = member
+        .containers
+        .iter()
+        .filter(|container| container.name == "workspace")
+        .flat_map(|container| &container.env)
+        .filter(|variable| variable.name == POD_RUNTIME_EGRESS_MODE_ENV)
+        .collect();
+    let broker = matches!(modes.as_slice(), [mode]
+        if !mode.from_source && mode.value.as_deref() == Some(POD_RUNTIME_EGRESS_MODE_BROKER));
+    Ok(!broker)
 }
 
-/// Whether a Pod may record its host key with `check`. A `standard` Pod
-/// needs a passing check: without one, or with any probe that found a way
-/// out, its key is refused. Any other Pod's daemon never runs one, so a
-/// check from it is refused as malformed. A check out of its bounds is
-/// refused before it is read.
-pub(crate) fn admit(standard: bool, check: Option<&[Probe<'_>]>) -> Result<(), BindError> {
+/// Whether a Pod may record its host key with `check`. A Pod that
+/// [`needs_self_check`] needs a passing one: without it, or with any probe
+/// that found a way out, its key is refused. Any other Pod's daemon never
+/// runs one, so a check from it is refused as malformed. A check out of its
+/// bounds is refused before it is read.
+pub(crate) fn admit(required: bool, check: Option<&[Probe<'_>]>) -> Result<(), BindError> {
     let Some(probes) = check else {
-        return if standard {
+        return if required {
             Err(BindError::FailedPrecondition)
         } else {
             Ok(())
         };
     };
-    if !standard {
+    if !required {
         return Err(BindError::InvalidArgument);
     }
     if probes.len() > MAX_PROBES
@@ -183,8 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn a_pod_read_without_its_spec_is_refused_and_its_class_is_its_own() {
-        use k8s_openapi::api::core::v1::{Pod, PodSpec};
+    fn only_a_broker_mode_standard_pod_or_another_class_goes_without_a_check() {
+        use k8s_openapi::api::core::v1::{Container, EnvVar, EnvVarSource, Pod, PodSpec};
 
         let facts = |spec: Option<PodSpec>| {
             crate::runtime::kubernetes::observation::member_facts(&Pod {
@@ -193,20 +216,99 @@ mod tests {
             })
             .unwrap()
         };
+        let pod = |class: Option<&str>, container: &str, mode: Option<EnvVar>| PodSpec {
+            runtime_class_name: class.map(Into::into),
+            containers: vec![Container {
+                name: container.into(),
+                env: mode.map(|mode| vec![mode]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mode = |value: &str| {
+            Some(EnvVar {
+                name: "CODEWIRE_VM_EGRESS_MODE".into(),
+                value: Some(value.into()),
+                ..Default::default()
+            })
+        };
+        let needs = |spec| needs_self_check(&facts(Some(spec)));
         assert_eq!(
-            standard_pod(&facts(None)),
+            needs_self_check(&facts(None)),
             Err(BindError::FailedPrecondition)
         );
-        assert_eq!(standard_pod(&facts(Some(PodSpec::default()))), Ok(false));
-        let standard = PodSpec {
-            runtime_class_name: Some("standard".into()),
-            ..Default::default()
-        };
-        assert_eq!(standard_pod(&facts(Some(standard))), Ok(true));
-        let commodity = PodSpec {
-            runtime_class_name: Some("commodity".into()),
-            ..Default::default()
-        };
-        assert_eq!(standard_pod(&facts(Some(commodity))), Ok(false));
+        for (case, spec, needed) in [
+            ("no class", pod(None, "workspace", None), false),
+            (
+                "commodity",
+                pod(Some("commodity"), "workspace", None),
+                false,
+            ),
+            (
+                "commodity, broker",
+                pod(Some("commodity"), "workspace", mode("broker")),
+                false,
+            ),
+            (
+                "standard, broker",
+                pod(Some("standard"), "workspace", mode("broker")),
+                false,
+            ),
+            (
+                "standard, guest-carried",
+                pod(Some("standard"), "workspace", mode("guest-carried")),
+                true,
+            ),
+            (
+                "standard, no mode",
+                pod(Some("standard"), "workspace", None),
+                true,
+            ),
+            (
+                "standard, another mode",
+                pod(Some("standard"), "workspace", mode("open")),
+                true,
+            ),
+            (
+                "standard, broker on another container",
+                pod(Some("standard"), "sidecar", mode("broker")),
+                true,
+            ),
+            (
+                "standard, broker from a source",
+                pod(
+                    Some("standard"),
+                    "workspace",
+                    Some(EnvVar {
+                        name: "CODEWIRE_VM_EGRESS_MODE".into(),
+                        value_from: Some(EnvVarSource::default()),
+                        ..Default::default()
+                    }),
+                ),
+                true,
+            ),
+        ] {
+            assert_eq!(needs(spec), Ok(needed), "{case}");
+        }
+        // Duplicates: the container would run the last one, so neither order
+        // waives the check, nor do two brokers.
+        for values in [
+            ["broker", "guest-carried"],
+            ["guest-carried", "broker"],
+            ["broker", "broker"],
+        ] {
+            let mut spec = pod(Some("standard"), "workspace", None);
+            spec.containers[0].env = Some(
+                values
+                    .iter()
+                    .map(|value| EnvVar {
+                        name: "CODEWIRE_VM_EGRESS_MODE".into(),
+                        value: Some((*value).into()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+            assert_eq!(needs(spec), Ok(true), "{values:?}");
+        }
     }
 }

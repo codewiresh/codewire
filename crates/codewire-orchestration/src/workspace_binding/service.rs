@@ -468,8 +468,8 @@ impl WorkspaceBindingState {
         still_valid(&bound.caller.identity)?;
         // #5602: a standard Pod's key, and so its access_ready, waits on its
         // guest's passing egress self-check.
-        let standard = self_check::standard_pod(&bound.caller.member)?;
-        self_check::admit(standard, self_check)?;
+        let required = self_check::needs_self_check(&bound.caller.member)?;
+        self_check::admit(required, self_check)?;
         let recorded = self
             .store
             .record_host_key(

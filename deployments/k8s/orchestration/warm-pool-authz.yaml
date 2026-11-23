@@ -750,6 +750,18 @@ spec:
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
         (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
       message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
+    # codewire#5602: CODEWIRE_VM_EGRESS_MODE is how a `standard` Pod's runtime
+    # chooses broker mode inside the VM or the guest's own network session,
+    # and the binding listener waives the guest's self-check only for
+    # `broker`. Only a standard environment template's workspace container
+    # sets it, once, to exactly guest-carried or broker, and every one does.
+    - expression: >-
+        variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
+        variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
+        e.value in ['guest-carried', 'broker'])) &&
+        (!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container, once, to guest-carried or broker, and every standard environment template sets it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

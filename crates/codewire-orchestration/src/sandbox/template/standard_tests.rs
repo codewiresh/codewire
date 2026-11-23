@@ -196,6 +196,8 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
         ("CODEWIRE_VM_DOCKER_DISK_MIB", "7347"),
         // Until its daemon's first bind is answered.
         ("CODEWIRE_VM_STATE", "new"),
+        // Until broker mode runs inside the VM.
+        ("CODEWIRE_VM_EGRESS_MODE", "guest-carried"),
         ("CODEWIRE_WORKSPACE_IMAGE", WORKSPACE_IMAGE),
         // The disk holds the workspace image, which has no systemd.
         ("CODEWIRE_WORKSPACE_INIT", "image"),

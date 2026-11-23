@@ -434,6 +434,13 @@ HOSTED_EGRESS_FRAGMENTS = [
     # TUN init under `standard`.
     "expression: variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
     "variables.pod.runtimeClassName == 'standard' name: standardEnvironment",
+    # codewire#5602: the egress mode is a standard environment template's own,
+    # literal, one of two values, and always present on one.
+    "variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' || "
+    "variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) && "
+    "e.value in ['guest-carried', 'broker'])) && "
+    "(!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) && "
+    "c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))",
     # A broker-mode workspace always has its stream and binding addresses.
     "variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0))",
     # The netstack is the only resolver.

@@ -96,3 +96,55 @@ async fn a_pod_read_without_its_spec_records_no_key() {
     assert!(record(&fixture, Some(&passing())).await.is_err());
     assert!(!recorded(&fixture));
 }
+
+/// A `standard` Pod as the renderer makes it with hosted egress on: the broker
+/// label, and its `workspace` container's egress mode.
+fn standard_pod_in(mode: &str) -> Pod {
+    let mut pod = standard_pod();
+    pod.metadata
+        .labels
+        .get_or_insert_with(Default::default)
+        .insert("codewire.sh/egress".into(), "broker".into());
+    pod.spec.as_mut().unwrap().containers = vec![k8s_openapi::api::core::v1::Container {
+        name: "workspace".into(),
+        env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
+            name: "CODEWIRE_VM_EGRESS_MODE".into(),
+            value: Some(mode.into()),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    }];
+    pod
+}
+
+#[tokio::test]
+async fn a_broker_mode_standard_pod_records_its_key_without_a_check_and_is_refused_one() {
+    let fixture = on(standard_pod_in("broker"));
+    assert_eq!(record(&fixture, None).await, Ok(()));
+    assert!(recorded(&fixture));
+
+    let fixture = on(standard_pod_in("broker"));
+    assert_eq!(
+        record(&fixture, Some(&passing())).await,
+        Err(BindError::InvalidArgument)
+    );
+    assert!(!recorded(&fixture));
+}
+
+#[tokio::test]
+async fn the_broker_label_alone_never_waives_a_standard_pods_check() {
+    // Every standard Pod carries the broker label while hosted egress is
+    // on; only its egress mode says whether broker mode runs in the VM.
+    for mode in ["guest-carried", "", "open"] {
+        let fixture = on(standard_pod_in(mode));
+        assert_eq!(
+            record(&fixture, None).await,
+            Err(BindError::FailedPrecondition),
+            "{mode}"
+        );
+        assert!(!recorded(&fixture), "{mode}");
+
+        let fixture = on(standard_pod_in(mode));
+        assert_eq!(record(&fixture, Some(&passing())).await, Ok(()), "{mode}");
+    }
+}

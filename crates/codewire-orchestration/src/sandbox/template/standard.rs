@@ -9,7 +9,8 @@ use std::net::SocketAddrV4;
 use serde_json::{Map, Value, json};
 
 use codewire_daemon_proto::{
-    POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
+    POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_EGRESS_MODE_ENV,
+    POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED, POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
     POD_RUNTIME_IMAGE_DISK_ID_ENV, POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV,
     POD_RUNTIME_PLATFORM_PEERS_ENV, POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH,
     POD_RUNTIME_VCPUS_ENV, POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING,
@@ -369,6 +370,12 @@ fn settings(
         (
             POD_RUNTIME_VM_STATE_ENV,
             POD_RUNTIME_VM_STATE_NEW.to_owned(),
+        ),
+        // Broker mode inside the VM is not built yet: the guest carries its
+        // own network session, checked by its daemon's self-check.
+        (
+            POD_RUNTIME_EGRESS_MODE_ENV,
+            POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED.to_owned(),
         ),
         (
             POD_RUNTIME_WORKSPACE_IMAGE_ENV,
