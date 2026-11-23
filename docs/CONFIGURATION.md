@@ -295,8 +295,9 @@ start), the billing leader:
 2. sets its `codewire_probe` metadata, which Stripe answers with a
    `customer.updated` event and no charge (`touch`);
 3. waits up to ten minutes for a `customer.updated` delivery recorded after the
-   touch; billing records an event only after its signature verifies
-   (`delivery`);
+   touch that Stripe, asked by the event's id, reports as the sentinel's with
+   this touch's probe; billing records an event only after its signature
+   verifies, and another customer's update doesn't count (`delivery`);
 4. posts one event signed with a wrong secret to its own webhook route and
    expects 400 (`forged`).
 

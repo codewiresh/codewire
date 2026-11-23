@@ -10,8 +10,10 @@
 //! 2. **touch:** set its `codewire_probe` metadata, which Stripe answers with
 //!    a `customer.updated` event and no charge;
 //! 3. **delivery:** within [`DELIVERY_WAIT`], see a `customer.updated` row in
-//!    `stripe_webhook_events` recorded after the touch: billing records an
-//!    event only after verifying its signature;
+//!    `stripe_webhook_events` recorded after the touch whose event, read back
+//!    from Stripe, is the sentinel's and carries this touch's probe. Billing
+//!    records an event only after verifying its signature, and another
+//!    customer's update in the same minutes proves nothing (#4862);
 //! 4. **forged:** post one event signed with a wrong secret to billing's own
 //!    webhook route and get 400.
 //!
@@ -22,6 +24,7 @@
 //! sentinel customer the check reports `disabled`: a deployment opts in by
 //! creating one (infra's checked-in helper does, for Production).
 
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -136,17 +139,35 @@ fn publish(report: &Report) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(report.clone());
 }
 
-/// Whether a sentinel event reached billing's webhook after `since`, a
-/// database time from the same clock that stamps the rows.
-pub async fn delivered_since(pool: &PgPool, since: NaiveDateTime) -> sqlx::Result<bool> {
+/// The ids of the `customer.updated` events billing's webhook recorded after
+/// `since`, a database time from the same clock that stamps the rows, oldest
+/// first. Any customer's update is one; [`is_this_touch`] picks the
+/// sentinel's.
+pub async fn customer_updates_since(
+    pool: &PgPool,
+    since: NaiveDateTime,
+) -> sqlx::Result<Vec<String>> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM stripe_webhook_events \
-          WHERE event_type = $1 AND processed_at >= $2)",
+        "SELECT id FROM stripe_webhook_events \
+          WHERE event_type = $1 AND processed_at >= $2 \
+          ORDER BY processed_at, id LIMIT 100",
     )
     .bind(DELIVERY_SENTINEL_EVENT)
     .bind(since)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
+}
+
+/// Whether an event Stripe reports about `customer` with `event_probe` is
+/// this run's touch: the sentinel, carrying the probe this run set. Another
+/// customer's update, or the sentinel's from an earlier run, is not.
+pub fn is_this_touch(
+    customer: &str,
+    event_probe: Option<&str>,
+    sentinel: &str,
+    probe: &str,
+) -> bool {
+    customer == sentinel && event_probe == Some(probe)
 }
 
 /// Posts one event signed with a wrong secret to `webhook_url`; `Ok` with
@@ -229,10 +250,28 @@ async fn check(stripe: &StripeHandle, pool: &PgPool, webhook_url: &str) -> Repor
         return Report::degraded(Some(&sentinel), Step::Touch, error.to_string());
     }
     let deadline = tokio::time::Instant::now() + DELIVERY_WAIT;
-    loop {
-        match delivered_since(pool, since).await {
-            Ok(true) => break,
-            Ok(false) => {}
+    let mut read_back = HashSet::new();
+    'wait: loop {
+        match customer_updates_since(pool, since).await {
+            Ok(ids) => {
+                for id in ids {
+                    if read_back.contains(&id) {
+                        continue;
+                    }
+                    match stripe.customer_event_probe(&id).await {
+                        Ok((customer, event_probe)) => {
+                            if is_this_touch(&customer, event_probe.as_deref(), &sentinel, &probe) {
+                                break 'wait;
+                            }
+                            read_back.insert(id);
+                        }
+                        // Read it again at the next poll.
+                        Err(error) => {
+                            tracing::warn!(event = %id, error = %error, "billing: Stripe webhook delivery check could not read an event back");
+                        }
+                    }
+                }
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "billing: Stripe webhook delivery check could not read deliveries");
             }
@@ -242,7 +281,7 @@ async fn check(stripe: &StripeHandle, pool: &PgPool, webhook_url: &str) -> Repor
                 Some(&sentinel),
                 Step::Delivery,
                 format!(
-                    "no {DELIVERY_SENTINEL_EVENT} delivery recorded within {}s of the touch",
+                    "no {DELIVERY_SENTINEL_EVENT} delivery of the sentinel's touch recorded within {}s",
                     DELIVERY_WAIT.as_secs()
                 ),
             );

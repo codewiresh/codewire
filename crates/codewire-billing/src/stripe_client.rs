@@ -722,6 +722,24 @@ struct WebhookEndpointList {
     has_more: bool,
 }
 
+/// What [`StripeHandle::customer_event_probe`] reads of a `customer.updated`
+/// event: its customer's id and metadata.
+#[derive(miniserde::Deserialize)]
+struct CustomerEvent {
+    data: CustomerEventData,
+}
+
+#[derive(miniserde::Deserialize)]
+struct CustomerEventData {
+    object: CustomerEventObject,
+}
+
+#[derive(miniserde::Deserialize)]
+struct CustomerEventObject {
+    id: String,
+    metadata: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(serde::Serialize)]
 struct WebhookEndpointListParams {
     limit: u8,
@@ -788,6 +806,37 @@ impl StripeHandle {
             .await
             .map_err(stripe_err)?;
         Ok(())
+    }
+
+    /// The customer a `customer.updated` event is about and the
+    /// `codewire_probe` it carries, read back from Stripe by the event's id.
+    /// The delivery check takes a recorded event as its own touch only when
+    /// both match (#4862).
+    pub async fn customer_event_probe(
+        &self,
+        event_id: &str,
+    ) -> Result<(String, Option<String>), AppError> {
+        // The id comes from a verified delivery; refuse anything that would
+        // change the request's path rather than name one event.
+        if event_id.is_empty()
+            || !event_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(AppError::InternalMsg(
+                format!("not a Stripe event id: {event_id:?}").into(),
+            ));
+        }
+        let mut event: CustomerEvent =
+            RequestBuilder::new(StripeMethod::Get, format!("/events/{event_id}"))
+                .customize()
+                .send(self.client()?)
+                .await
+                .map_err(stripe_err)?;
+        Ok((
+            event.data.object.id,
+            event.data.object.metadata.remove("codewire_probe"),
+        ))
     }
 
     /// Every webhook endpoint of the account. More than one page is an

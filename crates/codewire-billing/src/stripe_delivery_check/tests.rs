@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::post;
 
 use super::*;
@@ -71,23 +72,19 @@ async fn record(pool: &PgPool, id: &str, event_type: &str, ago_seconds: f64) {
     .unwrap();
 }
 
-/// `delivered_since`, narrowed to this test's rows: other tests may record
-/// sentinel events too.
-async fn seen(pool: &PgPool, since: NaiveDateTime, prefix: &str) -> bool {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM stripe_webhook_events \
-          WHERE event_type = $1 AND processed_at >= $2 AND id LIKE $3)",
-    )
-    .bind(DELIVERY_SENTINEL_EVENT)
-    .bind(since)
-    .bind(format!("{prefix}%"))
-    .fetch_one(pool)
-    .await
-    .unwrap()
+/// `customer_updates_since`, narrowed to this test's rows: other tests may
+/// record customer events too.
+async fn seen(pool: &PgPool, since: NaiveDateTime, prefix: &str) -> Vec<String> {
+    customer_updates_since(pool, since)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|id| id.starts_with(prefix))
+        .collect()
 }
 
 #[tokio::test]
-async fn db_only_a_sentinel_event_recorded_after_the_touch_counts() {
+async fn db_only_customer_events_recorded_after_the_touch_are_read_back() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL unset; skipping the delivery check database flow");
         return;
@@ -113,7 +110,7 @@ async fn db_only_a_sentinel_event_recorded_after_the_touch_counts() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(!seen(&pool, since, &prefix).await);
+    assert!(seen(&pool, since, &prefix).await.is_empty());
 
     record(
         &pool,
@@ -122,12 +119,91 @@ async fn db_only_a_sentinel_event_recorded_after_the_touch_counts() {
         0.0,
     )
     .await;
-    assert!(seen(&pool, since, &prefix).await);
-    assert!(delivered_since(&pool, since).await.unwrap());
+    assert_eq!(
+        seen(&pool, since, &prefix).await,
+        [format!("{prefix}_after")]
+    );
 
     sqlx::query("DELETE FROM stripe_webhook_events WHERE id LIKE $1")
         .bind(format!("{prefix}%"))
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[test]
+fn only_the_sentinel_carrying_this_runs_probe_is_the_touch() {
+    assert!(is_this_touch(
+        "cus_sentinel",
+        Some("probe-1"),
+        "cus_sentinel",
+        "probe-1"
+    ));
+    // Another customer's update in the same minutes, even with the same
+    // metadata, proves nothing about the sentinel's round trip (#4862).
+    assert!(!is_this_touch(
+        "cus_other",
+        Some("probe-1"),
+        "cus_sentinel",
+        "probe-1"
+    ));
+    // The sentinel's update from an earlier run, or one without a probe.
+    assert!(!is_this_touch(
+        "cus_sentinel",
+        Some("probe-0"),
+        "cus_sentinel",
+        "probe-1"
+    ));
+    assert!(!is_this_touch(
+        "cus_sentinel",
+        None,
+        "cus_sentinel",
+        "probe-1"
+    ));
+}
+
+/// Serves Stripe's event retrieval for one event about `customer`; any other
+/// path is not found.
+async fn stripe_with_event(
+    event_id: &'static str,
+    customer: &'static str,
+    probe: &'static str,
+) -> String {
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| async move {
+        if uri.path() != format!("/v1/events/{event_id}") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        axum::Json(serde_json::json!({
+            "id": event_id, "object": "event", "type": DELIVERY_SENTINEL_EVENT,
+            "data": {"object": {"id": customer, "object": "customer",
+                                "metadata": {"codewire_probe": probe, "codewire_sentinel": "delivery"}}}
+        }))
+        .into_response()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn a_recorded_event_is_read_back_as_its_customer_and_probe() {
+    let stripe =
+        StripeHandle::for_test(&stripe_with_event("evt_other_1", "cus_other", "probe-1").await);
+    let (customer, probe) = stripe.customer_event_probe("evt_other_1").await.unwrap();
+    assert_eq!(
+        (customer.as_str(), probe.as_deref()),
+        ("cus_other", Some("probe-1"))
+    );
+    assert!(!is_this_touch(
+        &customer,
+        probe.as_deref(),
+        "cus_sentinel",
+        "probe-1"
+    ));
+
+    // An id that would change the request's path is refused before any call.
+    for id in ["", "evt_1/../customers", "evt 1", "evt_1?expand=x"] {
+        assert!(stripe.customer_event_probe(id).await.is_err(), "{id:?}");
+    }
 }
