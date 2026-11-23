@@ -43,9 +43,10 @@ cases="$(python3 -I -B "$BUILDER" "$GOLDENS" "$work/policy.yaml" "$REGISTRY" "$w
 for name in pass-warm-pool-sandboxtemplate pass-warm-pool-subfolder-sandboxtemplate \
   pass-identity-free-sandboxtemplate pass-confidential-sandboxtemplate \
   pass-warm-pool-broker-sandboxtemplate pass-environment-broker-sandboxtemplate \
-  pass-confidential-broker-sandboxtemplate \
+  pass-confidential-broker-sandboxtemplate pass-standard-sandboxtemplate \
   deny-mount-registry deny-mount-renamed deny-mount-script deny-runc deny-dind-digest \
-  deny-privileged-workspace deny-privileged-init-numeric-name deny-devnet-disk; do
+  deny-privileged-workspace deny-privileged-init-numeric-name deny-devnet-disk \
+  deny-standard-disk-writable deny-standard-two-kvm; do
   grep -qw -- "$name" <<<"$cases" || fail "the builder made no $name case"
 done
 # The numeric-name control is the warm-pool Pod plus mount-workspace's copy named 1.
@@ -76,6 +77,24 @@ for pod in (deny, good):
     pod["metadata"]["name"] = ""
     pod["spec"]["volumes"] = [v for v in pod["spec"]["volumes"] if v["name"] != "egress-devnet"]
 assert deny == good, "deny-devnet-disk differs from the broker Pod beyond its device volume"
+# The standard controls are its Pod with only the disk mount or the device
+# count changed, and its image disk names the hosted registry.
+good = json.loads((pods / "pass-standard-sandboxtemplate.json").read_text())
+[disk] = [v for v in good["spec"]["volumes"] if "image" in v]
+assert disk["image"]["reference"].startswith("registry.example.com/codewire/workspace-disk@sha256:"), disk
+for name, path, value in (
+    ("deny-standard-disk-writable", ("volumeMounts", disk["name"], "readOnly"), False),
+    ("deny-standard-two-kvm", ("resources", "limits", "codewire.sh/kvm"), "2"),
+):
+    deny = json.loads((pods / f"{name}.json").read_text())
+    expected = json.loads(json.dumps(good))
+    workspace = expected["spec"]["containers"][0]
+    if path[0] == "volumeMounts":
+        next(m for m in workspace["volumeMounts"] if m["name"] == path[1])[path[2]] = value
+    else:
+        workspace[path[0]][path[1]][path[2]] = value
+    deny["metadata"]["name"] = expected["metadata"]["name"] = ""
+    assert deny == expected, f"{name} differs from the standard Pod beyond its one change"
 PY
 python3 -I - "$work/pods" "$REGISTRY" <<'PY'
 import json, pathlib, re, sys
@@ -125,6 +144,13 @@ python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/
   fail 'a broker golden without its TUN device volume was accepted'
 grep -q 'warm-pool-broker-sandboxtemplate has 0 egress-devnet volumes, not one; a tree from before #5667 needs main merged' \
   "$work/err" || fail 'a broker golden without its TUN device volume is not named'
+# A tree from before the standard profile (#5602): its golden is missing, and
+# the refusal says to merge main.
+rm "$work/goldens/standard-sandboxtemplate.golden.json"
+python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/no-standard" 2>"$work/err" &&
+  fail 'a tree without the standard golden was accepted'
+grep -q 'missing hosted SandboxTemplate goldens: standard-sandboxtemplate; a tree from before a golden was added needs main merged' \
+  "$work/err" || fail 'the missing standard golden is not named'
 # A golden committed as a symlink names a file outside the tree: refused, not read.
 mkdir "$work/linked"
 cp "$GOLDENS"/*sandboxtemplate*.golden.json "$work/linked/"

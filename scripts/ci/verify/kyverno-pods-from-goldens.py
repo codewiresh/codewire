@@ -43,10 +43,11 @@ HOSTED = (
     "warm-pool-broker-sandboxtemplate",
     "environment-broker-sandboxtemplate",
     "confidential-broker-sandboxtemplate",
+    # Codewire's own VM runtime in the Pod (#5602).
+    "standard-sandboxtemplate",
 )
-# Templates the shared policy refuses: local Kind's runc one, and the
-# `standard` profile's until the hosted policy admits its class (#5602).
-LOCAL_ONLY = ("identity-free-sandboxtemplate-runc", "standard-sandboxtemplate")
+# Rendered for local Kind only (runc), which the shared policy refuses.
+LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
 PLACEHOLDER_REGISTRY = "registry.example.invalid/"
 # A host, with an optional port and no scheme or path.
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$")
@@ -97,6 +98,10 @@ def pod(golden: dict, name: str, dind: dict[str, str], registry: str) -> dict:
     for key in ("initContainers", "containers"):
         for container in spec.get(key, []):
             container["image"] = real_image(container["image"], dind, registry)
+    # The standard profile's image disk is an image volume the policy pins.
+    for volume in spec.get("volumes", []):
+        if "image" in volume and "reference" in volume["image"]:
+            volume["image"]["reference"] = real_image(volume["image"]["reference"], dind, registry)
     metadata = copy.deepcopy(template.get("metadata") or {})
     metadata.update(name=name, namespace="dev-sandboxes")
     # The agent-sandbox controller adds this label to every member Pod.
@@ -145,7 +150,8 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
         raise Refused(f"unclassified SandboxTemplate goldens: {', '.join(unknown)}")
     missing = sorted(set(HOSTED) - set(templates))
     if missing:
-        raise Refused(f"missing hosted SandboxTemplate goldens: {', '.join(missing)}")
+        raise Refused(f"missing hosted SandboxTemplate goldens: {', '.join(missing)}; "
+                      "a tree from before a golden was added needs main merged")
 
     def load(stem: str) -> dict:
         return json.loads(read_golden(goldens / f"{stem}.golden.json"))
@@ -191,6 +197,28 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
         devnet[0]["emptyDir"] = {}
 
     mutated("deny-devnet-disk", disk_backed, "warm-pool-broker-sandboxtemplate")
+
+    # #5602: the standard Pod's image disk mounted writable, and a second
+    # KVM device. The Pod is otherwise exactly its golden.
+    def standard_workspace(case: dict) -> dict:
+        workspace = container(case, "workspace")
+        if "codewire.sh/kvm" not in workspace.get("resources", {}).get("limits", {}):
+            raise Refused("standard-sandboxtemplate's workspace takes no codewire.sh/kvm; "
+                          "a tree from before #5602 needs main merged")
+        return workspace
+
+    def writable_disk(case: dict) -> None:
+        disks = {volume["name"] for volume in case["spec"].get("volumes", []) if "image" in volume}
+        mounts = [mount for mount in standard_workspace(case).get("volumeMounts", []) if mount["name"] in disks]
+        if len(mounts) != 1:
+            raise Refused(f"standard-sandboxtemplate mounts {len(mounts)} image volumes, not one; "
+                          "a tree from before #5602 needs main merged")
+        mounts[0]["readOnly"] = False
+
+    mutated("deny-standard-disk-writable", writable_disk, "standard-sandboxtemplate")
+    mutated("deny-standard-two-kvm",
+            lambda case: standard_workspace(case)["resources"]["limits"].update({"codewire.sh/kvm": "2"}),
+            "standard-sandboxtemplate")
     return built
 
 
