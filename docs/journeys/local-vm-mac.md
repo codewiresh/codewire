@@ -8,11 +8,11 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-22.
+Updated 2026-11-23.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
-| `mac-vm-lifecycle` | observed on v0.4.22; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
+| `mac-vm-lifecycle` | observed on v0.4.22; a lost egress broker on v0.4.31; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
@@ -84,8 +84,7 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   `after-restart` and an uptime under a minute. After a lost egress broker,
   `cw --local info` reads `Error: egress_broker_exit` with the broker's exit
   status and its name, such as `exited 72: egress_broker_protocol` (#4953).
-  `cw --local daemon logs` shows the same in its `# exit` part (not yet
-  observed).
+  `cw --local daemon logs` shows the same in its `# exit` part.
 - **Gotchas:**
   - A first create with the default workspace image pulls about a minute of
     layers; a slow pull is not a failure.
@@ -139,6 +138,14 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
     `after-restart` with an uptime of 0 minutes; `rm` worked. A v0.4.21
     create pulled the image in 221-277 s. Commands and outputs:
     #4370, comment 112323.
+  - macOS 27.2.1, released v0.4.31, 2026-11-23, in a scratch `HOME`, a VM
+    with no profile, its egress broker killed by SIGKILL (#4953):
+    `cw --local info` read `Error: egress_broker_exit (ended by signal 9)`,
+    its JSON `"runner_exit": {"signal": 9, "status": null}`, and
+    `cw --local daemon logs` showed `# exit` then `egress_broker_exit:
+    ended by signal 9`. `cw --local stop` took 3 s and `cw --local start`
+    4 s; after them the guest's `curl https://example.com/` answered 200 and
+    the error was gone. A VM with a credential profile was not walked.
 
 ## 2. `mac-vm-refused-start`: a VM macOS refuses to start says so
 
