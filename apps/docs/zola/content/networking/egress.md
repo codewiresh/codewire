@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-11-21
+updated: 2026-11-23
 weight: 3
 ---
 
@@ -52,7 +52,7 @@ Choose it when you create the VM with `cw create --local --policy web-only`,
 or name it in the project's `codewire.yaml` as `network: {policy: web-only}`.
 An explicit `--policy` wins over the file. The file only names a policy, so a
 cloned repository cannot widen its own egress; a hosted create refuses a file
-that names one until hosted sandboxes can select a policy.
+that names one. To select a hosted policy, use `--policy` as shown below.
 `cw policy allow` and `cw policy rm` change a policy, and `cw policy delete`
 removes one no environment selects. If the worker or the broker stops, the
 environment fails closed (`error`) until you stop and start it.
@@ -100,10 +100,8 @@ local VMs once, a VM that was already running keeps using the GitHub
 connection as before the update, and a VM you start under a policy that does
 not allow GitHub gets none of its profile's credentials and says so.
 
-**A hosted sandbox** may reach the public Internet; private, loopback,
-link-local and carrier-grade NAT ranges are excluded. Your organization can
-keep network policies on the platform, with the same rules and words as on
-your computer, on a deployment that has them switched on:
+**A hosted sandbox** can use an organization network policy. On deployments
+with hosted policies enabled, create a policy and select it for a sandbox:
 
 ```sh
 cw --cloud policy create web-only --allow github.com
@@ -111,10 +109,14 @@ cw --cloud create --policy web-only
 cw --cloud policy ls
 ```
 
-They are stored, not enforced yet: a hosted sandbox can still reach anything
-public whatever it selects, and each command says so. `cw info` shows a
-sandbox's policy and whether it's enforced. A sandbox that selects nothing has
-`hosted-default`. `cw --local policy` and `cw --cloud policy` are two stores:
+Run `cw info NAME` to see the selected policy and its enforcement status
+for that sandbox. An enforced policy applies its destination rules. If the
+status is `Not enforced`, selecting the policy alone does not block traffic
+to unlisted public destinations. The platform still excludes private,
+loopback, link-local and carrier-grade NAT ranges. A sandbox that selects
+no policy has `hosted-default`.
+
+`cw --local policy` and `cw --cloud policy` are two stores:
 the same name in both is two policies, and `cw policy` with neither uses this
 computer's.
 

@@ -12,7 +12,7 @@ and pricing fixtures at desktop and mobile widths, in light and dark themes.
 
 | Step | Expected behavior | Observation |
 | --- | --- | --- |
-| Inspect Sign up and Request access on the homepage | Both have fully rounded ends; labels, focus outlines and links remain usable | Local Chromium review and fixture focus/contrast checks passed at desktop/mobile widths in both themes, 2026-11-17 |
+| Inspect the navigation and closing Request cloud access links on the homepage | Both have fully rounded ends; labels, focus outlines and links remain usable | Local Chromium review and fixture focus/contrast checks passed at desktop/mobile widths in both themes, 2026-11-17 |
 | Switch Independent to Mesh and back | The track and both selections have fully rounded ends; the selected fill is inset from the track; one `aria-pressed` value is true, and the diagram caption follows it | Observed in the local Rust application at both widths and themes, 2026-11-17 |
 | Change the isolation selection | It uses the same rounded track and selection treatment without hiding its focus outline | Hypervisor/Confidential selection switched in the local application; fixture focus checks passed, 2026-11-17 |
 | Change pricing sizes and billing periods | The selected pills remain clear; all presets fit on mobile; the displayed cost changes with the selection | Observed 8 vCPU preset and month selection updating the cost at 390px in the local application; both-width/theme fixture checks passed, 2026-11-17 |

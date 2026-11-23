@@ -9,8 +9,8 @@ proved by [local-vm-credentials-smoke.md](local-vm-credentials-smoke.md) and
 
 ## safety-01: the two panels explain themselves
 
-- **Entry point:** the homepage, "Not just a VM. Guardrails for your agent.",
-  between the hero and Sessions.
+- **Entry point:** the homepage, "Choose what your agent can access.",
+  between the hero and Compatible tools.
 - **States to exercise:** light and dark themes; 1440, 1024, 901, 768, 390
   and 320 pixels wide; reduced motion; JavaScript disabled.
 - **Driving it:** serve the real homepage with `make web` and open it at each
@@ -32,8 +32,8 @@ proved by [local-vm-credentials-smoke.md](local-vm-credentials-smoke.md) and
   strings are made up. The refusal line follows `cw policy check` in the
   [egress policies](../../apps/docs/zola/content/networking/egress.md)
   documentation; if that wording changes, this section changes with it. The
-  section says hosted sandboxes store a network policy without enforcing it
-  yet; remove that sentence when hosted enforcement ships.
+  caption identifies the local example and points readers to `cw info NAME`
+  for a hosted sandbox’s policy and enforcement status.
 
 These are observations of the real Rust homepage served locally with the
 `make web` settings, driven by headless Chromium, plus the design fixture's

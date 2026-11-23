@@ -56,6 +56,10 @@
   --fs-body:  15px;                     /* body text, tables, navigation */
   --fs-lead:  18px;                     /* paragraphs of copy */
   --fs-d1: clamp(26px, 3.1vw, 48px);    /* the hero statement */
+  --fs-opening-headline: min(1.6em, 10.8cqw);
+  --fs-opening-subhead: .8em;
+  --lh-opening-subhead: 1.18;
+  --opening-subhead-gap: 1em;
   --fs-d2: clamp(40px, 6.4vw, 104px);   /* section headlines */
   --fs-d3: clamp(52px, 10vw, 170px);    /* closing statements */
   --fs-code: clamp(var(--fs-small), 1.25vw, var(--fs-body));
@@ -219,7 +223,10 @@ body.blurbox .panel .panel, body.blurbox .box.nobg { -webkit-backdrop-filter: no
 .hero .idx { grid-column: 1 / 3; margin: 0; }   /* clear of the headline, which starts at the third column */
 .lede { transform: translate(calc(var(--lede-c) * var(--pitch)), calc(var(--lede-y) + var(--lede-fit))); grid-column: 3 / 9; margin: 0; font: 500 var(--fs-d1)/var(--lh-d1) var(--f-sans); line-height: var(--lh-d1-snap); letter-spacing: var(--track-d1); text-wrap: balance; }
 .lede span { color: var(--grey); }
-.hero .lede span { display: block; font-weight: 400; }   /* the homepage's second line, its own line and lighter than the first */
+[data-route="home"] .hero .lede { container-type: inline-size; }
+.cw-opening-headline { display: block; font-size: var(--fs-opening-headline); line-height: var(--lh-none); font-weight: inherit; }
+.hero .lede span { display: block; font-weight: 400; }
+.hero .cw-opening-headline + span { margin-top: var(--opening-subhead-gap); font-size: var(--fs-opening-subhead); line-height: var(--lh-opening-subhead); }
 .getrow { position: relative; z-index: 1; margin-top: var(--space-xl); }
 .getrow .getbox { grid-column: 4 / 10; }   /* centred under the headline, the same six columns a column to the right */
 /* the beta sticker: a silver holographic security label wrapped over the left edge of the page, as if the page were the box.

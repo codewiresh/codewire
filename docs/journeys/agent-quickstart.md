@@ -1,11 +1,11 @@
 # Agent-friendly first sandbox
 
-The homepage offers a copyable setup prompt above its manual install command.
+The homepage offers a copyable install prompt above its manual install command.
 It preserves the registration marks, grid and frosted surface. The supported
 agent marks use the foreground color with muted 1px circular outlines in both
 themes; Codex uses the OpenAI knot. Agent names sit below the marks, with the
 no-account note to their right.
-Read the setup prompt sits under Copy prompt. Text actions use pills.
+Read the install prompt sits under Copy install prompt. Text actions use pills.
 
 The quickstart begins with plain prompt text and a Copy prompt button in its
 upper right. A complete human walkthrough follows: install, optional Git
@@ -18,6 +18,7 @@ example source or copied prompts.
 
 | Step | Expected behavior | Observation |
 | --- | --- | --- |
+| Read the headline, then copy the install prompt | “Sandboxes for” and “agents and humans.” occupy one line each. The prompt installs the CLI, verifies it, and asks where to run the first sandbox | Chromium on the editable fixture at 320, 390, 760, 901, 1024 and 1440 pixels in both themes. Each headline line fits, the subhead gap is one em, and both copy controls write the expected text, 2026-11-23 |
 | Inspect the overlapping agent icon outlines in both themes | Each icon keeps its foreground color with a muted 1px outline in light and dark mode | Local Rust homepage: all seven borders measure 1px at 35% opacity, while icon color and opacity remain unchanged in both themes, 2026-11-17 |
 | Open homepage at desktop and mobile widths in both themes | Grid, registration marks and frost remain; readable agent marks; no horizontal overflow | Observed in the local Rust application, Chromium, 1440px and 390px, light and dark, 2026-11-17 |
 | Copy setup prompt and install command | Exact text reaches clipboard; control shows Copied then returns to its normal label; failure remains retryable | Exact clipboard text and Copied observed on both pages; fallback, failure, retry and label reset also observed at 320px, 2026-11-17 |

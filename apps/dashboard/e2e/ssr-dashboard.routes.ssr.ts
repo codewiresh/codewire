@@ -36,7 +36,7 @@ test.describe("homepage", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Codewire" })).toBeVisible();
     await expect(page.locator("script:not([src]), style")).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Blog" })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Request access" })).toHaveAttribute("href", "/signup");
+    await expect(page.locator("#end").getByRole("link", { name: "Request cloud access" })).toHaveAttribute("href", "/signup");
     expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
     await page.waitForLoadState("networkidle");
     expect(errors).toEqual([]);
@@ -86,10 +86,10 @@ test.describe("homepage", () => {
     const page = await context.newPage();
     try {
       await page.goto("/");
-      for (const name of [/^Every session in its own VM/, "Sandboxes everywhere.", "Choose your isolation.", "Take hold."]) {
+      for (const name of ["Size each sandbox for the task.", "Choose where your sandbox runs.", "Choose your isolation.", "Run your first sandbox."]) {
         await expect(page.getByRole("heading", { name })).toBeVisible();
       }
-      await expect(page.getByRole("link", { name: "Request access" })).toHaveAttribute("href", "/signup");
+      await expect(page.locator("#end").getByRole("link", { name: "Request cloud access" })).toHaveAttribute("href", "/signup");
     } finally {
       await context.close();
     }

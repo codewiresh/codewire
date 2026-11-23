@@ -85,6 +85,14 @@ Sign-in, sign-up and the other account pages sit on plain black
 share `routes/auth.css`. `login-preview.html` is the same sign-in reached from
 the private-preview redirect: only its title and one fixed context line differ.
 
+## Homepage opening
+
+The opening headline reads “Sandboxes for agents and humans.” The line break
+after “for” holds at phone and desktop widths. The subhead follows one
+subhead em below. The install prompt verifies the CLI, then lets the reader
+choose a local or hosted sandbox. The homepage labels hosted signup “Request
+cloud access”. The acceptance journey is `docs/journeys/agent-quickstart.md`.
+
 ## Compatible tools
 
 The homepage's “Compatible with your tools” section links to the existing Rex
@@ -98,8 +106,8 @@ The acceptance journey is `docs/journeys/tool-compatibility.md`.
 
 ## Safety panels
 
-The homepage's Safety section, "Not just a VM. Guardrails for your agent.",
-sits before Sessions. Two frosted panels share one row grid, so they are the
+The homepage's Safety section, "Choose what your agent can access.",
+sits between the install prompt and Compatible tools. Two frosted panels share one row grid, so they are the
 same height side by side, and stack at 900 pixels and below. All values shown
 are made up.
 
@@ -119,7 +127,7 @@ are made up.
   Without JavaScript the same markup is a still picture: one request before
   and after the boundary, and the five steps as a list.
 - The copy follows the documentation: a local VM enforces its network policy,
-  a hosted sandbox stores one without enforcing it yet, and keeping a key
+  a hosted sandbox reports its enforcement status in `cw info`, and keeping a key
   outside the VM is a different guarantee from egress control.
 
 `public.js` reads the section's markup; `cargo test -p codewire-dashboard-web`
