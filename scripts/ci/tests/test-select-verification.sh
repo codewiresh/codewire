@@ -1888,6 +1888,11 @@ run_paths_case runtime_transport_smokes pull_request refs/pull/3827/head false \
   scripts/runtime/dev/smoke-dev-transport-matrix.sh \
   scripts/runtime/dev/smoke-dev-candidate.sh \
   scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
+# The continuity Sandbox's ensure script runs inside Dev acceptance (#6095).
+run_paths_case runtime_continuity_sandbox pull_request refs/pull/6095/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/ensure-continuity-sandbox.sh \
+  scripts/runtime/tests/test-ensure-continuity-sandbox.sh
 run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/prove-dev-workspace-binding.sh \

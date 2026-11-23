@@ -49,6 +49,10 @@ Updated 2026-11-23.
   command as the synthetic Dev identity. On Production, the smoke identity
   (`scripts/runtime/prod/with-prod-smoke-auth.sh`) may create, inspect and
   remove only its own sandboxes.
+- The Dev smoke identity keeps one bound (Pod-scope) continuity Sandbox
+  running, named in deploy's `settings/dev.env`; Dev acceptance reads its Pod
+  before and after each delivery and fails the delivery that replaced it
+  (#6095). Never remove it in a walk.
 - Record `cw version` and the source the surface was running with every
   observation. On Dev, check that the orchestration image matches the
   services digest in the deploy repository's Dev `release.json` and that its

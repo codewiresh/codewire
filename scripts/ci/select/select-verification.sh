@@ -2159,6 +2159,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/smoke-dev-transport-matrix.sh|\
       scripts/runtime/dev/smoke-dev-candidate.sh|\
       scripts/runtime/tests/test-smoke-dev-transport-matrix.sh|\
+      scripts/runtime/dev/ensure-continuity-sandbox.sh|\
+      scripts/runtime/tests/test-ensure-continuity-sandbox.sh|\
       scripts/runtime/dev/prove-dev-workspace-binding.sh|\
       scripts/runtime/tests/test-workspace-binding-proof.sh|\
       scripts/runtime/dev/prove-dev-warm-pools.sh|\
