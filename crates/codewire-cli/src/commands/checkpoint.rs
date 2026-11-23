@@ -256,7 +256,10 @@ async fn handle_local_checkpoint_command(
             let environment = client
                 .restore_checkpoint_observed(&checkpoint.name, &source, account, &mut |_| {})
                 .await
-                .map_err(status("checkpoint restore"))?;
+                .map_err(|error| {
+                    locked_restore_failure(&source, &error)
+                        .unwrap_or_else(|| status("checkpoint restore")(error))
+                })?;
             let restored = restoring.elapsed();
             match args.output {
                 OutputFormat::Json => print_json(&serde_json::json!({
@@ -341,6 +344,24 @@ pub(super) fn refuse_unrestorable(checkpoint: &v1::Checkpoint, verb: &str) -> an
         ),
         format!("cw --local checkpoint rm {name}"),
     ))
+}
+
+/// A restore whose VM failed to start while this Mac is locked names the
+/// lock (#5976): macOS releases the saved state's key only while the Mac is
+/// unlocked, and the failed restore leaves the source in error until it is
+/// stopped. A lock before the restore is refused up front by the supervisor.
+fn locked_restore_failure(source: &str, status: &tonic::Status) -> Option<anyhow::Error> {
+    let vm_failed = codewire_local_vmm::supervisor_client::operation_error_code(status)
+        == Some("start_vmm_start_failed");
+    (vm_failed && codewire_local_vmm::console_lock::screen_locked()).then(|| {
+        let source = terminal_text(source);
+        crate::error_report::with_next_step(
+            anyhow::anyhow!(
+                "checkpoint restore: this Mac locked during the restore, and a VM checkpoint restores only while it is unlocked; unlock it, stop {source} and restore again"
+            ),
+            format!("cw --local stop {source}"),
+        )
+    })
 }
 
 fn print_warnings(checkpoint: &v1::Checkpoint) {

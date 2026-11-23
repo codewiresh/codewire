@@ -16,13 +16,15 @@ format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-22. Cloud capture, management and a three-way fork are
+Updated 2026-11-23. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
 are not observed. VM checkpoints are observed on a Mac and on Linux with
 development builds of #4654's branch (2026-11-21), and on a Mac with released
-`v0.4.28` (2026-11-22). On a locked Mac a restore or fork fails and leaves the
-VM in `error`; the refusal that replaces it is not yet built (#5976).
+`v0.4.28` (2026-11-22). On a locked Mac a restore or fork is refused before
+the source stops or a fork is made, and once the Mac is unlocked the same
+commands work, observed with a development build of #5976's branch
+(2026-11-22 and 2026-11-23).
 
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
@@ -33,8 +35,8 @@ VM in `error`; the refusal that replaces it is not yet built (#5976).
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
 | `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on a Mac with `v0.4.28`, 2026-11-22 | does not apply |
-| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; a running source observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal not yet built (#5976) | does not apply |
-| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal not yet built (#5976) | does not apply |
+| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; a running source observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal observed with a development build of #5976's branch, 2026-11-22 | does not apply |
+| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal observed with a development build of #5976's branch, 2026-11-22 | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -486,7 +488,7 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - another CPU: refused; on a Mac, another hardware model, or another macOS
     build ("a VM checkpoint restores only on the macOS build it was taken
     on");
-  - on a Mac with the screen locked (#5976, not yet built): refused before
+  - on a Mac with the screen locked (#5976): refused before
     the source stops, saying the Mac must be unlocked to restore a VM
     checkpoint and to unlock it and run the command again; the source is
     left as it was. If the Mac locks during a restore, the error names the
@@ -545,6 +547,15 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     stop 9.64 s, restore 12.87 s, total 22.51 s"; the marker read `before`
     and the ticker started before the checkpoint counted on from 17. The
     second, `again`, restored in 8.87 s with its marker.
+  - A local VM on macOS 27.2.1, `cw` and runtime from 940910dd83 (#5976),
+    2026-11-22, the Mac locked: `cw checkpoint restore before --yes` of the
+    running ck printed "Checkpoint restore: stop: VM checkpoint before cannot
+    be restored while this Mac is locked: unlock it and run the command
+    again". ck stayed running, its marker `after` and its ticker counting on
+    from 312 to 317. Once the Mac was unlocked, on 2026-11-23, the same
+    command restored it: "Restored ck to VM checkpoint before: stop
+    10.36 s, restore 15.88 s, total 26.25 s"; the marker read `before` and
+    the ticker counted on from 4.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -556,7 +567,7 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - the fork's first command, right after the create (#4651);
   - the checkpoint removed after the fork: the fork keeps running;
   - on a Mac, the same refusals as `ckpt-restore` for another hardware model
-    or macOS build, and for a locked screen (#5976, not yet built): no fork
+    or macOS build, and for a locked screen (#5976): no fork
     is made.
 - **Driving it:**
 
@@ -593,6 +604,14 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     `before` and the ticker at 17, still running as PID 14; its machine-id
     differed from ck's; after `cw checkpoint rm before` its ticker kept
     counting.
+  - A local VM on macOS 27.2.1, `cw` and runtime from 940910dd83 (#5976),
+    2026-11-22, the Mac locked: `cw create --local --checkpoint before --name
+    ck-fork` printed "Create ck-fork failed: VM checkpoint before cannot be
+    forked while this Mac is locked: unlock it and run the command again";
+    no ck-fork was made and ck kept running. Once the Mac was unlocked, on
+    2026-11-23, the same command printed "Created ck-fork from VM checkpoint
+    before in 15.3 s"; its first command read the marker `before` and the
+    ticker at 4.
 
 ## `snap-dashboard`: the Snapshots page
 

@@ -9,6 +9,7 @@ use crate::state::{CHECKPOINT_OUT_PREFIX, CHECKPOINT_VMM_FILES, CHECKPOINTS_DIRE
 
 mod host;
 mod proto;
+pub(in crate::supervisor) use host::require_unlocked;
 use host::{CLONING_FILESYSTEMS, pinned_vmm, require_same_host, synced_store_warning};
 pub(in crate::supervisor) use host::{host_identity, read_vmm_files};
 pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
@@ -272,9 +273,10 @@ fn checkpoint_name(environment: &str, requested: &str) -> Result<String, Status>
 /// whose payload names the checkpoint. The source must be stopped.
 /// Everything a restore requires of a VM checkpoint and its source,
 /// other than the source being stopped: the same workspace, resources,
-/// host, platform account, runtime and VMM build, and stored
-/// files that still match the manifest. A restore runs it, and so does a
-/// Stop for a restore before it discards the guest's state (#3046).
+/// host, platform account, runtime and VMM build, stored files that still
+/// match the manifest, and on a Mac, its screen unlocked. A restore runs
+/// it, and so does a Stop for a restore before it discards the guest's
+/// state (#3046).
 #[allow(clippy::too_many_arguments)]
 async fn admit_restorable(
     supervisor: &Supervisor,
@@ -338,6 +340,7 @@ async fn admit_restorable(
         )));
     }
     require_same_host(&row.name, &checkpoint.host)?;
+    require_unlocked(&row.name, "restored")?;
     let fresh = PlatformAccount::from_proto(account)?;
     if let (Some(recorded), Some(fresh)) = (manifest.platform_account.as_ref(), fresh.as_ref())
         && recorded != fresh

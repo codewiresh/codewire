@@ -20,6 +20,7 @@ pub mod ch_api;
 pub mod cloud_hypervisor;
 #[cfg(target_os = "linux")]
 mod cloud_hypervisor_restore;
+pub mod console_lock;
 pub mod control;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod cw_runtime;

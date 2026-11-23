@@ -223,6 +223,21 @@ pub(in crate::supervisor) fn require_same_host(
     }
 }
 
+/// A Mac restores or forks a VM checkpoint only while it is unlocked: macOS
+/// releases the key that protects the saved state only then (#5976). It is
+/// refused before the source stops or a fork is made, so nothing changes.
+pub(in crate::supervisor) fn require_unlocked(
+    checkpoint_name: &str,
+    verb: &str,
+) -> Result<(), Status> {
+    if crate::console_lock::screen_locked() {
+        return Err(Status::failed_precondition(format!(
+            "VM checkpoint {checkpoint_name} cannot be {verb} while this Mac is locked: unlock it and run the command again"
+        )));
+    }
+    Ok(())
+}
+
 /// A Linux checkpoint taken under another host kernel restores, and says so.
 #[cfg(target_os = "linux")]
 pub(in crate::supervisor) fn host_warning(recorded: &HostIdentity) -> Option<String> {

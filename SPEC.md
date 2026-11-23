@@ -280,7 +280,7 @@ only.
   taken on (#4654). A Mac restores or forks one only while it is unlocked,
   because macOS protects the saved state with a key it releases only then; on
   a locked Mac both are refused before the source stops or a fork is made
-  (#5976, not yet built). Hosted sandboxes have none.
+  (#5976). Hosted sandboxes have none.
 
 ## 3. Components
 
