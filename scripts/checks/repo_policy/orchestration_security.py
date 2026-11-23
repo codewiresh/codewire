@@ -390,13 +390,13 @@ SANDBOX_BROKER_WRITER_VARIABLES = ("broker", "wasBroker", "wholeBroker", "wasWho
 # member policy holds what a move adds to every check the template policy's
 # broker arm applies, from one source. Its validations that start with this
 # gate are the template policy's broker rules, each whole, in order: every
-# template rule that reads the switch, but for the pool's own (gated on the
-# name) and the one that reads a template's network policy, which a Sandbox
-# has none of. Every variable those rules read is the template's, verbatim,
+# template rule that reads the switch or sets CODEWIRE_VM_EGRESS_MODE
+# (codewire#6033), but for the pool's own (gated on the name) and the one
+# that reads a template's network policy, which a Sandbox has none of. Every variable those rules read is the template's, verbatim,
 # but for these, which a Sandbox decides for itself; its `broker` reads the
 # same label (SANDBOX_PRE_SWITCH).
 MEMBER_BROKER_SHAPE_GATE = "!variables.addsBroker || ( "
-MEMBER_BROKER_SHAPE_RULES = 8
+MEMBER_BROKER_SHAPE_RULES = 9
 # The whole broker shape: the label, the fence revision annotation, and the
 # TUN init or a standard VM. It must match hollow_broker_mode
 # (crates/codewire-orchestration/src/sandbox/client/egress_migration.rs),
@@ -466,7 +466,7 @@ def template_broker_rules(template: str) -> list[dict[str, str]]:
     return [
         item for item in policy_items(template, "validations")
         if not item["expression"].startswith("variables.environmentTemplate ||")
-        and "variables.hostedEgress" in item["expression"]
+        and ("variables.hostedEgress" in item["expression"] or "'CODEWIRE_VM_EGRESS_MODE'" in item["expression"])
         and "object.spec.networkPolicy" not in item["expression"]
     ]
 
@@ -2143,6 +2143,9 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_MEMBER_POLICY, "&& !variables.wasWholeBroker", ""),
             (WARM_POOL_MEMBER_POLICY, "variables.wholeBroker && !variables.wasWholeBroker", "variables.broker && !variables.wasBroker"),
             (WARM_POOL_MEMBER_POLICY, "variables.volumes.all(v, !has(v.hostPath))", "true"),
+            # ... the CODEWIRE_VM_EGRESS_MODE rule included (codewire#6033).
+            (WARM_POOL_MEMBER_POLICY, "e.value in ['guest-carried', 'broker']", "e.value in ['guest-carried', 'broker', 'direct']"),
+            (WARM_POOL_MEMBER_POLICY, "c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')", "true"),
             (WARM_POOL_MEMBER_POLICY, "variables.pod.dnsConfig.nameservers == ['192.0.2.1']", "true"),
             (WARM_POOL_MEMBER_POLICY, "variables.pod.runtimeClassName == 'standard'", "true"),
             (WARM_POOL_MEMBER_POLICY, "expression: \"false\"", "expression: \"true\""),

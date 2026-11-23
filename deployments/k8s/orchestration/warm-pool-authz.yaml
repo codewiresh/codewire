@@ -1119,6 +1119,17 @@ spec:
         params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']
         )
       message: with hosted egress on, a broker-mode Pod carries the fence revision the switch names in codewire.sh/egress-fence-revision
+    # codewire#6033: a move is held to the template policy's
+    # CODEWIRE_VM_EGRESS_MODE rule too, which reads no switch.
+    - expression: >-
+        !variables.addsBroker || (
+        variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
+        variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
+        e.value in ['guest-carried', 'broker'])) &&
+        (!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
+        )
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container, once, to guest-carried or broker, and every standard environment template sets it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

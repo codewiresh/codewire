@@ -596,6 +596,14 @@ def move_cases(cluster: "Cluster", env_today: dict, env_broker: dict, pool_today
         ("on, Sandbox: a pool-born one moved while running", pool_born_sandbox(pool_today) | {"spec": dict(
             pool_born_sandbox(pool_today)["spec"], operatingMode="Running")},
          move_to(env_broker, onto_own_template), ON, AS, AS, MOVE),
+        # codewire#6033: a move is held to the CODEWIRE_VM_EGRESS_MODE rule:
+        # only a standard environment's workspace container sets it.
+        ("on, Sandbox: a move that sets CODEWIRE_VM_EGRESS_MODE on the DinD container", moved_sandbox(env_today),
+         move_to(env_broker, lambda s: container(s, "dind").setdefault("env", []).append(
+             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, AS, EGRESS_MODE),
+        ("on, Sandbox: a commodity move that sets CODEWIRE_VM_EGRESS_MODE on its workspace", moved_sandbox(env_today),
+         move_to(env_broker, lambda s: container(s, "workspace").setdefault("env", []).append(
+             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, AS, EGRESS_MODE),
         # A move keeps the runtime class: never commodity to standard.
         ("on, Sandbox: a commodity one moved to the whole shape under standard", moved_sandbox(env_today),
          move_to(env_broker, setting(pod, "runtimeClassName", "standard")), ON, AS, AS, CLASS),
