@@ -460,7 +460,12 @@ detail; this section states the contract.
   `destroyed`, `archived`, `resized`) that the orchestration worker reconciles
   through Temporal. Every Start re-pins the Sandbox's daemon to the configured
   support image, except for confidential Sandboxes, whose attested Pod policy
-  admits exactly the containers they were rendered with.
+  admits exactly the containers they were rendered with. A new workflow run
+  keeps the operation generation, so it doesn't restart a running Sandbox,
+  when Temporal describes the run holding it as closed, with any close
+  status; that run's activities still executing are then refused, because
+  the generation's claim no longer names their run
+  ([docs/dev/ORCHESTRATION-FENCING.md](docs/dev/ORCHESTRATION-FENCING.md)).
 - **A release never restarts a running Sandbox through its credentials**
   (#6005). The runtime's reserved environment names are part of every
   credential selection's digest, and they are kept as append-only versions.

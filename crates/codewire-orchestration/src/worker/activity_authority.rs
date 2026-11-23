@@ -8,9 +8,11 @@
 use std::future::Future;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use sqlx::postgres::{PgArguments, PgQueryResult};
 use sqlx::query::Query;
 use sqlx::{PgPool, Postgres, Transaction};
+use temporalio_common::protos::temporal::api::enums::v1::WorkflowExecutionStatus;
 
 const AUTHORITY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const EXTERNAL_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,6 +38,64 @@ pub struct ActivityAuthority {
     environment_id: String,
     desired_state: String,
     operation_generation: i64,
+    /// The run the generation's claim row named at capture. A run that takes
+    /// the generation over renames the row, so every check compares it as
+    /// well as the generation (#6103). `None` only where no claim row exists
+    /// for the generation.
+    claim_run: Option<String>,
+}
+
+/// An environment's lifecycle intent and the run its current generation's
+/// claim row names, read together.
+#[derive(sqlx::FromRow)]
+struct CurrentAuthority {
+    desired_state: String,
+    state: String,
+    generation: i64,
+    claim_run: Option<String>,
+}
+
+async fn read_current(pool: &PgPool, environment_id: &str) -> anyhow::Result<CurrentAuthority> {
+    sqlx::query_as::<_, CurrentAuthority>(
+        "SELECT e.desired_state, e.state, e.environment_operation_generation AS generation,
+                c.workflow_run_id AS claim_run
+           FROM environments e
+           LEFT JOIN environment_operation_generation_claims c
+             ON c.environment_id = e.id
+            AND c.generation = e.environment_operation_generation
+          WHERE e.id = $1",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AuthorityLost.into())
+}
+
+/// Locks the claim row of `generation` `FOR SHARE` and requires it still to
+/// name `claim_run`, the run an authority was captured for (#6103). A run
+/// that takes the generation over renames the row under `FOR UPDATE`, so a
+/// write guarded by this check commits before the takeover or is refused
+/// after it. The claim row is locked before the environment row, the order
+/// the takeover takes them in.
+pub(crate) async fn lock_claim_run(
+    tx: &mut Transaction<'_, Postgres>,
+    environment_id: &str,
+    generation: i64,
+    claim_run: Option<&str>,
+) -> anyhow::Result<()> {
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT workflow_run_id FROM environment_operation_generation_claims
+          WHERE environment_id = $1 AND generation = $2
+          FOR SHARE",
+    )
+    .bind(environment_id)
+    .bind(generation)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if current.as_deref() != claim_run {
+        return Err(AuthorityLost.into());
+    }
+    Ok(())
 }
 
 /// A short-lived environment-row lock held across one external mutation.
@@ -68,7 +128,9 @@ impl ActivityAuthority {
     /// Capture the currently committed intent for an environment activity.
     ///
     /// The generation is required and must exactly match the current durable
-    /// generation. A hard-deleted row is ordinary authority loss.
+    /// generation. A hard-deleted row is ordinary authority loss. The run
+    /// holding the generation's claim at capture is pinned with it, so a
+    /// caller outside a workflow run is fenced by a takeover too.
     pub async fn capture(
         pool: &PgPool,
         environment_id: &str,
@@ -77,25 +139,34 @@ impl ActivityAuthority {
         if operation_generation <= 0 {
             return Err(AuthorityLost.into());
         }
-        let current: Option<(String, i64)> = sqlx::query_as(
-            "SELECT desired_state, environment_operation_generation
-               FROM environments WHERE id = $1",
-        )
-        .bind(environment_id)
-        .fetch_optional(pool)
-        .await?;
-        let Some((desired_state, current_generation)) = current else {
-            return Err(AuthorityLost.into());
-        };
-        if operation_generation != current_generation {
+        let current = read_current(pool, environment_id).await?;
+        if operation_generation != current.generation {
             return Err(AuthorityLost.into());
         }
         Ok(Self {
             pool: pool.clone(),
             environment_id: environment_id.to_string(),
-            desired_state,
+            desired_state: current.desired_state,
             operation_generation,
+            claim_run: current.claim_run,
         })
+    }
+
+    /// As [`Self::capture`], for an activity of run `workflow_run_id`: the
+    /// generation's claim row must name that run (#6103). An activity still
+    /// executing for a run whose generation another run has taken over is
+    /// refused here and at every later check.
+    pub async fn capture_for_run(
+        pool: &PgPool,
+        environment_id: &str,
+        operation_generation: i64,
+        workflow_run_id: &str,
+    ) -> anyhow::Result<Self> {
+        let authority = Self::capture(pool, environment_id, operation_generation).await?;
+        if authority.claim_run.as_deref() != Some(workflow_run_id) {
+            return Err(AuthorityLost.into());
+        }
+        Ok(authority)
     }
 
     /// Capture authority only when the command still matches its required
@@ -130,6 +201,30 @@ impl ActivityAuthority {
         self.operation_generation
     }
 
+    /// The run the generation's claim row named at capture.
+    pub fn claim_run(&self) -> Option<&str> {
+        self.claim_run.as_deref()
+    }
+
+    /// Whether `current` still carries this authority's intent, generation
+    /// and claim run.
+    fn holds(&self, current: &CurrentAuthority) -> bool {
+        current.desired_state == self.desired_state
+            && current.generation == self.operation_generation
+            && current.claim_run == self.claim_run
+    }
+
+    /// Locks this authority's claim row, as [`lock_claim_run`] does.
+    async fn lock_claim(&self, tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<()> {
+        lock_claim_run(
+            tx,
+            &self.environment_id,
+            self.operation_generation,
+            self.claim_run.as_deref(),
+        )
+        .await
+    }
+
     /// Claim the next workflow-execution generation before any environment
     /// activity is dispatched for the run.
     pub async fn claim(
@@ -138,7 +233,7 @@ impl ActivityAuthority {
         workflow_run_id: &str,
         scheduled_at_unix_nanos: i64,
     ) -> anyhow::Result<i64> {
-        Self::claim_continued(
+        Self::claim_taking_over(
             pool,
             environment_id,
             workflow_run_id,
@@ -148,21 +243,80 @@ impl ActivityAuthority {
         .await
     }
 
-    /// As [`Self::claim`], for a run that may have continued as new
-    /// (#5950). `continued_from` is the run Temporal reports this one
-    /// continued from, and reports as continued-as-new; it never comes from a
-    /// command. When that run holds the current generation's claim and was
-    /// scheduled earlier, this run takes the claim over, once, and keeps the
-    /// generation: a continued run is the same long-lived workflow, so its
-    /// Sandbox's binding, daemon and credential bridge stay current. Anything
-    /// else claims as a new run does.
-    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
-    pub async fn claim_continued(
+    /// As [`Self::claim`], after asking Temporal about the run that holds the
+    /// current generation (#6103). `read_status` reads that run's status:
+    /// `Ok(None)` when Temporal has no record of it, an error when the read
+    /// failed. A failed read claims nothing and returns the error, so the
+    /// claim activity retries; it never moves the generation. A holder that
+    /// Temporal describes as closed hands its generation on through
+    /// [`Self::claim_taking_over`]; any other holder is replaced as a new run
+    /// replaces it.
+    pub async fn claim_after_holder<R, F>(
         pool: &PgPool,
         environment_id: &str,
         workflow_run_id: &str,
         scheduled_at_unix_nanos: i64,
-        continued_from: Option<&str>,
+        read_status: R,
+    ) -> anyhow::Result<i64>
+    where
+        R: FnOnce(String) -> F,
+        F: Future<Output = anyhow::Result<Option<WorkflowExecutionStatus>>>,
+    {
+        let closed_holder =
+            match Self::current_holder(pool, environment_id, workflow_run_id).await? {
+                Some(holder) => {
+                    let status = read_status(holder.clone())
+                        .await
+                        .context("read the run that holds the current generation")?;
+                    is_closed(status).then_some(holder)
+                }
+                None => None,
+            };
+        Self::claim_taking_over(
+            pool,
+            environment_id,
+            workflow_run_id,
+            scheduled_at_unix_nanos,
+            closed_holder.as_deref(),
+        )
+        .await
+    }
+
+    /// The run named by the current generation's claim row, when that is a
+    /// run other than `workflow_run_id`.
+    async fn current_holder(
+        pool: &PgPool,
+        environment_id: &str,
+        workflow_run_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT c.workflow_run_id
+               FROM environments e
+               JOIN environment_operation_generation_claims c
+                 ON c.environment_id = e.id
+                AND c.generation = e.environment_operation_generation
+              WHERE e.id = $1 AND c.workflow_run_id <> $2",
+        )
+        .bind(environment_id)
+        .bind(workflow_run_id)
+        .fetch_optional(pool)
+        .await?)
+    }
+
+    /// As [`Self::claim`], taking over `closed_holder`'s claim (#5950,
+    /// #6103). `closed_holder` is a run Temporal describes as closed; it
+    /// never comes from a command. When it holds the current
+    /// generation's claim row and was scheduled earlier, this run takes the
+    /// row over, once, and keeps the generation, so a running credentialed
+    /// Sandbox's binding, daemon and credential bridge stay current. Anything
+    /// else claims as a new run does.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
+    pub async fn claim_taking_over(
+        pool: &PgPool,
+        environment_id: &str,
+        workflow_run_id: &str,
+        scheduled_at_unix_nanos: i64,
+        closed_holder: Option<&str>,
     ) -> anyhow::Result<i64> {
         if workflow_run_id.trim().is_empty() || scheduled_at_unix_nanos < 0 {
             return Err(AuthorityLost.into());
@@ -175,6 +329,20 @@ impl ActivityAuthority {
             },
         );
         let mut tx = pool.begin().await?;
+        let closed_holder = closed_holder.filter(|run| *run != workflow_run_id);
+        if let Some(holder) = closed_holder {
+            // The claim row first, then the environment row: the order every
+            // fenced write takes them in (`lock_claim_run`).
+            sqlx::query(
+                "SELECT 1 FROM environment_operation_generation_claims
+                  WHERE environment_id = $1 AND workflow_run_id = $2
+                  FOR UPDATE",
+            )
+            .bind(environment_id)
+            .bind(holder)
+            .execute(&mut *tx)
+            .await?;
+        }
         let current_generation: Option<i64> = sqlx::query_scalar(
             "SELECT environment_operation_generation
                FROM environments
@@ -206,9 +374,11 @@ impl ActivityAuthority {
             return Err(AuthorityLost.into());
         }
 
-        // The take-over renames the predecessor's row, so it happens once and
-        // the predecessor's own retries are fenced as a replaced run's are.
-        if let Some(predecessor) = continued_from.filter(|run| *run != workflow_run_id) {
+        // The take-over renames the holder's exact row, so it happens once,
+        // the holder's own retries and still-executing activities are fenced
+        // as a replaced run's are, and a row that changed since the holder
+        // was read matches nothing.
+        if let Some(holder) = closed_holder {
             let taken = sqlx::query(
                 "UPDATE environment_operation_generation_claims
                     SET workflow_run_id = $3, scheduled_at_unix_nanos = $4
@@ -219,11 +389,28 @@ impl ActivityAuthority {
             .bind(current_generation)
             .bind(workflow_run_id)
             .bind(scheduled_at_unix_nanos)
-            .bind(predecessor)
+            .bind(holder)
             .execute(&mut *tx)
             .await?
             .rows_affected();
             if taken == 1 {
+                // The holder's setup owner shares this generation and may
+                // share an activity id, which is a per-run sequence; this
+                // run's setup starts as a fresh owner.
+                sqlx::query(
+                    "UPDATE sandbox_environment_backend
+                        SET setup_owner_generation = NULL,
+                            setup_owner_activity_id = NULL,
+                            setup_owner_attempt = NULL,
+                            setup_owner_phase = NULL,
+                            setup_owner_status = NULL,
+                            setup_owner_pod_uid = NULL
+                      WHERE environment_id = $1 AND setup_owner_generation = $2",
+                )
+                .bind(environment_id)
+                .bind(current_generation)
+                .execute(&mut *tx)
+                .await?;
                 tx.commit().await?;
                 return Ok(current_generation);
             }
@@ -276,17 +463,8 @@ impl ActivityAuthority {
     /// Revalidate intent without taking a long-lived lock. Use this before
     /// external side effects and periodically while waiting.
     pub async fn ensure(&self) -> anyhow::Result<()> {
-        let current: Option<(String, i64)> = sqlx::query_as(
-            "SELECT desired_state, environment_operation_generation
-               FROM environments WHERE id = $1",
-        )
-        .bind(&self.environment_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((desired_state, generation)) = current else {
-            return Err(AuthorityLost.into());
-        };
-        if desired_state != self.desired_state || self.operation_generation != generation {
+        let current = read_current(&self.pool, &self.environment_id).await?;
+        if !self.holds(&current) {
             return Err(AuthorityLost.into());
         }
         Ok(())
@@ -296,28 +474,18 @@ impl ActivityAuthority {
     /// particular operation is allowed to mutate. The state predicate is what
     /// fences an older same-intent run after its replacement has progressed.
     pub async fn ensure_for_states(&self, states: &[&str]) -> anyhow::Result<()> {
-        let current: Option<(String, String, i64)> = sqlx::query_as(
-            "SELECT desired_state, state, environment_operation_generation
-               FROM environments WHERE id = $1",
-        )
-        .bind(&self.environment_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((desired_state, state, generation)) = current else {
-            return Err(AuthorityLost.into());
-        };
-        if desired_state != self.desired_state
-            || self.operation_generation != generation
-            || !states.contains(&state.as_str())
-        {
+        let current = read_current(&self.pool, &self.environment_id).await?;
+        if !self.holds(&current) || !states.contains(&current.state.as_str()) {
             return Err(AuthorityLost.into());
         }
         Ok(())
     }
 
-    /// Lock the environment row and verify authority. The lock keeps an API
-    /// intent update from racing the guarded write that follows.
+    /// Lock the claim row and the environment row and verify authority. The
+    /// locks keep a takeover or an API intent update from racing the guarded
+    /// write that follows.
     pub async fn lock_transaction(&self, tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<()> {
+        self.lock_claim(tx).await?;
         let current: Option<(String, i64)> = sqlx::query_as(
             "SELECT desired_state, environment_operation_generation
                FROM environments WHERE id = $1 FOR UPDATE",
@@ -334,13 +502,14 @@ impl ActivityAuthority {
         Ok(())
     }
 
-    /// Lock the environment row and require both the captured intent and an
-    /// operation-specific lifecycle state.
+    /// Lock the claim row and the environment row and require both the
+    /// captured authority and an operation-specific lifecycle state.
     pub async fn lock_transaction_for_states(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         states: &[&str],
     ) -> anyhow::Result<()> {
+        self.lock_claim(tx).await?;
         let current: Option<(String, String, i64)> = sqlx::query_as(
             "SELECT desired_state, state, environment_operation_generation
                FROM environments WHERE id = $1 FOR UPDATE",
@@ -372,6 +541,7 @@ impl ActivityAuthority {
         tx: &mut Transaction<'_, Postgres>,
         states: &[&str],
     ) -> anyhow::Result<()> {
+        self.lock_claim(tx).await?;
         let current: Option<(String, String, i64)> = sqlx::query_as(
             "SELECT desired_state, state, environment_operation_generation
                FROM environments WHERE id = $1 FOR NO KEY UPDATE",
@@ -498,6 +668,25 @@ impl ActivityAuthority {
     }
 }
 
+/// Whether Temporal describes a run as closed, with any close status. Only
+/// an explicit close counts: a running run, an unspecified status and a run
+/// Temporal has no record of (`None`) do not. A closed run's activities that
+/// are still executing are fenced by the claim row's run id, not by the
+/// generation (docs/dev/ORCHESTRATION-FENCING.md).
+fn is_closed(status: Option<WorkflowExecutionStatus>) -> bool {
+    matches!(
+        status,
+        Some(
+            WorkflowExecutionStatus::ContinuedAsNew
+                | WorkflowExecutionStatus::Completed
+                | WorkflowExecutionStatus::Failed
+                | WorkflowExecutionStatus::Terminated
+                | WorkflowExecutionStatus::TimedOut
+                | WorkflowExecutionStatus::Canceled
+        )
+    )
+}
+
 pub(crate) async fn await_external_mutation<F, T>(future: F) -> anyhow::Result<T>
 where
     F: Future<Output = anyhow::Result<T>>,
@@ -518,360 +707,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn external_mutation_wait_is_bounded() {
-        let result = await_external_mutation_with_timeout(
-            Duration::from_millis(5),
-            std::future::pending::<anyhow::Result<()>>(),
-        )
-        .await;
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("external mutation exceeded")
-        );
-    }
-
-    /// One running Sandbox, for a claim test.
-    async fn seed_environment(pool: &PgPool) -> String {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let user_id = format!("usr_continued_{suffix}");
-        let org_id = format!("org_continued_{suffix}");
-        let preset_id = format!("pre_continued_{suffix}");
-        let environment_id = format!("env_continued_{suffix}");
-        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
-            .bind(&user_id)
-            .bind(format!("{suffix}@continued.invalid"))
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&org_id)
-        .bind("Continued test")
-        .bind(format!("continued-{suffix}"))
-        .bind(&user_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
-             VALUES ($1, $2, $3, $4, '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
-        )
-        .bind(&preset_id)
-        .bind(&org_id)
-        .bind("Continued test")
-        .bind(format!("continued-{suffix}"))
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO environments
-                    (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
-             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
-                     '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
-        )
-        .bind(&environment_id)
-        .bind(&org_id)
-        .bind(&user_id)
-        .bind(&preset_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        environment_id
-    }
-
-    async fn generation(pool: &PgPool, environment_id: &str) -> i64 {
-        sqlx::query_scalar(
-            "SELECT environment_operation_generation FROM environments WHERE id = $1",
-        )
-        .bind(environment_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-    }
-
-    /// #5950: a run that continued as new from the current holder keeps its
-    /// generation, once, so a credentialed Sandbox's binding (captured at that
-    /// generation) stays current; every other claim is fenced as before.
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn a_continued_run_takes_over_its_predecessors_generation_once() {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
-        let pool = PgPool::connect(&database_url).await.unwrap();
-        let environment_id = seed_environment(&pool).await;
-        let claim = |run: &'static str, scheduled: i64, continued_from: Option<&'static str>| {
-            let pool = pool.clone();
-            let environment_id = environment_id.clone();
-            async move {
-                ActivityAuthority::claim_continued(
-                    &pool,
-                    &environment_id,
-                    run,
-                    scheduled,
-                    continued_from,
-                )
-                .await
-            }
-        };
-
-        assert_eq!(claim("run-a", 10, None).await.unwrap(), 1);
-        // A Sandbox bound now captures generation 1.
-        let bound_generation = generation(&pool, &environment_id).await;
-
-        // The continued run keeps it, and the environment's generation, which
-        // the binding is compared with, does not move.
-        assert_eq!(claim("run-b", 20, Some("run-a")).await.unwrap(), 1);
-        assert_eq!(generation(&pool, &environment_id).await, bound_generation);
-        // Its retry is idempotent; the predecessor's own retry is fenced.
-        assert_eq!(claim("run-b", 20, Some("run-a")).await.unwrap(), 1);
-        assert!(is_authority_lost(
-            &claim("run-a", 10, None).await.unwrap_err()
-        ));
-
-        // Once only: a second successor of the same predecessor finds the
-        // claim held by run-b and claims as a new run.
-        assert_eq!(claim("run-c", 30, Some("run-a")).await.unwrap(), 2);
-        // A predecessor that does not hold the current claim hands nothing on.
-        assert_eq!(claim("run-d", 40, Some("run-b")).await.unwrap(), 3);
-        // Nor does one scheduled later than its successor.
-        assert!(is_authority_lost(
-            &claim("run-e", 35, Some("run-d")).await.unwrap_err()
-        ));
-        // A run naming itself is no continuation.
-        assert_eq!(claim("run-f", 50, Some("run-f")).await.unwrap(), 4);
-        // Without a predecessor, a new run claims the next generation.
-        assert_eq!(claim("run-g", 60, None).await.unwrap(), 5);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn generation_claim_and_external_mutation_locking_are_fenced() {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
-        let pool = PgPool::connect(&database_url).await.unwrap();
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let user_id = format!("usr_authority_{suffix}");
-        let org_id = format!("org_authority_{suffix}");
-        let preset_id = format!("pre_authority_{suffix}");
-        let environment_id = format!("env_authority_{suffix}");
-
-        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
-            .bind(&user_id)
-            .bind(format!("{suffix}@authority.invalid"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&org_id)
-        .bind("Authority test")
-        .bind(format!("authority-{suffix}"))
-        .bind(&user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
-             VALUES ($1, $2, $3, $4, '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
-        )
-        .bind(&preset_id)
-        .bind(&org_id)
-        .bind("Authority test")
-        .bind(format!("authority-{suffix}"))
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO environments
-                    (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
-             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
-                     '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
-        )
-        .bind(&environment_id)
-        .bind(&org_id)
-        .bind(&user_id)
-        .bind(&preset_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO sandbox_environment_backend (environment_id, namespace)
-             VALUES ($1, 'authority-test')",
-        )
-        .bind(&environment_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let old = ActivityAuthority::claim(&pool, &environment_id, "run-old", 10)
-            .await
-            .unwrap();
-        assert_eq!(old, 1);
-        let old_authority = ActivityAuthority::capture(&pool, &environment_id, old)
-            .await
-            .unwrap();
-        assert_eq!(
-            ActivityAuthority::claim(&pool, &environment_id, "run-old", 10)
-                .await
-                .unwrap(),
-            old,
-            "an activity retry must reuse its workflow execution generation"
-        );
-        let mismatched_retry = ActivityAuthority::claim(&pool, &environment_id, "run-old", 11)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&mismatched_retry));
-
-        let replacement = ActivityAuthority::claim(&pool, &environment_id, "run-new", 20)
-            .await
-            .unwrap();
-        assert_eq!(replacement, 2);
-        let old_retry = ActivityAuthority::claim(&pool, &environment_id, "run-old", 10)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&old_retry));
-        let delayed_old = ActivityAuthority::claim(&pool, &environment_id, "run-delayed", 15)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&delayed_old));
-
-        let stale_backend = old_authority
-            .execute_for_states(
-                &["running"],
-                sqlx::query(
-                    "UPDATE sandbox_environment_backend SET namespace = 'stale'
-                      WHERE environment_id = $1",
-                )
-                .bind(&environment_id),
-            )
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&stale_backend));
-        let stale_state = old_authority
-            .execute_for_states(
-                &["running"],
-                sqlx::query("UPDATE environments SET error_reason = 'stale' WHERE id = $1")
-                    .bind(&environment_id),
-            )
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&stale_state));
-        let stale_log = super::super::env_log::emit_authoritative_environment_log_for_states(
-            &old_authority,
-            &["running"],
-            "stale",
-            "failed",
-            "stale",
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(is_authority_lost(&stale_log));
-        let stale_log_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM environment_logs
-              WHERE environment_id = $1 AND phase = 'stale'",
-        )
-        .bind(&environment_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(stale_log_count, 0);
-
-        let current_authority = ActivityAuthority::capture(&pool, &environment_id, replacement)
-            .await
-            .expect("current generation retains authority");
-
-        let guard = current_authority
-            .begin_external_mutation(&["running"])
-            .await
-            .unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            sqlx::query(
-                "INSERT INTO confidential_storage_keys
-                        (environment_id, kbs_uri, openbao_path, version, state)
-                 VALUES ($1, $2, $3, 1, 'provisioning')",
-            )
-            .bind(&environment_id)
-            .bind(format!(
-                "kbs:///default/codewire-workspace-luks/{environment_id}"
-            ))
-            .bind(format!("confidential-storage/{environment_id}"))
-            .execute(&pool),
-        )
-        .await
-        .expect("child foreign-key insert blocked behind its own authority guard")
-        .unwrap();
-
-        let mut competing = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL lock_timeout = '100ms'")
-            .execute(&mut *competing)
-            .await
-            .unwrap();
-        let error = sqlx::query("UPDATE environments SET desired_state = 'stopped' WHERE id = $1")
-            .bind(&environment_id)
-            .execute(&mut *competing)
-            .await
-            .unwrap_err();
-        match error {
-            sqlx::Error::Database(database) => {
-                assert_eq!(database.code().as_deref(), Some("55P03"));
-            }
-            other => panic!("expected PostgreSQL lock timeout, got {other}"),
-        }
-        competing.rollback().await.unwrap();
-        guard.commit().await.unwrap();
-
-        let stale = ActivityAuthority::capture(&pool, &environment_id, old)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&stale));
-
-        let missing_generation = ActivityAuthority::capture(&pool, &environment_id, 0)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&missing_generation));
-
-        let empty_run = ActivityAuthority::claim(&pool, &environment_id, "", 30)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&empty_run));
-
-        sqlx::query("DELETE FROM environments WHERE id = $1")
-            .bind(&environment_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let missing = ActivityAuthority::capture(&pool, &environment_id, replacement)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&missing));
-        let missing_claim = ActivityAuthority::claim(&pool, &environment_id, "run-missing", 30)
-            .await
-            .unwrap_err();
-        assert!(is_authority_lost(&missing_claim));
-        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
-            .bind(&preset_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM organizations WHERE id = $1")
-            .bind(&org_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(&user_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-}
+mod tests;

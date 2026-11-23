@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sqlx::{PgPool, Postgres, Transaction};
 
-use super::activity_authority::{ActivityAuthority, AuthorityLost};
+use super::activity_authority::{ActivityAuthority, AuthorityLost, lock_claim_run};
 use super::env_log::emit_environment_log_in_transaction;
 use super::start_timing::{since_accepted, with_since_accepted};
 
@@ -193,6 +193,9 @@ pub struct SetupPhaseAuthority {
     pool: PgPool,
     environment_id: String,
     identity: SetupActivityIdentity,
+    /// The run the generation's claim row named when the activity's
+    /// authority was captured (#6103).
+    claim_run: Option<String>,
 }
 
 impl SetupPhaseAuthority {
@@ -207,11 +210,32 @@ impl SetupPhaseAuthority {
             pool: activity_authority.pool().clone(),
             environment_id: activity_authority.environment_id().to_string(),
             identity,
+            claim_run: activity_authority.claim_run().map(str::to_owned),
         })
     }
 
     pub fn environment_id(&self) -> &str {
         &self.environment_id
+    }
+
+    /// Locks the claim row, then the setup rows, and requires this activity
+    /// to be current: its generation, its run still named by the claim row
+    /// (#6103), and running, started intent. Every guarded write runs in this
+    /// transaction, so a takeover is either before it or waits for it.
+    async fn lock_current(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> anyhow::Result<LockedSetupRow> {
+        lock_claim_run(
+            tx,
+            &self.environment_id,
+            self.identity.generation,
+            self.claim_run.as_deref(),
+        )
+        .await?;
+        let row = lock_setup_rows(tx, &self.environment_id).await?;
+        require_current(&row, &self.identity)?;
+        Ok(row)
     }
 
     pub fn identity(&self) -> &SetupActivityIdentity {
@@ -236,8 +260,7 @@ impl SetupPhaseAuthority {
     ) -> anyhow::Result<PhasePreparation> {
         let identity = &self.identity;
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         if (!allow_setup_complete && row.setup_complete) || row.setup_phase > phase {
             tx.commit().await?;
             return Ok(PhasePreparation::Ready(PhaseAcquire::AlreadyComplete(
@@ -306,8 +329,7 @@ impl SetupPhaseAuthority {
     pub async fn complete_post_start_mutation(&self, phase: i32) -> anyhow::Result<()> {
         let identity = &self.identity;
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, identity, phase)?;
         let result = sqlx::query(
             "UPDATE sandbox_environment_backend
@@ -432,8 +454,7 @@ impl SetupPhaseAuthority {
             return Err(AuthorityLost.into());
         }
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         if row.setup_phase != phase {
             return Err(AuthorityLost.into());
         }
@@ -482,8 +503,7 @@ impl SetupPhaseAuthority {
         }
         let mut tx = self.pool.begin().await?;
         set_guard_timeouts(&mut tx).await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         if row.setup_phase != phase {
             return Err(AuthorityLost.into());
         }
@@ -500,8 +520,7 @@ impl SetupPhaseAuthority {
     pub async fn ensure_active(&self, phase: i32) -> anyhow::Result<()> {
         let identity = &self.identity;
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, identity, phase)?;
         tx.commit().await?;
         Ok(())
@@ -620,8 +639,7 @@ impl SetupPhaseAuthority {
     ) -> anyhow::Result<()> {
         let identity = &self.identity;
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, identity, phase_number)?;
         emit_environment_log_in_transaction(
             &mut tx,
@@ -646,8 +664,7 @@ impl SetupPhaseAuthority {
         metadata: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, &self.identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, &self.identity, phase_number)?;
         emit_environment_log_in_transaction(
             &mut tx,
@@ -683,8 +700,7 @@ impl SetupPhaseAuthority {
 
     pub async fn set_error(&self, phase: i32, message: &str) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, &self.identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, &self.identity, phase)?;
         let result = sqlx::query(
             "UPDATE sandbox_environment_backend
@@ -721,8 +737,7 @@ impl SetupPhaseAuthority {
     ) -> anyhow::Result<Option<Duration>> {
         let accepted = since_accepted(&self.pool, &self.environment_id).await;
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, &self.identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, &self.identity, phase)?;
         emit_environment_log_in_transaction(
             &mut tx,
@@ -802,8 +817,7 @@ impl SetupPhaseAuthority {
         access: &str,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
-        let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
-        require_current(&row, &self.identity)?;
+        let row = self.lock_current(&mut tx).await?;
         require_exact_active_owner(&row, &self.identity, phase)?;
         sqlx::query(
             "INSERT INTO environment_ports (environment_id, port, label, access)

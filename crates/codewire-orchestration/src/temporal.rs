@@ -50,7 +50,7 @@ mod snapshot;
 mod worker;
 
 use activity_run::{
-    claim_authority_metadata, record_heartbeat, required_authority, run_claim_activity,
+    claim_authority_metadata, record_heartbeat, run_claim_activity,
     run_cleanup_aware_environment_activity, run_environment_activity, setup_activity_identity,
 };
 use commands::{ensure_workflow_environment, known_environment_action};
@@ -311,7 +311,7 @@ impl EnvironmentActivities {
                 generation,
             )?;
             let mut setup_completed = false;
-            if let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? {
+            if let Some(authority) = self.required_authority(&ctx, &cmd, "started").await? {
                 if host::ran(&self.wctx, &ctx, &authority, host::Step::Create).await? {
                     return Ok(ClaimAndCreateResult::Outcome {
                         operation_generation: generation,
@@ -366,7 +366,7 @@ impl EnvironmentActivities {
             &ctx,
         );
         async move {
-            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "started").await? else {
                 return Ok(());
             };
             if host::ran(&self.wctx, &ctx, &authority, host::Step::Create).await? {
@@ -401,7 +401,7 @@ impl EnvironmentActivities {
         );
         async move {
             let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "started").await? else {
                 return Ok(());
             };
             if host::ran(&self.wctx, &ctx, &authority, host::Step::Nothing).await? {
@@ -437,7 +437,7 @@ impl EnvironmentActivities {
         );
         async move {
             let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "started").await? else {
                 return Ok(());
             };
             if host::ran(
@@ -479,7 +479,7 @@ impl EnvironmentActivities {
             &ctx,
         );
         async move {
-            let Some(authority) = required_authority(&self.wctx, &cmd, "stopped").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "stopped").await? else {
                 return Ok(());
             };
             if host::ran(
@@ -520,7 +520,7 @@ impl EnvironmentActivities {
         );
         async move {
             let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "started").await? else {
                 return Ok(());
             };
             if host::ran(&self.wctx, &ctx, &authority, host::Step::Nothing).await? {
@@ -555,7 +555,7 @@ impl EnvironmentActivities {
             &ctx,
         );
         async move {
-            let Some(authority) = required_authority(&self.wctx, &cmd, "destroyed").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "destroyed").await? else {
                 return Ok(());
             };
             if host::ran(
@@ -596,7 +596,7 @@ impl EnvironmentActivities {
         );
         async move {
             let attempt = ctx.info().attempt;
-            let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
+            let Some(authority) = self.required_authority(&ctx, &cmd, "resized").await? else {
                 return Ok(());
             };
             if host::ran(
@@ -637,13 +637,7 @@ impl EnvironmentActivities {
             &ctx,
         );
         async move {
-            let authority = match ActivityAuthority::capture(
-                &self.wctx.pool,
-                &cmd.environment_id,
-                cmd.operation_generation,
-            )
-            .await
-            {
+            let authority = match self.run_authority(&ctx, &cmd).await {
                 Ok(authority) => authority,
                 Err(error) if is_authority_lost(&error) => return Ok(ReconcileOutcome::Continue),
                 Err(error) => return Err(error.into()),

@@ -20,8 +20,8 @@ is also changing.
 
 Each environment row has a monotonically increasing
 `environment_operation_generation`. One generation belongs to one workflow
-run, or to a chain of runs that continued as new from one another (below),
-not to one activity attempt. Retries of an activity in the same run keep
+run, or to a chain of runs each of which took it over from a closed run
+(below), not to one activity attempt. Retries of an activity in the same run keep
 the generation. A replacement run claims a higher one, which fences the old
 run.
 
@@ -48,39 +48,6 @@ after finishing a command, with no command queued and no handler running,
 the run continues as new with no command of its own. The workflow id stays
 the same, so the next signal reaches the new run.
 
-The new run keeps the generation (#5950). A credentialed Sandbox's daemon
-opens its credential bridge with the generation its binding captured, and
-the broker refuses one that differs from the environment's, so a new
-generation would make every running credentialed Sandbox's bootstrap stale
-and the reconcile would restart it. So the new run's first claim takes over
-its predecessor's claim row, once, and keeps the generation, when all of
-these hold (step 3 of the claim, below):
-
-- Temporal reports, in the new run's own `WorkflowExecutionStarted` event,
-  the run it continued from, and describes that run as
-  `ContinuedAsNew`. Neither comes from a command or an activity input;
-- that run holds the current generation's claim row;
-- that run's claim was scheduled earlier than the new run's.
-
-Otherwise, a Temporal error included, the new run claims a new generation as
-a replacement run does, and a credentialed Sandbox restarts once.
-
-What this means for fencing:
-
-1. A continued run keeps its predecessor's generation.
-2. The predecessor's in-flight activities keep the authority they had, as
-   within one run: `ensure`, `ensure_for_states` and the locked checks
-   compare the generation, the desired state and the lifecycle state, never
-   the run id. That is the exposure before runs continued as new, and it is
-   small because a run continues as new only at an idle point, after its
-   command finished, with no command queued and no handler running. The
-   setup lease's attempt takeover (below) still governs any setup attempt.
-3. A new claim by the predecessor is refused (`AuthorityLost`), because the
-   claim row now names the successor.
-4. A replacement that isn't a continuation (a reset, a duplicate run, an
-   operator's start, or a predecessor in any status other than
-   `ContinuedAsNew`) still claims +1 and fences everything older.
-
 The continuation check runs only while the workflow is not replaying. A run
 ends at the end of its history, and an open run's history never holds that
 end, so replaying an open run never reaches a point where it continued. This
@@ -88,6 +55,59 @@ also lets a run that predates the bound end at its next command. A patch
 could not do that: replay records the patch's answer as absent at the first
 check and keeps it. A query that replays a run which has continued as new
 cannot replay its end, so it fails; the open run answers queries.
+
+The new run keeps the generation (#5950), by the takeover below.
+
+### A new run takes over a closed run's generation
+
+A credentialed Sandbox's daemon opens its credential bridge with the
+generation its binding captured, and the broker refuses one that differs
+from the environment's. A new generation therefore makes every running
+credentialed Sandbox's bootstrap stale, and the reconcile restarts it. No
+restart is wanted when the run that held the generation has closed: it
+continued as new, or it failed after its activity's attempts ran out and
+the next command started a fresh run (#6103).
+
+So a run's first claim takes over the current generation's claim row, once,
+and keeps the generation, when all of these hold (step 3 of the claim,
+below):
+
+- the row names another run, the holder, under the same workflow id,
+  `environment/<environment id>`;
+- Temporal describes the holder as closed, with any close status:
+  `ContinuedAsNew`, `Completed`, `Failed`, `Terminated`, `TimedOut` or
+  `Canceled`. The holder comes from the claim row and its status from
+  Temporal, never from a command or an activity input;
+- the holder's claim was scheduled earlier than the new run's.
+
+Only an explicit close counts. A holder that Temporal describes as running,
+with no status it knows, or has no record of (`NotFound`, as once its
+retention has passed) is not taken over: the new run claims a new
+generation as a replacement run does, and a credentialed Sandbox restarts
+once. That restart is intended: when Temporal cannot say the holder closed,
+the fail-safe is a new generation, never a takeover.
+
+A Temporal read that fails claims nothing. The claim activity returns the
+error and is retried; when its attempts run out the run fails, and the next
+run reads again. A blip never moves the generation.
+
+A worker from before #5971 does not take over at all, so during the first
+rollout of a release that carries #5971 an old worker can still claim a new
+generation for a run that continued as new. Once no such worker runs, that
+cannot happen again.
+
+What this means for fencing:
+
+1. A run that takes over keeps the holder's generation number.
+2. Temporal closes a terminated, timed-out or canceled run without waiting
+   for its activities, so one may still be executing (see "The problem").
+   It is fenced by the claim row's run id, not by the generation: every
+   authority check also requires the generation's claim row to name the run
+   the authority was captured for (below), and the takeover renamed it.
+3. A new claim by the holder is refused (`AuthorityLost`), because the claim
+   row now names the run that took it over.
+4. A replacement whose holder is running or unknown to Temporal still claims
+   +1 and fences everything older.
 
 ### Claim
 
@@ -99,20 +119,28 @@ The table is unique on `(environment_id, workflow_run_id)` and on
 environment. `scheduled_at_unix_nanos` is the activity's original scheduled
 time as Temporal reports it, never a worker clock.
 
-The claim is one transaction:
+Before its transaction, the claim reads the run named by the current
+generation's claim row, when that is another run, and asks Temporal for its
+status. A failed read returns the error and claims nothing.
+`EnvironmentClaimAndCreateActivity` claims without reading the holder,
+because a create runs only for a Sandbox that is not running. The claim is
+then one transaction:
 
-1. Lock the environment row. A missing row is `AuthorityLost`.
+1. When the holder is closed, lock its claim row, then lock the environment
+   row. A missing environment row is `AuthorityLost`.
 2. If this run already has a claim row, return its generation only when it
    is still the current generation and the scheduled time matches.
    Otherwise return `AuthorityLost`. A retry after a lost response is
    idempotent, and a superseded run cannot increment again.
-3. A run that continued as new (above) takes over the current
-   generation's claim row when that row names its predecessor and an
-   earlier scheduled time: one `UPDATE` sets the row's run id and
-   scheduled time to the new run's, and the claim returns the current
-   generation unchanged. The row then names the new run, so the takeover
-   happens once, and the predecessor's own retried claim is
-   `AuthorityLost` by step 2. Otherwise the claim goes on.
+3. When the holder is closed (above), take over the current generation's
+   claim row: one `UPDATE` on the row for this environment, the current
+   generation and the holder's run id, with an earlier scheduled time, sets
+   its run id and scheduled time to the new run's, and the claim returns
+   the current generation unchanged. The same transaction clears the setup
+   owner held at that generation (see "Setup lease"). The row then names
+   the new run, so the takeover happens once, and the holder's own retried
+   claim is `AuthorityLost` by step 2. A row that changed since the holder
+   was read matches nothing, and the claim goes on.
 4. A run without a row may claim only when its scheduled time is strictly
    later than that of the current generation's row. An equal or earlier
    time is `AuthorityLost`. A positive current generation with no claim row
@@ -126,12 +154,23 @@ back after a newer run has claimed it.
 
 ## Authority-checked writes
 
-`ActivityAuthority` captures the generation and the committed
-`desired_state` when an activity starts. Every durable write locks the
-environment row and checks the generation, the desired state and the
-lifecycle states valid for that operation, in the same transaction as the
-write. This covers lifecycle transitions, error writes, backend rows, and
-every log and checkpoint row. A stale write is a no-op.
+`ActivityAuthority` captures the generation, the committed `desired_state`
+and the run that the generation's claim row names when an activity starts.
+An activity's capture requires that run to be the activity's own
+(`workflow_run_id`); a caller outside a workflow run, such as a loop or an
+API handler, pins whichever run holds the row. Every durable write locks
+the claim row (`FOR SHARE`), then the environment row, and checks that the
+claim row still names the captured run, the generation, the desired state
+and the lifecycle states valid for that operation, in the same transaction
+as the write. The unlocked `ensure` checks read the same. This covers
+lifecycle transitions, error writes, backend rows, and every log and
+checkpoint row. A stale write is a no-op.
+
+A takeover renames the claim row under `FOR UPDATE`, taking the claim row
+before the environment row as every fenced write does, so a write either
+commits before the takeover or is refused after it. Activities of the run
+whose generation was taken over keep the generation number and lose
+authority at their next check.
 
 `AuthorityLost` is control flow, not a failure. A hard-deleted environment
 is `AuthorityLost`, never a retryable missing-row error. An activity that
@@ -175,10 +214,14 @@ lease. Any partial or unknown combination fails closed.
 
 Rules:
 
-- Every setup transaction locks `environments` before
-  `sandbox_environment_backend`. It requires the current generation,
-  `desired_state = 'started'`, `state = 'running'`, the expected setup
-  phase and the exact lease owner (generation, activity id, attempt).
+- Every setup transaction locks the generation's claim row (`FOR SHARE`),
+  then `environments`, then `sandbox_environment_backend`. It requires the
+  claim row to name the run its activity authority was captured for, the
+  current generation, `desired_state = 'started'`, `state = 'running'`, the
+  expected setup phase and the exact lease owner (generation, activity id,
+  attempt). Activity ids are a per-run sequence, so after a takeover two
+  runs' setups can share a lease identity; the claim row's run id tells
+  them apart.
 - A setup phase first takes the lease as `claimed`. Before the first exec
   it records the Pod UID and moves to `running`. Before every exec or
   parallel launch group it revalidates the lease and holds the lock through
@@ -213,6 +256,11 @@ Rules:
   into a warning or followed by advancing to the next setup phase.
 
 ### Takeover
+
+A run that takes over a closed holder's generation clears the setup owner
+held at that generation in the takeover's transaction, so its setup starts
+as a fresh owner and the closed run's next setup step is refused. A
+`running` owner cleared this way is not reaped first.
 
 A `claimed` lease has launched nothing. The current generation and attempt
 may take it over directly. A `running` lease may hide a live process, so
