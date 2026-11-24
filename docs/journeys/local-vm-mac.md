@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-23.
+Updated 2026-11-24.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ Updated 2026-11-23.
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
-| `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
+| `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87); a platform profile not yet observed (#6191) | not yet observed |
 | `mac-vm-refresh` | a real Claude sign-in observed on a development build of #5957 (6636e3589f), and a synthetic one | not yet observed (#5539) |
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
 | `mac-vm-indexed-root` | the warning observed on a development build of #5831 (84a45bb16); a completed create not yet observed | not yet observed |
@@ -242,14 +242,17 @@ Issue: #5084.
 
 ## 5. `mac-vm-intercept`: a VM boots with agent interception on
 
-Issues: #3999, #4916.
+Issues: #3999, #4916, #4909, #6191.
 
 - **Entry points:** `cw create --local --profile local:P` or
-  `cw --local start` of a VM bound to a local profile: interception is on by
-  default. The file `egress-intercept` in the local VM state root
+  `cw --local start` of a VM bound to a local profile, and the same with a
+  platform profile, `--profile platform:P`: interception is on by default
+  for both, as on Linux. The file `egress-intercept` in the local VM state root
   (`~/.codewire/native-v1` by default) holding `off` switches it off.
 - **States to exercise:** a boot with interception on, and the same VM
-  stopped and started after `off` is written to the file.
+  stopped and started after `off` is written to the file. A VM on a
+  platform profile with Claude and Codex sign-ins, on its first boot and
+  after a stop and start.
 - **Driving it:** create a VM bound to a local profile, find its front-door process (`cw __native-front-door`), and in the
   VM read the CA that `NODE_EXTRA_CA_CERTS` names. A VM with no profile has no
   local credential broker, so it boots without interception, and the
@@ -259,7 +262,12 @@ Issues: #3999, #4916.
 - **Proof:** the boot succeeds. The front-door process runs under a Seatbelt
   profile: `sandbox_check(pid, NULL, 0)` is 1, as the `native_front_door`
   test checks. The guest trusts the boot's CA, and an intercepted HTTPS
-  request reaches the credential broker with its bound host.
+  request reaches the credential broker with its bound host. For a platform
+  profile, `cw --local info` reads `placeholders only: agents never hold your
+  tokens`, the supervisor logs `egress_intercept` with no `skipped`, Codex's
+  `auth.json` and Claude's login in the VM hold placeholders, and no real
+  token is anywhere in the guest's home or `/run`. `claude -p` and
+  `codex exec` are answered through the front door (#6191).
 - **Gotchas:**
   - The CA is made inside the confined process for each boot, so a stop and
     start brings a new CA.

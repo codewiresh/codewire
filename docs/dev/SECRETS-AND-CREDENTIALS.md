@@ -1776,11 +1776,11 @@ above.
   boot that has no local credential broker, or whose running credential
   authority predates boot secrets, does not intercept, and the supervisor's
   log and `cw` say why (below). Nor does a boot whose credentials come from
-  the platform on macOS, or against an authority that does not join the
-  platform's front-door session (#4909; see "A local VM on a platform
-  profile" below). On macOS the front door is confined by Seatbelt's
-  deny-all profile (#4916), and a boot whose credentials come from the
-  platform does not intercept there.
+  the platform against an authority that does not join the platform's
+  front-door session (#4909; see "A local VM on a platform profile" below).
+  On macOS the front door is confined by Seatbelt's deny-all profile
+  (#4916), and a boot whose credentials come from the platform intercepts
+  there exactly as on Linux (#6191).
 - **What `cw` shows (#4912).** The supervisor sends the boot's decision to
   its runner with the start, and the runner reports it while the boot runs.
   `cw --local info` shows it on its own line under the `Credentials` row
@@ -1791,9 +1791,8 @@ above.
   older supervisor started, has none.
   - `intercepted`: `placeholders only: agents never hold your tokens`.
   - `not_intercepted` with `platform_credentials`: `no placeholders: they
-    come from the platform`, for a platform profile's boot on macOS or
-    against an authority that does not join the platform's front-door
-    session (#4909).
+    come from the platform`, for a platform profile's boot against an
+    authority that does not join the platform's front-door session (#4909).
   - `not_intercepted` with `no_credentials`: `no placeholders: none are
     selected`.
   - `not_intercepted` with `nothing_to_intercept`: `no placeholders: none of
@@ -2553,10 +2552,11 @@ below):
 **A local VM on a platform profile (#4909).** Such a VM has no local
 credential engine: its confined local relay forwards the guest's bridge to
 the platform's broker over the owner-local delegation channel, one
-delegation epoch at a time. On Linux, against an authority that joins the
-platform's front-door session, the supervisor intercepts such a boot and
-the front-door session crosses the delegation. On macOS, or against an
-older authority, it starts without interception, its log says
+delegation epoch at a time. Against an authority that joins the platform's
+front-door session, on Linux and macOS alike, the supervisor intercepts such
+a boot and the front-door session crosses the delegation; the relay pairs
+with the front door before it confines (#6191). Against an older authority
+it starts without interception, its log says
 `skipped=platform_credentials`, and `cw --local info` says `no
 placeholders: they come from the platform` ("Agent host interception"
 above). These rules hold:

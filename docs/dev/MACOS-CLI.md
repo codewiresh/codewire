@@ -468,9 +468,13 @@ root and reads it from the authority's store, as on Linux.
 Platform sources and profiles for a local VM use the Linux platform-to-local
 delegation: the authority's platform connector holds your saved platform
 login, and the VM's broker runs as a relay under a deny-all Seatbelt profile
-(no store reads, no network; only the bridge and authority descriptors it
-already holds). This path is unit-tested on the Mac and not yet observed
-with a real platform login. `connect codex|github --local` runs Codewire's
+(no store reads, no network; only the bridge, authority and front-door
+descriptors it already holds, the front door paired before it confines). Such
+a boot intercepts its agent hosts as on Linux, the relay serving the front
+door through the delegation (#4909, #6191). Until #6191 a Mac skipped that
+and delivered the real Codex and Claude logins instead. This path is
+unit-tested on the Mac and not yet observed with a real platform login
+(`mac-vm-intercept` in [the Mac journey](../journeys/local-vm-mac.md)). `connect codex|github --local` runs Codewire's
 native device logins, which write no login file, and stores the tokens in
 the selected store, as on Linux.
 

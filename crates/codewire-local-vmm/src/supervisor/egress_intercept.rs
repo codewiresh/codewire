@@ -132,8 +132,8 @@ fn interception(switch: InterceptSwitch, skipped: Option<Skipped>) -> v1::Interc
 /// not intercept: its agent hosts are reached as they would be with the
 /// switch off, and the log and the boot's report say why. A boot whose
 /// credentials come from the platform intercepts only where its relay can
-/// serve the front door: on Linux, against an authority that joins the
-/// platform's front-door session (#4909).
+/// serve the front door: against an authority that joins the platform's
+/// front-door session (#4909), on Linux and macOS alike (#6191).
 pub(super) fn for_boot(
     root: &Path,
     log: Option<&DiagnosticLog>,
@@ -176,9 +176,9 @@ pub(super) struct AuthorityServes {
 /// Why a switched-on boot does not intercept, if it doesn't. A boot whose
 /// running authority predates boot secrets would get brokers that can never
 /// pair, so it starts as with the switch off instead (#3999). A platform
-/// boot's relay serves the front door only on Linux, where its confinement
-/// keeps the paired socket, and only against an authority that joins the
-/// platform's session (#4909).
+/// boot's relay pairs with the front door before it confines, on Linux and
+/// macOS alike, and serves it only against an authority that joins the
+/// platform's session (#4909, #6191).
 fn skipped(
     switch: InterceptSwitch,
     has_broker: bool,
@@ -189,7 +189,7 @@ fn skipped(
         None
     } else if !has_broker {
         Some(Skipped::NoCredentialBroker)
-    } else if platform && (cfg!(target_os = "macos") || !authority.front_door_delegation) {
+    } else if platform && !authority.front_door_delegation {
         Some(Skipped::PlatformCredentials)
     } else if !authority.boot_secrets {
         Some(Skipped::AuthorityPredatesBootSecrets)
@@ -243,7 +243,8 @@ mod tests {
     }
 
     /// A platform boot intercepts only against an authority that joins the
-    /// platform's front-door session, and never on macOS (#4909).
+    /// platform's front-door session (#4909), on macOS as on Linux: a Mac
+    /// that skipped it got real logins (#6191).
     #[test]
     fn a_platform_boot_intercepts_only_where_its_relay_serves_the_front_door() {
         use InterceptSwitch::On;
@@ -251,12 +252,7 @@ mod tests {
             skipped(On, true, true, SECRETS_ONLY),
             Some(Skipped::PlatformCredentials)
         );
-        let expected = if cfg!(target_os = "macos") {
-            Some(Skipped::PlatformCredentials)
-        } else {
-            None
-        };
-        assert_eq!(skipped(On, true, true, BOTH), expected);
+        assert_eq!(skipped(On, true, true, BOTH), None);
     }
 
     /// The boot's report says what its log says (#4912): intercepted for an
