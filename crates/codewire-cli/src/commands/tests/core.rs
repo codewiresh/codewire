@@ -2606,6 +2606,53 @@ fn an_ssh_connection_a_stop_ended_says_why_as_cw_shell_does() {
     assert_eq!(said(&running), None);
 }
 
+/// `cw shell --stdio` says a connection was lost once the server has been
+/// silent for as long as the server waits before it drops a client, with
+/// what keeps work running through a drop; any shorter silence, or a
+/// connection that never heard from the server, says nothing
+/// (docs/journeys/editor.md, `editor-reconnect`).
+#[test]
+fn an_ssh_connection_silent_for_the_servers_drop_window_says_it_was_lost() {
+    use std::time::Duration;
+
+    let drop_window = super::core::LOST_AFTER;
+    let said = |silent_for: Option<Duration>| {
+        super::core::lost_connection(silent_for, "walk").map(|error| {
+            let step = error.downcast_ref::<crate::error_report::NextStep>();
+            (error.root_cause().to_string(), step.map(ToString::to_string))
+        })
+    };
+    let lost = Some((
+        "lost the connection to walk: SSH sessions end after about a minute offline, and their \
+         processes stop"
+            .to_owned(),
+        Some(
+            "for work that must keep running, use cw shell --durable walk or cw run --detach"
+                .to_owned(),
+        ),
+    ));
+    assert_eq!(said(Some(drop_window)), lost);
+    assert_eq!(said(Some(Duration::from_secs(300))), lost);
+    assert_eq!(said(Some(drop_window - Duration::from_secs(1))), None);
+    assert_eq!(said(Some(Duration::from_secs(15))), None);
+    assert_eq!(said(None), None);
+}
+
+/// The silence `cw shell --stdio` calls lost is the workspace SSH server's
+/// own drop window: its keepalive interval times the keepalives it waits
+/// for. The server is Linux only, as is the crate that names it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_lost_connection_window_is_the_ssh_servers_drop_window() {
+    use codewire_workspace_access::ssh::{
+        WORKSPACE_SSH_KEEPALIVE_INTERVAL, WORKSPACE_SSH_KEEPALIVE_MAX,
+    };
+    assert_eq!(
+        super::core::LOST_AFTER,
+        WORKSPACE_SSH_KEEPALIVE_INTERVAL * u32::try_from(WORKSPACE_SSH_KEEPALIVE_MAX).unwrap()
+    );
+}
+
 #[test]
 fn logout_not_signed_in_names_cw_login_next() {
     use crate::output::{Charset, Style};

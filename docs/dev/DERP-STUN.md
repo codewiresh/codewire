@@ -30,6 +30,20 @@ cannot move, so the session ends there, and `cw shell --stdio` prints
 disconnect. A revoked credential closes with 1008, "access revoked", printed
 the same way (#6100, #3586).
 
+An SSH connection over `cw shell --stdio` does not survive a network cut of
+about a minute, on any path. The workspace SSH server drops a client after
+three unanswered keepalives, 45 to 60 s, and stops the processes its sessions
+started, except those in a session of their own (`setsid`). The ProxyCommand
+pipe never reconnects. #6101 records that decision; a durable transport would
+be #6147. While the connection is up, the server's keepalives reach `cw` at
+least every 15 s. So when the connection ends after 45 s or more with nothing
+from the server, measured on the wall clock so that a laptop's sleep counts,
+`cw shell --stdio` says so after OpenSSH's own line:
+`Lost the connection to ENV: SSH sessions end after about a minute offline,
+and their processes stop`, then `for work that must keep running, use
+cw shell --durable ENV or cw run --detach`. A connection that ends any other
+way, such as a shell's `exit`, prints nothing more.
+
 1. **Direct UDP** (preferred fast path): each peer advertises candidate
    endpoints. A hosted daemon advertises the direct-UDP endpoint the platform
    publishes for it; a client, or a daemon with no published endpoint, learns

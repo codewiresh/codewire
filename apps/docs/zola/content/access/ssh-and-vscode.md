@@ -1,7 +1,7 @@
 ---
 title: SSH and VS Code
 description: Use OpenSSH, scp, sftp and rsync with any environment, forward ports, and open an environment in VS Code.
-updated: 2026-11-20
+updated: 2026-11-23
 weight: 2
 aliases: ["/guides/ssh-and-vscode"]
 ---
@@ -146,6 +146,24 @@ For a local VM, `cw --local vscode my-vm`, `cw vscode cw-local-my-vm`, or
 same way. Remote-SSH reaches its
 server in the VM through port forwarding, so it needs a VM created by this
 `cw`; a VM on an older runtime refuses forwarding until it is recreated.
+
+## When the connection drops
+
+An SSH session over `cw` ends once its connection has been gone for about a
+minute, for example while a laptop sleeps or its network is down, and the
+commands it started stop with it. When that happens, `cw` says so after
+OpenSSH's own message:
+
+```text
+✗ Lost the connection to my-app: SSH sessions end after about a minute offline, and their processes stop
+→ for work that must keep running, use cw shell --durable my-app or cw run --detach
+```
+
+An editor reconnects by itself, and its server in the environment keeps
+running. A shell or a job that must outlive the connection belongs in a
+[terminal session](@/access/sessions.md): `cw shell --durable my-app`
+reattaches after a drop, and `cw run --detach` keeps a command running with no
+connection at all.
 
 ## Transport
 

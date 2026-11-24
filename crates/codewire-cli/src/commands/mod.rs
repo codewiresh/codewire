@@ -248,7 +248,7 @@ pub(crate) struct SetupArgs {
 pub(crate) enum SetupCommand {
     #[command(
         about = "Write the OpenSSH integration for Codewire environments",
-        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand. `cw setup ssh remove` takes it out again.\n\nEach Codewire host gets `ServerAliveInterval 30` and `ServerAliveCountMax 4`, so a session whose connection died, for example while the laptop slept, ends within about two and a half minutes instead of hanging. The section comes first in the file and OpenSSH keeps the first value it finds, so a keepalive set in your own entries does not apply to Codewire hosts. Set your own with `cw setup ssh -o 'ServerAliveInterval 60'` (`0` turns it off), or for one connection with `ssh -o ServerAliveInterval=60`. `cw setup` and `cw vscode` keep the options you gave; `cw setup ssh` without `-o` goes back to the defaults.\n\nThe section passes the host name to ProxyCommand (`%n`) for every `cw-*` host, so it needs OpenSSH 9.6 or later, or a distribution build that includes the CVE-2023-51385 fix. Without that fix, a host name from an untrusted source, such as a git submodule URL, can run commands."
+        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand. `cw setup ssh remove` takes it out again.\n\nEach Codewire host gets `ServerAliveInterval 30` and `ServerAliveCountMax 4`, so a session whose connection died, for example while the laptop slept, ends within about two and a half minutes instead of hanging. The environment ends a session whose connection has been gone for about a minute, and the commands it started stop with it; run work that must keep going with `cw shell --durable` or `cw run --detach`. The section comes first in the file and OpenSSH keeps the first value it finds, so a keepalive set in your own entries does not apply to Codewire hosts. Set your own with `cw setup ssh -o 'ServerAliveInterval 60'` (`0` turns it off), or for one connection with `ssh -o ServerAliveInterval=60`. `cw setup` and `cw vscode` keep the options you gave; `cw setup ssh` without `-o` goes back to the defaults.\n\nThe section passes the host name to ProxyCommand (`%n`) for every `cw-*` host, so it needs OpenSSH 9.6 or later, or a distribution build that includes the CVE-2023-51385 fix. Without that fix, a host name from an untrusted source, such as a git submodule URL, can run commands."
     )]
     Ssh(SshSetupArgs),
     #[command(
@@ -652,7 +652,10 @@ pub(crate) struct EnvironmentShellArgs {
         help = "Environment name or ID (same as ENV)"
     )]
     pub(crate) in_environment: Option<String>,
-    #[arg(long, help = "Pipe stdin/stdout for OpenSSH ProxyCommand")]
+    #[arg(
+        long,
+        help = "Pipe stdin/stdout for OpenSSH ProxyCommand; the SSH session ends after about a minute offline"
+    )]
     pub(crate) stdio: bool,
     #[arg(
         long,

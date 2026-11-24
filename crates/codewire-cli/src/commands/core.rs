@@ -363,13 +363,46 @@ pub(crate) async fn handle_shell_stdio(
         environment_client.get_environment(&org_id, &environment_id),
     )
     .await;
-    if let Ok(Ok(environment)) = looked_up {
-        let shown = alias.map_or(environment_id.as_str(), |alias| alias.environment_ref);
-        if let Some(stopped) = ended_by_stop(&environment, shown) {
-            return Err(stopped);
-        }
+    let shown = alias.map_or(environment_id.as_str(), |alias| alias.environment_ref);
+    if let Ok(Ok(environment)) = looked_up
+        && let Some(stopped) = ended_by_stop(&environment, shown)
+    {
+        return Err(stopped);
+    }
+    if let Some(lost) = lost_connection(codewire_client::stdio_silent_for(), shown) {
+        return Err(lost);
     }
     piped
+}
+
+/// The server silence after which `cw shell --stdio` calls its connection
+/// lost (#6101): the workspace SSH server's own wait before it drops a client
+/// that doesn't answer. While the connection is up, the server sends a
+/// keepalive whenever it has heard nothing for one interval, and a clean end
+/// ends with the server's closing packets, so neither is ever this silent.
+pub(crate) const LOST_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// When the connection ended after [`LOST_AFTER`] with nothing from the
+/// server, a lost connection, which ended the SSH session and its processes
+/// with it (`docs/dev/DERP-STUN.md`; `editor-reconnect`), and what keeps work
+/// running through one. `None` for any other end, or a connection that never
+/// heard from the server.
+pub(crate) fn lost_connection(
+    silent_for: Option<std::time::Duration>,
+    shown: &str,
+) -> Option<anyhow::Error> {
+    if silent_for? < LOST_AFTER {
+        return None;
+    }
+    Some(crate::error_report::with_next_step(
+        anyhow::anyhow!(
+            "lost the connection to {shown}: SSH sessions end after about a minute offline, \
+             and their processes stop"
+        ),
+        format!(
+            "for work that must keep running, use cw shell --durable {shown} or cw run --detach"
+        ),
+    ))
 }
 
 /// How long `cw shell --stdio` asks why its connection ended.

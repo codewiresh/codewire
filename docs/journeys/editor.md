@@ -16,7 +16,7 @@ Updated 2026-11-23.
 | `editor-connect` | cw-cli | observed 2026-11-14, with `ssh` and with the editor (#4641) | not yet observed |
 | `editor-server` | cw-cli | observed 2026-11-14 (#4641) | not yet observed |
 | `editor-edit` | cw-cli | observed 2026-11-14, with sftp and with the editor (#4641) | not yet observed |
-| `editor-reconnect` | cw-cli | observed 2026-11-14: the timed ending with `ssh`, and the editor's reconnect after a sleep (#4641) | not yet observed |
+| `editor-reconnect` | cw-cli | observed 2026-11-14: the timed ending with `ssh`, and the editor's reconnect after a sleep (#4641); the lost-connection line is not yet observed (#6101) | not yet observed |
 | `editor-failures` | cw-cli | observed 2026-11-14 with `ssh`; the stopped and signed-out messages are fixed by #4643, not yet on Dev | not yet observed |
 
 ## Before the walk
@@ -84,7 +84,8 @@ the line.
 ## `editor-reconnect`: a session that died ends, and the editor reconnects
 
 **States to exercise:** the computer sleeps, or its network changes, while the
-editor is connected and idle. Over the WebSocket fallback
+editor is connected and idle. A network cut of about 90 s while a plain
+`ssh` shell and a `cw shell --durable` shell are open (#6101). Over the WebSocket fallback
 (`CW_SSH_TRANSPORT=websocket`), also: the connection sits idle for 90 minutes;
 and Codewire's server restarts, as at a Dev rollout (#6100).
 
@@ -113,6 +114,24 @@ Over the WebSocket fallback:
   270 s of the orchestration replica's SIGTERM, and its terminal shows
   `the connection ended: server restarting; connect again`. The editor then
   reconnects.
+
+After a network cut of about 90 s (#6101):
+
+- The plain `ssh cw-cloud-editor-walk` shell ends, and its terminal shows,
+  after OpenSSH's own line:
+
+  ```text
+  ✗ Lost the connection to editor-walk: SSH sessions end after about a minute offline, and their processes stop
+  → for work that must keep running, use cw shell --durable editor-walk or cw run --detach
+  ```
+
+  A `sleep 900 &` started in that shell is gone afterwards.
+- `cw shell --durable editor-walk` reattaches by itself, and its shell still
+  has what was typed before the cut.
+- A shell left with `exit` and no cut prints nothing from `cw`.
+
+The cut is `nmcli networking off` and `on`, or, on a shared machine,
+`IPAddressDeny=any` on the systemd scope that `ssh` and `cw` run in.
 
 **Gotchas:** a keepalive in the user's own `Host *` entry doesn't apply to
 `cw-*` hosts, because the managed section comes first. Set one with

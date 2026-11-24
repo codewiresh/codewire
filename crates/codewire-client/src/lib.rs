@@ -18,6 +18,7 @@ pub mod hosted_shell;
 pub mod member_tailnet;
 pub mod session_wire;
 mod startup_script;
+mod stdio_heard;
 mod tailnet;
 #[cfg(feature = "tailnet-session")]
 pub mod tailnet_session;
@@ -53,6 +54,7 @@ pub use credential_delegation::{
     AdmittedCredentialDelegation, CredentialDelegationStream, FRONT_DOOR_EPOCH_BYTES,
     FRONT_DOOR_EPOCH_HEADER, FrontDoorDelegationStream, FrontDoorEpoch,
 };
+pub use stdio_heard::stdio_silent_for;
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
     StunServer, TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions,

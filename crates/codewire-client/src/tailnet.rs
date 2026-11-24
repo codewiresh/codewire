@@ -1036,7 +1036,7 @@ where
 {
     let (mut stream_rx, mut stream_tx) = tokio::io::split(stream);
     let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    let mut stdout = crate::stdio_heard::stdout();
 
     let stdin_to_stream = async {
         tokio::io::copy(&mut stdin, &mut stream_tx)
@@ -1087,7 +1087,7 @@ async fn pipe_websocket_stdio(
         .context("connect SSH WebSocket proxy")?;
     let (mut ws_tx, mut ws_rx) = ws.split();
     let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    let mut stdout = crate::stdio_heard::stdout();
     let mut deferred_stdin = Vec::new();
 
     let mut initial = vec![0u8; 32 * 1024];
