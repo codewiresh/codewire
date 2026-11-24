@@ -289,7 +289,9 @@ only.
   taken on (#4654). A Mac restores or forks one only while it is unlocked,
   because macOS protects the saved state with a key it releases only then; on
   a locked Mac both are refused before the source stops or a fork is made
-  (#5976). Hosted sandboxes have none.
+  (#5976). With a release build of `cw`, at 2 vCPU and 4 GiB, a whole
+  restore, the source's stop included, and a fork each finish in under
+  10 seconds, on Linux and on a Mac (#6124). Hosted sandboxes have none.
 
 ## 3. Components
 

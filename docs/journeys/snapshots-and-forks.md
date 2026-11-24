@@ -16,7 +16,7 @@ format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-23. Cloud capture, management and a three-way fork are
+Updated 2026-11-24. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
 are not observed. VM checkpoints are observed on a Mac and on Linux with
@@ -24,7 +24,8 @@ development builds of #4654's branch (2026-11-21), and on a Mac with released
 `v0.4.28` (2026-11-22). On a locked Mac a restore or fork is refused before
 the source stops or a fork is made, and once the Mac is unlocked the same
 commands work, observed with a development build of #5976's branch
-(2026-11-22 and 2026-11-23).
+(2026-11-22 and 2026-11-23). With release builds a restore and a fork each
+finish in under 10 seconds on both (2026-11-24, #6124).
 
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
@@ -562,6 +563,18 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     command restored it: "Restored ck to VM checkpoint before: stop
     10.36 s, restore 15.88 s, total 26.25 s"; the marker read `before` and
     the ticker counted on from 4.
+  - Timed against the under-10-second target (#6124), 2026-11-24, with
+    release builds of `cw` at 2 vCPU and 4 GiB, three restores of a running
+    VM each:
+    - Linux, Cloud Hypervisor, `cw` and runtime from 6636e3589f: "stop
+      0.34 s, restore 3.22 s, total 3.56 s", then 3.36 s and 3.33 s; the
+      marker read `before` and the ticker kept counting. A debug build of the
+      same `cw` took 14.2–19.8 s.
+    - macOS 27.2.1, `cw` and runtime from 75ef753cf3: "stop 0.09 s, restore
+      6.50 s, total 6.59 s", then 6.62 s and 6.75 s, about 4.9 s of each in
+      the VMM's own restore. The marker and the clock were not checked on
+      this run. With the Mac locked, the same restore was refused before
+      the source stopped.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -618,6 +631,10 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     2026-11-23, the same command printed "Created ck-fork from VM checkpoint
     before in 15.3 s"; its first command read the marker `before` and the
     ticker at 4.
+  - Timed against the under-10-second target (#6124), 2026-11-24, with
+    release builds of `cw` at 2 vCPU and 4 GiB, three forks beside the
+    running source each: on Linux (6636e3589f) 3.0 s, 3.1 s and 2.6 s; on
+    macOS 27.2.1 (75ef753cf3) 6.7 s each.
 
 ## `snap-dashboard`: the Snapshots page
 
