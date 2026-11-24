@@ -575,6 +575,15 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
       the VMM's own restore. The marker and the clock were not checked on
       this run. With the Mac locked, the same restore was refused before
       the source stopped.
+  - Walked as above with the same release builds, 2026-11-24, the marker
+    changed to `after` once the checkpoint `before` was taken:
+    - Linux: "Restored lck to VM checkpoint before: stop 0.23 s, restore
+      3.85 s, total 4.08 s"; the marker read `before`, and the ticker counted
+      on from 5 to 8 in 3 s, still PID 13. `cw run lck -- date -u +%s.%N`
+      read 7 ms from the host's clock.
+    - macOS 27.2.1, the Mac unlocked: "stop 0.09 s, restore 6.09 s, total
+      6.18 s"; the marker read `before`, and the ticker counted on from 4 to
+      7, still PID 13. The guest's clock read within 1 ms of the host's.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -600,6 +609,10 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
 - **Proof:** the fork has the source's files and the processes that were
   running at the checkpoint, its own environment ID, machine ID and SSH host
   key, and its first command succeeds.
+- **Gotchas:**
+  - At a terminal, `cw run` stays in its session once the command ends,
+    offering "Ctrl+B r restarts, Ctrl+C leaves"; press Ctrl+C to go on.
+    It is to return with the command's status instead (#6355).
 - **Observed:**
   - Linux: the refusal of a fork of a checkpoint an upgrade left
     unrestorable, in [local-vm-upgrade.md](local-vm-upgrade.md).
@@ -635,6 +648,13 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     release builds of `cw` at 2 vCPU and 4 GiB, three forks beside the
     running source each: on Linux (6636e3589f) 3.0 s, 3.1 s and 2.6 s; on
     macOS 27.2.1 (75ef753cf3) 6.7 s each.
+  - Walked with the same release builds, 2026-11-24: `cw create --local
+    --checkpoint before --name lck-fork` beside the running lck printed
+    "Created lck-fork from VM checkpoint before in 4.8 s" on Linux and in
+    6.2 s on a Mac. On both, its first command read the marker `before` and
+    the ticker (at 5 on Linux, 4 on a Mac), its machine-id differed from lck's,
+    and after `cw checkpoint rm before` its ticker kept counting with the
+    marker `before`.
 
 ## `snap-dashboard`: the Snapshots page
 
