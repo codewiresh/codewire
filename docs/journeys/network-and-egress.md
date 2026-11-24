@@ -52,6 +52,7 @@ separately.
 | `agent-own-key` | #3999, #4001 | partly observed 2026-11-21, main e62d4d033 (`locked`: another key and no key refused, the placeholder served; an unselected provider's host refused under every policy, #5555) | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
+| `local-vm-disk-cleared` | #6277 | not yet observed | not yet observed | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
 | `hosted-enforcement` | #4000 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (`cw info` on a selected and a changed revision and on `locked`), and 2026-11-24, Dev source d9abce139c (a lockdown not applied fails closed) | not yet observed |
 
@@ -1998,6 +1999,52 @@ Issue: #3999.
     and start applies it.
 - **Gotchas:** hosted Sandboxes have no such switch; their rollout is a
   deployment setting (#4000, #4001).
+- **Observed:** not yet observed.
+
+## `local-vm-disk-cleared`: a boot that intercepts after one that didn't starts with no earlier sign-in on the disk
+
+Issue: #6277.
+
+- **Entry points:** `cw --local start` of a VM whose last boot didn't
+  intercept: the switch was `off`, the boot skipped interception, or the VM
+  was made by a `cw` before interception was on by default (v0.4.31 and
+  earlier). `cw checkpoint ls`, `inspect` and `restore`, and
+  `cw create --local --checkpoint`, for its checkpoints.
+- **States to exercise:**
+  - a VM on a local profile with Claude and Codex sign-ins, booted with the
+    switch off, then stopped, switched on and started;
+  - a VM created on v0.4.31 with sign-ins, then started on this build;
+  - a clearing that fails: the start is refused; then the same start with
+    `--start-with-uncleared-disk` on a local profile, and the override
+    refused on a platform profile;
+  - checkpoints taken before this build, with interception on and off, one
+    taken after a start with the override, and one taken after the clearing.
+- **Driving it:** on Linux and on a Mac, with synthetic canary sign-ins
+  only. Boot with the switch off, so the canary logins are delivered and
+  rewritten at least once, and stop. Then switch on, start, take a
+  checkpoint, and stop. Scan the stopped state disk and the checkpoint's
+  disk with the canary scan and the shape scan (`no-token-at-rest`).
+- **Proof:**
+  - the start after the switch is turned back on logs `state_disk_clear
+    outcome=cleared`, then `egress_intercept` with no `skipped`;
+  - neither scan finds a canary or a provider shape in the stopped state
+    disk or in the new checkpoint's disk, read with and without a journal
+    replay;
+  - the next start logs no clearing, because the marker is there;
+  - an upgraded VM's first start on this build clears its disk the same way;
+  - a failed clearing refuses the start with `state_disk_not_cleared`, its
+    step, and the three ways out. The override starts a local-profile VM,
+    is logged as `outcome=overridden`, and clears again at the next start.
+    A platform-profile VM refuses the override;
+  - `cw checkpoint ls` flags the checkpoints taken without interception,
+    before this build, or after the override start, and not the one taken
+    after the clearing; restoring or forking a flagged one with interception
+    on is refused by name;
+  - the time the clearing took on a state disk with 20 GiB in use is
+    recorded.
+- **Gotchas:** clearing changes only the VM's own image. A checkpoint that
+  shares its blocks keeps its own copy, and host blocks freed by the
+  punching are protected only by host disk encryption.
 - **Observed:** not yet observed.
 
 ## `agent-hosted`: a hosted Sandbox's front door serves that Sandbox alone

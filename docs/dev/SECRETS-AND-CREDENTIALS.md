@@ -1810,7 +1810,9 @@ above.
   file, `on`, or anything else is on; anything but `on` or `off` is logged
   once. Unreadable or odd content leaves the safe default, placeholders. The
   supervisor reads it once per boot and logs `egress_intercept` with what the
-  boot used.
+  boot used. A boot that doesn't intercept leaves the VM's state disk marked
+  as uncleared, so the first boot that intercepts after it clears the disk
+  first ("Clearing a local VM's state disk", #6277).
 - **What a boot with it on does.** The runner binds the hosts the boot's
   selected credentials name (below) on 443 in the egress broker and carries
   the front door's CA certificate, never its key, to the guest in the seed.
@@ -3512,8 +3514,8 @@ at the delivering code. This table is the complete list.
 
 | Delivered | Where | Why | Readable by | Revocation | Never delivered |
 |---|---|---|---|---|---|
-| The environment creator's own personal Codex ChatGPT access token, ID token and account ID, with the non-empty placeholder refresh token `codewire-managed-no-refresh-token` | Codex's `auth.json` (mode 0600): `~/.codex/auth.json` in a hosted Sandbox, written by the workspace daemon; in the creator's own local VM, Codewire's native Codex home (`/run/codewire-agent/codex/auth.json`), written by the guest daemon for the workload user | Codex enables `/usage`, analytics and account routing only with its own ChatGPT login and has no hook for a login held elsewhere, so the proxy cannot provide them | Every process in the Sandbox or VM, the creator, org owners/admins of a hosted Sandbox and anyone granted terminal access | Delivery stops at the next check. Codewire deletes its `auth.json` within 2 minutes when the broker denies delivery, and within about 14 minutes when the environment loses credential authority entirely (the first failed check within 2 minutes, then 10 minutes of failed checks, then the next check within 2 minutes). A stopped local VM keeps it on its state disk until its next boot, which removes it unless that boot's writer keeps it, and always when the disk boots as another environment. A VM checkpoint of the local VM holds it in the guest's memory until the provider's expiry; it stays on the creator's host and is never exported (owner, 2026-10-25). The token stays valid at the provider until its `exp` | The refresh token, API keys, GitHub and SSH material, organization-owned credentials, another user's login, and a login for any local VM but the creator's own |
-| The environment creator's own personal Claude sign-in access token, with its expiry, its scopes (exactly `user:inference`, `user:profile`, `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload` and `user:plugins`, the scopes of Claude Code's own login; a stored scope beyond them is never delivered), plan and tier, and a per-delivery placeholder refresh token `codewire-managed-no-refresh-token-<nonce>` | `claudeAiOauth` in `~/.claude/.credentials.json` (mode 0600), other keys kept: in a hosted Sandbox, merged into the file by the workspace daemon; in the creator's own local VM, in the workload user's home, by the guest daemon | Claude Code shows `/usage` and the plan only with its own claude.ai login; the proxy cannot answer those calls. In a hosted Sandbox they were observed going straight to `api.anthropic.com` while `ANTHROPIC_BASE_URL` was set. That does not hold everywhere: in a local VM with this delivery the usage view was reported failing while `ANTHROPIC_BASE_URL` pointed at the host broker (#4877, owner, 2026-11-15; cause not confirmed), and with only a token variable and a custom `ANTHROPIC_BASE_URL`, Claude Code 2.1.309 on a host labelled the session "Claude API" and requested neither `/api/oauth/usage` nor `/api/oauth/profile` from that base URL (#4877). The front door (#3999) removes the base URL for agents | Every process in the Sandbox or VM, the creator, org owners and admins of a hosted Sandbox, and anyone granted terminal access | Delivery stops at the next check. Codewire removes its `claudeAiOauth` within 2 minutes when the broker denies delivery, and within about 14 minutes when the environment loses credential authority (as for Codex). A stopped local VM keeps it on its state disk until its next boot, which removes it unless that boot's writer keeps it, and always when the disk boots as another environment. A VM checkpoint of the local VM holds it in the guest's memory until `expiresAt`; it stays on the creator's host and is never exported (owner, 2026-10-25). The token stays valid at the provider until `expiresAt` (about 8 hours) | The refresh token, Claude setup tokens, API keys, GitHub and SSH material, organization-owned credentials, another user's login, and a login for any local VM but the creator's own |
+| The environment creator's own personal Codex ChatGPT access token, ID token and account ID, with the non-empty placeholder refresh token `codewire-managed-no-refresh-token` | Codex's `auth.json` (mode 0600): `~/.codex/auth.json` in a hosted Sandbox, written by the workspace daemon; in the creator's own local VM, Codewire's native Codex home (`/run/codewire-agent/codex/auth.json`), written by the guest daemon for the workload user | Codex enables `/usage`, analytics and account routing only with its own ChatGPT login and has no hook for a login held elsewhere, so the proxy cannot provide them | Every process in the Sandbox or VM, the creator, org owners/admins of a hosted Sandbox and anyone granted terminal access | Delivery stops at the next check. Codewire deletes its `auth.json` within 2 minutes when the broker denies delivery, and within about 14 minutes when the environment loses credential authority entirely (the first failed check within 2 minutes, then 10 minutes of failed checks, then the next check within 2 minutes). A stopped local VM keeps it on its state disk until its next boot, which removes it unless that boot's writer keeps it, and always when the disk boots as another environment; every earlier copy stays in the disk's freed blocks until a boot that intercepts first clears the disk ("Clearing a local VM's state disk", #6277). A VM checkpoint of the local VM holds it in the guest's memory until the provider's expiry; it stays on the creator's host and is never exported (owner, 2026-10-25). The token stays valid at the provider until its `exp` | The refresh token, API keys, GitHub and SSH material, organization-owned credentials, another user's login, and a login for any local VM but the creator's own |
+| The environment creator's own personal Claude sign-in access token, with its expiry, its scopes (exactly `user:inference`, `user:profile`, `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload` and `user:plugins`, the scopes of Claude Code's own login; a stored scope beyond them is never delivered), plan and tier, and a per-delivery placeholder refresh token `codewire-managed-no-refresh-token-<nonce>` | `claudeAiOauth` in `~/.claude/.credentials.json` (mode 0600), other keys kept: in a hosted Sandbox, merged into the file by the workspace daemon; in the creator's own local VM, in the workload user's home, by the guest daemon | Claude Code shows `/usage` and the plan only with its own claude.ai login; the proxy cannot answer those calls. In a hosted Sandbox they were observed going straight to `api.anthropic.com` while `ANTHROPIC_BASE_URL` was set. That does not hold everywhere: in a local VM with this delivery the usage view was reported failing while `ANTHROPIC_BASE_URL` pointed at the host broker (#4877, owner, 2026-11-15; cause not confirmed), and with only a token variable and a custom `ANTHROPIC_BASE_URL`, Claude Code 2.1.309 on a host labelled the session "Claude API" and requested neither `/api/oauth/usage` nor `/api/oauth/profile` from that base URL (#4877). The front door (#3999) removes the base URL for agents | Every process in the Sandbox or VM, the creator, org owners and admins of a hosted Sandbox, and anyone granted terminal access | Delivery stops at the next check. Codewire removes its `claudeAiOauth` within 2 minutes when the broker denies delivery, and within about 14 minutes when the environment loses credential authority (as for Codex). A stopped local VM keeps it on its state disk until its next boot, which removes it unless that boot's writer keeps it, and always when the disk boots as another environment; every earlier copy stays in the disk's freed blocks until a boot that intercepts first clears the disk ("Clearing a local VM's state disk", #6277). A VM checkpoint of the local VM holds it in the guest's memory until `expiresAt`; it stays on the creator's host and is never exported (owner, 2026-10-25). The token stays valid at the provider until `expiresAt` (about 8 hours) | The refresh token, Claude setup tokens, API keys, GitHub and SSH material, organization-owned credentials, another user's login, and a login for any local VM but the creator's own |
 
 The broker delivers the login only when all of these hold: the environment
 is a hosted Sandbox, or a local VM whose platform delegation is authenticated
@@ -3654,6 +3656,58 @@ login saved before this record existed records no account until the next
 `cw login`, and a re-login with an older `cw`, which does not know the file,
 can leave a stale one beside the new login; `cw logout` removes it.
 
+**Clearing a local VM's state disk (#6277).** A local VM's own state disk is
+cleared by the same steps, in place, before a boot that intercepts when the
+disk may hold a delivered login. A boot that doesn't intercept may get the
+real login under the direct delivery exceptions below, and each rewrite of it
+leaves the earlier copy in a freed block. A root process in a later guest can
+read the raw disk, so that copy is a real token within an agent's reach: the
+user's own sign-in, or, on a platform profile, an organization's credential.
+Every VM a `cw` made before interception was on by default (v0.4.31 and
+earlier) is such a VM. A reader that doesn't replay the journal sees more: a
+disk copied while its guest runs, as a VM checkpoint's is, shows the old login
+as the current file until the journal is replayed (measured on #6277).
+
+- **The marker.** The supervisor keeps `state-disk-cleared` in the VM's
+  directory beside its disks. It is written when the VM's state disk is made
+  and after each clearing. It is removed before the runner starts any boot
+  that doesn't intercept. A VM created from a disk snapshot gets one, since
+  capture cleared the snapshot; a VM restored or forked from a VM checkpoint
+  gets one only when that checkpoint recorded it (below), never from its
+  source VM's marker. Each write and removal fsyncs the file and the
+  directory before the boot goes on.
+- **The clearing.** When a boot will intercept and the marker is missing, the
+  supervisor clears `state.raw` before the runner starts, holding the VM's
+  `vm.lock`, with its VMM proven dead and no process holding the disk open:
+  - the first `e2fsck -f -p` must exit 0 or 1 (1 is its journal replay or a
+    preen fix); anything higher stops the clearing before any other write;
+  - Codewire's logins and temporaries are zeroed and removed by the rules
+    above; the guest's cw runtime selection stays, since the disk boots as
+    the same environment;
+  - a second `e2fsck -f -p`, which must also exit 0 or 1, or the clearing
+    has failed and nothing is punched; then every free range in that final
+    check's bitmaps is punched out of `state.raw`, and samples are read back
+    as zeros.
+
+  Only then is the marker written, and the boot goes on. A crash part-way
+  leaves no marker, so the next start clears again.
+- **A clearing that fails refuses the boot** with `state_disk_not_cleared`,
+  naming the step that failed. Its message gives the ways out: start again;
+  sign the provider out (`cw credentials`, or the provider's own page), then
+  start once with `--start-with-uncleared-disk`; or recreate the VM. That
+  override applies to one start, is logged as `state_disk_clear
+  outcome=overridden`, and leaves the marker missing, so the next start
+  clears again. It is refused for a VM on a platform profile, whose
+  credentials are not the user's to accept that risk for: only a successful
+  clearing or a new VM starts it.
+- **The host's limit.** Clearing changes only this VM's image. A VM
+  checkpoint that shares its blocks by reflink keeps its own copy (below).
+  Host blocks the punching frees keep their data until reused, protected only
+  by the host's disk encryption: FileVault on a Mac, LUKS or similar on Linux.
+  An unencrypted Linux host has the same limit as a Mac without FileVault. A
+  token already copied elsewhere, by an agent or into a backup, is fixed only
+  by signing that provider out.
+
 A hosted disk snapshot (`cw --cloud snapshot create`) is a kept copy of a
 stopped hosted environment's workspace volume, private to its creator. Capture
 never edits the source. It restores a raw snapshot of the volume into a clearing
@@ -3753,6 +3807,23 @@ under its own authority. An in-place restore keeps its environment's logins,
 and the writer rechecks them under the new generation. Agent processes that
 were running at capture keep the copy they held until it expires. The
 manifest records only references and hashes, never resolved values.
+
+A checkpoint records whether the VM's state disk was cleared when it was taken
+(`state_disk_cleared`, from the marker above). Its disk half is never cleared
+afterwards and a checkpoint is never removed automatically: it is the user's
+data. `cw checkpoint ls` and `cw checkpoint inspect` flag one that may hold an
+earlier real sign-in, and name `cw checkpoint rm`. That is one taken without
+interception, which holds it by the exceptions above, and one whose
+`state_disk_cleared` is absent or false: absent on every checkpoint taken
+before #6277, false on one taken after a start with the override below, which
+intercepts with no marker. While interception is
+on, a restore or fork of a flagged checkpoint is refused by name, because a
+restore can't be cleared first: its memory refers to its disks as they were.
+One taken without interception stays refused outright. One taken with
+interception whose record is absent or false is refused unless that one restore or
+fork passes `--start-with-uncleared-disk`, which a platform profile can't, as
+above. A VM restored or forked that way has no marker, so its next cold start
+clears its disk.
 
 On a Mac (#4654) the saved state `state.vzsave` holds the same memory. It
 and the helper's `vz.json` are sealed 0400 and pinned by their sha256, and
