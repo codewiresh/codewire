@@ -821,10 +821,20 @@ where
         let (admitted, projected) = admitted;
         epoch.ensure_live().map_err(bridge_status)?;
         // A forward from here would leave from the platform, past the
-        // Sandbox's own policy and cw-egress, so none is sent (#5555).
-        let broker = OpenAiBroker::new(provider, self.state.upstream.clone())
-            .map_err(|_| unavailable())?
-            .with_untouched_forwards_refused();
+        // Sandbox's own policy and cw-egress, so none is sent (#5555). Where
+        // the Sandbox projects GitHub's placeholder, Git's requests that
+        // carry none get GitHub's challenge instead, so Git asks its helper
+        // for it (#4001).
+        let broker =
+            OpenAiBroker::new(provider, self.state.upstream.clone()).map_err(|_| unavailable())?;
+        let broker = if projected
+            .as_ref()
+            .is_some_and(|projected| projected.github().is_some())
+        {
+            broker.with_untouched_forwards_refused_challenging_git()
+        } else {
+            broker.with_untouched_forwards_refused()
+        };
         let broker = match &self.state.github_app_authorization {
             Some(owner) => broker.with_github_app_authorization_owner(owner.clone()),
             None => broker,

@@ -144,6 +144,15 @@ pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost>
     hosts
 }
 
+/// Whether the front door serves GitHub's two hosts for `clients`: a GitHub
+/// connection, once [`GITHUB_INTERCEPTED`] is on. Both placements bind them
+/// from [`front_door_hosts`], so each reads this from the same selection.
+pub fn binds_github(clients: ManagedCredentialClients) -> bool {
+    front_door_hosts(clients)
+        .iter()
+        .any(|host| GITHUB_HOSTS.contains(&host.host))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +347,7 @@ mod tests {
                 .iter()
                 .any(|host| GITHUB_HOSTS.contains(host))
         );
+        assert_eq!(binds_github(github), GITHUB_INTERCEPTED);
+        assert!(!binds_github(clients(&["anthropic", "ssh"])));
     }
 }

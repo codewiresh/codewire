@@ -9,12 +9,21 @@
 //! so it refuses every such request by its own rule. Each forward branch asks
 //! here with the URL it would dial, never a name the request gives, and a
 //! refused request is answered the same whatever it carried.
+//!
+//! One exception, hosted only: where the binding selects the `github` slot,
+//! a Git smart-HTTP request to `github.com` that carries no placeholder gets
+//! GitHub's own challenge instead of the refusal, so Git asks its credential
+//! helper, which answers with the placeholder (#4001; docs/dev/
+//! SECRETS-AND-CREDENTIALS.md, "GitHub, hosted"). Nothing is leased for it
+//! and nothing is sent upstream.
 
 use std::collections::BTreeSet;
 
+use http::Method;
 use url::Url;
 
 use super::{BrokerRequestError, OpenAiBroker};
+use crate::network::RouteHost;
 
 /// Where an untouched forward may go.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,8 +31,11 @@ pub(crate) enum UntouchedForwards {
     /// To the hosts the policy's holder named as allowed by rule on 443,
     /// lowercase. A broker started without an answer has none.
     AllowedHosts(BTreeSet<String>),
-    /// Nowhere: this broker runs in the platform.
-    Refused,
+    /// Nowhere: this broker runs in the platform. With `git_challenge`, the
+    /// binding selects the `github` slot, so Git's smart-HTTP requests to
+    /// `github.com` are challenged rather than refused
+    /// ([`Self::challenges_git`]).
+    Refused { git_challenge: bool },
 }
 
 impl Default for UntouchedForwards {
@@ -44,7 +56,7 @@ impl UntouchedForwards {
     /// refuses its connection before any hand-off (`deny_beats_interception`).
     pub(crate) fn check(&self, target: &Url, routed: bool) -> Result<(), BrokerRequestError> {
         match self {
-            Self::Refused => Err(BrokerRequestError::SelectedCredentialOnly),
+            Self::Refused { .. } => Err(BrokerRequestError::SelectedCredentialOnly),
             Self::AllowedHosts(hosts) => {
                 let allowed = target.scheme() == "https"
                     && target.port_or_known_default() == Some(INTERCEPT_PORT)
@@ -62,6 +74,55 @@ impl UntouchedForwards {
                 }
             }
         }
+    }
+
+    /// Whether a request that carries no placeholder-shaped value gets
+    /// GitHub's challenge (401, `WWW-Authenticate: Basic realm="GitHub"`)
+    /// instead of [`Self::check`]'s answer. Only when all hold: this broker
+    /// refuses untouched forwards and its binding selects the `github` slot;
+    /// the host is `github.com`, never `api.github.com`; and the request is
+    /// on Git's smart-HTTP grammar exactly ([`git_smart_http`]).
+    pub(crate) fn challenges_git(
+        &self,
+        host: RouteHost,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> bool {
+        matches!(
+            self,
+            Self::Refused {
+                git_challenge: true
+            }
+        ) && host == RouteHost::GitHub
+            && git_smart_http(method, path, query)
+    }
+}
+
+/// The services Git's smart HTTP names: fetch and push.
+const GIT_SERVICES: [&str; 2] = ["git-upload-pack", "git-receive-pack"];
+
+/// Git's smart-HTTP grammar, exactly: `GET <repository>/info/refs` whose
+/// whole query is `service=` and one of [`GIT_SERVICES`], or
+/// `POST <repository>/<service>` with no query. Any other method, path
+/// suffix or query is not Git's.
+fn git_smart_http(method: &Method, path: &str, query: Option<&str>) -> bool {
+    let under_repository = |suffix: &str| {
+        path.strip_suffix(suffix)
+            .is_some_and(|repository| repository.len() > 1)
+    };
+    if *method == Method::GET {
+        under_repository("/info/refs")
+            && query
+                .and_then(|query| query.strip_prefix("service="))
+                .is_some_and(|service| GIT_SERVICES.contains(&service))
+    } else if *method == Method::POST {
+        query.is_none()
+            && GIT_SERVICES
+                .iter()
+                .any(|service| under_repository(&format!("/{service}")))
+    } else {
+        false
     }
 }
 
@@ -85,7 +146,20 @@ impl<P, U> OpenAiBroker<P, U> {
 
     /// A hosted broker: no untouched forward, whatever the policy.
     pub fn with_untouched_forwards_refused(mut self) -> Self {
-        self.untouched_forwards = UntouchedForwards::Refused;
+        self.untouched_forwards = UntouchedForwards::Refused {
+            git_challenge: false,
+        };
+        self
+    }
+
+    /// A hosted broker whose binding selects the `github` slot: Git's
+    /// smart-HTTP requests to `github.com` that carry no placeholder get
+    /// GitHub's challenge rather than the refusal (#4001). Every other
+    /// untouched forward stays refused.
+    pub fn with_untouched_forwards_refused_challenging_git(mut self) -> Self {
+        self.untouched_forwards = UntouchedForwards::Refused {
+            git_challenge: true,
+        };
         self
     }
 
@@ -176,9 +250,133 @@ mod tests {
 
     #[test]
     fn a_hosted_broker_refuses_whatever_is_allowed() {
-        assert_eq!(
-            UntouchedForwards::Refused.check(&url("https://api.anthropic.com/v1/messages"), false),
-            Err(BrokerRequestError::SelectedCredentialOnly)
-        );
+        for git_challenge in [false, true] {
+            for target in [
+                "https://api.anthropic.com/v1/messages",
+                "https://github.com/owner/repo.git/info/refs?service=git-upload-pack",
+            ] {
+                assert_eq!(
+                    UntouchedForwards::Refused { git_challenge }.check(&url(target), false),
+                    Err(BrokerRequestError::SelectedCredentialOnly)
+                );
+            }
+        }
+    }
+
+    /// GitHub's challenge needs every condition: a hosted broker whose
+    /// binding selects the `github` slot, `github.com`, and Git's smart-HTTP
+    /// grammar exactly. Each request here fails exactly one of them.
+    #[test]
+    fn only_gits_smart_http_to_github_com_is_challenged_and_only_when_github_is_selected() {
+        let selected = UntouchedForwards::Refused {
+            git_challenge: true,
+        };
+        let challenged = |forwards: &UntouchedForwards, host, method, path, query| {
+            forwards.challenges_git(host, &method, path, query)
+        };
+        let grammar = [
+            (
+                Method::GET,
+                "/owner/repo.git/info/refs",
+                Some("service=git-upload-pack"),
+            ),
+            (
+                Method::GET,
+                "/owner/repo/info/refs",
+                Some("service=git-receive-pack"),
+            ),
+            (Method::POST, "/owner/repo.git/git-upload-pack", None),
+            (Method::POST, "/owner/repo.git/git-receive-pack", None),
+        ];
+        for (method, path, query) in grammar.clone() {
+            assert!(
+                challenged(&selected, RouteHost::GitHub, method.clone(), path, query),
+                "{method} {path}"
+            );
+            // Never on the API's host.
+            assert!(!challenged(
+                &selected,
+                RouteHost::GitHubApi,
+                method.clone(),
+                path,
+                query
+            ));
+            // Never unless the binding selects the github slot, and never on
+            // a broker that may forward.
+            for other in [
+                UntouchedForwards::Refused {
+                    git_challenge: false,
+                },
+                UntouchedForwards::AllowedHosts(["github.com".to_owned()].into()),
+                UntouchedForwards::default(),
+            ] {
+                assert!(!challenged(
+                    &other,
+                    RouteHost::GitHub,
+                    method.clone(),
+                    path,
+                    query
+                ));
+            }
+        }
+        for (method, path, query) in [
+            // A service Git does not fetch or push with, or none.
+            (
+                Method::GET,
+                "/owner/repo.git/info/refs",
+                Some("service=git-upload-archive"),
+            ),
+            (
+                Method::GET,
+                "/owner/repo.git/info/refs",
+                Some("service=git-upload-pack&x=1"),
+            ),
+            (
+                Method::GET,
+                "/owner/repo.git/info/refs",
+                Some("x=1&service=git-upload-pack"),
+            ),
+            (Method::GET, "/owner/repo.git/info/refs", Some("service=")),
+            (Method::GET, "/owner/repo.git/info/refs", Some("")),
+            (Method::GET, "/owner/repo.git/info/refs", None),
+            // An extra path suffix, or none before the suffix.
+            (
+                Method::GET,
+                "/owner/repo.git/info/refs/x",
+                Some("service=git-upload-pack"),
+            ),
+            (
+                Method::GET,
+                "/owner/repo.git/info/refsx",
+                Some("service=git-upload-pack"),
+            ),
+            (Method::GET, "/info/refs", Some("service=git-upload-pack")),
+            (Method::POST, "/owner/repo.git/git-upload-pack/x", None),
+            (Method::POST, "/git-receive-pack", None),
+            (Method::POST, "/owner/repo.git/info/lfs/objects/batch", None),
+            // A query on a POST, or the other method for a path.
+            (
+                Method::POST,
+                "/owner/repo.git/git-upload-pack",
+                Some("service=git-upload-pack"),
+            ),
+            (
+                Method::POST,
+                "/owner/repo.git/info/refs",
+                Some("service=git-upload-pack"),
+            ),
+            (Method::GET, "/owner/repo.git/git-upload-pack", None),
+            (Method::PUT, "/owner/repo.git/git-receive-pack", None),
+            (
+                Method::HEAD,
+                "/owner/repo.git/info/refs",
+                Some("service=git-upload-pack"),
+            ),
+        ] {
+            assert!(
+                !challenged(&selected, RouteHost::GitHub, method.clone(), path, query),
+                "{method} {path} {query:?}"
+            );
+        }
     }
 }

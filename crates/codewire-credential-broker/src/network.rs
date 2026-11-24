@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
 use codewire_access::HttpProvider;
 #[cfg(feature = "platform")]
-use codewire_access::{AvailableGrants, FRONT_DOOR_HOSTS};
+use codewire_access::{AvailableGrants, CapabilitySlot, FRONT_DOOR_HOSTS, GITHUB_HOSTS};
 use codewire_egress_policy::intercept::InterceptBinding;
 use futures::StreamExt as _;
 use http::{HeaderMap, Method};
@@ -703,9 +703,17 @@ impl RouteHost {
     /// The names an interception leaf carries for these grants (#4001): each
     /// front-door host the grants' routes reach, and for a suffix entry its
     /// one-label wildcard. Only the Codex slot's route reaches `chatgpt.com`,
-    /// so only it gets `*.chatgpt.com` (#6195).
+    /// so only it gets `*.chatgpt.com` (#6195). GitHub's two hosts are named
+    /// exactly when the grants bind them ([`binds_github`]).
     #[cfg(feature = "platform")]
     pub(crate) fn interceptable(grants: &AvailableGrants) -> BTreeSet<&'static str> {
+        Self::interceptable_when(grants, binds_github(grants))
+    }
+
+    /// [`Self::interceptable`], with GitHub's two hosts served exactly when
+    /// `github_bound`.
+    #[cfg(feature = "platform")]
+    fn interceptable_when(grants: &AvailableGrants, github_bound: bool) -> BTreeSet<&'static str> {
         grants
             .grants
             .iter()
@@ -714,11 +722,13 @@ impl RouteHost {
                     Self::of_route(grant.capability_slot.as_str(), permission.route.as_str())
                 })
             })
-            .flat_map(|route_host| {
+            .flat_map(move |route_host| {
+                let host = route_host.as_str();
                 FRONT_DOOR_HOSTS
                     .iter()
-                    .filter(move |served| served.host == route_host.as_str())
+                    .filter(move |served| served.host == host)
                     .filter_map(|served| served.leaf_name())
+                    .chain((github_bound && GITHUB_HOSTS.contains(&host)).then_some(host))
             })
             .collect()
     }
@@ -737,6 +747,21 @@ impl RouteHost {
             .copied()
             .find(|route_host| route_host.as_str() == host)
     }
+}
+
+/// Whether `grants` bind GitHub's two hosts behind the front door: they
+/// grant the `github` slot, and the front door serves GitHub's hosts for a
+/// GitHub connection ([`codewire_access::binds_github`]), as orchestration
+/// binds them in `cw-egress` from the same selection (#4001). The projected
+/// placeholders, the leaves and Git's challenge all follow it.
+#[cfg(feature = "platform")]
+pub(crate) fn binds_github(grants: &AvailableGrants) -> bool {
+    grants
+        .grants
+        .iter()
+        .any(|grant| grant.capability_slot == CapabilitySlot::github())
+        && codewire_access::ManagedCredentialClients::from_profile_slots(["github"])
+            .is_ok_and(codewire_access::binds_github)
 }
 
 fn selected_hosts(
@@ -1185,15 +1210,50 @@ mod tests {
             RouteHost::interceptable(&grants(&[("openai", "openai-api")])),
             BTreeSet::from(["api.openai.com"])
         );
-        // GitHub's hosts are a route's, but the front door doesn't serve them.
-        assert!(
-            RouteHost::interceptable(&grants(&[
-                ("github", "github-api"),
-                ("github", "github-https"),
-                ("ssh", "ssh-agent"),
-            ]))
-            .is_empty()
+        // GitHub's hosts are a route's, but the front door serves them only
+        // while they are bound.
+        let github = grants(&[
+            ("github", "github-api"),
+            ("github", "github-https"),
+            ("ssh", "ssh-agent"),
+        ]);
+        assert_eq!(binds_github(&github), codewire_access::GITHUB_INTERCEPTED);
+        assert!(RouteHost::interceptable_when(&github, false).is_empty());
+        if !codewire_access::GITHUB_INTERCEPTED {
+            assert!(RouteHost::interceptable(&github).is_empty());
+        }
+    }
+
+    /// Bound, GitHub's two hosts get leaves exactly as far as the grants'
+    /// routes reach them, beside the other hosts; and only grants of the
+    /// `github` slot bind them (#4001).
+    #[cfg(feature = "platform")]
+    #[test]
+    fn leaves_name_githubs_hosts_only_while_they_are_bound() {
+        let both = grants(&[
+            ("anthropic", "anthropic-api"),
+            ("github", "github-api"),
+            ("github", "github-https"),
+        ]);
+        assert_eq!(
+            RouteHost::interceptable_when(&both, true),
+            BTreeSet::from(["api.anthropic.com", "api.github.com", "github.com"])
         );
+        assert_eq!(
+            RouteHost::interceptable_when(&both, false),
+            BTreeSet::from(["api.anthropic.com"])
+        );
+        assert_eq!(
+            RouteHost::interceptable_when(&grants(&[("github", "github-https")]), true),
+            BTreeSet::from(["github.com"])
+        );
+        // Bound or not, a grant that reaches no GitHub host gets none.
+        let codex = grants(&[("codex", "openai-api")]);
+        let bound = RouteHost::interceptable_when(&codex, true);
+        assert_eq!(bound, RouteHost::interceptable_when(&codex, false));
+        assert!(GITHUB_HOSTS.iter().all(|host| !bound.contains(host)));
+        assert!(!binds_github(&grants(&[("anthropic", "anthropic-api")])));
+        assert!(!binds_github(&grants(&[])));
     }
 
     /// `DestinationDenied` means nothing was sent (#3999): a request-builder

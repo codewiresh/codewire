@@ -44,6 +44,10 @@ pub(crate) struct CredentialBridge {
     /// Whether this daemon's agents are intercepted (#4001): only then may a
     /// host's Open carry placeholders.
     intercepted: bool,
+    /// A hosted daemon's generated `gh` configuration, which each launch
+    /// converges to its own projection (#4001).
+    #[cfg(target_os = "linux")]
+    gh_config: Option<Arc<crate::gh_config::LaunchGhConfig>>,
     // Where a Hosted ingress listens: the fixed guest-facing loopback address
     // in the product. Unit tests bind port 0 instead, so the kernel gives
     // each ingress its own port and no test run contends for a fixed one.
@@ -147,6 +151,8 @@ impl CredentialBridge {
             config,
             inner,
             intercepted: false,
+            #[cfg(target_os = "linux")]
+            gh_config: None,
             #[cfg(not(test))]
             loopback: hosted_loopback_address(),
             #[cfg(test)]
@@ -167,6 +173,14 @@ impl CredentialBridge {
         self
     }
 
+    /// This bridge for a hosted daemon whose launches converge `gh`'s
+    /// generated configuration in `config` to their own projection (#4001).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_gh_config(mut self, config: crate::gh_config::GhConfig) -> Self {
+        self.gh_config = Some(Arc::new(crate::gh_config::LaunchGhConfig::new(config)));
+        self
+    }
+
     /// The placeholders the active epoch gave this Sandbox to project
     /// (#4001), waiting until `deadline` for the first host.
     pub(crate) async fn projected_placeholders(
@@ -180,8 +194,12 @@ impl CredentialBridge {
     /// Sandbox whose bind turned interception on (#4001) projects the
     /// active epoch's Anthropic placeholder, waiting for the first epoch as
     /// long as a launch waits for its host; without one it projects no
-    /// Anthropic bearer at all, never the loopback route. Any other daemon's
-    /// configuration is used as it is.
+    /// Anthropic bearer at all, never the loopback route. With the epoch's
+    /// GitHub placeholder, which it carries exactly while GitHub's hosts are
+    /// bound, it projects Git and `gh` to GitHub's own names, trusting the
+    /// installed bundle, and converges `gh`'s generated configuration to
+    /// match; without one GitHub keeps its loopback route. Any other
+    /// daemon's configuration is used as it is.
     pub(crate) async fn launch_config<'a>(
         &self,
         config: &'a crate::Config,
@@ -200,10 +218,23 @@ impl CredentialBridge {
             .await
             .unwrap_or_default();
         let mut launch = config.clone();
-        launch.interception = config
-            .interception
-            .as_ref()
-            .map(|interception| interception.with_anthropic(placeholders.anthropic().cloned()));
+        launch.interception = config.interception.as_ref().map(|interception| {
+            let interception = interception.with_anthropic(placeholders.anthropic().cloned());
+            match placeholders.github() {
+                Some(github) => interception.with_github(
+                    github.clone(),
+                    codewire_daemon_proto::HOSTED_EGRESS_TRUST_BUNDLE_PATH,
+                ),
+                None => interception,
+            }
+        });
+        #[cfg(target_os = "linux")]
+        if let Some(gh_config) = &self.gh_config {
+            gh_config.prepare(
+                launch.managed_credential_clients,
+                launch.interception.as_ref(),
+            );
+        }
         std::borrow::Cow::Owned(launch)
     }
 

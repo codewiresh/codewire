@@ -9,7 +9,11 @@
 //!    nothing is sent, with or without a credential (#4926).
 //! 2. A placeholder beside another credential is refused, as on every route.
 //! 3. A request with no placeholder-shaped value is forwarded as it was sent,
-//!    on any path, with no lease and nothing of the broker's in it.
+//!    on any path, with no lease and nothing of the broker's in it. A hosted
+//!    broker forwards nothing untouched: such a request is refused, or, on
+//!    Git's smart-HTTP grammar at `github.com` where the binding selects the
+//!    `github` slot, answered with GitHub's own challenge, so Git asks its
+//!    credential helper for the placeholder (`runtime/untouched.rs`, #4001).
 //! 4. A placeholder-shaped value on a request outside the route's grammar
 //!    (Git fetch and push, and the API operations the route grants) is
 //!    refused without a lease, whoever's placeholder it looks like. It is
@@ -17,7 +21,8 @@
 //!    would only fail there, and nothing should teach a client to send it.
 //! 5. On the grammar, the swap rule decides: this environment's placeholder
 //!    is served exactly as the loopback route serves it, and any other value
-//!    is forwarded untouched.
+//!    is forwarded untouched. A lease whose placeholder key could not be
+//!    read refuses the request, as on Anthropic's route (#5087).
 //!
 //! Bodies: a forwarded body streams whatever its size. A Git POST given the
 //! credential streams as on the loopback route. An API request given the
@@ -46,6 +51,10 @@ use crate::transparent::without_framing;
 pub(crate) const PLACEHOLDER_OUTSIDE_ROUTE_CODE: &str = "placeholder_outside_route";
 
 const OUTSIDE_ROUTE_MESSAGE: &str = "Codewire's GitHub connection serves Git fetch and push and a fixed set of GitHub API operations. This request is not one of them, so it was not sent. Git LFS is not served. To make this request, use your own GitHub token.";
+
+/// The body of GitHub's challenge, which Git does not show: it asks its
+/// credential helper and repeats the request.
+const CHALLENGE_MESSAGE: &str = "Authentication required. Git's credential helper answers with Codewire's placeholder for this Sandbox's GitHub connection.\n";
 
 const TOO_LARGE_MESSAGE: &str = "Codewire's GitHub connection accepts GitHub API request bodies up to 4 MiB. This request was not sent.";
 
@@ -85,7 +94,17 @@ where
         }
         let presented = match Presented::of(&request.headers) {
             Presented::Conflict => return Ok(credential_conflict_response()),
-            Presented::Foreign => return self.forward_github(host, request, body_stream).await,
+            Presented::Foreign => {
+                if self.untouched_forwards.challenges_git(
+                    host,
+                    &request.method,
+                    &request.path,
+                    request.query.as_deref(),
+                ) {
+                    return Ok(challenge_response());
+                }
+                return self.forward_github(host, request, body_stream).await;
+            }
             Presented::Placeholder(placeholder) => placeholder,
         };
         if crate::github::classify_request(
@@ -143,6 +162,13 @@ where
             .await
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
+        if lease.placeholder_failed() {
+            // This environment's key could not be read, so neither ours nor a
+            // foreign value can be told: refused, and never remembered, as on
+            // Anthropic's route (#5087).
+            drop(lease);
+            return Err(BrokerRequestError::AuthorityUnavailable);
+        }
         self.placeholders
             .remember(&request.slot, lease.placeholder());
         if !lease
@@ -269,6 +295,22 @@ fn outside_route_response(route: &str) -> BrokerHttpResponse {
         )
     };
     fixed_response(StatusCode::FORBIDDEN, content_type, body)
+}
+
+/// GitHub's own challenge to Git: 401 with `WWW-Authenticate: Basic
+/// realm="GitHub"` and a fixed body. Nothing is leased and nothing is sent.
+fn challenge_response() -> BrokerHttpResponse {
+    let (status, mut headers, body) = fixed_response(
+        StatusCode::UNAUTHORIZED,
+        "text/plain; charset=utf-8",
+        CHALLENGE_MESSAGE.to_owned(),
+    )
+    .into_parts();
+    headers.insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"GitHub\""),
+    );
+    BrokerHttpResponse::new(status, headers, body)
 }
 
 /// 413 for an API request that would be given the credential and is over

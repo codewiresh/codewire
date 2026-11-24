@@ -14,13 +14,20 @@
 //! GitHub is not selected the file and the directory are removed. A selection
 //! change restarts the Sandbox, so one pass at daemon start covers it.
 //!
+//! An intercepted Sandbox learns whether GitHub's hosts are bound only from
+//! its credential epoch, which carries GitHub's placeholder exactly then
+//! (#4001). So each launch also converges the file to its own projection
+//! ([`LaunchGhConfig`]): while the launch projects that placeholder, `gh`
+//! speaks HTTPS to `api.github.com` itself and the file names no socket.
+//!
 //! Only [`GhConfigSync`] states are logged, never file contents.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use codewire_access::{
-    GH_CONFIG_FILE_NAME, GH_PLATFORM_CONFIG_DIR, ManagedCredentialClientPlacement,
+    GH_CONFIG_FILE_NAME, GH_PLATFORM_CONFIG_DIR, Interception, ManagedCredentialClientPlacement,
     ManagedCredentialClients,
 };
 
@@ -76,8 +83,19 @@ impl GhConfig {
 
     /// Write, keep or remove the generated configuration for `clients`.
     pub fn sync(&self, clients: ManagedCredentialClients) -> io::Result<GhConfigSync> {
+        self.sync_intercepted(clients, None)
+    }
+
+    /// [`Self::sync`] for a launch under `interception`: the projection
+    /// that launch takes, which names no socket while it carries GitHub's
+    /// placeholder (#4001).
+    pub fn sync_intercepted(
+        &self,
+        clients: ManagedCredentialClients,
+        interception: Option<&Interception>,
+    ) -> io::Result<GhConfigSync> {
         let Some(projection) = clients
-            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .for_placement_intercepted(ManagedCredentialClientPlacement::Platform, interception)
             .gh
         else {
             self.remove()?;
@@ -142,6 +160,42 @@ impl GhConfig {
     }
 }
 
+/// The generated configuration an intercepted hosted Sandbox's launches
+/// converge to their own projection, one launch at a time (#4001).
+pub(crate) struct LaunchGhConfig {
+    config: GhConfig,
+    writing: Mutex<()>,
+}
+
+impl LaunchGhConfig {
+    pub(crate) fn new(config: GhConfig) -> Self {
+        Self {
+            config,
+            writing: Mutex::new(()),
+        }
+    }
+
+    /// Converge the file before a launch under `interception`. A change and
+    /// a failure are logged; a failure leaves `gh` without its route, as at
+    /// daemon start, and never stops the launch.
+    pub(crate) fn prepare(
+        &self,
+        clients: ManagedCredentialClients,
+        interception: Option<&Interception>,
+    ) {
+        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.config.sync_intercepted(clients, interception) {
+            Ok(GhConfigSync::Written) => {
+                tracing::info!(gh_config = ?GhConfigSync::Written, "hosted gh configuration");
+            }
+            Ok(GhConfigSync::Current | GhConfigSync::NotSelected) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "hosted gh configuration could not be written");
+            }
+        }
+    }
+}
+
 fn foreign() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -195,6 +249,48 @@ mod tests {
             (before.ino(), before.mtime_nsec()),
             (after.ino(), after.mtime_nsec())
         );
+    }
+
+    /// A launch that projects GitHub's placeholder (#4001) converges the
+    /// file to name no socket, so `gh` speaks HTTPS to GitHub's own host; a
+    /// launch without it, intercepted or not, gets the socket's again.
+    #[test]
+    fn a_launch_with_githubs_placeholder_names_no_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = GhConfig::new(temp.path().join("gh"));
+        let launches = LaunchGhConfig::new(config.clone());
+        let selected = clients(&["github", "anthropic"]);
+        let placeholder = codewire_access::CredentialPlaceholder::parse(
+            codewire_access::known_answer::PLACEHOLDER,
+        )
+        .unwrap();
+        let without = Interception::new(None).with_hosted_ca_installed();
+        let github = without.clone().with_github(
+            placeholder,
+            codewire_daemon_proto::HOSTED_EGRESS_TRUST_BUNDLE_PATH,
+        );
+        let socket = "version: 1\nhttp_unix_socket: /codewire/run/credentials.sock\n";
+
+        config.sync(selected).unwrap();
+        assert_eq!(std::fs::read_to_string(config.path()).unwrap(), socket);
+        launches.prepare(selected, Some(&github));
+        assert_eq!(
+            std::fs::read_to_string(config.path()).unwrap(),
+            "version: 1\n"
+        );
+        assert_eq!(mode(&config.path()), 0o600);
+        assert_eq!(
+            config.sync_intercepted(selected, Some(&github)).unwrap(),
+            GhConfigSync::Current
+        );
+        for interception in [Some(&without), None] {
+            launches.prepare(selected, Some(&github));
+            launches.prepare(selected, interception);
+            assert_eq!(std::fs::read_to_string(config.path()).unwrap(), socket);
+        }
+        // GitHub not selected: nothing of Codewire's stays, placeholder or not.
+        launches.prepare(clients(&["anthropic"]), Some(&github));
+        assert!(!config.directory().exists());
     }
 
     #[test]

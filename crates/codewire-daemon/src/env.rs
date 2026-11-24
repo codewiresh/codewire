@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use codewire_access::{ManagedCredentialClient, ManagedCredentialClientPlacement};
 use codewire_daemon_proto::{
-    HOSTED_EGRESS_TRUST_BUNDLE_PATH, HOSTED_EGRESS_TRUST_CA_PATH, SANDBOX_SERVER_URL_ENV,
+    HOSTED_EGRESS_TRUST_BUNDLE_PATH, HOSTED_EGRESS_TRUST_CA_DIR, HOSTED_EGRESS_TRUST_CA_PATH,
+    SANDBOX_SERVER_URL_ENV,
 };
 
 use crate::config::{
@@ -210,29 +211,70 @@ fn bypass_proxy_for_loopback(
 
 /// An intercepted hosted Sandbox's launches trust its front door (#6072), as
 /// a local guest's workload does: `NODE_EXTRA_CA_CERTS` names the CA the
-/// daemon installed, and `CODEX_CA_CERTIFICATE` the bundle while the Codex
-/// client is selected. A name the image or the project already sets is
-/// kept, and that tool then does not trust the front door.
+/// daemon installed, `CODEX_CA_CERTIFICATE` the bundle while the Codex
+/// client is selected, and `SSL_CERT_DIR` the image's own certificate
+/// directory then the CA's while the launch projects GitHub's placeholder,
+/// so `gh` adds the CA to its roots (#4001). A name the image or the project
+/// already sets is kept, and that tool then does not trust the front door;
+/// a kept `SSL_CERT_DIR`, and a `GIT_SSL_CAINFO` that overrides Git's
+/// setting, are logged, as a local guest logs them.
 fn name_hosted_egress_ca(
     config: &Config,
     persisted: &[String],
     inherited: &mut Vec<(String, String)>,
 ) {
-    let mut trust = vec![("NODE_EXTRA_CA_CERTS", HOSTED_EGRESS_TRUST_CA_PATH)];
+    let mut trust = vec![(
+        "NODE_EXTRA_CA_CERTS",
+        HOSTED_EGRESS_TRUST_CA_PATH.to_owned(),
+    )];
     if config
         .managed_credential_clients
         .contains(ManagedCredentialClient::Codex)
     {
-        trust.push(("CODEX_CA_CERTIFICATE", HOSTED_EGRESS_TRUST_BUNDLE_PATH));
+        trust.push((
+            "CODEX_CA_CERTIFICATE",
+            HOSTED_EGRESS_TRUST_BUNDLE_PATH.to_owned(),
+        ));
+    }
+    let github = config
+        .interception
+        .as_ref()
+        .is_some_and(|interception| interception.github().is_some());
+    if github {
+        trust.push((
+            "SSL_CERT_DIR",
+            format!("{IMAGE_CERTIFICATE_DIRECTORY}:{HOSTED_EGRESS_TRUST_CA_DIR}"),
+        ));
     }
     for (name, path) in trust {
         let set = inherited.iter().any(|(inherited, _)| inherited == name)
             || environment_names(persisted).any(|persisted| persisted == name);
         if !set {
-            inherited.push((name.to_owned(), path.to_owned()));
+            inherited.push((name.to_owned(), path));
+        } else if name == "SSL_CERT_DIR" {
+            tracing::info!(
+                name,
+                "the image or project sets this name, so it is kept and gh does not trust the egress front door"
+            );
         }
     }
+    // Git reads this variable after its configuration, so it replaces the
+    // projection's `sslCAInfo` for GitHub too.
+    let name = "GIT_SSL_CAINFO";
+    if github
+        && (inherited.iter().any(|(inherited, _)| inherited == name)
+            || environment_names(persisted).any(|persisted| persisted == name))
+    {
+        tracing::info!(
+            name,
+            "the image or project sets this name, so Git does not trust the egress front door"
+        );
+    }
 }
+
+/// The image's own certificate directory, which `SSL_CERT_DIR` names before
+/// the front door's CA, so the image's roots stay trusted.
+const IMAGE_CERTIFICATE_DIRECTORY: &str = "/etc/ssl/certs";
 
 fn environment_names(entries: &[String]) -> impl Iterator<Item = &str> {
     entries
@@ -559,6 +601,97 @@ mod tests {
         let claude_only = managed_entries(&claude_only);
         assert!(value(&claude_only, "NODE_EXTRA_CA_CERTS").is_some());
         assert_eq!(value(&claude_only, "CODEX_CA_CERTIFICATE"), None);
+    }
+
+    /// A hosted launch that projects GitHub's placeholder (#4001) hands Git
+    /// and `gh` the placeholder and the front door's trust: Git's helper and
+    /// `GH_TOKEN`, Git's `sslCAInfo` for `https://github.com/` naming the
+    /// bundle, and `SSL_CERT_DIR` the image's directory then the CA's, never
+    /// over an image's or project's own. Without GitHub's placeholder, or
+    /// without an installed CA, no `SSL_CERT_DIR` is set.
+    #[test]
+    fn a_hosted_launch_with_githubs_placeholder_gives_git_and_gh_the_front_doors_trust() {
+        let value = |entries: &[String], name: &str| {
+            entries
+                .iter()
+                .find_map(|entry| entry.strip_prefix(&format!("{name}=")))
+                .map(str::to_owned)
+        };
+        let git_config = |entries: &[String]| {
+            let count: usize = value(entries, "GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+            (0..count)
+                .map(|index| {
+                    (
+                        value(entries, &format!("GIT_CONFIG_KEY_{index}")).unwrap(),
+                        value(entries, &format!("GIT_CONFIG_VALUE_{index}")).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let placeholder =
+            codewire_access::CredentialPlaceholder::parse(&format!("cwp1_{}A", "G".repeat(42)))
+                .unwrap();
+        let mut config = selected_config(
+            PathBuf::from("/home/codewire"),
+            &["github", "anthropic"],
+            CredentialBridgeTransport::Hosted,
+        );
+        let installed = codewire_access::Interception::new(None).with_hosted_ca_installed();
+        config.interception = Some(
+            installed
+                .clone()
+                .with_github(placeholder.clone(), HOSTED_EGRESS_TRUST_BUNDLE_PATH),
+        );
+        let github = managed_entries(&config);
+        assert_eq!(
+            value(&github, "SSL_CERT_DIR").as_deref(),
+            Some("/etc/ssl/certs:/codewire/run/egress-trust/ca.d")
+        );
+        assert_eq!(
+            value(&github, "GH_TOKEN").as_deref(),
+            Some(placeholder.as_str())
+        );
+        let entries = git_config(&github);
+        assert!(entries.contains(&(
+            "http.https://github.com/.sslCAInfo".to_owned(),
+            HOSTED_EGRESS_TRUST_BUNDLE_PATH.to_owned()
+        )));
+        assert!(
+            entries
+                .iter()
+                .any(|(key, value)| key == "credential.https://github.com.helper"
+                    && value.contains(placeholder.as_str()))
+        );
+
+        let image = vec![("SSL_CERT_DIR".to_owned(), "/opt/corp-certs".to_owned())];
+        let own = build_managed_process_env_from(&config, Vec::new(), &[], "", image, "/bin/sh")
+            .unwrap()
+            .entries;
+        assert_eq!(
+            value(&own, "SSL_CERT_DIR").as_deref(),
+            Some("/opt/corp-certs")
+        );
+        let project = vec!["SSL_CERT_DIR=/opt/project-certs".to_owned()];
+        let own = build_managed_process_env_from(&config, project, &[], "", Vec::new(), "/bin/sh")
+            .unwrap()
+            .entries;
+        assert_eq!(
+            value(&own, "SSL_CERT_DIR").as_deref(),
+            Some("/opt/project-certs")
+        );
+
+        config.interception = Some(installed);
+        let without = managed_entries(&config);
+        assert_eq!(value(&without, "SSL_CERT_DIR"), None);
+        assert_ne!(
+            value(&without, "GH_TOKEN").as_deref(),
+            Some(placeholder.as_str())
+        );
+        config.interception = Some(
+            codewire_access::Interception::new(None)
+                .with_github(placeholder.clone(), HOSTED_EGRESS_TRUST_BUNDLE_PATH),
+        );
+        assert_eq!(value(&managed_entries(&config), "SSL_CERT_DIR"), None);
     }
 
     fn selected_config(

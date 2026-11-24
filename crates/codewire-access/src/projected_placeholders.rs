@@ -2,9 +2,11 @@
 //! docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosted interception").
 //!
 //! The set is exactly a local guest's seed's: the `anthropic` slot's, which
-//! its API-key and subscription-token forms take as a variable. The sign-in
-//! form's and Codex's placeholders travel in their delivered logins, and
-//! GitHub keeps its loopback route. The credential service derives the set
+//! its API-key and subscription-token forms take as a variable, and the
+//! `github` slot's while GitHub's hosts are bound, which Git and `gh` take.
+//! The sign-in form's and Codex's placeholders travel in their delivered
+//! logins, and GitHub keeps its loopback route while its hosts are not
+//! bound. The credential service derives the set
 //! at an intercepted epoch's admission; orchestration's credential relay
 //! carries it from the admission header into the daemon's Open; the daemon
 //! projects it. Each reads it with [`ProjectedPlaceholders::from_entries`] or
@@ -16,13 +18,14 @@ use std::fmt;
 use crate::{AccessError, CapabilitySlot, CredentialPlaceholder};
 
 /// The slots whose placeholders a Sandbox projects, in wire order.
-pub const PROJECTED_PLACEHOLDER_SLOTS: [&str; 1] = ["anthropic"];
+pub const PROJECTED_PLACEHOLDER_SLOTS: [&str; 2] = ["anthropic", "github"];
 
 /// One intercepted epoch's projected placeholders, at most one per slot of
 /// [`PROJECTED_PLACEHOLDER_SLOTS`]. `Debug` names the slots, never a value.
 #[derive(Clone, Default)]
 pub struct ProjectedPlaceholders {
     anthropic: Option<CredentialPlaceholder>,
+    github: Option<CredentialPlaceholder>,
 }
 
 impl ProjectedPlaceholders {
@@ -37,11 +40,17 @@ impl ProjectedPlaceholders {
         };
         let mut set = Self::default();
         for (slot, placeholder) in entries {
-            if slot != CapabilitySlot::anthropic().as_str() || set.anthropic.is_some() {
+            let entry = if slot == CapabilitySlot::anthropic().as_str() {
+                &mut set.anthropic
+            } else if slot == CapabilitySlot::github().as_str() {
+                &mut set.github
+            } else {
+                return Err(invalid);
+            };
+            if entry.is_some() {
                 return Err(invalid);
             }
-            set.anthropic =
-                Some(CredentialPlaceholder::parse(placeholder).map_err(|_| invalid.clone())?);
+            *entry = Some(CredentialPlaceholder::parse(placeholder).map_err(|_| invalid.clone())?);
         }
         Ok(set)
     }
@@ -73,15 +82,32 @@ impl ProjectedPlaceholders {
         self.anthropic.as_ref()
     }
 
+    /// The `github` slot's placeholder, which Git and `gh` take while
+    /// GitHub's hosts are bound.
+    pub fn with_github(mut self, placeholder: CredentialPlaceholder) -> Self {
+        self.github = Some(placeholder);
+        self
+    }
+
+    pub fn github(&self) -> Option<&CredentialPlaceholder> {
+        self.github.as_ref()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.anthropic.is_none()
+        self.anthropic.is_none() && self.github.is_none()
     }
 
     /// Each `(slot, placeholder)`, in wire order.
     pub fn entries(&self) -> impl Iterator<Item = (&'static str, &CredentialPlaceholder)> {
+        let [anthropic, github] = PROJECTED_PLACEHOLDER_SLOTS;
         self.anthropic
             .iter()
-            .map(|placeholder| (PROJECTED_PLACEHOLDER_SLOTS[0], placeholder))
+            .map(move |placeholder| (anthropic, placeholder))
+            .chain(
+                self.github
+                    .iter()
+                    .map(move |placeholder| (github, placeholder)),
+            )
     }
 
     /// The admission header's one value; [`Self::from_header`] reads it back.
@@ -95,11 +121,15 @@ impl ProjectedPlaceholders {
     /// Whether both sets hold the same placeholders, compared in constant
     /// time.
     pub fn ct_eq(&self, other: &Self) -> bool {
-        match (&self.anthropic, &other.anthropic) {
-            (None, None) => true,
-            (Some(left), Some(right)) => left.ct_eq(right),
-            _ => false,
-        }
+        same(&self.anthropic, &other.anthropic) & same(&self.github, &other.github)
+    }
+}
+
+fn same(left: &Option<CredentialPlaceholder>, right: &Option<CredentialPlaceholder>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.ct_eq(right),
+        _ => false,
     }
 }
 

@@ -33,6 +33,9 @@
 //! component resolved inside it, so a symlink in the image can never make
 //! PID 1 copy one of the guest's own files into the bundle.
 //!
+//! A hosted daemon publishes the same three from its first egress session
+//! instead ([`publish_hosted`]), at its own paths.
+//!
 //! Without a CA in the seed nothing is published: the boot is exactly as
 //! before interception existed. A restored boot publishes from its own seed
 //! before the workspace thaws, and removes the files when it has no CA.
@@ -198,21 +201,27 @@ fn publish_ca_directory(directory: &Path, certificate: Option<&EgressCaCertifica
 const HOSTED_NO_CA: &[u8] = b"# This Sandbox's egress is not intercepted; it has no egress CA.\n";
 
 /// Install a hosted daemon's trust from its first egress session (#6072),
-/// before the daemon serves: `ca_path` holds the CA alone, and `bundle_path`
+/// before the daemon serves: `ca_path` holds the CA alone, `bundle_path`
 /// the image's own system bundle (this container's, read under `/`)
-/// followed by the CA. Without a CA, `ca_path` holds a comment and
-/// `bundle_path` is removed. An error means the daemon must not serve.
+/// followed by the CA, and `ca_directory` the CA alone under its subject-hash
+/// name, as a local guest's `egress-ca.d` (#4001). The directory is
+/// installed with every CA, since GitHub's placeholder, which decides
+/// whether a launch names it in `SSL_CERT_DIR`, arrives later with the
+/// credential epoch. Without a CA, `ca_path` holds a comment and the bundle
+/// and directory are removed. An error means the daemon must not serve.
 pub fn publish_hosted(
     certificate: Option<&EgressCaCertificate>,
     ca_path: &Path,
     bundle_path: &Path,
+    ca_directory: &Path,
 ) -> Result<()> {
-    for path in [ca_path, bundle_path] {
+    for path in [ca_path, bundle_path, ca_directory] {
         let parent = path
             .parent()
             .with_context(|| format!("{} has no parent", path.display()))?;
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    publish_ca_directory(ca_directory, certificate)?;
     let Some(certificate) = certificate else {
         match std::fs::remove_file(bundle_path) {
             Ok(()) => {}

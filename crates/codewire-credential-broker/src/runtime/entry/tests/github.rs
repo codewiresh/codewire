@@ -570,3 +570,5 @@ async fn without_the_policys_answer_github_sends_nothing_without_our_placeholder
         assert!(recorded.outbound().is_empty());
     }
 }
+
+mod hosted;

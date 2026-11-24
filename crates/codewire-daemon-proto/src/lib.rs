@@ -81,6 +81,11 @@ pub const HOSTED_EGRESS_TRUST_CA_PATH: &str = "/codewire/run/egress-trust/ca.pem
 /// own system bundle followed by it, which a launch names as
 /// `CODEX_CA_CERTIFICATE` while the Codex client is selected (#6072).
 pub const HOSTED_EGRESS_TRUST_BUNDLE_PATH: &str = "/codewire/run/egress-trust/ca-certificates.crt";
+/// Beside [`HOSTED_EGRESS_TRUST_CA_PATH`] while there is a CA: a directory
+/// holding the CA alone under its OpenSSL subject-hash name (`<hash>.0`),
+/// which a launch adds to `SSL_CERT_DIR` while GitHub's hosts are bound, so
+/// `gh` trusts the front door beside the image's roots (#4001).
+pub const HOSTED_EGRESS_TRUST_CA_DIR: &str = "/codewire/run/egress-trust/ca.d";
 /// Exact projected-token purpose for cw-egress calling orchestration's
 /// `EgressService`. Orchestration accepts it only for
 /// [`EGRESS_NODE_SERVICE_ACCOUNT`] in its own (server) namespace, and reads
@@ -850,6 +855,10 @@ mod tests {
         assert_eq!(
             HOSTED_EGRESS_TRUST_BUNDLE_PATH,
             "/codewire/run/egress-trust/ca-certificates.crt"
+        );
+        assert_eq!(
+            HOSTED_EGRESS_TRUST_CA_DIR,
+            "/codewire/run/egress-trust/ca.d"
         );
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
         assert_eq!(

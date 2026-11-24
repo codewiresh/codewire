@@ -39,6 +39,11 @@ fn only_one_whole_set_on_an_intercepted_epoch_is_taken() {
             .is_empty()
     );
     assert!(broker_placeholders(&header(&[]), false).unwrap().is_empty());
+    // GitHub's slot travels beside Anthropic's while its hosts are bound
+    // (#4001).
+    let both = broker_placeholders(&header(&[&format!("{good},github={OTHER}")]), true).unwrap();
+    assert_eq!(both.github().unwrap().as_str(), OTHER);
+    assert!(both.anthropic().is_some());
     for (values, intercepted) in [
         // Missing on an intercepted epoch, present on one that isn't.
         (vec![], true),
@@ -56,7 +61,9 @@ fn only_one_whole_set_on_an_intercepted_epoch_is_taken() {
     for value in [
         format!("openai={PLACEHOLDER}"),
         format!("codex={PLACEHOLDER}"),
-        format!("github={PLACEHOLDER}"),
+        format!("ssh={PLACEHOLDER}"),
+        format!("{good},github={OTHER},github={OTHER}"),
+        format!("{good},github=not-a-placeholder"),
         format!("{good},anthropic={OTHER}"),
         format!("{good},{good}"),
         format!("{good},openai={OTHER}"),
@@ -140,6 +147,18 @@ async fn the_brokers_placeholders_reach_the_open_whole_and_never_a_log() {
     assert_eq!(open.placeholders.len(), 1);
     assert_eq!(open.placeholders[0].capability_slot, "anthropic");
     assert_eq!(open.placeholders[0].placeholder, PLACEHOLDER);
+    let open = open_with(
+        vec![format!("github={OTHER},anthropic={PLACEHOLDER}")],
+        true,
+    )
+    .await
+    .expect("a whole set with GitHub's slot is admitted");
+    let slots: Vec<_> = open
+        .placeholders
+        .iter()
+        .map(|entry| (entry.capability_slot.as_str(), entry.placeholder.as_str()))
+        .collect();
+    assert_eq!(slots, [("anthropic", PLACEHOLDER), ("github", OTHER)]);
 
     // An intercepted epoch with nothing to project, and one that isn't
     // intercepted, carry none.

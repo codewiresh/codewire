@@ -498,6 +498,72 @@ async fn a_launch_before_the_first_epoch_waits_a_bounded_time() {
     bridge.shutdown().await;
 }
 
+/// With GitHub's hosts bound, the epoch's Open carries GitHub's placeholder,
+/// and a launch projects it with the installed bundle as Git's trust, and
+/// converges `gh`'s generated configuration to name no socket (#4001). An
+/// epoch without it leaves GitHub on its loopback route.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_launch_projects_githubs_placeholder_and_gh_follows_it() {
+    use codewire_access::known_answer::PLACEHOLDER;
+    let github = "cwp1_GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA";
+    let (temp, bridge, path) = fixture();
+    let gh = crate::gh_config::GhConfig::new(temp.path().join("gh"));
+    let bridge = bridge.intercepting(true).with_gh_config(gh.clone());
+    let mut config = hosted_config(&bridge, true);
+    config.managed_credential_clients =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic", "github"])
+            .unwrap();
+
+    let (sender, mut first) = prepared(&bridge, &path).await;
+    first.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(
+            &bridge,
+            &[("anthropic", PLACEHOLDER), ("github", github)],
+        )))
+        .await
+        .unwrap();
+    let launch = bridge.launch_config(&config).await;
+    let interception = launch.interception.as_ref().unwrap();
+    assert_eq!(interception.anthropic().unwrap().as_str(), PLACEHOLDER);
+    assert_eq!(interception.github().unwrap().as_str(), github);
+    assert_eq!(
+        interception.github_trust_bundle(),
+        Some(codewire_daemon_proto::HOSTED_EGRESS_TRUST_BUNDLE_PATH)
+    );
+    assert_eq!(std::fs::read_to_string(gh.path()).unwrap(), "version: 1\n");
+    assert!(config.interception.as_ref().unwrap().github().is_none());
+
+    let (sender, mut second) = prepared(&bridge, &path).await;
+    second.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[("anthropic", PLACEHOLDER)])))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while bridge
+            .projected_placeholders(soon())
+            .await
+            .unwrap()
+            .github()
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let launch = bridge.launch_config(&config).await;
+    assert!(launch.interception.as_ref().unwrap().github().is_none());
+    assert!(
+        std::fs::read_to_string(gh.path())
+            .unwrap()
+            .contains("http_unix_socket:")
+    );
+    bridge.shutdown().await;
+}
+
 /// A daemon that isn't intercepted uses its configuration as it is, and a
 /// local one too.
 #[tokio::test]
@@ -524,13 +590,32 @@ async fn a_launch_that_is_not_intercepted_keeps_its_configuration() {
 async fn an_open_with_placeholders_it_cant_take_is_refused() {
     use codewire_access::known_answer::PLACEHOLDER;
     let other = "cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    let cases: [(bool, &[(&str, &str)]); 6] = [
+    let cases: [(bool, &[(&str, &str)]); 10] = [
         (false, &[("anthropic", PLACEHOLDER)]),
+        (false, &[("github", PLACEHOLDER)]),
         (true, &[("openai", PLACEHOLDER)]),
         (true, &[("anthropic", PLACEHOLDER), ("anthropic", other)]),
         (true, &[("anthropic", PLACEHOLDER), ("codex", other)]),
         (true, &[("anthropic", "not-a-placeholder")]),
         (true, &[("Anthropic", PLACEHOLDER)]),
+        // GitHub's slot repeated or malformed refuses the whole Open, its
+        // well-formed Anthropic entry included.
+        (
+            true,
+            &[
+                ("anthropic", PLACEHOLDER),
+                ("github", other),
+                ("github", other),
+            ],
+        ),
+        (
+            true,
+            &[
+                ("anthropic", PLACEHOLDER),
+                ("github", "ghp_not-a-placeholder"),
+            ],
+        ),
+        (true, &[("github", "")]),
     ];
     for (intercepted, entries) in cases {
         let (_temp, bridge, path) = fixture();

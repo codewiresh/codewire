@@ -1854,6 +1854,10 @@ above.
     (`<hash>.0`). `gh` reads the image's default bundle and every certificate
     in those directories, so the CA is added to its roots and replaces
     nothing. A root added to the image's store after boot is still trusted.
+    A hosted daemon installs that directory with its CA as
+    `/codewire/run/egress-trust/ca.d`, and a launch that projects GitHub's
+    placeholder gets `SSL_CERT_DIR` `/etc/ssl/certs:/codewire/run/egress-trust/ca.d`
+    and Git's setting naming `/codewire/run/egress-trust/ca-certificates.crt`.
   - Other tools that read `SSL_CERT_DIR` see the same addition, as Node
     already does through `NODE_EXTRA_CA_CERTS`. What limits the CA differs by
     placement:
@@ -1883,11 +1887,12 @@ above.
   `github.com` and `api.github.com` whole, so that Git and `gh` use GitHub's
   own names. A boot binds them when its profile has a GitHub connection
   (`front_door_hosts`, #5463), and then hands Git and `gh` the GitHub
-  placeholder and trust in the boot's CA (below). Built for a local VM: the
-  placeholder's delivery in the seed, the projection's call and the trust.
-  Not yet built: the hosted placeholder, leaves and 401 challenge (#4001
-  comment 136112). Until they are, `GITHUB_INTERCEPTED` stays off and GitHub
-  stays on its loopback route on both placements. The broker's rule for a request to
+  placeholder and trust in the boot's CA (below). Built: the placeholder's
+  delivery in a local VM's seed and in a hosted epoch's Open, the
+  projection's call and the trust on both placements, and the hosted leaves
+  and 401 challenge. Not yet built: the switch (#4001 comment 136112). Until
+  it is, `GITHUB_INTERCEPTED` stays off and GitHub stays on its loopback
+  route on both placements. The broker's rule for a request to
   either host, in order:
   1. The environment's network policy must allow GitHub's hosts by rule, or
      nothing is sent, with or without a credential (#4926). Today that is
@@ -2701,9 +2706,9 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   takes an OAuth login only; a personal access token is not a GitHub
   connection). A credential the Sandbox's profile does not select is not
   bound.
-- **GitHub, hosted.** Not yet built (#4001 comment 136112). With GitHub's
-  hosts bound, the broker's rule for them is the local one above, with two
-  differences:
+- **GitHub, hosted.** Built, and off until the switch, `GITHUB_INTERCEPTED`,
+  is turned on (#4001 comment 136112). With GitHub's hosts bound, the
+  broker's rule for them is the local one above, with two differences:
   - A request with no placeholder-shaped value is never forwarded, since the
     credential service forwards nothing untouched. A Git request instead
     gets GitHub's own challenge: 401 with

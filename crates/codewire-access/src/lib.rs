@@ -29,7 +29,8 @@ pub use credential_name::{
 pub use front_door::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, CHATGPT_WILDCARD, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST,
     FRONT_DOOR_HOSTS, FrontDoorHost, GITHUB_HOSTS, GITHUB_INTERCEPTED, INTERCEPT_PORT,
-    OPENAI_API_HOST, ROUTED_SUFFIXES, front_door_hosts, one_label_under, routed_suffix,
+    OPENAI_API_HOST, ROUTED_SUFFIXES, binds_github, front_door_hosts, one_label_under,
+    routed_suffix,
 };
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile, UngrantedGitHub,

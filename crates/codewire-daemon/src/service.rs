@@ -137,6 +137,18 @@ impl DaemonServiceImpl {
     pub fn with_runtime_state(config: Config, runtime_state: DaemonRuntimeState) -> Self {
         let credential_bridge = CredentialBridge::new(config.credential_bridge.clone())
             .intercepting(config.interception.is_some());
+        // An intercepted hosted Sandbox's launches keep `gh`'s generated
+        // configuration in step with GitHub's placeholder (#4001). Unit tests
+        // never write the product path.
+        #[cfg(all(target_os = "linux", not(test)))]
+        let credential_bridge = if config.interception.is_some()
+            && config.credential_bridge.as_ref().is_some_and(|bridge| {
+                bridge.transport == crate::config::CredentialBridgeTransport::Hosted
+            }) {
+            credential_bridge.with_gh_config(crate::gh_config::GhConfig::default())
+        } else {
+            credential_bridge
+        };
         let session_engine = SessionEngine::new(&config, credential_bridge.clone());
         let workload_sockets = crate::forward::WorkloadSockets::default();
         Self {
