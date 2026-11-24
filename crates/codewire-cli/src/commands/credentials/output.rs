@@ -73,15 +73,21 @@ impl From<&CredentialRecord> for CredentialView {
 }
 
 /// What kind of credential a provider and authentication kind make, as a
-/// person names it: the two Claude forms, Codex, GitHub, an SSH key or a
-/// provider's API key.
+/// person names it: the registry type's label (#6286). A form no type has,
+/// such as GitHub's App form, is named by its provider.
 pub(in crate::commands) fn kind_label(provider: &str, authentication_kind: &str) -> String {
+    let catalog_provider = if provider == "codex" {
+        "openai"
+    } else {
+        provider
+    };
+    if let Some(row) = codewire_access::CREDENTIAL_TYPES.iter().find(|row| {
+        row.provider == catalog_provider
+            && authentication_kind_label(row.form) == authentication_kind
+    }) {
+        return row.label.to_owned();
+    }
     match (provider, authentication_kind) {
-        ("anthropic", "claude_sign_in") => "Claude (sign-in)".to_owned(),
-        ("anthropic", "oauth") => "Claude (token)".to_owned(),
-        ("anthropic", "api_key") => "Anthropic API key".to_owned(),
-        ("openai", "api_key") => "OpenAI API key".to_owned(),
-        ("openai" | "codex", "oauth") => "Codex".to_owned(),
         ("github", _) => "GitHub".to_owned(),
         (_, "ssh_key") => "SSH key".to_owned(),
         (provider, kind) => format!("{provider} {}", kind.replace('_', " ")),

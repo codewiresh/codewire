@@ -200,12 +200,19 @@ pub(in crate::commands) fn discarded_sign_in(
 
 /// The provider's name in messages.
 pub(in crate::commands) fn provider_label(provider: CredentialConnectProviderArg) -> &'static str {
-    match provider {
-        CredentialConnectProviderArg::Codex => "Codex",
-        CredentialConnectProviderArg::Github => "GitHub",
-        CredentialConnectProviderArg::Claude => "Claude (sign-in)",
-        CredentialConnectProviderArg::ClaudeToken => "Claude (token)",
-    }
+    credential_type_of_arg(provider).label
+}
+
+/// The registry's row for a `connect` provider (#6286). Every provider clap
+/// takes is the word of a registry `connect` type, as a test checks.
+pub(in crate::commands) fn credential_type_of_arg(
+    provider: CredentialConnectProviderArg,
+) -> &'static codewire_access::CredentialType {
+    let word = provider
+        .to_possible_value()
+        .expect("connect providers are never skipped");
+    codewire_access::credential_type(word.get_name())
+        .expect("every connect provider is a registry type")
 }
 
 /// What the reconnect confirmation shows of an existing credential.

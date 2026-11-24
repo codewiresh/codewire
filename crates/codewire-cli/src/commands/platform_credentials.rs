@@ -1541,12 +1541,12 @@ mod tests {
     /// lacks.
     #[test]
     fn the_add_picker_offers_every_provider_cloud_add_takes() {
-        use crate::commands::credential_input::{ADD_PROVIDERS, PROVIDER_WORDS_FOR_TESTS};
+        use crate::commands::credential_input::{PROVIDER_WORDS_FOR_TESTS, add_providers};
         for provider in PROVIDER_WORDS_FOR_TESTS {
-            let offered = ADD_PROVIDERS
-                .iter()
+            let offered = add_providers()
+                .into_iter()
                 .find(|(word, ..)| *word == provider)
-                .map(|(_, kind, _)| *kind);
+                .map(|(_, kind, _)| kind);
             let args = CredentialAddArgs {
                 provider: Some(provider.into()),
                 name: Some("work".into()),

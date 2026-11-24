@@ -4,7 +4,7 @@ use codewire_access::{AccessProfileName, CredentialStatus, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    ADD_PROVIDERS, PROFILE_SLOTS, execute_credential_operation, resolve_credential_operation,
+    PROFILE_SLOTS, add_providers, execute_credential_operation, resolve_credential_operation,
     supported_profile_slot,
 };
 use super::guided::{self, Choice};
@@ -44,9 +44,13 @@ pub(super) async fn complete(
         CredentialsCommand::Add(a) => {
             a.guided = was_missing || storage_missing;
             if a.provider.is_none() {
-                let choices = ADD_PROVIDERS.map(|(_, _, label)| Choice::new(label, ""));
+                let providers = add_providers();
+                let choices = providers
+                    .iter()
+                    .map(|(_, _, label)| Choice::new(*label, ""))
+                    .collect::<Vec<_>>();
                 a.provider = Some(
-                    ADD_PROVIDERS[guided::choose("Which provider?", &choices)?]
+                    providers[guided::choose("Which provider?", &choices)?]
                         .0
                         .into(),
                 );
@@ -111,31 +115,17 @@ pub(super) async fn complete(
 
 /// The `connect` picker's rows: each provider `connect` takes, with its
 /// label and detail, as the approved credentials screen 2 shows them
-/// (owner, 2026-11-15, #4717). The rows are clap's own providers in their
-/// declared order, and the match is exhaustive, so a provider can't be
-/// added to `connect` without its row (#5446). `connect` takes the same
-/// providers in both placements.
+/// (owner, 2026-11-15, #4717), from the registry (#6286). The rows are
+/// clap's own providers in their declared order, so a provider can't be
+/// added to `connect` without its row (#5446); a test holds clap's providers
+/// to the registry's `connect` types. `connect` takes the same providers in
+/// both placements.
 fn connect_rows() -> Vec<(CredentialConnectProviderArg, &'static str, &'static str)> {
     CredentialConnectProviderArg::value_variants()
         .iter()
         .map(|&provider| {
-            let (label, detail) = match provider {
-                CredentialConnectProviderArg::Codex => {
-                    ("Codex", "sign in with your ChatGPT account")
-                }
-                CredentialConnectProviderArg::Github => {
-                    ("GitHub", "sign in with your GitHub account")
-                }
-                CredentialConnectProviderArg::Claude => (
-                    "Claude (sign-in)",
-                    "your subscription; shows your plan and usage",
-                ),
-                CredentialConnectProviderArg::ClaudeToken => (
-                    "Claude (token)",
-                    "your subscription; lasts a year, for automation, model requests only",
-                ),
-            };
-            (provider, label, detail)
+            let row = super::credential_input::connect::credential_type_of_arg(provider);
+            (provider, row.label, row.detail)
         })
         .collect()
 }
@@ -656,7 +646,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            ADD_PROVIDERS.map(|(provider, _, label)| (provider, label)),
+            add_providers()
+                .into_iter()
+                .map(|(provider, _, label)| (provider, label))
+                .collect::<Vec<_>>(),
             [
                 ("openai", "OpenAI API key"),
                 ("anthropic", "Anthropic API key"),
@@ -664,6 +657,20 @@ mod tests {
             ]
         );
         assert_eq!(set_slots(), ["codex", "openai", "anthropic", "ssh"]);
+    }
+
+    /// `connect` takes the registry's `connect` types, in its order (#6286).
+    #[test]
+    fn connect_takes_the_registrys_connect_types() {
+        let taken = CredentialConnectProviderArg::value_variants()
+            .iter()
+            .map(|provider| word(*provider))
+            .collect::<Vec<_>>();
+        let registry =
+            codewire_access::credential_types_for(codewire_access::CredentialVerb::Connect)
+                .map(|row| row.word.to_owned())
+                .collect::<Vec<_>>();
+        assert_eq!(taken, registry);
     }
 
     /// `connect` takes, in either placement, exactly the providers its

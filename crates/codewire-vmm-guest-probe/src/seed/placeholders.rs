@@ -138,3 +138,40 @@ impl fmt::Debug for SeedPlaceholders {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// The wire codes are fixed, and the slots are exactly the registry's
+    /// types whose placeholder the environment holds (#6286).
+    #[test]
+    fn the_slots_and_codes_are_pinned_to_the_registry() {
+        let slots = [
+            (PlaceholderSlot::AnthropicApiKey, 1, "anthropic"),
+            (
+                PlaceholderSlot::AnthropicSubscriptionToken,
+                2,
+                "claude-token",
+            ),
+            (PlaceholderSlot::GitHub, 3, "github"),
+        ];
+        assert_eq!(PlaceholderSlot::ALL, slots.map(|(slot, ..)| slot));
+        for (slot, code, _) in slots {
+            assert_eq!(slot.code(), code);
+            assert_eq!(PlaceholderSlot::from_code(code), Some(slot));
+        }
+        let held: std::collections::BTreeSet<&str> = codewire_access::CREDENTIAL_TYPES
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.agent,
+                    codewire_access::AgentHolds::Placeholder(_)
+                        | codewire_access::AgentHolds::GitHelper
+                )
+            })
+            .map(|row| row.word)
+            .collect();
+        assert_eq!(held, slots.map(|(.., word)| word).into());
+    }
+}

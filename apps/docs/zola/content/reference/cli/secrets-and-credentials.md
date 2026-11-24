@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-23
+updated: 2026-11-24
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -102,6 +102,8 @@ cw credentials --cloud add ssh --name NAME --key-file PATH
 cw credentials --cloud generate ssh --name NAME [--expires-at DATE]
 ```
 
+<!-- credential-types: generated from codewire_access::CREDENTIAL_TYPES; UPDATE_CREDENTIAL_TYPES_DOCS=1 cargo test -p codewire-access credential_types -->
+
 | Provider | How |
 | --- | --- |
 | `codex` | ChatGPT device-code sign-in; enable device code authorization in ChatGPT's Security settings first |
@@ -110,6 +112,8 @@ cw credentials --cloud generate ssh --name NAME [--expires-at DATE]
 | `claude-token` | Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded |
 | `openai`, `anthropic` | API key from stdin |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
+
+<!-- /credential-types -->
 
 Guided `add`, `connect`, and `generate` ask for missing provider, name, and
 SSH-file choices. Menus offer providers supported by the chosen store. After a

@@ -2534,4 +2534,36 @@ mod tests {
             ));
         }
     }
+
+    /// Each registry type is one dashboard form, filling one of its slots
+    /// (#6286). The dashboard's form words differ from `cw`'s (its `claude`
+    /// is Claude (token)) until #6286 step 4 renames them.
+    #[test]
+    fn each_registry_type_is_one_dashboard_form() {
+        let mut forms = BTreeSet::new();
+        for row in &codewire_access::CREDENTIAL_TYPES {
+            let kind = match row.form {
+                codewire_access::CredentialAuthKind::OAuth => CredentialAuthenticationKind::Oauth,
+                codewire_access::CredentialAuthKind::ApiKey => CredentialAuthenticationKind::ApiKey,
+                codewire_access::CredentialAuthKind::ClaudeSignIn => {
+                    CredentialAuthenticationKind::ClaudeSignIn
+                }
+                codewire_access::CredentialAuthKind::SshKey => CredentialAuthenticationKind::SshKey,
+                other => panic!("no dashboard form for {other:?}"),
+            };
+            let form = credential_form(&credential(
+                "00000000-0000-4000-8000-000000000099",
+                "registry",
+                row.provider,
+                kind,
+            ))
+            .unwrap_or_else(|_| panic!("{} has no dashboard form", row.word));
+            assert!(
+                row.slots.contains(&form_slot(form)),
+                "{} fills {form}",
+                row.word
+            );
+            assert!(forms.insert(form), "{form} names two types");
+        }
+    }
 }

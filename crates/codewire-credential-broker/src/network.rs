@@ -1367,6 +1367,59 @@ mod tests {
         );
     }
 
+    /// Each form's hosts alone, as literals: a change here widens or narrows
+    /// what a credential reaches, so it fails here first (#6286).
+    #[test]
+    fn each_forms_hosts_are_pinned_and_match_its_registry_row() {
+        let golden: [(HttpProvider, &[&str]); 11] = [
+            (HttpProvider::OpenAiApiKey, &["api.openai.com"]),
+            (
+                HttpProvider::CodexOAuth,
+                &["chatgpt.com", "auth.openai.com"],
+            ),
+            (HttpProvider::AnthropicApiKey, &["api.anthropic.com"]),
+            (
+                HttpProvider::AnthropicSubscriptionToken,
+                &["api.anthropic.com"],
+            ),
+            (
+                HttpProvider::AnthropicClaudeSignIn,
+                &["api.anthropic.com", "platform.claude.com"],
+            ),
+            (HttpProvider::GitHubOAuth, &["api.github.com", "github.com"]),
+            (
+                HttpProvider::GitHubAppAuthorization,
+                &["api.github.com", "github.com"],
+            ),
+            (HttpProvider::CodexDeviceEnrollment, &["auth.openai.com"]),
+            (
+                HttpProvider::ClaudeSignInEnrollment,
+                &["api.anthropic.com", "platform.claude.com"],
+            ),
+            (HttpProvider::CodexTokenRevocation, &["auth.openai.com"]),
+            (HttpProvider::GitHubAppTokenRevocation, &["api.github.com"]),
+        ];
+        for (provider, hosts) in golden {
+            assert_eq!(
+                selected_hosts(&BTreeSet::from([provider])).unwrap(),
+                hosts.iter().copied().collect::<BTreeSet<_>>(),
+                "{provider:?}"
+            );
+        }
+        for row in &codewire_access::CREDENTIAL_TYPES {
+            let Some(provider) = row.http else {
+                assert!(row.hosts.is_empty(), "{}", row.word);
+                continue;
+            };
+            assert_eq!(
+                selected_hosts(&BTreeSet::from([provider])).unwrap(),
+                row.hosts.iter().copied().collect::<BTreeSet<_>>(),
+                "{}",
+                row.word
+            );
+        }
+    }
+
     #[test]
     fn multi_provider_destination_policy_pins_selected_hosts_and_github_routes() {
         let selected = BTreeSet::from([

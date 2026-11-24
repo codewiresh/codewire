@@ -8,6 +8,7 @@
 
 mod catalog;
 mod credential_name;
+mod credential_types;
 mod front_door;
 mod grant;
 mod id;
@@ -25,6 +26,10 @@ pub use catalog::{
 pub use credential_name::{
     CREDENTIAL_NAME_PROVIDERS, credential_name_provider_prefixes, is_credential_name_provider,
     reserves_provider_prefix,
+};
+pub use credential_types::{
+    AgentHolds, CREDENTIAL_TYPES, CredentialFlow, CredentialType, CredentialVerb, credential_type,
+    credential_type_of, credential_types_docs_table, credential_types_for,
 };
 pub use front_door::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, CHATGPT_WILDCARD, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST,

@@ -2424,13 +2424,13 @@ mod tests {
     /// the picker lacks. Every API key offered is one the catalog takes.
     #[test]
     fn the_add_picker_offers_every_provider_local_add_takes() {
-        use crate::commands::credential_input::{ADD_PROVIDERS, PROVIDER_WORDS_FOR_TESTS};
+        use crate::commands::credential_input::{PROVIDER_WORDS_FOR_TESTS, add_providers};
         let catalog = builtin_provider_catalog();
         for provider in PROVIDER_WORDS_FOR_TESTS {
-            let offered = ADD_PROVIDERS
-                .iter()
+            let offered = add_providers()
+                .into_iter()
                 .find(|(word, ..)| *word == provider)
-                .map(|(_, kind, _)| *kind);
+                .map(|(_, kind, _)| kind);
             let api_key = api_key_enrollment_kind(provider).is_ok();
             assert_eq!(
                 api_key,

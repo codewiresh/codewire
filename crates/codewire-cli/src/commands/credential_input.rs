@@ -9,7 +9,8 @@ use std::path::Path;
 use anyhow::Context as _;
 use codewire_access::{
     AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
-    CredentialId, ProviderId, builtin_provider_catalog,
+    CredentialFlow, CredentialId, CredentialType, CredentialVerb, ProviderId,
+    builtin_provider_catalog, credential_types_for,
 };
 use codewire_protected_store::{MAX_PROTECTED_VALUE_BYTES, ProtectedStoreBackend, ProtectedValue};
 use zeroize::{Zeroize as _, Zeroizing};
@@ -787,26 +788,42 @@ pub(super) enum AddKind {
 }
 
 /// The providers `cw credentials add` takes, the same in both placements,
-/// each with its row in the guided picker, in the picker's order. Both
-/// placements accept a provider only through [`add_kind`], so this list is
-/// the whole accepted set, and the picker is built from it (#5446).
+/// each with its row in the guided picker, in the picker's order: the
+/// registry's `add` types (#6286). Both placements accept a provider only
+/// through [`add_kind`], so this is the whole accepted set, and the picker is
+/// built from it (#5446).
 ///
 /// `claude-subscription`, the one-release alias of `connect claude-token`
 /// (#4945), is deliberately not here: it is hidden, both placements turn it
 /// into that `connect` before they ask this list, and the guided pickers
 /// offer Claude under `connect`.
-pub(super) const ADD_PROVIDERS: [(&str, AddKind, &str); 3] = [
-    ("openai", AddKind::ApiKey, "OpenAI API key"),
-    ("anthropic", AddKind::ApiKey, "Anthropic API key"),
-    ("ssh", AddKind::SshKey, "SSH private key"),
-];
+pub(super) fn add_providers() -> Vec<(&'static str, AddKind, &'static str)> {
+    credential_types_for(CredentialVerb::Add)
+        .map(|row| {
+            let kind = match row.flow {
+                CredentialFlow::SshKey => AddKind::SshKey,
+                CredentialFlow::Paste | CredentialFlow::SignIn => AddKind::ApiKey,
+            };
+            (row.word, kind, add_picker_label(row))
+        })
+        .collect()
+}
+
+/// The `add` picker's row label: the type's label, but for SSH, whose row
+/// keeps "SSH private key" until the owner settles its text on #6286.
+fn add_picker_label(row: &CredentialType) -> &'static str {
+    match row.flow {
+        CredentialFlow::SshKey => "SSH private key",
+        CredentialFlow::Paste | CredentialFlow::SignIn => row.label,
+    }
+}
 
 /// What `add` takes for `provider`, or `None` when `add` refuses it.
 pub(super) fn add_kind(provider: &str) -> Option<AddKind> {
-    ADD_PROVIDERS
-        .iter()
+    add_providers()
+        .into_iter()
         .find(|(word, ..)| *word == provider)
-        .map(|(_, kind, _)| *kind)
+        .map(|(_, kind, _)| kind)
 }
 
 /// Words a credentials command might be given as a provider or a slot:
@@ -1414,6 +1431,23 @@ pub(super) mod connect;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The profile's slots and providers are the registry's, in the order
+    /// `set`'s picker shows them (#6286).
+    #[test]
+    fn profile_slots_and_providers_are_the_registrys() {
+        use std::collections::BTreeSet;
+        let slots: BTreeSet<&str> = codewire_access::CREDENTIAL_TYPES
+            .iter()
+            .flat_map(|row| row.slots.iter().copied())
+            .collect();
+        assert_eq!(BTreeSet::from(PROFILE_SLOTS), slots);
+        let providers: BTreeSet<&str> = codewire_access::CREDENTIAL_TYPES
+            .iter()
+            .map(|row| row.provider)
+            .collect();
+        assert_eq!(BTreeSet::from(PROFILE_PROVIDERS), providers);
+    }
 
     /// Each provider's prompt says what to paste and where to get it, in the
     /// user's words (#4715).
