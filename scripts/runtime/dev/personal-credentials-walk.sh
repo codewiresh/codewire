@@ -258,9 +258,9 @@ jq -e --arg credential "$CREDENTIAL_ID" '.entries.anthropic == $credential' <<<"
 jq -e '.is_default != true' <<<"$profile" >/dev/null ||
   die "the walk's profile became the default, which can't be deleted"
 
-printf '\n$ cw --cloud create --name %s --no-file --ttl 30m --no-network --profile %s\n' "$NAME" "$NAME"
+printf '\n$ cw --cloud create --name %s --no-file --ttl 30m --no-network --profile %s --yes\n' "$NAME" "$NAME"
 create_status=0
-cw --cloud create --name "$NAME" --no-file --ttl 30m --no-network --profile "$NAME" || create_status=$?
+cw --cloud create --name "$NAME" --no-file --ttl 30m --no-network --profile "$NAME" --yes || create_status=$?
 SANDBOX_ID="$(sandbox_id)" || true
 [[ -z "$SANDBOX_ID" ]] || log "created Sandbox id=$SANDBOX_ID"
 [[ "$create_status" == 0 ]] || die "cw create exited $create_status"

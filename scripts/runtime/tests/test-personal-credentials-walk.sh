@@ -83,7 +83,7 @@ case "$*" in
     jq -e --arg id "$id" 'any(.[]; .entries.anthropic == $id)' "$S/profiles.json" >/dev/null && exit 1
     jq --arg id "$id" 'map(select(.id != $id))' "$S/credentials.json" >"$S/next.json"
     mv "$S/next.json" "$S/credentials.json" ;;
-  '--cloud create --name '*' --no-file --ttl 30m --no-network --profile '*)
+  '--cloud create --name '*' --no-file --ttl 30m --no-network --profile '*' --yes')
     name="$4" profile="$(profile_ref "${10}")"
     event "create-sandbox $name"
     [[ "$MOCK_MODE" != create_fails ]] || exit 1
@@ -169,7 +169,7 @@ sandbox="$(sed -n 's/^create-sandbox //p' "$CASE/state/events")"
 [[ "$sandbox" =~ ^personal-walk-[0-9]{8}t[0-9]{6}z-[0-9a-f]{6}$ ]] || fail 'fresh_account: the Sandbox name lacks the walk and run id'
 grep -q -- "--server https://codewire-dev.sh credentials --cloud --profile $sandbox set anthropic id:" "$CASE/state/argv" ||
   fail 'fresh_account: the profile was not named for the run'
-grep -q -- "--cloud create --name $sandbox .*--profile $sandbox$" "$CASE/state/argv" ||
+grep -q -- "--cloud create --name $sandbox .*--profile $sandbox --yes$" "$CASE/state/argv" ||
   fail 'fresh_account: the Sandbox was not created with the profile'
 
 PROFILES="$ANCHOR" run_case existing_anchor success 0

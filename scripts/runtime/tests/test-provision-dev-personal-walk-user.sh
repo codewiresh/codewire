@@ -45,8 +45,9 @@ if [[ "$sql" == *'INSERT INTO users'* ]]; then
   printf 'db-account\n' >>"$MOCK_STATE/events"
   [[ "$MOCK_MODE" != db_failure ]] || exit 1
   printf 'removed|1|2|1|1|0\n'
-  if [[ "$MOCK_MODE" == bad_state ]]; then printf 'state|1|1|1|1|1|2|1|0\n'
-  else printf 'state|1|1|1|1|1|1|1|0\n'; fi
+  if [[ "$MOCK_MODE" == bad_state ]]; then printf 'state|1|1|1|1|1|2|1|0|1|1\n'
+  elif [[ "$MOCK_MODE" == over_credit ]]; then printf 'state|1|1|1|1|1|1|1|0|1|0\n'
+  else printf 'state|1|1|1|1|1|1|1|0|1|1\n'; fi
 elif [[ "$sql" == *"'session ' ||"* ]]; then
   printf 'db-list\n' >>"$MOCK_STATE/events"
   if [[ "$MOCK_MODE" == bad_grant_id ]]; then printf 'session bad;id\n'; exit 0; fi
@@ -205,7 +206,10 @@ done
 for statement in "'regular', false" 'is_admin = false' 'two_factor_enabled = false' \
   'WHERE organizations.created_by = EXCLUDED.created_by' 'DELETE FROM api_keys' \
   "DELETE FROM org_invitations WHERE org_id = :'walk_org_id' AND status = 'pending'" \
-  "DELETE FROM org_members WHERE org_id = :'walk_org_id' AND user_id <> :'walk_user_id'"; do
+  "DELETE FROM org_members WHERE org_id = :'walk_org_id' AND user_id <> :'walk_user_id'" \
+  "VALUES (:'walk_org_id', 2, 2, 4000, 16384)" "'grant', 5000000000 - balance" \
+  'WHERE balance < 5000000000;' 'AND balance_nano_eur = 5000000000' \
+  'auto_top_up_enabled = false' 'AND NOT auto_top_up_enabled'; do
   grep -qF -- "$statement" "$CASE/state/psql.sql" || fail "create: the SQL lacks: $statement"
 done
 # Revocation is by the exact ids listed, never by account alone.
@@ -238,6 +242,12 @@ expect_events "$PROVEN"$'\ndb-list'
 expect_output 'unexpected shape'
 
 run_case bad_state bad_state fail --create-document
+expect_events $'bao-get\ndb-account'
+expect_output 'expected account state'
+
+# A balance the top-up couldn't bring to exactly EUR 5 (one above the bound)
+# stops the run before anything is published.
+run_case over_credit over_credit fail --create-document
 expect_events $'bao-get\ndb-account'
 expect_output 'expected account state'
 

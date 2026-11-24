@@ -223,7 +223,11 @@ awk 'NR == 1 && /^\$argon2id\$v=19\$m=65536,t=3,p=2\$[A-Za-z0-9+\/]+\$[A-Za-z0-9
 # One transaction. The account exists, is verified and enabled, is no admin,
 # has no second factor and signs in only with the new password. It owns one
 # organization on the regular rate card, of which it is the only member, with
-# no pending invitation. It holds no API key and no linked sign-in. An
+# no pending invitation. It holds no API key and no linked sign-in. The
+# organization's quota is two environments of the smallest shape, and its
+# compute credit is topped up to exactly EUR 5 by one named grant, with
+# automatic top-up off, so a leaked sign-in can never mean more Dev compute
+# than that, even with a card added (#6074). An
 # organization with this slug that the account did not create stops the run.
 # Sessions and CLI sign-ins stay until the new password is proven.
 log 'writing the account, its password hash and its personal organization'
@@ -241,11 +245,11 @@ ON CONFLICT (email) DO UPDATE SET email_verified = true, email_vouched_by = NULL
   failed_login_attempts = 0, locked_until = NULL, name = EXCLUDED.name, updated_at = NOW();
 SELECT id AS walk_user_id FROM users WHERE email = :'email' \gset
 INSERT INTO organizations (id, name, slug, created_by, rate_card, billing_exempt,
-  created_at, updated_at)
+  auto_top_up_enabled, created_at, updated_at)
 VALUES (encode(public.gen_random_bytes(16), 'hex'), :'org_name', :'org_slug',
-  :'walk_user_id', 'regular', false, NOW(), NOW())
+  :'walk_user_id', 'regular', false, false, NOW(), NOW())
 ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, rate_card = 'regular',
-  billing_exempt = false, updated_at = NOW()
+  billing_exempt = false, auto_top_up_enabled = false, updated_at = NOW()
 WHERE organizations.created_by = EXCLUDED.created_by
 RETURNING id AS walk_org_id \gset
 WITH links AS (
@@ -273,6 +277,19 @@ SELECT encode(public.gen_random_bytes(16), 'hex'), :'walk_org_id', :'walk_user_i
 WHERE NOT EXISTS (
   SELECT 1 FROM org_members WHERE org_id = :'walk_org_id' AND user_id = :'walk_user_id'
 );
+INSERT INTO environment_quotas (org_id, max_concurrent_environments, max_concurrent_sandbox,
+  max_cpu_millicores, max_memory_mb)
+VALUES (:'walk_org_id', 2, 2, 4000, 16384)
+ON CONFLICT (org_id) DO UPDATE SET max_concurrent_environments = 2, max_concurrent_sandbox = 2,
+  max_cpu_millicores = 4000, max_memory_mb = 16384;
+INSERT INTO billing_credit_ledger (organization_id, entry_kind, amount_nano_eur, idempotency_key,
+  reason)
+SELECT :'walk_org_id', 'grant', 5000000000 - balance,
+  'personal-walk-dev-top-up-' || to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYYMMDD"T"HH24MISSUS'),
+  'Dev personal-walk test credit (#6074): topped up to EUR 5 by its provisioner'
+FROM (SELECT COALESCE((SELECT balance_nano_eur FROM billing_credit_balances
+  WHERE organization_id = :'walk_org_id'), 0) AS balance) AS current
+WHERE balance < 5000000000;
 SELECT 'state',
   (SELECT count(*) FROM users WHERE id = :'walk_user_id' AND enabled AND email_verified
     AND NOT COALESCE(is_admin, false) AND NOT COALESCE(two_factor_enabled, false)),
@@ -283,8 +300,14 @@ SELECT 'state',
     AND role = 'owner'),
   (SELECT count(*) FROM org_members WHERE org_id = :'walk_org_id'),
   (SELECT count(*) FROM organizations WHERE id = :'walk_org_id' AND rate_card = 'regular'
-    AND NOT billing_exempt AND deletion_state = 'active' AND suspended_at IS NULL),
-  (SELECT count(*) FROM api_keys WHERE user_id = :'walk_user_id');
+    AND NOT billing_exempt AND NOT auto_top_up_enabled AND deletion_state = 'active'
+    AND suspended_at IS NULL),
+  (SELECT count(*) FROM api_keys WHERE user_id = :'walk_user_id'),
+  (SELECT count(*) FROM environment_quotas WHERE org_id = :'walk_org_id'
+    AND max_concurrent_environments = 2 AND max_concurrent_sandbox = 2
+    AND max_cpu_millicores = 4000 AND max_memory_mb = 16384),
+  (SELECT count(*) FROM billing_credit_balances WHERE organization_id = :'walk_org_id'
+    AND balance_nano_eur = 5000000000);
 COMMIT;
 SQL
 } | run_psql --set "email=$WALK_EMAIL" --set "name=$WALK_NAME" \
@@ -294,7 +317,7 @@ removed="$(awk -F'|' '$1 == "removed" { print $2, $3, $4, $5, $6 }' "$DB_RESULT"
 state="$(awk -F'|' '$1 == "state" { $1 = ""; print substr($0, 2) }' "$DB_RESULT")"
 [[ "$removed" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] ||
   die 'the database returned no removal counts'
-[[ "$state" == '1 1 1 1 1 1 1 0' ]] ||
+[[ "$state" == '1 1 1 1 1 1 1 0 1 1' ]] ||
   die "the database did not reach the expected account state (got: ${state:-none})"
 read -r links memberships members invitations keys <<<"$removed"
 log "account ready; removed sign_in_links=$links other_memberships=$memberships other_members=$members pending_invitations=$invitations api_keys=$keys"
@@ -408,4 +431,4 @@ if [[ -s "$OLD_SIGN_IN_BODY" ]]; then
   old_password_refused=true
 fi
 
-log "PASS canonical_store=openbao path=$OPENBAO_PATH sign_in_probe=true old_password_refused=$old_password_refused org=$WALK_ORG_SLUG rate_card=regular members=1 api_keys=0 secret_values_printed=false"
+log "PASS canonical_store=openbao path=$OPENBAO_PATH sign_in_probe=true old_password_refused=$old_password_refused org=$WALK_ORG_SLUG rate_card=regular members=1 api_keys=0 quota=2x4000m16384MB credit_eur=5 secret_values_printed=false"
