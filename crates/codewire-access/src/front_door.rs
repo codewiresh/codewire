@@ -52,11 +52,12 @@ pub const CODEX_TOKEN_HOST: &str = "auth.openai.com";
 /// GitHub over Git and the GitHub API. Served only for a GitHub connection,
 /// and only once [`GITHUB_INTERCEPTED`] is on.
 pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
-/// Whether GitHub's hosts are served at all. They stay off until a
-/// placeholder sent outside GitHub's route is refused on that route (#5087;
-/// cw-security's condition on #5149), so GitHub stays on its loopback route
-/// on both placements until then.
-pub const GITHUB_INTERCEPTED: bool = false;
+/// Whether GitHub's hosts are served at all. On: a placeholder sent outside
+/// GitHub's route is refused on that route (#5087, #5149), and both
+/// placements deliver the `github` slot's placeholder and trust (#4001). A
+/// boot or epoch without that placeholder still leaves GitHub on its
+/// loopback route.
+pub const GITHUB_INTERCEPTED: bool = true;
 
 /// One host the front door serves on [`INTERCEPT_PORT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,22 +333,24 @@ mod tests {
         }
     }
 
+    /// GitHub's two hosts are served for a GitHub connection, and only then
+    /// (#4001).
     #[test]
-    fn github_hosts_wait_for_the_refusal_on_their_route() {
+    fn github_hosts_are_served_for_a_github_connection() {
         let github = clients(&["github", "ssh"]);
         assert_eq!(
             names(github)
                 .iter()
                 .filter(|host| GITHUB_HOSTS.contains(host))
                 .count(),
-            if GITHUB_INTERCEPTED { 2 } else { 0 }
+            2
         );
         assert!(
             !names(clients(&["ssh"]))
                 .iter()
                 .any(|host| GITHUB_HOSTS.contains(host))
         );
-        assert_eq!(binds_github(github), GITHUB_INTERCEPTED);
+        assert!(binds_github(github));
         assert!(!binds_github(clients(&["anthropic", "ssh"])));
     }
 }

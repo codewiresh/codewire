@@ -452,20 +452,16 @@ mod tests {
     }
 
     /// Claude's token host is bound for a Claude sign-in and no other
-    /// Anthropic form; GitHub's hosts are never bound from a boot (#5087).
+    /// Anthropic form. GitHub's hosts follow GitHub's placeholder
+    /// (`githubs_hosts_are_bound_only_with_a_github_placeholder`).
     #[test]
-    fn the_token_host_follows_a_claude_sign_in_and_github_is_never_bound() {
+    fn the_token_host_follows_a_claude_sign_in() {
         let sign_in = clients(&["anthropic", "github"])
             .with_anthropic_sign_in()
             .unwrap();
-        let intercepts = boot_intercepts(true, sign_in);
-        assert!(intercepts.binds("platform.claude.com", 443));
-        for host in ["github.com", "api.github.com"] {
-            assert!(!intercepts.binds(host, 443), "{host}");
-        }
+        assert!(boot_intercepts(true, sign_in).binds("platform.claude.com", 443));
         let api_key = boot_intercepts(true, clients(&["anthropic", "github"]));
         assert!(!api_key.binds("platform.claude.com", 443));
-        assert!(!api_key.binds("github.com", 443));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -548,23 +544,24 @@ mod tests {
         assert!(!binds_github(&without));
         assert!(without.binds("api.anthropic.com", 443));
         assert_eq!(placeholders.entries().len(), 1);
-        let with = boot_interception(
+        let (intercepts, placeholders) = boot_interception(
             true,
             selected,
             vec![entry(1, &placeholder()), entry(3, &placeholder())],
+        )
+        .unwrap();
+        assert!(
+            codewire_access::GITHUB_HOSTS
+                .iter()
+                .all(|host| intercepts.binds(host, 443))
         );
-        if codewire_access::GITHUB_INTERCEPTED {
-            let (intercepts, placeholders) = with.unwrap();
-            assert!(
-                codewire_access::GITHUB_HOSTS
-                    .iter()
-                    .all(|host| intercepts.binds(host, 443))
-            );
-            assert_eq!(placeholders.entries().len(), 2);
-        } else {
-            // Nothing binds GitHub's hosts yet, so its placeholder is refused.
-            assert!(matches!(with, Err(RunnerError::InvalidRequest)));
-        }
+        assert_eq!(placeholders.entries().len(), 2);
+        // A GitHub-only boot with its placeholder binds GitHub's hosts, so
+        // it runs a front door and reports itself intercepted (#5670).
+        let (github_only, _) =
+            boot_interception(true, clients(&["github"]), vec![entry(3, &placeholder())]).unwrap();
+        assert!(!github_only.is_empty());
+        assert!(binds_github(&github_only));
         // Without the GitHub client its hosts are never bound.
         assert!(matches!(
             boot_interception(

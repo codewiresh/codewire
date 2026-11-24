@@ -1217,11 +1217,12 @@ mod tests {
             ("github", "github-https"),
             ("ssh", "ssh-agent"),
         ]);
-        assert_eq!(binds_github(&github), codewire_access::GITHUB_INTERCEPTED);
+        assert!(binds_github(&github));
         assert!(RouteHost::interceptable_when(&github, false).is_empty());
-        if !codewire_access::GITHUB_INTERCEPTED {
-            assert!(RouteHost::interceptable(&github).is_empty());
-        }
+        assert_eq!(
+            RouteHost::interceptable(&github),
+            BTreeSet::from(["api.github.com", "github.com"])
+        );
     }
 
     /// Bound, GitHub's two hosts get leaves exactly as far as the grants'

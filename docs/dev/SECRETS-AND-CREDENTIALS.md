@@ -1799,9 +1799,10 @@ above.
   - `not_intercepted` with `nothing_to_intercept`: `no placeholders: none of
     its credentials is intercepted yet`. The runner reports it, never the
     supervisor: a boot told to intercept that runs no front door, because
-    none of its selected credentials goes through one yet (GitHub's does
-    not, #5087). `intercepted` is reported only while the boot runs a front
-    door (#5670).
+    none of its selected credentials goes through one, as a GitHub-only
+    selection whose boot gets no GitHub placeholder (a platform profile's,
+    #4001). `intercepted` is reported only while the boot runs a front door
+    (#5670).
   - `not_intercepted` with `credential_service_outdated`: `no placeholders:
     the local credential service that is running is from an earlier cw; stop
     your local VMs so cw replaces that service, then start this one`. That is
@@ -1887,13 +1888,14 @@ above.
   `github.com` and `api.github.com` whole, so that Git and `gh` use GitHub's
   own names. A boot binds them when its profile has a GitHub connection
   (`front_door_hosts`, #5463), and then hands Git and `gh` the GitHub
-  placeholder and trust in the boot's CA (below). Built: the placeholder's
-  delivery in a local VM's seed and in a hosted epoch's Open, the
-  projection's call and the trust on both placements, and the hosted leaves
-  and 401 challenge. Not yet built: the switch (#4001 comment 136112). Until
-  it is, `GITHUB_INTERCEPTED` stays off and GitHub stays on its loopback
-  route on both placements. The broker's rule for a request to
-  either host, in order:
+  placeholder and trust in the boot's CA (below). Built and on
+  (`GITHUB_INTERCEPTED`, #4001): the placeholder's delivery in a local VM's
+  seed and in a hosted epoch's Open, the projection's call and the trust on
+  both placements, and the hosted leaves and 401 challenge. A boot or epoch
+  that gets no GitHub placeholder binds neither host, and Git and `gh` keep
+  their loopback route. A local VM on a platform profile keeps GitHub on its
+  loopback route until the platform serves its seed placeholders (#4001).
+  The broker's rule for a request to either host, in order:
   1. The environment's network policy must allow GitHub's hosts by rule, or
      nothing is sent, with or without a credential (#4926). Today that is
      the answer the broker is started with; the egress broker's signed
@@ -2706,9 +2708,9 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   takes an OAuth login only; a personal access token is not a GitHub
   connection). A credential the Sandbox's profile does not select is not
   bound.
-- **GitHub, hosted.** Built, and off until the switch, `GITHUB_INTERCEPTED`,
-  is turned on (#4001 comment 136112). With GitHub's hosts bound, the
-  broker's rule for them is the local one above, with two differences:
+- **GitHub, hosted.** Built and on (`GITHUB_INTERCEPTED`, #4001). With
+  GitHub's hosts bound, the broker's rule for them is the local one above,
+  with two differences:
   - A request with no placeholder-shaped value is never forwarded, since the
     credential service forwards nothing untouched. A Git request instead
     gets GitHub's own challenge: 401 with
@@ -2736,6 +2738,14 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   hosts as on Anthropic's (#5087), whatever the request carries. Leaves are
   signed for GitHub's hosts once they are bound, from the same selection
   `cw-egress` binds.
+
+  A Sandbox keeps the daemon it started with. A daemon older than the
+  `github` slot refuses an Open that carries it, so every credential epoch
+  of that Sandbox ends, not only GitHub's: every agent credential, Claude,
+  Codex and OpenAI included, stops working there until the Sandbox is
+  recreated with a current daemon. That fails closed: nothing is sent and
+  no placeholder leaves the credential service (owner decision,
+  2026-11-24, #4001).
 - **Placeholders, in the local shape.** Each placement carries a
   per-environment placeholder derived as above, under a key the credential
   service holds for that environment (#5017), never stored. It keeps its

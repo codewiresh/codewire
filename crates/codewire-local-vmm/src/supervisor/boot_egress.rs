@@ -27,6 +27,10 @@ pub(super) struct BootEgress {
     /// What the boot starts with, and why not when the switch is on but it
     /// does not intercept, for its runner to report (#4912).
     pub(super) interception: v1::Interception,
+    /// Whether the boot's credentials come from the platform (#4909): its
+    /// seed then asks for no GitHub placeholder, which nothing forwards to
+    /// the platform yet (#4001).
+    pub(super) platform: bool,
 }
 
 impl Supervisor {
@@ -79,6 +83,7 @@ impl Supervisor {
             network_policy_document,
             intercept: interception.state == v1::InterceptionState::Intercepted as i32,
             interception,
+            platform: broker.platform.is_some(),
         })
     }
 }

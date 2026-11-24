@@ -7,6 +7,7 @@ use codewire_access::{
     ManagedCredentialClients, front_door_hosts,
 };
 
+use super::boot_egress::BootEgress;
 use super::{EnvironmentRecord, Supervisor, SupervisorError, credential_control_error, v1};
 
 /// The seed's code for each slot that takes a placeholder.
@@ -25,17 +26,19 @@ impl Supervisor {
     ///   whenever it intercepts, so its agents would have no credential at
     ///   all.
     /// - The `github` slot's, when the selection would bind GitHub's hosts
-    ///   ([`front_door_hosts`], #4001). Without one the start goes on, and
-    ///   the runner binds no GitHub host for it, so Git and `gh` keep their
-    ///   loopback route.
+    ///   ([`front_door_hosts`], #4001), and never for a platform profile's
+    ///   boot: the local authority refuses a platform binding, and nothing
+    ///   forwards the slot to the platform yet. Without one the start goes
+    ///   on, and the runner binds no GitHub host for it, so Git and `gh`
+    ///   keep their loopback route.
     pub(super) async fn seed_placeholders(
         &self,
-        intercept: bool,
+        egress: &BootEgress,
         environment: &EnvironmentRecord,
         generation: u64,
         clients: ManagedCredentialClients,
     ) -> Result<Vec<v1::SeedCredentialPlaceholder>, SupervisorError> {
-        let wanted = WantedSlots::for_boot(intercept, clients);
+        let wanted = WantedSlots::for_boot(egress.intercept, egress.platform, clients);
         if wanted.anthropic.is_none() && !wanted.github {
             return Ok(Vec::new());
         }
@@ -63,7 +66,8 @@ struct WantedSlots {
 }
 
 impl WantedSlots {
-    fn for_boot(intercept: bool, clients: ManagedCredentialClients) -> Self {
+    /// `platform`: the boot's credentials come from the platform.
+    fn for_boot(intercept: bool, platform: bool, clients: ManagedCredentialClients) -> Self {
         if !intercept {
             return Self {
                 anthropic: None,
@@ -79,9 +83,10 @@ impl WantedSlots {
                 API_KEY_SLOT
             }
         });
-        let github = front_door_hosts(clients)
-            .iter()
-            .any(|host| GITHUB_HOSTS.contains(&host.host));
+        let github = !platform
+            && front_door_hosts(clients)
+                .iter()
+                .any(|host| GITHUB_HOSTS.contains(&host.host));
         Self { anthropic, github }
     }
 
@@ -172,18 +177,31 @@ mod tests {
         assert_eq!(entries[0].placeholder, placeholder().as_str());
     }
 
+    /// A platform profile's intercepting boot asks for no `github` slot,
+    /// which the local authority would refuse and fail the boot with; its
+    /// Anthropic slot is asked for as before (#4001).
+    #[test]
+    fn a_platform_boot_asks_for_no_github_slot() {
+        let platform = WantedSlots::for_boot(true, true, clients(&["anthropic", "github"]));
+        assert!(!platform.github);
+        assert_eq!(platform.anthropic, Some(API_KEY_SLOT));
+        assert_eq!(platform.slots(), vec![CapabilitySlot::anthropic()]);
+        let github_only = WantedSlots::for_boot(true, true, clients(&["github"]));
+        assert!(github_only.slots().is_empty());
+    }
+
     /// GitHub's placeholder is asked for only when the boot would bind its
     /// hosts; a grant without one leaves GitHub out rather than failing the
     /// start, and a slot nobody asked for refuses it (#4001).
     #[test]
     fn the_github_slot_is_asked_for_only_while_its_hosts_would_be_bound() {
         let selected = clients(&["anthropic", "github"]);
-        let off = WantedSlots::for_boot(false, selected);
+        let off = WantedSlots::for_boot(false, false, selected);
         assert!(off.anthropic.is_none() && !off.github && off.slots().is_empty());
-        let on = WantedSlots::for_boot(true, selected);
+        let on = WantedSlots::for_boot(true, false, selected);
         assert_eq!(on.anthropic, Some(API_KEY_SLOT));
-        assert_eq!(on.github, codewire_access::GITHUB_INTERCEPTED);
-        assert!(!WantedSlots::for_boot(true, clients(&["anthropic"])).github);
+        assert!(on.github);
+        assert!(!WantedSlots::for_boot(true, false, clients(&["anthropic"])).github);
 
         let both = WantedSlots {
             anthropic: Some(API_KEY_SLOT),

@@ -4461,7 +4461,7 @@ impl Supervisor {
         let egress = self.boot_egress(environment.id, &broker_request).await?;
         let credential_placeholders = self
             .seed_placeholders(
-                egress.intercept,
+                &egress,
                 &projection_environment,
                 generation,
                 managed_credential_clients,

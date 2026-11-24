@@ -1025,9 +1025,11 @@ request adds.
     intercepted and the VM is as with the switch off, except that
     `cw --local info` shows `no placeholders: none are selected` under its
     `Credentials` row (`"reason": "no_credentials"`).
-  - With the switch on and only a GitHub sign-in selected, no front door
-    runs, since GitHub stays on its own route (#5087). `cw --local info`
-    shows `no placeholders: none of its credentials is intercepted yet`
+  - With the switch on and only a GitHub sign-in selected, a front door
+    runs for GitHub's two hosts and `cw --local info` shows `intercepted`
+    (#4001). A platform profile's boot gets no GitHub placeholder yet, so
+    there no front door runs, and `cw --local info` shows `no placeholders:
+    none of its credentials is intercepted yet`
     (`"reason": "nothing_to_intercept"`), never `intercepted` (#5670).
   - Known limit, tracked on #3999: a restore gives the VM a new certificate
     authority, and a running process cannot reload the one it trusts. Agents
@@ -1534,6 +1536,11 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
     GitHub's own 401 challenge, so Git asks its helper and an anonymous clone
     of a public repository uses the GitHub connection. Locally it reaches
     GitHub as it is, when the policy allows GitHub's hosts.
+  - A Sandbox with a GitHub connection whose daemon predates the GitHub
+    placeholder refuses the credential epoch that carries it, so every
+    agent credential stops working there, not only GitHub: Git, `gh`,
+    Claude and Codex all fail until the Sandbox is recreated with a current
+    daemon. It does not keep the loopback route.
   - The placeholder works only for Git's fetch and push requests and for the
     API operations the GitHub route grants. Anywhere else on the two hosts it
     is refused, whoever's placeholder it looks like. Git LFS is one such case.

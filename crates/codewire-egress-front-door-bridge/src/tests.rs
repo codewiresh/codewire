@@ -610,9 +610,8 @@ fn only_a_selected_providers_hosts_are_routed() {
 }
 
 /// GitHub's two hosts are routed, and so bound, only with a GitHub
-/// connection, and always together, and not at all until GitHub's hosts are
-/// intercepted (#5087). Each covers every path with no prefix: the bridge
-/// selects the route from the bound host.
+/// connection, and always together (#4001). Each covers every path with no
+/// prefix: the bridge selects the route from the bound host.
 #[test]
 fn githubs_hosts_are_routed_only_with_a_github_connection() {
     let without = ManagedCredentialClients::from_profile_slots(["anthropic", "openai"]).unwrap();
@@ -621,9 +620,8 @@ fn githubs_hosts_are_routed_only_with_a_github_connection() {
 
     let with = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
     assert_eq!(
-        RouteTable::for_clients(with)
-            .is_some_and(|routes| routes.hosts().iter().any(|host| host.contains("github"))),
-        codewire_access::GITHUB_INTERCEPTED
+        RouteTable::for_clients(with).unwrap().hosts(),
+        ["github.com", "api.github.com"]
     );
     let routes = RouteTable::with_optional_hosts(false, true);
     assert_eq!(

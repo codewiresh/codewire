@@ -72,8 +72,9 @@ enum FrontDoor {
 /// What a running boot reports: `lost` once its front door has ended, and
 /// `intercepted` only while it runs one, so the claim holds by itself and
 /// not through the route table's defaults (#5670). A boot told to intercept
-/// that bound nothing, as one whose only credential is GitHub's does
-/// (#5087), reports not intercepted with nothing to intercept.
+/// that bound nothing, as a GitHub-only one whose seed carries no GitHub
+/// placeholder does (#4001), reports not intercepted with nothing to
+/// intercept.
 fn reported(started: Option<v1::Interception>, front_door: FrontDoor) -> Option<v1::Interception> {
     let report = |state: v1::InterceptionState, reason: v1::InterceptionReason| v1::Interception {
         state: state as i32,
