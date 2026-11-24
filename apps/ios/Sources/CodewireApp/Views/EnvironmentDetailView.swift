@@ -41,7 +41,12 @@ struct EnvironmentDetailView: View {
             Section {
                 if env.state == "running" {
                     Button {
-                        showShell = true
+                        // A shell is a stream, never resent: start it with a
+                        // token at least 10 minutes from expiry.
+                        Task {
+                            _ = try? await auth.signIn?.token()
+                            showShell = true
+                        }
                     } label: {
                         Label("Open Shell", systemImage: "terminal")
                     }
@@ -104,10 +109,10 @@ struct EnvironmentDetailView: View {
     // MARK: - Actions
 
     private func startEnvironment() async {
-        guard let token = auth.accessToken else { return }
+        guard let signIn = auth.signIn else { return }
         isActioning = true
         do {
-            try await auth.client.startEnvironment(token: token, orgID: org.id, envID: env.id)
+            try await auth.client.startEnvironment(bearer: signIn, orgID: org.id, envID: env.id)
             error = nil
             await onRefresh()
         } catch {
@@ -117,10 +122,10 @@ struct EnvironmentDetailView: View {
     }
 
     private func stopEnvironment() async {
-        guard let token = auth.accessToken else { return }
+        guard let signIn = auth.signIn else { return }
         isActioning = true
         do {
-            try await auth.client.stopEnvironment(token: token, orgID: org.id, envID: env.id)
+            try await auth.client.stopEnvironment(bearer: signIn, orgID: org.id, envID: env.id)
             error = nil
             await onRefresh()
         } catch {
@@ -130,10 +135,10 @@ struct EnvironmentDetailView: View {
     }
 
     private func deleteEnvironment() async {
-        guard let token = auth.accessToken else { return }
+        guard let signIn = auth.signIn else { return }
         isActioning = true
         do {
-            try await auth.client.deleteEnvironment(token: token, orgID: org.id, envID: env.id)
+            try await auth.client.deleteEnvironment(bearer: signIn, orgID: org.id, envID: env.id)
             error = nil
             await onRefresh()
             dismiss()

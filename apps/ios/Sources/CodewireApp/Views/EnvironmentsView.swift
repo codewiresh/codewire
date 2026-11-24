@@ -46,10 +46,10 @@ struct EnvironmentsView: View {
     }
 
     private func loadEnvironments() async {
-        guard let token = auth.accessToken else { return }
+        guard let signIn = auth.signIn else { return }
         isLoading = true
         do {
-            environments = try await auth.client.listEnvironments(token: token, orgID: org.id)
+            environments = try await auth.client.listEnvironments(bearer: signIn, orgID: org.id)
             error = nil
         } catch {
             self.error = error.localizedDescription

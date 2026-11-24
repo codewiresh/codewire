@@ -19,7 +19,7 @@ final class CodewireClientTests: XCTestCase {
         )
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        let organizations = try await client.listOrganizations(token: "tok")
+        let organizations = try await client.listOrganizations(bearer: FixedBearer("tok"))
 
         XCTAssertEqual(organizations, [Organization(id: "o1", name: "Acme", slug: "acme", role: "admin")])
         XCTAssertEqual(session.recordedRequests.count, 1)
@@ -37,7 +37,7 @@ final class CodewireClientTests: XCTestCase {
         )
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        let environments = try await client.listEnvironments(token: "tok", orgID: "o1")
+        let environments = try await client.listEnvironments(bearer: FixedBearer("tok"), orgID: "o1")
 
         XCTAssertEqual(environments.count, 1)
         XCTAssertEqual(environments[0].state, "running")
@@ -57,7 +57,7 @@ final class CodewireClientTests: XCTestCase {
         )
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        let environments = try await client.listEnvironments(token: "tok", orgID: "o1")
+        let environments = try await client.listEnvironments(bearer: FixedBearer("tok"), orgID: "o1")
 
         XCTAssertEqual(environments, [])
     }
@@ -71,7 +71,7 @@ final class CodewireClientTests: XCTestCase {
         )
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        let organizations = try await client.listOrganizations(token: "tok")
+        let organizations = try await client.listOrganizations(bearer: FixedBearer("tok"))
 
         XCTAssertEqual(organizations, [])
     }
@@ -88,7 +88,7 @@ final class CodewireClientTests: XCTestCase {
         )
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        let environments = try await client.listEnvironments(token: "tok", orgID: "o1")
+        let environments = try await client.listEnvironments(bearer: FixedBearer("tok"), orgID: "o1")
 
         XCTAssertEqual(environments.count, 1)
         XCTAssertEqual(environments[0].cpuMillicores, 0)
@@ -107,7 +107,7 @@ final class CodewireClientTests: XCTestCase {
         let client = CodewireClient(baseURL: baseURL, session: session)
 
         do {
-            _ = try await client.listOrganizations(token: "tok")
+            _ = try await client.listOrganizations(bearer: FixedBearer("tok"))
             XCTFail("expected invalid response")
         } catch CodewireClientError.invalidResponse {
             // expected
@@ -126,7 +126,7 @@ final class CodewireClientTests: XCTestCase {
         let client = CodewireClient(baseURL: baseURL, session: session)
 
         await assertError(.unauthorized) {
-            _ = try await client.listOrganizations(token: "tok")
+            _ = try await client.listOrganizations(bearer: FixedBearer("tok"))
         }
     }
 
@@ -140,7 +140,7 @@ final class CodewireClientTests: XCTestCase {
         let client = CodewireClient(baseURL: baseURL, session: session)
 
         await assertError(.forbidden) {
-            _ = try await client.listEnvironments(token: "tok", orgID: "o1")
+            _ = try await client.listEnvironments(bearer: FixedBearer("tok"), orgID: "o1")
         }
     }
 
@@ -160,9 +160,9 @@ final class CodewireClientTests: XCTestCase {
         }
         let client = CodewireClient(baseURL: baseURL, session: session)
 
-        try await client.startEnvironment(token: "tok", orgID: "o1", envID: "e1")
-        try await client.stopEnvironment(token: "tok", orgID: "o1", envID: "e1")
-        try await client.deleteEnvironment(token: "tok", orgID: "o1", envID: "e1")
+        try await client.startEnvironment(bearer: FixedBearer("tok"), orgID: "o1", envID: "e1")
+        try await client.stopEnvironment(bearer: FixedBearer("tok"), orgID: "o1", envID: "e1")
+        try await client.deleteEnvironment(bearer: FixedBearer("tok"), orgID: "o1", envID: "e1")
 
         XCTAssertEqual(session.recordedRequests.count, actionPaths.count)
         for (request, action) in zip(session.recordedRequests, actionPaths) {

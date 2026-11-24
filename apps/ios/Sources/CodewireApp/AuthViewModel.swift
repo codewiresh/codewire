@@ -10,6 +10,9 @@ import UIKit
 final class AuthViewModel: ObservableObject {
     @Published var isAuthenticated = false
     @Published var accessToken: String?
+    /// The signed-in session every request takes its bearer from; it renews
+    /// the access token while the app is open.
+    @Published private(set) var signIn: SignIn?
     @Published var error: String?
     @Published var isLoading = false
 
@@ -53,6 +56,7 @@ final class AuthViewModel: ObservableObject {
         client = CodewireClient(baseURL: environment.baseURL)
         tokenStore = KeychainTokenStore(account: environment.keychainAccount)
         accessToken = nil
+        signIn = nil
         isAuthenticated = false
         error = nil
         checkExistingToken()
@@ -110,12 +114,14 @@ final class AuthViewModel: ObservableObject {
                         // surface the persistence failure without exposing it.
                     }
                     accessToken = nil
+                    signIn = nil
                     isAuthenticated = false
                     self.error = "Your session expired. Please sign in again."
                 }
             }
         } catch {
             accessToken = nil
+            signIn = nil
             isAuthenticated = false
             self.error = "Unable to read the saved session. Please sign in again."
         }
@@ -213,6 +219,7 @@ final class AuthViewModel: ObservableObject {
             return
         }
         accessToken = nil
+        signIn = nil
         isAuthenticated = false
         error = nil
         guard let stored else { return }
@@ -239,6 +246,21 @@ final class AuthViewModel: ObservableObject {
     }
 
     private func completeLogin(_ token: TokenInfo) {
+        let baseURL = baseURL
+        signIn = SignIn(
+            token: token,
+            store: tokenStore,
+            renew: { refreshToken in
+                try await OIDCFlow.refresh(
+                    baseURL: baseURL,
+                    clientID: OIDCFlow.nativeClientID,
+                    refreshToken: refreshToken
+                )
+            },
+            renewed: { [weak self] renewed in
+                Task { @MainActor in self?.accessToken = renewed.accessToken }
+            }
+        )
         accessToken = token.accessToken
         isAuthenticated = true
         error = nil

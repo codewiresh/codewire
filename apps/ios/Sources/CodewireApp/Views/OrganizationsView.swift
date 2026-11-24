@@ -64,10 +64,10 @@ struct OrganizationsView: View {
     }
 
     private func loadOrgs() async {
-        guard let token = auth.accessToken else { return }
+        guard let signIn = auth.signIn else { return }
         isLoading = true
         do {
-            orgs = try await auth.client.listOrganizations(token: token)
+            orgs = try await auth.client.listOrganizations(bearer: signIn)
             error = nil
         } catch {
             self.error = error.localizedDescription

@@ -33,63 +33,73 @@ public actor CodewireClient {
         self.session = session
     }
 
-    public func listOrganizations(token: String) async throws -> [Organization] {
+    public func listOrganizations(bearer: BearerSource) async throws -> [Organization] {
         let response: ListOrganizationsResponse = try await postConnect(
             path: "codewire.v1.OrganizationService/ListOrganizations",
-            token: token,
+            bearer: bearer,
             request: EmptyRequest()
         )
         return try (response.organizations ?? []).map(Self.organization(from:))
     }
 
-    public func listEnvironments(token: String, orgID: String) async throws -> [Environment] {
+    public func listEnvironments(bearer: BearerSource, orgID: String) async throws -> [Environment] {
         let response: ListEnvironmentsResponse = try await postConnect(
             path: "codewire.v1.EnvironmentService/ListEnvironments",
-            token: token,
+            bearer: bearer,
             request: OrganizationRequest(orgId: orgID)
         )
         return try (response.environments ?? []).map(Self.environment(from:))
     }
 
-    public func startEnvironment(token: String, orgID: String, envID: String) async throws {
+    public func startEnvironment(bearer: BearerSource, orgID: String, envID: String) async throws {
         let _: EmptyResponse = try await postConnect(
             path: "codewire.v1.EnvironmentService/StartEnvironment",
-            token: token,
+            bearer: bearer,
             request: EnvironmentRequest(orgId: orgID, environmentId: envID)
         )
     }
 
-    public func stopEnvironment(token: String, orgID: String, envID: String) async throws {
+    public func stopEnvironment(bearer: BearerSource, orgID: String, envID: String) async throws {
         let _: EmptyResponse = try await postConnect(
             path: "codewire.v1.EnvironmentService/StopEnvironment",
-            token: token,
+            bearer: bearer,
             request: EnvironmentRequest(orgId: orgID, environmentId: envID)
         )
     }
 
-    public func deleteEnvironment(token: String, orgID: String, envID: String) async throws {
+    public func deleteEnvironment(bearer: BearerSource, orgID: String, envID: String) async throws {
         let _: EmptyResponse = try await postConnect(
             path: "codewire.v1.EnvironmentService/DeleteEnvironment",
-            token: token,
+            bearer: bearer,
             request: EnvironmentRequest(orgId: orgID, environmentId: envID)
         )
     }
 
     // MARK: - Connect JSON transport
 
+    /// Sends a unary call with the bearer `bearer` gives. When the auth layer
+    /// refuses that bearer (`BEARER_REFUSED`), it is renewed and the call sent
+    /// once more; any other answer, a second refusal included, is final
+    /// (docs/dev/AUTH-POLICY.md, "Native sign-in lifetimes").
     private func postConnect<Request: Encodable, Response: Decodable>(
         path: String,
-        token: String,
+        bearer: BearerSource,
         request: Request
     ) async throws -> Response {
         var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
         urlRequest.httpMethod = "POST"
-        urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, response) = try await session.data(for: urlRequest)
+        let token = try await bearer.token()
+        urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        var (data, response) = try await session.data(for: urlRequest)
+        if Self.bearerRefused(response, data: data),
+           let renewed = try? await bearer.afterRefusal(token) {
+            urlRequest.setValue("Bearer \(renewed)", forHTTPHeaderField: "Authorization")
+            (data, response) = try await session.data(for: urlRequest)
+        }
         try checkStatus(response, data: data)
         do {
             return try JSONDecoder().decode(Response.self, from: data)
@@ -121,6 +131,24 @@ public actor CodewireClient {
         case 404: throw CodewireClientError.notFound
         case 500...599: throw CodewireClientError.serverError(http.statusCode)
         default: throw CodewireClientError.invalidResponse
+        }
+    }
+
+    /// Whether an answer is the auth layer's own refusal of the bearer: 401,
+    /// `unauthenticated`, and a `google.rpc.ErrorInfo` with reason
+    /// `BEARER_REFUSED` in domain `codewire.sh`. A handler's
+    /// `unauthenticated` without it may follow a change and is never resent.
+    static func bearerRefused(_ response: URLResponse, data: Data) -> Bool {
+        guard (response as? HTTPURLResponse)?.statusCode == 401,
+              let error = try? JSONDecoder().decode(ConnectError.self, from: data),
+              error.code == "unauthenticated"
+        else { return false }
+        return (error.details ?? []).contains { detail in
+            guard detail.type == "google.rpc.ErrorInfo",
+                  let value = detail.value,
+                  let info = ErrorInfoFields(base64: value)
+            else { return false }
+            return info.reason == "BEARER_REFUSED" && info.domain == "codewire.sh"
         }
     }
 
@@ -220,6 +248,12 @@ private struct EnvironmentRequest: Encodable { let orgId: String; let environmen
 
 private struct ConnectError: Decodable {
     let code: String?
+    let details: [ConnectErrorDetail]?
+}
+
+private struct ConnectErrorDetail: Decodable {
+    let type: String?
+    let value: String?
 }
 
 private struct ListOrganizationsResponse: Decodable {

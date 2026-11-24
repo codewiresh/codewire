@@ -961,8 +961,8 @@ These are the numbers set on #4786 for the three native clients,
 `codewire-cli`, `codewire-desktop` and `codewire-ios`; #6145 builds them.
 Until it ships, each client is registered with a 720-hour access token. `cw`
 and the desktop app refresh as below, in their last 10 minutes, once after the
-auth layer's `BEARER_REFUSED`, and the desktop under its lock file. The iOS
-app still refreshes only at launch. The auth layer's `BEARER_REFUSED` and its
+auth layer's `BEARER_REFUSED`, and the desktop under its lock file; the iOS app
+does the same while it is open. The auth layer's `BEARER_REFUSED` and its
 repository check have shipped. The change that ships the lifetimes moves this
 section into [Client use](#client-use).
 
