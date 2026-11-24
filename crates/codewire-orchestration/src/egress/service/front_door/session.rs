@@ -99,6 +99,8 @@ pub(super) struct Session {
     /// Framed frames for cw-egress, or the error that ends the session.
     pub(super) output: mpsc::Sender<Result<Vec<u8>, Status>>,
     pub(super) stop: CancellationToken,
+    /// The replica's drain, which is also one cause of `stop`.
+    pub(super) draining: CancellationToken,
 }
 
 /// The upstreams a session holds, by epoch id.
@@ -140,7 +142,7 @@ impl Upstreams {
 
 impl Session {
     /// Serve until cw-egress closes, the front door breaks the protocol,
-    /// cw-egress stops reading, or `stop`.
+    /// cw-egress stops reading, or `stop` ([`Self::stopped`]).
     pub(super) async fn run(
         self,
         first: (u64, Joined),
@@ -164,7 +166,7 @@ impl Session {
             }
             tokio::select! {
                 biased;
-                () = self.stop.cancelled() => return,
+                () = self.stop.cancelled() => return self.stopped().await,
                 () = sleep_until(no_epoch_since.map(|since| since + NO_EPOCH)) => {
                     // One more attempt, whatever the backoff: end only when
                     // the registry has no epoch for this binding, or its
@@ -381,6 +383,22 @@ impl Session {
             tokio::time::timeout(STALL, self.output.send(Ok(frame))).await,
             Ok(Ok(()))
         )
+    }
+
+    /// A replaced session just goes. A drained one ends UNAVAILABLE, which
+    /// cw-egress opens again after its first backoff, on a replica that has
+    /// the epochs: this one's relays left when the drain began (#6099). The
+    /// status waits behind any answer still queued, as a frame would, since
+    /// a clean end would only reopen within 2 s.
+    async fn stopped(&self) {
+        if self.draining.is_cancelled() {
+            tracing::info!(
+                event = "front_door_session_drained",
+                "a front-door session ended for this replica's drain"
+            );
+            let status = Status::unavailable("this orchestration replica is draining");
+            let _ = tokio::time::timeout(STALL, self.output.send(Err(status))).await;
+        }
     }
 
     async fn end(&self, status: Status) {

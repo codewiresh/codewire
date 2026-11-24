@@ -23,6 +23,7 @@ use connectrpc::{
     ConnectError, InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream,
 };
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 
 use codewire_egress_node::replacement::StartLimiter;
 
@@ -84,6 +85,11 @@ pub struct EgressServiceState {
     /// The startup re-apply of broker policies (`super::reapply`): until it
     /// has finished, no lockdown is decided.
     pub reapplied: Arc<super::reapply::PoliciesReapplied>,
+    /// Cancelled when this replica's drain begins. The credential relays
+    /// move to the next leader then, so front-door sessions end and new ones
+    /// are refused, and cw-egress opens them again where the epochs are
+    /// (#6099).
+    pub draining: CancellationToken,
 }
 
 mod front_door;

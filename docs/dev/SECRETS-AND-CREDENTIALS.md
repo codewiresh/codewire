@@ -3005,11 +3005,15 @@ above). These rules hold:
   paired and none draining, a request waits at the front door for the next
   one, at most 10 s, and then fails closed; it is never queued past that or
   sent twice (#6099). While a predecessor still drains, the front door keeps
-  serving it and refuses a new request at once instead of waiting. The front
-  door keeps at most two sessions, so a third pairing ends the oldest. A
-  request that outlives two rotations, or its own epoch, is cut: one still
-  waiting for its response gets the error response, and a response already
-  streaming ends early. A long streamed response is the case this reaches.
+  serving it and refuses a new request at once instead of waiting. When an
+  orchestration replica's drain begins, its relays move to the next leader,
+  so it ends every front-door session `UNAVAILABLE` and refuses new ones;
+  cw-egress opens the session again on the next replica after its first
+  backoff, about a second (#6099). The front door keeps at most two
+  sessions, so a third pairing ends the oldest. A request that outlives two
+  rotations, or its own epoch, is cut: one still waiting for its response
+  gets the error response, and a response already streaming ends early. A
+  long streamed response is the case this reaches.
 - **Logins are placeholders from the first request.** The relay of an
   intercepting boot sets `front_door` in its delegation's Open, which the
   admission echoes exactly. The platform then seals that epoch's agent

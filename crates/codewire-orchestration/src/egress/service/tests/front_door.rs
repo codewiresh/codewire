@@ -584,6 +584,108 @@ async fn the_session_and_its_upstreams_end_when_cw_egress_goes() {
     bounded(upstream.ended.cancelled()).await;
 }
 
+/// A replica of its own, whose drain `draining` begins.
+fn replica(front_doors: &Arc<FrontDoorEpochs>, draining: &CancellationToken) -> axum::Router {
+    let state = EgressServiceState {
+        draining: draining.clone(),
+        ..state(
+            &Cluster::healthy(),
+            Arc::new(Bound),
+            Some(Arc::clone(front_doors)),
+        )
+    };
+    codewire_server_core::connect::connect_router(egress_router(Arc::new(state)))
+}
+
+/// A rollout (#6099): the old replica's drain moves the relays, so its
+/// session ends UNAVAILABLE at once and lets go of its upstream, and the
+/// session cw-egress opens again is served by the next replica.
+#[tokio::test]
+async fn a_front_door_request_is_served_across_a_drain() {
+    let old_epochs = Arc::new(FrontDoorEpochs::default());
+    let old_draining = CancellationToken::new();
+    let (_old_epoch, old_asked) = epoch(&old_epochs, key());
+    let (old_joined, mut old) = upstream();
+    serving(old_asked, old_joined);
+    let mut before = Live::start(replica(&old_epochs, &old_draining)).await;
+    before.attached().await;
+    before.send_message(&ready()).await;
+    before.send_message(&request("r1")).await;
+    assert_eq!(bounded(old.guests.recv()).await.unwrap(), request("r1"));
+    old.host.send(Ok(response_end("r1"))).await.unwrap();
+    assert_eq!(
+        bounded(before.next()).await.unwrap(),
+        framed_bridge(&response_end("r1"))
+    );
+
+    old_draining.cancel();
+    let end = bounded(before.next()).await.unwrap();
+    assert_eq!(end["error"]["code"], "unavailable", "{end}");
+    bounded(old.ended.cancelled()).await;
+
+    let new_epochs = Arc::new(FrontDoorEpochs::default());
+    let (_new_epoch, new_asked) = epoch(&new_epochs, key());
+    let (new_joined, mut new) = upstream();
+    serving(new_asked, new_joined);
+    let mut after = Live::start(replica(&new_epochs, &CancellationToken::new())).await;
+    after.attached().await;
+    after.send_message(&ready()).await;
+    after.send_message(&request("r2")).await;
+    assert_eq!(bounded(new.guests.recv()).await.unwrap(), request("r2"));
+    new.host.send(Ok(response_end("r2"))).await.unwrap();
+    assert_eq!(
+        bounded(after.next()).await.unwrap(),
+        framed_bridge(&response_end("r2"))
+    );
+}
+
+/// A request waiting for a successor when the drain begins is answered then,
+/// not at the wait's bound: no successor comes to a draining replica.
+#[tokio::test(start_paused = true)]
+async fn a_request_waiting_between_epochs_is_answered_when_the_drain_begins() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let draining = CancellationToken::new();
+    let (ended_epoch, asked) = epoch(&front_doors, key());
+    let (joined, ended) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(replica(&front_doors, &draining)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    drop(ended_epoch);
+    drop(ended.host);
+    ended.ended.cancelled().await;
+    live.send_message(&request("r")).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let started = tokio::time::Instant::now();
+    draining.cancel();
+    let answer = live.next().await.unwrap();
+    let frame = STANDARD.decode(answer["bridge"].as_str().unwrap()).unwrap();
+    let message =
+        v1::CredentialBridgeHostMessage::decode(registry::frame_message(&frame).unwrap()).unwrap();
+    assert!(
+        matches!(
+            message.payload,
+            Some(v1::credential_bridge_host_message::Payload::ResponseFailure(ref failure))
+                if failure.request_id == "r"
+        ),
+        "{message:?}"
+    );
+    let end = live.next().await.unwrap();
+    assert_eq!(end["error"]["code"], "unavailable", "{end}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn a_draining_replica_refuses_a_new_session_before_any_relay_work() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let draining = CancellationToken::new();
+    let (_epoch, mut asked) = epoch(&front_doors, key());
+    draining.cancel();
+    let messages = session(replica(&front_doors, &draining), &[open()]).await;
+    assert_eq!(refused(&messages), "unavailable", "{messages:?}");
+    assert!(asked.try_recv().is_err(), "no epoch was asked to join");
+}
+
 #[tokio::test]
 async fn an_upstream_that_fails_answers_its_requests_and_the_session_goes_on() {
     let front_doors = Arc::new(FrontDoorEpochs::default());

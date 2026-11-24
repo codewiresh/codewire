@@ -111,6 +111,8 @@ pub fn service_state(
         interception_cas,
         // No startup sweep to wait for unless the caller gives one ([`mount`]).
         reapplied: reapply::PoliciesReapplied::finished(),
+        // No drain unless the caller gives one ([`mount`]).
+        draining: tokio_util::sync::CancellationToken::new(),
     }))
 }
 
@@ -150,7 +152,11 @@ pub fn mount(
     )?;
     Ok(match state {
         Some(state) => {
-            let state = Arc::new(service::EgressServiceState { reapplied, ..state });
+            let state = Arc::new(service::EgressServiceState {
+                reapplied,
+                draining: api.drain.begun(),
+                ..state
+            });
             spawn_report_sweep(state.pool.clone());
             if let Some(kube) = api.kube.clone() {
                 interception_trust::spawn_sweep(

@@ -420,6 +420,7 @@ fn state(
         front_doors,
         interception_cas: None,
         reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
+        draining: tokio_util::sync::CancellationToken::new(),
     }
 }
 
@@ -819,6 +820,7 @@ rules:
         front_doors: None,
         interception_cas: None,
         reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
+        draining: tokio_util::sync::CancellationToken::new(),
     };
     let bound = Assignment::Bound {
         environment_id: "env".into(),
@@ -869,6 +871,7 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             front_doors: None,
             interception_cas: None,
             reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
+            draining: tokio_util::sync::CancellationToken::new(),
         }
     };
     let bound = |interception| Assignment::Bound {
@@ -1010,6 +1013,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             front_doors: None,
             interception_cas: None,
             reapplied: crate::egress::reapply::PoliciesReapplied::finished(),
+            draining: tokio_util::sync::CancellationToken::new(),
         }),
         caller: Caller {
             namespace: SERVER.into(),

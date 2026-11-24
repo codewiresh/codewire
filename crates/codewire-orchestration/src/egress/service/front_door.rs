@@ -19,7 +19,6 @@ use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, Ser
 use futures::StreamExt as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
 use tonic::{Code, Status};
 use uuid::Uuid;
 
@@ -47,6 +46,9 @@ impl EgressServiceState {
                 "hosted credential interception is off",
             ));
         };
+        if self.draining.is_cancelled() {
+            return Err(draining());
+        }
         let first = requests
             .next()
             .await
@@ -70,8 +72,9 @@ impl EgressServiceState {
             generation: u64::try_from(binding.operation_generation).map_err(|_| denied())?,
         };
         // A newer session for the Pod replaces an older one, which only the
-        // Pod's own node can have opened (`guest_on_node` above).
-        let stop = CancellationToken::new();
+        // Pod's own node can have opened (`guest_on_node` above). The drain
+        // stops every session too.
+        let stop = self.draining.child_token();
         let place = front_doors
             .take_session(&key.pod_uid, stop.clone(), REPLACE_WAIT)
             .await;
@@ -98,6 +101,7 @@ impl EgressServiceState {
             key,
             output,
             stop: stop.clone(),
+            draining: self.draining.clone(),
         };
         tokio::spawn(async move {
             // Held until the session has let go of its upstreams.
@@ -138,6 +142,10 @@ fn not_open() -> ConnectError {
 
 fn no_epoch() -> ConnectError {
     ConnectError::unavailable("no credential relay epoch is running for this Pod")
+}
+
+fn draining() -> ConnectError {
+    ConnectError::unavailable("this orchestration replica is draining")
 }
 
 /// The relay's answer for cw-egress, by code only.

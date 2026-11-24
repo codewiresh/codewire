@@ -1421,6 +1421,9 @@ an error the client can retry.
     the new one;
   - a dashboard terminal open on the old Pod at the drain deadline, both the
     durable terminal and the one-off terminal (#4459);
+  - an intercepted request through a Sandbox's front door, whose session the
+    old Pod ends at SIGTERM so cw-egress opens it again on the new one
+    (#6099);
   - API calls throughout, none refused.
 - **Driving it:**
   1. Dev runs a source with #4445, so its orchestration Pods carry a 10 s
