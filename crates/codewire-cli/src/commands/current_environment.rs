@@ -528,6 +528,7 @@ mod tests {
                 name: "work".into(),
             },
             network: NetworkRef::NotAttached,
+            error_code: None,
         }
     }
 

@@ -86,3 +86,24 @@ async fn shell(
     }
     launch_durable_shell(globals, environment).await
 }
+
+/// A local VM lists its sessions only while it runs: say so, in the words
+/// every session command uses, instead of the supervisor's state refusal.
+pub(super) async fn stopped_environment_sessions(
+    target: &EnvironmentSessionTarget,
+) -> Option<anyhow::Error> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let EnvironmentSessionTarget::NativeLocal { target, .. } = target {
+        let environment = native_environment(&target.name).await.ok()??;
+        // One in `error` says why, and what to do about that (#5359).
+        let in_error = crate::commands::native::error_view::ErrorView::of(&environment).refusal();
+        if in_error.is_some() {
+            return in_error;
+        }
+        let name = crate::progress::terminal_text(&target.name);
+        let state = refusal::local_state(environment.state);
+        return refusal::state_error(crate::output::VmLocation::Local, &name, state, None);
+    }
+    let _ = target;
+    None
+}

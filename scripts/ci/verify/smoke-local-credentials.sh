@@ -93,6 +93,19 @@ for entry in json.load(sys.stdin):
 ' "$1"
 }
 
+# What `cw ls --local --output json` gives as VM's error: its cause while it
+# is in `error`, else nothing.
+vm_error() {
+  smoke_cw "$CW" ls --local --output json 2>>"$LOG" |
+    python3 -c '
+import json, sys
+name = sys.argv[1]
+for entry in json.load(sys.stdin):
+    if entry.get("name") == name:
+        print(entry.get("error") or "")
+' "$1"
+}
+
 # A VM made with no credentials is given a credential profile; its managed
 # restart must bring it back running with the key in its agent.
 step_profile_after_create() {
@@ -396,9 +409,10 @@ wait_for_probes() {
 # agent answers again within seconds with no restart
 # (docs/dev/SECRETS-AND-CREDENTIALS.md, "It mends by itself"). An egress
 # broker is not: from a second after the kill nothing the guest sends gets an
-# answer, the VM turns `error`, and `cw stop` and `cw start` restore it.
+# answer, the VM turns `error` and says why, and `cw start` restores it.
 step_proxy_down() {
   local step=smoke-proxy-down name=smoke-p key=smoke-n-key vm probes stop id killed pid replaced
+  local refusal
   local address offset
   # The earlier steps' VMs are stopped, so this VM's helpers are the only ones.
   for vm in "${VMS[@]}"; do
@@ -450,17 +464,25 @@ print(next(entry["id"] for entry in json.load(sys.stdin) if entry.get("name") ==
     step_fail "$step" 'a guest request got an answer a second or more after the egress broker was killed'
   [[ "$(vm_state "$name")" == error ]] ||
     step_fail "$step" 'the VM did not turn error when its egress broker was killed'
-  # What a person sees now; not yet a check (the refusal names no cause).
-  printf '$ cw exec --in %s -- true\n' "$name" >>"$LOG"
-  smoke_cw "$CW" exec --in "$name" -- true >>"$LOG" 2>&1 || true
+  # The VM says why, and what to do about it (#5359).
+  [[ "$(vm_error "$name")" == egress_broker_exit ]] ||
+    step_fail "$step" 'cw ls --output json does not give egress_broker_exit as the error of the VM'
+  refusal="$(smoke_cw "$CW" exec --in "$name" -- true 2>&1)" &&
+    step_fail "$step" 'cw exec ran in a VM whose egress broker was killed'
+  printf '$ cw exec --in %s -- true\n%s\n' "$name" "$refusal" >>"$LOG"
+  if ! grep -qF "the VM's network broker stopped, so nothing can leave the VM" <<<"$refusal" ||
+    ! grep -qF "cw --local start $name" <<<"$refusal"; then
+    step_fail "$step" 'cw exec did not say that the network broker stopped and how to start the VM again'
+  fi
   : >"$stop"
   cat -- "$probes" >>"$LOG"
 
-  step_cw "$step" stop --local "$name"
   step_cw "$step" start --local "$name"
   step_cw "$step" exec --in "$name" -- curl -sS -o /dev/null -w 'egress %{http_code}\n' --max-time 10 "$PROBE_URL"
   tail -n 1 "$LOG" | grep -qx 'egress 200' ||
-    step_fail "$step" "stop and start did not restore the guest's HTTPS"
+    step_fail "$step" "cw start did not restore the guest's HTTPS"
+  [[ -z "$(vm_error "$name")" ]] ||
+    step_fail "$step" 'the started VM still shows an error in cw ls --output json'
   printf 'ok %s\n' "$step"
 }
 

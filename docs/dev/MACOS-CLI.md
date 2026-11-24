@@ -281,6 +281,10 @@ probing HTTPS once a second:
   the confined worker remains but cannot dial.
 - In both cases, from the second of the kill on, every probe fails, and no
   process of the environment holds an internet socket.
+- While the environment is in that state, `cw` says why and what to do in
+  the same words as on Linux
+  ([LINUX-LOCAL-VMS.md](LINUX-LOCAL-VMS.md), "A VM that lost its network");
+  those words are not yet observed on a Mac (#5359).
 
 The TLS front door (#3999) runs for a boot with agent interception switched
 on, as on Linux. It is `cw __native-front-door`, and `main` starts it before

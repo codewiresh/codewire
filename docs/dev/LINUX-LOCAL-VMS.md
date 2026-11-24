@@ -291,13 +291,11 @@ While the VM is in that state, `cw` says why and what to do:
   `error` give its code, where the commands said only that the environment
   is not in the required state.
 
-**Not yet built** (#5359). Today `cw --local info` shows the code line and
-nothing under it, `cw exec` says `Failed_precondition: local environment is
-not in the required state`, `cw shell` the same, and `cw ls --output json`
-has `"error": null`. The VM does fail closed, and `cw --local start NAME`
-does restore it (observed on `main`, 2026-11-18, for the broker; for the
-worker only the state and the code are observed). The journey step is
-`smoke-proxy-down` in `docs/journeys/local-vm-credentials-smoke.md`.
+**Built** (#5359). For the broker, all of it is observed on a Linux host:
+the journey step is `smoke-proxy-down` in
+`docs/journeys/local-vm-credentials-smoke.md`. For the worker, the state,
+the code and what `cw --local info` and `cw exec` say are observed; that
+nothing the guest sends gets out is not yet measured.
 
 ## Host ports
 

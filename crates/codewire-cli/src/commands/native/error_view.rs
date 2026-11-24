@@ -37,6 +37,9 @@ pub(crate) struct ErrorView {
     /// The environment's name, for the next step a line names.
     #[serde(skip)]
     pub(crate) name: String,
+    /// Whether the environment is in `error` now; its code outlives that.
+    #[serde(skip)]
+    in_error: bool,
 }
 
 /// Egress refused because the VM's egress broker is past its deadline: how
@@ -170,6 +173,16 @@ pub(crate) struct RunnerExitView {
     pub(crate) signal: Option<i32>,
 }
 
+/// Looks `name` up for a command that runs in it, with the credential
+/// service it needs, and refuses a VM that is in `error` with why and what to
+/// do (#5359).
+pub(crate) async fn reachable(name: &str) -> anyhow::Result<()> {
+    let mut supervisor = super::native_client().await?;
+    let found =
+        super::get_native_environment_with_required_authority(&mut supervisor, name).await?;
+    ErrorView::of(&found).refusal().map_or(Ok(()), Err)
+}
+
 impl ErrorView {
     pub(crate) fn of(environment: &v1::Environment) -> Self {
         let error_code = trimmed_str(&environment.error_code).map(str::to_owned);
@@ -202,7 +215,56 @@ impl ErrorView {
                     last_unix_ms: refusals.last_unix_ms,
                 }),
             name: environment.name.clone(),
+            in_error: environment.state == v1::EnvironmentState::Error as i32,
         }
+    }
+
+    /// What the error code means for whoever uses the VM, where the code
+    /// alone does not say (#5359).
+    fn meaning(&self) -> Option<&'static str> {
+        match self.error_code.as_deref()? {
+            "egress_broker_exit" => {
+                Some("the VM's network broker stopped, so nothing can leave the VM")
+            }
+            "network_worker_exit" => {
+                Some("the VM's network worker stopped, so nothing can leave the VM")
+            }
+            _ => None,
+        }
+    }
+
+    /// The code of a VM that is in `error` now, as `cw ls --output json`
+    /// carries it.
+    pub(crate) fn current_code(&self) -> Option<&str> {
+        self.error_code.as_deref().filter(|_| self.in_error)
+    }
+
+    /// Why a command cannot run in a VM that is in `error`, with its next
+    /// step; `None` for a VM in any other state, which the command's own
+    /// error covers.
+    pub(crate) fn refusal(&self) -> Option<anyhow::Error> {
+        if !self.in_error {
+            return None;
+        }
+        let name = crate::commands::progress::terminal_text(&self.name);
+        let (message, step) = match (self.meaning(), &self.error_code) {
+            (Some(meaning), _) => (
+                format!("local VM {name} can't be reached: {meaning}"),
+                format!("cw --local start {name}"),
+            ),
+            (None, Some(code)) => (
+                format!("local VM {name} is in error ({code})"),
+                format!("cw --local info {name}"),
+            ),
+            (None, None) => (
+                format!("local VM {name} is in error"),
+                format!("cw --local info {name}"),
+            ),
+        };
+        Some(crate::error_report::with_next_step(
+            anyhow::anyhow!(message),
+            step,
+        ))
     }
 
     /// The `Error:` line, then the `Egress:` line, each only when it
@@ -289,25 +351,31 @@ impl ErrorView {
             return String::new();
         };
         let how = match &self.runner_exit {
-            None => return format!("Error:       {error_code}\n"),
+            None => String::new(),
             Some(RunnerExitView {
                 status: None,
                 signal: Some(signal),
                 ..
-            }) => format!("ended by signal {signal}"),
-            Some(RunnerExitView { status: None, .. }) => "ended by a signal".to_owned(),
+            }) => format!(" (ended by signal {signal})"),
+            Some(RunnerExitView { status: None, .. }) => " (ended by a signal)".to_owned(),
             Some(RunnerExitView {
                 status: Some(status),
                 reason: None,
                 ..
-            }) => format!("exited {status}"),
+            }) => format!(" (exited {status})"),
             Some(RunnerExitView {
                 status: Some(status),
                 reason: Some(reason),
                 ..
-            }) => format!("exited {status}: {reason}"),
+            }) => format!(" (exited {status}: {reason})"),
         };
-        format!("Error:       {error_code} ({how})\n")
+        match self.meaning().filter(|_| self.in_error) {
+            Some(meaning) => format!(
+                "Error:       {error_code}{how}: {meaning}; `cw --local start {name}` starts it again\n",
+                name = self.name,
+            ),
+            None => format!("Error:       {error_code}{how}\n"),
+        }
     }
 }
 
@@ -328,6 +396,104 @@ mod tests {
             }),
             ..Default::default()
         })
+    }
+
+    /// A VM in `error` with `error_code`, named `ed`.
+    fn in_error(error_code: &str) -> ErrorView {
+        ErrorView::of(&v1::Environment {
+            name: "ed".to_owned(),
+            state: v1::EnvironmentState::Error as i32,
+            error_code: error_code.to_owned(),
+            runner_exit: Some(v1::RunnerExit {
+                status: None,
+                reason: String::new(),
+                signal: None,
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn said(error: &anyhow::Error) -> (String, Option<String>) {
+        let step = error
+            .downcast_ref::<crate::error_report::NextStep>()
+            .map(ToString::to_string);
+        (error.root_cause().to_string(), step)
+    }
+
+    /// A VM whose network process ended says what that means and how to
+    /// get it back, on its `Error:` line and to a command run in it.
+    #[test]
+    fn a_vm_that_lost_its_network_says_so_and_what_to_do() {
+        let broker = in_error("egress_broker_exit");
+        assert_eq!(
+            broker.line(),
+            "Error:       egress_broker_exit (ended by a signal): the VM's network broker stopped, so nothing can leave the VM; `cw --local start ed` starts it again\n"
+        );
+        assert_eq!(
+            said(&broker.refusal().unwrap()),
+            (
+                "local VM ed can't be reached: the VM's network broker stopped, so nothing can leave the VM".to_owned(),
+                Some("cw --local start ed".to_owned())
+            )
+        );
+        assert_eq!(broker.current_code(), Some("egress_broker_exit"));
+        let worker = in_error("network_worker_exit");
+        assert!(
+            worker
+                .line()
+                .contains("the VM's network worker stopped, so nothing can leave the VM;")
+        );
+        assert!(
+            said(&worker.refusal().unwrap())
+                .0
+                .ends_with("the VM's network worker stopped, so nothing can leave the VM")
+        );
+    }
+
+    /// Any other cause is named by its code, and sends to `cw info`.
+    #[test]
+    fn a_vm_in_error_for_another_cause_is_named_by_its_code() {
+        let vmm = in_error("vmm_exit");
+        assert_eq!(vmm.line(), "Error:       vmm_exit (ended by a signal)\n");
+        assert_eq!(
+            said(&vmm.refusal().unwrap()),
+            (
+                "local VM ed is in error (vmm_exit)".to_owned(),
+                Some("cw --local info ed".to_owned())
+            )
+        );
+        assert_eq!(
+            said(&in_error("").refusal().unwrap()),
+            (
+                "local VM ed is in error".to_owned(),
+                Some("cw --local info ed".to_owned())
+            )
+        );
+    }
+
+    /// A code outlives the error it named: a VM that is running or stopped
+    /// is refused nothing here, and its line says only the code.
+    #[test]
+    fn a_code_left_on_a_vm_that_is_not_in_error_refuses_nothing() {
+        for state in [
+            v1::EnvironmentState::Running,
+            v1::EnvironmentState::Stopped,
+            v1::EnvironmentState::Starting,
+        ] {
+            let view = ErrorView::of(&v1::Environment {
+                name: "ed".to_owned(),
+                state: state as i32,
+                error_code: "egress_broker_exit".to_owned(),
+                ..Default::default()
+            });
+            assert!(view.refusal().is_none(), "{state:?}");
+            assert_eq!(view.current_code(), None, "{state:?}");
+            assert_eq!(
+                view.line(),
+                "Error:       egress_broker_exit\n",
+                "{state:?}"
+            );
+        }
     }
 
     #[test]

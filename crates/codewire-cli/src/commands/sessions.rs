@@ -15,6 +15,7 @@ pub(crate) mod setup;
 mod short_id;
 mod table;
 pub(crate) use desktop::{DesktopArgs, handle_desktop_command};
+use entry::stopped_environment_sessions;
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
 pub(crate) use navigation::AttachNavigationDecoder;
@@ -3077,20 +3078,6 @@ pub(crate) async fn handle_environment_sessions_list(
         },
     };
     print_environment_sessions(&sessions, output)
-}
-
-/// A local VM lists its sessions only while it runs: say so, in the words
-/// every session command uses, instead of the supervisor's state refusal.
-async fn stopped_environment_sessions(target: &EnvironmentSessionTarget) -> Option<anyhow::Error> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let EnvironmentSessionTarget::NativeLocal { target, .. } = target {
-        let state = native_environment(&target.name).await.ok()??.state;
-        let name = crate::progress::terminal_text(&target.name);
-        let state = refusal::local_state(state);
-        return refusal::state_error(crate::output::VmLocation::Local, &name, state, None);
-    }
-    let _ = target;
-    None
 }
 
 pub(crate) async fn handle_attach_command(

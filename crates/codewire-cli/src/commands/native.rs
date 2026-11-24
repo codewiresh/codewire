@@ -29,7 +29,7 @@ use info_text::format_native_environment;
 
 mod create_hint;
 pub(crate) mod dev_store;
-mod error_view;
+pub(crate) mod error_view;
 pub(crate) mod host_create;
 mod host_support;
 mod info_text;
@@ -2186,9 +2186,7 @@ async fn ensure_native_credential_authority(environment: &v1::Environment) -> an
 pub(crate) async fn native_environment_session_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicSessionClient> {
-    let mut supervisor = native_client().await?;
-    get_native_environment_with_required_authority(&mut supervisor, name).await?;
-    drop(supervisor);
+    error_view::reachable(name).await?;
     codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
         &native_runtime_config()?,
         name,
@@ -2200,9 +2198,7 @@ pub(crate) async fn native_environment_session_client(
 pub(crate) async fn native_environment_data_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicDataClient> {
-    let mut supervisor = native_client().await?;
-    get_native_environment_with_required_authority(&mut supervisor, name).await?;
-    drop(supervisor);
+    error_view::reachable(name).await?;
     codewire_local_vmm::public_client::NativePublicDataClient::connect_or_start(
         &native_runtime_config()?,
         name,

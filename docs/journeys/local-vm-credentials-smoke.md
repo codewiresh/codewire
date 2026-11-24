@@ -12,7 +12,7 @@ person walks are in [credentials.md](credentials.md). The format is in
 
 ## Where it stands
 
-Updated 2026-11-20. Every step not listed as observed is **not yet
+Updated 2026-11-23. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Run by |
@@ -24,7 +24,7 @@ observed**.
 | `smoke-credential-codex` | not yet observed | no command yet (#5220) |
 | `smoke-attach-restart` | observed, v0.4.22, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-upgrade` | not yet observed | no command yet (#5220) |
-| `smoke-proxy-down` | observed, `main` at 1250f23ed, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
+| `smoke-proxy-down` | observed, `main` at 1250f23ed, 2026-11-18 (by hand); the readable refusal (#5359) with a development build of its change, 2026-11-23 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-provider-unresolved` | observed, `main` at 4cae0f601, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 
 ## Before the walk
@@ -214,8 +214,7 @@ same (#5238).
   host measures the guest clock's offset through `cw exec` (to within half a
   second), kills the one helper of that kind the `cw` under test runs for
   the VM, then reads the log in the host's clock. After the egress broker's
-  kill, `cw exec`, `cw ls --output json` and `cw --local info`, then
-  `cw stop` and `cw start`.
+  kill, `cw ls --output json` and `cw exec`, then `cw start` alone.
 - **Proof:**
   - **The credential broker mends by itself,** as
     [SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md) says:
@@ -224,18 +223,15 @@ same (#5238).
     needed.
   - **The egress broker fails closed:** no request the guest starts a
     second or more after the kill gets an answer, whether through the proxy
-    or straight to an address, and the VM turns `error`. `cw stop` and
-    `cw start` restore HTTPS from the guest.
-  - **A readable refusal** (not yet observed, #5359): after the egress
-    broker's kill, `cw exec` in the VM fails saying that the VM's network
-    broker stopped, so nothing can leave the VM, with `cw --local start
-    NAME` as its next step; `cw ls --output json` has `"error":
-    "egress_broker_exit"` for the VM; and `cw --local info NAME` shows the
-    code, the same sentence and the same next step. Today the guest's
-    requests just time out, `cw exec` answers `Failed_precondition: local
-    environment is not in the required state`, and `cw ls --output json`
-    has `"error": null`; the smoke logs what `cw exec` says and checks none
-    of this until #5359 lands.
+    or straight to an address, and the VM turns `error`. `cw start`
+    restores HTTPS from the guest.
+  - **A readable refusal** (#5359): after the egress broker's kill,
+    `cw ls --output json` has `"error": "egress_broker_exit"` for the VM,
+    and `cw exec` in it fails saying that the VM's network broker stopped,
+    so nothing can leave the VM, with `cw --local start NAME` as its next
+    step. `cw --local start NAME` alone then restores HTTPS from the guest,
+    and the VM's `error` is `null` again. `cw --local info`, `cw shell` and
+    `cw run` say the same; the smoke does not check those three.
   - **How it ended** (#4953): after the kill,
     `cw --local info NAME --output json` has `"runner_exit": {"status":
     null, "signal": 9}`, `cw --local info NAME` says the broker was ended by
@@ -255,8 +251,24 @@ same (#5238).
   --scratch <dir>` printed `ok smoke-proxy-down` after the other steps, and
   nothing was left on the host. Exploring it with v0.4.22 the same day, one
   agent request failed in the 0.2 s after the credential broker's kill, and
-  every request failed from the first one after the egress broker's. Not
-  yet run in CI (#5220).
+  every request failed from the first one after the egress broker's.
+  Against a `cw` built from `main` before #5359 the step failed with "cw ls
+  --output json does not give egress_broker_exit as the error of the VM".
+  With the readable refusal, 2026-11-23, a static `cw` built from #5359's
+  change merged with `main`, and a runtime built from 6636e3589f the same
+  day: the whole smoke printed `ok` for each of its four steps. By hand on the
+  same build, after a SIGKILL of a VM's egress broker:
+  - `cw --local info` read ``Error: egress_broker_exit (ended by signal 9):
+    the VM's network broker stopped, so nothing can leave the VM;
+    `cw --local start exw` starts it again``;
+  - `cw ls --output json` had `"error": "egress_broker_exit"`;
+  - `cw exec`, `cw shell` and `cw run` each failed with `✗ Local VM exw
+    can't be reached: the VM's network broker stopped, so nothing can leave
+    the VM` and `→ cw --local start exw`;
+  - `cw --local start exw` alone brought it back in 19.7 s, a command ran,
+    and its `error` was `null` again.
+
+  Not yet run in CI (#5220).
 
 ## 6. `smoke-provider-unresolved`: a provider's name doesn't resolve when the VM starts
 

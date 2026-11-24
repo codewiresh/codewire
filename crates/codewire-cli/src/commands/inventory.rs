@@ -94,6 +94,8 @@ pub(crate) struct InventoryEntry {
     pub(crate) allocation: Allocation,
     pub(crate) credentials: SourceRef,
     pub(crate) network: NetworkRef,
+    /// Why a local VM is in `error` now, as its error code (#5359).
+    pub(crate) error_code: Option<String>,
 }
 
 impl InventoryEntry {
@@ -507,6 +509,9 @@ pub(crate) fn local_entry(
         ),
         credentials: local_vm_credentials(environment),
         network: network_ref(environment.mesh.as_ref()),
+        error_code: super::native::error_view::ErrorView::of(environment)
+            .current_code()
+            .map(str::to_owned),
     }
 }
 
@@ -552,6 +557,7 @@ pub(crate) fn cloud_entry(
             environment.network_state.as_deref(),
             environment.network_failure.as_deref(),
         ),
+        error_code: None,
     }
 }
 
@@ -598,6 +604,7 @@ fn host_entry(
         allocation: Allocation::default(),
         credentials: SourceRef::None,
         network: NetworkRef::NotAttached,
+        error_code: None,
     }
 }
 
@@ -847,7 +854,9 @@ pub(crate) async fn handle_environment_inventory(
             running,
             session_count: error.is_none().then_some(sessions.len()),
             sessions: sessions_json(&sessions)?,
-            error,
+            // A VM in `error` says why; one whose sessions can't be read
+            // says that.
+            error: error.or_else(|| entry.error_code.clone()),
             entry: entry.list.clone(),
             location: entry.location,
             network: entry.network.clone(),
@@ -873,7 +882,8 @@ pub(crate) async fn handle_environment_inventory(
         );
     }
     let style = caps.stderr_style();
-    for row in rows.iter().filter(|row| row.error.is_some()) {
+    // Only a running row's sessions are read; any other row's error is its own.
+    for row in rows.iter().filter(|row| row.running && row.error.is_some()) {
         eprintln!(
             "{} Sessions in {} could not be read: {}",
             style.status(Status::Attention),
@@ -1336,6 +1346,7 @@ mod tests {
             allocation: Allocation::default(),
             credentials: SourceRef::None,
             network: NetworkRef::NotAttached,
+            error_code: None,
         }
     }
 
@@ -1417,6 +1428,16 @@ mod tests {
         let row = local_entry(&environment, None);
         assert!(!row.list.selected);
         assert_eq!(row.list.state, "stopped");
+        // A code left from an earlier failure is not this row's error.
+        environment.error_code = "egress_broker_exit".into();
+        assert_eq!(local_entry(&environment, None).error_code, None);
+        let mut failed = environment.clone();
+        failed.state = v1::EnvironmentState::Error as i32;
+        assert_eq!(
+            local_entry(&failed, None).error_code.as_deref(),
+            Some("egress_broker_exit")
+        );
+        environment.error_code.clear();
         assert_eq!(row.list.daemon_health, "unavailable");
         assert_eq!(
             row.allocation.cells(),
