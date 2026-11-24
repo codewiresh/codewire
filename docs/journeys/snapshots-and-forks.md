@@ -218,8 +218,12 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - a snapshot that is not `ready`: "snapshot NAME is not ready";
   - `--snapshot` with a repository, `--branch`, `--file` or
     `--share-mounts`: refused;
-  - a disk smaller than the snapshot's, or a snapshot that does not exist:
-    refused, each with its reason;
+  - no `--disk`: the fork's disk is at least the snapshot's size, also when
+    the source's disk came from a `codewire.yaml`, which a fork doesn't read
+    (#6276);
+  - a `--disk` smaller than the snapshot's: refused with "the disk must be at
+    least as large as the snapshot, N GiB"; a snapshot that does not exist:
+    refused with its reason;
   - zero credit: a fork is a create, so the create's credit refusal applies
     (#4379);
   - one create in a `--count` series fails: `cw` names the forks it already
@@ -269,6 +273,8 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     Everything was removed afterwards.
   - One fork with `--name`, the not-ready refusal and the credit refusal
     for a fork: not yet observed on any surface.
+  - A fork with no `--disk` of a snapshot larger than the 80 GiB default
+    (#6276): not yet observed.
   - The launch walk's own step 10, by a new account on Production: not yet
     observed. deploy#242, which turns snapshots on, reached Production with
     the `v0.4.18` promotion (#4370).

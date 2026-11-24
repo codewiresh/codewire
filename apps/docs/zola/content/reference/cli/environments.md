@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, desktop, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-23
+updated: 2026-11-24
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -682,7 +682,9 @@ Noninteractive and JSON calls must name the source environment explicitly.
 environment's workspace disk. The snapshot is private to you, and
 Codewire-delivered sign-ins are cleared from it. `cw --cloud create --snapshot
 NAME [--count N]` starts new environments from it, each with fresh identity;
-`cw --cloud snapshot ls`, `inspect` and `rm` manage it.
+`cw --cloud snapshot ls`, `inspect` and `rm` manage it. Without `--disk`, each
+new environment's disk is at least the snapshot's size; a smaller `--disk` is
+refused, and the refusal gives the snapshot's size.
 
 A cloud snapshot is kept on the storage node that holds the environment's disk
 and is not backed up: if that node is lost, so is the snapshot. New

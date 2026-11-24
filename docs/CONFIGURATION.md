@@ -406,7 +406,11 @@ memory (owner, 2026-10-27; #3554); a confidential one gets 50 GiB, its own
 limit, and 16 GiB of memory, because its guest unpacks images into RAM-backed
 storage and the workspace image does not fit in 8 GiB (owner, 2026-10-30;
 #2497). Create and resize accept a disk up to 200 GiB and refuse more with
-`disk_limit_exceeded`; a disk never shrinks. These limits are in the code
+`disk_limit_exceeded`; a disk never shrinks. A create from a snapshot whose
+request names no disk gets at least the snapshot's size, rounded up to a whole
+GiB, over the default and a preset's disk alike; one that names a smaller disk
+is refused with `snapshot_disk_too_small`, which gives the snapshot's size
+(#6276). These limits are in the code
 (`crates/codewire-orchestration/src/api/create.rs`), not configuration. The
 class's thin capacity must hold every pool member and live workspace at its
 size. A grown disk is expanded by the StorageClass's CSI driver, online when

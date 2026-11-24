@@ -1335,6 +1335,12 @@ database_lane_orchestration_workspaces() {
       'api::create::identity_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "a restore's disk is at least its snapshot's size" snapshot-restore-disk \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::snapshot_disk_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "sandbox identity mint subject and records" sandbox-identity-mint \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

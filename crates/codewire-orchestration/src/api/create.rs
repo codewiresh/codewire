@@ -1295,63 +1295,8 @@ pub(crate) async fn create_environment_core(
         let (state, user, org_id) = (&owned_state, &owned_user, owned_org_id.as_str());
         let pool = &state.pool;
         let result: AppResult<Environment> = async {
-            let preset: Preset = if body.preset_id.as_deref().is_some_and(|s| !s.is_empty()) {
-                let preset_id = body.preset_id.clone().unwrap();
-                let preset = get_preset(pool, &preset_id).await.map_err(|_| {
-                    coded(
-                        StatusCode::BAD_REQUEST,
-                        "preset_not_found",
-                        "preset not found",
-                    )
-                })?;
-                validate_preset_scope(&preset, org_id)?;
-                preset
-            } else if !body.project_spec.preset.is_empty() || !body.project_spec.image.is_empty() {
-                resolve_project_preset(pool, org_id, &body.project_spec).await?
-            } else if let Some(repository_source) = body
-                .project_spec
-                .repositories
-                .first()
-                .map(|repository| repository.source.clone())
-            {
-                match resolve_from_repo_config(pool, org_id, &repository_source).await? {
-                    Some((saved_preset, saved_spec)) => {
-                        tracing::info!(
-                            repo_url = repository_source,
-                            "smart create: using saved repo config"
-                        );
-                        merge_environment_defaults(&mut body, &saved_spec)?;
-                        match saved_preset {
-                            Some(preset) => {
-                                validate_preset_scope(&preset, org_id)?;
-                                preset
-                            }
-                            None if body.project_spec.image.is_empty()
-                                && body.project_spec.preset.is_empty() =>
-                            {
-                                return Err(repository_analysis_pending());
-                            }
-                            None => {
-                                // Saved workload defaults must be executable
-                                // before image resolution can write a preset.
-                                ensure_current_platform_runtime_support(&body)?;
-                                resolve_project_preset(pool, org_id, &body.project_spec).await?
-                            }
-                        }
-                    }
-                    None => return Err(repository_analysis_pending()),
-                }
-            } else {
-                return Err(coded(
-                    StatusCode::BAD_REQUEST,
-                    "missing_input",
-                    "project_spec must select a preset, image, or repository",
-                ));
-            };
-
-            ensure_no_preset_secret_delivery(&preset)?;
-            merge_environment_defaults(&mut body, &preset.project_spec)?;
-            apply_environment_resource_defaults(&mut body.project_spec, isolation_tier);
+            let preset =
+                resolve_create_defaults(pool, user, org_id, &mut body, isolation_tier).await?;
             body.project_spec.validate().map_err(invalid_project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
@@ -1438,15 +1383,19 @@ pub(crate) async fn create_environment_core(
     .await
 }
 
+mod create_defaults;
 mod source_snapshot;
 
+use create_defaults::resolve_create_defaults;
 pub(crate) use source_snapshot::admit_source_snapshot;
-use source_snapshot::validate_source_snapshot_request;
+use source_snapshot::{fit_disk_to_source_snapshot, validate_source_snapshot_request};
 
 #[cfg(test)]
 mod identity_database_tests;
 #[cfg(test)]
 mod limit_database_tests;
+#[cfg(test)]
+mod snapshot_disk_database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

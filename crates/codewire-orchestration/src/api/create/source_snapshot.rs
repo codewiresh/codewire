@@ -44,6 +44,39 @@ pub(super) fn validate_source_snapshot_request(
     Ok(())
 }
 
+/// A snapshot's size in whole GiB, rounded up: the smallest disk it restores to.
+fn snapshot_disk_gib(size_bytes: i64) -> u64 {
+    u64::try_from(size_bytes).unwrap_or(0).div_ceil(1 << 30)
+}
+
+/// A create from a snapshot whose request names no disk gets at least the
+/// snapshot's size, so a plain restore of a disk larger than the default works
+/// (#6276). A snapshot it can't read is left to the admission to refuse.
+pub(super) async fn fit_disk_to_source_snapshot(
+    pool: &PgPool,
+    org_id: &str,
+    user_id: &str,
+    body: &mut CreateEnvironmentBody,
+) -> AppResult<()> {
+    let Some(snapshot_id) = body.source_snapshot_id.as_deref() else {
+        return Ok(());
+    };
+    let size_bytes: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT size_bytes FROM hosted_snapshots
+          WHERE id = $1 AND org_id = $2 AND created_by = $3 AND state = 'ready'",
+    )
+    .bind(snapshot_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(size_bytes) = size_bytes.flatten() {
+        let disk_gib = body.project_spec.resources.disk_gib.get_or_insert(0);
+        *disk_gib = (*disk_gib).max(snapshot_disk_gib(size_bytes));
+    }
+    Ok(())
+}
+
 /// A snapshot is private to its creator, so another member's reads as absent.
 /// The share lock holds off a delete until this create commits, and a use of a
 /// snapshot counts toward its expiry in the transaction that authorizes it.
@@ -81,10 +114,13 @@ pub(crate) async fn admit_source_snapshot(
         ));
     }
     if size_bytes.unwrap_or(0) > i64::from(disk_gib) * (1 << 30) {
-        return Err(coded(
+        return Err(crate::api::environments::coded_owned(
             StatusCode::BAD_REQUEST,
             "snapshot_disk_too_small",
-            "the disk must be at least as large as the snapshot",
+            format!(
+                "the disk must be at least as large as the snapshot, {} GiB",
+                snapshot_disk_gib(size_bytes.unwrap_or(0))
+            ),
         ));
     }
     sqlx::query("UPDATE hosted_snapshots SET last_used_at = now() WHERE id = $1")
