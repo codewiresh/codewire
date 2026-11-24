@@ -144,7 +144,7 @@ async fn serve() -> anyhow::Result<()> {
     codewire_idp::expose_abuse_metrics();
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
-    let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
+    let pool = codewire_server_core::db::connect_published(&cfg.database_url, "main").await?;
     let idp_cfg = codewire_idp::IdpConfig::from_env()?;
     let email = codewire_email::EmailClient::from_env().await?;
     let signing_keyring = codewire_idp::SigningKekKeyring::from_env()?;

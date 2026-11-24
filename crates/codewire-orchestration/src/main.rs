@@ -474,7 +474,7 @@ async fn database(
     codewire_orchestration::lease_owner::LeaseOwner,
 )> {
     codewire_server_core::migrate::ensure_schema_logged(database_url).await?;
-    let pool = codewire_server_core::db::connect(database_url).await?;
+    let pool = codewire_server_core::db::connect_published(database_url, "main").await?;
     let lease_owner = codewire_orchestration::lease_owner::spawn(database_url.to_owned());
     Ok((pool, lease_owner))
 }

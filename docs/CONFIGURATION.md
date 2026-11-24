@@ -641,6 +641,25 @@ In a cluster, orchestration reaches the Kubernetes API through the `kubernetes` 
 |---|---|---|---|
 | `CODEWIRE_KUBE_API_PREFERRED_ADDRS` | No | Comma-separated `ip:port` addresses of the near API servers, in order of preference. A new connection dials the first one that the `default/kubernetes` EndpointSlice lists as ready and that answered its last dial within 2 s; a server that did not is skipped for 10 s. With none left, it dials the Service. Unset or empty dials the Service only. A name, a missing port or a repeated address stops orchestration at startup. | `192.0.2.12:6443,192.0.2.11:6443` |
 
+## Database pools
+
+Each service's Postgres pool opens at most 25 connections per process, and a
+request waits 5 s for one before it fails (`codewire-server-core`
+`db::pool_options`). A pool opens connections as concurrent work needs them
+and keeps them: it hands out its longest-idle connection first, so steady
+traffic uses every connection before the 10-minute idle timeout, and a pool's
+size stays at the highest concurrency it has met (#6262). Orchestration, the
+identity service, billing and the coordinator publish their pool on
+`/metrics`, sampled every second:
+
+- `codewire_db_pool_connections{pool, state}`: the pool's open connections,
+  `state` `idle` or `in_use`;
+- `codewire_db_pool_max_connections{pool}`: its configured maximum.
+
+`pool` is `main`, each service's own pool. Every Pod of every service that
+shares a database, during a rollout too, must fit that database's
+`max_connections`, less the slots it keeps for superusers.
+
 ## Unplanned restarts
 
 Orchestration writes one `WARN` line, with the environment's `environment_id`

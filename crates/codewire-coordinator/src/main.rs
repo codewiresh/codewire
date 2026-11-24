@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
     let derp_map = DerpMap::from_env()?;
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
-    let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
+    let pool = codewire_server_core::db::connect_published(&cfg.database_url, "main").await?;
     let auth = AuthState { pool: pool.clone() };
     let nats = codewire_server_core::nats::connect_with_login(
         cfg.nats_url.as_deref(),

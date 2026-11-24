@@ -4,8 +4,10 @@
 //! side's `pgxpool`: max 25 connections, sane timeouts, lazy connection
 //! verification at startup.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use prometheus::{IntGaugeVec, Opts, register_int_gauge_vec};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection as _, PgPool};
 
@@ -144,9 +146,112 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
     Ok(pool)
 }
 
+/// [`connect`], with the pool published under `name` ([`publish_pool`]): a
+/// service's own pool.
+pub async fn connect_published(url: &str, name: &'static str) -> anyhow::Result<PgPool> {
+    let pool = connect(url).await?;
+    publish_pool(name, &pool);
+    Ok(pool)
+}
+
+/// How often [`publish_pool`] samples a pool. A pool opens connections as
+/// concurrent work needs them and keeps them, so its size is the highest
+/// concurrency it has met, and a second's sampling reads it (#6262).
+const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+static POOL_CONNECTIONS: OnceLock<IntGaugeVec> = OnceLock::new();
+static POOL_MAX_CONNECTIONS: OnceLock<IntGaugeVec> = OnceLock::new();
+
+fn pool_connections() -> &'static IntGaugeVec {
+    POOL_CONNECTIONS.get_or_init(|| {
+        register_int_gauge_vec!(
+            Opts::new(
+                "codewire_db_pool_connections",
+                "Open connections of a named database pool, idle or in use."
+            ),
+            &["pool", "state"]
+        )
+        .expect("database pool metric registration must be unique")
+    })
+}
+
+fn pool_max_connections() -> &'static IntGaugeVec {
+    POOL_MAX_CONNECTIONS.get_or_init(|| {
+        register_int_gauge_vec!(
+            Opts::new(
+                "codewire_db_pool_max_connections",
+                "The configured maximum of a named database pool."
+            ),
+            &["pool"]
+        )
+        .expect("database pool metric registration must be unique")
+    })
+}
+
+/// Publishes `pool` on the registry `metrics` serves, sampled every second
+/// until the pool closes (docs/CONFIGURATION.md, "Database pools"). `name`
+/// is one of a service's fixed pool names, never an identifier.
+pub fn publish_pool(name: &'static str, pool: &PgPool) {
+    let pool = pool.clone();
+    pool_max_connections()
+        .with_label_values(&[name])
+        .set(i64::from(pool.options().get_max_connections()));
+    tokio::spawn(async move {
+        let mut sample = tokio::time::interval(POOL_SAMPLE_INTERVAL);
+        while !pool.is_closed() {
+            sample.tick().await;
+            let open = i64::from(pool.size());
+            let idle = i64::try_from(pool.num_idle()).unwrap_or(i64::MAX);
+            pool_connections()
+                .with_label_values(&[name, "idle"])
+                .set(idle);
+            pool_connections()
+                .with_label_values(&[name, "in_use"])
+                .set((open - idle).max(0));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #6262: a published pool's maximum and connections are on the shared
+    /// registry under its name.
+    #[tokio::test]
+    async fn a_published_pool_reports_its_maximum_and_connections() {
+        use prometheus::{Encoder as _, TextEncoder};
+        let pool = pool_options(PoolHealth::default())
+            .connect_lazy("postgres://synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        publish_pool("publish-test", &pool);
+        let exposition = || {
+            let mut rendered = Vec::new();
+            TextEncoder::new()
+                .encode(&prometheus::gather(), &mut rendered)
+                .unwrap();
+            String::from_utf8(rendered).unwrap()
+        };
+        let idle = r#"codewire_db_pool_connections{pool="publish-test",state="idle"} 0"#;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !exposition().contains(idle) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first sample is taken at once");
+        // A lazy pool has opened nothing yet.
+        let text = exposition();
+        assert!(
+            text.contains(r#"codewire_db_pool_max_connections{pool="publish-test"} 25"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"codewire_db_pool_connections{pool="publish-test",state="in_use"} 0"#),
+            "{text}"
+        );
+        pool.close().await;
+    }
 
     #[test]
     fn service_pools_do_not_ping_on_every_acquire() {
