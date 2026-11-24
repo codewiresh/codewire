@@ -621,4 +621,18 @@ for context in '' "$outside" "$fixture/.missing-context"; do
   [[ ! -s "$work/pod-refused-build.log" ]] || fail "a refused pod-runtime context reached the build: '$context'"
 done
 
+# The /dev/kvm device plugin's image (#6202) builds alone from its own
+# Dockerfile, with the checkout as its context.
+plugin_output="$work/plugin-output"
+plugin_context_log="$work/plugin-context.log"
+run_group kvm-device-plugin "$plugin_output" "$work/plugin-docker.log" "$work/plugin-build.log" 55 \
+  CONTEXT_LOG="$plugin_context_log" >/dev/null 2>"$work/plugin.stderr" ||
+  fail "the kvm-device-plugin group failed: $(cat "$work/plugin.stderr")"
+[[ "$(cat "$plugin_context_log")" == "kvm-device-plugin deployments/docker/kvm-device-plugin.Dockerfile ." ]] ||
+  fail "the device plugin image was not built alone from its Dockerfile: $(cat "$plugin_context_log")"
+grep -Eq '^kvm-device-plugin_candidate_ref=registry\.example\.invalid/codewire/kvm-device-plugin@sha256:[0-9a-f]{64}$' "$plugin_output" ||
+  fail 'the kvm-device-plugin group omitted its exact candidate output'
+grep -qx "kvm-device-plugin_built_from=$head_sha" "$plugin_output" ||
+  fail 'the kvm-device-plugin group omitted its built-from source'
+
 printf '[test-build-push-runtime-images] split protected runtime build contract passed\n'

@@ -275,4 +275,34 @@ for refused in "registry.example.invalid/codewire/egress@$digest" "registry.exam
   fi
 done
 
+# --kvm-device-plugin verifies the /dev/kvm device plugin's image (#6202) the
+# same way: a pod-runtime signature on the same digest does not count.
+plugin_ref="registry.example.invalid/codewire/kvm-device-plugin@$digest"
+verify_plugin() {
+  PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    DOCKER_LOG="$docker_log" COSIGN_LOG="$cosign_log" FETCH_LOG="$fetch_log" \
+    SIGNATURES="$signatures" FAKE_COSIGN_BINARY="$work/fake-cosign" \
+    OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/fetcher" \
+    "$VERIFIER" --kvm-device-plugin "$1" "$public_key"
+}
+: >"$signatures"
+printf '%s pod-runtime %s main-ci\n' "$plugin_ref" "$source_sha" >>"$signatures"
+if verify_plugin "$plugin_ref" >"$work/plugin-none.out" 2>"$work/plugin-none.err"; then
+  fail 'a device plugin image signed only as another family was accepted'
+fi
+grep -Fq 'The kvm-device-plugin image has no valid main-CI-verified signature' "$work/plugin-none.err" ||
+  fail 'the unsigned device plugin refusal was not attributable'
+printf '%s kvm-device-plugin %s main-ci\n' "$plugin_ref" "$source_sha" >>"$signatures"
+verify_plugin "$plugin_ref" >"$work/plugin.out" 2>"$work/plugin.err" || {
+  cat "$work/plugin.err" >&2
+  fail 'a signed device plugin image was refused'
+}
+[[ "$(cat "$work/plugin.out")" == "$source_sha" ]] ||
+  fail 'the verifier did not print exactly the source of the verified device plugin signature'
+for refused in "registry.example.invalid/codewire/pod-runtime@$digest" "registry.example.invalid/codewire/kvm-device-plugin:$source_sha"; do
+  if verify_plugin "$refused" >/dev/null 2>&1; then
+    fail "the device plugin verifier accepted $refused"
+  fi
+done
+
 printf '[test-verify-runtime-image-signatures] Production signature reuse contract passed\n'

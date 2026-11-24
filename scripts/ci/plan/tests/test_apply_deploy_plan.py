@@ -22,6 +22,7 @@ RUNTIME_ARTIFACTS = (
 ARTIFACTS = ("dev_release_tree", "dev_acceptance_harness", *RUNTIME_ARTIFACTS)
 EGRESS_FINGERPRINT = "f" * 64
 POD_RUNTIME_FINGERPRINT = "a" * 64
+KVM_DEVICE_PLUGIN_FINGERPRINT = "c" * 64
 
 
 def plan_document(
@@ -30,6 +31,7 @@ def plan_document(
     baseline_valid: bool = True,
     egress: dict | None = None,
     pod_runtime: dict | None = None,
+    kvm_device_plugin: dict | None = None,
 ) -> dict:
     effective_states = {name: "unaffected" for name in ARTIFACTS}
     effective_states.update(states or {})
@@ -62,6 +64,9 @@ def plan_document(
             "pod_runtime_image": pod_runtime
             if pod_runtime is not None
             else {"state": "unaffected", "head_fingerprint": POD_RUNTIME_FINGERPRINT},
+            "kvm_device_plugin_image": kvm_device_plugin
+            if kvm_device_plugin is not None
+            else {"state": "unaffected", "head_fingerprint": KVM_DEVICE_PLUGIN_FINGERPRINT},
         },
         "degraded_reasons": [],
     }
@@ -260,6 +265,28 @@ class DeployPlanAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outputs["reason"], "plan_invalid")
         self.assertEqual(outputs["pod_runtime_image_fingerprint"], "")
+
+    # The /dev/kvm device plugin's image (#6202) is keyed the same way.
+    def test_the_device_plugin_fingerprint_is_passed_on_and_selects_nothing(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(kvm_device_plugin={"state": "affected", "head_fingerprint": "d" * 64})
+        )
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["kvm_device_plugin_image_fingerprint"], "d" * 64)
+        self.assertNotIn("kvm_device_plugin_image", outputs["matched_categories"])
+
+    def test_no_device_plugin_fingerprint_builds_no_device_plugin_image(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(kvm_device_plugin={"state": "unclassified", "head_fingerprint": None})
+        )
+        self.assertEqual(outputs["kvm_device_plugin_image_fingerprint"], "")
+
+    def test_a_malformed_device_plugin_fingerprint_fails_closed(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(kvm_device_plugin={"state": "unaffected", "head_fingerprint": "D" * 64})
+        )
+        self.assertEqual(outputs["reason"], "plan_invalid")
+        self.assertEqual(outputs["kvm_device_plugin_image_fingerprint"], "")
 
 
 if __name__ == "__main__":

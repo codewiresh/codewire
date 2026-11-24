@@ -355,6 +355,45 @@
         "scripts/dev/cpu-slice.sh"
       ]
     },
+    "kvm_device_plugin_binary": {
+      "kind": "rust-package",
+      "manifest": "Cargo.toml",
+      "package": "codewire-kvm-device-plugin",
+      "lockfile": "Cargo.lock",
+      "profiles": [
+        "runtime"
+      ],
+      "release_targets": [
+        "host"
+      ],
+      "package_inputs": {
+        "codewire-kvm-device-plugin": [
+          "crates/codewire-kvm-device-plugin/proto/**"
+        ]
+      },
+      "explicit_inputs": [
+        "rust-toolchain.toml"
+      ]
+    },
+    "kvm_device_plugin_image": {
+      "kind": "composite",
+      "dependencies": [
+        "kvm_device_plugin_binary"
+      ],
+      "inputs": [
+        "deployments/docker/kvm-device-plugin.Dockerfile",
+        "deployments/docker/kvm-device-plugin.Dockerfile.dockerignore",
+        "deployments/docker/rust-base.Dockerfile",
+        "docker-bake.hcl",
+        "scripts/ci/images/build-push-image.sh",
+        "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/compute-image-tags.sh",
+        "scripts/ci/images/pipeline-identity.sh",
+        "scripts/ci/setup/trusted-buildkit.sh",
+        "scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh",
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
+      ]
+    },
     "base_image": {
       "kind": "file-set",
       "inputs": ["images/base/**"]

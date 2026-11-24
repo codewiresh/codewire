@@ -5,6 +5,9 @@
 #   build-push-runtime-images.sh daemon     # the static CW producer and daemon
 #   build-push-runtime-images.sh egress     # cw-egress, built and signed but never
 #                                           # delivered by Dev delivery
+#   build-push-runtime-images.sh kvm-device-plugin
+#                                           # the /dev/kvm device plugin's own image
+#                                           # (#6202), likewise
 #   build-push-runtime-images.sh pod-runtime
 #                                           # the standard pod-runtime image (#5602),
 #                                           # likewise; its context is the directory
@@ -31,7 +34,7 @@ readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image regi
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 if [ "$#" -ne 1 ]; then
-  echo 'Usage: build-push-runtime-images.sh services|daemon|egress|pod-runtime' >&2
+  echo 'Usage: build-push-runtime-images.sh services|daemon|egress|kvm-device-plugin|pod-runtime' >&2
   exit 2
 fi
 readonly runtime_group="$1"
@@ -39,9 +42,10 @@ case "$runtime_group" in
   services) image_families=(services mesh dashboard derp) ;;
   daemon) image_families=(daemon) ;;
   egress) image_families=(egress) ;;
+  kvm-device-plugin) image_families=(kvm-device-plugin) ;;
   pod-runtime) image_families=(pod-runtime) ;;
   *)
-    echo 'Runtime image group must be exactly services, daemon, egress or pod-runtime' >&2
+    echo 'Runtime image group must be exactly services, daemon, egress, kvm-device-plugin or pod-runtime' >&2
     exit 2
     ;;
 esac
@@ -347,6 +351,8 @@ elif [ "$runtime_group" = daemon ]; then
   build_one daemon deployments/docker/daemon.Dockerfile
 elif [ "$runtime_group" = egress ]; then
   build_one egress deployments/docker/egress.Dockerfile
+elif [ "$runtime_group" = kvm-device-plugin ]; then
+  build_one kvm-device-plugin deployments/docker/kvm-device-plugin.Dockerfile
 else
   # pod-runtime-context.py assembled the context inside this checkout, so the
   # build's provenance names this commit as every runtime image's does.

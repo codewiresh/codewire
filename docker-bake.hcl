@@ -118,6 +118,16 @@ target "egress" {
   }
 }
 
+# The /dev/kvm device plugin's own image (#6202).
+target "kvm-device-plugin" {
+  inherits   = ["_rust-product"]
+  dockerfile = "deployments/docker/kvm-device-plugin.Dockerfile"
+  tags       = ["${IMAGE_PREFIX}-kvm-device-plugin:${IMAGE_TAG}"]
+  labels = {
+    "org.opencontainers.image.title" = "codewire-kvm-device-plugin"
+  }
+}
+
 target "daemon" {
   # Build through scripts/ci/images/build-product-images.sh (or the owning
   # Kind/protected wrapper). It admits and binds codewire-verified-cw before

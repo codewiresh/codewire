@@ -33,6 +33,8 @@ DEPLOY_ARTIFACTS = (DEV_RELEASE_ARTIFACT, DEV_ACCEPTANCE_ARTIFACT, *RUNTIME_ARTI
 EGRESS_ARTIFACT = "egress_image"
 # The standard pod-runtime image (#5602) is built, signed and keyed the same way.
 POD_RUNTIME_ARTIFACT = "pod_runtime_image"
+# And the /dev/kvm device plugin's own image (#6202).
+KVM_DEVICE_PLUGIN_ARTIFACT = "kvm_device_plugin_image"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
@@ -158,6 +160,7 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         "baseline_valid": str(valid).lower(),
         "egress_image_fingerprint": egress_fingerprint(plan),
         "pod_runtime_image_fingerprint": egress_fingerprint(plan, POD_RUNTIME_ARTIFACT),
+        "kvm_device_plugin_image_fingerprint": egress_fingerprint(plan, KVM_DEVICE_PLUGIN_ARTIFACT),
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs
@@ -179,6 +182,7 @@ def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
         "baseline_valid": "false",
         "egress_image_fingerprint": "",
         "pod_runtime_image_fingerprint": "",
+        "kvm_device_plugin_image_fingerprint": "",
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs

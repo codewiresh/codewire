@@ -58,6 +58,7 @@ jobs:
       dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
       egress_image_fingerprint: ${{ steps.select.outputs.egress_image_fingerprint }}
       pod_runtime_image_fingerprint: ${{ steps.select.outputs.pod_runtime_image_fingerprint }}
+      kvm_device_plugin_image_fingerprint: ${{ steps.select.outputs.kvm_device_plugin_image_fingerprint }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -479,6 +480,97 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --egress "$CODEWIRE_EGRESS_CANDIDATE" \
             scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/egress-image-tag.sh tag "$CODEWIRE_EGRESS_CANDIDATE" "$CODEWIRE_EGRESS_FINGERPRINT"
+
+  # The /dev/kvm device plugin's own image (#6202) is built and signed here and
+  # never delivered, exactly as cw-egress is: only a merged pin in
+  # deployments/k8s/kvm-device-plugin/image.digest decides what a deployment
+  # runs. Its fingerprint is the plugin crate's own closure and its Dockerfile,
+  # so it builds rarely, and only on the run that holds the delivery turn, so
+  # a deferred or replaced commit never builds.
+  build-kvm-device-plugin-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Build and push the kvm device plugin image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 60
+    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]
+    if: ${{ always() && needs.deploy-selection.result == 'success' && needs.dev-delivery-turn.result == 'success' && needs.dev-delivery-turn.outputs.turn == 'go' && needs.deploy-selection.outputs.kvm_device_plugin_image_fingerprint != '' }}
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.kvm-device-plugin_candidate_ref }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      CODEWIRE_KVM_DEVICE_PLUGIN_FINGERPRINT: ${{ needs.deploy-selection.outputs.kvm_device_plugin_image_fingerprint }}
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # A fp- tag exists only once a build of these inputs was signed
+      # (kvm-device-plugin-image-tag.sh), so a present one means there is
+      # nothing to build.
+      - name: Look for a signed image of these inputs
+        id: existing
+        run: |
+          set -euo pipefail
+          state="$(scripts/ci/images/kvm-device-plugin-image-tag.sh exists "$CODEWIRE_KVM_DEVICE_PLUGIN_FINGERPRINT")"
+          echo "kvm device plugin image for fingerprint $CODEWIRE_KVM_DEVICE_PLUGIN_FINGERPRINT: $state"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+
+      - name: Build and push the kvm device plugin image
+        id: build
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        # No protected R2 compiler cache: the plugin's closure is small and
+        # builds rarely, so the job holds no cache credential.
+        env:
+          CODEWIRE_SCCACHE_MODE: local
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+        run: scripts/ci/images/build-push-runtime-images.sh kvm-device-plugin
+
+  # Signs only the digest this run's build reported, after main CI's verdict
+  # for this exact commit, as sign-egress-image does.
+  sign-kvm-device-plugin-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Sign the kvm device plugin image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [deploy-selection, build-kvm-device-plugin-image]
+    if: ${{ always() && needs.build-kvm-device-plugin-image.result == 'success' && needs.build-kvm-device-plugin-image.outputs.candidate_ref != '' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Read main CI's verdict for this commit
+        id: verdict
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/plan/main-ci-verdict.py check \
+            --sha "$GITHUB_SHA" --tree "$(git rev-parse "$GITHUB_SHA^{tree}")" --github-output
+
+      # Signs nothing a tag points at: only the build's reported digest, and
+      # only while this commit's source tag still names it.
+      - name: Sign the exact kvm device plugin image this run built
+        if: ${{ steps.verdict.outputs.verified == 'true' }}
+        env:
+          CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}
+          CODEWIRE_KVM_DEVICE_PLUGIN_CANDIDATE: ${{ needs.build-kvm-device-plugin-image.outputs.candidate_ref }}
+          CODEWIRE_KVM_DEVICE_PLUGIN_FINGERPRINT: ${{ needs.deploy-selection.outputs.kvm_device_plugin_image_fingerprint }}
+        run: |
+          set -euo pipefail
+          source_digest="$(scripts/ci/images/kvm-device-plugin-image-tag.sh source-digest "$GITHUB_SHA")"
+          [[ "$source_digest" == "${CODEWIRE_KVM_DEVICE_PLUGIN_CANDIDATE##*@}" ]] || {
+            echo "::error::the kvm device plugin source tag names $source_digest, not the digest this run built" >&2
+            exit 1
+          }
+          scripts/ci/images/sign-runtime-image-set.sh --kvm-device-plugin "$CODEWIRE_KVM_DEVICE_PLUGIN_CANDIDATE" \
+            scripts/ci/trust/codewire-runtime-signing.pub
+          scripts/ci/images/kvm-device-plugin-image-tag.sh tag "$CODEWIRE_KVM_DEVICE_PLUGIN_CANDIDATE" "$CODEWIRE_KVM_DEVICE_PLUGIN_FINGERPRINT"
 
   # The standard pod-runtime image (#5602) is built and signed here and never
   # delivered, exactly as cw-egress is: only a merged pin in

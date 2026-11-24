@@ -360,6 +360,14 @@ class FixtureRepository:
                         "proto/**",
                     ],
                 },
+                "kvm_device_plugin_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                    ],
+                },
                 "base_image": {
                     "kind": "file-set",
                     "inputs": ["images/base/**"],

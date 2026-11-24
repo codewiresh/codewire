@@ -157,7 +157,9 @@ for half in "$service_job" "$daemon_job"; do
 done
 publish_job="$(sed -n '/^  publish-runtime-images:/,/^  # cw-egress is built and signed here/p' "$WORKFLOW")"
 egress_build_job="$(sed -n '/^  build-egress-image:/,/^  sign-egress-image:/p' "$WORKFLOW")"
-egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  build-pod-runtime-image:/p' "$WORKFLOW")"
+egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  build-kvm-device-plugin-image:/p' "$WORKFLOW")"
+plugin_build_job="$(sed -n '/^  build-kvm-device-plugin-image:/,/^  sign-kvm-device-plugin-image:/p' "$WORKFLOW")"
+plugin_sign_job="$(sed -n '/^  sign-kvm-device-plugin-image:/,/^  build-pod-runtime-image:/p' "$WORKFLOW")"
 pod_build_job="$(sed -n '/^  build-pod-runtime-image:/,/^  sign-pod-runtime-image:/p' "$WORKFLOW")"
 pod_sign_job="$(sed -n '/^  sign-pod-runtime-image:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
 
@@ -693,10 +695,40 @@ tag_line="$(grep -n 'pod-runtime-image-tag.sh tag' <<<"$pod_sign_job" | cut -d: 
 [[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
   ((source_check_line < sign_line && sign_line < tag_line)) ||
   fail 'the pod-runtime sign job does not check the source tag, then sign, then tag, in that order'
-# Only the publish job and the two single-image sign jobs sign, in every workflow.
+# The /dev/kvm device plugin's image (#6202) is built and signed the same way:
+# only on the run that holds the delivery turn, never delivered, and signed
+# only after main CI's verdict, as the build reported it.
+[[ -n "$plugin_build_job" && -n "$plugin_sign_job" ]] || fail 'the device plugin build or sign job is missing'
+grep -Fxq '    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]' <<<"$plugin_build_job" ||
+  fail 'the device plugin build does not wait for the delivery turn and the publish job'
+grep -Fq "needs.dev-delivery-turn.outputs.turn == 'go'" <<<"$plugin_build_job" ||
+  fail 'the device plugin build runs on a commit that does not hold the delivery turn'
+grep -Fq "scripts/ci/images/kvm-device-plugin-image-tag.sh exists" <<<"$plugin_build_job" ||
+  fail 'the device plugin build does not look for a signed image of its inputs first'
+grep -Fq 'run: scripts/ci/images/build-push-runtime-images.sh kvm-device-plugin' <<<"$plugin_build_job" ||
+  fail 'the device plugin build does not build its own family'
+if grep -Eq 'sign-runtime-image-set|cosign|image-tag.sh tag|dispatch-deploy-dev' <<<"$plugin_build_job"; then
+  fail 'the device plugin build signs, tags or dispatches'
+fi
+if [[ "$(grep -cE '^    needs:.*build-kvm-device-plugin-image' "$WORKFLOW")" -ne 1 ]]; then
+  fail 'a job other than the device plugin sign job waits for the device plugin build'
+fi
+grep -Fq 'main-ci-verdict.py check' <<<"$plugin_sign_job" ||
+  fail 'the device plugin sign job does not read main CI'"'"'s verdict'
+grep -Fq "if: \${{ steps.verdict.outputs.verified == 'true' }}" <<<"$plugin_sign_job" ||
+  fail 'the device plugin sign job signs without a verified verdict'
+grep -Fq 'CODEWIRE_KVM_DEVICE_PLUGIN_CANDIDATE: ${{ needs.build-kvm-device-plugin-image.outputs.candidate_ref }}' <<<"$plugin_sign_job" ||
+  fail 'the device plugin sign job signs something other than the build'"'"'s digest'
+source_check_line="$(grep -n 'kvm-device-plugin-image-tag.sh source-digest' <<<"$plugin_sign_job" | cut -d: -f1)"
+sign_line="$(grep -n 'sign-runtime-image-set.sh --kvm-device-plugin' <<<"$plugin_sign_job" | cut -d: -f1)"
+tag_line="$(grep -n 'kvm-device-plugin-image-tag.sh tag' <<<"$plugin_sign_job" | cut -d: -f1)"
+[[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
+  ((source_check_line < sign_line && sign_line < tag_line)) ||
+  fail 'the device plugin sign job does not check the source tag, then sign, then tag, in that order'
+# Only the publish job and the three single-image sign jobs sign, in every workflow.
 signers="$(grep -l 'sign-runtime-image-set.sh' "$ROOT"/.gitea/workflows/*.yaml)"
 [[ "$signers" == "$WORKFLOW" ]] || fail "a workflow other than Deploy Dev signs runtime images: $signers"
-[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 4 ]] ||
-  fail 'a job other than the publish job and the cw-egress and pod-runtime sign jobs signs runtime images'
+[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 5 ]] ||
+  fail 'a job other than the publish job and the cw-egress, device plugin and pod-runtime sign jobs signs runtime images'
 
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'

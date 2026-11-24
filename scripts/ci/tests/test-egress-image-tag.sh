@@ -135,6 +135,20 @@ pod="registry.example.invalid/codewire/pod-runtime@sha256:$(printf 'c%.0s' {1..6
 if "$POD_SCRIPT" tag "$first" "$fingerprint" >/dev/null 2>&1; then
   fail 'the pod-runtime wrapper tagged a cw-egress reference'
 fi
+# The /dev/kvm device plugin's image (#6202) likewise.
+readonly PLUGIN_SCRIPT="$ROOT/scripts/ci/images/kvm-device-plugin-image-tag.sh"
+plugin="registry.example.invalid/codewire/kvm-device-plugin@sha256:$(printf 'd%.0s' {1..64})"
+[[ "$("$PLUGIN_SCRIPT" exists "$fingerprint")" == absent ]] ||
+  fail 'the device plugin tag was read from another repository'
+"$PLUGIN_SCRIPT" tag "$plugin" "$fingerprint" | grep -Fq "Tagged $plugin" || fail 'the device plugin image was not tagged'
+[[ "$(cat "$FAKE_REGISTRY/kvm-device-plugin_fp-$fingerprint")" == "${plugin##*@}" ]] ||
+  fail 'the device plugin tag does not name its image'
+[[ "$(cat "$FAKE_REGISTRY/pod-runtime_fp-$fingerprint")" == "${pod##*@}" ]] ||
+  fail 'tagging the device plugin image moved the pod-runtime tag'
+: >"$FAKE_DOCKER_LOG"
+if "$PLUGIN_SCRIPT" tag "$pod" "$fingerprint" >/dev/null 2>&1; then
+  fail 'the device plugin wrapper tagged a pod-runtime reference'
+fi
 if CODEWIRE_SIGNED_IMAGE_REPOSITORY=codewire/mesh "$SCRIPT" exists "$fingerprint" >/dev/null 2>&1; then
   fail 'another repository was accepted'
 fi

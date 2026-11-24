@@ -1,0 +1,14 @@
+# BuildKit per-Dockerfile ignore for the /dev/kvm device plugin image (#6202).
+*
+!Cargo.toml
+!Cargo.lock
+!third_party
+!third_party/sqlx-sqlite-unused
+!third_party/sqlx-sqlite-unused/**
+!crates
+!crates/**
+!proto
+!proto/**
+!libs/daemon-proto
+!libs/daemon-proto/**
+crates/**/target

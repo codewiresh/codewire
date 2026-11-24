@@ -16,13 +16,15 @@ set -euo pipefail
 # Harbor reference by digest and signs it exactly as a runtime family.
 # --pod-runtime signs the standard pod-runtime image (#5602) the same way: Dev
 # delivery builds and signs it, and a deployment pins it by digest.
+# --kvm-device-plugin signs the /dev/kvm device plugin's image (#6202) the
+# same way.
 sign_target=delivery
 single_ref=''
 single_family=''
 if [[ "${1:-}" == --ghcr-mirror ]]; then
   sign_target=ghcr-mirror
   shift
-elif [[ "${1:-}" == --egress || "${1:-}" == --pod-runtime ]]; then
+elif [[ "${1:-}" == --egress || "${1:-}" == --pod-runtime || "${1:-}" == --kvm-device-plugin ]]; then
   sign_target=single
   single_family="${1#--}"
   single_ref="${2:-}"
@@ -33,6 +35,7 @@ if [[ $# -ne 2 ]]; then
   echo 'Usage: sign-runtime-image-set.sh [--ghcr-mirror] IMAGE_BUNDLE PUBLIC_KEY' >&2
   echo '       sign-runtime-image-set.sh --egress HARBOR_EGRESS_REF PUBLIC_KEY' >&2
   echo '       sign-runtime-image-set.sh --pod-runtime HARBOR_POD_RUNTIME_REF PUBLIC_KEY' >&2
+  echo '       sign-runtime-image-set.sh --kvm-device-plugin HARBOR_KVM_DEVICE_PLUGIN_REF PUBLIC_KEY' >&2
   exit 2
 fi
 

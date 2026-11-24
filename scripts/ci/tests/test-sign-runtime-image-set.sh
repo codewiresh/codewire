@@ -538,4 +538,34 @@ for refused in \
   [[ ! -s "$signature_state" ]] || fail "pod-runtime signing signed something for $refused"
 done
 
+# The /dev/kvm device plugin's image (#6202) likewise (--kvm-device-plugin).
+plugin_ref="registry.example.invalid/codewire/kvm-device-plugin@$digest"
+: >"$signature_state"
+: >"$signature_annotations"
+: >"$curl_log"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" --kvm-device-plugin "$plugin_ref" "$public_key" >"$work/plugin.out" 2>"$work/plugin.err"; then
+  sed -n '1,40p' "$work/plugin.err" >&2
+  fail 'device plugin signing fixture failed'
+fi
+[[ "$(wc -l <"$signature_state")" -eq 1 ]] && grep -Fxq "$plugin_ref" "$signature_state" ||
+  fail 'device plugin signing did not sign exactly the device plugin reference'
+grep -Fq "$plugin_ref dev.codewire.image-family=kvm-device-plugin" "$signature_annotations" ||
+  fail 'device plugin signature did not name its family'
+grep -Fq 'Verified and signed the exact kvm-device-plugin image in Harbor' "$work/plugin.out" ||
+  fail 'device plugin signing omitted its result'
+for refused in \
+    "registry.example.invalid/codewire/pod-runtime@$digest" \
+    "registry.example.invalid/codewire/kvm-device-plugin:$source_sha" \
+    "ghcr.io/codewiresh/kvm-device-plugin@$digest"; do
+  : >"$signature_state"
+  if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+      "$SIGNER" --kvm-device-plugin "$refused" "$public_key" >/dev/null 2>"$work/plugin-refused.err"; then
+    fail "device plugin signing accepted $refused"
+  fi
+  grep -Fq 'must be a codewire/kvm-device-plugin digest reference in Harbor' "$work/plugin-refused.err" ||
+    fail "device plugin refusal of $refused was not attributable"
+  [[ ! -s "$signature_state" ]] || fail "device plugin signing signed something for $refused"
+done
+
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'

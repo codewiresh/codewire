@@ -1861,6 +1861,7 @@ run_release() {
   scripts/ci/tests/test-propose-egress-image-pin.sh
   scripts/ci/tests/test-egress-image-pin-verify.sh
   scripts/ci/tests/test-pod-runtime-image-pin.sh
+  scripts/ci/tests/test-kvm-device-plugin-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
   python3 -B scripts/ci/tests/test-sdk-release-workflow.py
   python3 -B scripts/ci/tests/test-scorecard-workflow.py

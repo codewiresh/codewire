@@ -865,6 +865,7 @@ case "$image_name:$dockerfile_from_context" in
   daemon:deployments/docker/daemon.Dockerfile) product_bake_target=daemon ;;
   mesh:deployments/docker/mesh.Dockerfile) product_bake_target=mesh ;;
   egress:deployments/docker/egress.Dockerfile) product_bake_target=egress ;;
+  kvm-device-plugin:deployments/docker/kvm-device-plugin.Dockerfile) product_bake_target=kvm-device-plugin ;;
   services:deployments/docker/services.Dockerfile) product_bake_target=services ;;
 esac
 if [ "$build_runtime_set" = 1 ] && [ "$product_bake_target" != services ]; then

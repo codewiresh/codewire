@@ -2497,6 +2497,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-sign-runtime-image-set.sh|\
       scripts/ci/images/egress-image-tag.sh|\
       scripts/ci/images/pod-runtime-image-tag.sh|\
+      scripts/ci/images/kvm-device-plugin-image-tag.sh|\
       scripts/ci/tests/test-egress-image-tag.sh|\
       scripts/ci/images/verify-runtime-image-signatures.sh|\
       scripts/ci/tests/test-verify-runtime-image-signatures.sh|\
@@ -2641,6 +2642,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-egress-image-pin-verify.sh|\
       scripts/ci/images/pod-runtime-image-pin.py|\
       scripts/ci/tests/test-pod-runtime-image-pin.sh|\
+      scripts/ci/images/kvm-device-plugin-image-pin.py|\
+      scripts/ci/tests/test-kvm-device-plugin-image-pin.sh|\
       scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\
