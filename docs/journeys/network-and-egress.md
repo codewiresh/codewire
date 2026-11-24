@@ -2096,9 +2096,6 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a Sandbox claimed from the warm pool;
   - an intercepted request made at once after `cw create`, before the front
     door's first leaves are installed (#6267);
-  - the switch flipped while warm members are idle, each way, with a member
-    created before the flip claimed after it, and a Sandbox started again
-    after it (#6200);
   - the Sandbox's trust before any agent runs: a new intercepted Sandbox,
     one not intercepted, an image that sets its own
     `NODE_EXTRA_CA_CERTS`, and an image with no system bundle (#6072);
@@ -2160,15 +2157,12 @@ arguments hold no real token, and the hosted sign-in exception is not used
     handshake waits for the front door's first leaves rather than failing,
     and the time from the bind to the first served handshake is recorded
     (#6267, not yet observed);
-  - a Sandbox claimed from the warm pool serves an intercepted host under
-    the CA it installed before it was claimed: the CA file's digest is the
-    same before and after the claim, and the claim installs nothing new;
-  - a member created before the switch went on and claimed after it has no
-    CA and is stored as not intercepted, and its agents use the relay path;
-    a member created with a CA and claimed after the switch went off is
-    stored as not intercepted, and no leaf is signed for it; a Sandbox
-    started again after a flip follows the switch, with its CA and its
-    stored decision in agreement (#6200, not yet observed);
+  - a Sandbox claimed from the warm pool gets its CA at the claim, since a
+    member's daemon starts its egress only once bound. Its first egress
+    session carries the CA its trust record names, and it serves
+    intercepted hosts under that CA, with its binding, trust record, CA row
+    and installed CA in agreement (#6200; observed on Dev at 694706e718,
+    2026-11-24, #6200 comment 139927);
   - a new intercepted Sandbox has its CA at
     `/codewire/run/egress-trust/ca.pem` before anything runs, with the
     same digest as the certificate its binding stores. A session, `cw exec`
@@ -2217,6 +2211,8 @@ arguments hold no real token, and the hosted sign-in exception is not used
     refused 403 `invalid_request` with nothing sent. Without the Codex slot
     it is ordinary egress. Not yet observed (#6197).
 - **Gotchas:**
+  - Hosted interception is always on, and its off switch is never used
+    (#6201), so no state here flips it.
   - The search for the real token is done by its holder, without
     printing it; the tool is owned by #3999.
   - A host bound as a suffix is served for names one label under it. A

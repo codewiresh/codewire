@@ -3082,7 +3082,8 @@ Every admission of the Pod gives it a CA exactly when its record says so,
 whatever the switch says by then, so the guest's trust never changes during
 its life (#5006). Orchestration then decides interception once, at the Pod's
 first bind (the record, the switch still on, and the Pod being a broker-mode
-Sandbox), and stores it on the binding (#6200, not yet observed). The bind, every rebind
+Sandbox), and stores it on the binding (#6200; observed on Dev with the switch on,
+2026-11-24). The bind, every rebind
 and every credential relay epoch of that Pod read the stored decision, and
 so does orchestration's egress service for the Pod's interception CA, its
 assignment's host bindings and its leaves, so none can disagree
