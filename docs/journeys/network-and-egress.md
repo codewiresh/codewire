@@ -2012,9 +2012,9 @@ real token is inside the Sandbox. Each row below is walked on Dev:
 
 | Credential | Walked by | Proof inside the Sandbox |
 | --- | --- | --- |
-| Claude sign-in | a `claude -p` turn, then `/usage` and the plan display | the turn answers, `/usage` and the plan show; the login file's tokens are `sk-ant-oat01-cwp1_…` placeholders |
-| Claude subscription token | a `claude -p` turn, under `cw run` and under `cw exec` | `CLAUDE_CODE_OAUTH_TOKEN` is an `sk-ant-oat01-cwp1_…` placeholder in both (#6179) |
-| Anthropic API key | a `claude -p` turn | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is a placeholder in its placement's prefix |
+| Claude sign-in | a `claude -p` turn, then `/usage` and the plan display | the turn answers, `/usage` and the plan show; the login file's tokens are `cwp1_` placeholders (`sk-ant-oat01-cwp1_…` once #5159 lands) |
+| Claude subscription token | a `claude -p` turn, under `cw run` and under `cw exec` | `CLAUDE_CODE_OAUTH_TOKEN` is a `cwp1_` placeholder in both (#6179; `sk-ant-oat01-cwp1_…` once #5159 lands) |
+| Anthropic API key | a `claude -p` turn | `ANTHROPIC_AUTH_TOKEN` is a `cwp1_` placeholder and `ANTHROPIC_API_KEY` is unset |
 | Codex sign-in | a `codex exec` task, with account routing | `~/.codex/auth.json` holds placeholders in Codex's JWT shape |
 | OpenAI API key | a `codex exec` task on the key | as in a local VM, the key's variable holds Codewire's fixed managed value and its base URL is the loopback route |
 | GitHub | `git clone` and `git push` over HTTPS, and `gh api user` | `git credential fill` and `gh auth token` give a placeholder or nothing; until GitHub's hosts are intercepted (#4001, after #5463), Git and `gh` use today's loopback route, which holds no token in the Sandbox either |

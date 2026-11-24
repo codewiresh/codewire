@@ -2832,12 +2832,15 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   2026-11-24, #4001).
 - **Placeholders, in the local shape.** Each placement carries a
   per-environment placeholder derived as above, under a key the credential
-  service holds for that environment (#5017), never stored. It keeps its
-  form's provider prefix (#5159): `sk-ant-oat01-cwp1_` and 43 base64url
-  characters in Claude Code's login file, `CLAUDE_CODE_OAUTH_TOKEN` and
-  `ANTHROPIC_AUTH_TOKEN`; `sk-ant-api03-cwp1_` and 43 in `ANTHROPIC_API_KEY`.
-  Codex's login keeps its unsigned JWT shape, and GitHub its own grammar
-  (#5149). A placeholder is recognised by its whole value's length and
+  service holds for that environment (#5017), never stored. The Anthropic
+  forms carry the plain `cwp1_` value, as the local guest's do: an API key's
+  in `ANTHROPIC_AUTH_TOKEN`, a subscription token's in
+  `CLAUDE_CODE_OAUTH_TOKEN`, and a sign-in's in Claude Code's login file.
+  `ANTHROPIC_API_KEY` is never set, because the swap rule refuses a
+  placeholder sent beside a second credential header. Keeping each form's
+  provider prefix (`sk-ant-api03-cwp1_…`, `sk-ant-oat01-cwp1_…`) is #5159,
+  not built. Codex's login keeps its unsigned JWT shape, and GitHub its own
+  grammar (#5149). A placeholder is recognised by its whole value's length and
   charset, never by a prefix, and one sent outside the route table is
   refused, never forwarded.
 - **What the Sandbox projects.** Exactly what a local guest's seed carries:
