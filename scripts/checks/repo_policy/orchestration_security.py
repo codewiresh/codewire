@@ -410,12 +410,58 @@ def whole_broker(side: str, label: str) -> str:
             f"{side}.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))")
 
 
+HOSTED_EGRESS_SWITCH_EXPRESSION = (f"has(params.data) && '{HOSTED_EGRESS_SWITCH}' in params.data && "
+                                   f"params.data['{HOSTED_EGRESS_SWITCH}'] == 'true'")
 MEMBER_OWN_VARIABLES = {
     "clearing": "false",
+    # The switch alone. The template policy's hostedEgress also holds an
+    # update that keeps a whole broker template (keepsBroker); a move adds
+    # the broker shape to a Sandbox that lacks it, so it is never a keep, and
+    # the two differ by design.
+    "hostedEgress": HOSTED_EGRESS_SWITCH_EXPRESSION,
     "wholeBroker": whole_broker("object", "broker"),
     "wasWholeBroker": whole_broker("oldObject", "wasBroker"),
     "addsBroker": "request.operation == 'UPDATE' && variables.wholeBroker && !variables.wasWholeBroker",
 }
+# codewire#6121, cw-security's terms: with the switch off, the template
+# policy's broker arm holds a template, and so admits a broker-mode one, only
+# for an UPDATE of a per-environment template whose stored version is whole
+# broker, to the whole broker shape again, while the switch names a fence
+# revision. Its hostedEgress is the switch or that keep, and only switchOn
+# reads the switch, so every rule that reads hostedEgress, every broker check
+# among them, holds a kept template as it holds one with the switch on.
+TEMPLATE_KEEPS_BROKER_VARIABLES = {
+    "switchOn": HOSTED_EGRESS_SWITCH_EXPRESSION,
+    "wasBroker": "has(oldObject.spec.podTemplate.metadata) && has(oldObject.spec.podTemplate.metadata.labels) && "
+                 "'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels && "
+                 "oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'",
+    "wholeBroker": whole_broker("object", "broker"),
+    "wasWholeBroker": whole_broker("oldObject", "wasBroker"),
+    "keepsBroker": "variables.environmentTemplate && request.operation == 'UPDATE' && "
+                   "variables.wasWholeBroker && variables.wholeBroker && "
+                   "has(params.data) && 'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data && "
+                   "size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0",
+    "hostedEgress": "variables.switchOn || variables.keepsBroker",
+}
+
+
+def template_keeps_broker_violations(template: str) -> list[str]:
+    output: list[str] = []
+    variables = {item["name"]: item["expression"] for item in policy_items(template, "variables")}
+    for name, expression in TEMPLATE_KEEPS_BROKER_VARIABLES.items():
+        if variables.get(name) != expression:
+            output.append(f"{WARM_POOL_TEMPLATE_POLICY} variable {name} must be exactly {expression}: {variables.get(name)}")
+    readers = sorted(name for name, expression in variables.items() if f"'{HOSTED_EGRESS_SWITCH}'" in expression)
+    if readers != ["switchOn"]:
+        output.append(f"{WARM_POOL_TEMPLATE_POLICY} reads the switch only in switchOn, not in {readers}")
+    readers = sorted(name for name, expression in variables.items() if "variables.switchOn" in expression)
+    if readers != ["hostedEgress"]:
+        output.append(f"{WARM_POOL_TEMPLATE_POLICY} reads switchOn only in hostedEgress, not in {readers}")
+    direct = [item["expression"] for item in policy_items(template, "validations")
+              if "variables.switchOn" in item["expression"] or f"'{HOSTED_EGRESS_SWITCH}'" in item["expression"]]
+    if direct:
+        output.append(f"{WARM_POOL_TEMPLATE_POLICY} rules read the switch only through hostedEgress: {direct[0][:160]}")
+    return output
 
 
 def yaml_scalar(lines: list[str]) -> str:
@@ -827,6 +873,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
     template = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY)
     member = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", WARM_POOL_MEMBER_POLICY)
+    if len(template) == 1:
+        output.extend(f"{label}: {violation}" for violation in template_keeps_broker_violations(template[0]))
     if len(template) == 1 and len(member) == 1:
         output.extend(f"{label}: {violation}" for violation in member_broker_shape_violations(template[0], member[0]))
     writer = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", SANDBOX_BROKER_WRITER_POLICY)
@@ -1918,6 +1966,38 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                                           "kustomize.toolkit.fluxcd.io/prune: disabled", "codewire.sh/x: y")),
             ("the template picking its own arm", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                                         "variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled", "true")),
+            # codewire#6121: each of cw-security's terms for keeping a broker
+            # template with the switch off is load-bearing.
+            ("a broker template kept on a CREATE", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                          "request.operation == 'UPDATE' && variables.wasWholeBroker", "variables.wasWholeBroker")),
+            ("a broker template made from a non-broker one", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                    "variables.wasWholeBroker && variables.wholeBroker &&", "variables.wholeBroker &&")),
+            ("a broker template kept without the whole shape", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                      "variables.wasWholeBroker && variables.wholeBroker &&", "variables.wasWholeBroker &&")),
+            ("a broker template kept without the fence setting", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                        "variables.wholeBroker && has(params.data) && "
+                                                                        "'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data && "
+                                                                        "size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0",
+                                                                        "variables.wholeBroker")),
+            ("a broker pool template kept", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                   "variables.environmentTemplate && request.operation == 'UPDATE'", "request.operation == 'UPDATE'")),
+            ("a hollow template counted whole", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                       "'codewire.sh/egress-fence-revision' in oldObject.spec.podTemplate.metadata.annotations &&", "")),
+            ("a template kept broker under the label alone", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                    "oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'", "true")),
+            ("the broker arm on the switch alone", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                          "variables.switchOn || variables.keepsBroker", "variables.switchOn")),
+            ("the broker arm on any update", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                    "variables.switchOn || variables.keepsBroker",
+                                                    "variables.switchOn || request.operation == 'UPDATE'")),
+            ("the arm rule reading the switch alone", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                             "variables.hostedEgress ? variables.broker", "variables.switchOn ? variables.broker")),
+            ("the broker egress reading the switch alone", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                                  "!variables.hostedEgress || has(object.spec.networkPolicy)",
+                                                                  "!variables.switchOn || has(object.spec.networkPolicy)")),
+            ("the resolver reading the switch alone", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                             "!variables.hostedEgress || variables.clearing || has(variables.pod.dnsPolicy)",
+                                                             "!variables.switchOn || variables.clearing || has(variables.pod.dnsPolicy)")),
             # codewire#4000: the clearing exception stays exactly the rendered clearing template.
             ("any cw-snap- template as clearing", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                                          "-clear$') &&", "-clear') &&")),
@@ -2165,6 +2245,10 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
              "!(s.spec.podTemplate.spec.runtimeClassName in ['runc', '', 'another-vm']))"),
             (WARM_POOL_MEMBER_POLICY, "['runc', '']", "['runc', '', 'commodity']"),
             (WARM_POOL_MEMBER_POLICY, "params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'", "true"),
+            # codewire#6121: a move is never a keep, so the member's switch
+            # admits nothing more than the switch.
+            (WARM_POOL_MEMBER_POLICY, "params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'",
+             "params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true' || request.operation == 'UPDATE'"),
         ]:
             image_cache_rejected(f"warm pool {before}", "ValidatingAdmissionPolicy", before, after, policy_name)
         image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",

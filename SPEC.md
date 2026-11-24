@@ -1518,7 +1518,13 @@ the switch on, every template orchestration writes is broker-mode except
 one: a snapshot's clearing template, which runs one container on the
 restored disk, is never a workspace, and has a network policy with no
 ingress and no egress. A restore makes a new environment through create,
-so it is broker-mode.
+so it is broker-mode. With the switch off, admission refuses every
+broker-mode template orchestration writes except an update of an
+environment's own template that already has the whole broker shape and
+keeps it, while the switch's settings still name a fence revision, and the
+result must pass every broker check it would with the switch on; creating a
+broker-mode template, or making an existing one broker-mode, stays refused
+(#6121).
 
 Target, not shipped (#6070): turning hosted egress off affects new creates
 only. The switch (`CODEWIRE_HOSTED_EGRESS_ENABLED`) decides what a create

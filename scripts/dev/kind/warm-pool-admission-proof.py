@@ -7,7 +7,9 @@ real API server admit or deny each case, as orchestration's service account.
 It matches every SandboxTemplate orchestration writes: the pool's allowlist
 holds cw-pool- templates, and the broker arm holds every template while hosted
 egress is on, so per-environment templates are proved here too, and so is
-the one template excepted from it, a snapshot's clearing template. The member
+the one template excepted from it, a snapshot's clearing template, and, with
+the switch off, an update that keeps an environment's whole-broker template
+whole (#6121). The member
 policy's broker-mode rules, its hold on a VM Sandbox made before hosted
 egress, and a start's move of one to broker mode, held to the template
 policy's own broker checks, are proved on Sandboxes, and so is the policy that
@@ -88,6 +90,9 @@ ON = {
     # The goldens' fence revision.
     "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION": "2",
 }
+# The switch off with the broker settings still named (#6121), as a
+# deployment that turned it off after broker-mode Sandboxes were made has it.
+OFF_KEEPING = ON | {"CODEWIRE_HOSTED_EGRESS_ENABLED": "false"}
 # The key broker's Pods, as a deployment that names them sets kbsPeer (#4000).
 KBS_PODS = {"app": "kbs", "app.kubernetes.io/instance": "codewire-trustee", "app.kubernetes.io/name": "trustee"}
 WORLD = {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": [
@@ -624,6 +629,72 @@ def move_cases(cluster: "Cluster", env_today: dict, env_broker: dict, pool_today
     return results
 
 
+def template_change(cluster: "Cluster", before: dict, change: Callable[[dict], object],
+                    param: dict[str, str]) -> str | None:
+    """With the switch at `param`, create `before` as the cluster's
+    administrator, whom the policy does not match, so any stored shape can
+    be the starting point; apply `change` to the stored template and update
+    it as orchestration, then delete it."""
+    cluster.param(param)
+    stored = cluster.kubectl("create", "-f", "-", stdin=json.dumps(before))
+    if stored.returncode != 0:
+        return "create failed: " + stored.stderr.strip()
+    name, namespace = before["metadata"]["name"], before["metadata"]["namespace"]
+    live = json.loads(cluster.kubectl("get", "sandboxtemplate", name, "-n", namespace, "-o", "json").stdout)
+    change(live)
+    denial = cluster.admit("replace", live)
+    cluster.kubectl("delete", "sandboxtemplate", name, "-n", namespace, "--wait=true")
+    return denial
+
+
+def keep_cases(cluster: "Cluster", env_today: dict, env_broker: dict, standard: dict,
+               pool_broker: dict) -> list[bool]:
+    """codewire#6121, cw-security's terms: with the switch off, orchestration
+    may update an environment's own template that is already whole broker,
+    only to the whole broker shape again, held to every broker check as with
+    the switch on, and only while the switch names a fence revision. A
+    create, or an update that makes a template broker-mode, stays refused."""
+    def repin(t: dict) -> None:
+        container(t, "workspace")["image"] = "registry.example.invalid/codewire/workspace@sha256:" + "6" * 64
+
+    def annotations(t: dict) -> dict:
+        return t["spec"]["podTemplate"]["metadata"]["annotations"]
+
+    def become(template: dict) -> Callable[[dict], object]:
+        return lambda t: t.__setitem__("spec", copy.deepcopy(template["spec"]))
+
+    hollow = mutate(env_broker, lambda t: annotations(t).pop("codewire.sh/egress-fence-revision"))
+    no_fence = OFF_KEEPING | {"CODEWIRE_HOSTED_EGRESS_FENCE_REVISION": ""}
+    results = []
+    for name, before, change, param, expected in [
+        ("off, keeping: an environment's broker template re-pinned", env_broker, repin, OFF_KEEPING, None),
+        ("off, keeping: a standard broker template re-pinned", standard, repin, OFF_KEEPING, None),
+        ("off, keeping: the fence revision dropped", env_broker,
+         lambda t: (repin(t), annotations(t).pop("codewire.sh/egress-fence-revision")), OFF_KEEPING, GATE),
+        ("off, keeping: the TUN init dropped", env_broker, without_tun, OFF_KEEPING, GATE),
+        ("off, keeping: a host path added", env_broker,
+         lambda t: pod(t)["volumes"].append({"name": "host", "hostPath": {"path": "/"}}), OFF_KEEPING, HOST),
+        ("off, keeping: an extra nameserver", env_broker,
+         lambda t: pod(t)["dnsConfig"]["nameservers"].append("10.44.0.10"), OFF_KEEPING, RESOLVER),
+        ("off, keeping: the world rule added", env_broker,
+         lambda t: egress(t).append(copy.deepcopy(WORLD)), OFF_KEEPING, EGRESS),
+        ("off, keeping: a privileged workspace", env_broker,
+         lambda t: security(t, "workspace").__setitem__("privileged", True), OFF_KEEPING, PRIVILEGE),
+        ("off, keeping: under another fence revision", env_broker,
+         lambda t: annotations(t).__setitem__("codewire.sh/egress-fence-revision", "1"), OFF_KEEPING, FENCE),
+        ("off, keeping: a non-broker template made broker", env_today, become(env_broker), OFF_KEEPING, GATE),
+        ("off, keeping: a hollow broker template made whole", hollow, become(env_broker), OFF_KEEPING, GATE),
+        ("off, keeping: a pool's broker template re-pinned", pool_broker, repin, OFF_KEEPING, ENVIRONMENT),
+        ("off, no fence setting: an environment's broker template re-pinned", env_broker, repin, no_fence, GATE),
+        ("off, no settings: an environment's broker template re-pinned", env_broker, repin, OFF, GATE),
+        ("on: an environment's broker template re-pinned", env_broker, repin, ON, None),
+    ]:
+        results.append(check(name, template_change(cluster, before, change, param), expected))
+    cluster.param(OFF_KEEPING)
+    results.append(check("off, keeping: the broker golden created", cluster.admit("create", env_broker), GATE))
+    return results
+
+
 SNAPSHOT_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
@@ -883,6 +954,9 @@ def main() -> int:
             cluster.param(param)
             current = param
         results.append(check(name, cluster.admit(verb, template), expected))
+    results.extend(keep_cases(cluster, pinned(load("identity-free-sandboxtemplate.golden.json")),
+                              pinned(load("environment-broker-sandboxtemplate.golden.json")),
+                              load("standard-sandboxtemplate.golden.json"), broker))
 
     # An UPDATE to a refused shape: create the broker golden for real, then
     # update it to world egress.

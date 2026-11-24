@@ -35,7 +35,10 @@
 #   adding the whole broker shape in one update, held to the template
 #   policy's own broker checks; no other identity adds broker mode;
 # - with hosted egress on, a snapshot's clearing template, exactly as
-#   rendered, is the one template excepted from the broker shape.
+#   rendered, is the one template excepted from the broker shape;
+# - with it off, orchestration writes no broker-mode template but for an
+#   update that keeps an environment's whole-broker template whole, held
+#   to every broker check as with it on.
 #
 # The Rust renderer (crates/codewire-orchestration/src/sandbox/warm_pool.rs)
 # and its goldens produce exactly these shapes;
@@ -318,10 +321,11 @@ spec:
     # "Warm-pool template admission"). The deployment decides, never the
     # template: the switch is the codewire-hosted-egress ConfigMap that
     # orchestration's environment also reads, and orchestration cannot write
-    # it. On, only broker-mode templates are admitted; off, none is. No state
-    # admits both, so a template that drops the label never falls back to
-    # the world egress below.
-    - name: hostedEgress
+    # it. On, only broker-mode templates are admitted; off, none is but an
+    # update that keeps a broker template whole (keepsBroker, below). No
+    # state admits both, so a template that drops the label never falls back
+    # to the world egress below.
+    - name: switchOn
       expression: >-
         has(params.data) && 'CODEWIRE_HOSTED_EGRESS_ENABLED' in params.data &&
         params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'
@@ -430,6 +434,49 @@ spec:
       expression: >-
         variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
         variables.pod.runtimeClassName == 'standard'
+    # codewire#6121: a broker-mode Sandbox stays so with the switch off
+    # (#6070), so a start may still have to update its environment's own
+    # template. With the switch off, such an update is held to the broker
+    # arm exactly as with it on, and is admitted only when it is an UPDATE
+    # of a per-environment template whose stored version has the whole
+    # broker shape and keeps it, while the switch names a fence revision.
+    # wholeBroker and wasWholeBroker are the member policy's text.
+    - name: wasBroker
+      expression: >-
+        has(oldObject.spec.podTemplate.metadata) && has(oldObject.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels &&
+        oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: wholeBroker
+      expression: >-
+        variables.broker &&
+        has(object.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in object.spec.podTemplate.metadata.annotations &&
+        has(object.spec.podTemplate.spec) &&
+        (has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(object.spec.podTemplate.spec.initContainers) &&
+        object.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+    - name: wasWholeBroker
+      expression: >-
+        variables.wasBroker &&
+        has(oldObject.spec.podTemplate.metadata.annotations) &&
+        'codewire.sh/egress-fence-revision' in oldObject.spec.podTemplate.metadata.annotations &&
+        has(oldObject.spec.podTemplate.spec) &&
+        (has(oldObject.spec.podTemplate.spec.runtimeClassName) && oldObject.spec.podTemplate.spec.runtimeClassName == 'standard' ||
+        has(oldObject.spec.podTemplate.spec.initContainers) &&
+        oldObject.spec.podTemplate.spec.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+    - name: keepsBroker
+      expression: >-
+        variables.environmentTemplate && request.operation == 'UPDATE' &&
+        variables.wasWholeBroker && variables.wholeBroker &&
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_FENCE_REVISION' in params.data &&
+        size(params.data['CODEWIRE_HOSTED_EGRESS_FENCE_REVISION']) > 0
+    # Whether the broker arm holds this template: the switch is on, or the
+    # update keeps a broker template whole. Every rule below that depends on
+    # the switch reads this, so a kept template passes every broker check a
+    # template does with the switch on. The member policy's own hostedEgress
+    # is the switch alone, since a move is never a keep.
+    - name: hostedEgress
+      expression: variables.switchOn || variables.keepsBroker
   validations:
     - expression: >-
         variables.environmentTemplate ||
@@ -614,7 +661,8 @@ spec:
       message: warm-pool egress is Codewire's allowlist only, the world outside every private range plus the named in-cluster peers and ports
     # Hosted egress (codewire#4000): the switch, not the template, picks the
     # arm. On, every template is broker-mode, except a snapshot's clearing
-    # template (see clearing); off, none carries the egress label.
+    # template (see clearing); off, none carries the egress label. An
+    # update that keeps a broker template whole counts as on (hostedEgress).
     - expression: >-
         variables.hostedEgress ? variables.broker || variables.clearing : !variables.egressLabelled
       message: with hosted egress on, every template orchestration writes is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
