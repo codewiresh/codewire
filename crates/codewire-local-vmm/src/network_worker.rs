@@ -118,10 +118,17 @@ struct ProductWorkerSession {
     network_key: NetworkKey,
     mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
+    /// The guest network's /30, from the runner's own launch.
+    addresses: SessionAddresses,
 }
 
-/// Entrypoint used only by the hidden product `cw` worker command.
-pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerError> {
+/// Entrypoint used only by the hidden product `cw` worker command. The runner
+/// that spawned it names `addresses`; nothing the guest sends chooses them.
+pub async fn run_inherited_worker(
+    vm_id: Uuid,
+    generation: u64,
+    addresses: SessionAddresses,
+) -> Result<(), NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
     let mut bootstrap = inherited_std_unix_stream(NETWORK_BOOTSTRAP_FD)?;
     let prepared = (|| {
@@ -185,6 +192,7 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
             network_key: prepared.network_key,
             mesh_ingress_key: prepared.mesh_ingress_key,
             mesh_ingress_ports: prepared.mesh_ingress_ports,
+            addresses,
         },
         vm_id,
         generation,
@@ -242,6 +250,7 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         session.network_key,
         vm_id,
         generation,
+        session.addresses,
         broker,
         Some(inbound_rx),
         move || publish_product_worker_status(&ready_status, WORKER_READY_MESSAGE),

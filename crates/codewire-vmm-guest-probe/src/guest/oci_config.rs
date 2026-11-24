@@ -64,7 +64,11 @@ pub(super) fn workspace_oci_config_with_cw(
     } else {
         vec!["CAP_SETGID", "CAP_SETUID"]
     };
-    let (devices, allowed_devices) = standard_devices();
+    let (mut devices, mut allowed_devices) = standard_devices();
+    // A hosted boot's own (broker mode's TUN device), none otherwise.
+    let (hosted_devices, hosted_allowed) = super::hosted::container_devices();
+    devices.extend(hosted_devices);
+    allowed_devices.extend(hosted_allowed);
     let mut configuration = serde_json::json!({
         "ociVersion": "1.2.0",
         "process": {

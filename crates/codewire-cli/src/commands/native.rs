@@ -116,9 +116,18 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
 pub(crate) async fn run_native_network_worker(args: NativeNetworkWorkerArgs) -> anyhow::Result<()> {
     let environment_id = Uuid::parse_str(&args.environment_id)
         .context("native network worker environment ID is invalid")?;
-    codewire_local_vmm::network_worker::run_inherited_worker(environment_id, args.generation)
-        .await
-        .context("run native environment network worker")
+    let addresses = if args.hosted_broker_network {
+        codewire_local_vmm::network_worker::SessionAddresses::HOSTED_BROKER
+    } else {
+        codewire_local_vmm::network_worker::SessionAddresses::STANDARD
+    };
+    codewire_local_vmm::network_worker::run_inherited_worker(
+        environment_id,
+        args.generation,
+        addresses,
+    )
+    .await
+    .context("run native environment network worker")
 }
 
 pub(crate) async fn run_native_egress_broker(args: NativeEgressBrokerArgs) -> anyhow::Result<()> {

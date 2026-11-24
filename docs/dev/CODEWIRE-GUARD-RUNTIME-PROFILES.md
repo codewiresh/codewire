@@ -396,7 +396,15 @@ pool shape.
 The workspace container's `CODEWIRE_VM_EGRESS_MODE` says how the guest's
 workload reaches the network: `guest-carried`, its own network session with
 only the platform peers, or `broker`, hosted broker mode inside the VM.
-Orchestration renders `guest-carried` until broker mode runs inside the VM.
+Orchestration renders `broker` on an environment's own template and
+`guest-carried` on a pool's. In `broker` mode cw-egress's 8089 stream is one
+of the Pod's literal platform peers, as on every broker-mode Pod; the Pod's
+settings name it on the host, and no guest message adds or changes it. The
+guest holds the Pod-bound cw-egress token, so cw-egress's admission is the
+check: the token opens only this Pod's stream, on this node, matched to the
+token's Pod UID, the Pod's label and the stream's source address as cw-egress
+sees them. A claimed pool member stays `guest-carried` until pools render
+broker mode.
 The template policy and the class's Pod rule admit it only on a `standard`
 workspace, once, as one of those two literal values. The runtime refuses any
 other value. The binding listener waives the guest's own egress self-check

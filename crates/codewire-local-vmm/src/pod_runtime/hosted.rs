@@ -41,6 +41,8 @@ pub struct HostedPaths {
     pub coordinator_extra_roots: PathBuf,
     pub binding_token: PathBuf,
     pub credential_token: PathBuf,
+    /// The Pod's `cw-egress` token, read in broker mode only.
+    pub egress_token: PathBuf,
 }
 
 impl Default for HostedPaths {
@@ -52,6 +54,7 @@ impl Default for HostedPaths {
             binding_token: Path::new(codewire_daemon_proto::WORKSPACE_BINDING_TOKEN_MOUNT_PATH)
                 .join("token"),
             credential_token: codewire_access::CODEX_PLATFORM_TOKEN_FILE.into(),
+            egress_token: codewire_daemon_proto::EGRESS_TOKEN_PATH.into(),
         }
     }
 }
@@ -106,9 +109,15 @@ fn read_roots(directory: &Path) -> Result<BTreeMap<String, String>, PodRuntimeEr
     Ok(files)
 }
 
-/// The two tokens that cross: the binding token, which the Pod always has,
-/// and the credential workspace token, when the credential runtime is set up.
-pub(super) fn read_tokens(paths: &HostedPaths) -> Result<HostedTokens, PodRuntimeError> {
+/// The tokens that cross ([`HostedTokens`]): the binding token, which the Pod
+/// always has; the credential workspace token, when the credential runtime is
+/// set up; and in broker mode alone, the Pod's `cw-egress` token, which that
+/// mode needs. A guest-carried guest never gets the egress token, though the
+/// Pod mounts it.
+pub(super) fn read_tokens(
+    paths: &HostedPaths,
+    mode: EgressMode,
+) -> Result<HostedTokens, PodRuntimeError> {
     let token = |path: &Path| -> Result<Option<String>, PodRuntimeError> {
         match read_bounded(path, MAX_TOKEN_BYTES) {
             Ok(bytes) => String::from_utf8(bytes)
@@ -122,6 +131,12 @@ pub(super) fn read_tokens(paths: &HostedPaths) -> Result<HostedTokens, PodRuntim
         binding: token(&paths.binding_token)?
             .ok_or(PodRuntimeError::Setting("the binding token"))?,
         credential: token(&paths.credential_token)?,
+        egress: match mode {
+            EgressMode::GuestCarried => None,
+            EgressMode::Broker => Some(
+                token(&paths.egress_token)?.ok_or(PodRuntimeError::Setting("the egress token"))?,
+            ),
+        },
     };
     tokens
         .validate()
@@ -207,9 +222,10 @@ pub(super) async fn hand_over(
 pub(super) async fn refresh_tokens(
     running: &RunningVm,
     paths: &HostedPaths,
+    mode: EgressMode,
     last: HostedTokens,
 ) -> Result<HostedTokens, PodRuntimeError> {
-    let current = read_tokens(paths)?;
+    let current = read_tokens(paths, mode)?;
     if current == last {
         return Ok(last);
     }
@@ -289,6 +305,7 @@ mod tests {
             coordinator_extra_roots: directory.path().join("absent"),
             binding_token: token,
             credential_token: directory.path().join("absent-token"),
+            egress_token: directory.path().join("absent-egress-token"),
         };
         let settings = read_settings(
             |name| match name {
@@ -302,9 +319,48 @@ mod tests {
         assert_eq!(settings.environment[SHIM_ADDRESS_NAME], "127.0.0.1:17777");
         assert_eq!(settings.binding_tls_roots.len(), 1);
         assert!(settings.coordinator_extra_roots.is_empty());
-        let tokens = read_tokens(&paths).unwrap();
+        let tokens = read_tokens(&paths, EgressMode::GuestCarried).unwrap();
         assert_eq!(tokens.binding, "eyJh.eyJz.c2ln");
         assert_eq!(tokens.credential, None);
+    }
+
+    /// The egress token crosses in broker mode alone, whole and as the
+    /// kubelet last wrote it, and a broker-mode Pod without it does not boot.
+    #[test]
+    fn only_a_broker_mode_guest_gets_the_egress_token_and_needs_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let binding = directory.path().join("binding");
+        fs::write(&binding, b"eyJh.eyJi.c2ln\n").unwrap();
+        let egress = directory.path().join("egress");
+        let paths = HostedPaths {
+            binding_tls_roots: directory.path().join("absent"),
+            coordinator_extra_roots: directory.path().join("absent"),
+            binding_token: binding,
+            credential_token: directory.path().join("absent-token"),
+            egress_token: egress.clone(),
+        };
+        assert!(matches!(
+            read_tokens(&paths, EgressMode::Broker),
+            Err(PodRuntimeError::Setting("the egress token"))
+        ));
+        fs::write(&egress, b"eyJh.eyJl.c2ln\n").unwrap();
+        assert_eq!(
+            read_tokens(&paths, EgressMode::Broker)
+                .unwrap()
+                .egress
+                .as_deref(),
+            Some("eyJh.eyJl.c2ln")
+        );
+        assert_eq!(
+            read_tokens(&paths, EgressMode::GuestCarried)
+                .unwrap()
+                .egress,
+            None
+        );
+        // A rotation is seen as a change, so the refresh resends all three.
+        let first = read_tokens(&paths, EgressMode::Broker).unwrap();
+        fs::write(&egress, b"eyJh.eyJm.c2ln\n").unwrap();
+        assert_ne!(read_tokens(&paths, EgressMode::Broker).unwrap(), first);
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     let pod_uid = config.pod_uid().to_owned();
     let daemon_config = config.into_config(&bound.binding);
     #[cfg(target_os = "linux")]
+    hosted_egress::refuse_carried_interception(carried, daemon_config.interception.is_some())?;
+    #[cfg(target_os = "linux")]
     codewire_daemon::login_cleanup::clear_logins_for_bound_environment(
         &daemon_config,
         bound.binding.environment_id(),
@@ -125,17 +127,7 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // task can record the host key: orchestration's access proof therefore
     // comes after this write. No defaults, as from an older server, reports
     // nothing, and setup writes them itself.
-    let defaults = match &bound.defaults {
-        Some(defaults) => Some(
-            codewire_daemon::workspace_defaults::apply(
-                &daemon_config,
-                bound.binding.operation_generation(),
-                defaults,
-            )
-            .await,
-        ),
-        None => None,
-    };
+    let defaults = apply_defaults(&daemon_config, &bound).await;
     #[cfg(target_os = "linux")]
     let check = {
         let client = client.clone();
@@ -180,6 +172,23 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         }),
     )
     .await
+}
+
+/// The bind's saved project defaults applied, or nothing when the server
+/// sent none.
+async fn apply_defaults(
+    daemon_config: &codewire_daemon::Config,
+    bound: &hosted_binding::BoundWorkspace,
+) -> Option<codewire_daemon::workspace_defaults::DefaultsOutcome> {
+    let defaults = bound.defaults.as_ref()?;
+    Some(
+        codewire_daemon::workspace_defaults::apply(
+            daemon_config,
+            bound.binding.operation_generation(),
+            defaults,
+        )
+        .await,
+    )
 }
 
 /// Runs `check`, then `serve` only once `check` has passed. `serve` is a

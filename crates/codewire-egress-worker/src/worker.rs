@@ -30,7 +30,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub use crate::session::{
-    AsyncReadWrite, BoxedBrokerStream, BrokerDnsAnswer, DenyBroker, EgressBroker, TcpFlow,
+    AsyncReadWrite, BoxedBrokerStream, BrokerDnsAnswer, DenyBroker, EgressBroker, SessionAddresses,
+    TcpFlow,
 };
 use codewire_network_session::SelfCheckFailure;
 
@@ -1290,11 +1291,15 @@ where
     .map_err(NetworkWorkerError::from)
 }
 
+/// A local VM's or standard Pod's session with its guest's inbound streams,
+/// on the /30 `addresses` the host side chose.
+#[allow(clippy::too_many_arguments)] // The identity, the /30 and the channels.
 pub async fn run_host_session_with_ingress<S, B, R>(
     stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
+    addresses: SessionAddresses,
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
     ready: R,
@@ -1307,9 +1312,8 @@ where
     run_portable_network_session_with_ingress(
         stream,
         key,
-        vm_id,
-        generation,
-        codewire_network_session::SessionLimits::LOCAL,
+        (vm_id, generation),
+        (codewire_network_session::SessionLimits::LOCAL, addresses),
         broker,
         inbound,
         ready,
@@ -1799,6 +1803,7 @@ mod tests {
             network_key,
             vm_id,
             generation,
+            SessionAddresses::STANDARD,
             broker,
             Some(inbound_rx),
             move || {

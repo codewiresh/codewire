@@ -884,7 +884,7 @@ fn open_and_configure_tun(interface: &str) -> Result<OwnedFd> {
             "workspace-net-link-failed",
         ),
         (
-            vec!["ip", "addr", "add", NETWORK_GUEST_ADDRESS, "dev", interface],
+            vec!["ip", "addr", "add", hosted::eth0().0, "dev", interface],
             "workspace-net-address-failed",
         ),
         (
@@ -894,7 +894,7 @@ fn open_and_configure_tun(interface: &str) -> Result<OwnedFd> {
                 "add",
                 "default",
                 "via",
-                NETWORK_GATEWAY_ADDRESS,
+                hosted::eth0().1,
                 "dev",
                 interface,
             ],

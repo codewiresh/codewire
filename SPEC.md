@@ -561,8 +561,36 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   log names each probe, its target and its outcome either way.
   The Pod's `CODEWIRE_VM_EGRESS_MODE`, fixed when it is created, waives
   that check only for `broker`, hosted broker mode inside the VM, whose
-  stream cw-egress checks as on Kata. Until broker mode is built, every
-  `standard` Pod is `guest-carried`.
+  stream cw-egress checks as on Kata. A pool's template is `guest-carried`.
+  A guest-carried daemon whose bind is intercepted refuses to serve: it has
+  no egress loop to install the front door's CA.
+- **Broker mode inside the VM** (#5602). An environment's own `standard`
+  template is `broker`: the daemon in the VM runs hosted broker mode
+  unchanged. Before the workload starts, the VM's init makes the egress TUN
+  `cwegress0`, owned by the workspace user, in the workspace's network, with
+  the same routing a Kata Pod's TUN init makes: the workload's default route
+  and its resolver go into the TUN, and the daemon's own platform dials
+  leave by the guest's `eth0`. The daemon dials cw-egress, one of the Pod's
+  platform peers, with the Pod's own egress token and carries the TUN over
+  that stream, so the workload reaches the network only through cw-egress,
+  under the environment's policy. The runtime sends that token into the VM
+  in this mode alone and resends it whenever the kubelet rotates it; the VM
+  replaces its copy whole. cw-egress's admission is the check: the token
+  opens only this Pod's stream, on this node, checked against the token's
+  Pod UID, the Pod's label and the stream's source address as cw-egress sees
+  them, never a value the guest supplies. The guest's `eth0` and the
+  supervisor's end of the VM's session take `192.0.2.6/30` and `192.0.2.5`
+  in this mode, beside the TUN's `192.0.2.2/30`, and the supervisor accepts
+  packets from that one guest address; the runtime chooses the pair from the
+  Pod's own setting, never from the guest. A broker-mode guest's kernel
+  command line names `codewire.hosted_broker=1`, which the runtime alone
+  sets, never beside the guest-carried parameter.
+  The tokens that cross into a `standard` guest, each Pod-bound:
+  | Token | Audience | Mode | Checked by |
+  |---|---|---|---|
+  | binding | the workspace binding | both | orchestration's binding, by TokenReview and the live Pod |
+  | credential | the credential workspace | both, when set up | the credential service, by reviewed Pod UID |
+  | egress | cw-egress | `broker` only | cw-egress's admission: this Pod's UID, label and address, on this node |
   The Pod's 7777 and 2222 reach the VM over two fixed guest-channel ports
   that exist only in such a boot and accept only the host; the guest joins
   each to one address in the workspace's network: the daemon's gRPC

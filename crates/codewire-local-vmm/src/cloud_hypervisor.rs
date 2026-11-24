@@ -10,6 +10,7 @@ use codewire_vmm_guest_probe::{
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
+use codewire_vmm_guest_probe::hosted_control::HostedEgressMode;
 use codewire_vmm_guest_probe::image_disk::IMAGE_DISK_SERIAL;
 
 mod image_build;
@@ -69,9 +70,10 @@ pub struct CloudHypervisorConfig {
     /// The shared read-only image disk the guest's overlay takes its lower
     /// from (#4646). None for a VM on the old combined root disk.
     pub image_disk: Option<PathBuf>,
-    /// A standard Pod's guest: the kernel command line names
-    /// [`codewire_vmm_guest_probe::hosted_control::GUEST_CARRIED_PARAMETER`].
-    pub guest_carried: bool,
+    /// A standard Pod's guest: the kernel command line names its egress
+    /// mode's one parameter
+    /// ([`codewire_vmm_guest_probe::hosted_control::HostedEgressMode`]).
+    pub hosted_egress: Option<HostedEgressMode>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -106,7 +108,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("setup_disk", &self.setup_disk)
             .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("image_disk", &self.image_disk)
-            .field("guest_carried", &self.guest_carried)
+            .field("hosted_egress", &self.hosted_egress)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -214,7 +216,7 @@ impl CloudHypervisorConfig {
             setup_disk,
             cw_runtime_disk: None,
             image_disk: None,
-            guest_carried: false,
+            hosted_egress: None,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -275,8 +277,8 @@ impl CloudHypervisorConfig {
         Ok(self)
     }
 
-    pub fn with_guest_carried(mut self, guest_carried: bool) -> Self {
-        self.guest_carried = guest_carried;
+    pub fn with_hosted_egress(mut self, hosted_egress: Option<HostedEgressMode>) -> Self {
+        self.hosted_egress = hosted_egress;
         self
     }
 
@@ -352,13 +354,9 @@ impl CloudHypervisorConfig {
         push_option(
             &mut arguments,
             "--cmdline",
-            if self.guest_carried {
-                format!(
-                    "{GUEST_KERNEL_CMDLINE} {}",
-                    codewire_vmm_guest_probe::hosted_control::GUEST_CARRIED_PARAMETER
-                )
-            } else {
-                GUEST_KERNEL_CMDLINE.to_owned()
+            match self.hosted_egress {
+                Some(mode) => format!("{GUEST_KERNEL_CMDLINE} {}", mode.parameter()),
+                None => GUEST_KERNEL_CMDLINE.to_owned(),
             },
         );
         push_option(
@@ -931,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_standard_pods_guest_boots_with_the_guest_carried_parameter() {
+    fn only_a_standard_pods_guest_boots_with_its_egress_modes_one_parameter() {
         let command_line = |config: CloudHypervisorConfig| {
             let command = config.command().unwrap();
             command.validate_allowlist().unwrap();
@@ -943,14 +941,15 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(command_line(config()), GUEST_KERNEL_CMDLINE);
-        let carried = command_line(config().with_guest_carried(true));
-        assert!(codewire_vmm_guest_probe::hosted_control::guest_carried(
-            &carried
-        ));
-        assert!(!codewire_vmm_guest_probe::hosted_control::guest_carried(
-            GUEST_KERNEL_CMDLINE
-        ));
-        assert!(carried.starts_with(GUEST_KERNEL_CMDLINE));
+        assert_eq!(
+            HostedEgressMode::from_command_line(GUEST_KERNEL_CMDLINE),
+            Ok(None)
+        );
+        for mode in [HostedEgressMode::GuestCarried, HostedEgressMode::Broker] {
+            let line = command_line(config().with_hosted_egress(Some(mode)));
+            assert_eq!(HostedEgressMode::from_command_line(&line), Ok(Some(mode)));
+            assert!(line.starts_with(GUEST_KERNEL_CMDLINE));
+        }
     }
 
     #[test]

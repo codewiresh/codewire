@@ -21,6 +21,12 @@ pub const HOSTED_GUEST_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 pub const HOSTED_PREFIX_LEN: u8 = 30;
 /// The netstack's address: the default route and the only DNS resolver.
 pub const HOSTED_GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+/// A broker-mode standard guest's `eth0` (#5602): its `cwegress0` holds the
+/// /30 above, so `eth0` and the Pod runtime's network worker take the next
+/// one. The worker's session accepts packets from this address alone.
+pub const HOSTED_BROKER_POD_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 6);
+/// That guest's gateway on `eth0`: the Pod runtime's network worker.
+pub const HOSTED_BROKER_POD_GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 5);
 /// The TUN's MTU, inside [`crate::SessionLimits::HOSTED`]'s bound.
 pub const HOSTED_TUN_MTU: usize = 65_000;
 /// The daemon's direct tailnet socket, whose traffic leaves over the Pod's

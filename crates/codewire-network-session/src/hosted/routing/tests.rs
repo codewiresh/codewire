@@ -221,3 +221,93 @@ fn a_default_route_names_its_table_gateway_and_interface() {
 fn this_namespace_verifies() {
     verify().unwrap();
 }
+
+/// Where a packet leaves under the rules [`rule_selectors`] makes, by the
+/// kernel's order: the first rule whose every selector matches sends it to
+/// the Pod table, whose default is `eth0`; otherwise the main table, where a
+/// destination inside an interface's own /30 goes to that interface and
+/// anything else follows the default into the TUN. A model of the routing,
+/// not the kernel's; the Kind walk checks the kernel.
+fn leaves_by(
+    plan: &Plan,
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    udp_source_port: Option<u16>,
+    bound_to_pod: bool,
+) -> &'static str {
+    let matches = |selector: &RuleAttribute| match selector {
+        RuleAttribute::IpProtocol(IpProtocol::Udp) => udp_source_port.is_some(),
+        RuleAttribute::SourcePortRange(range) => {
+            udp_source_port.is_some_and(|port| (range.start..=range.end).contains(&port))
+        }
+        RuleAttribute::Oifname(name) => bound_to_pod && name == HOSTED_POD_INTERFACE,
+        RuleAttribute::Source(IpAddr::V4(address)) => source == *address,
+        _ => false,
+    };
+    if rule_selectors(plan)
+        .iter()
+        .any(|(_, selectors, _)| selectors.iter().all(matches))
+    {
+        return HOSTED_POD_INTERFACE;
+    }
+    let same_slash_30 = |a: Ipv4Addr, b: Ipv4Addr| u32::from(a) >> 2 == u32::from(b) >> 2;
+    if same_slash_30(destination, HOSTED_GUEST_ADDRESS) {
+        HOSTED_TUN_NAME
+    } else if same_slash_30(destination, plan.pod_address) {
+        HOSTED_POD_INTERFACE
+    } else {
+        HOSTED_TUN_NAME
+    }
+}
+
+fn standard_broker_plan(pod_address: Ipv4Addr, pod_gateway: Ipv4Addr) -> Plan {
+    Plan {
+        tun: 7,
+        pod: 2,
+        pod_address,
+        pod_gateway,
+    }
+}
+
+/// A broker-mode standard guest (#5602): its `eth0` holds the /30 beside
+/// `cwegress0`'s, so the workload's packets, from `cwegress0`'s address,
+/// and its DNS at the netstack leave by `cwegress0`, while the daemon's
+/// platform dials, bound to `eth0`, and its direct tailnet socket leave by
+/// `eth0` (cw-egress's review, #5602 comment 139460).
+#[test]
+fn a_broker_mode_standard_guests_workload_leaves_by_the_tun() {
+    let plan = standard_broker_plan(
+        super::super::HOSTED_BROKER_POD_ADDRESS,
+        super::super::HOSTED_BROKER_POD_GATEWAY,
+    );
+    let public = Ipv4Addr::new(203, 0, 113, 7);
+    assert_eq!(
+        leaves_by(&plan, HOSTED_GUEST_ADDRESS, public, None, false),
+        HOSTED_TUN_NAME
+    );
+    assert_eq!(
+        leaves_by(
+            &plan,
+            HOSTED_GUEST_ADDRESS,
+            HOSTED_GATEWAY,
+            Some(53_000),
+            false
+        ),
+        HOSTED_TUN_NAME
+    );
+    let platform_peer = Ipv4Addr::new(10, 44, 0, 89);
+    assert_eq!(
+        leaves_by(&plan, plan.pod_address, platform_peer, None, true),
+        HOSTED_POD_INTERFACE
+    );
+    assert_eq!(
+        leaves_by(
+            &plan,
+            HOSTED_GUEST_ADDRESS,
+            public,
+            Some(TAILNET_DIRECT_SOURCE_PORT),
+            false
+        ),
+        HOSTED_POD_INTERFACE
+    );
+}

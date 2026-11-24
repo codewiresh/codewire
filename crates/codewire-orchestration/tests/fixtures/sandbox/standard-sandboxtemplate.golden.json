@@ -219,7 +219,7 @@
               },
               {
                 "name": "CODEWIRE_VM_EGRESS_MODE",
-                "value": "guest-carried"
+                "value": "broker"
               },
               {
                 "name": "CODEWIRE_WORKSPACE_IMAGE",

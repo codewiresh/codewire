@@ -121,16 +121,70 @@ pub const GUEST_CARRIED_PARAMETER: &str = "codewire.guest_carried=1";
 /// Whether a kernel command line names [`GUEST_CARRIED_PARAMETER`] as one
 /// whole parameter.
 pub fn guest_carried(command_line: &str) -> bool {
+    names(command_line, GUEST_CARRIED_PARAMETER)
+}
+
+/// The kernel command-line parameter a standard Pod's VMM boots a
+/// broker-mode guest with, never beside [`GUEST_CARRIED_PARAMETER`] (#5602,
+/// design: comment 130891). The hosted daemon in that guest runs hosted
+/// broker mode unchanged: its workload's default route is the egress TUN the
+/// guest's init makes, carried to `cw-egress` over a stream the daemon opens
+/// with the Pod's own egress token. As with the other parameter, only the
+/// runtime's fixed VMM configuration writes it.
+pub const HOSTED_BROKER_PARAMETER: &str = "codewire.hosted_broker=1";
+
+/// How a standard Pod's guest carries its workload's egress. The Pod's
+/// `CODEWIRE_VM_EGRESS_MODE` chooses it on the host, and the kernel command
+/// line carries it into the guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedEgressMode {
+    /// The workload has no egress; the daemon reaches only the platform
+    /// peers, through the VM's own network session.
+    GuestCarried,
+    /// Hosted broker mode inside the VM.
+    Broker,
+}
+
+impl HostedEgressMode {
+    /// The one kernel command-line parameter that names this mode.
+    pub fn parameter(self) -> &'static str {
+        match self {
+            Self::GuestCarried => GUEST_CARRIED_PARAMETER,
+            Self::Broker => HOSTED_BROKER_PARAMETER,
+        }
+    }
+
+    /// The mode a kernel command line names: none for a local VM's, and an
+    /// error for one naming both, which no runtime writes.
+    pub fn from_command_line(command_line: &str) -> Result<Option<Self>, HostedControlError> {
+        match (
+            guest_carried(command_line),
+            names(command_line, HOSTED_BROKER_PARAMETER),
+        ) {
+            (false, false) => Ok(None),
+            (true, false) => Ok(Some(Self::GuestCarried)),
+            (false, true) => Ok(Some(Self::Broker)),
+            (true, true) => Err(HostedControlError::InvalidContent),
+        }
+    }
+}
+
+/// Whether a standard Pod's VMM booted this kernel, in either mode.
+pub fn hosted_guest(command_line: &str) -> bool {
+    !matches!(HostedEgressMode::from_command_line(command_line), Ok(None))
+}
+
+fn names(command_line: &str, parameter: &str) -> bool {
     command_line
         .split_ascii_whitespace()
-        .any(|parameter| parameter == GUEST_CARRIED_PARAMETER)
+        .any(|named| named == parameter)
 }
 pub const HOSTED_CHALLENGE_LEN: usize = 32;
 pub const HOSTED_HELLO_LEN: usize = 40;
 pub const HOSTED_REPLY_LEN: usize = 48;
 /// A message's header before its payload: magic, kind, reserved, length.
 pub const HOSTED_REQUEST_HEADER_LEN: usize = 16;
-/// The largest payload: the settings with two roots bundles, or two tokens.
+/// The largest payload: the settings with two roots bundles, or three tokens.
 pub const HOSTED_MAX_PAYLOAD: usize = 256 * 1024;
 const TAG_LEN: usize = 32;
 
@@ -268,9 +322,17 @@ pub struct HostedSettings {
     pub coordinator_extra_roots: BTreeMap<String, String>,
 }
 
-/// The tokens that cross into the guest: exactly two (cw-security's
-/// condition). The egress token stays with the host end, which is what joins
-/// `cw-egress`.
+/// The tokens that cross into a standard guest, each Pod-bound and each
+/// checked by the service it opens, never by anything the guest says
+/// (cw-security, #5602 comments 130894 and 130903):
+///
+/// | Token | Audience | Mode | Checked by |
+/// |---|---|---|---|
+/// | `binding` | the workspace binding | both | orchestration's binding, by TokenReview and the live Pod |
+/// | `credential` | the credential workspace | both, when set up | the credential service, by reviewed Pod UID |
+/// | `egress` | `cw-egress` | broker only | `cw-egress`'s admission: this Pod's UID and address, on this node |
+///
+/// A guest-carried guest gets no egress token.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostedTokens {
@@ -278,6 +340,10 @@ pub struct HostedTokens {
     pub binding: String,
     /// The credential workspace token, when the credential runtime is set up.
     pub credential: Option<String>,
+    /// The Pod-bound `cw-egress` token a broker-mode daemon opens its egress
+    /// stream with; absent in guest-carried mode.
+    #[serde(default)]
+    pub egress: Option<String>,
 }
 
 impl HostedSettings {
@@ -315,10 +381,9 @@ impl HostedTokens {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
         };
         if !valid(&self.binding)
-            || self
-                .credential
-                .as_deref()
-                .is_some_and(|token| !valid(token))
+            || [&self.credential, &self.egress]
+                .into_iter()
+                .any(|token| token.as_deref().is_some_and(|token| !valid(token)))
         {
             return Err(HostedControlError::InvalidContent);
         }
@@ -511,7 +576,33 @@ mod tests {
         HostedTokens {
             binding: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln".to_owned(),
             credential: None,
+            egress: Some("eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJlZ3Jlc3MifQ.c2ln".to_owned()),
         }
+    }
+
+    #[test]
+    fn a_kernel_command_line_names_one_hosted_mode_or_none() {
+        let base = "console=ttyS0 rdinit=/init panic=-1";
+        assert_eq!(HostedEgressMode::from_command_line(base), Ok(None));
+        assert!(!hosted_guest(base));
+        for mode in [HostedEgressMode::GuestCarried, HostedEgressMode::Broker] {
+            let line = format!("{base} {}", mode.parameter());
+            assert_eq!(HostedEgressMode::from_command_line(&line), Ok(Some(mode)));
+            assert!(hosted_guest(&line));
+        }
+        // Only whole parameters count, and the two never stand together.
+        for near in ["codewire.hosted_broker=10", "xcodewire.hosted_broker=1"] {
+            assert_eq!(
+                HostedEgressMode::from_command_line(&format!("{base} {near}")),
+                Ok(None)
+            );
+        }
+        let both = format!("{base} {GUEST_CARRIED_PARAMETER} {HOSTED_BROKER_PARAMETER}");
+        assert_eq!(
+            HostedEgressMode::from_command_line(&both),
+            Err(HostedControlError::InvalidContent)
+        );
+        assert!(!guest_carried(&format!("{base} {HOSTED_BROKER_PARAMETER}")));
     }
 
     #[test]
@@ -569,14 +660,21 @@ mod tests {
             );
         }
         for token in ["", "has space", &"a".repeat(MAX_TOKEN_BYTES + 1)] {
-            let refused = HostedTokens {
-                binding: token.to_owned(),
-                credential: None,
-            };
-            assert_eq!(
-                HostedMessage::Tokens(refused).encode(&key(1), &challenge),
-                Err(HostedControlError::InvalidContent)
-            );
+            for refused in [
+                HostedTokens {
+                    binding: token.to_owned(),
+                    ..tokens()
+                },
+                HostedTokens {
+                    egress: Some(token.to_owned()),
+                    ..tokens()
+                },
+            ] {
+                assert_eq!(
+                    HostedMessage::Tokens(refused).encode(&key(1), &challenge),
+                    Err(HostedControlError::InvalidContent)
+                );
+            }
         }
     }
 

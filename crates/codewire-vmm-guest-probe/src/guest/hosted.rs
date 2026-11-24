@@ -15,9 +15,11 @@ use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 use super::*;
 use crate::hosted_control::{
     HOSTED_CONTROL_VSOCK_PORT, HOSTED_DAEMON_LISTENER_FD, HOSTED_DAEMON_LISTENER_FD_ENV,
-    HOSTED_HELLO_LEN, HOSTED_REQUEST_HEADER_LEN, HostedControlKey, HostedMessage, HostedSettings,
-    HostedTokens, encode_hello, encode_reply,
+    HOSTED_HELLO_LEN, HOSTED_REQUEST_HEADER_LEN, HostedControlKey, HostedEgressMode, HostedMessage,
+    HostedSettings, HostedTokens, encode_hello, encode_reply,
 };
+
+mod broker;
 
 /// Everything the guest keeps for the hosted workspace, in memory.
 pub(super) const HOSTED_ROOT: &str = "/run/codewire/hosted";
@@ -28,6 +30,10 @@ pub(super) const HOSTED_BINDING_ROOTS_PATH: &str = "/run/codewire/hosted/binding
 pub(super) const HOSTED_COORDINATOR_ROOTS_PATH: &str = "/run/codewire/hosted/coordinator-roots";
 pub(super) const HOSTED_BINDING_TOKEN_PATH: &str = "/run/codewire/hosted/binding-token";
 pub(super) const HOSTED_CREDENTIAL_TOKEN_PATH: &str = "/run/codewire/hosted/credential-token";
+/// The Pod's `cw-egress` token, in broker mode only.
+pub(super) const HOSTED_EGRESS_TOKEN_PATH: &str = "/run/codewire/hosted/egress-token";
+/// The TUN device a broker-mode daemon attaches `cwegress0` through.
+const TUN_DEVICE: (&str, i64, i64) = ("/dev/net/tun", 10, 200);
 /// The daemon's own state directory, the container's `/codewire/run`.
 pub(super) const HOSTED_RUN_PATH: &str = "/run/codewire/hosted/run";
 /// The daemon's readiness marker, as the guest sees it.
@@ -108,6 +114,12 @@ impl HostedState {
                     received.settings.is_some(),
                     "hosted tokens arrived before the settings"
                 );
+                // The egress token is broker mode's alone, and that mode's
+                // need: the two modes stay apart.
+                ensure!(
+                    tokens.egress.is_some() == broker(),
+                    "the hosted tokens do not match this boot's egress mode"
+                );
                 if let Some((uid, gid)) = received.owner {
                     write_tokens(&tokens, uid, gid)?;
                 }
@@ -178,8 +190,42 @@ pub(super) fn start(seed: &Seed) -> Result<Arc<HostedState>> {
     ready_rx
         .recv_timeout(Duration::from_secs(2))
         .context("wait for the hosted control listener")??;
-    super::hosted_ingress::start(&kernel_command_line()?)?;
+    let command_line = kernel_command_line()?;
+    let mode = HostedEgressMode::from_command_line(&command_line)
+        .ok()
+        .flatten()
+        .context("a standard Pod's boot names exactly one hosted egress mode")?;
+    let _ = MODE.set(mode); // Set once per boot.
+    super::hosted_ingress::start(&command_line)?;
     Ok(state)
+}
+
+/// A broker-mode guest's `eth0` address and gateway, the host worker's
+/// `SessionAddresses::HOSTED_BROKER` (#5602).
+const BROKER_POD_ADDRESS: &str = "192.0.2.6/30";
+const BROKER_POD_GATEWAY: &str = "192.0.2.5";
+
+/// The guest network's address and gateway on `eth0`. A broker-mode guest's
+/// `cwegress0` holds the usual /30, so its `eth0` takes the next one; every
+/// other guest's is unchanged. Read from the kernel command line, in
+/// whichever process asks (the network agent is not this one).
+pub(super) fn eth0() -> (&'static str, &'static str) {
+    eth0_addresses_for(&fs::read_to_string("/proc/cmdline").unwrap_or_default())
+}
+
+fn eth0_addresses_for(command_line: &str) -> (&'static str, &'static str) {
+    match HostedEgressMode::from_command_line(command_line) {
+        Ok(Some(HostedEgressMode::Broker)) => (BROKER_POD_ADDRESS, BROKER_POD_GATEWAY),
+        _ => (super::NETWORK_GUEST_ADDRESS, super::NETWORK_GATEWAY_ADDRESS),
+    }
+}
+
+/// This boot's hosted egress mode, from the kernel command line.
+static MODE: std::sync::OnceLock<HostedEgressMode> = std::sync::OnceLock::new();
+
+/// Whether this boot runs hosted broker mode inside the VM.
+pub(super) fn broker() -> bool {
+    MODE.get() == Some(&HostedEgressMode::Broker)
 }
 
 async fn serve(mut stream: VsockStream, key: &HostedControlKey, state: &HostedState) -> Result<()> {
@@ -240,18 +286,27 @@ fn write_tokens(tokens: &HostedTokens, uid: u32, gid: u32) -> Result<()> {
     for (directory, token) in [
         (HOSTED_BINDING_TOKEN_PATH, Some(&tokens.binding)),
         (HOSTED_CREDENTIAL_TOKEN_PATH, tokens.credential.as_ref()),
+        (HOSTED_EGRESS_TOKEN_PATH, tokens.egress.as_ref()),
     ] {
-        create_owned_dir(Path::new(directory), uid, gid)?;
-        let Some(token) = token else {
+        if directory == HOSTED_EGRESS_TOKEN_PATH && !broker() {
             continue;
-        };
-        let staged = Path::new(directory).join(format!(".{TOKEN_NAME}"));
-        write_durable(&staged, token.as_bytes(), 0o600)?;
-        lchown(&staged, uid, gid)?;
-        fs::rename(&staged, Path::new(directory).join(TOKEN_NAME))
-            .context("publish a hosted token")?;
+        }
+        create_owned_dir(Path::new(directory), uid, gid)?;
+        if let Some(token) = token {
+            write_token(Path::new(directory), token, uid, gid)?;
+        }
     }
     Ok(())
+}
+
+/// One token, written whole beside its file and renamed over it. A daemon
+/// rereading it on every reconnect (the egress stream's included) reads the
+/// last token or this one, never part of either.
+fn write_token(directory: &Path, token: &str, uid: u32, gid: u32) -> Result<()> {
+    let staged = directory.join(format!(".{TOKEN_NAME}"));
+    write_durable(&staged, token.as_bytes(), 0o600)?;
+    lchown(&staged, uid, gid)?;
+    fs::rename(&staged, directory.join(TOKEN_NAME)).context("publish a hosted token")
 }
 
 fn create_owned_dir(path: &Path, uid: u32, gid: u32) -> Result<()> {
@@ -293,7 +348,12 @@ impl HostedState {
             plan.identity.uid,
             plan.identity.gid,
         )?;
-        self.publish(plan.identity.uid, plan.identity.gid)
+        self.publish(plan.identity.uid, plan.identity.gid)?;
+        // Broker mode's egress path exists before the workload's first packet.
+        if broker() {
+            broker::make_egress_path(plan.identity.uid)?;
+        }
+        Ok(())
     }
 }
 
@@ -323,8 +383,14 @@ pub(super) fn container_mounts() -> Vec<serde_json::Value> {
         ),
         (HOSTED_CREDENTIAL_TOKEN_PATH, token_directory, "ro"),
         (HOSTED_RUN_PATH, "/codewire/run", "rw"),
+        (
+            HOSTED_EGRESS_TOKEN_PATH,
+            codewire_daemon_proto::EGRESS_TOKEN_MOUNT_PATH,
+            "ro",
+        ),
     ]
     .into_iter()
+    .filter(|(source, ..)| *source != HOSTED_EGRESS_TOKEN_PATH || broker())
     .map(|(source, destination, access)| {
         serde_json::json!({
             "destination": destination, "type": "none", "source": source,
@@ -334,12 +400,31 @@ pub(super) fn container_mounts() -> Vec<serde_json::Value> {
     .collect()
 }
 
+/// The devices a hosted workspace container adds to the standard set, and
+/// their cgroup rules: in broker mode, the TUN device the daemon attaches
+/// `cwegress0` through, as a Kata broker Pod's `egress-devnet` holds it.
+pub(super) fn container_devices() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    if !broker() {
+        return (Vec::new(), Vec::new());
+    }
+    let (path, major, minor) = TUN_DEVICE;
+    (
+        vec![serde_json::json!({
+            "path": path, "type": "c", "major": major, "minor": minor,
+            "fileMode": 0o666, "uid": 0, "gid": 0
+        })],
+        vec![serde_json::json!({
+            "allow": true, "type": "c", "major": major, "minor": minor, "access": "rwm"
+        })],
+    )
+}
+
 /// Inside the container: the plan every readiness message is made from,
 /// which the guest's own copy must match, and the plan the workload runs
 /// from, which for a hosted workspace is [`container_plan`]'s.
 pub(super) fn with_workload(plan: WorkspacePlan) -> Result<(WorkspacePlan, WorkspacePlan)> {
     let mut workload = container_plan(plan.clone())?;
-    // A guest-carried container's workload alone inherits the daemon's
+    // A standard Pod's container's workload alone inherits the daemon's
     // listener, passed at its spawn, and the variable that names it. The
     // image and the project may not set that variable themselves.
     if super::hosted_ingress::claim_container_listener()? {
@@ -369,8 +454,8 @@ fn names_listener_variable(environment: &[String]) -> bool {
     })
 }
 
-/// The guest kernel's command line, which says whether this boot is
-/// guest-carried.
+/// The guest kernel's command line, which names this boot's hosted egress
+/// mode.
 fn kernel_command_line() -> Result<String> {
     fs::read_to_string("/proc/cmdline").context("read the guest kernel command line")
 }
@@ -421,6 +506,70 @@ pub(super) fn wait_until_ready() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rotation replaces the token by rename: a reader holding the old
+    /// file keeps reading all of it, the path reads all of the new one, and
+    /// no staged file is left.
+    #[test]
+    fn a_rotated_token_replaces_the_old_one_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        // SAFETY: getuid and getgid read this process's ids and cannot fail.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        write_token(directory.path(), "eyJh.eyJv.b2xk", uid, gid).unwrap();
+        let mut held = fs::File::open(directory.path().join(TOKEN_NAME)).unwrap();
+        write_token(directory.path(), "eyJh.eyJuZXc.bmV3", uid, gid).unwrap();
+        let mut old = String::new();
+        held.read_to_string(&mut old).unwrap();
+        assert_eq!(old, "eyJh.eyJv.b2xk");
+        assert_eq!(
+            fs::read_to_string(directory.path().join(TOKEN_NAME)).unwrap(),
+            "eyJh.eyJuZXc.bmV3"
+        );
+        let names: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(TOKEN_NAME)]);
+    }
+
+    /// A broker-mode guest's `eth0` takes the /30 the host worker's session
+    /// takes for it, beside `cwegress0`'s; every other guest's is unchanged.
+    #[test]
+    fn only_a_broker_mode_guests_eth0_takes_the_next_slash_30() {
+        use codewire_network_session::hosted::{
+            HOSTED_BROKER_POD_ADDRESS, HOSTED_BROKER_POD_GATEWAY, HOSTED_GUEST_ADDRESS,
+            HOSTED_PREFIX_LEN,
+        };
+        let base = "console=ttyS0 rdinit=/init panic=-1";
+        let broker = eth0_addresses_for(&format!("{base} codewire.hosted_broker=1"));
+        assert_eq!(
+            broker,
+            (
+                format!("{HOSTED_BROKER_POD_ADDRESS}/{HOSTED_PREFIX_LEN}").as_str(),
+                HOSTED_BROKER_POD_GATEWAY.to_string().as_str(),
+            )
+        );
+        // Not cwegress0's /30.
+        assert!(!broker.0.starts_with(&format!("{HOSTED_GUEST_ADDRESS}/")));
+        for line in [base.to_owned(), format!("{base} codewire.guest_carried=1")] {
+            assert_eq!(
+                eth0_addresses_for(&line),
+                (
+                    super::super::NETWORK_GUEST_ADDRESS,
+                    super::super::NETWORK_GATEWAY_ADDRESS
+                )
+            );
+        }
+    }
+
+    /// The broker-mode container adds exactly the TUN device, and no other
+    /// boot adds any.
+    #[test]
+    fn only_a_broker_boot_adds_the_tun_device() {
+        // MODE is unset in a test process: no hosted mode, no device.
+        assert_eq!(container_devices(), (Vec::new(), Vec::new()));
+        assert_eq!(TUN_DEVICE, ("/dev/net/tun", 10, 200));
+    }
 
     #[test]
     fn the_image_and_project_may_not_name_the_listener_variable() {

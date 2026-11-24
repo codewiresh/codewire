@@ -165,6 +165,20 @@ fn guest_carried_from(
     Ok(true)
 }
 
+/// A guest-carried daemon runs no egress loop, so it never receives
+/// `cw-egress`'s trust frame or installs the front door's CA. An intercepted
+/// bind there would project placeholders its agents can't use through a
+/// front door they don't trust, so the daemon refuses to serve rather than
+/// leave interception quietly off (#5602). A broker-mode standard guest's
+/// daemon runs the egress loop and installs the CA as a Kata Pod's does.
+pub(crate) fn refuse_carried_interception(carried: bool, intercepted: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !(carried && intercepted),
+        "this Sandbox is intercepted, but a guest-carried daemon has no egress loop to install the front door's CA; refusing to serve"
+    );
+    Ok(())
+}
+
 /// The guest-carried daemon's start-time self-check (cw-security, #5602),
 /// standing in for the broker loop's until the host end joins `cw-egress`:
 /// from the workload's network, bound to the Pod interface, a TCP dial to a
@@ -633,6 +647,21 @@ mod tests {
         // settings.
         assert!(guest_carried_from(carried, true, true).is_err());
         assert!(guest_carried_from(carried, false, false).is_err());
+        // A broker-mode standard guest is not guest-carried: with its egress
+        // token and `cwegress0`, it runs broker mode's egress loop, whose
+        // trust frame installs the front door's CA, as a Kata Pod's does.
+        let broker = "console=ttyS0 rdinit=/init panic=-1 codewire.hosted_broker=1";
+        assert!(!guest_carried_from(broker, true, true).unwrap());
+    }
+
+    /// Interception is never quietly off: only a guest-carried daemon with
+    /// an intercepted bind refuses to serve.
+    #[test]
+    fn a_guest_carried_daemon_refuses_an_intercepted_bind() {
+        assert!(refuse_carried_interception(true, true).is_err());
+        for (carried, intercepted) in [(true, false), (false, true), (false, false)] {
+            refuse_carried_interception(carried, intercepted).unwrap();
+        }
     }
     use std::collections::HashMap;
 

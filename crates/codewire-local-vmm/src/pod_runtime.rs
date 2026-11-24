@@ -6,10 +6,11 @@
 //! paths are fixed by the Pod's shape, and the few values that differ per
 //! sandbox come from the template's environment.
 //!
-//! This first version boots the guest with its own daemon and no network at
-//! all: the egress broker runs the locked policy, the only mode. The hosted
-//! daemon, its settings and tokens, and the platform peers it may reach come
-//! next, under the conditions cw-security set on #5602.
+//! The guest runs the hosted daemon with the Pod's settings and tokens. The
+//! host end's network worker runs the locked policy with the Pod's platform
+//! peers alone open, in both egress modes ([`EgressMode`]): in broker mode
+//! the workload's traffic reaches the network only inside the daemon's stream
+//! to `cw-egress`, one of those peers (#5602, design: comment 130891).
 
 use std::fs;
 use std::io::{self, Read as _};
@@ -135,6 +136,22 @@ pub enum EgressMode {
     /// The workload has no egress, and the daemon reaches only the platform
     /// peers. The runtime marks the guest with `codewire.guest_carried=1`.
     GuestCarried,
+    /// Hosted broker mode inside the VM: the daemon carries the workload over
+    /// `cwegress0` to `cw-egress` with the Pod's egress token, which crosses
+    /// into the guest in this mode alone. The guest is marked
+    /// `codewire.hosted_broker=1`.
+    Broker,
+}
+
+impl EgressMode {
+    fn hosted(self) -> codewire_vmm_guest_probe::hosted_control::HostedEgressMode {
+        match self {
+            Self::GuestCarried => {
+                codewire_vmm_guest_probe::hosted_control::HostedEgressMode::GuestCarried
+            }
+            Self::Broker => codewire_vmm_guest_probe::hosted_control::HostedEgressMode::Broker,
+        }
+    }
 }
 
 /// Orchestration renders `new` and sets `existing` once the sandbox's
@@ -199,11 +216,10 @@ impl PodSettings {
                 "existing" => VmState::Existing,
                 _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_STATE")),
             },
-            // `broker` (the daemon's broker mode inside the VM) is agreed on
-            // #5602 but not built here yet, so it is refused, like any value
-            // other than these.
+            // Exactly these two values; anything else is refused.
             egress_mode: match read("CODEWIRE_VM_EGRESS_MODE")?.as_str() {
                 "guest-carried" => EgressMode::GuestCarried,
+                "broker" => EgressMode::Broker,
                 _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_EGRESS_MODE")),
             },
         };
@@ -443,8 +459,8 @@ fn boot_request(
         cw_runtime_catalog_generation: Some(cw_runtime_catalog_generation),
         cw_runtime_moved_from_generation: None,
         image_disk: Some(settings.attachment(&paths.image_disk)),
-        // Closed is the only mode, with the platform peers alone open to the
-        // daemon (cw-security, #5602).
+        // Closed at the host end in both modes, with the platform peers alone
+        // open (cw-security, #5602); in broker mode `cw-egress` is one of them.
         network_policy: CompiledPolicy::locked_with_platform_peers(&settings.platform_peers)?,
         intercepts: InterceptSet::default(),
         credential_placeholders: Default::default(),
@@ -467,9 +483,11 @@ async fn boot_and_wait(
     );
     // Read before the boot, so a Pod missing its settings fails at once.
     let hosted_settings = hosted::read_settings(|name| std::env::var(name).ok(), &paths.hosted)?;
-    let mut tokens = hosted::read_tokens(&paths.hosted)?;
+    let mut tokens = hosted::read_tokens(&paths.hosted, settings.egress_mode)?;
     let booting = std::time::Instant::now();
-    let prepared = runner.prepare_hosted(request).await?;
+    let prepared = runner
+        .prepare_hosted(request, settings.egress_mode.hosted())
+        .await?;
     let mut running = runner.start(prepared).await?;
     // The guest waits for these before it starts the workspace, network
     // readiness included, so they go before the network worker's wait.
@@ -507,7 +525,9 @@ async fn boot_and_wait(
                 if exit != ExitClass::StillRunning {
                     break exit;
                 }
-                tokens = hosted::refresh_tokens(&running, &paths.hosted, tokens).await?;
+                tokens =
+                    hosted::refresh_tokens(&running, &paths.hosted, settings.egress_mode, tokens)
+                        .await?;
             }
         }
     };
@@ -763,6 +783,14 @@ mod tests {
         assert_eq!(settings.memory_mib, 4096);
         assert_eq!(settings.state_disk_bytes, 20480 * 1024 * 1024);
         assert_eq!(settings.egress_mode, EgressMode::GuestCarried);
+        let broker =
+            PodSettings::from_environment(environment(&[("CODEWIRE_VM_EGRESS_MODE", "broker")]))
+                .unwrap();
+        assert_eq!(broker.egress_mode, EgressMode::Broker);
+        assert_eq!(
+            broker.egress_mode.hosted(),
+            codewire_vmm_guest_probe::hosted_control::HostedEgressMode::Broker
+        );
         // Docker is off unless the Pod sizes its disk.
         assert_eq!(settings.docker_disk_bytes, None);
         let docker =
@@ -787,9 +815,9 @@ mod tests {
                 "ABCDEF0123456789abcdef0123456789",
             ),
             ("CODEWIRE_WORKSPACE_IMAGE", ""),
-            // Missing, not yet built, and unknown: never defaulted.
+            // Missing or unknown: never defaulted.
             ("CODEWIRE_VM_EGRESS_MODE", ""),
-            ("CODEWIRE_VM_EGRESS_MODE", "broker"),
+            ("CODEWIRE_VM_EGRESS_MODE", "Broker"),
             ("CODEWIRE_VM_EGRESS_MODE", "Guest-carried"),
             ("CODEWIRE_VM_EGRESS_MODE", "direct"),
             ("CODEWIRE_VM_STATE", ""),

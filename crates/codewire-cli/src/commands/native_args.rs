@@ -43,6 +43,10 @@ pub(crate) struct NativeNetworkWorkerArgs {
     pub(crate) environment_id: String,
     #[arg(long)]
     pub(crate) generation: u64,
+    /// A broker-mode standard guest's network (#5602): its `eth0` takes the
+    /// /30 beside the one its `cwegress0` holds. Only the runner sets it.
+    #[arg(long)]
+    pub(crate) hosted_broker_network: bool,
 }
 
 #[derive(Debug, Args)]

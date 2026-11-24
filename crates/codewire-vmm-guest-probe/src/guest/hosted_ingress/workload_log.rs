@@ -1,6 +1,6 @@
 //! The hosted workload's output, out to the host (#5602, cw-security's
 //! conditions on comment 134050). Under Kata the hosted daemon's stdout and
-//! stderr are its container's log; in a guest-carried boot they reach the Pod
+//! stderr are its container's log; in a standard Pod's boot they reach the Pod
 //! log this way instead.
 //!
 //! Guest init holds a pipe for the guest's life. Its write end is passed into
@@ -21,7 +21,7 @@ use anyhow::{Context as _, Result};
 use tokio::io::AsyncWriteExt as _;
 use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
 
-use crate::hosted_control::{HOSTED_LOG_MAX_LINE, HOSTED_LOG_VSOCK_PORT, guest_carried};
+use crate::hosted_control::{HOSTED_LOG_MAX_LINE, HOSTED_LOG_VSOCK_PORT, hosted_guest};
 
 /// Lines held while the host is not reading; more are dropped.
 const BUFFERED_LINES: usize = 256;
@@ -33,10 +33,10 @@ const READ_RETRY: Duration = Duration::from_millis(100);
 /// The pipe's write end, which the workspace container receives.
 static WRITER: OnceLock<OwnedFd> = OnceLock::new();
 
-/// Makes the pipe and starts forwarding it, once, in a guest-carried boot; a
+/// Makes the pipe and starts forwarding it, once, in a standard Pod's boot; a
 /// local VM's boot makes neither.
 pub(in crate::guest) fn hold(command_line: &str) -> Result<()> {
-    if !guest_carried(command_line) || WRITER.get().is_some() {
+    if !hosted_guest(command_line) || WRITER.get().is_some() {
         return Ok(());
     }
     let (reader, writer) = pipe().context("make the log pipe")?;

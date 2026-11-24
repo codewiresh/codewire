@@ -122,11 +122,13 @@ mod egress_spawn;
 mod host_port_forward;
 mod mesh_ingress_pass;
 use mesh_ingress_pass::take_mesh_ingress_receiver_exit;
+mod network_worker_spawn;
 mod stage_times;
 mod worker_descriptors;
 mod worker_frames;
 #[cfg(target_os = "linux")]
 use cw_runtime_disk::validate_live_cw_runtime_disk;
+use network_worker_spawn::spawn_network_worker_process;
 mod progress;
 #[cfg(target_os = "macos")]
 mod vz_launch;
@@ -290,22 +292,22 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
-        self.prepare_boot(request, false).await
+        self.prepare_boot(request, None).await
     }
 
-    /// A standard Pod's boot (#5602): its guest runs the hosted daemon, with
-    /// the settings and tokens the hosted control channel carries.
+    /// A standard Pod's boot (#5602): the hosted daemon, in `egress` mode.
     pub async fn prepare_hosted(
         &self,
         request: CreateVmRequest,
+        egress: codewire_vmm_guest_probe::hosted_control::HostedEgressMode,
     ) -> Result<PreparedVm, RunnerError> {
-        self.prepare_boot(request, true).await
+        self.prepare_boot(request, Some(egress)).await
     }
 
     async fn prepare_boot(
         &self,
         request: CreateVmRequest,
-        hosted: bool,
+        hosted: Option<codewire_vmm_guest_probe::hosted_control::HostedEgressMode>,
     ) -> Result<PreparedVm, RunnerError> {
         #[cfg(target_os = "linux")]
         preflight()?;
@@ -365,7 +367,7 @@ impl CloudHypervisorRunner {
             direct_shares_sha256,
             docker_disk.is_some(),
             cw_runtime_disk.as_ref(),
-            hosted,
+            hosted.is_some(),
             // The front door's spawn supplies the placeholders beside its CA
             // (#3999, change 12), in the request; none until then.
             egress_ca,
@@ -408,7 +410,7 @@ impl CloudHypervisorRunner {
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
         .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_image_disk(image_disk.as_ref().map(|disk| disk.path.clone()))?
-        .with_guest_carried(hosted)
+        .with_hosted_egress(hosted)
         .with_checkpoint_dir(Some(paths.checkpoints_dir.clone()))?
         .with_virtiofs(
             direct_shares
@@ -448,6 +450,7 @@ impl CloudHypervisorRunner {
             host_port_listeners,
             front_door,
             lock,
+            hosted_egress: hosted,
         })
     }
 
@@ -695,6 +698,7 @@ impl CloudHypervisorRunner {
             network_worker: None,
             host_port_listeners: prepared.host_port_listeners,
             restored,
+            hosted_egress: prepared.hosted_egress,
             _lock: prepared.lock,
         })
     }
@@ -1150,6 +1154,8 @@ pub struct PreparedVm {
     /// The boot's front door, started before the seed (#3999).
     front_door: Option<front_door::RunningFrontDoor>,
     lock: VmLock,
+    /// A standard Pod's hosted egress mode (#5602); `None` for a local VM.
+    hosted_egress: Option<codewire_vmm_guest_probe::hosted_control::HostedEgressMode>,
 }
 
 impl fmt::Debug for PreparedVm {
@@ -1235,6 +1241,9 @@ pub struct RunningVm {
     host_ports: Vec<HostPortBinding>,
     /// What the guest reported when this boot resumed from a VM checkpoint.
     restored: Option<RestoreReport>,
+    /// A standard Pod's hosted egress mode (#5602), which picks the guest
+    /// network's /30 for the worker; `None` for a local VM.
+    hosted_egress: Option<codewire_vmm_guest_probe::hosted_control::HostedEgressMode>,
     /// The environment's front door and its pairing socket (#3999), when
     /// the boot binds interception.
     front_door: Option<front_door::RunningFrontDoor>,
@@ -1566,6 +1575,8 @@ impl RunningVm {
                 policy: &self.request.network_policy,
                 // Empty, the default, binds nothing (#3999).
                 intercepts: self.request.intercepts.clone(),
+                hosted_broker_network: self.hosted_egress
+                    == Some(codewire_vmm_guest_probe::hosted_control::HostedEgressMode::Broker),
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -2092,6 +2103,8 @@ struct NetworkStackLaunch<'a> {
     /// gets a hand-off socket to the front door and these bindings before it
     /// is ready.
     intercepts: codewire_egress_policy::intercept::InterceptSet,
+    /// A broker-mode standard guest's network takes the next /30 (#5602).
+    hosted_broker_network: bool,
 }
 
 struct NetworkWorkerProcess {
@@ -3310,222 +3323,6 @@ async fn spawn_egress_broker_process(
         endpoints,
         key,
     })
-}
-
-async fn spawn_network_worker_process(
-    context: &NetworkStackLaunch<'_>,
-    key: NetworkKey,
-    attachment: WorkerBrokerAttachment,
-) -> Result<NetworkWorkerProcess, RunnerError> {
-    PrivateRoot::open(context.working_directory)?;
-    let (bootstrap_parent, bootstrap_child) =
-        StdUnixStream::pair().map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    bootstrap_parent
-        .set_nonblocking(true)
-        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
-        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
-    let mesh_ingress_key = product_worker.then(fresh_mesh_ingress_control_key);
-    let (bytes, broker_endpoints) = match attachment {
-        WorkerBrokerAttachment::Product {
-            endpoints,
-            key: broker_key,
-        } => (
-            encode_product_worker_bootstrap(
-                context.vm_id,
-                context.generation,
-                &key,
-                &broker_key,
-                mesh_ingress_key
-                    .as_deref()
-                    .expect("product worker has a Mesh ingress control key"),
-                context
-                    .mesh
-                    .map(|attachment| attachment.guest_ports.as_slice())
-                    .unwrap_or_default(),
-                context.policy.digest(),
-            )
-            .map(|bytes| Zeroizing::new(bytes.to_vec())),
-            Some(endpoints),
-        ),
-        WorkerBrokerAttachment::InjectedVerification => (
-            encode_worker_bootstrap(context.vm_id, context.generation, &key)
-                .map(|bytes| Zeroizing::new(bytes.to_vec())),
-            None,
-        ),
-    };
-    let bytes = bytes.map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
-    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
-        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    let bootstrap_fd = inherited_bootstrap.as_raw_fd();
-    let expected_parent = unsafe { libc::getpid() };
-    let mut command = crate::swept_tokio_command(context.executable, &[]);
-    command
-        .arg(if product_worker {
-            "__native-network-worker"
-        } else {
-            "__native-network-worker-fixture"
-        })
-        .arg("--environment-id")
-        .arg(context.vm_id.to_string())
-        .arg("--generation")
-        .arg(context.generation.to_string())
-        .env_clear()
-        .current_dir(context.working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    unsafe {
-        command.pre_exec(move || {
-            raise_open_file_limit()?;
-            prepare_isolated_child(expected_parent, &[(bootstrap_fd, NETWORK_BOOTSTRAP_FD)])
-        });
-    }
-    let child = command
-        .spawn()
-        .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
-    drop(inherited_bootstrap);
-    drop(bootstrap_child);
-    let mut startup = NetworkWorkerStartup::new(child);
-    let Some(pid) = startup.child_mut().id() else {
-        reap_failed_network_worker_startup(&mut startup).await?;
-        return Err(RunnerError::NetworkWorkerSpawn);
-    };
-
-    let bootstrap_write = tokio::time::timeout_at(context.deadline, async {
-        bootstrap.write_all(bytes.as_ref()).await?;
-        bootstrap.flush().await
-    })
-    .await;
-    match bootstrap_write {
-        Ok(Ok(())) => {}
-        Err(_) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerStartTimeout);
-        }
-        Ok(Err(_)) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-    }
-    drop(bytes);
-
-    let prepared_deadline = std::cmp::min(
-        context.deadline,
-        tokio::time::Instant::now() + NETWORK_WORKER_READY_TIMEOUT,
-    );
-    let prepared = match read_worker_status_frame(&mut bootstrap, prepared_deadline).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            let error = classify_network_worker_startup_error(&mut startup, error).await?;
-            return Err(error);
-        }
-    };
-    if prepared.as_slice() != WORKER_PREPARED_MESSAGE {
-        if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
-            decode_worker_startup_status(&prepared)
-        {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerStartup(failure));
-        }
-        reap_failed_network_worker_startup(&mut startup).await?;
-        return Err(RunnerError::NetworkWorkerBootstrap);
-    }
-
-    let process = match LiveProcess::capture_child(pid, context.executable) {
-        Ok(process) => process,
-        Err(error) => {
-            let fallback = RunnerError::Recovery(error);
-            let error = classify_network_worker_startup_error(&mut startup, fallback).await?;
-            return Err(error);
-        }
-    };
-    startup.admit(process);
-
-    if let Some(endpoints) = broker_endpoints {
-        // One message per session, in session order, answered together.
-        let status = pass_to_worker(
-            &mut startup,
-            &mut bootstrap,
-            endpoints,
-            context.deadline,
-            send_worker_broker_descriptor,
-        )
-        .await?;
-        if status.as_slice() != WORKER_BROKER_READY_MESSAGE {
-            if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
-                decode_worker_startup_status(&status)
-            {
-                reap_failed_network_worker_startup(&mut startup).await?;
-                return Err(RunnerError::NetworkWorkerStartup(failure));
-            }
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-    }
-
-    let network = loop {
-        match startup.child_mut().try_wait() {
-            Ok(Some(status)) => return Err(network_worker_exit_error(status)),
-            Ok(None) => {}
-            Err(_) => {
-                reap_failed_network_worker_startup(&mut startup).await?;
-                return Err(RunnerError::NetworkWorkerWait);
-            }
-        }
-        let connection = tokio::time::timeout_at(
-            context.deadline,
-            context.hybrid.connect_guest_port(GUEST_NETWORK_VSOCK_PORT),
-        )
-        .await;
-        match connection {
-            Ok(Ok(network)) => break network,
-            Ok(Err(
-                HybridVsockError::InvalidSocketPath
-                | HybridVsockError::InvalidGuestPort
-                | HybridVsockError::SocketIdentity(_),
-            )) => {
-                reap_failed_network_worker_startup(&mut startup).await?;
-                return Err(RunnerError::NetworkWorkerBootstrap);
-            }
-            Ok(Err(_)) if tokio::time::Instant::now() < context.deadline => {
-                tokio::time::sleep(NETWORK_WORKER_RETRY_DELAY).await;
-            }
-            Ok(Err(_)) | Err(_) => {
-                reap_failed_network_worker_startup(&mut startup).await?;
-                return Err(RunnerError::NetworkWorkerStartTimeout);
-            }
-        }
-    };
-    let network = match network.into_std() {
-        Ok(network) => network,
-        Err(_) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-    };
-    let status = pass_to_worker(
-        &mut startup,
-        &mut bootstrap,
-        vec![network],
-        context.deadline,
-        send_worker_network_descriptor,
-    )
-    .await?;
-    match decode_worker_startup_status(&status) {
-        Some(NetworkWorkerStartupStatus::Ready) => {}
-        Some(NetworkWorkerStartupStatus::Failed(failure)) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerStartup(failure));
-        }
-        None => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-    }
-    let ingress_control = product_worker.then_some(bootstrap);
-    Ok(startup.disarm(ingress_control, mesh_ingress_key))
 }
 
 async fn transfer_worker_descriptor(

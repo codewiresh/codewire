@@ -199,8 +199,8 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
         ("CODEWIRE_VM_DOCKER_DISK_MIB", "7347"),
         // Until its daemon's first bind is answered.
         ("CODEWIRE_VM_STATE", "new"),
-        // Until broker mode runs inside the VM.
-        ("CODEWIRE_VM_EGRESS_MODE", "guest-carried"),
+        // An environment's own template: broker mode inside the VM.
+        ("CODEWIRE_VM_EGRESS_MODE", "broker"),
         ("CODEWIRE_WORKSPACE_IMAGE", WORKSPACE_IMAGE),
         // The disk holds the workspace image, which has no systemd.
         ("CODEWIRE_WORKSPACE_INIT", "image"),
@@ -223,6 +223,66 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
     );
     // Docker is the guest's own.
     assert!(!env.contains_key("DOCKER_HOST"));
+}
+
+/// An environment's own template runs broker mode inside the VM, its
+/// daemon reaching cw-egress as one of its platform peers; a pool's
+/// identity-free template stays guest-carried, as admission holds a standard
+/// pool member (#6261).
+#[test]
+fn only_an_environments_own_template_runs_broker_mode_inside_the_vm() {
+    let broker = env(&render_sandbox_template(NAMESPACE, &opts()));
+    assert_eq!(broker["CODEWIRE_VM_EGRESS_MODE"], "broker");
+    let stream = broker["CODEWIRE_EGRESS_STREAM_ADDR"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        broker["CODEWIRE_POD_PLATFORM_PEERS"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|peer| peer == stream),
+        "cw-egress's stream is a platform peer"
+    );
+    let pool = env(&render_sandbox_template(
+        NAMESPACE,
+        &TemplateOpts {
+            environment_id: String::new(),
+            organization_id: String::new(),
+            ..opts()
+        },
+    ));
+    assert_eq!(pool["CODEWIRE_VM_EGRESS_MODE"], "guest-carried");
+    // The egress token is mounted only where broker mode uses it.
+    let volumes = |template: &Value| -> Vec<String> {
+        pod(template)["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|volume| volume["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let token = crate::sandbox::template::hosted_egress::EGRESS_TOKEN_VOLUME;
+    assert!(
+        volumes(&render_sandbox_template(NAMESPACE, &opts()))
+            .iter()
+            .any(|name| name == token)
+    );
+    let pool_template = render_sandbox_template(
+        NAMESPACE,
+        &TemplateOpts {
+            environment_id: String::new(),
+            organization_id: String::new(),
+            ..opts()
+        },
+    );
+    assert!(!volumes(&pool_template).iter().any(|name| name == token));
+    assert!(
+        !pod(&pool_template)
+            .to_string()
+            .contains(codewire_daemon_proto::EGRESS_TOKEN_MOUNT_PATH)
+    );
 }
 
 #[test]

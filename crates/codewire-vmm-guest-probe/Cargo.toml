@@ -21,7 +21,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = { workspace = true }
 codewire-access = { workspace = true }
-codewire-network-session = { workspace = true }
+codewire-network-session = { workspace = true, features = ["hosted-routing"] }
 codewire-project = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

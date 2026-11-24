@@ -58,13 +58,36 @@ pub(super) fn mount_workspace(
 }
 
 /// The token, mounted into the workspace container only, and the addresses
-/// the daemon dials instead of names. A `standard` workspace takes only
-/// these: its VM has no TUN.
+/// the daemon dials instead of names. A `standard` workspace in broker mode
+/// takes only these: its VM's init makes its own TUN.
 pub(super) fn mount_identity(
     ws: &mut Value,
     volumes: &mut Vec<Value>,
     egress: &HostedEgressTemplate,
 ) {
+    mount_token(ws, volumes);
+    mount_addresses(ws, volumes, egress);
+}
+
+/// The addresses alone, for a guest-carried `standard` pool template: its
+/// guest never gets the egress token, so the Pod mounts none (#5602).
+pub(super) fn mount_addresses(
+    ws: &mut Value,
+    _volumes: &mut Vec<Value>,
+    egress: &HostedEgressTemplate,
+) {
+    let env = ws["env"].as_array_mut().expect("workspace env");
+    env.push(json!({ "name": "CODEWIRE_EGRESS_STREAM_ADDR", "value": egress.stream_addr }));
+    env.push(json!({ "name": "CODEWIRE_WORKSPACE_BINDING_ADDR", "value": egress.binding_addr }));
+    // The daemon's platform path (#5039): every platform connection by
+    // address, none by name.
+    env.push(json!({ "name": "CODEWIRE_API_ADDR", "value": egress.gateway_addr }));
+    env.push(json!({ "name": "CODEWIRE_MESH_ADDR", "value": egress.gateway_addr }));
+    env.push(json!({ "name": "CODEWIRE_DERP_ADDR", "value": egress.derp_addr }));
+    env.push(json!({ "name": "CODEWIRE_CLUSTER_DNS_IP", "value": egress.cluster_dns_ip }));
+}
+
+fn mount_token(ws: &mut Value, volumes: &mut Vec<Value>) {
     volumes.push(json!({
         "name": EGRESS_TOKEN_VOLUME,
         "projected": {
@@ -86,15 +109,6 @@ pub(super) fn mount_identity(
             "mountPath": EGRESS_TOKEN_MOUNT_PATH,
             "readOnly": true,
         }));
-    let env = ws["env"].as_array_mut().expect("workspace env");
-    env.push(json!({ "name": "CODEWIRE_EGRESS_STREAM_ADDR", "value": egress.stream_addr }));
-    env.push(json!({ "name": "CODEWIRE_WORKSPACE_BINDING_ADDR", "value": egress.binding_addr }));
-    // The daemon's platform path (#5039): every platform connection by
-    // address, none by name.
-    env.push(json!({ "name": "CODEWIRE_API_ADDR", "value": egress.gateway_addr }));
-    env.push(json!({ "name": "CODEWIRE_MESH_ADDR", "value": egress.gateway_addr }));
-    env.push(json!({ "name": "CODEWIRE_DERP_ADDR", "value": egress.derp_addr }));
-    env.push(json!({ "name": "CODEWIRE_CLUSTER_DNS_IP", "value": egress.cluster_dns_ip }));
 }
 
 /// The netstack as the only resolver: no cluster DNS, no search list.

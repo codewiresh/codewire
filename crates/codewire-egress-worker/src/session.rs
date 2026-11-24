@@ -52,6 +52,31 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
+/// One session's /30, as one value: the worker's address, which is the
+/// guest's gateway and its resolver, and the one guest address the session
+/// accepts packets from. Only the host side chooses it, never the guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionAddresses {
+    pub worker: Ipv4Addr,
+    pub guest: Ipv4Addr,
+}
+
+impl SessionAddresses {
+    /// Every session's pair but one: a local VM's, `cw-egress`'s hosted
+    /// session's, and a guest-carried standard guest's.
+    pub const STANDARD: Self = Self {
+        worker: WORKER_IP,
+        guest: GUEST_IP,
+    };
+    /// A broker-mode standard guest's `eth0` (#5602): that guest's
+    /// `cwegress0` holds [`Self::STANDARD`]'s /30 for its own stream to
+    /// `cw-egress`, so its session with this worker takes the next /30.
+    pub const HOSTED_BROKER: Self = Self {
+        worker: codewire_network_session::hosted::HOSTED_BROKER_POD_GATEWAY,
+        guest: codewire_network_session::hosted::HOSTED_BROKER_POD_ADDRESS,
+    };
+}
+
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 
 impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
@@ -188,7 +213,7 @@ where
         stream,
         key,
         (pod_uid, 1),
-        SessionLimits::HOSTED,
+        (SessionLimits::HOSTED, SessionAddresses::STANDARD),
         broker,
         None,
         Some(checks),
@@ -216,17 +241,24 @@ where
     B: EgressBroker,
     R: FnOnce() -> io::Result<()> + Send,
 {
-    run_network_session_with_ingress(stream, key, vm_id, generation, limits, broker, None, ready)
-        .await
+    run_network_session_with_ingress(
+        stream,
+        key,
+        (vm_id, generation),
+        (limits, SessionAddresses::STANDARD),
+        broker,
+        None,
+        ready,
+    )
+    .await
 }
 
-#[allow(clippy::too_many_arguments)] // The public entry point plus the ingress channel.
+/// [`run_network_session`] with the guest's inbound streams, on `addresses`.
 pub async fn run_network_session_with_ingress<S, B, R>(
     stream: S,
     key: NetworkKey,
-    vm_id: Uuid,
-    generation: u64,
-    limits: SessionLimits,
+    (vm_id, generation): (Uuid, u64),
+    (limits, addresses): (SessionLimits, SessionAddresses),
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
     ready: R,
@@ -240,7 +272,7 @@ where
         stream,
         key,
         (vm_id, generation),
-        limits,
+        (limits, addresses),
         broker,
         inbound,
         None,
@@ -254,7 +286,7 @@ async fn run_session<S, B, R>(
     mut stream: S,
     key: NetworkKey,
     (vm_id, generation): (Uuid, u64),
-    limits: SessionLimits,
+    (limits, addresses): (SessionLimits, SessionAddresses),
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
     hosted: Option<HostedChecks>,
@@ -274,7 +306,7 @@ where
     let (from_stack, outbound_packets) = mpsc::channel(PACKET_QUEUE);
     let stack = Netstack::with_config_and_limits(
         NetstackConfig {
-            local_ip: IpAddr::V4(WORKER_IP),
+            local_ip: IpAddr::V4(addresses.worker),
             prefix_len: 30,
             mtu: limits.mtu(),
             verify_rx_checksums: true,
@@ -345,7 +377,7 @@ where
     let writer = write_authenticated_frames(stream_write, session, bound, outbound_packets);
     let dispatcher = dispatch_packets(
         guest_packets,
-        stack,
+        (stack, addresses),
         to_stack,
         from_stack,
         broker,
@@ -535,7 +567,7 @@ const DRAIN_FLUSH: Duration = Duration::from_secs(1);
 
 async fn dispatch_packets<B: EgressBroker>(
     mut packets: mpsc::Receiver<Vec<u8>>,
-    stack: Netstack,
+    (stack, SessionAddresses { worker, guest }): (Netstack, SessionAddresses),
     to_stack: mpsc::Sender<Vec<u8>>,
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
@@ -597,7 +629,7 @@ async fn dispatch_packets<B: EgressBroker>(
                 if inbound_bridges.len() >= MAX_INBOUND_STREAM_FLOWS {
                     continue;
                 }
-                let destination = SocketAddr::new(IpAddr::V4(GUEST_IP), incoming.guest_port);
+                let destination = SocketAddr::new(IpAddr::V4(guest), incoming.guest_port);
                 let guest = tokio::time::timeout(
                     GUEST_CONNECT_TIMEOUT,
                     stack.connect(destination),
@@ -656,8 +688,8 @@ async fn dispatch_packets<B: EgressBroker>(
                 continue;
             }
         };
-        if let Ok(question) = parse_ipv4_dns_question(&packet, WORKER_IP, DNS_MESSAGE_LIMIT) {
-            if question.source.ip() != IpAddr::V4(GUEST_IP) {
+        if let Ok(question) = parse_ipv4_dns_question(&packet, worker, DNS_MESSAGE_LIMIT) {
+            if question.source.ip() != IpAddr::V4(guest) {
                 continue;
             }
             // Count only questions still in flight.
@@ -690,10 +722,10 @@ async fn dispatch_packets<B: EgressBroker>(
             udp_refusals.refuse(&packet, &broker);
             continue;
         };
-        if tcp.source.ip() != IpAddr::V4(GUEST_IP) {
+        if tcp.source.ip() != IpAddr::V4(guest) {
             continue;
         }
-        if tcp.destination.ip() == IpAddr::V4(WORKER_IP) {
+        if tcp.destination.ip() == IpAddr::V4(worker) {
             if tcp.initial_syn {
                 // Nothing serves TCP at the worker's address (its DNS is UDP),
                 // and the catch-all listener must not accept a connection
@@ -707,8 +739,8 @@ async fn dispatch_packets<B: EgressBroker>(
                 continue;
             }
             // Host-port publication creates an outbound userspace-netstack
-            // connection from WORKER_IP to one exact guest port. Feed return
-            // packets to that stack; it rejects non-matching connections.
+            // connection from the worker's address to one guest port. Feed
+            // return packets to that stack; it rejects non-matching ones.
             to_stack
                 .send(packet)
                 .await
@@ -838,6 +870,7 @@ mod tests {
 
     use super::*;
 
+    mod addresses;
     mod hosted;
     mod udp;
 

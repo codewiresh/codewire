@@ -9,7 +9,7 @@ use std::net::SocketAddrV4;
 use serde_json::{Map, Value, json};
 
 use codewire_daemon_proto::{
-    POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_EGRESS_MODE_ENV,
+    POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_EGRESS_MODE_BROKER, POD_RUNTIME_EGRESS_MODE_ENV,
     POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED, POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
     POD_RUNTIME_IMAGE_DISK_ID_ENV, POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV,
     POD_RUNTIME_PLATFORM_PEERS_ENV, POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH,
@@ -344,7 +344,13 @@ pub(super) fn pod_spec(
         ],
     });
     let mut volumes = vec![runtime.image_disk_volume(), run_volume()];
-    identity::mount_identity(opts, &mut ws, &mut volumes, hosted_egress::mount_identity);
+    // The egress token only where broker mode uses it (cw-security, #5602).
+    let mount_egress = if egress_mode(opts) == POD_RUNTIME_EGRESS_MODE_BROKER {
+        hosted_egress::mount_identity
+    } else {
+        hosted_egress::mount_addresses
+    };
+    identity::mount_identity(opts, &mut ws, &mut volumes, mount_egress);
     ws["env"]
         .as_array_mut()
         .expect("workspace env")
@@ -379,6 +385,20 @@ pub(super) fn pod_spec(
     Value::Object(spec)
 }
 
+/// How the guest's workload reaches the network (#5602). An environment's
+/// own template runs hosted broker mode inside the VM: its daemon carries the
+/// workload over `cwegress0` to `cw-egress`, under the environment's policy,
+/// as a Kata broker workspace does (design: #5602 comment 130891). A pool's
+/// identity-free template stays guest-carried, its workload closed, as the
+/// warm-pool admission holds a standard pool member (#6261).
+fn egress_mode(opts: &TemplateOpts) -> &'static str {
+    if opts.environment_id.is_empty() {
+        POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED
+    } else {
+        POD_RUNTIME_EGRESS_MODE_BROKER
+    }
+}
+
 /// What `cw __pod-runtime` reads, by its fixed names.
 fn settings(
     opts: &TemplateOpts,
@@ -403,12 +423,7 @@ fn settings(
             POD_RUNTIME_VM_STATE_ENV,
             POD_RUNTIME_VM_STATE_NEW.to_owned(),
         ),
-        // Broker mode inside the VM is not built yet: the guest carries its
-        // own network session, checked by its daemon's self-check.
-        (
-            POD_RUNTIME_EGRESS_MODE_ENV,
-            POD_RUNTIME_EGRESS_MODE_GUEST_CARRIED.to_owned(),
-        ),
+        (POD_RUNTIME_EGRESS_MODE_ENV, egress_mode(opts).to_owned()),
         (
             POD_RUNTIME_WORKSPACE_IMAGE_ENV,
             runtime.workspace_image.clone(),

@@ -2,7 +2,7 @@
 //! 7777 and 2222 reach the guest over two fixed vsock ports, and the guest
 //! joins each connection to one fixed address in the workspace's network
 //! namespace: the hosted daemon's gRPC port and its SSH port. The listeners
-//! exist only in a guest-carried boot, accept only the host CID, and refuse a
+//! exist only in a standard Pod's boot, accept only the host CID, and refuse a
 //! connection over [`HOSTED_INGRESS_MAX_JOINS`] rather than queue it. The
 //! guest's local daemon and its `ForwardTcp`, which refuses the platform's
 //! own listeners, are not involved.
@@ -19,7 +19,7 @@ mod workload_log;
 
 use crate::hosted_control::{
     HOSTED_DAEMON_GUEST_PORT, HOSTED_DAEMON_INGRESS_VSOCK_PORT, HOSTED_INGRESS_CONNECT,
-    HOSTED_INGRESS_IDLE, HOSTED_INGRESS_MAX_JOINS, HOSTED_SSH_INGRESS_VSOCK_PORT, guest_carried,
+    HOSTED_INGRESS_IDLE, HOSTED_INGRESS_MAX_JOINS, HOSTED_SSH_INGRESS_VSOCK_PORT, hosted_guest,
     join_until_idle,
 };
 
@@ -32,11 +32,11 @@ const INGRESS: [(u32, u16); 2] = [
     ),
 ];
 
-/// Starts both listeners on their own thread when the kernel booted
-/// guest-carried, and waits until they listen; a local VM's boot opens
-/// neither.
+/// Starts both listeners on their own thread when a standard Pod's VMM
+/// booted the kernel, in either egress mode, and waits until they listen; a
+/// local VM's boot opens neither.
 pub(super) fn start(command_line: &str) -> Result<()> {
-    if !guest_carried(command_line) {
+    if !hosted_guest(command_line) {
         return Ok(());
     }
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -151,10 +151,10 @@ fn connect_from_workspace_namespace(port: u16) -> std::io::Result<std::net::TcpS
 /// lands anywhere else. A container restart gets this same descriptor.
 static DAEMON_LISTENER: std::sync::OnceLock<std::net::TcpListener> = std::sync::OnceLock::new();
 
-/// Binds and holds the daemon's listener in a guest-carried boot, once, and
+/// Binds and holds the daemon's listener in a standard Pod's boot, once, and
 /// the pipe its output leaves the guest by.
 pub(super) fn hold_daemon_listener(command_line: &str, uid: u32, gid: u32) -> Result<()> {
-    if !guest_carried(command_line) || DAEMON_LISTENER.get().is_some() {
+    if !hosted_guest(command_line) || DAEMON_LISTENER.get().is_some() {
         return Ok(());
     }
     workload_log::hold(command_line)?;
@@ -190,7 +190,7 @@ pub(super) fn daemon_listener_fd() -> Option<std::os::fd::RawFd> {
     DAEMON_LISTENER.get().map(AsRawFd::as_raw_fd)
 }
 
-/// runc's `--preserve-fds`: the readiness channel, and in a guest-carried
+/// runc's `--preserve-fds`: the readiness channel, and in a standard Pod's
 /// boot the held listener and the log pipe, as descriptors 3, 4 and 5.
 pub(super) fn preserved_fds() -> &'static str {
     match container_fds() {

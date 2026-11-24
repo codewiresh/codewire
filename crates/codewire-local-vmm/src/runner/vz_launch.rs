@@ -111,6 +111,7 @@ impl CloudHypervisorRunner {
         };
         let (child, process) = startup.disarm();
         Ok(RunningVm {
+            hosted_egress: prepared.hosted_egress,
             // Evaluated before the request moves.
             host_ports: prepared.request.host_ports.clone(),
             request: prepared.request,

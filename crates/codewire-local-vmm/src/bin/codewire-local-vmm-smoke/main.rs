@@ -233,6 +233,7 @@ mod linux {
                     codewire_local_vmm::network_worker::run_inherited_worker(
                         environment_id,
                         generation,
+                        codewire_local_vmm::network_worker::SessionAddresses::STANDARD,
                     )
                     .await
                     .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
