@@ -1422,6 +1422,32 @@ SELECTOR_CASE_ROOT="$reader_root" \
   run_paths_case script_test_named_not_read pull_request refs/pull/6288/head false \
   'deploy policy security security_idp_kek security_js' \
   deployments/k8s/egress/kustomization.yaml
+# The scan reads only regular files: a candidate's test that is a FIFO would
+# block the step, and one that is a symlink is not the candidate's text. Here
+# a FIFO and a symlink to a reader of the pin are skipped, so the pin selects
+# only its own families, and the selector ends within its bound.
+# The fixture lives outside the checkout, so no other check that walks the
+# tree meets the FIFO, and is removed as soon as the selector ends.
+special_root="$(mktemp -d)"
+mkdir -p "$special_root/repo/scripts/ci/tests" "$special_root/repo/scripts/ci/verify"
+git init -q "$special_root/repo"
+printf 'run_release() {\n  scripts/ci/tests/test-link-reader.sh\n}\n' \
+  > "$special_root/repo/scripts/ci/verify/run-product-verification.sh"
+printf 'cat "$%s/%s"\n' "$root_name" deployments/k8s/orchestration/pod-runtime-image.digest \
+  > "$special_root/link-target.sh"
+ln -s "$special_root/link-target.sh" "$special_root/repo/scripts/ci/tests/test-link-reader.sh"
+mkfifo "$special_root/repo/scripts/ci/tests/test-fifo-reader.sh"
+printf '%s\n' deployments/k8s/orchestration/pod-runtime-image.digest > "$special_root/paths"
+special_status=0
+special_output="$(cd "$special_root/repo" && timeout 60 env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/6272/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$special_root/paths")" || special_status=$?
+rm -rf -- "$special_root"
+[ "$special_status" -eq 0 ] || {
+  echo "the script test scan did not end on a FIFO or symlinked test (exit $special_status)" >&2
+  exit 1
+}
+assert_tokens script_test_special_files 'deploy policy' "$special_output"
 run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind.rs

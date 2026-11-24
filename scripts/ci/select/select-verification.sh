@@ -598,18 +598,33 @@ script_test_readers() {
   python3 - "$repo_root" "$changed" <<'PY'
 import os
 import re
+import stat
 import sys
 
 repo_root, changed_path = sys.argv[1:]
 root = os.path.realpath(repo_root)
 with open(changed_path, encoding="utf-8") as handle:
     changed = {line.strip() for line in handle if line.strip()}
+
+
+def regular(path):
+    # The candidate's files are read, never followed: a symlink, FIFO or
+    # device is skipped, as grep -r skips them in include_dependents, so a
+    # candidate cannot make this step block.
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 shell_read = re.compile(r'\$\{?ROOT\}?/([A-Za-z0-9_.@+/-]+)')
 python_read = re.compile(r'\bROOT((?:\s*/\s*"[A-Za-z0-9_.@+/-]+")+)')
 tests = os.path.join(root, "scripts", "ci", "tests")
 readers = set()
 for name in os.listdir(tests):
     if not re.fullmatch(r"test-[A-Za-z0-9_.-]+\.(?:sh|py)", name):
+        continue
+    if not regular(os.path.join(tests, name)):
         continue
     test = f"scripts/ci/tests/{name}"
     with open(os.path.join(tests, name), encoding="utf-8", errors="replace") as handle:
@@ -635,14 +650,21 @@ family_tokens = {
 runner = os.path.join(root, "scripts", "ci", "verify", "run-product-verification.sh")
 families = {}
 function = None
-with open(runner, encoding="utf-8") as handle:
-    for line in handle:
-        start = re.match(r"([a-z_]+)\(\) \{", line)
-        if start:
-            function = start.group(1)
-        for test in re.findall(r"scripts/ci/tests/test-[A-Za-z0-9_.-]+\.(?:sh|py)", line):
-            if function in family_tokens:
-                families.setdefault(test, set()).add(family_tokens[function])
+# A runner that is not a regular file lists no family, so every reader is
+# classified as if it changed.
+lines = []
+if regular(runner):
+    with open(runner, encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+for line in lines:
+    start = re.match(r"([a-z_]+)\(\) \{", line)
+    if start:
+        function = start.group(1)
+    elif line.startswith("}"):
+        function = None
+    for test in re.findall(r"scripts/ci/tests/test-[A-Za-z0-9_.-]+\.(?:sh|py)", line):
+        if function in family_tokens:
+            families.setdefault(test, set()).add(family_tokens[function])
 for test in sorted(readers):
     if test in families:
         for token in sorted(families[test]):
