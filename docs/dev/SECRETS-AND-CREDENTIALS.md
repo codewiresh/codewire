@@ -24,7 +24,9 @@ code is right and this document is the bug.
   placement. Never copy provider material between stores or silently fall back.
 
 Application secrets are not proxied: there is no `cw secrets run`, no
-exposure flag and no per-key mapping. macOS stores local values and its local
+exposure flag and no per-key mapping. The approved direction (#4003, not yet
+built) proxies a secret only when its user binds it to hosts; see
+[Host-bound application secrets](#host-bound-application-secrets-not-yet-built-4003). macOS stores local values and its local
 VMs consume local sources and profiles; see
 [macOS local storage](#macos-local-storage). Docker and Compose inside
 environments are supported.
@@ -142,6 +144,21 @@ is now their one home, and `AGENTS.md` points here.
     old, or after its provider answers 401;
     `scripts/ci/verify/codex-login-compat.py` runs it against a stand-in and
     fails if it refreshes anywhere else or with another grant.
+- **Approved direction, not yet shipped: host-bound application secrets**
+  (owner, 2026-11-19, 2026-11-21 and 2026-11-24; #4003, D4). An application
+  secret its user binds to hosts reaches the environment as a per-environment
+  placeholder under its own name, and its value leaves the credential
+  service only on a request to one of those hosts, through the front door,
+  in the header its binding names. It never enters the environment, and the
+  environment's processes and root can't read it. A secret with no hosts
+  stays plain: selecting its source authorizes ordinary child-visible
+  projection, as above. The user declares the binding; it is never inferred
+  from a key's name or value, and never adopted from what a request sends.
+  Adding a host, changing how the value is presented, and making a bound
+  secret plain each need the value entered again. The rules are in
+  [Host-bound application secrets](#host-bound-application-secrets-not-yet-built-4003).
+  Until #4003 turns it on, the selection rule above describes what ships, and
+  the change that turns it on rewrites that rule in the same change.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
@@ -193,6 +210,15 @@ operations explicitly select `--user` or `--organization`; local organization
 storage is unsupported. No saved project default, YAML-derived write target or
 retargeting through `cw use` is permitted. Validate placement/scope/authority
 before reading a value. Values use a protected prompt or stdin, never argv.
+
+Binding a secret to hosts (#4003, not yet built) adds flags to `set`:
+`--host` (repeatable), `--header`, `--scheme`, `--prefix`, `--basic`,
+`--basic-user`, `--username`, `--preset`, `--remove-host` and `--plain`. The
+rules are in
+[Host-bound application secrets](#host-bound-application-secrets-not-yet-built-4003);
+`list` shows each bound secret's hosts beside its key, and `plain` for
+the rest. The commands' exact output comes with the CLI design and is added
+here with the code.
 
 Keep key set/list/delete/rename separate from `projects create/list/delete`.
 Missing, empty or whitespace-only keys cannot mean project deletion. Collection
@@ -2230,6 +2256,240 @@ below).
     the platform no longer admits refuses the seed call, and so the start,
     as above, and the delegation, as it does today.
 
+### Host-bound application secrets (not yet built, #4003)
+
+An application secret can be bound to the hosts it is sent to. A bound
+secret reaches the environment as a per-environment placeholder under its
+own name. The app sends it as it would send the value, and the front door
+swaps in the real value only on a request to one of the secret's hosts, in
+the header the binding names. A secret with no hosts is plain and is
+projected exactly as [Application secrets](#application-secrets) describes.
+This section is the target; nothing in it ships until #4003 turns it on,
+and the change that does rewrites the
+[Invariants](#invariants) rule it replaces. The journey is
+[`docs/journeys/host-bound-secrets.md`](../journeys/host-bound-secrets.md).
+
+It reuses the `bound` credential kind's binding, swap, refusals and
+redaction (#5043, `private-docs: designs/2026-11-22-host-bound-credentials.md`),
+the front door and `cw-egress`, and the credential service. It adds no proxy
+and no second list. Host and header validation, the presentation forms and
+the swap are one module that both kinds call.
+
+**The binding.** A personal, organization or project secret may carry:
+
+| Field | Rule |
+| --- | --- |
+| `hosts` | 1 to 16 exact DNS names, port 443 only. No wildcards, IP addresses, single-label names, or names under `localhost`, `local`, `internal`, `arpa`, `cluster.local` or `svc`. None of the hosts a built-in credential names (`codewire_access::FRONT_DOOR_HOSTS` and `chatgpt.com`'s suffix), and none of the deployment's own names (below). Lowercased and stored in canonical form; a trailing dot or an IDN look-alike is refused, never normalised into a match. |
+| `presentation` | `header` (default), `basic` or `basic-user`. |
+| `header` | `header` only. `Authorization` by default; one name, or two for a client that sends a key in both. Refused: `Host`, `Cookie`, `Set-Cookie`, `Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Expect`, `Via`, `Max-Forwards`, `Early-Data`, `Forwarded`, every `X-Forwarded-*`, every `Proxy-*`, `Origin`, `Referer`, `User-Agent`, `X-Request-Id`, `Traceparent`, `Tracestate`, every `Codewire-*`, any HTTP/2 pseudo-header (a name beginning `:`), and any name that isn't an RFC 9110 token. Matched without regard to case. |
+| `scheme` | `header` only. The word before the value: `Bearer` by default, or one ASCII token such as `token` or `ApiKey`, or none (the header is the value alone). |
+| `prefix` | Optional. At most 16 characters of `[A-Za-z0-9_-]`, put before the placeholder for a client that checks a key's shape, such as `sk_`. It may not contain `cwp1_`. |
+| `username` | `basic` only. The fixed user name the real request carries, not secret. |
+
+`basic` sends `username:value` for a request whose `Authorization: Basic`
+password is the placeholder, which is how Git over HTTPS and many APIs take
+a token. `basic-user` sends `value:` for a request whose Basic user name is
+the placeholder and whose password is empty, as some payment APIs take keys;
+a `basic-user` value containing `:` is refused when it is set.
+
+**The deployment's own names.** A binding may never name a host the
+platform itself serves: the Sandbox gateway's names (such as
+`openbao.sandbox.<domain>`), the platform's identity issuer, its image
+registries, its forge, and every other name the deployment's configuration
+gives its own services. They are one list, built from that configuration
+and from `codewire_access::FRONT_DOOR_HOSTS`, in the module that validates
+bindings for both this and the `bound` credential kind. The credential
+service checks it when a binding is set and again at bind, so a name the
+deployment adds later refuses an existing binding at the next bind
+(`bound_host_reserved`, naming the host), never serving it.
+
+The value of a bound secret is printable ASCII, at most 8 KiB. The key
+name is the variable name, as for every secret. Out of scope: values used
+inside the app, such as a database password or a signing key. They stay
+plain.
+
+**Who binds.** Whoever may set the secret today: its user for a personal
+secret, an organization owner or admin for an organization or project
+secret (`require_manage_role`, `require_manage`). The binding is the user's
+own statement. Codewire never infers one from a key's name or value, and
+never adopts a header it sees a placeholder in.
+
+**Re-entering the value.** These changes need the value entered again in
+the same request, so an editor of a shared secret can't send its existing
+value to a host of their own or read it in an environment:
+
+- adding a host, the first one included (making a plain secret bound), and
+  replacing one (removing one host and adding another in one request);
+- changing the presentation, header, scheme or user name, including through
+  a `--preset` that changes any of them;
+- removing the last host (making a bound secret plain);
+- changing a bound secret's key name or scope, if `set` or a move ever
+  allows it, since that changes its slot.
+
+Removing a host while others remain, and changing the prefix, need no
+value. A request that needs the value and has none is refused with
+`secret_value_required`, naming the change, and nothing is changed.
+
+**The record.** A bound secret's record gains a `binding_id`, made when it
+is first bound and kept until the secret is deleted, and a
+`binding_generation`, which every change to the presentation, header,
+scheme, user name or prefix, and every change between plain and bound,
+moves. Changing hosts does not move it. Setting a new value with the same
+binding moves neither. Deleting and setting the key again makes a new
+`binding_id`.
+
+**The placeholder.** `<prefix>cwp1_` and 43 base64url characters, from the
+[per-environment placeholder](#per-environment-placeholders) derivation, under
+the same keys: the environment's key hosted, and the owner's local root for
+a local VM. The inputs:
+
+- the environment;
+- the slot, `secret/<scope>/<scope id>/<key>`, where the scope is `user`,
+  `organization` or `project`. The slot grammar refuses a string that
+  parses as a provider slot or a `bound/<id>` slot, and a test holds that;
+- the credential, the secret's `binding_id` and `binding_generation`;
+- no profile revision: a secret is selected through a source, not a
+  profile.
+
+So a placeholder stays the same across the environment's launches and
+restarts, and across a new value with the same binding. A binding change
+that moves the generation, or a re-created secret, gives a new one. It is
+derived and never stored. It names nothing outside the environment's own
+front door: its string carries the prefix the user chose, the `cwp1_`
+marker, and an HMAC, never the key's name, its scope or any part of its
+value.
+
+**Projection.** Values are already read at each launch, not at create
+(an `EnvironmentProjectionRequest`, rechecked against the selection digest). For a bound
+key, the credential service projects the placeholder in the value's place,
+so the value never leaves it for a launch:
+
+- hosted, through the daemon's per-launch projection;
+- in a local VM, through the local authority's projection for a local
+  source, and through the delegation for a platform source.
+
+The raw value is projected only when the secret is plain now and the
+environment's boot or Pod recorded it plain. A secret that is bound now is
+never projected raw, whatever the environment recorded: until the
+environment selects its source again, a new process gets the placeholder,
+and the front door binds the secret's hosts only from then.
+
+**Hosts and the front door.**
+
+- The environment's front-door hosts are the union of
+  `front_door_hosts(clients)` and the hosts of every bound secret its
+  selected sources hold, as of the boot (local) or the first bind (hosted).
+  The boot or Pod records, for each bound key, its `binding_id`,
+  `binding_generation` and hosts.
+- **When the set is decided** is the rule above: with the selection, fixed
+  for a boot and for a Pod. An added host reaches an environment only at its
+  next boot or Pod. Selecting the source again (`cw update --secrets`, a
+  restart) is that.
+- **Two values never name one host.** The union is refused with
+  `bound_host_conflict`, naming the host and both keys or credentials, when
+  two bound secrets, or a bound secret and a selected credential, name the
+  same host. It is checked at create, at every rebind, and at every source
+  change that reaches a live environment. As a backstop the front door
+  refuses a request on a host that two of the epoch's bindings name
+  (`credential_conflict`).
+- At most 16 bound-secret hosts per environment, refused over that with
+  `too_many_bound_hosts`. Together with the provider hosts this stays under
+  the 32 bindings `cw-egress` carries.
+- **The front door must serve them.** A front door that serves bound hosts
+  says so in its admission's served-host report (#6290) as a capability,
+  not as a list of names. A Sandbox whose selection binds a secret's host,
+  admitted by a front door without it, is refused at bind with
+  `front_door_hosts_unserved`, naming the host. It is never bound with no
+  route and never quietly left plain.
+- **Interception is never quietly off.** A boot or Pod that would bind a
+  secret's host and can't intercept refuses to start, by name
+  (`bound_secret_not_interceptable`, naming the key). It never falls back to
+  projecting the value. Today that covers a local VM whose credentials come
+  from the platform on macOS ("Agent host interception" above), until that
+  placement intercepts.
+- **What that does to the host.** A bound host goes through the front door
+  for the whole environment. In a local VM a request to it that carries no
+  Codewire value follows the network policy, as for every intercepted host.
+  In a hosted Sandbox such a request is refused (`selected_credential_only`,
+  #5555): binding a secret to a host means every request from the Sandbox
+  to that host must carry one of its placeholders. `cw secrets set` says so
+  when it binds.
+- A binding never widens the network policy. The policy must allow the host
+  on 443 or nothing is sent, as for GitHub's hosts.
+
+**The swap**, on a bound host, after the network policy:
+
+1. The epoch's grants include each bound key the environment's selected
+   sources hold, evaluated under the projection's authority: the creator,
+   the organization, the selection digest and the source, never a field a
+   frame sends.
+2. Each lease rereads the secret's record by scope and key and checks its
+   `binding_id`, `binding_generation` and hosts against what the boot or Pod
+   recorded. The value comes from the protected store where the secret lives
+   today. Decrypted values may be reused only as the
+   [Invariants](#invariants) allow, keyed by the value's own version, so a
+   new value, an empty one or a deleted secret is read at the next lease,
+   never served from an epoch's memory past it.
+3. `header`: the bound header must hold exactly `<scheme> <placeholder>`
+   (or the placeholder alone with no scheme), and the broker sends
+   `<scheme> <value>`. `basic` and `basic-user` as above.
+4. Refused, never forwarded:
+   - the placeholder anywhere else on a bound host: another header, the
+     query string, or the first 64 KiB of the body
+     (`placeholder_outside_binding`, with the hint below);
+   - the placeholder beside a second credential header, two placeholders,
+     or the bound header appearing more than once, as two lines or as one
+     combined list (`credential_conflict`), never swapped in the first;
+   - a host removed from the binding since the boot or Pod, or one the
+     environment didn't record (`secret_not_bound_to_host`);
+   - a placeholder whose `binding_id` or generation is no longer the
+     secret's, or a secret that was deleted (`secret_binding_changed`, or
+     `secret_deleted`).
+5. Replies are redacted of the value in its raw, JSON-escaped, percent and
+   base64 forms, as for every injected credential, so an endpoint that
+   echoes request headers returns the placeholder's redaction, not the
+   value. As on every injected route, the broker sends
+   `accept-encoding: identity`, and a reply that still arrives with a
+   `content-encoding` other than identity is refused (`upstream_failed`),
+   never passed on unread, so redaction is never skipped.
+
+Removing a host applies at the next request: its lease no longer finds the
+host. A request to a host the binding never named carries only the
+placeholder, which is worthless there, and Codewire doesn't see it, since
+that host isn't intercepted.
+
+**Hints.** When step 4 finds this environment's placeholder outside its
+binding, the refusal's `Fix:` line and the refusal log (`cw policy log`)
+give the exact command that would bind it there, naming the store, scope,
+key, host, header and scheme the request used (`--scheme none` for a header
+that holds the placeholder alone), for example
+`cw secrets --cloud --project=myapp set FANCY_TOKEN --host api.fancy.com --header X-Api-Key --scheme none`,
+and say that it asks for the value again. For the query string or the
+body it says only that Codewire can't protect a value sent there, and that
+a plain secret is readable by every process in the environment. It never
+advises making the secret plain, since a package in the environment can
+send the placeholder there on purpose to produce that advice. A hint never
+names a value, and never applies a binding.
+
+**Presets.** `--preset NAME` fills the hosts, presentation, header, scheme
+and prefix from a closed table checked into `codewire-access`; a flag the
+user also gives overrides its field. Each row is checked against the
+vendor's own documentation when it is added. The table and the first rows
+come with the CLI design. An MCP server's header token that a user
+configures is bound like any secret, and named by its variable in the MCP
+configuration (`${FANCY_TOKEN}`); Codewire doesn't write MCP configuration
+in this slice.
+
+**Audit and logs.** Each swap writes one closed line: the environment, the
+key, its scope, the host, the presentation and the outcome, and the user it
+acts for. Never a value, a placeholder, a path or a header value. A
+refusal's line is the refusal log's.
+
+**Parity.** The same rules hold in a local VM on Linux and macOS and in a
+hosted Sandbox (#4717). The one difference is the hosted refusal of an
+uncarried request on a bound host, which is the hosted rule for every
+intercepted host.
+
 ### Refusals an agent or a person can read (#5057)
 
 Codewire refuses some of an agent's traffic itself, on every managed route:
@@ -2292,6 +2552,10 @@ with #4971.
 | `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on. In a local VM that includes a provider whose name did not resolve when the VM's credential broker started (#5286) | "Codewire: PROVIDER couldn't be reached; try again." |
 | `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." Fix: to send it, select a network policy with a rule that allows HOST on port 443; for a Codex workspace host one label under `chatgpt.com`, the rule it names is `*.chatgpt.com`, since a rule for one such name doesn't count until #4931's signed decision. The owner's `cw policy log` will show it once #5058 lands |
 | `selected_credential_only` | 403 | in a hosted Sandbox, a request on an intercepted host that carries none of the Sandbox's placeholders: the user's own key, another environment's placeholder, or no credential. It is never sent, whatever the network policy, until such a request can leave through the Sandbox's own egress (#5555) | "Codewire: in a hosted Sandbox, requests to HOST must carry the Sandbox's Codewire credential." No fix line |
+| `placeholder_outside_binding` | 403 | (#4003, not yet built) on a bound secret's host, this environment's placeholder for it is in another header, the query string or the body | "Codewire: KEY is bound to HEADER on HOST; this request sent it elsewhere, so it was not sent." Fix: the exact `cw secrets … set KEY --host HOST --header NAME` that binds it there (it asks for the value again); for the query string or body, no command: Codewire can't protect a value sent there, and a plain secret is readable by every process in the environment |
+| `secret_not_bound_to_host` | 403 | (#4003, not yet built) a bound secret's placeholder on an intercepted host its binding no longer names, or never named for this environment | "Codewire: KEY is not bound to HOST." Fix: bind it with `cw secrets … set KEY --host HOST`, then restart the environment |
+| `secret_binding_changed` | 403 | (#4003, not yet built) a bound secret's placeholder from before its binding changed (another header, scheme, prefix or presentation) | "Codewire: KEY's binding changed since this environment started." Fix: restart the environment |
+| `secret_deleted` | 403 | (#4003, not yet built) a bound secret's placeholder after the secret was deleted | "Codewire: KEY was deleted." No fix line |
 | `credential_refresh_rate_limited` | 429 | a sign-in that waits out its provider's rate limit on a refresh, for a request whose access token has expired; it carries `Retry-After` with the wait left, 60 to 600 seconds, and is never Reconnect needed (#4975) | "Codewire: the provider is rate-limiting the refresh of the PROVIDER credential; try again in N seconds." No fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 
