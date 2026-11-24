@@ -165,7 +165,7 @@ pub(crate) fn sentence(error: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
-fn render(error: &anyhow::Error, style: Style) -> String {
+pub(crate) fn render(error: &anyhow::Error, style: Style) -> String {
     let step = next_step(error);
     let mut text = format!(
         "{} {}\n",

@@ -78,10 +78,12 @@ async fn token_at(socket: &Path, resource: &str) -> anyhow::Result<zeroize::Zero
                     "the signing key is not published yet; tokens start within a day"
                 }
             };
-            anyhow::anyhow!("{}: {why}", refusal.name())
+            // The name comes last: the error report capitalises the first
+            // letter, and the name must stay exactly as the contract spells it.
+            anyhow::anyhow!("{why} ({})", refusal.name())
         }
         FetchError::InvalidAnswer => {
-            anyhow::anyhow!("identity_unavailable: the workspace daemon's answer was not a token")
+            anyhow::anyhow!("the workspace daemon's answer was not a token (identity_unavailable)")
         }
     })
 }
@@ -148,11 +150,23 @@ mod tests {
             let (_directory, socket) = daemon(status, name).await;
             let error = token(&socket).await.unwrap_err();
             assert!(
-                error.to_string().starts_with(&format!("{name}: ")),
+                error.to_string().ends_with(&format!(" ({name})")),
                 "{error}"
             );
             assert_eq!(exit_code(&error), None);
         }
+    }
+
+    #[tokio::test]
+    async fn a_printed_refusal_keeps_its_name_as_written() {
+        use crate::output::{Charset, Style};
+
+        let (_directory, socket) = daemon("400 Bad Request", "invalid_target").await;
+        let error = token(&socket).await.unwrap_err();
+        assert_eq!(
+            crate::error_report::render(&error, Style::new(false, Charset::Unicode)),
+            "✗ The resource is not an https URI your organization registered (invalid_target)\n"
+        );
     }
 
     #[tokio::test]
