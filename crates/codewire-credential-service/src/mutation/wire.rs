@@ -343,6 +343,7 @@ impl CredentialMutationService for Service {
                 authority(&ctx)?,
                 request.credential_id,
                 request.expected_revocation_generation,
+                false,
             )
             .await
             .map_err(error)?;
@@ -360,9 +361,26 @@ impl CredentialMutationService for Service {
         request: ServiceRequest<'_, proto::DeleteCredentialRequest>,
     ) -> ServiceResult<proto::DeleteCredentialResponse> {
         let request = request.to_owned_message();
+        let authority = authority(&ctx)?;
+        if request.revoke_first {
+            let (_, provider) = self
+                .owner
+                .revoke(
+                    authority,
+                    request.credential_id,
+                    request.expected_revocation_generation,
+                    true,
+                )
+                .await
+                .map_err(error)?;
+            return connectrpc::Response::ok(proto::DeleteCredentialResponse {
+                provider_revocation: provider.to_proto().into(),
+                ..Default::default()
+            });
+        }
         self.owner
             .lifecycle(
-                authority(&ctx)?,
+                authority,
                 request.credential_id,
                 request.expected_revocation_generation,
                 true,
@@ -496,6 +514,7 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
     // errors are never retained in the service error or its public detail.
     let reason = match error {
         Error::StaleRevision => "CREDENTIAL_REVISION_CHANGED",
+        Error::InUse => "CREDENTIAL_IN_USE",
         Error::EnrollmentFailed => "CREDENTIAL_ENROLLMENT_FAILED",
         Error::EnrollmentUnsupported => "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
         Error::EnrollmentNotPublished => "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",

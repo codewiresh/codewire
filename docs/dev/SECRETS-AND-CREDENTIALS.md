@@ -266,7 +266,18 @@ it, or the VMs and the `cw update NAME --profile local:PROFILE` that moves each
 to the profile as it is now, or `cw rm NAME` (#6128). Otherwise one store
 step revokes it, asks its provider and removes it; if removing the stored
 copy fails after the revoke, the credential is no longer listed and the store
-finishes the removal when it next starts. Codewire revocation stops Codewire use at once. Where
+finishes the removal when it next starts. `cw credentials --cloud delete` is
+the same (#6211). It is refused before the question when a profile selects
+the credential, naming the `unset`, or when a Sandbox is bound to an earlier
+revision that does, naming the `cw update NAME --profile platform:PROFILE`
+that moves it, or `cw rm NAME`. Otherwise one `DeleteCredential` with
+`revoke_first` runs the in-use check, the revoke and the delete in one
+transaction under the credential's row lock, so a credential something still
+uses is refused unrevoked (`CREDENTIAL_IN_USE`). Only then is the provider
+asked, with the token read before the transaction under the refresh fence,
+and `provider_revocation` reports its answer. A service from before
+`revoke_first` refuses an active credential's delete and changes nothing; `cw`
+then revokes and deletes in two steps after the same check. Codewire revocation stops Codewire use at once. Where
 the provider offers a revocation Codewire can ask for, revoking also asks it,
 and `cw` reports the answer ([Revoking at the provider](#revoking-at-the-provider));
 it is never a promise of provider-side logout.

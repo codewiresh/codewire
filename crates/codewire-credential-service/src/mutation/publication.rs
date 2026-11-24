@@ -47,6 +47,10 @@ enum Mutation {
     Delete {
         id: CredentialId,
         revision: u64,
+        /// Revoke an active credential in the same transaction, once the
+        /// in-use check has passed (#6211).
+        revoke_first: bool,
+        fence: Option<RevokeFence>,
     },
 }
 
@@ -338,7 +342,12 @@ pub(super) async fn lifecycle(
     delete: bool,
 ) -> Result<Option<CredentialMetadata>, Error> {
     let mutation = if delete {
-        Mutation::Delete { id, revision }
+        Mutation::Delete {
+            id,
+            revision,
+            revoke_first: false,
+            fence: None,
+        }
     } else {
         Mutation::Revoke {
             id,
@@ -349,18 +358,30 @@ pub(super) async fn lifecycle(
     publish(shared, scope, mutation).await.result
 }
 
-/// A revoke whose provider ask relies on `fence`.
+/// A revoke whose provider ask relies on `fence`; with `delete`, the same
+/// transaction also deletes the credential, or changes nothing when a
+/// profile or binding still selects it (#6211).
 pub(super) async fn fenced_revoke(
     shared: &Shared,
     scope: &Scope,
     id: CredentialId,
     revision: u64,
     fence: Option<RevokeFence>,
+    delete: bool,
 ) -> Result<Option<CredentialMetadata>, Error> {
-    let mutation = Mutation::Revoke {
-        id,
-        revision,
-        fence,
+    let mutation = if delete {
+        Mutation::Delete {
+            id,
+            revision,
+            revoke_first: true,
+            fence,
+        }
+    } else {
+        Mutation::Revoke {
+            id,
+            revision,
+            fence,
+        }
     };
     publish(shared, scope, mutation).await.result
 }
@@ -567,16 +588,7 @@ async fn apply(
             if record.metadata.revocation_generation != revision {
                 return Err(Error::StaleRevision);
             }
-            // Under the row lock every refresh transition also takes, so the
-            // answer holds until this transaction commits.
-            if let Some(fence) = &fence {
-                let held = shared
-                    .store
-                    .holds_revocation_fence_in(tx, &id, fence.attempt_id)
-                    .await
-                    .map_err(store_error)?;
-                fence.held.store(held, Ordering::SeqCst);
-            }
+            check_fence(shared, tx, &id, fence.as_ref()).await?;
             shared
                 .store
                 .revoke_in(tx, &scope.owner, &id, record.version)
@@ -584,7 +596,12 @@ async fn apply(
                 .map(|record| Some(record.metadata))
                 .map_err(store_error)
         }
-        Mutation::Delete { id, revision } => {
+        Mutation::Delete {
+            id,
+            revision,
+            revoke_first,
+            fence,
+        } => {
             let record = shared
                 .store
                 .record_for_update_in(tx, &scope.owner, &id)
@@ -597,10 +614,15 @@ async fn apply(
                 && record.metadata.authentication_kind == CredentialAuthKind::OAuth;
             let version = if record.metadata.status == CredentialStatus::Revoked {
                 record.version
-            } else if github {
+            } else if github || revoke_first {
                 // GitHub is one account-level connection with no user-visible
                 // revoke step. Revoke and forget it in this same fenced
                 // transaction; profiles are unchanged and include it again on reconnect.
+                // Any other credential is revoked here only when asked to
+                // (#6211). The in-use check below then refuses a credential
+                // a profile or binding still selects, and its refusal rolls
+                // the revoke back with the rest of this transaction.
+                check_fence(shared, tx, &id, fence.as_ref()).await?;
                 shared
                     .store
                     .revoke_in(tx, &scope.owner, &id, record.version)
@@ -618,4 +640,23 @@ async fn apply(
             Ok(None)
         }
     }
+}
+
+/// Under the row lock every refresh transition also takes, so the answer
+/// holds until this transaction commits.
+async fn check_fence(
+    shared: &Shared,
+    tx: &mut Transaction<'_, Postgres>,
+    id: &CredentialId,
+    fence: Option<&RevokeFence>,
+) -> Result<(), Error> {
+    if let Some(fence) = fence {
+        let held = shared
+            .store
+            .holds_revocation_fence_in(tx, id, fence.attempt_id)
+            .await
+            .map_err(store_error)?;
+        fence.held.store(held, Ordering::SeqCst);
+    }
+    Ok(())
 }

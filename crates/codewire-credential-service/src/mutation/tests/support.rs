@@ -568,6 +568,24 @@ impl Rpc {
         Ok((status, value))
     }
 
+    /// DeleteCredential with `revoke_first` (#6211).
+    pub async fn delete_revoking(
+        &self,
+        auth: Auth,
+        id: &str,
+        revision: u64,
+    ) -> Result<(StatusCode, Value)> {
+        let response = tokio::time::timeout(HANG_GUARD, authenticate(self.client
+            .post(format!("{}/{SERVICE}/DeleteCredential", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&json!({"credentialId":id,"expectedRevocationGeneration":revision.to_string(),"revokeFirst":true})),auth)
+            .send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        Ok((status, value))
+    }
+
     pub async fn lifecycle_error(
         &self,
         method: &str,
@@ -923,6 +941,8 @@ pub struct RevocationProvider {
     /// sees what Codewire had published when the provider was asked.
     observed: Mutex<Option<(PgPool, String)>>,
     seen: Mutex<Vec<String>>,
+    /// What each answer's body says, when set.
+    body: Mutex<Option<&'static [u8]>>,
 }
 
 impl RevocationProvider {
@@ -932,7 +952,13 @@ impl RevocationProvider {
             sent: Mutex::new(Vec::new()),
             observed: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
         }
+    }
+
+    /// Answer every request with `body` too.
+    pub fn answer_body(&self, body: &'static [u8]) {
+        *self.body.lock().unwrap() = Some(body);
     }
 
     /// Read `credential`'s status in `pool` as each request arrives.
@@ -960,22 +986,29 @@ impl BrokerUpstreamTransport for RevocationProvider {
         let (method, target, _headers, body) = request.into_parts();
         let observed = self.observed.lock().unwrap().clone();
         if let Some((pool, credential)) = observed {
-            let status: String =
+            let status: Option<String> =
                 sqlx::query_scalar("SELECT status::text FROM platform_credentials WHERE id = $1")
                     .bind(&credential)
-                    .fetch_one(&pool)
+                    .fetch_optional(&pool)
                     .await
                     .map_err(|_| BrokerUpstreamError::Protocol)?;
-            self.seen.lock().unwrap().push(status);
+            self.seen
+                .lock()
+                .unwrap()
+                .push(status.unwrap_or_else(|| "deleted".to_owned()));
         }
         self.sent
             .lock()
             .unwrap()
             .push((method, target.as_str().to_owned(), body.to_vec()));
+        let body = *self.body.lock().unwrap();
         Ok(BrokerUpstreamResponse::new(
             self.status,
             http::HeaderMap::new(),
-            Box::pin(futures::stream::empty()),
+            match body {
+                Some(body) => Box::pin(futures::stream::once(async move { Ok(body.into()) })),
+                None => Box::pin(futures::stream::empty()),
+            },
         ))
     }
 }

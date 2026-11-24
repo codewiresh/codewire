@@ -159,7 +159,7 @@ where
                 .into_iter()
                 .map(|(id, profile)| (names.get(&id).cloned().unwrap_or(id), profile))
                 .collect();
-            Some(anyhow::anyhow!(refusal::held_by_vms(name, &vms)))
+            Some(anyhow::anyhow!(refusal::held_by_vms("local", name, &vms)))
         }
         _ => None,
     }

@@ -550,18 +550,27 @@ pub(in crate::commands) mod refusal {
         )
     }
 
-    /// `delete` of a credential local VMs still use: each was made with an
-    /// earlier revision of a profile that selected it, and keeps it until
-    /// `cw update` moves it to the profile as it is now (#6128). `vms` is
-    /// each VM's name and its profile's.
-    pub(in crate::commands) fn held_by_vms(name: &str, vms: &[(String, String)]) -> String {
+    /// `delete` of a credential local VMs or cloud Sandboxes still use:
+    /// each was made with an earlier revision of a profile that selected it,
+    /// and keeps it until `cw update` moves it to the profile as it is now
+    /// (#6128, #6211). `vms` is each one's name and its profile's.
+    pub(in crate::commands) fn held_by_vms(
+        placement: &str,
+        name: &str,
+        vms: &[(String, String)],
+    ) -> String {
         let mut profiles: Vec<&str> = vms.iter().map(|(_, profile)| profile.as_str()).collect();
         profiles.sort_unstable();
         profiles.dedup();
         let names = vms.iter().map(|(vm, _)| vm.as_str()).collect::<Vec<_>>();
+        let (one, several, prefix) = if placement == "local" {
+            ("local VM", "local VMs", "local")
+        } else {
+            ("Sandbox", "Sandboxes", "platform")
+        };
         let (noun, which, vm) = match names.as_slice() {
-            [one] => ("local VM", "it", *one),
-            _ => ("local VMs", "each", "NAME"),
+            [only] => (one, "it", *only),
+            _ => (several, "each", "NAME"),
         };
         let (made_with, profile) = match profiles.as_slice() {
             [one] => (format!("an earlier version of profile {one:?}"), *one),
@@ -578,8 +587,17 @@ pub(in crate::commands) mod refusal {
             ),
         };
         format!(
-            "local credential {name:?} is still used by {noun} {}, made with {made_with}; move {which} to the profile as it is now with `cw update {vm} --profile local:{profile}`, or remove {which} with `cw rm {vm}`",
+            "{placement} credential {name:?} is still used by {noun} {}, made with {made_with}; move {which} to the profile as it is now with `cw update {vm} --profile {prefix}:{profile}`, or remove {which} with `cw rm {vm}`",
             names.join(", ")
+        )
+    }
+
+    /// A cloud `delete` the service refused because something still uses the
+    /// credential that the check before it did not find, such as a Sandbox
+    /// in an organization this account can't list (#6211). Nothing changed.
+    pub(in crate::commands) fn still_in_use(placement: &str, name: &str) -> String {
+        format!(
+            "{placement} credential {name:?} was not deleted: a profile or a Sandbox still uses it, and it was not revoked; free it, then delete it again"
         )
     }
 
@@ -1453,16 +1471,24 @@ mod delete_tests {
         // across two profiles.
         let vm = |vm: &str, profile: &str| (vm.to_owned(), profile.to_owned());
         assert_eq!(
-            refusal::held_by_vms("work", &[vm("dev", "daily")]),
+            refusal::held_by_vms("local", "work", &[vm("dev", "daily")]),
             "local credential \"work\" is still used by local VM dev, made with an earlier version of profile \"daily\"; move it to the profile as it is now with `cw update dev --profile local:daily`, or remove it with `cw rm dev`"
         );
         assert_eq!(
-            refusal::held_by_vms("work", &[vm("dev", "daily"), vm("web", "daily")]),
+            refusal::held_by_vms("local", "work", &[vm("dev", "daily"), vm("web", "daily")]),
             "local credential \"work\" is still used by local VMs dev, web, made with an earlier version of profile \"daily\"; move each to the profile as it is now with `cw update NAME --profile local:daily`, or remove each with `cw rm NAME`"
         );
         assert_eq!(
-            refusal::held_by_vms("work", &[vm("dev", "same"), vm("web", "daily")]),
+            refusal::held_by_vms("local", "work", &[vm("dev", "same"), vm("web", "daily")]),
             "local credential \"work\" is still used by local VMs dev, web, made with earlier versions of profiles \"daily\", \"same\"; move each to the profile as it is now with `cw update NAME --profile local:PROFILE`, or remove each with `cw rm NAME`"
+        );
+        assert_eq!(
+            refusal::held_by_vms("cloud", "work", &[vm("dev", "daily")]),
+            "cloud credential \"work\" is still used by Sandbox dev, made with an earlier version of profile \"daily\"; move it to the profile as it is now with `cw update dev --profile platform:daily`, or remove it with `cw rm dev`"
+        );
+        assert_eq!(
+            refusal::held_by_vms("cloud", "work", &[vm("dev", "daily"), vm("web", "daily")]),
+            "cloud credential \"work\" is still used by Sandboxes dev, web, made with an earlier version of profile \"daily\"; move each to the profile as it is now with `cw update NAME --profile platform:daily`, or remove each with `cw rm NAME`"
         );
         assert_eq!(
             revoke_question("cloud", "work"),

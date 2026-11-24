@@ -77,12 +77,15 @@ struct Fence {
 impl CredentialMutationOwner {
     /// Revokes the exact revision, then asks its provider to revoke its
     /// token, both in one owned worker. Codewire's own revoke failing asks
-    /// nothing.
+    /// nothing. With `delete`, the revoke's transaction also deletes the
+    /// credential (#6211): one a profile or binding still selects is refused
+    /// as in use, stays as it was, and its provider is not asked.
     pub(crate) async fn revoke(
         &self,
         authority: CredentialMutationAuthority,
         id: String,
         revision: u64,
+        delete: bool,
     ) -> Result<(Option<CredentialMetadata>, ProviderOutcome), Error> {
         let id = CredentialId::parse(id).map_err(|_| Error::InvalidInput)?;
         if revision == 0 || i64::try_from(revision).is_err() {
@@ -110,8 +113,15 @@ impl CredentialMutationOwner {
                     held: Arc::new(AtomicBool::new(false)),
                 });
                 let fence_held = check.as_ref().map(|check| Arc::clone(&check.held));
-                let result =
-                    publication::fenced_revoke(&shared, &scope, id.clone(), revision, check).await;
+                let result = publication::fenced_revoke(
+                    &shared,
+                    &scope,
+                    id.clone(),
+                    revision,
+                    check,
+                    delete,
+                )
+                .await;
                 let committed = result.is_ok();
                 let _ = published.send(result);
                 if let Some(fence) = fence.filter(|_| !committed) {
@@ -123,7 +133,12 @@ impl CredentialMutationOwner {
                         .await;
                 }
                 let outcome = match fence_held {
-                    _ if !committed => ProviderOutcome::NotAsked,
+                    _ if !committed => {
+                        // A refused delete still holds the token it read:
+                        // drop it, zeroed, without asking.
+                        drop(held);
+                        ProviderOutcome::NotAsked
+                    }
                     // The fence lapsed and a refresh replaced it before the
                     // commit: the token read may no longer be the live one.
                     Some(fence_held) if !fence_held.load(Ordering::SeqCst) => {

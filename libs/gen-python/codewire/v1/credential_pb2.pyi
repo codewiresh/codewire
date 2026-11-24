@@ -431,13 +431,17 @@ class ProviderRevocation(_message.Message):
     def __init__(self, outcome: _Optional[_Union[ProviderRevocationOutcome, str]] = ..., failure: _Optional[_Union[ProviderRevocationFailure, str]] = ..., http_status: _Optional[int] = ...) -> None: ...
 
 class DeleteCredentialRequest(_message.Message):
-    __slots__ = ("credential_id", "expected_revocation_generation")
+    __slots__ = ("credential_id", "expected_revocation_generation", "revoke_first")
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    REVOKE_FIRST_FIELD_NUMBER: _ClassVar[int]
     credential_id: str
     expected_revocation_generation: int
-    def __init__(self, credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+    revoke_first: bool
+    def __init__(self, credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ..., revoke_first: _Optional[bool] = ...) -> None: ...
 
 class DeleteCredentialResponse(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("provider_revocation",)
+    PROVIDER_REVOCATION_FIELD_NUMBER: _ClassVar[int]
+    provider_revocation: ProviderRevocation
+    def __init__(self, provider_revocation: _Optional[_Union[ProviderRevocation, _Mapping]] = ...) -> None: ...

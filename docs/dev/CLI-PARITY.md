@@ -146,8 +146,8 @@ reconnect, show the provider step and print the result in their own way.
 | `rotate` an OAuth credential (*read, not run*) | "OAuth credential material cannot be entered manually; use credentials connect …" | The same message as SSH above | **Gap C4** |
 | `rotate` a Claude subscription token | Not possible (no such local credential) | Replaces the token, restarts its one-year expiry | **Gap** #4714 |
 | `revoke` | The metadata line (table), JSON with `--output json` | The metadata line, JSON | **Gap C1** (format only) |
-| `delete` an active credential | Deleted | Refused: "revoke the platform credential before deleting its stored record" | **Gap C6** |
-| `delete` a credential a profile uses | Refused before any revoke, naming the profile and the `unset` that frees it, or the local VMs made with an earlier revision and the `cw update` that frees each (#6128) | Refused only after a revoke: "… credential is referenced by a profile or binding", which doesn't say how to free it | **Gap C4**, C6 |
+| `delete` an active credential | Asked once, then revoked and deleted in one step | Asked once, then revoked and deleted in one step (#6211) | same |
+| `delete` a credential a profile uses | Refused before any revoke, naming the profile and the `unset` that frees it, or the local VMs made with an earlier revision and the `cw update` that frees each (#6128) | Refused before any revoke, naming the profile and the `unset` that frees it, or the Sandboxes made with an earlier revision and the `cw update` that frees each; one the service still finds in use is refused unrevoked (#6211) | same (placement word only) |
 | `delete` without `--yes` at a terminal | `Delete local credential "NAME"? [y/N]` | `Delete platform credential "NAME"? [y/N]` | same (placement word only) |
 
 ### Profiles

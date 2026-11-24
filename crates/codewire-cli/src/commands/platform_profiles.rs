@@ -229,7 +229,7 @@ async fn print_revisions(
     )
 }
 
-async fn list_revisions(
+pub(super) async fn list_revisions(
     client: &CodewireClient,
     id: &str,
 ) -> anyhow::Result<Vec<rpc::AccessProfileRevision>> {

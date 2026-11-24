@@ -775,3 +775,251 @@ fn only_a_publication_that_did_not_happen_revokes_its_sign_in() {
         "an unknown outcome may have stored it"
     );
 }
+
+/// A revoke-first delete (#6211): the same worker and fence as a revoke,
+/// with the in-use check, the revoke and the delete in one transaction.
+async fn delete_revoking(h: &Harness, record: &CredentialRecord) -> Result<(StatusCode, Value)> {
+    h.rpc
+        .delete_revoking(
+            Auth::Alice,
+            record.metadata.id.as_str(),
+            record.metadata.revocation_generation,
+        )
+        .await
+}
+
+/// Nothing about a refused delete changed: the credential is active at its
+/// revision with its material, the provider wasn't asked, and the fence the
+/// delete took no longer holds refreshes off.
+async fn unchanged(
+    h: &Harness,
+    provider: &RevocationProvider,
+    record: &CredentialRecord,
+) -> Result<()> {
+    let current = h.store.record(&alice()?, &record.metadata.id).await?;
+    ensure!(current.metadata.status == CredentialStatus::Active);
+    ensure!(current.version == record.version, "{:?}", current.version);
+    ensure!(material_count(&h.db.pool, record.metadata.id.as_str()).await? == 1);
+    ensure!(provider.sent().is_empty(), "the provider was asked");
+    let mut state = attempt_state(h, record).await?;
+    for _ in 0..100 {
+        if state.as_deref() == Some("cancelled") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state = attempt_state(h, record).await?;
+    }
+    ensure!(
+        state.as_deref() == Some("cancelled"),
+        "fence left {state:?}"
+    );
+    Ok(())
+}
+
+fn refused_in_use(status: StatusCode, value: &Value) -> Result<()> {
+    ensure!(
+        !status.is_success() && value["code"] == "failed_precondition",
+        "{value}"
+    );
+    ensure!(
+        value["message"] == "credential is referenced by a profile or binding",
+        "{value}"
+    );
+    let detail = value["details"][0]["value"].as_str().unwrap_or_default();
+    let info = base64::engine::general_purpose::STANDARD_NO_PAD.decode(detail)?;
+    ensure!(
+        info.windows(17)
+            .any(|reason| reason == b"CREDENTIAL_IN_USE"),
+        "no closed reason: {value}"
+    );
+    Ok(())
+}
+
+/// Alice's default profile, then "daily" selecting `credential` as codex.
+async fn daily(
+    h: &Harness,
+    credential: &CredentialRecord,
+) -> Result<(PlatformAccessProfileStore, codewire_access::AccessProfile)> {
+    let manager = PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog());
+    let owner = alice()?;
+    manager
+        .create(
+            &owner,
+            AccessProfileName::parse("default")?,
+            BTreeMap::new(),
+        )
+        .await?;
+    let profile = manager
+        .create(
+            &owner,
+            AccessProfileName::parse("daily")?,
+            BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await?;
+    Ok((manager, profile))
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_revoke_first_delete_revokes_deletes_and_then_asks_the_provider() -> Result<()> {
+    let (h, provider) = Harness::with_provider_revocation(http::StatusCode::OK).await?;
+    let result = async {
+        let record = codex(&h).await?;
+        provider.observe(h.db.pool.clone(), record.metadata.id.as_str());
+        let (status, value) = delete_revoking(&h, &record).await?;
+        ensure!(status.is_success(), "{value}");
+        ensure!(
+            value
+                == json!({"providerRevocation": {"outcome": "PROVIDER_REVOCATION_OUTCOME_CONFIRMED"}}),
+            "{value}"
+        );
+        // OpenAI was asked only once the delete had committed.
+        ensure!(provider.seen() == ["deleted"], "seen {:?}", provider.seen());
+        ensure!(h.count().await? == 0);
+        let sent = provider.sent();
+        ensure!(sent.len() == 1, "one request: {}", sent.len());
+        let form: Vec<(String, String)> = url::form_urlencoded::parse(&sent[0].2)
+            .into_owned()
+            .collect();
+        ensure!(form.contains(&("token".to_owned(), REFRESH_TOKEN.to_owned())));
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_revoke_first_delete_a_profile_selects_is_refused_and_asks_nothing() -> Result<()> {
+    let (h, provider) = Harness::with_provider_revocation(http::StatusCode::OK).await?;
+    let result = async {
+        let record = codex(&h).await?;
+        daily(&h, &record).await?;
+        let (status, value) = delete_revoking(&h, &record).await?;
+        refused_in_use(status, &value)?;
+        unchanged(&h, &provider, &record).await
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_revoke_first_delete_a_sandbox_holds_on_an_earlier_revision_is_refused() -> Result<()> {
+    // #6211: after `unset`, a Sandbox bound to the earlier revision still
+    // uses the credential; the delete changes nothing, revoke included.
+    let (h, provider) = Harness::with_provider_revocation(http::StatusCode::OK).await?;
+    let result = async {
+        let record = codex(&h).await?;
+        let (manager, profile) = daily(&h, &record).await?;
+        let environment = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO environment_presets(id,org_id,name,slug,project_spec) \
+            VALUES ('synthetic-preset','mutation-org','Synthetic','synthetic','{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
+            .execute(&h.db.pool).await?;
+        sqlx::query("INSERT INTO environments(id,org_id,created_by,type,preset_id,state,desired_state,environment_operation_generation,project_spec) \
+            VALUES ($1,'mutation-org',$2,'sandbox','synthetic-preset','running','started',7,'{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
+            .bind(&environment).bind(ALICE).execute(&h.db.pool).await?;
+        let context = codewire_access::GrantContext {
+            environment_id: codewire_access::EnvironmentId::parse(&environment)?,
+            environment_generation: 7,
+            placement: codewire_access::GrantPlacement::Platform,
+            user_id: OwnerId::parse(ALICE)?,
+            organization_id: Some(OwnerId::parse("mutation-org")?),
+            allow_personal_credentials: true,
+            authorized_credentials: [record.metadata.id.clone()].into_iter().collect(),
+        };
+        let binding = codewire_access::EnvironmentAccessBinding {
+            environment_id: context.environment_id.clone(),
+            profile_id: profile.id.clone(),
+            profile_revision: profile.revision,
+        };
+        manager
+            .create_binding(&context, binding.clone(), Some(&context.user_id))
+            .await?;
+        // `unset`: the profile as it is now no longer selects it.
+        manager
+            .update(&alice()?, &profile.id, profile.revision, BTreeMap::new())
+            .await?;
+        let (status, value) = delete_revoking(&h, &record).await?;
+        refused_in_use(status, &value)?;
+        unchanged(&h, &provider, &record).await?;
+        // Once the Sandbox lets go, the same delete goes through.
+        manager.delete_binding(&context, &binding).await?;
+        let (status, value) = delete_revoking(&h, &record).await?;
+        ensure!(status.is_success(), "{value}");
+        ensure!(provider.sent().len() == 1);
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_revoke_first_delete_racing_a_refresh_deletes_and_asks_nobody() -> Result<()> {
+    // The fence lapses and a refresh starts before the delete commits: the
+    // token read may no longer be the live one, so nobody is asked.
+    let (h, provider) = Harness::with_provider_revocation(http::StatusCode::OK).await?;
+    let result = async {
+        let owner = alice()?;
+        let record = codex(&h).await?;
+        h.provider.unwrap_gate.arm();
+        let replace = async {
+            h.provider.unwrap_gate.wait().await?;
+            sqlx::query(
+                "UPDATE platform_credential_refresh_attempts \
+                 SET reserved_until = clock_timestamp() - interval '1 second' WHERE credential_id=$1",
+            )
+            .bind(record.metadata.id.as_str())
+            .execute(&h.db.pool)
+            .await?;
+            let prepared = h
+                .store
+                .begin_oauth_refresh(&owner, &record.metadata.id, record.version, Uuid::new_v4())
+                .await?;
+            let started = h.store.start_oauth_refresh(prepared).await?;
+            h.provider.unwrap_gate.release();
+            anyhow::Ok(started)
+        };
+        let (deleted, started) = tokio::join!(delete_revoking(&h, &record), replace);
+        let _started = started?;
+        let (status, value) = deleted?;
+        ensure!(status.is_success(), "{value}");
+        ensure!(
+            value["providerRevocation"]["failure"] == "PROVIDER_REVOCATION_FAILURE_NOT_READ",
+            "{value}"
+        );
+        ensure!(h.count().await? == 0);
+        ensure!(provider.sent().is_empty(), "OpenAI was asked");
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_revoke_first_delete_reports_a_refusal_without_the_providers_text() -> Result<()> {
+    let (h, provider) = Harness::with_provider_revocation(http::StatusCode::FORBIDDEN).await?;
+    let result = async {
+        provider.answer_body(b"{\"error\":\"synthetic-provider-detail\"}");
+        let record = codex(&h).await?;
+        let (status, value) = delete_revoking(&h, &record).await?;
+        ensure!(status.is_success(), "{value}");
+        // The closed outcome and the HTTP status, and nothing else.
+        ensure!(
+            value
+                == json!({"providerRevocation": {
+                    "outcome": "PROVIDER_REVOCATION_OUTCOME_FAILED",
+                    "failure": "PROVIDER_REVOCATION_FAILURE_REFUSED",
+                    "httpStatus": 403,
+                }}),
+            "{value}"
+        );
+        ensure!(!value.to_string().contains("synthetic-provider-detail"));
+        ensure!(h.count().await? == 0);
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}

@@ -1104,17 +1104,19 @@ async fn print_listing(
     )
 }
 
-/// `cw credentials --cloud delete` (#4717 C6), as the local delete: a
-/// credential a profile selects is refused with the exact `unset` that frees
-/// it; an active one is asked about once, revoked (which asks its provider
-/// too) and deleted; then the provider's answer is said.
+/// `cw credentials --cloud delete` (#4717 C6, #6211), as the local delete: a
+/// credential a profile selects, or a Sandbox made with an earlier revision
+/// still uses, is refused before the question, naming what frees it. An
+/// active one is then revoked and deleted in one step on the service, which
+/// refuses it unchanged if anything still uses it, and asks its provider
+/// too; then the provider's answer is said.
 async fn delete_credential(
     client: &CodewireClient,
     current: rpc::Credential,
     yes: bool,
 ) -> anyhow::Result<()> {
     use super::credentials::confirm;
-    use super::credentials::output::{self, ProviderAnswer, refusal};
+    use super::credentials::output::{self, refusal};
     let profiles = super::platform_profiles::list_profiles(client)
         .await
         .context("list cloud profiles before deleting a credential")?;
@@ -1128,46 +1130,39 @@ async fn delete_credential(
     if let Some((profile, slot)) = selected {
         anyhow::bail!(refusal::in_use("cloud", &current.name, profile, slot));
     }
+    let sandboxes = held_by_sandboxes(client, &current.id, &profiles).await?;
+    if !sandboxes.is_empty() {
+        anyhow::bail!(refusal::held_by_vms("cloud", &current.name, &sandboxes));
+    }
     let active = current.status != rpc::CredentialStatus::Revoked;
     let change = confirm::Change::Delete { active };
     if !confirm::confirm("cloud", &current.name, change, yes, OutputFormat::Text)? {
         return Ok(());
     }
-    let (revision, answer) = if active {
-        // Codewire's own revoke failing stops here: nothing is deleted.
-        let revoked = client.revoke_credential(rpc::RevokeCredentialRequest {
-            credential_id: current.id.clone(),
-            expected_revocation_generation: current.revocation_generation,
-            ..Default::default()
-        }).await.context("revoke exact cloud credential revision; inspect metadata before retrying an uncertain result")?;
-        let revision = revoked
-            .credential
-            .as_option()
-            .context("the cloud omitted revoked metadata")?
-            .revocation_generation;
-        (
-            revision,
-            provider_answer(revoked.provider_revocation.as_option()),
-        )
-    } else {
-        (current.revocation_generation, ProviderAnswer::NotAsked)
-    };
     let deleted = client
         .delete_credential(rpc::DeleteCredentialRequest {
             credential_id: current.id.clone(),
-            expected_revocation_generation: revision,
+            expected_revocation_generation: current.revocation_generation,
+            revoke_first: active,
             ..Default::default()
         })
         .await;
-    if active {
-        deleted.context(refusal::revoked_not_deleted(
-            "cloud",
-            &current.provider,
-            &current.name,
-        ))?;
-    } else {
-        deleted.context("delete exact revoked cloud credential revision; inspect metadata before retrying an uncertain result")?;
-    }
+    let answer = match deleted {
+        Ok(response) => provider_answer(response.provider_revocation.as_option()),
+        Err(error) if service_reason(&error) == Some(CREDENTIAL_IN_USE) => {
+            anyhow::bail!(refusal::still_in_use("cloud", &current.name))
+        }
+        // A service from before the one-step delete: revoke, then delete,
+        // after the same check.
+        Err(error) if active && refuses_active_delete(&error) => {
+            revoke_then_delete(client, &current).await?
+        }
+        Err(error) => {
+            return Err(anyhow::Error::from(error).context(
+                "delete exact cloud credential revision; inspect metadata before retrying an uncertain result",
+            ));
+        }
+    };
     output::print_done(&output::deleted("cloud", &current.name));
     // It is deleted: a kind this cw cannot name only drops the line after.
     if let Some(line) = output::CredentialView::cloud(&current)
@@ -1177,6 +1172,121 @@ async fn delete_credential(
         eprintln!("{line}");
     }
     Ok(())
+}
+
+/// The service's in-use refusal (#6211); nothing changed.
+const CREDENTIAL_IN_USE: &str = "CREDENTIAL_IN_USE";
+
+/// A service that predates `revoke_first` refuses an active credential's
+/// delete, with no reason, and changes nothing.
+fn refuses_active_delete(error: &rpc::ClientError) -> bool {
+    error.code() == rpc::ErrorCode::FailedPrecondition
+        && service_reason(error).is_none()
+        && error.message() == "credential must be revoked before deletion"
+}
+
+/// The two steps a service that predates `revoke_first` needs: the revoke
+/// asks the provider, and a delete that then fails says to run it again.
+async fn revoke_then_delete(
+    client: &CodewireClient,
+    current: &rpc::Credential,
+) -> anyhow::Result<super::credentials::output::ProviderAnswer> {
+    use super::credentials::output::refusal;
+    // Codewire's own revoke failing stops here: nothing is deleted.
+    let revoked = client.revoke_credential(rpc::RevokeCredentialRequest {
+        credential_id: current.id.clone(),
+        expected_revocation_generation: current.revocation_generation,
+        ..Default::default()
+    }).await.context("revoke exact cloud credential revision; inspect metadata before retrying an uncertain result")?;
+    let revision = revoked
+        .credential
+        .as_option()
+        .context("the cloud omitted revoked metadata")?
+        .revocation_generation;
+    client
+        .delete_credential(rpc::DeleteCredentialRequest {
+            credential_id: current.id.clone(),
+            expected_revocation_generation: revision,
+            ..Default::default()
+        })
+        .await
+        .context(refusal::revoked_not_deleted(
+            "cloud",
+            &current.provider,
+            &current.name,
+        ))?;
+    Ok(provider_answer(revoked.provider_revocation.as_option()))
+}
+
+/// The Sandboxes, by name with their profile's, still bound to an earlier
+/// revision of one of `profiles` that selected the credential: an `unset`
+/// doesn't free them (#6211). Each organization's environments are listed
+/// once, and a profile's revisions only when a Sandbox is on an earlier one.
+async fn held_by_sandboxes(
+    client: &CodewireClient,
+    credential_id: &str,
+    profiles: &[rpc::AccessProfile],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let organizations = client
+        .list_organizations(rpc::ListOrganizationsRequest::default())
+        .await
+        .context("list organizations before deleting a credential")?
+        .organizations;
+    let mut earlier = Vec::new();
+    for organization in organizations
+        .into_iter()
+        .filter_map(|membership| membership.organization.into_option())
+    {
+        let environments = client
+            .list_environments(rpc::ListEnvironmentsRequest {
+                org_id: organization.id,
+                ..Default::default()
+            })
+            .await
+            .context("list Sandboxes before deleting a credential")?
+            .environments;
+        for environment in environments {
+            let Some(selection) = environment.source_selection.as_option() else {
+                continue;
+            };
+            let (Some(binding), Some(revision)) = (
+                selection.credentials.as_option(),
+                selection.profile_revision,
+            ) else {
+                continue;
+            };
+            let Some(profile) = profiles.iter().find(|profile| {
+                binding.profile.strip_prefix("platform:id:") == Some(profile.id.as_str())
+            }) else {
+                continue;
+            };
+            if revision != profile.revision {
+                earlier.push((environment.name, profile, revision));
+            }
+        }
+    }
+    let mut revisions = BTreeMap::new();
+    let mut holders = Vec::new();
+    for (environment, profile, revision) in earlier {
+        if !revisions.contains_key(&profile.id) {
+            let listed = super::platform_profiles::list_revisions(client, &profile.id).await?;
+            revisions.insert(profile.id.clone(), listed);
+        }
+        let selects = revisions[&profile.id]
+            .iter()
+            .filter_map(|listed| listed.access_profile.as_option())
+            .any(|listed| {
+                listed.revision == revision
+                    && listed
+                        .entries
+                        .iter()
+                        .any(|entry| entry.credential_id == credential_id)
+            });
+        if selects {
+            holders.push((environment, profile.name.clone()));
+        }
+    }
+    Ok(holders)
 }
 
 /// `cw credentials --cloud revoke` (#4717 C6): asked once, then revoked at
@@ -1599,13 +1709,121 @@ mod tests {
         .await;
     }
 
+    /// One organization whose Sandboxes are `environments`.
+    async fn expect_sandboxes(server: &MockServer, environments: Vec<rpc::Environment>) {
+        unary(
+            server,
+            "OrganizationService",
+            "ListOrganizations",
+            rpc::ListOrganizationsRequest::default(),
+            rpc::ListOrganizationsResponse {
+                organizations: vec![rpc::OrganizationMembership {
+                    organization: Some(rpc::Organization {
+                        id: "org-synthetic".into(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        unary(
+            server,
+            "EnvironmentService",
+            "ListEnvironments",
+            rpc::ListEnvironmentsRequest {
+                org_id: "org-synthetic".into(),
+                ..Default::default()
+            },
+            rpc::ListEnvironmentsResponse {
+                environments,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    const PROFILE: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// A Sandbox bound to `revision` of the profile [`PROFILE`].
+    fn sandbox(name: &str, revision: u64) -> rpc::Environment {
+        rpc::Environment {
+            name: name.into(),
+            source_selection: Some(rpc::EnvironmentSourceSelection {
+                credentials: Some(rpc::ProjectCredentialBinding {
+                    profile: format!("platform:id:{PROFILE}"),
+                    ..Default::default()
+                })
+                .into(),
+                profile_revision: Some(revision),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    /// Profile [`PROFILE`], named "daily", at `revision` selecting `entries`.
+    fn daily(revision: u64, entries: &[&str]) -> rpc::AccessProfile {
+        rpc::AccessProfile {
+            id: PROFILE.into(),
+            name: "daily".into(),
+            revision,
+            entries: entries
+                .iter()
+                .map(|id| rpc::AccessProfileEntry {
+                    capability_slot: "codex".into(),
+                    credential_id: (*id).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// An older service's answer to `revoke_first`: it refuses an active
+    /// credential and changes nothing.
+    fn must_be_revoked() -> ResponseTemplate {
+        ResponseTemplate::new(400)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "code": "failed_precondition",
+                "message": "credential must be revoked before deletion",
+            }))
+    }
+
+    async fn delete_answer(
+        server: &MockServer,
+        request: rpc::DeleteCredentialRequest,
+        answer: ResponseTemplate,
+    ) {
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.CredentialMutationService/DeleteCredential",
+            ))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(answer)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn delete(credential: &str) -> CredentialsCommand {
+        CredentialsCommand::Delete(CredentialDeleteArgs {
+            credential: Some(credential.into()),
+            yes: true,
+        })
+    }
+
     #[tokio::test]
-    async fn platform_delete_revokes_an_active_credential_then_deletes_the_revoked_revision() {
+    async fn platform_delete_revokes_and_deletes_an_active_credential_in_one_step() {
         use rpc::get_credential_request::Selector;
         let server = MockServer::start().await;
         let client = client(&server);
-        // Active (#4717 C6): revoked at the observed revision, which asks the
-        // provider too, then deleted at the revoked revision.
+        // Active (#6211): one delete at the observed revision, which the
+        // service revokes, deletes and asks the provider about.
         expect_metadata(
             &server,
             Selector::Name("work".into()),
@@ -1613,6 +1831,79 @@ mod tests {
         )
         .await;
         expect_profiles(&server, Vec::new()).await;
+        expect_sandboxes(&server, Vec::new()).await;
+        unary(
+            &server,
+            "CredentialMutationService",
+            "DeleteCredential",
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                revoke_first: true,
+                ..Default::default()
+            },
+            rpc::DeleteCredentialResponse {
+                provider_revocation: Some(rpc::ProviderRevocation {
+                    outcome: rpc::ProviderRevocationOutcome::Confirmed.into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        execute(&client, delete("name:work")).await.unwrap();
+        server.verify().await;
+        server.reset().await;
+
+        // Already revoked: deleted at its own revision, with no revoke.
+        expect_metadata(
+            &server,
+            Selector::Name("work".into()),
+            rpc::CredentialStatus::Revoked,
+        )
+        .await;
+        expect_profiles(&server, Vec::new()).await;
+        expect_sandboxes(&server, Vec::new()).await;
+        unary(
+            &server,
+            "CredentialMutationService",
+            "DeleteCredential",
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                ..Default::default()
+            },
+            rpc::DeleteCredentialResponse::default(),
+        )
+        .await;
+        execute(&client, delete("work")).await.unwrap();
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn platform_delete_against_an_older_service_revokes_then_deletes() {
+        use rpc::get_credential_request::Selector;
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        expect_profiles(&server, Vec::new()).await;
+        expect_sandboxes(&server, Vec::new()).await;
+        delete_answer(
+            &server,
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                revoke_first: true,
+                ..Default::default()
+            },
+            must_be_revoked(),
+        )
+        .await;
         let mut revoked = metadata(rpc::CredentialStatus::Revoked);
         revoked.revocation_generation = REVISION + 1;
         unary(
@@ -1626,11 +1917,6 @@ mod tests {
             },
             rpc::RevokeCredentialResponse {
                 credential: Some(revoked).into(),
-                provider_revocation: Some(rpc::ProviderRevocation {
-                    outcome: rpc::ProviderRevocationOutcome::Confirmed.into(),
-                    ..Default::default()
-                })
-                .into(),
                 ..Default::default()
             },
         )
@@ -1647,47 +1933,7 @@ mod tests {
             rpc::DeleteCredentialResponse::default(),
         )
         .await;
-        execute(
-            &client,
-            CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: Some("name:work".into()),
-                yes: true,
-            }),
-        )
-        .await
-        .unwrap();
-        server.verify().await;
-        server.reset().await;
-
-        // Already revoked: deleted at its own revision, with no revoke.
-        expect_metadata(
-            &server,
-            Selector::Name("work".into()),
-            rpc::CredentialStatus::Revoked,
-        )
-        .await;
-        expect_profiles(&server, Vec::new()).await;
-        unary(
-            &server,
-            "CredentialMutationService",
-            "DeleteCredential",
-            rpc::DeleteCredentialRequest {
-                credential_id: ID.into(),
-                expected_revocation_generation: REVISION,
-                ..Default::default()
-            },
-            rpc::DeleteCredentialResponse::default(),
-        )
-        .await;
-        execute(
-            &client,
-            CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: Some("work".into()),
-                yes: true,
-            }),
-        )
-        .await
-        .unwrap();
+        execute(&client(&server), delete("work")).await.unwrap();
         server.verify().await;
     }
 
@@ -1702,6 +1948,18 @@ mod tests {
         )
         .await;
         expect_profiles(&server, Vec::new()).await;
+        expect_sandboxes(&server, Vec::new()).await;
+        delete_answer(
+            &server,
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                revoke_first: true,
+                ..Default::default()
+            },
+            must_be_revoked(),
+        )
+        .await;
         let mut revoked = metadata(rpc::CredentialStatus::Revoked);
         revoked.revocation_generation = REVISION + 1;
         unary(
@@ -1719,30 +1977,99 @@ mod tests {
             },
         )
         .await;
-        Mock::given(method("POST"))
-            .and(path(
-                "/codewire.v1.CredentialMutationService/DeleteCredential",
-            ))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "code": "failed_precondition", "message": "synthetic refusal"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let error = execute(
-            &client(&server),
-            CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: Some("work".into()),
-                yes: true,
-            }),
+        delete_answer(
+            &server,
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION + 1,
+                ..Default::default()
+            },
+            refusal(400, "failed_precondition", None),
         )
-        .await
-        .unwrap_err();
+        .await;
+        let error = execute(&client(&server), delete("work")).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "cloud credential \"work\" was revoked, but may not have been deleted; run `cw credentials --cloud delete openai/work` again"
         );
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn platform_delete_held_by_a_sandbox_on_an_earlier_revision_names_it_and_changes_nothing()
+    {
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        // Revision 2 is after `unset`; the Sandbox stays on revision 1, and
+        // another on revision 2 doesn't hold it.
+        expect_profiles(&server, vec![daily(2, &[])]).await;
+        expect_sandboxes(&server, vec![sandbox("dev", 1), sandbox("web", 2)]).await;
+        unary(
+            &server,
+            "AccessProfileService",
+            "ListAccessProfileRevisions",
+            rpc::ListAccessProfileRevisionsRequest {
+                access_profile_id: PROFILE.into(),
+                page_size: 100,
+                ..Default::default()
+            },
+            rpc::ListAccessProfileRevisionsResponse {
+                revisions: [daily(2, &[]), daily(1, &[ID])]
+                    .into_iter()
+                    .map(|profile| rpc::AccessProfileRevision {
+                        access_profile: Some(profile).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let error = execute(&client(&server), delete("work")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cloud credential \"work\" is still used by Sandbox dev, made with an earlier version of profile \"daily\"; move it to the profile as it is now with `cw update dev --profile platform:daily`, or remove it with `cw rm dev`"
+        );
+        // Checked before the question: no revoke and no delete.
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn platform_delete_the_service_finds_in_use_is_refused_unrevoked() {
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        expect_profiles(&server, Vec::new()).await;
+        expect_sandboxes(&server, Vec::new()).await;
+        delete_answer(
+            &server,
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                revoke_first: true,
+                ..Default::default()
+            },
+            refusal(400, "failed_precondition", Some((CREDENTIAL_IN_USE, None))),
+        )
+        .await;
+        let error = execute(&client(&server), delete("work")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cloud credential \"work\" was not deleted: a profile or a Sandbox still uses it, and it was not revoked; free it, then delete it again"
+        );
+        // No revoke follows the refusal.
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 5);
     }
 
     #[tokio::test]
