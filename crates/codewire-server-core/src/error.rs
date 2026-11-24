@@ -220,10 +220,17 @@ impl AppError {
     }
 }
 
+/// The code of the Connect auth layer's own refusal of a presented bearer
+/// (`ErrorInfo` reason `BEARER_REFUSED`): a native client refreshes once and
+/// sends the call again only on it. Only `connect::admission` raises it, so
+/// a handler's refusal never makes a client repeat a call; the repository
+/// check `bearer-refused-reason` holds that.
+pub(crate) const BEARER_REFUSED_CODE: &str = "bearer_refused";
+
 /// Returns the stable CLI corrective hint for a machine-readable code.
 pub fn hint_for_code(code: &str) -> Option<&'static str> {
     Some(match code {
-        "session_expired" => "Run 'cw login' to re-authenticate",
+        "session_expired" | BEARER_REFUSED_CODE => "Run 'cw login' to re-authenticate",
         "org_not_found" => "Check org with 'cw org list'",
         "preset_not_found" => "List presets with 'cw preset list'",
         "unsupported_agent" => "Valid agents: claude-code, codex, gemini-cli, aider",

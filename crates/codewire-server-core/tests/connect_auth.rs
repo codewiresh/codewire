@@ -406,6 +406,13 @@ fn decode_error_info(detail: &serde_json::Value) -> codewire_proto::google::rpc:
     buffa::Message::decode_from_slice(&bytes).expect("protobuf ErrorInfo")
 }
 
+/// The `ErrorInfo` reason of a rejection body with exactly one detail.
+fn error_reason(body: &serde_json::Value) -> String {
+    let details = body["details"].as_array().expect("details");
+    assert_eq!(details.len(), 1);
+    decode_error_info(&details[0]).reason
+}
+
 async fn post_ping(
     client: &reqwest::Client,
     url: &str,
@@ -813,8 +820,25 @@ async fn connect_auth_matrix() {
     assert_eq!(resp.status(), 401, "invalid credentials must reject");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "unauthenticated");
+    assert_eq!(error_reason(&body), "BEARER_REFUSED");
 
-    // Row 8 — expired OIDC access token fails.
+    // Row 7b — an invalid cookie alone keeps SESSION_EXPIRED: only a refused
+    // bearer is marked for a native client's one refresh and resend (#6145).
+    let resp = post_ping(
+        &client,
+        &ping_url(addr, "Ping"),
+        r#"{"message":"hi"}"#,
+        Some("not-a-real-session"),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), 401, "an invalid cookie must reject");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "unauthenticated");
+    assert_eq!(error_reason(&body), "SESSION_EXPIRED");
+
+    // Row 8 — expired OIDC access token fails, refused by the layer itself
+    // with BEARER_REFUSED and the same sign-in hint.
     let resp = post_ping(
         &client,
         &ping_url(addr, "Ping"),
@@ -826,6 +850,15 @@ async fn connect_auth_matrix() {
     assert_eq!(resp.status(), 401, "expired OIDC token must reject");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "unauthenticated");
+    let details = body["details"].as_array().expect("details");
+    assert_eq!(details.len(), 1);
+    let info = decode_error_info(&details[0]);
+    assert_eq!(info.reason, "BEARER_REFUSED");
+    assert_eq!(info.domain, "codewire.sh");
+    assert_eq!(
+        info.metadata.get("hint").map(String::as_str),
+        Some("Run 'cw login' to re-authenticate")
+    );
 
     // Row 8b — auth runs BEFORE method dispatch (doc 03 D3 ordering
     // note): an unauthenticated request to an unknown method of a mounted

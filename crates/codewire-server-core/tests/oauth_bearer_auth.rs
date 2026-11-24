@@ -99,8 +99,15 @@ async fn oauth_only_rejects_unadmitted_credentials_before_lookup_or_dispatch() -
     duplicate.append(header::AUTHORIZATION, "Bearer synthetic-second".parse()?);
     candidates.push(duplicate);
 
-    let mut expected = None;
+    // A presented bearer is refused as BEARER_REFUSED and anything else as an
+    // ordinary refusal (connect_auth.rs proves which), so each kind has one body.
+    let mut expected: [Option<Value>; 2] = [None, None];
     for candidate in candidates {
+        let bearer = candidate
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Bearer ") || value.starts_with("bearer "));
+        let expected = &mut expected[usize::from(bearer)];
         // Invalid credentials must not enumerate methods or parse their bodies.
         // Even the probe's ordinarily public handler is protected on this mount.
         for method in ["Ping", "PublicPing", "NotARealMethod"] {
@@ -116,16 +123,17 @@ async fn oauth_only_rejects_unadmitted_credentials_before_lookup_or_dispatch() -
             ensure!(status == StatusCode::UNAUTHORIZED);
             ensure!(body["code"] == "unauthenticated");
             ensure!(!body.to_string().contains("synthetic"));
-            if let Some(expected) = &expected {
+            if let Some(expected) = expected {
                 ensure!(
                     &body == expected,
                     "credential rejection enumerated a method"
                 );
             } else {
-                expected = Some(body);
+                *expected = Some(body);
             }
         }
     }
+    ensure!(expected.iter().all(Option::is_some));
     Ok(())
 }
 

@@ -801,6 +801,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py sqlx-sqlite-unused
   python3 scripts/checks/repo_checks.py revocation-log-writers --self-test
   python3 scripts/checks/repo_checks.py revocation-log-writers
+  python3 scripts/checks/repo_checks.py bearer-refused-reason --self-test
+  python3 scripts/checks/repo_checks.py bearer-refused-reason
   python3 scripts/checks/repo_checks.py workspace-lints --self-test
   python3 scripts/checks/repo_checks.py workspace-lints
   python3 scripts/checks/repo_checks.py image-patch-paths --self-test

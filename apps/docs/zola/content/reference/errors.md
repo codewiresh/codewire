@@ -28,6 +28,7 @@ the message text, which can change.
 | Code | Means | What to do |
 | --- | --- | --- |
 | `session_expired` | Your saved sign-in has expired | `cw login` |
+| `bearer_refused` | The token or API key sent with the request isn't accepted: it expired or was revoked | `cw login`, or use a current API key |
 | `forbidden` | Only organization owners and admins may do this | Ask an owner or admin |
 | `access_denied` | Only the environment's creator, or someone it is shared with, may do this | Ask the creator to share it; see [Members and sharing](@/organizations/members.md) |
 | `insufficient_scope` | The sign-in lacks the API scope | `cw login` again |

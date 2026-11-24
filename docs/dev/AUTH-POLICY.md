@@ -961,8 +961,9 @@ These are the numbers set on #4786 for the three native clients,
 `codewire-cli`, `codewire-desktop` and `codewire-ios`; #6145 builds them.
 Until it ships, each client is registered with a 720-hour access token, and
 `cw` and the desktop app refresh only within 60 seconds of expiry. The iOS app
-refreshes only at launch. The change that ships this moves it into
-[Client use](#client-use).
+refreshes only at launch. The auth layer's `BEARER_REFUSED` and its
+repository check have shipped; nothing retries on them yet. The change that
+ships the rest moves this section into [Client use](#client-use).
 
 **Lifetimes.** The IdP registers each native client on startup, so a release
 changes them for tokens issued after it.

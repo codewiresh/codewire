@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::auth::Authentication;
+use crate::error::BEARER_REFUSED_CODE;
 use crate::revocation::{Admitted, Fence, Refused, Watch};
 
 /// Why the layer refused a request.
@@ -70,6 +71,29 @@ pub(super) async fn admit(
             auth: Box::new(auth),
         }),
         None => Ok((auth, mutation_authority)),
+    }
+}
+
+/// Gives the layer's own refusal of a presented bearer its own code,
+/// [`BEARER_REFUSED_CODE`], which is also its `ErrorInfo` reason. It comes
+/// before any handler runs, so a native client refreshes once and sends the
+/// call again (`docs/dev/AUTH-POLICY.md`, "Native sign-in lifetimes"). A
+/// refused cookie, and every other failure, keeps its own answer.
+pub(super) fn mark_bearer_refusal(
+    failure: AuthResolutionFailure,
+    headers: &http::HeaderMap,
+) -> AuthResolutionFailure {
+    match failure {
+        AuthResolutionFailure::Authentication(AppError::Unauthorized)
+            if bearer_token(headers).is_some() =>
+        {
+            AuthResolutionFailure::Authentication(AppError::Coded {
+                status: StatusCode::UNAUTHORIZED,
+                code: BEARER_REFUSED_CODE,
+                detail: "unauthorized".into(),
+            })
+        }
+        failure => failure,
     }
 }
 
@@ -160,4 +184,54 @@ pub async fn admit_stream(
             }
         })?;
     Ok((admitted, watch))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    fn code(failure: &AuthResolutionFailure) -> Option<String> {
+        match failure {
+            AuthResolutionFailure::Authentication(error) => error.code().map(String::from),
+            AuthResolutionFailure::DeadlineExceeded => None,
+        }
+    }
+
+    #[test]
+    fn only_a_refused_bearer_is_marked() {
+        let bearer = headers(&[("authorization", "Bearer refused")]);
+        let marked = mark_bearer_refusal(
+            AuthResolutionFailure::Authentication(AppError::Unauthorized),
+            &bearer,
+        );
+        assert_eq!(code(&marked).as_deref(), Some(BEARER_REFUSED_CODE));
+        let AuthResolutionFailure::Authentication(error) = &marked else {
+            panic!("a marked refusal stays an authentication failure");
+        };
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+
+        let cookie = headers(&[("cookie", "codewire.session_token=refused")]);
+        let kept = mark_bearer_refusal(
+            AuthResolutionFailure::Authentication(AppError::Unauthorized),
+            &cookie,
+        );
+        assert_eq!(code(&kept).as_deref(), Some("session_expired"));
+
+        let forbidden = mark_bearer_refusal(
+            AuthResolutionFailure::Authentication(AppError::Forbidden),
+            &bearer,
+        );
+        assert_eq!(code(&forbidden).as_deref(), Some("forbidden"));
+
+        let timed_out = mark_bearer_refusal(AuthResolutionFailure::DeadlineExceeded, &bearer);
+        assert!(matches!(timed_out, AuthResolutionFailure::DeadlineExceeded));
+    }
 }

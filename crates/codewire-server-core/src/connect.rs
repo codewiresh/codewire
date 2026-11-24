@@ -1166,7 +1166,7 @@ async fn authorize_and_dispatch(
         Ok(admitted) => admitted,
         Err(admission::Refusal::Unresolved { failure, timeout }) => {
             return connect_auth_failure_response(
-                failure,
+                admission::mark_bearer_refusal(failure, &request_headers),
                 timeout,
                 request_id.as_deref(),
                 &request_headers,
