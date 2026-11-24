@@ -1609,11 +1609,15 @@ Sandbox's binding, cw-egress runs one TLS front door for that Sandbox, a
 child of its supervisor confined as the local one is (no filesystem, no new
 sockets, no process creation, only the descriptors it inherits). The Sandbox's
 broker hands each connection to a bound agent host on 443 to it instead of
-dialling. The front door makes its own P-256 key; only the public key leaves
-it, to the credential service's signer through orchestration, which returns
-leaves of the Pod's interception CA for the binding's own hosts, each for at
-most an hour and renewed at half-life. No CA key and no credential is ever on
-the node. The guest's trust frame carries that CA's certificate, the same for
+dialling. cw-egress serves exact names, plus one-label `*.chatgpt.com` for
+the Codex slot (#6195): a binding that selects Codex also binds the suffix
+`chatgpt.com`, from the closed table in code, so Codex's routed workspace
+origin is served as on a local VM. The front door makes its own P-256 key;
+only the public key leaves it, to the credential service's signer through
+orchestration, which returns leaves of the Pod's interception CA for the
+binding's own hosts, each for at most an hour and renewed at half-life. For
+the Codex slot the leaf names `chatgpt.com` and `*.chatgpt.com`, which covers
+one label only. No CA key and no credential is ever on the node. The guest's trust frame carries that CA's certificate, the same for
 the Pod's life; with interception on, a stream whose CA cannot be had is
 refused rather than started with an empty frame, and the guest redials. The
 front door's requests go to the credential service over the
@@ -1625,11 +1629,11 @@ an exact name but the set can't be served (a port other than 443, a name not
 in canonical form, or an environment or generation the front door can't be
 keyed by), the Pod gets no front door, its broker refuses each binding's
 dials on that binding's own port as `intercept_unavailable`, and other egress
-carries on. A suffix, a host that is not an exact name, a port that is not
-one, or more bindings than a set holds start no egress for the Pod at all, so
-the Sandbox has no egress through cw-egress. A change to the intercepted set
-ends the Pod's egress pair, and the next one starts with the new set. The
-journey is `agent-hosted` in
+carries on. A suffix other than `chatgpt.com` on 443, a host that is not an
+exact name, a port that is not one, or more bindings than a set holds start
+no egress for the Pod at all, so the Sandbox has no egress through cw-egress.
+A change to the intercepted set ends the Pod's egress pair, and the next one
+starts with the new set. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`, not yet observed.
 
 Hosted enforcement status (#4000;

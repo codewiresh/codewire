@@ -213,9 +213,8 @@ fn random_serial() -> Result<SerialNumber, rand::Error> {
 }
 
 /// The names a leaf may carry: exact canonical DNS names of at least two
-/// labels, and a `*.<suffix>` only for an interceptable suffix. Until #5013
-/// lands `FRONT_DOOR_HOSTS`, no suffix is interceptable, so every wildcard is
-/// refused.
+/// labels, and a `*.<suffix>` only for an interceptable suffix, which a TLS
+/// client matches one label deep.
 fn leaf_names<'a>(hosts: &[&'a str]) -> Result<Vec<&'a str>, LeafRefusal> {
     if hosts.is_empty() || hosts.len() > MAX_LEAF_HOSTS {
         return Err(LeafRefusal::InvalidHosts);
@@ -253,10 +252,12 @@ fn canonical(host: &str) -> bool {
 }
 
 /// Whether `*.<suffix>` may be signed: an entry of the interceptable-host
-/// table marked as a suffix (cw-security's addendum, #4001). #5013 brings the
-/// table; until then none is.
-fn interceptable_suffix(_suffix: &str) -> bool {
-    false
+/// table marked as a suffix (cw-security's addendum, #4001), which is only
+/// `chatgpt.com`, for the Codex slot (#6195).
+fn interceptable_suffix(suffix: &str) -> bool {
+    codewire_access::FRONT_DOOR_HOSTS
+        .iter()
+        .any(|entry| entry.suffix && entry.host == suffix)
 }
 
 /// An ECDSA P-256 public key from its DER SubjectPublicKeyInfo, which for

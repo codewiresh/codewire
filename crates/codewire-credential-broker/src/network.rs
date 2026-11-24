@@ -697,9 +697,10 @@ impl RouteHost {
         }
     }
 
-    /// The hosts these grants reach that the front door serves exactly: the
-    /// only hosts an interception leaf names (#4001). A suffix entry gets no
-    /// leaf until suffix bindings exist.
+    /// The names an interception leaf carries for these grants (#4001): each
+    /// front-door host the grants' routes reach, and for a suffix entry its
+    /// one-label wildcard. Only the Codex slot's route reaches `chatgpt.com`,
+    /// so only it gets `*.chatgpt.com` (#6195).
     #[cfg(feature = "platform")]
     pub(crate) fn interceptable(grants: &AvailableGrants) -> BTreeSet<&'static str> {
         grants
@@ -710,11 +711,11 @@ impl RouteHost {
                     Self::of_route(grant.capability_slot.as_str(), permission.route.as_str())
                 })
             })
-            .map(|route_host| route_host.as_str())
-            .filter(|host| {
+            .flat_map(|route_host| {
                 FRONT_DOOR_HOSTS
                     .iter()
-                    .any(|served| !served.suffix && served.host == *host)
+                    .filter(move |served| served.host == route_host.as_str())
+                    .filter_map(|served| served.leaf_name())
             })
             .collect()
     }
@@ -891,18 +892,13 @@ fn validate_github_forward_target(
     Ok(())
 }
 
-/// Whether `host` is canonical and strictly under one of
-/// [`ROUTED_SUFFIXES`]: `a.chatgpt.com`, never `chatgpt.com` or
-/// `xchatgpt.com`.
+/// Whether `host` is canonical and exactly one label under one of
+/// [`ROUTED_SUFFIXES`] (#6195): `a.chatgpt.com`, never `chatgpt.com`,
+/// `a.b.chatgpt.com` or `xchatgpt.com`.
 pub(crate) fn routed_host(host: &str) -> bool {
     let canonical =
         InterceptBinding::new(host, OPENAI_PORT).is_ok_and(|binding| binding.hostname() == host);
-    canonical
-        && ROUTED_SUFFIXES.iter().any(|suffix| {
-            host.strip_suffix(suffix)
-                .and_then(|label| label.strip_suffix('.'))
-                .is_some_and(|label| !label.is_empty())
-        })
+    canonical && codewire_access::routed_suffix(host).is_some()
 }
 
 /// The only path served at a routed origin: Codex's model path.
@@ -1172,7 +1168,11 @@ mod tests {
         );
         assert_eq!(
             RouteHost::interceptable(&grants(&[("codex", "openai-api")])),
-            BTreeSet::from(["api.openai.com", "chatgpt.com"])
+            BTreeSet::from(["*.chatgpt.com", "api.openai.com", "chatgpt.com"])
+        );
+        assert_eq!(
+            RouteHost::interceptable(&grants(&[("openai", "openai-api")])),
+            BTreeSet::from(["api.openai.com"])
         );
         // GitHub's hosts are a route's, but the front door doesn't serve them.
         assert!(
@@ -2384,15 +2384,16 @@ mod tests {
     /// itself would dial (#3999).
     #[test]
     fn a_routed_origin_is_admitted_only_pinned_on_codex_s_model_path() {
-        for routed in ["routed.chatgpt.com", "a.b.chatgpt.com"] {
-            assert!(routed_host(routed), "{routed}");
-        }
+        assert!(routed_host("routed.chatgpt.com"));
         for other in [
             "chatgpt.com",
+            "a.b.chatgpt.com",
+            ".chatgpt.com",
             "xchatgpt.com",
             "ROUTED.chatgpt.com",
             "routed.chatgpt.com.",
             "routed.chatgpt.com.evil.test",
+            "routed.xn--chatgt-frf.com",
             "routed.api.openai.com",
             "*.chatgpt.com",
         ] {

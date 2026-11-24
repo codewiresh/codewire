@@ -23,13 +23,25 @@ pub const CHATGPT_HOST: &str = "chatgpt.com";
 /// at the origin this session recorded, dialled at the admitted address.
 pub const ROUTED_SUFFIXES: [&str; 1] = [CHATGPT_HOST];
 
+/// The name a leaf carries for the `chatgpt.com` suffix: as TLS clients match
+/// a wildcard, it covers exactly one label under it.
+pub const CHATGPT_WILDCARD: &str = "*.chatgpt.com";
+
 /// The routed suffix `host` is exactly one label under, if any.
 pub fn routed_suffix(host: &str) -> Option<&'static str> {
-    ROUTED_SUFFIXES.into_iter().find(|suffix| {
-        host.strip_suffix(suffix)
-            .and_then(|label| label.strip_suffix('.'))
-            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
-    })
+    ROUTED_SUFFIXES
+        .into_iter()
+        .find(|suffix| one_label_under(host, suffix))
+}
+
+/// Whether `host` is exactly one non-empty label under `suffix`, compared byte
+/// for byte: `a.chatgpt.com` is, and `a.b.chatgpt.com`, `.chatgpt.com`,
+/// `xchatgpt.com` and `a.chatgpt.com.` are not. A caller that takes a name a
+/// client chose checks it is canonical first, since case is not folded here.
+pub fn one_label_under(host: &str, suffix: &str) -> bool {
+    host.strip_suffix(suffix)
+        .and_then(|label| label.strip_suffix('.'))
+        .is_some_and(|label| !label.is_empty() && !label.contains('.'))
 }
 /// Claude's token host, on every path: the pinned Claude Code refreshes its
 /// sign-in at `/v1/oauth/token`. Served only for a Claude sign-in.
@@ -47,14 +59,29 @@ pub const GITHUB_INTERCEPTED: bool = false;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrontDoorHost {
     pub host: &'static str,
-    /// Every name strictly under `host` that no exact entry names, never
-    /// `host` itself. A host served both ways is listed once each way.
+    /// Every name exactly one label under `host` that no exact entry names,
+    /// never `host` itself. A host served both ways is listed once each way.
     pub suffix: bool,
 }
 
+impl FrontDoorHost {
+    /// The name an interception leaf carries for this entry: the host, or
+    /// for a suffix its one-label wildcard. `None` for a suffix this table
+    /// has no wildcard for, which no entry is.
+    pub fn leaf_name(self) -> Option<&'static str> {
+        match (self.host, self.suffix) {
+            (host, false) => Some(host),
+            (CHATGPT_HOST, true) => Some(CHATGPT_WILDCARD),
+            _ => None,
+        }
+    }
+}
+
 /// Every provider host a selected credential may name for the front door:
-/// the table [`front_door_hosts`] selects from.
-pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 3] = [
+/// the table [`front_door_hosts`] selects from. Its one suffix is
+/// `chatgpt.com`, for Codex's routed workspace origin, and only the Codex
+/// slot selects it (#6195).
+pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 4] = [
     FrontDoorHost {
         host: ANTHROPIC_API_HOST,
         suffix: false,
@@ -67,15 +94,20 @@ pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 3] = [
         host: CHATGPT_HOST,
         suffix: false,
     },
+    FrontDoorHost {
+        host: CHATGPT_HOST,
+        suffix: true,
+    },
 ];
 
 /// The hosts the front door serves for an environment whose stock clients are
-/// `clients`, each exact, and only those its selected credentials name: the
-/// Anthropic API for an Anthropic client, and Claude's token host as well for
-/// a Claude sign-in; the OpenAI API for an OpenAI API key; `chatgpt.com` for
-/// Codex; and GitHub's two hosts for a GitHub connection once
-/// [`GITHUB_INTERCEPTED`]. Every other host, an unselected provider's
-/// included, is reached as it would be without a front door.
+/// `clients`, and only those its selected credentials name: the Anthropic API
+/// for an Anthropic client, and Claude's token host as well for a Claude
+/// sign-in; the OpenAI API for an OpenAI API key; `chatgpt.com` and every
+/// name one label under it for Codex; and GitHub's two hosts for a GitHub
+/// connection once [`GITHUB_INTERCEPTED`]. Each is exact but Codex's suffix.
+/// Every other host, an unselected provider's included, is reached as it
+/// would be without a front door.
 pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost> {
     let exact = |host| FrontDoorHost {
         host,
@@ -90,6 +122,10 @@ pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost>
     }
     if clients.contains(ManagedCredentialClient::Codex) {
         hosts.push(exact(CHATGPT_HOST));
+        hosts.push(FrontDoorHost {
+            host: CHATGPT_HOST,
+            suffix: true,
+        });
     }
     if clients.anthropic_sign_in() {
         hosts.push(exact(CLAUDE_TOKEN_HOST));
@@ -108,11 +144,35 @@ mod tests {
         ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
     }
 
+    /// The exact hosts served for `clients`.
     fn names(clients: ManagedCredentialClients) -> Vec<&'static str> {
         front_door_hosts(clients)
             .iter()
+            .filter(|host| !host.suffix)
             .map(|host| host.host)
             .collect()
+    }
+
+    /// Every selection of the slots, in each Anthropic form it can take.
+    fn every_selection() -> Vec<(Vec<&'static str>, ManagedCredentialClients)> {
+        let slots = ["anthropic", "openai", "codex", "ssh", "github"];
+        let mut selections = Vec::new();
+        for bits in 0..(1_u8 << slots.len()) {
+            let chosen: Vec<&str> = (0..slots.len())
+                .filter(|bit| bits & (1 << bit) != 0)
+                .map(|bit| slots[bit])
+                .collect();
+            let base = clients(&chosen);
+            let forms = [
+                Some(base),
+                base.with_anthropic_subscription_token().ok(),
+                base.with_anthropic_sign_in().ok(),
+            ];
+            for selection in forms.into_iter().flatten() {
+                selections.push((chosen.clone(), selection));
+            }
+        }
+        selections
     }
 
     #[test]
@@ -133,6 +193,85 @@ mod tests {
         // Every host served is one of the table's.
         let every = clients(&["anthropic", "openai", "codex"]);
         assert_eq!(front_door_hosts(every), FRONT_DOOR_HOSTS);
+    }
+
+    /// The `chatgpt.com` suffix is served for the Codex slot and no other
+    /// selection, beside its exact host, and it is the only suffix any
+    /// selection is served (#6195).
+    #[test]
+    fn the_chatgpt_suffix_is_served_for_the_codex_slot_only() {
+        let suffix = FrontDoorHost {
+            host: CHATGPT_HOST,
+            suffix: true,
+        };
+        for (chosen, selection) in every_selection() {
+            let served = front_door_hosts(selection);
+            let codex = chosen.contains(&"codex");
+            assert_eq!(served.contains(&suffix), codex, "{chosen:?}");
+            assert_eq!(
+                served.iter().filter(|host| host.suffix).count(),
+                usize::from(codex),
+                "{chosen:?}"
+            );
+            if codex {
+                assert!(names(selection).contains(&CHATGPT_HOST), "{chosen:?}");
+            }
+        }
+    }
+
+    /// Each suffix the table serves is a routed suffix, and the name its leaf
+    /// carries is its one-label wildcard.
+    #[test]
+    fn each_table_entry_has_its_leaf_name() {
+        for host in FRONT_DOOR_HOSTS {
+            let name = host.leaf_name().expect("every entry has a leaf name");
+            if host.suffix {
+                assert!(ROUTED_SUFFIXES.contains(&host.host), "{host:?}");
+                assert_eq!(name, format!("*.{}", host.host));
+            } else {
+                assert_eq!(name, host.host);
+            }
+        }
+        assert_eq!(
+            FrontDoorHost {
+                host: OPENAI_API_HOST,
+                suffix: true,
+            }
+            .leaf_name(),
+            None
+        );
+    }
+
+    /// A routed name is exactly one label under its suffix, byte for byte
+    /// (#6195): the forms cw-security named fail closed.
+    #[test]
+    fn a_routed_name_is_exactly_one_label_under_its_suffix() {
+        for routed in ["x.chatgpt.com", "chatgpt-us.chatgpt.com"] {
+            assert_eq!(routed_suffix(routed), Some(CHATGPT_HOST), "{routed}");
+        }
+        for refused in [
+            "a.b.chatgpt.com",
+            "chatgpt.com.example",
+            "x.chatgpt.com.example",
+            "xchatgpt.com",
+            ".chatgpt.com",
+            "..chatgpt.com",
+            "chatgpt.com",
+            "x.chatgpt.com.",
+            "X.ChatGPT.com",
+            "x.CHATGPT.COM",
+            // Look-alikes of the suffix: Cyrillic letters, in Unicode and as
+            // punycode, and a full-width dot.
+            "x.chatg\u{0440}t.com",
+            "x.xn--chatgt-frf.com",
+            "x.xn--hatgpt-hrf.com",
+            "x\u{ff0e}chatgpt.com",
+            "",
+        ] {
+            assert_eq!(routed_suffix(refused), None, "{refused:?}");
+        }
+        assert!(one_label_under("routed.example.com", "example.com"));
+        assert!(!one_label_under("example.com", "example.com"));
     }
 
     #[test]

@@ -260,10 +260,9 @@ impl FrontDoorFailure {
 /// front door routes for `clients`, which is none when its selected
 /// credentials name no host (#5215), and every name strictly under each of
 /// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443.
-/// Its exact hosts are the one selection a hosted Sandbox binds too
-/// (`codewire_access::front_door_hosts`, #4001 step P), which binds no
-/// suffix, and which keeps GitHub on its loopback route until its hosts are
-/// intercepted.
+/// Its hosts and suffix are the one selection a hosted Sandbox binds too
+/// (`codewire_access::front_door_hosts`, #4001 step P, #6195), which keeps
+/// GitHub on its loopback route until its hosts are intercepted.
 pub(crate) fn boot_intercepts(
     intercept: bool,
     clients: codewire_access::ManagedCredentialClients,

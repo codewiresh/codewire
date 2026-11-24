@@ -2612,6 +2612,28 @@ which its first bind will store, decides its CA.
   token, redacts the reply and refreshes, exactly as a local broker does.
   `cw-egress` holds certificates and no credential, and a front door never
   acts for another Sandbox.
+- **Which names `cw-egress` serves.** Exact names, plus one-label
+  `*.chatgpt.com` for the Codex slot (#6195), where Codex's account routing
+  names its workspace origin. The suffix comes only from Codewire's
+  interceptable-host table in code (`codewire_access::FRONT_DOOR_HOSTS`), and
+  only a binding that selects the Codex slot binds it; no other credential's
+  binding gains a suffix, and nothing a profile, a frame or a response says
+  adds one. `x.chatgpt.com` is served. These fail closed, never getting the
+  credential: `a.b.chatgpt.com`, an empty label (`.chatgpt.com`) and a
+  trailing dot are refused, and `chatgpt.com.example`, `xchatgpt.com` and an
+  IDN or punycode look-alike of `chatgpt.com` are not under the suffix, so
+  they are never intercepted. Mixed case is normalised where the client
+  chooses the name (DNS, SNI, Host) and then matched; past the front door
+  only the canonical name travels, and anything else is refused. The egress
+  broker hands every name under the suffix to the front door, so a deeper
+  name fails its handshake there rather than leaving as ordinary egress. The
+  front door's leaf, the bridge's route and the credential service's
+  routed-origin check each take exactly one label, so no layer is looser
+  than the one before it. The swap is unchanged: the placeholder is replaced
+  only where it is replaced for `chatgpt.com`, on Codex's model path at the
+  origin the session's `accounts/check` recorded, and the agent's
+  `chatgpt-account-id` is dropped and the credential's inserted. Any other
+  suffix, or the suffix on another port, starts no egress for the Pod.
 - **Every connected agent credential.** The Claude sign-in, with `/usage` and
   the plan display working; a Claude subscription token; an Anthropic API
   key; the Codex sign-in, with Codex's account routing; an OpenAI API key;
@@ -2810,7 +2832,8 @@ signer outage (#5032).
   stored decision is refused while the switch is on.
 - **Leaves** are signed for a public key the front door sends, for the hosts
   the signer passes: exact DNS names, or one `*.<suffix>` for a suffix in
-  Codewire's interceptable-host table, which covers one label only. A leaf is
+  Codewire's interceptable-host table, which covers one label only. The
+  table's one suffix is `chatgpt.com`, for the Codex slot. A leaf is
   serverAuth only, never a CA, and lives at most an hour, never past its CA.
   An unbound Pod gets none. The signer takes its hosts from the hosts the
   session's grants reach, never from the request, which names none. Since
@@ -2883,8 +2906,11 @@ credential, and never serves under a CA it made itself.
 - **Which hosts.** Only those in Codewire's interceptable-host table that
   the route of a credential this session is authorized for reaches; a caller
   cannot name one. A session with no such credential, and so an unbound Pod,
-  gets none. Suffix wildcards stay refused until the table carries suffix
-  bindings. The key must be a P-256 public key.
+  gets none. The table's one suffix is `chatgpt.com`, so a session whose
+  grants reach the Codex slot's route gets a leaf naming `chatgpt.com` and
+  `*.chatgpt.com` beside that route's exact hosts, and no other session gets
+  a wildcard. The signer refuses any other wildcard. The key must be a P-256
+  public key.
 - **Lifetime.** A leaf ends with its epoch, after an hour, or with its CA,
   whichever comes first. `renew_at_unix` is its half-life. A rebind reissues
   the leaves on the next call. One live set per Pod, epoch, key and host set:

@@ -121,7 +121,13 @@ impl Signer {
     }
 
     fn leaf(&self, spki: &[u8], host: &str) -> Vec<u8> {
-        let mut params = CertificateParams::new(vec![host.to_owned()]).unwrap();
+        self.leaf_for(spki, &[host])
+    }
+
+    /// A leaf for the front door's key naming `hosts`.
+    fn leaf_for(&self, spki: &[u8], hosts: &[&str]) -> Vec<u8> {
+        let hosts: Vec<String> = hosts.iter().map(|host| (*host).to_owned()).collect();
+        let mut params = CertificateParams::new(hosts).unwrap();
         params.distinguished_name = DistinguishedName::new();
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::minutes(5);
@@ -135,6 +141,15 @@ impl Signer {
 
     /// A TLS client on `stream` that trusts only this signer.
     async fn connect(&self, stream: tokio::net::UnixStream) -> std::io::Result<()> {
+        self.connect_as(stream, BOUND).await
+    }
+
+    /// [`Self::connect`], asking for `server_name`.
+    async fn connect_as(
+        &self,
+        stream: tokio::net::UnixStream,
+        server_name: &str,
+    ) -> std::io::Result<()> {
         let mut roots = RootCertStore::empty();
         roots
             .add(CertificateDer::from(self.certificate.der().to_vec()))
@@ -145,10 +160,10 @@ impl Signer {
                 .unwrap()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
-        bounded(
-            TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from(BOUND).unwrap(), stream),
-        )
+        bounded(TlsConnector::from(Arc::new(config)).connect(
+            ServerName::try_from(server_name.to_owned()).unwrap(),
+            stream,
+        ))
         .await
         .map(drop)
     }
@@ -222,6 +237,69 @@ async fn a_front_door_whose_image_check_fails_is_never_told_to_confine() {
         "{ended:?}"
     );
     assert!(!running.confined.load(Ordering::SeqCst));
+}
+
+/// The Codex slot's front door, its spec taken as cw-egress takes an
+/// assignment naming `chatgpt.com` exactly and as its suffix (#6195).
+fn codex_spec() -> FrontDoorSpec {
+    use codewire_proto::codewire::internal::v1::{BoundAssignment, InterceptionBinding};
+    let binding = |suffix| InterceptionBinding {
+        host: "chatgpt.com".into(),
+        port: 443,
+        suffix,
+        ..Default::default()
+    };
+    let assignment = BoundAssignment {
+        environment_id: spec().environment_id.to_string(),
+        operation_generation: 2,
+        interception: true,
+        interception_bindings: vec![binding(false), binding(true)],
+        ..Default::default()
+    };
+    match crate::interception::interception(&assignment) {
+        crate::interception::Interception::On(spec) => spec,
+        other => panic!("a front door, not {other:?}"),
+    }
+}
+
+/// With the Codex slot's leaf for `chatgpt.com` and `*.chatgpt.com`, the
+/// front door serves `chatgpt.com` and a name one label under it, whatever
+/// its case. A deeper name the broker hands over fails its handshake, and a
+/// name outside the suffix is never served (#6195).
+#[tokio::test]
+async fn the_codex_leaf_serves_one_label_under_chatgpt_com_and_nothing_deeper() {
+    let (mut running, mut broker, spki) = serving_spec(&codex_spec()).await;
+    let signer = Signer::new();
+    install(
+        &mut running.control,
+        &[signer.leaf_for(&spki, &["chatgpt.com", "*.chatgpt.com"])],
+    )
+    .await
+    .unwrap();
+    for (handed, asked) in [
+        ("chatgpt.com", "chatgpt.com"),
+        ("routed.chatgpt.com", "routed.chatgpt.com"),
+        ("routed.chatgpt.com", "Routed.ChatGPT.com"),
+    ] {
+        signer
+            .connect_as(broker.hand_over(handed, POD), asked)
+            .await
+            .unwrap_or_else(|error| panic!("{asked}: {error}"));
+    }
+    for refused in [
+        "a.b.chatgpt.com",
+        "xchatgpt.com",
+        "chatgpt.com.example",
+        "routed.xn--chatgt-frf.com",
+    ] {
+        assert!(
+            signer
+                .connect_as(broker.hand_over(refused, POD), refused)
+                .await
+                .is_err(),
+            "{refused}"
+        );
+    }
 }
 
 /// No leaf, no handshake: a bound host fails closed until the signer's leaf
@@ -364,15 +442,21 @@ async fn a_front_door_refuses_bindings_off_443_before_it_confines() {
 
 /// A front door brought to serving, and its broker.
 async fn serving() -> (Running, Broker) {
+    let (running, broker, _) = serving_spec(&spec()).await;
+    (running, broker)
+}
+
+/// A front door for `spec` brought to serving, its broker, and its key.
+async fn serving_spec(spec: &FrontDoorSpec) -> (Running, Broker, Vec<u8>) {
     let mut running = Running::start();
-    prepare(&mut running.control, &spec(), deadline(), || Ok(()))
+    let spki = prepare(&mut running.control, spec, deadline(), || Ok(()))
         .await
         .unwrap();
     let (door_end, broker) = Broker::new();
     take_handoff(&mut running.control, door_end, deadline())
         .await
         .unwrap();
-    (running, broker)
+    (running, broker, spki)
 }
 
 /// A socket pair whose far end opens with `tag`, as the supervisor writes

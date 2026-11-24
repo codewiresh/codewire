@@ -564,3 +564,131 @@ async fn without_a_credential_session_a_request_fails_closed_until_one_pairs() {
     let (_, status, body) = running.request().await;
     assert_eq!((status, body), (StatusCode::OK, Bytes::from("answered")));
 }
+
+/// The Codex slot's bindings as cw-egress takes them: `chatgpt.com`, exactly
+/// and as its suffix (#6195).
+fn codex_binding() -> InterceptSet {
+    use codewire_egress_policy::intercept::InterceptSuffix;
+    InterceptSet::with_suffixes(
+        [InterceptBinding::new("chatgpt.com", 443).unwrap()],
+        [InterceptSuffix::new("chatgpt.com", 443).unwrap()],
+    )
+    .unwrap()
+}
+
+/// A Codex model call on a fresh stream the broker handed over for `handed`,
+/// naming `server_name` and sending `host` as Host, with a placeholder and the
+/// account the agent names: the status and refusal the guest read.
+async fn codex_call(
+    running: &mut Running,
+    handed: &str,
+    server_name: &'static str,
+    host: &'static str,
+) -> tokio::task::JoinHandle<(StatusCode, Option<String>)> {
+    let stream = running.own_stream(handed);
+    let tls = running.tls(stream, server_name).await.expect("handshake");
+    let (mut sender, connection) =
+        bounded(hyper::client::conn::http1::handshake(TokioIo::new(tls)))
+            .await
+            .unwrap();
+    tokio::spawn(connection);
+    tokio::spawn(async move {
+        let request = Request::post("/backend-api/codex/responses")
+            .header("host", host)
+            .header("authorization", "Bearer cwp1_agent-placeholder")
+            .header("chatgpt-account-id", "agent-named-account")
+            .body(Full::new(Bytes::from_static(b"{}")))
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let refusal = response
+            .headers()
+            .get("codewire-refusal")
+            .map(|value| value.to_str().unwrap().to_owned());
+        (response.status(), refusal)
+    })
+}
+
+/// Codex's routed origin, one label under `chatgpt.com` and matched by the
+/// suffix the Codex slot binds, reaches the credential broker naming that
+/// origin and the admitted address, carrying the placeholder and the account
+/// the agent sent as received: the swap, and the account header's
+/// replacement, are the credential broker's alone, exactly as for
+/// `chatgpt.com` (#6195). Mixed case in SNI or Host is normalised and then
+/// matched; a Host with a trailing dot is misdirected, and a deeper name is
+/// refused, both before the credential broker hears of them.
+#[tokio::test]
+async fn a_routed_origin_reaches_the_credential_broker_as_the_agent_sent_it() {
+    let mut running = Running::start_binding(codex_binding(), |_| {}).await;
+    for (server_name, host) in [
+        ("routed.chatgpt.com", "routed.chatgpt.com"),
+        ("Routed.ChatGPT.com", "ROUTED.chatgpt.COM"),
+    ] {
+        let call = codex_call(&mut running, "routed.chatgpt.com", server_name, host).await;
+        let seen = received(running.host()).await;
+        assert_eq!(
+            (
+                seen.intercepted_host.as_str(),
+                seen.destination_ip.as_str(),
+                seen.capability_slot.as_str(),
+                seen.route.as_str(),
+                seen.path.as_str(),
+            ),
+            (
+                "routed.chatgpt.com",
+                "192.0.2.1",
+                "codex",
+                "openai-api",
+                "/backend-api/codex/responses",
+            ),
+            "{server_name} {host}"
+        );
+        let sent = |name: &str| -> Vec<&[u8]> {
+            seen.headers
+                .iter()
+                .filter(|header| header.name == name)
+                .map(|header| header.value.as_slice())
+                .collect()
+        };
+        assert_eq!(
+            sent("authorization"),
+            [&b"Bearer cwp1_agent-placeholder"[..]]
+        );
+        assert_eq!(sent("chatgpt-account-id"), [&b"agent-named-account"[..]]);
+        answer(running.host(), &seen.request_id).await;
+        assert_eq!(bounded(call).await.unwrap().0, StatusCode::OK);
+    }
+
+    for (name, host, refused) in [
+        (
+            "routed.chatgpt.com",
+            "routed.chatgpt.com.",
+            (StatusCode::MISDIRECTED_REQUEST, "request_not_forwarded"),
+        ),
+        (
+            "a.b.chatgpt.com",
+            "a.b.chatgpt.com",
+            (StatusCode::NOT_FOUND, "path_not_served"),
+        ),
+    ] {
+        let call = codex_call(&mut running, name, name, host).await;
+        let (status, refusal) = bounded(call).await.unwrap();
+        assert_eq!(
+            (status, refusal.as_deref()),
+            (refused.0, Some(refused.1)),
+            "{name} {host}"
+        );
+    }
+    // Nothing reached the credential broker for either: its next request is
+    // the next served one.
+    let call = codex_call(
+        &mut running,
+        "x.chatgpt.com",
+        "x.chatgpt.com",
+        "x.chatgpt.com",
+    )
+    .await;
+    let seen = received(running.host()).await;
+    assert_eq!(seen.intercepted_host, "x.chatgpt.com");
+    answer(running.host(), &seen.request_id).await;
+    assert_eq!(bounded(call).await.unwrap().0, StatusCode::OK);
+}

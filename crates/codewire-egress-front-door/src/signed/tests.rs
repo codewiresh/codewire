@@ -170,11 +170,20 @@ fn a_wildcard_leaf_covers_exactly_one_label() {
     );
     leaves.install([&leaf]).unwrap();
     assert!(served(&leaves, "ab.chatgpt.com").is_ok());
+    // Mixed case is normalised, then matched (#6195).
+    assert_eq!(
+        served(&leaves, "AB.ChatGPT.com"),
+        Ok("ab.chatgpt.com".to_owned())
+    );
     for host in [
         "chatgpt.com",
         "a.b.chatgpt.com",
         ".chatgpt.com",
         "xchatgpt.com",
+        "ab.chatgpt.com.",
+        "chatgpt.com.example",
+        "ab.xn--chatgt-frf.com",
+        "ab.chatg\u{0440}t.com",
     ] {
         assert_eq!(served(&leaves, host), Err(CaError::UnboundHost), "{host}");
     }

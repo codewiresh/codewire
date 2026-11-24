@@ -410,19 +410,30 @@ fn the_defaults_bind_three_hosts() {
     assert!(!intercepts.binds("routed.anthropic.com", 443));
 }
 
-/// A name strictly under the `chatgpt.com` suffix maps whole to the Codex
-/// route, as `chatgpt.com` does; no other name falls to a suffix route.
+/// A canonical name exactly one label under the `chatgpt.com` suffix maps
+/// whole to the Codex route, as `chatgpt.com` does; no other name falls to a
+/// suffix route (#6195). The front door hands over only the canonical name,
+/// so any other form is refused here, not normalised.
 #[test]
 fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
     let defaults = RouteTable::defaults();
+    for refused in [
+        "a.b.chatgpt.com",
+        ".chatgpt.com",
+        "routed.chatgpt.com.",
+        "Routed.ChatGPT.com",
+        "chatgpt.com.example",
+        "routed.xn--chatgt-frf.com",
+    ] {
+        assert_eq!(
+            rewrite(&defaults, refused, "/backend-api/codex/responses"),
+            Err(StatusCode::NOT_FOUND),
+            "{refused}"
+        );
+    }
     for (host, uri, rewritten) in [
         (
             "routed.chatgpt.com",
-            "/backend-api/codex/responses",
-            Ok("/v1/backend-api/codex/responses".to_owned()),
-        ),
-        (
-            "a.b.chatgpt.com",
             "/backend-api/codex/responses",
             Ok("/v1/backend-api/codex/responses".to_owned()),
         ),
@@ -1409,9 +1420,9 @@ async fn requests_through_a_front_door_reach_the_bridge_and_replies_stream_back(
     door.close();
 }
 
-/// The route table and the hosted bindings serve the same hosts for every
-/// client selection, because both are [`codewire_access::front_door_hosts`]
-/// (#4001 step P).
+/// The route table and the hosted bindings serve the same hosts and
+/// suffixes for every client selection, because both are
+/// [`codewire_access::front_door_hosts`] (#4001 step P, #6195).
 #[test]
 fn the_route_table_serves_exactly_the_shared_selection() {
     let slots = ["codex", "openai", "anthropic", "ssh", "github"];
@@ -1427,15 +1438,23 @@ fn the_route_table_serves_exactly_the_shared_selection() {
             base.with_anthropic_sign_in().ok(),
         ];
         for clients in forms.into_iter().flatten() {
-            let mut selected: Vec<&str> = codewire_access::front_door_hosts(clients)
-                .iter()
-                .map(|host| host.host)
-                .collect();
+            let selected = codewire_access::front_door_hosts(clients);
+            let named = |suffix: bool| {
+                let mut names: Vec<&str> = selected
+                    .iter()
+                    .filter(|host| host.suffix == suffix)
+                    .map(|host| host.host)
+                    .collect();
+                names.sort_unstable();
+                names
+            };
             let table = RouteTable::for_clients(clients);
             let mut routed = table.as_ref().map(RouteTable::hosts).unwrap_or_default();
-            selected.sort_unstable();
             routed.sort_unstable();
-            assert_eq!(routed, selected, "{clients:?}");
+            assert_eq!(routed, named(false), "{clients:?}");
+            let mut suffixes = table.as_ref().map(RouteTable::suffixes).unwrap_or_default();
+            suffixes.sort_unstable();
+            assert_eq!(suffixes, named(true), "{clients:?}");
         }
     }
 }

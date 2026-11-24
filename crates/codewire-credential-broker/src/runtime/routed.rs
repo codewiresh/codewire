@@ -263,7 +263,7 @@ fn workspace_backend_origin(reply: &[u8], account: &str) -> Option<String> {
 
 /// The host a routed origin names, when it is one this broker serves: HTTPS,
 /// no credentials, path, query or fragment, port 443 or none, and a host
-/// strictly under a routed suffix. `Ok(None)` for a routed suffix itself,
+/// exactly one label under a routed suffix. `Ok(None)` for a routed suffix itself,
 /// which its exact route serves; `Err` with what to log for anything else.
 fn routed_origin_host(origin: &str) -> Result<Option<String>, String> {
     let Ok(url) = url::Url::parse(origin) else {
@@ -376,9 +376,22 @@ mod tests {
             session.recorded(Carried::Swapped).as_deref(),
             Some("routed.chatgpt.com")
         );
+        // The URL parser lowercases the host, and then it is matched.
+        session.record(
+            Carried::Swapped,
+            &check("https://Routed.ChatGPT.com"),
+            Some(ACCOUNT),
+        );
+        assert_eq!(
+            session.recorded(Carried::Swapped).as_deref(),
+            Some("routed.chatgpt.com")
+        );
         for cleared in [
             "NO_CONSTRAINT",
             "https://chatgpt.com",
+            "https://a.b.chatgpt.com",
+            "https://routed.chatgpt.com.",
+            "https://routed.chatg\u{0440}t.com",
             "https://evil.example.com",
             "http://routed.chatgpt.com",
             "https://routed.chatgpt.com:8443",

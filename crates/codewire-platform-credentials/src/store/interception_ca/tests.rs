@@ -112,6 +112,34 @@ fn a_leaf_chains_to_the_stored_ca_names_only_its_hosts_and_serves_only() {
     assert_ne!(again.raw_serial(), leaf.raw_serial());
 }
 
+/// The Codex slot's leaf names `chatgpt.com` and `*.chatgpt.com`, exactly as
+/// given, and nothing else (#6195).
+#[test]
+fn the_codex_suffix_is_signed_as_its_one_label_wildcard() {
+    let ca = ca(CA_VALIDITY);
+    let der = ca
+        .sign_leaf(
+            &leaf_key(),
+            &["chatgpt.com", "*.chatgpt.com"],
+            MAX_LEAF_LIFETIME,
+        )
+        .unwrap();
+    let (_, leaf) = X509Certificate::from_der(&der).unwrap();
+    let names: Vec<String> = leaf
+        .subject_alternative_name()
+        .unwrap()
+        .unwrap()
+        .value
+        .general_names
+        .iter()
+        .map(|name| match name {
+            GeneralName::DNSName(name) => (*name).to_owned(),
+            other => panic!("only DNS names: {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, ["chatgpt.com", "*.chatgpt.com"]);
+}
+
 #[test]
 fn a_leaf_never_outlives_its_ca_and_an_expired_ca_signs_nothing() {
     let short = ca(Duration::from_secs(10 * 60));
@@ -170,12 +198,35 @@ fn the_signer_refuses_anything_outside_the_profile() {
             "{hosts:?}"
         );
     }
-    // Until #5013 brings the interceptable-host table, no suffix is
-    // interceptable, so every well-formed wildcard is refused as such.
-    assert_eq!(
-        ca.sign_leaf(&key, &["*.chatgpt.com"], MAX_LEAF_LIFETIME),
-        Err(LeafRefusal::WildcardNotInterceptable)
-    );
+    // The table's one suffix is chatgpt.com (#6195): every other well-formed
+    // wildcard is refused as such, and a malformed one as invalid.
+    for wildcard in [
+        "*.openai.com",
+        "*.api.openai.com",
+        "*.a.chatgpt.com",
+        "*.xchatgpt.com",
+        "*.chatgpt.com.example",
+        "*.xn--chatgt-frf.com",
+        "*.anthropic.com",
+    ] {
+        assert_eq!(
+            ca.sign_leaf(&key, &[wildcard], MAX_LEAF_LIFETIME),
+            Err(LeafRefusal::WildcardNotInterceptable),
+            "{wildcard}"
+        );
+    }
+    for malformed in [
+        "*.ChatGPT.com",
+        "*.chatgpt.com.",
+        "*..chatgpt.com",
+        "**.chatgpt.com",
+    ] {
+        assert_eq!(
+            ca.sign_leaf(&key, &[malformed], MAX_LEAF_LIFETIME),
+            Err(LeafRefusal::InvalidHosts),
+            "{malformed}"
+        );
+    }
 
     let p384 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)
         .unwrap()

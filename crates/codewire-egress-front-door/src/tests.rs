@@ -667,6 +667,62 @@ async fn another_server_name_is_handed_back_untouched() {
     assert!(backend.seen().is_empty());
 }
 
+/// A server name sent with a trailing dot is not the bound name, so it is
+/// handed back, never served under the bound name; mixed case is matched
+/// (#6195). Clients drop the dot before sending, so this is a real hello
+/// with its name replaced byte for byte.
+#[tokio::test]
+async fn a_server_name_with_a_trailing_dot_is_not_the_bound_name() {
+    let backend = Arc::new(Fake::default());
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND], [BOUND]).unwrap();
+    let door: Door = Arc::new(FrontDoor::new(
+        ca,
+        backend.clone(),
+        FrontDoorConfig::default(),
+    ));
+    let bound = format!("routed.{BOUND}");
+    let sent = format!("routedx.{BOUND}");
+    let dotted = format!("{bound}.");
+    assert_eq!(sent.len(), dotted.len());
+    let mut hello = client_hello(door.ca(), named(&sent));
+    let at = hello
+        .windows(sent.len())
+        .position(|window| window == sent.as_bytes())
+        .expect("the hello names its server");
+    hello[at..at + sent.len()].copy_from_slice(dotted.as_bytes());
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    let accepting = door.clone();
+    let name = bound.clone();
+    let outcome: Outcome =
+        tokio::spawn(async move { accepting.accept_to(server, &[name.as_str()], None).await });
+    client.write_all(&hello).await.unwrap();
+    let (_stream, read, why) = handed_back(outcome).await;
+    assert_eq!(why, HandBackReason::OtherServerName);
+    assert_eq!(read, hello);
+
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let accepting = door.clone();
+    let outcome: Outcome =
+        tokio::spawn(async move { accepting.accept_to(server, &[bound.as_str()], None).await });
+    let tls = TlsConnector::from(client_config(door.ca(), &[b"http/1.1"]))
+        .connect(named(&format!("Routed.{}", BOUND.to_uppercase())), client)
+        .await
+        .expect("handshake");
+    let mut sender = http1(tls).await;
+    let request = Request::get("/")
+        .header(HOST, format!("ROUTED.{BOUND}"))
+        .body(Full::default())
+        .unwrap();
+    assert_eq!(
+        sender.send_request(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    drop(sender);
+    assert_eq!(served(outcome).await.requests, 1);
+    let hosts: Vec<String> = backend.seen().into_iter().map(|seen| seen.host).collect();
+    assert_eq!(hosts, [format!("routed.{BOUND}")]);
+}
+
 #[tokio::test]
 async fn a_named_accept_serves_the_host_its_client_hello_names() {
     let (door, backend) = door();

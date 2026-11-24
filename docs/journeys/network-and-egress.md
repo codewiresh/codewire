@@ -1125,8 +1125,11 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
   - a swapped reply from `chatgpt.com` keeps the account id. Codex finds its
     workspace in `accounts/check` by that id, so `/status` and the model
     call working show it was not redacted on this path;
-  - with a routed origin under `chatgpt.com`, the model call reaches it through
-    the front door, and nothing else is served on that name;
+  - with a routed origin one label under `chatgpt.com`, in a local VM and in
+    a hosted Sandbox (#6195), the model call reaches it through the front
+    door with the credential's account id, never the one Codex sent, and
+    nothing else is served on that name; a name more than one label under
+    it is refused;
   - with an origin outside the list, the model call fails, the refusal log
     names the host once for the session, and no request carrying the
     placeholder leaves for that host;
@@ -1158,7 +1161,8 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
     Without it, Codex's model call fails with "workspace routing discovery
     failed" (#5447).
   - Every name under `chatgpt.com` on 443 is intercepted, because the egress
-    broker sees only host and port. Other traffic to those names follows the
+    broker sees only host and port, and only a name one label under it is
+    served. Other traffic to those names follows the
     network policy: a placeholder on a path the route does not serve is
     refused, and a request without the placeholder passes untouched where a
     rule allows the host. Not yet true: today a path the route does not
@@ -1837,7 +1841,10 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - orchestration refusing the session: hosted interception off there, or the
     Pod denied;
   - bindings no front door can serve: an exact name on a port other than
-    443, and a suffix;
+    443, and a suffix other than the Codex slot's `chatgpt.com`;
+  - the Codex slot, with an account whose `accounts/check` names a routed
+    origin one label under `chatgpt.com`, and requests to names under it
+    that are not one label (#6195);
   - a credential added to a running Sandbox, changing its bound hosts;
   - a Sandbox destroyed after its first intercepted call.
 - **Driving it:** no command yet (#4001).
@@ -1909,7 +1916,16 @@ arguments hold no real token, and the hosted sign-in exception is not used
     served again without a restart;
   - an exact name the front door can't serve is refused on its bound port
     as `intercept_unavailable` and never dialled, while other egress works;
-    a suffix binding leaves the Sandbox with no egress through `cw-egress`;
+    a suffix binding other than the Codex slot's `chatgpt.com` leaves the
+    Sandbox with no egress through `cw-egress`;
+  - with Codex selected, the Sandbox's leaf names `chatgpt.com` and
+    `*.chatgpt.com`, and a Sandbox without Codex gets no wildcard. Codex's
+    model call to its routed origin one label under `chatgpt.com` is
+    answered through the front door, and the provider receives the
+    credential's `chatgpt-account-id`, never the one the agent sent.
+    `a.b.chatgpt.com` and a Host with a trailing dot are refused at the
+    front door, and `xchatgpt.com` and `chatgpt.com.example` are never
+    intercepted; none of them gets the credential (#6195);
   - after a change to the bound hosts, the new set is intercepted and a
     host no longer bound is ordinary egress again;
   - once a Sandbox is destroyed, its environment's placeholder key row is
@@ -1918,9 +1934,10 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - The search for the real token is done by its holder, without
     printing it; the tool is owned by #3999.
   - A host bound as a suffix is served for names one label under it. A
-    deeper name fails its handshake on a hosted Sandbox, where a local VM
-    serves it. No real routed origin has been observed yet; the first
-    `agent-codex` run records its depth (#4947).
+    deeper name fails its handshake on a hosted Sandbox; a local VM
+    completes the handshake and then refuses it (#6195). No real routed
+    origin has been observed yet; the first `agent-codex` run records its
+    depth (#4947).
 - **Observed:** not yet observed.
 
 ## `hosted-enforcement`: a hosted Sandbox proves its egress is enforced

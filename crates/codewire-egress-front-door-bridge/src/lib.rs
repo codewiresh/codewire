@@ -25,6 +25,7 @@ pub mod control;
 mod environment;
 pub mod handoff;
 
+pub use codewire_access::ROUTED_SUFFIXES;
 pub use codewire_credential_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
 pub use environment::{Ended, EnvironmentFrontDoor, INTERCEPT_PORT, StartError};
 
@@ -37,7 +38,7 @@ use bytes::Bytes;
 use codewire_access::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, GITHUB_HOSTS,
     MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
-    OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure,
+    OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure, one_label_under,
 };
 use codewire_credential_bridge::{
     CredentialBridge, FrontDoorRequestId, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
@@ -148,13 +149,14 @@ pub enum RouteTableError {
     Suffix,
 }
 
-/// Validated host routes, and suffix routes for the names strictly under
-/// one of their hosts.
+/// Validated host routes, and suffix routes for the names exactly one label
+/// under one of their hosts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteTable {
     routes: Vec<HostRoute>,
-    /// Routes whose `host` is a suffix: they serve a name strictly under it
-    /// that no exact route names (#3999).
+    /// Routes whose `host` is a suffix: they serve a canonical name exactly
+    /// one label under it that no exact route names (#3999, #6195). A deeper
+    /// name is refused here, as a hosted leaf refuses it at the handshake.
     suffixes: Vec<HostRoute>,
 }
 
@@ -175,7 +177,7 @@ impl RouteTable {
         })
     }
 
-    /// This table, also routing any name strictly under each suffix route's
+    /// This table, also routing any name one label under each suffix route's
     /// host that no exact route names (#3999). Each suffix must be one of
     /// this table's hosts, so the CA's name constraint already covers it.
     pub fn with_suffixes<I>(self, suffixes: I) -> Result<Self, RouteTableError>
@@ -276,7 +278,7 @@ impl RouteTable {
         &self.routes
     }
 
-    /// The suffix routes: each serves a name strictly under its host.
+    /// The suffix routes: each serves a name one label under its host.
     pub fn suffix_routes(&self) -> &[HostRoute] {
         &self.suffixes
     }
@@ -337,11 +339,13 @@ impl RouteTable {
                 .iter()
                 .filter(|route| route.host == host)
                 .collect()
-        } else {
+        } else if canonical_host(host) {
             self.suffixes
                 .iter()
-                .filter(|route| strictly_under(host, &route.host))
+                .filter(|route| one_label_under(host, &route.host))
                 .collect()
+        } else {
+            Vec::new()
         };
         let (route, rest) = candidates
             .into_iter()
@@ -508,14 +512,6 @@ where
         table.push(route);
     }
     Ok(table)
-}
-
-/// Whether `host` is a name strictly under `suffix`: `a.chatgpt.com` is
-/// under `chatgpt.com`, `xchatgpt.com` is not.
-fn strictly_under(host: &str, suffix: &str) -> bool {
-    host.strip_suffix(suffix)
-        .and_then(|label| label.strip_suffix('.'))
-        .is_some_and(|label| !label.is_empty())
 }
 
 /// The policy crate's canonical names, taken as they are, as the front

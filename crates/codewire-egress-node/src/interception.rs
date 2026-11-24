@@ -1,24 +1,33 @@
 //! Which hosts a bound Pod's broker hands to its own front door (#4001;
 //! `SPEC.md`, cw-egress's front door), read from the Pod's assignment.
 //!
-//! cw-egress's front door serves only exact names on 443. With interception
-//! on, a bound host's requests carry the Sandbox's placeholders, so they are
-//! never dialled as ordinary egress (#5159):
+//! cw-egress's front door serves exact names on 443, plus one-label
+//! `*.chatgpt.com` for the Codex slot (#6195;
+//! `docs/dev/SECRETS-AND-CREDENTIALS.md`, "Which names `cw-egress` serves").
+//! A suffix binding is taken only for a suffix in the closed list in code
+//! ([`ROUTED_SUFFIXES`]), exactly as orchestration names it, on 443. The
+//! broker hands every name under it to the front door, whose leaf and routes
+//! serve one label only, so a deeper name fails closed there rather than
+//! being dialled. With interception on, a bound host's requests carry the
+//! Sandbox's placeholders, so they are never dialled as ordinary egress
+//! (#5159):
 //!
-//! - every binding exact and servable: the Pod runs a front door, and its
-//!   broker hands each bound host's dial to it;
-//! - every binding an exact name, but the set unservable (another port, a
-//!   name not in canonical form, an environment or generation the front door
-//!   cannot be keyed by): no front door, and the broker refuses each binding's
-//!   dials, on its own port, as `intercept_unavailable`; other egress carries
-//!   on;
-//! - a suffix, a host that is not an exact name, a port that is not one, or
-//!   more bindings than a set holds: no broker set can match every dial they
-//!   name, so the Pod gets no pair at all.
+//! - every binding servable: the Pod runs a front door, and its broker hands
+//!   each bound host's dial to it;
+//! - every binding an exact name or that suffix, but the set unservable
+//!   (another port, a name not in canonical form, an environment or
+//!   generation the front door cannot be keyed by): no front door, and the
+//!   broker refuses each binding's dials, on its own port, as
+//!   `intercept_unavailable`; other egress carries on;
+//! - any other suffix, a host that is not an exact name, a port that is not
+//!   one, or more bindings than a set holds: no broker set can match every
+//!   dial they name, so the Pod gets no pair at all.
 
-use codewire_egress_front_door_bridge::INTERCEPT_PORT;
-use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet, MAX_INTERCEPT_BINDINGS};
-use codewire_proto::codewire::internal::v1::BoundAssignment;
+use codewire_egress_front_door_bridge::{INTERCEPT_PORT, ROUTED_SUFFIXES};
+use codewire_egress_policy::intercept::{
+    InterceptBinding, InterceptSet, InterceptSuffix, MAX_INTERCEPT_BINDINGS,
+};
+use codewire_proto::codewire::internal::v1::{BoundAssignment, InterceptionBinding};
 use uuid::Uuid;
 
 /// What a Pod's front door is started with.
@@ -26,7 +35,7 @@ use uuid::Uuid;
 pub struct FrontDoorSpec {
     pub environment_id: Uuid,
     pub generation: u64,
-    /// Exact names on 443; never empty.
+    /// Exact names, and at most the routed suffix, on 443; never empty.
     pub intercepts: InterceptSet,
 }
 
@@ -37,7 +46,7 @@ pub enum Interception {
     Off,
     On(FrontDoorSpec),
     /// On and unservable: no front door, and the broker refuses every dial
-    /// to `hosts`, each an exact name on its bound port.
+    /// to `hosts`, each an exact name or the routed suffix on its bound port.
     RefuseHosts {
         hosts: InterceptSet,
         why: InterceptionRefusal,
@@ -72,7 +81,8 @@ impl Interception {
 /// host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterceptionRefusal {
-    /// A suffix binding: no exact set covers its subdomains.
+    /// A suffix binding other than a routed suffix on 443, as orchestration
+    /// names it.
     Suffix,
     /// A host that is not an exact name the policy crate accepts.
     Binding,
@@ -111,9 +121,14 @@ pub fn interception(bound: &BoundAssignment) -> Interception {
     }
     let mut unservable = None;
     let mut hosts = Vec::with_capacity(bound.interception_bindings.len());
+    let mut suffixes = Vec::new();
     for binding in &bound.interception_bindings {
         if binding.suffix {
-            return Interception::FailClosed(InterceptionRefusal::Suffix);
+            let Some(suffix) = routed_suffix(binding) else {
+                return Interception::FailClosed(InterceptionRefusal::Suffix);
+            };
+            suffixes.push(suffix);
+            continue;
         }
         // Refused on its own port: the broker matches host and port exactly.
         let Some(port) = u16::try_from(binding.port).ok().filter(|port| *port != 0) else {
@@ -132,7 +147,7 @@ pub fn interception(bound: &BoundAssignment) -> Interception {
         }
         hosts.push(exact);
     }
-    let Ok(hosts) = InterceptSet::new(hosts) else {
+    let Ok(hosts) = InterceptSet::with_suffixes(hosts, suffixes) else {
         return Interception::FailClosed(InterceptionRefusal::TooMany);
     };
     if hosts.is_empty() {
@@ -146,6 +161,16 @@ pub fn interception(bound: &BoundAssignment) -> Interception {
         }),
         (Some(why), _) | (None, Err(why)) => Interception::RefuseHosts { hosts, why },
     }
+}
+
+/// `binding` as the one suffix cw-egress serves: a routed suffix exactly as
+/// listed, so already canonical, on 443. Nothing else becomes a suffix.
+fn routed_suffix(binding: &InterceptionBinding) -> Option<InterceptSuffix> {
+    let listed = ROUTED_SUFFIXES.contains(&binding.host.as_str());
+    let on_443 = binding.port == u32::from(INTERCEPT_PORT);
+    (listed && on_443)
+        .then(|| InterceptSuffix::new(&binding.host, INTERCEPT_PORT).ok())
+        .flatten()
 }
 
 /// The environment and generation a front door's bridge is keyed by.
@@ -274,6 +299,84 @@ mod tests {
                     why: InterceptionRefusal::Identity
                 },
                 "{environment_id} {generation}"
+            );
+        }
+    }
+
+    /// The Codex slot's bindings: `chatgpt.com`, exactly and as a suffix.
+    fn codex_hosts() -> Vec<InterceptionBinding> {
+        vec![
+            binding("chatgpt.com", 443, false),
+            binding("chatgpt.com", 443, true),
+        ]
+    }
+
+    /// The routed suffix is served beside its exact host: every name under
+    /// it is handed to the front door, which serves one label of them, and
+    /// nothing outside it is (#6195).
+    #[test]
+    fn the_routed_suffix_is_bound_beside_its_exact_host() {
+        let Interception::On(spec) = interception(&bound(true, codex_hosts())) else {
+            panic!("a front door");
+        };
+        assert_eq!(
+            spec.intercepts,
+            InterceptSet::with_suffixes(
+                [InterceptBinding::new("chatgpt.com", 443).unwrap()],
+                [InterceptSuffix::new("chatgpt.com", 443).unwrap()],
+            )
+            .unwrap()
+        );
+        // The broker matches canonical names, as its DNS leases hold them.
+        for handed in ["chatgpt.com", "x.chatgpt.com", "a.b.chatgpt.com"] {
+            assert!(spec.intercepts.binds(handed, 443), "{handed}");
+        }
+        for dialled in [
+            "xchatgpt.com",
+            "chatgpt.com.example",
+            "x.xn--chatgt-frf.com",
+            "api.openai.com",
+        ] {
+            assert!(!spec.intercepts.binds(dialled, 443), "{dialled}");
+        }
+        assert!(!spec.intercepts.binds("x.chatgpt.com", 80));
+
+        // Unservable for another reason, the suffix is refused with the rest.
+        let mut assignment = bound(true, codex_hosts());
+        assignment.environment_id = "env".into();
+        let Interception::RefuseHosts { hosts, why } = interception(&assignment) else {
+            panic!("refused hosts");
+        };
+        assert_eq!(why, InterceptionRefusal::Identity);
+        assert!(hosts.binds("x.chatgpt.com", 443));
+    }
+
+    /// Only a suffix in the closed list, exactly as it is listed, on 443, is
+    /// taken; any other fails the Pod closed, whatever exact hosts are
+    /// beside it (#6195).
+    #[test]
+    fn only_a_listed_suffix_on_443_is_taken() {
+        for (host, port) in [
+            ("ChatGPT.com", 443),
+            ("chatgpt.com.", 443),
+            ("*.chatgpt.com", 443),
+            (".chatgpt.com", 443),
+            ("x.chatgpt.com", 443),
+            ("xchatgpt.com", 443),
+            ("chatgpt.com.example", 443),
+            ("xn--chatgt-frf.com", 443),
+            ("chatg\u{0440}t.com", 443),
+            ("openai.com", 443),
+            ("com", 443),
+            ("chatgpt.com", 8443),
+            ("chatgpt.com", 0),
+        ] {
+            let mut bindings = codex_hosts();
+            bindings.push(binding(host, port, true));
+            assert_eq!(
+                interception(&bound(true, bindings)),
+                Interception::FailClosed(InterceptionRefusal::Suffix),
+                "{host}:{port}"
             );
         }
     }

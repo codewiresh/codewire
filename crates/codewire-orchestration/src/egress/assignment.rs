@@ -296,8 +296,9 @@ mod tests {
         check_interception_bindings(true).unwrap();
     }
 
-    /// A hosted sandbox binds exactly the hosts a local boot's front door
-    /// routes for the same clients, for every selection (#4001 step P).
+    /// A hosted sandbox binds exactly the hosts and suffixes a local boot's
+    /// front door routes for the same clients, for every selection (#4001
+    /// step P, #6195).
     #[test]
     fn the_bindings_are_the_hosts_the_local_front_door_routes() {
         let slots = ["codex", "openai", "anthropic", "ssh", "github"];
@@ -312,18 +313,27 @@ mod tests {
                 base.with_anthropic_sign_in().ok(),
             ];
             for clients in forms.into_iter().flatten() {
-                let exact: Vec<String> = interception_bindings(true, clients)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|intercept| !intercept.suffix)
-                    .map(|intercept| intercept.binding.hostname().to_owned())
-                    .collect();
-                let mut routed: Vec<String> =
-                    codewire_egress_front_door_bridge::RouteTable::for_clients(clients)
-                        .map(|table| table.hosts().into_iter().map(str::to_owned).collect())
-                        .unwrap_or_default();
+                let bound = interception_bindings(true, clients).unwrap();
+                let named = |suffix: bool| -> Vec<String> {
+                    bound
+                        .iter()
+                        .filter(|intercept| intercept.suffix == suffix)
+                        .map(|intercept| intercept.binding.hostname().to_owned())
+                        .collect()
+                };
+                let table = codewire_egress_front_door_bridge::RouteTable::for_clients(clients);
+                let mut routed: Vec<String> = table
+                    .as_ref()
+                    .map(|table| table.hosts().into_iter().map(str::to_owned).collect())
+                    .unwrap_or_default();
                 routed.sort();
-                assert_eq!(exact, routed, "{clients:?}");
+                assert_eq!(named(false), routed, "{clients:?}");
+                let mut suffixes: Vec<String> = table
+                    .as_ref()
+                    .map(|table| table.suffixes().into_iter().map(str::to_owned).collect())
+                    .unwrap_or_default();
+                suffixes.sort();
+                assert_eq!(named(true), suffixes, "{clients:?}");
             }
         }
         assert_eq!(
