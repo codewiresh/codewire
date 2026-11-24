@@ -264,12 +264,16 @@ panel comment.
   is plain on Dev and coloured on the local VM. On Dev on 2026-11-23 (#6161):
   the first start's terminal was found before any input; the file manager
   opened from the panel has a dark frame and dark controls; the panel's size,
-  changed from 36 to 44, was still 44 after a stop and start. Two proofs
-  fail. The terminal's background is the dashboard terminal's, but its text
-  is cream and its cursor purple, where the dashboard's are `#e4e4e7`. The
-  wallpaper fills the screen at every size tried, but the wordmark is whole
-  only at 16:10 (1600x1000, 1280x800, 1920x1200), and cut at 1920x1080 and
-  1024x768.
+  changed from 36 to 44, was still 44 after a stop and start. On Dev on
+  2026-11-24, from the workspace image with #6161's fix (pin #6216, delivery
+  76319), with nothing in the home: the terminal is titled "Terminal", its
+  text and cursor are `#e4e4e7` on `#0a0a0a`, and its ANSI colours are the
+  dashboard terminal's. The wallpaper fills the screen and the wordmark is
+  whole at 1024x768, 1600x1000, 1280x800, 1920x1200, 1920x1080, 2048x1536
+  and 2560x1080. At 1024x768 the default terminal window covers all of it,
+  and at 1280x800 part of it; with the window minimized it shows whole.
+  Every size was set inside the environment with
+  `xrandr`; a resize made by a viewer is not yet observed.
 
 ## `desktop-browser`: Chromium runs sandboxed, and an agent can drive it
 
