@@ -2,15 +2,15 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:57baf3379849a0bdcc20c749ad970c169d4a99f1fc1819b4203b01d56a923294";
+pub const DIGEST: &str = "sha256:6ea688069b333fe0fcab4ff016f74a42b805e75ebf2a6d25d1045049310f4860";
 /// The image at the public GHCR mirror, pulled anonymously by local
 /// environments. A deployment pulls the same digest from its configured
 /// repository.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:57baf3379849a0bdcc20c749ad970c169d4a99f1fc1819b4203b01d56a923294";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:6ea688069b333fe0fcab4ff016f74a42b805e75ebf2a6d25d1045049310f4860";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "8749749a4e9c325a27714cfb09d860df57437f3a";
+pub const SOURCE_SHA: &str = "3e020c340559ba2aeaaa735e505efc4ad3f78e17";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
 pub const INPUTS_SHA256: &str = "9d2122e444a0851d5ad1b215f5296adc62c4815b38265c452c51a17b4398a15a";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
@@ -23,6 +23,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:57baf3379849a0bdcc20c749ad970c169d4a99f1fc1819b4203b01d56a923294",
     "sha256:c8cfc9a193c4709332eac4432a58ef0dc96e11bd4b599c642266fdfb068e8e3a",
     "sha256:318ef37d09fa03e6117766f435d19344ad6e83ab86fd112b26b39db9e5b8d3b0",
     "sha256:22bcf08bd3a3fddebc64dee9e1749dec559e23af0eea6fe5d6b01756e5728ff8",
@@ -54,5 +55,4 @@ pub const PREVIOUS_DIGESTS: &[&str] = &[
     "sha256:0ce0c5eb4fe7aed222b4e3f4180757665b8ab8f227c0e4a9f7bf6f22c89e37f6",
     "sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419",
     "sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959",
-    "sha256:ad1f2db5ff86c616ea7fb7b8c3f196b271a0bc5b75a636f4b4ffd77fb1ee2313",
 ];
