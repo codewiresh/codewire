@@ -255,6 +255,14 @@ impl BindingStore for TwoPodStore {
     ) -> Result<bool, BindingStoreUnavailable> {
         Ok(decided)
     }
+
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
+    }
 }
 
 fn state(store: Arc<TwoPodStore>, reviews: Arc<AtomicUsize>) -> Arc<WorkspaceBindingState> {

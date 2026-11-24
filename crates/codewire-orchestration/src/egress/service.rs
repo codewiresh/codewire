@@ -455,8 +455,9 @@ impl EgressServiceState {
     /// Whether `guest`'s streams intercept: the decision its first bind
     /// stored (C5, #5468, #5496), which every rebind and relay epoch reads
     /// too, so its CA, its assignment's bindings and its epochs never
-    /// disagree. An unbound warm member has no decision yet, and the setting,
-    /// which its first bind will store, decides. A bound Pod with none was
+    /// disagree. An unbound warm member has no decision yet, and the setting
+    /// is what its trust record is first written with, if its first admission
+    /// comes before its first bind (#6200). A bound Pod with none was
     /// bound before decisions were stored: while the switch is off it counts
     /// as not intercepted, which it was, as its relay stores; while it is on
     /// it is refused, as its relay refuses it an epoch, until it is replaced.
@@ -472,18 +473,35 @@ impl EgressServiceState {
         }
     }
 
-    /// The guest's interception CA certificate, or nothing when it does not
-    /// intercept. An intercepting guest whose certificate can't be had is
-    /// refused rather than admitted with an empty trust frame: the guest
-    /// keeps the trust of its first session for the Pod's life (#5006), so an
-    /// empty one would refuse every later session that carries the CA. It
-    /// redials instead.
+    /// The guest's interception CA certificate, or nothing when its trust
+    /// carries none. The guest keeps the trust of its first session for the
+    /// Pod's life (#5006), so the Pod's trust record decides (#6200): the
+    /// first of its first admission and first bind writes it, here what
+    /// [`Self::intercepts`] answers, and every admission follows it whatever
+    /// the switch says by then. `facts` is the Pod as read from the API, whose
+    /// UID admission already matched to the reviewed token. An intercepting
+    /// guest whose certificate can't be had is refused rather than admitted
+    /// with an empty trust frame, which would refuse every later session that
+    /// carries the CA. It redials instead.
     async fn interception_ca(
         &self,
         guest: &GuestPod,
+        facts: &crate::runtime::MemberFacts,
         binding: Option<&LiveBinding>,
     ) -> Result<Vec<u8>, ConnectError> {
-        if !self.intercepts(binding)? {
+        let proposed = self.intercepts(binding)?;
+        let pod_uid = facts.uid.as_deref().ok_or_else(denied)?;
+        let trusted = self
+            .bindings
+            .record_trust(pod_uid, proposed)
+            .await
+            .map_err(|_| {
+                unavailable(
+                    "record the Pod's interception trust",
+                    "binding store unavailable",
+                )
+            })?;
+        if !trusted {
             return Ok(Vec::new());
         }
         let source = self
@@ -787,7 +805,10 @@ impl EgressService for EgressConnectService {
         if let Some(binding) = &binding {
             self.state.lockdown_applied(&guest, &facts, binding).await?;
         }
-        let ca_certificate_der = self.state.interception_ca(&guest, binding.as_ref()).await?;
+        let ca_certificate_der = self
+            .state
+            .interception_ca(&guest, &facts, binding.as_ref())
+            .await?;
         let assignment = self.state.assignment_of(binding).await?;
         connectrpc::Response::ok(AdmitResponse {
             pod_uid: guest.uid,

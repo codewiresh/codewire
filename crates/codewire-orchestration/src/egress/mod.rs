@@ -19,6 +19,7 @@ pub mod assignment;
 pub mod confidential_hold;
 pub mod gateway_check;
 pub mod interception_ca;
+pub mod interception_trust;
 pub mod lockdown;
 pub mod own_mode;
 pub mod pre_switch;
@@ -67,11 +68,15 @@ pub fn service_state(
     );
     let attestation: Arc<dyn RuntimeAttestation> = runtime;
     // An intercepting sandbox's admission carries its CA certificate, which
-    // only the credential service can make (#4001).
-    let interception_cas = match (settings.interception, credential_broker) {
-        (false, _) => None,
-        (true, None) => anyhow::bail!("hosted interception needs the platform credential runtime"),
-        (true, Some(origin)) => Some(Arc::new(interception_ca::RelayInterceptionCas {
+    // only the credential service can make (#4001). A Pod whose trust record
+    // carries a CA still gets it after the switch goes off (#6200), so the
+    // source exists wherever the credential runtime does.
+    let interception_cas = match credential_broker {
+        None if settings.interception => {
+            anyhow::bail!("hosted interception needs the platform credential runtime")
+        }
+        None => None,
+        Some(origin) => Some(Arc::new(interception_ca::RelayInterceptionCas {
             broker: codewire_tls::ClientTlsEndpoint::new(
                 origin,
                 std::path::PathBuf::from(
@@ -140,6 +145,12 @@ pub fn mount(
         Some(state) => {
             let state = Arc::new(service::EgressServiceState { reapplied, ..state });
             spawn_report_sweep(state.pool.clone());
+            if let Some(kube) = api.kube.clone() {
+                interception_trust::spawn_sweep(
+                    state.pool.clone(),
+                    kube::Api::namespaced(kube, &state.sandbox_namespace),
+                );
+            }
             app.with_connect_routes(service::egress_router(state))
         }
         None => app,
@@ -298,7 +309,7 @@ mod tests {
         );
         let state = service_state(
             Some(intercepting()),
-            Some(runtime),
+            Some(runtime.clone()),
             "postgres://unused",
             pool(),
             "dev",
@@ -312,5 +323,21 @@ mod tests {
         .unwrap();
         assert!(state.interception);
         assert!(state.interception_cas.is_some());
+        // Off, a Pod whose trust record carries a CA still gets it (#6200).
+        let off = service_state(
+            Some(on()),
+            Some(runtime),
+            "postgres://unused",
+            pool(),
+            "dev",
+            "sb",
+            InterceptionInputs {
+                front_doors: None,
+                credential_broker: Some("https://credentials.codewire.test".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!off.interception && off.interception_cas.is_some());
     }
 }

@@ -475,6 +475,8 @@ struct FakeStore {
     reports: Mutex<Vec<(String, String, MeshAttachmentReport)>>,
     /// The interception each Pod's first bind stored, set once.
     interception: Mutex<HashMap<String, bool>>,
+    /// Each Pod's interception trust, recorded once (#6200).
+    trust: Mutex<HashMap<String, bool>>,
 }
 
 impl FakeStore {
@@ -491,6 +493,7 @@ impl FakeStore {
             issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
             reports: Mutex::new(Vec::new()),
             interception: Mutex::new(HashMap::new()),
+            trust: Mutex::new(HashMap::new()),
         })
     }
 
@@ -514,6 +517,19 @@ impl FakeStore {
 
 #[async_trait]
 impl BindingStore for FakeStore {
+    async fn record_trust(
+        &self,
+        pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(*self
+            .trust
+            .lock()
+            .unwrap()
+            .entry(pod_uid.to_owned())
+            .or_insert(ca_given))
+    }
+
     async fn record_interception(
         &self,
         pod_uid: &str,
@@ -1064,6 +1080,46 @@ async fn a_rebind_keeps_the_interception_its_first_bind_stored() {
     }
 }
 
+/// The first bind follows the trust the Pod's first admission recorded
+/// (#6200): a warm member admitted with no CA before the switch went on is
+/// stored as not intercepted when it is claimed after, and one admitted with
+/// a CA stays so.
+#[tokio::test]
+async fn the_first_bind_follows_the_trust_its_first_admission_recorded() {
+    let broker_pod = || {
+        let mut pod = workspace_pod();
+        pod.metadata.labels.as_mut().unwrap().insert(
+            crate::egress::admission::EGRESS_MODE_LABEL.into(),
+            crate::egress::admission::EGRESS_MODE_BROKER.into(),
+        );
+        pod
+    };
+    let cluster = || {
+        FakeCluster::new(
+            valid_review(),
+            vec![Some(broker_pod())],
+            vec![Some(sandbox())],
+        )
+    };
+    for admitted_with_ca in [false, true] {
+        let store = FakeStore::bound(WorkspaceCredentialScope::Pod);
+        store
+            .trust
+            .lock()
+            .unwrap()
+            .insert(POD_UID.into(), admitted_with_ca);
+        let on = fixture_with(cluster(), store.clone(), |state| {
+            state.with_interception(true)
+        });
+        assert_eq!(
+            on.bind(20).await.unwrap().interception,
+            admitted_with_ca,
+            "admitted with a CA: {admitted_with_ca}"
+        );
+        assert_eq!(store.trust.lock().unwrap()[POD_UID], admitted_with_ca);
+    }
+}
+
 #[tokio::test]
 async fn garbage_and_expired_bearers_never_reach_token_review() {
     let fixture = fixture(
@@ -1449,6 +1505,7 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
         reports: Mutex::new(Vec::new()),
         interception: Mutex::new(HashMap::new()),
+        trust: Mutex::new(HashMap::new()),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))

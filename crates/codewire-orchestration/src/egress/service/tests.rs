@@ -377,6 +377,15 @@ impl BindingStore for Unbound {
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
         Ok(None)
     }
+
+    /// No record yet: each first writer's answer is recorded.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
+    }
 }
 
 /// What the deployment under test renders workspaces with.
@@ -1233,6 +1242,15 @@ impl BindingStore for Decided {
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
         Ok(Some(decided(self.0)))
     }
+
+    /// No record yet: each first writer's answer is recorded.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
+    }
 }
 
 fn decided(interception: Option<bool>) -> LiveBinding {
@@ -1257,6 +1275,15 @@ impl BindingStore for Bound {
         _pod_name: &str,
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
         Ok(Some(binding()))
+    }
+
+    /// No record yet: each first writer's answer is recorded.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
     }
 }
 
@@ -1568,6 +1595,15 @@ impl BindingStore for Claimable {
         _pod_name: &str,
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
         Ok(self.0.load(Ordering::SeqCst).then(binding))
+    }
+
+    /// No record yet: each first writer's answer is recorded.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
     }
 }
 
@@ -2029,7 +2065,11 @@ async fn a_stored_decision_gives_the_ca_and_the_bindings_together() {
                     >);
             let binding = decided(Some(stored));
             let guest = state.named_guest(GUEST, GUEST_UID);
-            let ca = state.interception_ca(&guest, Some(&binding)).await.unwrap();
+            let facts = guest_facts(&state).await;
+            let ca = state
+                .interception_ca(&guest, &facts, Some(&binding))
+                .await
+                .unwrap();
             let bindings = binding_intercepts(
                 state.intercepts(Some(&binding)).unwrap(),
                 &binding.managed_credential_clients,
@@ -2038,6 +2078,71 @@ async fn a_stored_decision_gives_the_ca_and_the_bindings_together() {
             let case = format!("switch {setting}, stored {stored}");
             assert_eq!(!ca.is_empty(), stored, "{case}");
             assert_eq!(!bindings.is_empty(), stored, "{case}");
+        }
+    }
+}
+
+/// The guest Pod as the service reads it from the API.
+async fn guest_facts(state: &EgressServiceState) -> crate::runtime::MemberFacts {
+    state
+        .attestation
+        .attested_pod(SANDBOXES, GUEST)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// An unbound guest whose trust another first writer already recorded.
+struct Recorded(bool);
+
+#[async_trait]
+impl BindingStore for Recorded {
+    async fn live_binding(
+        &self,
+        _pod_uid: &str,
+        _namespace: &str,
+        _pod_name: &str,
+    ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
+        Ok(None)
+    }
+
+    async fn record_trust(
+        &self,
+        pod_uid: &str,
+        _ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        assert_eq!(pod_uid, GUEST_UID, "the trust is the resolved Pod's");
+        Ok(self.0)
+    }
+}
+
+/// Every admission gives exactly the trust the Pod's record holds, whatever
+/// the switch says by then (#6200): a warm member admitted before a flip
+/// keeps the trust its guest installed, and its first bind follows it.
+#[tokio::test]
+async fn an_admission_gives_the_recorded_trust_never_the_switch_now() {
+    let cluster = Cluster::healthy();
+    for setting in [false, true] {
+        for recorded in [false, true] {
+            let cas = Arc::new(Cas {
+                certificate: Some(b"synthetic-ca-der".to_vec()),
+                asked: Default::default(),
+            });
+            let mut state = state(&cluster, Arc::new(Recorded(recorded)), None);
+            state.interception = setting;
+            state.interception_cas =
+                Some(Arc::clone(&cas)
+                    as Arc<
+                        dyn crate::egress::interception_ca::InterceptionCaSource,
+                    >);
+            let guest = state.named_guest(GUEST, GUEST_UID);
+            let facts = guest_facts(&state).await;
+            let ca = state.interception_ca(&guest, &facts, None).await.unwrap();
+            assert_eq!(
+                !ca.is_empty(),
+                recorded,
+                "switch {setting}, recorded {recorded}"
+            );
         }
     }
 }

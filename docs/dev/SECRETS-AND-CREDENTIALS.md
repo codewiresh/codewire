@@ -2617,9 +2617,15 @@ With hosted interception on, a hosted Sandbox's agent credentials go through
 the proxy as a local VM's do with its front door, and the Sandbox holds no
 real token (owner, 2026-11-19, #4001). It is a deployment switch,
 `CODEWIRE_HOSTED_INTERCEPTION_ENABLED` on orchestration, off by default, and it
-takes effect at a Sandbox's next start, never during its life: orchestration
-decides it once, at the Pod's first bind (the switch, and the Pod being a
-broker-mode Sandbox), and stores it on the binding. The bind, every rebind
+takes effect at a Sandbox's next start, never during its life. Each Pod first
+gets a trust record, written once by whichever comes first, its first egress
+admission or its first bind: whether its guest trusts an interception CA,
+which is the switch at that moment and the Pod being a broker-mode Sandbox.
+Every admission of the Pod gives it a CA exactly when its record says so,
+whatever the switch says by then, so the guest's trust never changes during
+its life (#5006). Orchestration then decides interception once, at the Pod's
+first bind (the record, the switch still on, and the Pod being a broker-mode
+Sandbox), and stores it on the binding (#6200, not yet observed). The bind, every rebind
 and every credential relay epoch of that Pod read the stored decision, and
 so does orchestration's egress service for the Pod's interception CA, its
 assignment's host bindings and its leaves, so none can disagree
@@ -2635,8 +2641,16 @@ write-once, since the bind would decide the same; that covers a Pod an older
 orchestration bound during a rollout, whose daemon binds only once per start.
 With the switch on, only the bind decides, since only the bind sees the Pod:
 such a Pod's egress admission is then refused too, so it fails closed until
-it is replaced. An unbound warm member has no decision yet, and the switch,
-which its first bind will store, decides its CA.
+it is replaced. An unbound warm member has no decision yet, and its trust
+record decides its CA. So a member created before the switch went on and
+claimed after it, whose guest trusts no CA, is stored as not intercepted and
+runs as before until it is replaced; one created with a CA and claimed after
+the switch went off is stored as not intercepted, and its guest trusts a CA
+under which nothing is ever signed. A Sandbox's next start is a new Pod with
+a new record, so it follows the switch then. A record is never changed, and
+is deleted only when the API server's complete list of Pods confirms its Pod
+is gone. That list is of the sandbox namespace, the one namespace where
+admission and the bind accept a Pod, so a live Pod is always on it.
 
 - **The path.** The Sandbox's egress broker in `cw-egress` sends each agent
   host on 443 to the Sandbox's front door. The front door decrypts with a leaf
@@ -2873,9 +2887,8 @@ signer outage (#5032).
   idempotent by Pod UID and refuses a Pod whose binding was released. The key
   is opened only to sign a leaf, and only for an attached row whose Pod UID
   and environment match what the Pod's relay epoch authenticated.
-  Orchestration asks only for a Pod that intercepts: a bound Pod whose
-  stored decision is intercepted, or an unbound warm member while the switch
-  is on. A Pod stored as not intercepted gets no CA, and a bound Pod with no
+  Orchestration asks only for a Pod whose trust record carries a CA, the
+  record its first admission or first bind wrote (#6200). A Pod stored as not intercepted gets no CA, and a bound Pod with no
   stored decision is refused while the switch is on.
 - **Leaves** are signed for a public key the front door sends, for the hosts
   the signer passes: exact DNS names, or one `*.<suffix>` for a suffix in
@@ -2917,9 +2930,10 @@ credential, and never serves under a CA it made itself.
   authenticated. It returns the certificate, which
   `AdmitResponse.ca_certificate_der` carries and `cw-egress` sends unchanged
   as the stream's trust frame, so a later bind changes nothing the guest
-  sees. A bound Pod intercepts when its binding recorded that at its first
-  bind (C5); an unbound warm member when the switch is on, as its first bind
-  will record. Until the binding stores that decision (#5496), a bound Pod
+  sees. The frame carries the CA exactly when the Pod's trust record says
+  so, written once by its first admission or its first bind (#6200); a bound
+  Pod intercepts only when its binding recorded that at its first bind (C5),
+  which follows the same record. Until the binding stores that decision (#5496), a bound Pod
   is decided by the switch too. The field is empty only for a Pod that does
   not intercept. An
   intercepting Pod whose CA can't be had is refused `UNAVAILABLE`, never

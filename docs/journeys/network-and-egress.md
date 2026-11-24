@@ -1870,6 +1870,9 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a `cw-egress` rollout, and a `cw-egress` restart, under a running
     Sandbox that has made intercepted calls;
   - a Sandbox claimed from the warm pool;
+  - the switch flipped while warm members are idle, each way, with a member
+    created before the flip claimed after it, and a Sandbox started again
+    after it (#6200);
   - the Sandbox's trust before any agent runs: a new intercepted Sandbox,
     one not intercepted, an image that sets its own
     `NODE_EXTRA_CA_CERTS`, and an image with no system bundle (#6072);
@@ -1928,7 +1931,14 @@ arguments hold no real token, and the hosted sign-in exception is not used
     installed at its start. The Sandbox installs nothing new, and a
     process that was already running keeps working;
   - a Sandbox claimed from the warm pool serves an intercepted host under
-    the CA it installed before it was claimed;
+    the CA it installed before it was claimed: the CA file's digest is the
+    same before and after the claim, and the claim installs nothing new;
+  - a member created before the switch went on and claimed after it has no
+    CA and is stored as not intercepted, and its agents use the relay path;
+    a member created with a CA and claimed after the switch went off is
+    stored as not intercepted, and no leaf is signed for it; a Sandbox
+    started again after a flip follows the switch, with its CA and its
+    stored decision in agreement (#6200, not yet observed);
   - a new intercepted Sandbox has its CA at
     `/codewire/run/egress-trust/ca.pem` before anything runs, with the
     same digest as the certificate its binding stores. A session, `cw exec`

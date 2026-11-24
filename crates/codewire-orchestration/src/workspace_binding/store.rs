@@ -133,6 +133,19 @@ pub trait BindingStore: Send + Sync {
         Err(BindingStoreUnavailable)
     }
 
+    /// Records whether `pod_uid`'s guest trusts an interception CA,
+    /// `ca_given`, if nothing is recorded for it yet, and answers what is
+    /// recorded (#6200). The first of the Pod's first egress admission and
+    /// first bind writes it, and every admission and the first bind follow
+    /// it, so the guest's trust and the stored decision agree. Never changed.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        _ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
     /// The enabled runtime transport zone `name`, if any.
     async fn transport_zone(
         &self,
@@ -294,6 +307,19 @@ impl BindingStore for PgBindingStore {
             BindingStoreUnavailable
         })?;
         row.map(live_binding_from_row).transpose()
+    }
+
+    async fn record_trust(
+        &self,
+        pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        crate::egress::interception_trust::record(&self.pool, pod_uid, ca_given)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "pod interception trust record failed");
+                BindingStoreUnavailable
+            })
     }
 
     async fn record_interception(

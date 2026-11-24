@@ -428,13 +428,19 @@ impl WorkspaceBindingState {
         // §4.7: respond only while the reviewed token is still valid.
         still_valid(&caller.identity)?;
         // Decided at the Pod's first bind and stored; every later bind, and
-        // every relay epoch, reads the stored decision.
+        // every relay epoch, reads the stored decision. It follows the trust
+        // the guest installed (#6200): its record, which this bind writes if
+        // no admission has yet.
+        let proposed = intercepted(self.interception, &member);
+        let pod_uid = member.uid.as_deref().ok_or(BindError::PermissionDenied)?;
+        let trusted = self
+            .store
+            .record_trust(pod_uid, proposed)
+            .await
+            .map_err(|_| BindError::Unavailable)?;
         let interception = self
             .store
-            .record_interception(
-                caller.identity.pod_uid(),
-                intercepted(self.interception, &member),
-            )
+            .record_interception(caller.identity.pod_uid(), trusted && proposed)
             .await
             .map_err(|_| BindError::Unavailable)?;
         let mut response = respond(

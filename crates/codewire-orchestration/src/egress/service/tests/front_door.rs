@@ -54,6 +54,15 @@ impl BindingStore for Bound {
             }),
         )
     }
+
+    /// No record yet: each first writer's answer is recorded.
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
+    }
 }
 
 fn key() -> BindingKey {
