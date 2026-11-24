@@ -30,6 +30,9 @@ mod credit_database_tests;
 mod dedicated_cpu_database_tests;
 #[cfg(test)]
 mod quota_database_tests;
+pub mod sandbox_counts;
+#[cfg(test)]
+mod sandbox_counts_database_tests;
 #[cfg(test)]
 mod startup_database_tests;
 pub mod suspension;

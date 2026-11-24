@@ -10,6 +10,7 @@ mod account_sign_in_methods;
 mod account_two_factor;
 mod admin_account_deletion;
 mod admin_connect;
+mod admin_sandbox_counts;
 mod assets;
 mod auth;
 mod billing_banner;

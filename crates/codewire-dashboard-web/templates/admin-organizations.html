@@ -36,19 +36,28 @@
             </form>
           </div>
         </section>
+        <section class="cw-stat-grid cw-stat-grid--five" aria-label="Sandboxes across every organization">
+          {% match organizations.sandbox_totals %}{% when Some(totals) %}<article class="cw-card cw-admin-stat"><span>Sandboxes created</span><strong>{{ totals.created }}</strong></article>
+          <article class="cw-card cw-admin-stat"><span>Sandboxes running</span><strong>{{ totals.running }}</strong></article>
+          <article class="cw-card cw-admin-stat"><span>Sandboxes stopped</span><strong>{{ totals.stopped }}</strong></article>
+          <article class="cw-card cw-admin-stat"><span>Sandboxes failed</span><strong>{{ totals.failed }}</strong></article>
+          <article class="cw-card cw-admin-stat"><span>Sandboxes deleted</span><strong>{{ totals.deleted }}</strong></article>{% when None %}<article class="cw-card cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>{% endmatch %}
+        </section>
         <section class="cw-card" aria-labelledby="organizations-heading">
-          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>{{ organizations.len() }} organizations</p></div></header>
-          {% if organizations.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No organizations exist yet.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table cw-table--row-links"><thead><tr><th scope="col">Organization</th><th scope="col">Slug</th><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead><tbody>
-            {% for organization in organizations %}<tr>
-              <th scope="row"><a class="cw-row-link" href="{{ organization.url }}">{{ organization.name }}</a></th>
-              <td><code>{{ organization.slug }}</code></td>
-              <td>{{ organization.billing_plan }}</td>
-              <td>{{ organization.billing_status }}</td>
-              <td>{% match organization.confidential_environments %}{% when Some(true) %}<span class="cw-badge" data-tone="success">Opted in</span>{% when Some(false) %}Not opted in{% when None %}Unavailable{% endmatch %}</td>
-              <td>{{ organization.created }}</td>
-            </tr>{% endfor %}
-          </tbody></table></div>{% endif %}
+          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>{{ organizations.rows.len() }} organizations</p></div></header>
+          {% if organizations.rows.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No organizations exist yet.</p></div>{% else %}
+          <div class="cw-table-wrap"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
+            {% for organization in organizations.rows %}<tbody>
+              <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="{{ organization.url }}">{{ organization.name }}</a> <code>{{ organization.slug }}</code></th></tr>
+              <tr>
+                <td>{{ organization.billing_plan }}</td>
+                <td>{{ organization.billing_status }}</td>
+                {% match organization.sandboxes %}{% when Some(sandboxes) %}<td>{{ sandboxes.counts.created }}</td><td>{{ sandboxes.counts.running }}</td><td>{{ sandboxes.counts.stopped }}</td><td>{{ sandboxes.counts.failed }}</td><td>{{ sandboxes.counts.deleted }}</td><td>{{ sandboxes.last_created }}</td>{% when None %}<td colspan="6">Unavailable</td>{% endmatch %}
+                <td>{% match organization.confidential_environments %}{% when Some(true) %}<span class="cw-badge" data-tone="success">Opted in</span>{% when Some(false) %}Not opted in{% when None %}Unavailable{% endmatch %}</td>
+                <td>{{ organization.created }}</td>
+              </tr>
+            </tbody>{% endfor %}
+          </table></div>{% endif %}
         </section>
       </div></div></main>
     </div>

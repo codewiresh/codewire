@@ -21,17 +21,20 @@ use codewire_admin_proto::codewire::admin::v1::{
     GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
     ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
     ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse,
+    ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse,
     ListOrganizationsRequest, ListOrganizationsResponse, NodeCapacity, NodeReservedCapacity,
     NodeUsedCapacity, Organization as ProtoOrganization,
     OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
     OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
     OrganizationMember as ProtoOrganizationMember,
-    OrganizationSubscription as ProtoOrganizationSubscription, SetDefaultEnvironmentQuotaRequest,
-    SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest,
-    SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest,
-    SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest,
-    SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary, SuspendAccountRequest,
-    SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse,
+    OrganizationSandboxCounts as ProtoOrganizationSandboxCounts,
+    OrganizationSubscription as ProtoOrganizationSubscription, SandboxCounts as ProtoSandboxCounts,
+    SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse,
+    SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse,
+    SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse,
+    SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary,
+    SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest,
+    UnsuspendAccountResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -46,7 +49,7 @@ use crate::api::admin::{
 };
 use crate::api::feedback;
 
-/// Registers the ten AdminService reads, the three audited quota writes and
+/// Registers the twelve AdminService reads, the three audited quota writes and
 /// the audited rate card, dedicated CPU and credit writes on their generated
 /// Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
@@ -95,6 +98,17 @@ impl AdminService for AdminConnectService {
             organizations,
             ..Default::default()
         })
+    }
+
+    async fn list_organization_sandbox_counts(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListOrganizationSandboxCountsRequest>,
+    ) -> ServiceResult<ListOrganizationSandboxCountsResponse> {
+        let counts = admin::sandbox_counts::list_organization_sandbox_counts_core(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_organization_sandbox_counts(counts))
     }
 
     async fn list_audit_logs(
@@ -537,6 +551,39 @@ fn proto_organization(value: AdminOrg) -> AppResult<ProtoOrganization> {
         dedicated_cpu: value.dedicated_cpu,
         ..Default::default()
     })
+}
+
+fn proto_sandbox_counts(counts: admin::sandbox_counts::SandboxCounts) -> ProtoSandboxCounts {
+    ProtoSandboxCounts {
+        created: counts.created,
+        running: counts.running,
+        stopped: counts.stopped,
+        failed: counts.failed,
+        deleted: counts.deleted,
+        ..Default::default()
+    }
+}
+
+fn proto_organization_sandbox_counts(
+    counts: admin::sandbox_counts::AdminSandboxCounts,
+) -> ListOrganizationSandboxCountsResponse {
+    ListOrganizationSandboxCountsResponse {
+        organizations: counts
+            .organizations
+            .into_iter()
+            .map(|organization| ProtoOrganizationSandboxCounts {
+                organization_id: organization.organization_id,
+                counts: Some(proto_sandbox_counts(organization.counts)).into(),
+                last_created_at: organization
+                    .last_created_at
+                    .map(proto_naive_timestamp)
+                    .into(),
+                ..Default::default()
+            })
+            .collect(),
+        totals: Some(proto_sandbox_counts(counts.totals)).into(),
+        ..Default::default()
+    }
 }
 
 fn proto_organization_quota(

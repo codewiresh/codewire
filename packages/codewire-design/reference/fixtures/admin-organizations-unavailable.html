@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin, organizations, Sandbox counts unavailable fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/billing-admin.css">
+  <script src="../../dashboard.js" defer></script>
+</head>
+<body class="cw-body" data-route="admin" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>organizations</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+        <header class="cw-admin-heading"><div><h1 class="cw-page-title">Organizations</h1><p>Inspect any organization's members, billing, environment quota, usage and API keys.</p></div></header>
+        <section class="cw-card" aria-labelledby="defaults-heading">
+          <header class="cw-card-header"><div><h2 id="defaults-heading">Defaults for organizations without their own quota</h2><p>Every organization without its own quota gets these limits. An organization on the Unlimited rate card has no limits.</p></div></header>
+          <div class="cw-card-body">
+            <form class="cw-catalog-form" method="post" action="#" aria-labelledby="defaults-heading">
+              <label class="cw-field"><span>Concurrent environments</span><input class="cw-input" type="number" name="environments" min="-1" step="1" value="-1" required></label>
+              <label class="cw-field"><span>Concurrent sandboxes</span><input class="cw-input" type="number" name="sandboxes" min="-1" step="1" value="10" required></label>
+              <label class="cw-field"><span>CPU (millicores)</span><input class="cw-input" type="number" name="cpu_millicores" min="-1" step="1" value="16000" required></label>
+              <label class="cw-field"><span>Memory (MiB)</span><input class="cw-input" type="number" name="memory_mb" min="-1" step="1" value="32768" required></label>
+              <p class="cw-muted">Now unlimited environments, 10 sandboxes, 16 vCPU and 32 GiB. Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Save defaults</button></div>
+            </form>
+          </div>
+        </section>
+        <section class="cw-stat-grid cw-stat-grid--five" aria-label="Sandboxes across every organization">
+          <article class="cw-card cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>
+        </section>
+        <section class="cw-card" aria-labelledby="organizations-heading">
+          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>4 organizations</p></div></header>
+          <div class="cw-table-wrap"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
+            <tbody>
+              <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="#org_ada">Analytical Engines</a> <code>analytical-engines</code></th></tr>
+              <tr>
+                <td>standard</td>
+                <td>active</td>
+                <td colspan="6">Unavailable</td>
+                <td><span class="cw-badge" data-tone="success">Opted in</span></td>
+                <td>Mar 4, 2026, 10:00 UTC</td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="#org_grace">Compiler Works</a> <code>compiler-works</code></th></tr>
+              <tr>
+                <td>unlimited</td>
+                <td>active</td>
+                <td colspan="6">Unavailable</td>
+                <td>Not opted in</td>
+                <td>May 19, 2026, 14:30 UTC</td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="#org_edsger">Shortest Paths</a> <code>shortest-paths</code></th></tr>
+              <tr>
+                <td>none</td>
+                <td>none</td>
+                <td colspan="6">Unavailable</td>
+                <td>Not opted in</td>
+                <td>Sep 30, 2026, 16:05 UTC</td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="#org_new">New Arrivals</a> <code>new-arrivals</code></th></tr>
+              <tr>
+                <td>none</td>
+                <td>none</td>
+                <td colspan="6">Unavailable</td>
+                <td>Not opted in</td>
+                <td>Nov 23, 2026, 07:55 UTC</td>
+              </tr>
+            </tbody>
+          </table></div>
+        </section>
+</div></div></main>
+</body>
+</html>

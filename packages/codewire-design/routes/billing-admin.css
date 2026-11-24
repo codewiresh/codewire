@@ -13,6 +13,7 @@
 .cw-badge-row .cw-badge { margin-left: 0; }
 .cw-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
 .cw-stat-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cw-stat-grid--five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .cw-stat { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
 dl.cw-stat-grid { margin: 0; }
 .cw-stat > span, .cw-stat > strong, .cw-stat > dt, .cw-stat > dd { display: block; margin: 0; }
@@ -113,7 +114,7 @@ dl.cw-stat-grid { margin: 0; }
   .cw-payment-method { grid-template-columns: minmax(0, 1fr); justify-items: start; }
   /* A saved card keeps its menu on the right, so the menu opens on screen. */
   .cw-payment-method:has(> .cw-menu) { grid-template-columns: minmax(0, 1fr) auto; }
-  .cw-stat-grid, .cw-stat-grid--three, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
+  .cw-stat-grid, .cw-stat-grid--three, .cw-stat-grid--five, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
   .cw-organization-toggle { flex-wrap: nowrap; }
   .cw-admin-heading, .cw-filter-form, .cw-setting-row { align-items: stretch; flex-direction: column; }
   .cw-admin-heading > .cw-badge { align-self: flex-start; }

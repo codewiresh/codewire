@@ -38,6 +38,9 @@ const (
 	// AdminServiceListOrganizationsProcedure is the fully-qualified name of the AdminService's
 	// ListOrganizations RPC.
 	AdminServiceListOrganizationsProcedure = "/codewire.admin.v1.AdminService/ListOrganizations"
+	// AdminServiceListOrganizationSandboxCountsProcedure is the fully-qualified name of the
+	// AdminService's ListOrganizationSandboxCounts RPC.
+	AdminServiceListOrganizationSandboxCountsProcedure = "/codewire.admin.v1.AdminService/ListOrganizationSandboxCounts"
 	// AdminServiceListAuditLogsProcedure is the fully-qualified name of the AdminService's
 	// ListAuditLogs RPC.
 	AdminServiceListAuditLogsProcedure = "/codewire.admin.v1.AdminService/ListAuditLogs"
@@ -97,6 +100,11 @@ type AdminServiceClient interface {
 	GetStats(context.Context, *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error)
 	// ListOrganizations returns every organization ordered by name.
 	ListOrganizations(context.Context, *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error)
+	// ListOrganizationSandboxCounts returns how many Sandboxes each
+	// organization has created, and how many of those are running, stopped,
+	// failed and deleted now, with the totals across every organization. One query reads
+	// every organization at once.
+	ListOrganizationSandboxCounts(context.Context, *connect.Request[v1.ListOrganizationSandboxCountsRequest]) (*connect.Response[v1.ListOrganizationSandboxCountsResponse], error)
 	// ListAuditLogs returns newest-first global audit entries.
 	ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error)
 	// ListFeedback returns newest-first feedback sent with `cw feedback`,
@@ -192,6 +200,13 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			httpClient,
 			baseURL+AdminServiceListOrganizationsProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("ListOrganizations")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		listOrganizationSandboxCounts: connect.NewClient[v1.ListOrganizationSandboxCountsRequest, v1.ListOrganizationSandboxCountsResponse](
+			httpClient,
+			baseURL+AdminServiceListOrganizationSandboxCountsProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("ListOrganizationSandboxCounts")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -313,6 +328,7 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 type adminServiceClient struct {
 	getStats                          *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
 	listOrganizations                 *connect.Client[v1.ListOrganizationsRequest, v1.ListOrganizationsResponse]
+	listOrganizationSandboxCounts     *connect.Client[v1.ListOrganizationSandboxCountsRequest, v1.ListOrganizationSandboxCountsResponse]
 	listAuditLogs                     *connect.Client[v1.ListAuditLogsRequest, v1.ListAuditLogsResponse]
 	listFeedback                      *connect.Client[v1.ListFeedbackRequest, v1.ListFeedbackResponse]
 	listEnvironmentLifecycleJournal   *connect.Client[v1.ListEnvironmentLifecycleJournalRequest, v1.ListEnvironmentLifecycleJournalResponse]
@@ -340,6 +356,11 @@ func (c *adminServiceClient) GetStats(ctx context.Context, req *connect.Request[
 // ListOrganizations calls codewire.admin.v1.AdminService.ListOrganizations.
 func (c *adminServiceClient) ListOrganizations(ctx context.Context, req *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error) {
 	return c.listOrganizations.CallUnary(ctx, req)
+}
+
+// ListOrganizationSandboxCounts calls codewire.admin.v1.AdminService.ListOrganizationSandboxCounts.
+func (c *adminServiceClient) ListOrganizationSandboxCounts(ctx context.Context, req *connect.Request[v1.ListOrganizationSandboxCountsRequest]) (*connect.Response[v1.ListOrganizationSandboxCountsResponse], error) {
+	return c.listOrganizationSandboxCounts.CallUnary(ctx, req)
 }
 
 // ListAuditLogs calls codewire.admin.v1.AdminService.ListAuditLogs.
@@ -437,6 +458,11 @@ type AdminServiceHandler interface {
 	GetStats(context.Context, *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error)
 	// ListOrganizations returns every organization ordered by name.
 	ListOrganizations(context.Context, *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error)
+	// ListOrganizationSandboxCounts returns how many Sandboxes each
+	// organization has created, and how many of those are running, stopped,
+	// failed and deleted now, with the totals across every organization. One query reads
+	// every organization at once.
+	ListOrganizationSandboxCounts(context.Context, *connect.Request[v1.ListOrganizationSandboxCountsRequest]) (*connect.Response[v1.ListOrganizationSandboxCountsResponse], error)
 	// ListAuditLogs returns newest-first global audit entries.
 	ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error)
 	// ListFeedback returns newest-first feedback sent with `cw feedback`,
@@ -528,6 +554,13 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		AdminServiceListOrganizationsProcedure,
 		svc.ListOrganizations,
 		connect.WithSchema(adminServiceMethods.ByName("ListOrganizations")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceListOrganizationSandboxCountsHandler := connect.NewUnaryHandler(
+		AdminServiceListOrganizationSandboxCountsProcedure,
+		svc.ListOrganizationSandboxCounts,
+		connect.WithSchema(adminServiceMethods.ByName("ListOrganizationSandboxCounts")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -648,6 +681,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceGetStatsHandler.ServeHTTP(w, r)
 		case AdminServiceListOrganizationsProcedure:
 			adminServiceListOrganizationsHandler.ServeHTTP(w, r)
+		case AdminServiceListOrganizationSandboxCountsProcedure:
+			adminServiceListOrganizationSandboxCountsHandler.ServeHTTP(w, r)
 		case AdminServiceListAuditLogsProcedure:
 			adminServiceListAuditLogsHandler.ServeHTTP(w, r)
 		case AdminServiceListFeedbackProcedure:
@@ -697,6 +732,10 @@ func (UnimplementedAdminServiceHandler) GetStats(context.Context, *connect.Reque
 
 func (UnimplementedAdminServiceHandler) ListOrganizations(context.Context, *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ListOrganizations is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) ListOrganizationSandboxCounts(context.Context, *connect.Request[v1.ListOrganizationSandboxCountsRequest]) (*connect.Response[v1.ListOrganizationSandboxCountsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ListOrganizationSandboxCounts is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error) {

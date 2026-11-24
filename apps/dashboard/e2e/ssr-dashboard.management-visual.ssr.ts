@@ -173,12 +173,13 @@ test.describe.serial("rounded management interface", () => {
     await expect(page.getByLabel("Concurrent sandboxes")).toHaveAttribute("min", "-1");
     await expectNoPageOverflow(page);
 
-    // A click on the row's slug cell, not its name, opens the organization;
-    // the name link stays the row's only focusable element. The link's overlay
-    // covers the row by design, so the pointer lands on it at the slug's position.
-    const row = page.locator("tbody tr").filter({ has: page.locator("code", { hasText: slug }) });
-    await expect(row.locator("a, button, input, [tabindex]")).toHaveCount(1);
-    await row.locator("code", { hasText: slug }).click({ force: true });
+    // Each organization is two rows: its name and slug, then its details
+    // (#6086). A click on the details row, not the name, opens it; the name
+    // link stays the only focusable element. The link's overlay covers both
+    // rows by design, so the pointer lands on it at the details' position.
+    const group = page.locator("tbody").filter({ has: page.locator("code", { hasText: slug }) });
+    await expect(group.locator("a, button, input, [tabindex]")).toHaveCount(1);
+    await group.locator("tr").nth(1).locator("td").first().click({ force: true });
     await expect(page).toHaveURL(/\/admin\/organizations\/[A-Za-z0-9_-]+\/$/);
     await expect(page.getByRole("heading", { name: "Management Visual", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Environment quota and usage" })).toBeVisible();

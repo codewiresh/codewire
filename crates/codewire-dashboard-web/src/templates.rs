@@ -2,7 +2,7 @@ use askama::Template;
 
 use crate::account_home::Balance;
 use crate::admin_connect::{
-    AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
+    AdminCatalogView, AdminOrganizationView, AdminOrganizations, AdminStatsView, AuditLogRow,
     FeedbackFilter, FeedbackRow, FeedbackSenderView, QuotaView, pricing::PricingPageView,
 };
 use crate::billing_banner::BillingBannerView;
@@ -73,7 +73,7 @@ pub(crate) struct AdminOverviewTemplate<'a> {
 #[template(path = "admin-organizations.html")]
 pub(crate) struct AdminOrganizationsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
-    pub(crate) organizations: &'a [AdminOrganizationRow],
+    pub(crate) organizations: &'a AdminOrganizations,
     pub(crate) defaults: &'a QuotaView,
     pub(crate) csrf_token: &'a str,
     pub(crate) message: &'a str,

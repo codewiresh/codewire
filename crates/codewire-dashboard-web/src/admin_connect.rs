@@ -7,7 +7,8 @@ use codewire_admin_proto::codewire::admin::v1::{
     EnvironmentQuota, FeedbackEntry, FeedbackSender, GetCatalogRequest,
     GetDefaultEnvironmentQuotaRequest, GetOrganizationDefaultCardRequest,
     GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
-    ListConfidentialOrganizationsRequest, ListFeedbackRequest, ListOrganizationsRequest,
+    ListConfidentialOrganizationsRequest, ListFeedbackRequest,
+    ListOrganizationSandboxCountsRequest, ListOrganizationsRequest,
     ListSubscriptionMigrationsRequest, ListSystemdOrganizationsRequest, PlanSpec,
     PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
     SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
@@ -19,7 +20,11 @@ use codewire_admin_proto::codewire::admin::v1::{
 use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
-    mailto::mailto, state::AppState, time_display::calendar_datetime, transport::BrowserTransport,
+    admin_sandbox_counts::{OrganizationSandboxes, SandboxCountsByOrganization, SandboxCountsView},
+    mailto::mailto,
+    state::AppState,
+    time_display::calendar_datetime,
+    transport::BrowserTransport,
 };
 
 pub(crate) mod pricing;
@@ -213,6 +218,16 @@ pub(crate) struct AdminOrganizationRow {
     /// Opted in to confidential environments (#2497); `None` while the
     /// billing service that owns the opt-in cannot be read.
     pub(crate) confidential_environments: Option<bool>,
+    /// Its Sandboxes (#6086); `None` while the counts cannot be read.
+    pub(crate) sandboxes: Option<OrganizationSandboxes>,
+}
+
+/// Admin → Organizations: every organization, and the Sandbox totals across
+/// them, `None` while the counts cannot be read.
+#[derive(Debug)]
+pub(crate) struct AdminOrganizations {
+    pub(crate) rows: Vec<AdminOrganizationRow>,
+    pub(crate) sandbox_totals: Option<SandboxCountsView>,
 }
 
 #[derive(Debug)]
@@ -855,17 +870,30 @@ async fn systemd_organization_ids(
 pub(crate) async fn organizations(
     state: &AppState,
     cookie: HeaderValue,
-) -> Result<Vec<AdminOrganizationRow>, ConnectError> {
+) -> Result<AdminOrganizations, ConnectError> {
     let admin_rpc = admin_client(state, cookie.clone());
-    let (response, confidential) = tokio::join!(
+    let (response, confidential, sandboxes) = tokio::join!(
         admin_rpc.list_organizations(ListOrganizationsRequest::default()),
         confidential_organization_ids(state, cookie),
+        admin_rpc.list_organization_sandbox_counts(ListOrganizationSandboxCountsRequest::default()),
     );
     let response = response?.into_owned();
-    Ok(response
+    let sandboxes = sandboxes
+        .inspect_err(|error| {
+            tracing::warn!(
+                error = %error,
+                "Admin Organizations could not read the Sandbox counts and shows them as unavailable"
+            );
+        })
+        .ok()
+        .map(|sandboxes| SandboxCountsByOrganization::new(sandboxes.into_owned()));
+    let rows = response
         .organizations
         .into_iter()
         .map(|organization| AdminOrganizationRow {
+            sandboxes: sandboxes
+                .as_ref()
+                .map(|sandboxes| sandboxes.organization(&organization.id)),
             confidential_environments: confidential
                 .as_ref()
                 .map(|ids| ids.contains(&organization.id)),
@@ -881,7 +909,11 @@ pub(crate) async fn organizations(
                     .map(|value| value.seconds),
             ),
         })
-        .collect())
+        .collect();
+    Ok(AdminOrganizations {
+        rows,
+        sandbox_totals: sandboxes.map(|sandboxes| sandboxes.totals),
+    })
 }
 
 pub(crate) async fn organization(

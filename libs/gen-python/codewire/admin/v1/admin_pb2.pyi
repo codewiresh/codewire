@@ -67,6 +67,42 @@ class ListOrganizationsResponse(_message.Message):
     organizations: _containers.RepeatedCompositeFieldContainer[Organization]
     def __init__(self, organizations: _Optional[_Iterable[_Union[Organization, _Mapping]]] = ...) -> None: ...
 
+class SandboxCounts(_message.Message):
+    __slots__ = ("created", "running", "stopped", "deleted", "failed")
+    CREATED_FIELD_NUMBER: _ClassVar[int]
+    RUNNING_FIELD_NUMBER: _ClassVar[int]
+    STOPPED_FIELD_NUMBER: _ClassVar[int]
+    DELETED_FIELD_NUMBER: _ClassVar[int]
+    FAILED_FIELD_NUMBER: _ClassVar[int]
+    created: int
+    running: int
+    stopped: int
+    deleted: int
+    failed: int
+    def __init__(self, created: _Optional[int] = ..., running: _Optional[int] = ..., stopped: _Optional[int] = ..., deleted: _Optional[int] = ..., failed: _Optional[int] = ...) -> None: ...
+
+class OrganizationSandboxCounts(_message.Message):
+    __slots__ = ("organization_id", "counts", "last_created_at")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    COUNTS_FIELD_NUMBER: _ClassVar[int]
+    LAST_CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    counts: SandboxCounts
+    last_created_at: _timestamp_pb2.Timestamp
+    def __init__(self, organization_id: _Optional[str] = ..., counts: _Optional[_Union[SandboxCounts, _Mapping]] = ..., last_created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class ListOrganizationSandboxCountsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListOrganizationSandboxCountsResponse(_message.Message):
+    __slots__ = ("organizations", "totals")
+    ORGANIZATIONS_FIELD_NUMBER: _ClassVar[int]
+    TOTALS_FIELD_NUMBER: _ClassVar[int]
+    organizations: _containers.RepeatedCompositeFieldContainer[OrganizationSandboxCounts]
+    totals: SandboxCounts
+    def __init__(self, organizations: _Optional[_Iterable[_Union[OrganizationSandboxCounts, _Mapping]]] = ..., totals: _Optional[_Union[SandboxCounts, _Mapping]] = ...) -> None: ...
+
 class ListAuditLogsRequest(_message.Message):
     __slots__ = ("limit", "offset", "action", "severity")
     LIMIT_FIELD_NUMBER: _ClassVar[int]

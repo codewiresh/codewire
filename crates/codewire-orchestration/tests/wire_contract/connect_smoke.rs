@@ -64,6 +64,13 @@ async fn assert_json_connect_routes(harness: &Harness) {
         ),
         (
             ADMIN_SERVICE,
+            "ListOrganizationSandboxCounts",
+            json!({}),
+            Auth::GlobalAdmin,
+            Some("totals"),
+        ),
+        (
+            ADMIN_SERVICE,
             "GetOrganizationEnvironmentQuota",
             json!({"organizationId": PRIMARY_ORG}),
             Auth::GlobalAdmin,
@@ -253,9 +260,10 @@ async fn assert_auth_boundary(harness: &Harness) {
         .await;
     assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
 
-    // Nor may one switch a rate card, move credit (#3381) or suspend an
-    // account (#3297).
+    // Nor may one read every organization's Sandbox counts (#6086), switch a
+    // rate card, move credit (#3381) or suspend an account (#3297).
     for (method, body) in [
+        ("ListOrganizationSandboxCounts", json!({})),
         (
             "SetOrganizationDedicatedCpu",
             json!({"organizationId": PRIMARY_ORG, "dedicatedCpu": true}),

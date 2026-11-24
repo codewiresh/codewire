@@ -21,6 +21,15 @@ service AdminService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ListOrganizationSandboxCounts returns how many Sandboxes each
+  // organization has created, and how many of those are running, stopped,
+  // failed and deleted now, with the totals across every organization. One query reads
+  // every organization at once.
+  rpc ListOrganizationSandboxCounts(ListOrganizationSandboxCountsRequest)
+      returns (ListOrganizationSandboxCountsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // ListAuditLogs returns newest-first global audit entries.
   rpc ListAuditLogs(ListAuditLogsRequest) returns (ListAuditLogsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -168,6 +177,40 @@ message ListOrganizationsRequest {}
 
 message ListOrganizationsResponse {
   repeated Organization organizations = 1;
+}
+
+// Sandbox counts from the environments table, which keeps a deleted
+// Sandbox's row. Every Sandbox is in exactly one of running, stopped, failed
+// and deleted, so they add up to created.
+message SandboxCounts {
+  // Every Sandbox ever created, deleted ones included.
+  int64 created = 1;
+  // Running, or on its way there: pending, pending_build, building,
+  // pulling_snapshot, creating, starting, running, restoring or resizing.
+  int64 running = 2;
+  // Stopping or stopped, archiving or archived: nothing runs and the disk is
+  // kept.
+  int64 stopped = 3;
+  // Being deleted or deleted: destroying or destroyed.
+  int64 deleted = 4;
+  // Any other state: error, build_failed or unknown.
+  int64 failed = 5;
+}
+
+message OrganizationSandboxCounts {
+  string organization_id = 1;
+  SandboxCounts counts = 2;
+  // When the organization last created a Sandbox.
+  google.protobuf.Timestamp last_created_at = 3;
+}
+
+message ListOrganizationSandboxCountsRequest {}
+
+message ListOrganizationSandboxCountsResponse {
+  // Only organizations that have created a Sandbox; any other has none.
+  repeated OrganizationSandboxCounts organizations = 1;
+  // The sums of every organization's counts.
+  SandboxCounts totals = 2;
 }
 
 message ListAuditLogsRequest {

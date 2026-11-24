@@ -60,6 +60,17 @@
 .cw-table--row-links tbody tr:focus-within { background: var(--bg-primary); }
 .cw-table--row-links .cw-row-link::after { position: absolute; inset: 0; content: ""; }
 
+/* A table whose items each take two rows, one tbody per item: a name row
+   spanning the table, then a row of details under the column headings. The
+   name's link stretches over both rows, both highlight together, and only
+   the details row draws the line under the item. */
+.cw-table--row-groups tbody { position: relative; }
+.cw-table--row-groups tbody:is(:hover, :focus-within) { background: var(--bg-primary); }
+.cw-table--row-groups tbody tr:hover { background: transparent; }
+.cw-table--row-groups .cw-row-link::after { position: absolute; inset: 0; content: ""; }
+.cw-table--row-groups tbody tr:first-child :is(td, th) { height: auto; padding-bottom: 0; border-bottom: 0; font-weight: var(--weight-medium); }
+.cw-table--row-groups tbody:not(:last-of-type) tr:last-child :is(td, th) { border-bottom: 1px solid var(--border-subtle); }
+
 .cw-table tbody tr:last-child :is(td, th) {
   border-bottom: 0;
 }

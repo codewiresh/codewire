@@ -6,9 +6,10 @@ use connectrpc::ConnectError;
 use crate::{
     admin_connect::{
         AdminApiKeyRow, AdminMemberRow, AdminOrganizationRow, AdminOrganizationView,
-        AdminSubscriptionRow, AuditLogRow, FeedbackFilter, FeedbackRow, FeedbackSenderView,
-        QuotaLimitView, QuotaView,
+        AdminOrganizations, AdminSubscriptionRow, AuditLogRow, FeedbackFilter, FeedbackRow,
+        FeedbackSenderView, QuotaLimitView, QuotaView,
     },
+    admin_sandbox_counts::{OrganizationSandboxes, SandboxCountsView},
     response::{HTMX_REQUEST, login_redirect, safe_auth_continuation, two_factor_redirect},
     templates::{
         AdminAccountsTemplate, AdminAuditTemplate, AdminFeedbackTemplate,
@@ -898,15 +899,34 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
 #[test]
 fn admin_organizations_template_links_each_row_and_escapes_names() {
     let view = admin_view();
-    let organizations = vec![AdminOrganizationRow {
-        name: "<script>alert('org')</script>".into(),
-        slug: "safe-org".into(),
-        billing_plan: "unlimited".into(),
-        billing_status: "active".into(),
-        created: "2026-10-28".into(),
-        url: "/admin/organizations/org_safe-1/".into(),
-        confidential_environments: Some(true),
-    }];
+    let organizations = AdminOrganizations {
+        rows: vec![AdminOrganizationRow {
+            name: "<script>alert('org')</script>".into(),
+            slug: "safe-org".into(),
+            billing_plan: "unlimited".into(),
+            billing_status: "active".into(),
+            created: "2026-10-28".into(),
+            url: "/admin/organizations/org_safe-1/".into(),
+            confidential_environments: Some(true),
+            sandboxes: Some(OrganizationSandboxes {
+                counts: SandboxCountsView {
+                    created: 18,
+                    running: 9,
+                    stopped: 4,
+                    failed: 3,
+                    deleted: 2,
+                },
+                last_created: "Nov 20, 2026, 09:30 UTC".into(),
+            }),
+        }],
+        sandbox_totals: Some(SandboxCountsView {
+            created: 19,
+            running: 9,
+            stopped: 4,
+            failed: 3,
+            deleted: 3,
+        }),
+    };
     let defaults = unsafe_organization(false).effective_quota;
     let body = AdminOrganizationsTemplate {
         view: &view,
@@ -919,10 +939,12 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
     .render()
     .expect("render admin organizations page");
     assert!(!body.contains("<script>"));
-    // The whole row opens the organization through its one stretched link.
-    assert!(body.contains(r#"<table class="cw-table cw-table--row-links">"#));
+    // Each organization is a row group (#6086): its name and slug on one row,
+    // the details under the column headings on the next. Both rows open it
+    // through its one stretched link.
+    assert!(body.contains(r#"<table class="cw-table cw-table--row-groups">"#));
     assert!(body.contains(
-        r#"<th scope="row"><a class="cw-row-link" href="/admin/organizations/org_safe-1/">"#
+        r#"<th scope="rowgroup" colspan="10"><a class="cw-row-link" href="/admin/organizations/org_safe-1/">"#
     ));
     assert_eq!(body.matches(r#"class="cw-row-link""#).count(), 1);
     // The confidential opt-in is a column of state, not a control in the row.
@@ -951,8 +973,68 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
         );
     }
     assert!(body.contains(r#"<th scope="col">Plan</th>"#));
-    assert!(body.contains(r#"<th scope="row">"#));
+    assert!(body.contains("</a> <code>safe-org</code></th></tr>"));
+    assert_eq!(
+        body.matches("<th scope=\"col\">").count(),
+        10,
+        "the headings label the details row only"
+    );
     assert!(body.contains(r#"href="/admin/organizations/">Organizations</a>"#));
+    // The Sandbox totals across every organization, then each one's (#6086).
+    for (label, value) in [
+        ("Sandboxes created", 19),
+        ("Sandboxes running", 9),
+        ("Sandboxes stopped", 4),
+        ("Sandboxes failed", 3),
+        ("Sandboxes deleted", 3),
+    ] {
+        assert!(
+            body.contains(&format!(
+                r#"<article class="cw-card cw-admin-stat"><span>{label}</span><strong>{value}</strong></article>"#
+            )),
+            "{label}"
+        );
+    }
+    assert!(body.contains(
+        r#"<th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th>"#
+    ));
+    assert!(body.contains(
+        "<td>18</td><td>9</td><td>4</td><td>3</td><td>2</td><td>Nov 20, 2026, 09:30 UTC</td>"
+    ));
+}
+
+#[test]
+fn admin_organizations_template_says_when_the_sandbox_counts_are_unavailable() {
+    let view = admin_view();
+    let organizations = AdminOrganizations {
+        rows: vec![AdminOrganizationRow {
+            name: "Example".into(),
+            slug: "example".into(),
+            billing_plan: "none".into(),
+            billing_status: "none".into(),
+            created: "2026-10-28".into(),
+            url: "/admin/organizations/org_example/".into(),
+            confidential_environments: None,
+            sandboxes: None,
+        }],
+        sandbox_totals: None,
+    };
+    let defaults = unsafe_organization(false).effective_quota;
+    let body = AdminOrganizationsTemplate {
+        view: &view,
+        organizations: &organizations,
+        defaults: &defaults,
+        csrf_token: "csrf-safe",
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin organizations page");
+    assert!(body.contains(
+        r#"<article class="cw-card cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>"#
+    ));
+    assert!(!body.contains("Sandboxes running"));
+    assert!(body.contains(r#"<td colspan="6">Unavailable</td>"#));
 }
 
 #[test]
