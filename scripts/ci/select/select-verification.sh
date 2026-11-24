@@ -872,6 +872,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-ci-done-measures.py|\
       scripts/ci/verify/scan-credential-canaries.py|\
       scripts/ci/tests/test-scan-credential-canaries.py|\
+      scripts/ci/verify/scan-token-shapes.py|\
+      scripts/ci/tests/test-scan-token-shapes.py|\
       scripts/ci/verify/lib/local-smoke-isolation.sh|\
       scripts/ci/verify/smoke-local-credentials.sh|\
       scripts/ci/tests/test-local-smoke-isolation.py|\

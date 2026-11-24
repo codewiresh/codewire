@@ -47,7 +47,7 @@ separately.
 | `agent-codex-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-claude-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-github` | #3999 | no command yet | partly observed 2026-11-19, v0.4.24 (read only) | n/a | n/a |
-| `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
+| `no-token-at-rest` | #3999 (#4897), #4001, #6194 | no command yet | no command yet | no command yet | no command yet |
 | `agent-own-key` | #3999, #4001 | partly observed 2026-11-21, main e62d4d033 (`locked`: another key and no key refused, the placeholder served; an unselected provider's host refused under every policy, #5555) | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
@@ -1372,41 +1372,178 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
 
 ## `no-token-at-rest`: no credential value is left on a disk, in a checkpoint or in a log
 
-Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
+Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes), #6194 (the
+shape scan).
+
+Two scans, each run where the walk's credentials are bound under
+interception, with the same findings format: a finding names a shape or a
+value, a form, a file and an offset, never the bytes.
+
+- **The canary scan** (`scripts/ci/verify/scan-credential-canaries.py`,
+  #4897) looks for synthetic values it is given, in every form a program
+  might store them in. It proves the local smoke's own values never land.
+- **The shape scan** (`scripts/ci/verify/scan-token-shapes.py`, #6194)
+  looks for any value in a real provider's shape, so it needs no
+  value and works with a real sign-in. It is run in every interception walk,
+  local and hosted, by whoever walks `agent-claude`, `agent-codex`,
+  `agent-github` and `agent-own-key` with real credentials.
+
+The shape scan:
+
+- **Shapes:** a closed table in the script, each a provider's fixed prefix
+  and the length and alphabet of what follows. It covers every credential
+  form a walk binds, refresh tokens included:
+  - Anthropic API keys and Claude sign-in access and refresh tokens
+    (`sk-ant-` forms);
+  - OpenAI keys (`sk-proj-`, `sk-svcacct-`, `sk-admin-`, and the older
+    `sk-` form);
+  - GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`);
+  - Google, GitLab, Slack, AWS access key IDs, Stripe and Hugging Face keys;
+  - **signed JWTs**, whose header names an algorithm other than `none`: one
+    whose `iss` is in the script's closed list of exact issuer URLs (the
+    providers' sign-in servers, such as `https://auth.openai.com` for
+    Codex's ChatGPT ID and access tokens; reported as `jwt-openai` or
+    `jwt-google` by issuer) is a finding, and so is one whose
+    header or payload doesn't decode or has no `iss` ("unreadable JWT").
+    A JWT with another issuer is not a credential here; Codewire's own
+    workload identity tokens are proved by their own journeys. A JWT whose
+    header says `none` is unsigned and not a credential only when its third
+    segment is empty or exactly `codewire-placeholder`; any other third
+    segment is a finding;
+  - **a refresh token of no fixed shape,** such as Codex's ChatGPT refresh
+    token: a JSON `"refresh_token"` field, or a TOML, YAML or env-style
+    `refresh_token =`, `refresh_token:` or `REFRESH_TOKEN=` line, whose
+    value is a token's (20 or more of `A-Za-z0-9._~+/=-`, with a letter and
+    a digit) and not a Codewire placeholder refresh token
+    (`codewire-managed-no-refresh-token`, alone or with its `-` and nonce),
+    is a finding, in every form below. An empty string, `null`, or code
+    that names a token (`refresh_token = data.get(...)`) is not.
+- **Placeholders pass.** A match whose part after the provider prefix is a
+  whole placeholder, `cwp1_` and 43 base64url characters, is counted by
+  shape and is not a finding; so is a bare `cwp1_` placeholder. Codex's
+  delivered login keeps an unsigned JWT shape (`alg` `none`), which is not
+  a finding. Anything else in a provider's shape is a finding. There is no
+  other allow-list: a listed direct delivery exception is a finding
+  wherever interception is on, because interception replaces it.
+- **A baseline for what an image ships.** Software in an image can carry
+  values in a provider's shape, such as a public API key inside a package,
+  and the raw disk scan finds them.
+  - The walk takes the baseline in the same run, before any credential is
+    bound: `--write-baseline FILE --image DIGEST` writes the findings under
+    a first line naming the image's digest and the scanner's SHA-256 (this
+    script and the canary scanner it loads).
+  - `--baseline FILE --image DIGEST` refuses, with exit 2, a file for
+    another image or scanner, and one listing a control or a shape the walk
+    binds (`anthropic`, `openai`, `openai-legacy`, `github`, `github-pat`,
+    `refresh-token-field` and `jwt-openai`, cut or whole).
+  - It excuses a finding only at the same shape, form, path, offset and
+    length, and only in a disk the walk declares holds the image alone
+    (`--image-disk PATH`, never a state disk), read raw or through its
+    filesystem outside `/home`, `/workspace`, `/root`, `/tmp`, `/var/tmp`
+    and `/run`. Never a process, a stream, a decompressed log, a memory
+    image or checkpoint, or the host's cw directories.
+  - An excused finding is counted as `baseline<TAB>SHAPE<TAB>COUNT`, and the
+    walk records the baseline it used.
+- **Forms:** raw, UTF-16LE, JSON-escaped (`\u00XX` escapes inside a value),
+  and inside base64:
+  - a run of 40 or more base64 characters, standard or URL-safe, padding
+    optional, and runs broken only by `\r?\n` (MIME-wrapped) joined first;
+  - each run decoded at all three byte alignments, in both alphabets, and
+    the decoded bytes scanned once more in every form above, not decoded
+    again.
+- **Compressed files** are read decompressed: gzip, zstd and xz (rotated
+  logs), and journald files through `journalctl --file`, whose large
+  fields are compressed. A compressed file the scan can't read fails the
+  scan (exit 2); none is skipped.
+- **Where a value may be split:** a disk is read raw and through its
+  filesystem, so a file's bytes are whole in the second. A memory image or
+  a raw disk keeps a value in pages or blocks that need not be adjacent, so
+  a provider prefix followed by at least 16 of its shape's characters,
+  ending at a 4 KiB boundary, is a finding of its own, "cut at a page end",
+  in the raw and the UTF-16LE (32 bytes) forms. Every 4 KiB boundary also
+  covers 16 KiB and 64 KiB pages. A cut whose part after the prefix starts
+  with `cwp1_` is a cut placeholder and is counted.
+- **Reading:** the canary scan's walk: links not followed, only allocated
+  ranges, a directory it can't list fails the scan, ext4 images read
+  through `debugfs -c`, and `--scanned FILE` lists every file read with
+  its size.
+- **Where what it reads goes.** The debugfs spill and every buffer of a
+  streamed log hold real values, so they go in a new 0700 directory on
+  tmpfs (`$XDG_RUNTIME_DIR`), never on a persistent disk, removed by exact
+  path on every exit, failure included. The scanner sets `RLIMIT_CORE` to
+  0, so a crash leaves no core dump.
+- **Never a value.** A finding is `SHAPE<TAB>FORM<TAB>PATH<TAB>OFFSET<TAB>LENGTH`.
+  No byte of the match is printed, hashed, logged or kept past the check
+  that classifies it, the provider prefix included; placeholders are
+  counted, never listed. Every error is caught at the boundary and names
+  only the path, the offset and the error's class, never bytes or their
+  repr, and no traceback reaches the output. Exit 0 means nothing but
+  placeholders and controls, 1 a finding or a missing control, and 2 that
+  the scan itself failed.
+- **Controls:** the walk makes one random value in each shape it binds and
+  passes them on stdin (`NAME<TAB>VALUE`, never argv), and plants them where
+  the scan must find them: a file in the guest's home, a guest process's
+  memory (local), a line the walk writes to a scanned log, and the host's
+  cw state directory. A match equal to a control is reported as that
+  control, by name. A control that is not found fails the scan, so a clean
+  result means each medium was read.
+- **In a hosted Sandbox** the walk copies the scanner in, checks its
+  SHA-256 before running it, and runs it as root, so every process's
+  environment and command line can be read; one that can't fails the scan,
+  as an unlistable directory does. The Sandbox is a fresh one for the walk,
+  and its controls are random and used once.
 
 - **Entry points:** none for a user. A scan run by whoever walks this file,
-  over what a local VM writes.
+  over what a local VM, a hosted Sandbox and the host write.
 - **States to exercise:**
-  - a VM's disks, a VM checkpoint, and the supervisor's, the runner's and
-    the brokers' logs (the front door's once it writes one, #4884), after an
-    agent has run;
-  - synthetic values planted in the credential store, and controls planted
-    where a scan must find them;
+  - a local VM's disks, a VM checkpoint, and the supervisor's, the
+    runner's and the brokers' logs (the front door's once it writes one,
+    #4884), after an agent has run;
+  - the host's cw config, data, state and cache directories and the local
+    runtime's directory, with the same credentials bound;
+  - a hosted Sandbox with interception on, after an agent has run: its
+    filesystem, every process's environment and command line, and its
+    session logs, scanned inside the Sandbox; and the workspace daemon's
+    and the front door's logs on Dev, streamed from the cluster into the
+    scan on the walker's host, never written to its disk or printed;
+  - for the canary scan, synthetic values planted in the credential store,
+    and controls planted where a scan must find them;
   - on macOS, disks and logs only: a Mac VM checkpoint (#4654) is not
     scanned yet.
-- **Driving it:** no command yet (#4897). The scan plants synthetic values
-  only. Searching for a real token would mean reading it, so for a real
-  sign-in `agent-claude` checks the other side: the login file holds a
+- **Driving it:** the canary scan runs in the managed native smoke,
+  `smoke-native-local-environment.sh --managed-credential-broker` (#4897).
+  The shape scan, with the controls on stdin:
+  `scan-token-shapes.py [--debugfs DEBUGFS] [--spill-parent DIR]
+  [--processes] [--exclude PATH]... [--image DIGEST [--image-disk PATH]...
+  [--write-baseline FILE | --baseline FILE]] [--scanned FILE] PATH...`. A log streamed from elsewhere is a PATH such as
+  `<(kubectl logs …)`. No walk runs it yet. Searching for a real token
+  means reading it, so the scan never shows what it read, and for a real
+  sign-in
+  `agent-claude` also checks the other side: the login file holds a
   `cwp1_` placeholder.
 - **Proof:**
   - each synthetic value is found nowhere: not raw, not split across a block
     or page, not as base64, hex or UTF-16, and not through an ext4 image's
     filesystem;
+  - the shape scan finds nothing but placeholders in every place listed,
+    and counts at least one placeholder for each credential the walk bound;
   - three controls written into the guest's home are found on its state
     disk, raw and through the filesystem: plain, base64-only, and one cut
     inside a scan window and split across non-adjacent blocks, found only
     through its other window;
   - a control held only in a guest process's memory is found in the
-    checkpoint's memory;
+    checkpoint's memory, by both scans;
+  - each shape-scan control is found where it was planted;
   - each log was read and is not empty;
-  - a finding names the value, the form, the file and the offset, never the
-    bytes.
+  - no run prints a value: the walk's own output is searched for every
+    control and comes back clean.
 - **Gotchas:**
   - A run needs about 40 GB free: a checkpoint holds all of the guest's
     memory.
   - Until the local placement gives Codex placeholders (#4002), the Codex
-    access token is in the guest by the listed exception, and the scan looks
-    for it only after the VM is deleted.
+    access token is in the guest by the listed exception, and the canary
+    scan looks for it only after the VM is deleted. The shape scan reports
+    it as a finding wherever interception is on.
 - **Observed:** not yet observed.
 
 ## `agent-own-key`: a process with its own key is left alone

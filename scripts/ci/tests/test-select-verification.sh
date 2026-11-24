@@ -1140,6 +1140,10 @@ run_paths_case credential_canary_scanner pull_request refs/pull/3999/head false 
   'policy security security_js' \
   scripts/ci/verify/scan-credential-canaries.py \
   scripts/ci/tests/test-scan-credential-canaries.py
+run_paths_case token_shape_scanner pull_request refs/pull/6194/head false \
+  'policy security security_js' \
+  scripts/ci/verify/scan-token-shapes.py \
+  scripts/ci/tests/test-scan-token-shapes.py
 run_paths_case github_app_permissions pull_request refs/pull/4926/head false \
   'policy security security_js' \
   .gitea/workflows/github-app-permissions.yaml \
