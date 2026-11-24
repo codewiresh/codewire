@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-23
+updated: 2026-11-24
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -77,8 +77,10 @@ environment, may be.
 | `--effort low\|medium\|high\|xhigh\|max` | Agent reasoning effort |
 | `-o, --output json` | Print the session and do not attach |
 
-A foreground run streams output and fails when the command exits
-unsuccessfully. A hosted sandbox refuses `--tty`, a command and `--env`
+A foreground run streams output and ends when the command does. At a
+terminal `cw` then prints one line naming how it ended and the `cw logs` and
+`cw restart` commands for its session, and exits with the command's status.
+Without a terminal, a command that exits unsuccessfully makes the run fail. A hosted sandbox refuses `--tty`, a command and `--env`
 together with `--agent`.
 
 `--env KEY` with no value sends the value `KEY` has in `cw`'s own
@@ -191,7 +193,7 @@ refused: use `cw msg`, `cw steer` and `cw logs`.
 | `Ctrl+B h` / `Ctrl+B l` | Previous / next session in this environment |
 | `Ctrl+B k` / `Ctrl+B j` | Previous / next environment |
 | `Ctrl+B w` | Show the environment list |
-| `Ctrl+B r` | Restart the session once it has exited |
+| `Ctrl+B r` | Restart the session once it has exited, in `cw attach` |
 | `Ctrl+B b` | Send a literal Ctrl+B |
 
 These keys work too when the program in the session turns on the kitty

@@ -9,8 +9,10 @@ mod desktop;
 mod entry;
 mod exec;
 mod navigation;
+mod platform_attach;
 mod reattach;
-use attach_mode::{attaches_interactively, session_is_terminal};
+use attach_mode::{AttachKind, attaches_interactively, session_is_terminal};
+use platform_attach::attach_platform_environment_session;
 pub(crate) mod setup;
 mod short_id;
 mod table;
@@ -1795,13 +1797,34 @@ async fn launch_run(
         eprintln!("  {}", place.detach_hint(&session, style));
     }
     let mut lost_output = 0;
-    let ended = attach_environment_session(globals, target, session, &mut lost_output).await?;
+    let ended =
+        attach_environment_session(globals, target, session, AttachKind::Run, &mut lost_output)
+            .await?;
+    finish_foreground_run(&place, style, interactive, lost_output, ended)
+}
+
+/// How a foreground run ends, once its attachment has.
+fn finish_foreground_run(
+    place: &SessionPlace,
+    style: crate::output::Style,
+    interactive: bool,
+    lost_output: u64,
+    ended: Option<EnvironmentSessionView>,
+) -> anyhow::Result<()> {
     // Without a terminal the output is data, piped or saved: a gap in it
     // must not pass for the whole (#4427).
     if !interactive && lost_output > 0 {
         anyhow::bail!(lost_output_error(lost_output));
     }
     if let Some(session) = ended {
+        // At a terminal the run ends with its command, as `cw shell` does,
+        // with the command's own status (#6355).
+        if interactive && session_is_terminal(&session) {
+            eprintln!("{}", place.ended_hint(&session, style));
+            if let (Some(code @ 1..), "Exited") = (session.exit_code, session.state.as_str()) {
+                std::process::exit(code);
+            }
+        }
         ensure_environment_session_succeeded(&session)?;
     }
     Ok(())
@@ -1910,6 +1933,25 @@ impl SessionPlace {
             self.environment,
             session_reference(session),
             self.location
+        )
+    }
+
+    /// What a foreground run says once its command ended: `Exited with
+    /// status 3 · Output: cw --local logs app --session test · Restart: cw
+    /// --local restart app --session test`.
+    fn ended_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
+        let ended = match session.exit_code {
+            Some(0) => "Exited".to_owned(),
+            Some(code) => format!("Exited with status {code}"),
+            None => session.state.clone(),
+        };
+        let (placement, environment) = (self.placement, &self.environment);
+        let reference = session_reference(session);
+        style.paint(
+            crate::output::Role::Dim,
+            &format!(
+                "{ended} · Output: cw {placement}logs {environment} --session {reference} · Restart: cw {placement}restart {environment} --session {reference}"
+            ),
         )
     }
 
@@ -2112,8 +2154,15 @@ async fn plain_shell(
     let place = SessionPlace::of(&target);
     let mut rex = RexStatus::new(&place.environment, &session_reference(&session));
     // A terminal's lost history is a repaint, not lost data.
-    let ended =
-        attach_session_until_detached(globals, target, session, &mut rex, true, &mut 0).await?;
+    let ended = attach_session_until_detached(
+        globals,
+        target,
+        session,
+        &mut rex,
+        AttachKind::Shell,
+        &mut 0,
+    )
+    .await?;
     Ok(Some(match ended {
         Some(session) => session.exit_code.unwrap_or(1),
         None => 0,
@@ -2340,6 +2389,7 @@ async fn attach_environment_session(
     globals: &Globals,
     target: EnvironmentSessionTarget,
     session: EnvironmentSessionView,
+    kind: AttachKind,
     lost_output: &mut u64,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut rex = RexStatus::new(
@@ -2347,7 +2397,7 @@ async fn attach_environment_session(
         &session_reference(&session),
     );
     let ended =
-        attach_session_until_detached(globals, target, session, &mut rex, false, lost_output)
+        attach_session_until_detached(globals, target, session, &mut rex, kind, lost_output)
             .await?;
     if let Some(session) = &ended {
         let (state, message) = match (session.state.as_str(), session.exit_code) {
@@ -2405,14 +2455,13 @@ async fn after_failed_attach(
     Err(error)
 }
 
-/// `plain` is a `cw shell`'s attachment: every key goes to the session, so
-/// it can neither detach nor move to another session, and it ends with it.
+/// `kind` says how the attachment ends ([`AttachKind`]).
 async fn attach_session_until_detached(
     globals: &Globals,
     mut target: EnvironmentSessionTarget,
     mut session: EnvironmentSessionView,
     rex: &mut RexStatus,
-    plain: bool,
+    kind: AttachKind,
     lost_output: &mut u64,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
@@ -2444,7 +2493,7 @@ async fn attach_session_until_detached(
                     &session,
                     output_offset,
                     session.pty,
-                    plain,
+                    kind.plain(),
                     true,
                     &mut LogsAnsiFilter::default(),
                     &mut screen,
@@ -2461,7 +2510,7 @@ async fn attach_session_until_detached(
                     output_offset,
                     &mut input_stream,
                     attaches_interactively(&session),
-                    plain,
+                    kind,
                     true,
                     &mut screen,
                     std::future::pending(),
@@ -2516,7 +2565,7 @@ async fn attach_session_until_detached(
                             output_offset,
                             &mut input_stream,
                             attaches_interactively(&session),
-                            plain,
+                            kind,
                             true,
                             &mut screen,
                             back,
@@ -2634,197 +2683,6 @@ async fn attach_session_until_detached(
             AttachExit::OpenWorkspaces => {
                 show_workspace_list(globals).await?;
                 return Ok(None);
-            }
-        }
-    }
-}
-
-/// Carry one attachment opened at `start_offset`. It ends early if
-/// `tailnet_back` completes.
-/// Passes an attachment's status to its input stream (#3993): on the first
-/// one, sends the resend and the held keys and says what happened to the keys
-/// typed during a drop. False when the attachment closed meanwhile.
-async fn send_stream_status(
-    input: &codewire_client::EnvironmentSessionAttachmentInput,
-    input_stream: &mut InputStream,
-    status: &codewire_client::AttachSessionStatus,
-) -> bool {
-    let written = status
-        .session
-        .as_option()
-        .and_then(|session| session.input_end_offset);
-    let (requests, notices) = input_stream.status(written, std::time::Instant::now());
-    for notice in notices {
-        match notice {
-            InputNotice::Resent(keys) => {
-                eprint!("\r\n[cw] resent {keys} key(s) typed during the drop\r\n");
-            }
-            InputNotice::Lost(keys) => {
-                eprint!("\r\n[cw] {keys} key(s) typed during the drop were lost\r\n");
-            }
-        }
-    }
-    for request in requests {
-        if input.send(request).await.is_err() {
-            return false;
-        }
-    }
-    true
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn attach_platform_environment_session(
-    mut attachment: codewire_client::EnvironmentSessionAttachment,
-    start_offset: u64,
-    input_stream: &mut InputStream,
-    interactive: bool,
-    plain: bool,
-    raw_output: bool,
-    screen: &mut SessionScreen,
-    tailnet_back: impl std::future::Future<Output = ()>,
-    lost_output: &mut u64,
-) -> anyhow::Result<AttachExit> {
-    tokio::pin!(tailnet_back);
-    let input = attachment.input_handle();
-    let mut stdin = crate::terminal_attach::terminal_input().await;
-    let mut stdin_buf = [0_u8; 4096];
-    let mut stdout = std::io::stdout();
-    let interactive =
-        interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let _raw = interactive
-        .then(RawModeGuard::enable)
-        .transpose()
-        .context("enabling raw mode")?;
-    let mut decoder = AttachNavigationDecoder::new(plain);
-    let mut output_offset = start_offset;
-    let mut stdin_closed = !interactive;
-    let mut output_open = true;
-    let mut terminal = false;
-    // `interactive` is set only for a PTY session on a terminal. Its PTY
-    // follows this terminal's size; a lost resize is cosmetic.
-    let mut sizes = reattach::PtySizes::new(
-        crate::terminal_attach::WindowSizeWatch::new(interactive),
-        screen,
-    );
-    if let Some(size) = sizes.first() {
-        let _ = input.send(reattach::resize_request(size)).await;
-    }
-    // Keys wait for this attachment's first status, which says whether the
-    // server keeps input offsets (#3993).
-    input_stream.attaching();
-    loop {
-        if !output_open && stdin_closed {
-            return Ok(if terminal {
-                AttachExit::Terminal
-            } else {
-                AttachExit::StreamEnded { output_offset }
-            });
-        }
-        tokio::select! {
-            () = &mut tailnet_back, if output_open => {
-                return Ok(AttachExit::TailnetBack { output_offset });
-            }
-            size = sizes.changed(), if output_open => {
-                if let Some(size) = size {
-                    let _ = input.send(reattach::resize_request(size)).await;
-                }
-            }
-            event = attachment.next_output(), if output_open => {
-                let event = match event {
-                    Ok(Some(event)) => event,
-                    Ok(None) => {
-                        if terminal && interactive {
-                            output_open = false;
-                            continue;
-                        }
-                        return Ok(AttachExit::StreamEnded { output_offset });
-                    }
-                    Err(error) if error.is_retryable_transport_interruption() => {
-                        return Ok(AttachExit::StreamInterrupted { output_offset });
-                    }
-                    Err(error) => return Err(display_client_error(error)),
-                };
-                match event.event {
-                    Some(codewire_client::attach_session_response::Event::HistoryGap(gap)) => {
-                        eprintln!("\r\n[cw] older output unavailable; replaying recent history");
-                        *lost_output += gap.retained_start_offset.saturating_sub(output_offset);
-                        output_offset = gap.retained_start_offset;
-                    }
-                    Some(codewire_client::attach_session_response::Event::Output(output)) => {
-                        if raw_output {
-                            screen.observe(&output.data);
-                        }
-                        sizes.output(output.next_offset);
-                        write_session_output(&mut stdout, &output.data, raw_output)?;
-                        output_offset = output.next_offset;
-                    }
-                    Some(codewire_client::attach_session_response::Event::Status(status))
-                        if status.session.as_option().is_some_and(platform_session_is_terminal) => {
-                        send_stream_status(&input, input_stream, &status).await;
-                        terminal = true;
-                        // A plain `cw shell` ends with its shell, as `ssh`
-                        // does; only a durable session offers a restart.
-                        if !interactive || plain {
-                            return Ok(AttachExit::Terminal);
-                        }
-                        screen.release();
-                        eprint!("[cw] session exited; Ctrl+B r restarts, Ctrl+C leaves\r\n");
-                    }
-                    Some(codewire_client::attach_session_response::Event::Status(status)) => {
-                        let sent = send_stream_status(&input, input_stream, &status).await;
-                        sizes.answered(
-                            status.session.as_option().map_or(0, |session| session.output_end_offset),
-                        );
-                        if !sent {
-                            return Ok(AttachExit::StreamInterrupted { output_offset });
-                        }
-                    }
-                    None => {}
-                }
-            }
-            read = stdin.read(&mut stdin_buf), if !stdin_closed => {
-                let read = read.context("read terminal input")?;
-                if read == 0 {
-                    let pending = decoder.finish();
-                    if !pending.is_empty()
-                        && let Some(request) = input_stream.typed(pending, std::time::Instant::now())
-                    {
-                        reattach::send_keys(&input, request).await?;
-                    }
-                    stdin_closed = true;
-                    continue;
-                }
-                let (action, forward) = decoder.feed(&stdin_buf[..read]);
-                if terminal {
-                    // The program is gone and its attachment closed, so
-                    // keystrokes have nowhere to go. Ctrl-C, Ctrl-D and
-                    // Ctrl+B d leave; the session no longer runs.
-                    if forward.iter().any(|byte| matches!(byte, 0x03 | 0x04))
-                        || action == Some(AttachExit::Detached)
-                    {
-                        return Ok(AttachExit::Terminal);
-                    }
-                    if let Some(action) = action {
-                        return Ok(action);
-                    }
-                    continue;
-                }
-                if !forward.is_empty()
-                    && let Some(request) = input_stream.typed(forward, std::time::Instant::now())
-                {
-                    reattach::send_keys(&input, request).await?;
-                }
-                if let Some(action) = action {
-                    if matches!(action, AttachExit::Detached) && output_open {
-                        // Detaching is local: an attachment that closed
-                        // meanwhile needs no notice.
-                        let _ = input.send(codewire_client::AttachSessionRequest {
-                            input: Some(codewire_client::attach_session_request::Input::Detach(Box::default())),
-                            ..Default::default()
-                        }).await;
-                    }
-                    return Ok(action);
-                }
             }
         }
     }
@@ -3134,7 +2992,8 @@ pub(crate) async fn handle_attach_command(
     if session.pty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         eprintln!("  {}", place.detach_hint(&session, style));
     }
-    let _ = attach_environment_session(globals, target, session, &mut 0).await?;
+    let _ =
+        attach_environment_session(globals, target, session, AttachKind::Attach, &mut 0).await?;
     Ok(())
 }
 
@@ -3394,7 +3253,7 @@ async fn follow_session_output(
                     output_offset,
                     &mut input_stream,
                     false,
-                    false,
+                    AttachKind::Attach,
                     raw_output,
                     &mut SessionScreen::new(false),
                     std::future::pending(),
@@ -3429,7 +3288,7 @@ async fn follow_session_output(
                             output_offset,
                             &mut input_stream,
                             false,
-                            false,
+                            AttachKind::Attach,
                             raw_output,
                             &mut SessionScreen::new(false),
                             std::future::pending(),
@@ -3665,7 +3524,7 @@ mod attach_offset_tests {
             start_offset,
             &mut InputStream::default(),
             false,
-            false,
+            AttachKind::Attach,
             false,
             &mut SessionScreen::new(false),
             tailnet_back,
@@ -3703,7 +3562,7 @@ mod attach_offset_tests {
             0,
             &mut InputStream::default(),
             false,
-            false,
+            AttachKind::Attach,
             false,
             &mut SessionScreen::new(false),
             std::future::pending(),
@@ -3836,6 +3695,32 @@ mod run_output_tests {
         // Names reach the terminal without control characters.
         let hostile = SessionPlace::of(&local_vm("a\x1b[2Jb"));
         assert!(!hostile.reconnect(&coding).contains('\x1b'));
+    }
+
+    /// A foreground run that ended says how, and how to read its output
+    /// again or restart it (#6355).
+    #[test]
+    fn an_ended_run_names_its_status_its_output_and_its_restart() {
+        let place = SessionPlace::of(&local_vm("app"));
+        let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+        let mut ended = session("test", "Exited");
+        ended.exit_code = Some(3);
+        assert_eq!(
+            place.ended_hint(&ended, plain),
+            "Exited with status 3 · Output: cw --local logs app --session test · Restart: cw --local restart app --session test"
+        );
+        ended.exit_code = Some(0);
+        assert!(
+            place
+                .ended_hint(&ended, plain)
+                .starts_with("Exited · Output: ")
+        );
+        let failed = session("test", "Failed");
+        assert!(
+            place
+                .ended_hint(&failed, plain)
+                .starts_with("Failed · Output: ")
+        );
     }
 
     #[test]

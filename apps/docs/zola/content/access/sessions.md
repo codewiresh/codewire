@@ -1,7 +1,7 @@
 ---
 title: Terminal sessions
 description: Run commands that outlive your terminal, read their output later, type into them, wait for them in a script, and stop or restart them.
-updated: 2026-11-21
+updated: 2026-11-24
 weight: 1
 aliases: ["/guides/sessions"]
 ---
@@ -84,8 +84,19 @@ detach and leave it running.
 | `Ctrl+B h` / `Ctrl+B l` | Previous / next session in this environment |
 | `Ctrl+B k` / `Ctrl+B j` | Previous / next environment |
 | `Ctrl+B w` | Show the environment list |
-| `Ctrl+B r` | Restart the session once it has exited |
+| `Ctrl+B r` | Restart the session once it has exited, in `cw attach` |
 | `Ctrl+B b` | Send a literal Ctrl+B |
+
+A foreground `cw run` at a terminal ends when its command does, as
+`cw shell` does. It prints one line on how the command ended and how to read
+its output again or restart it, and `cw` exits with the command's status:
+
+```text
+Exited with status 3 · Output: cw --local logs app --session sh · Restart: cw --local restart app --session sh
+```
+
+The session stays listed with its saved output. Attach to it with `cw attach`
+to restart it with `Ctrl+B r`.
 
 ## Wait in a script
 

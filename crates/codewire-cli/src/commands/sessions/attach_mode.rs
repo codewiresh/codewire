@@ -18,9 +18,48 @@ pub(super) fn session_is_terminal(session: &EnvironmentSessionView) -> bool {
     )
 }
 
+/// Whose attachment it is, which says how it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AttachKind {
+    /// A plain `cw shell`: every key goes to the session, so it can neither
+    /// detach nor move to another session, and it ends with its shell.
+    Shell,
+    /// A foreground `cw run`: it ends with its command (#6355).
+    Run,
+    /// `cw attach`: an ended session stays on screen and offers a restart.
+    Attach,
+}
+
+impl AttachKind {
+    pub(super) fn plain(self) -> bool {
+        self == Self::Shell
+    }
+
+    /// Whether the attachment ends when its program does. Only `cw attach`
+    /// at a terminal stays, to offer a restart; with no terminal there is
+    /// nothing to offer it on.
+    pub(super) fn ends_with_program(self, interactive: bool) -> bool {
+        !interactive || self != Self::Attach
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shell and a foreground run end with their program; only `cw
+    /// attach` at a terminal stays to offer a restart (#6355).
+    #[test]
+    fn only_attach_at_a_terminal_outlives_its_program() {
+        for kind in [AttachKind::Shell, AttachKind::Run, AttachKind::Attach] {
+            assert!(kind.ends_with_program(false), "{kind:?}");
+        }
+        assert!(AttachKind::Shell.ends_with_program(true));
+        assert!(AttachKind::Run.ends_with_program(true));
+        assert!(!AttachKind::Attach.ends_with_program(true));
+        assert!(AttachKind::Shell.plain());
+        assert!(!AttachKind::Run.plain() && !AttachKind::Attach.plain());
+    }
 
     fn session(name: &str, state: &str) -> EnvironmentSessionView {
         EnvironmentSessionView {
