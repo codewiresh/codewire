@@ -55,7 +55,8 @@ selector_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 tmp="$(mktemp)"
 tokens_tmp="$(mktemp)"
 graph_tmp="$(mktemp -d)"
-trap 'rm -f "$tmp" "$tokens_tmp"; rm -rf "$graph_tmp"' EXIT
+readers_tmp="$(mktemp)"
+trap 'rm -f "$tmp" "$tokens_tmp" "$readers_tmp"; rm -rf "$graph_tmp"' EXIT
 
 event="${GITHUB_EVENT_NAME:-}"
 explicit_paths=false
@@ -579,6 +580,78 @@ for crate in sorted(embedders):
 PY
 }
 
+# Selects the CI-script tests that read a changed file from the checkout: a
+# shell test through "$ROOT/PATH", a Python test through ROOT / "PATH" (each
+# test's ROOT is the repository root). The path table routes each test by its
+# own path, not by every file it reads: #6272 changed the pod-runtime pin,
+# which test-pod-runtime-image-pin.sh copies from the tree, no run selected
+# that test, and main went red unseen (infra#1534). Only literal paths count;
+# a path built from variables does not.
+#
+# Prints "token NAME" for the family whose runner function in
+# run-product-verification.sh lists a reader. A reader no listed function
+# runs prints "path TEST", and the path table classifies it as if it changed:
+# a wider selection, never a narrower one.
+script_test_readers() {
+  local changed="$1"
+  [ -d "$repo_root/scripts/ci/tests" ] || return 0
+  python3 - "$repo_root" "$changed" <<'PY'
+import os
+import re
+import sys
+
+repo_root, changed_path = sys.argv[1:]
+root = os.path.realpath(repo_root)
+with open(changed_path, encoding="utf-8") as handle:
+    changed = {line.strip() for line in handle if line.strip()}
+shell_read = re.compile(r'\$\{?ROOT\}?/([A-Za-z0-9_.@+/-]+)')
+python_read = re.compile(r'\bROOT((?:\s*/\s*"[A-Za-z0-9_.@+/-]+")+)')
+tests = os.path.join(root, "scripts", "ci", "tests")
+readers = set()
+for name in os.listdir(tests):
+    if not re.fullmatch(r"test-[A-Za-z0-9_.-]+\.(?:sh|py)", name):
+        continue
+    test = f"scripts/ci/tests/{name}"
+    with open(os.path.join(tests, name), encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    reads = {match.group(1).rstrip("/") for match in shell_read.finditer(text)}
+    for match in python_read.finditer(text):
+        reads.add("/".join(re.findall(r'"([^"]+)"', match.group(1))))
+    if test not in changed and reads & changed:
+        readers.add(test)
+if not readers:
+    sys.exit(0)
+# The runner function that runs each test, and the token that selects it.
+family_tokens = {
+    "run_ci_script_tests": "ci_script_tests",
+    "run_release": "release",
+    "run_deploy": "deploy",
+    "run_kind_tools": "kind_tools",
+    "run_web": "web",
+    # Repository rules, with the shell syntax checks they run, are Policy's.
+    "run_repo_rules": "policy",
+    "run_verification_shell_syntax": "policy",
+}
+runner = os.path.join(root, "scripts", "ci", "verify", "run-product-verification.sh")
+families = {}
+function = None
+with open(runner, encoding="utf-8") as handle:
+    for line in handle:
+        start = re.match(r"([a-z_]+)\(\) \{", line)
+        if start:
+            function = start.group(1)
+        for test in re.findall(r"scripts/ci/tests/test-[A-Za-z0-9_.-]+\.(?:sh|py)", line):
+            if function in family_tokens:
+                families.setdefault(test, set()).add(family_tokens[function])
+for test in sorted(readers):
+    if test in families:
+        for token in sorted(families[test]):
+            print(f"token {token}")
+    else:
+        print(f"path {test}")
+PY
+}
+
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
@@ -765,6 +838,24 @@ if [ "$event_selected" = false ]; then
       select_token ci_script_tests
       ;;
   esac
+
+  # The CI-script tests that read a changed file run too; see
+  # script_test_readers. A reader no family lists is classified below as if
+  # it changed.
+  if [ "$change_set_class" = general ]; then
+    if readers="$(script_test_readers "$tmp")"; then
+      while read -r kind value; do
+        case "$kind" in
+          token) select_token "$value" ;;
+          path) printf '%s\n' "$value" >> "$readers_tmp" ;;
+        esac
+      done <<<"$readers"
+    else
+      echo "warning: the script test scan failed; selecting all product verification" >&2
+      select_all_product
+      classification=unclassified
+    fi
+  fi
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -2837,7 +2928,7 @@ if [ "$event_selected" = false ]; then
       select_all_product
       classification=unclassified
     fi
-  done < "$tmp"
+  done < <(cat "$tmp" "$readers_tmp")
 
   # An unclassified path selects all product verification, but it is never
   # under crates/ and never one of the static guest's other build inputs, which

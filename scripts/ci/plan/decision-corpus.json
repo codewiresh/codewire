@@ -69,7 +69,7 @@
       "paths": ["Cargo.toml"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_plan_tests", "ci_plan_tests_omittable", "ci_script_tests", "ci_script_tests_omittable", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_curated_locks", "rust_workspace", "static_guest_proof", "static_guest_proof_omittable", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
+        "selection_tokens": ["ci_plan_tests", "ci_plan_tests_omittable", "ci_script_tests", "ci_script_tests_omittable", "confidential_script_tests", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "repo_check_self_tests_omittable", "rust", "rust_curated_locks", "rust_workspace", "security", "security_js", "static_guest_proof", "static_guest_proof_omittable", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
         "required_local_mode": "default"
       }
     },
@@ -105,7 +105,7 @@
       "paths": ["crates/codewire-proto/build.rs"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_plan_tests_omittable", "ci_script_tests_omittable", "contracts", "contracts_proto", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_pkg_codewire_proto"],
+        "selection_tokens": ["ci_plan_tests_omittable", "ci_script_tests", "ci_script_tests_omittable", "contracts", "contracts_proto", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_pkg_codewire_proto"],
         "required_local_mode": "default"
       }
     },
