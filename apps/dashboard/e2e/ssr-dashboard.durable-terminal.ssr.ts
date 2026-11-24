@@ -1349,6 +1349,11 @@ test("a terminal refit after copying keeps the copy announcement", { tag: "@mobi
   const panel = page.getByRole("tabpanel");
   const rendered = panel.locator(".xterm-rows").getByText("refit-output", { exact: true });
   await expect(rendered).toBeVisible();
+  // The terminal fits itself again once its font has loaded, and a fit that
+  // changes its rows clears the selection. That fit sends the terminal's size,
+  // so select only after it: on a loaded runner the font landed between the
+  // drag and the click, and Copy selection stayed disabled (run 76390).
+  await expect.poll(() => state.connections[0].frames.some((frame) => frame.type === "resize")).toBe(true);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
   const measured = { box: null as Awaited<ReturnType<typeof rendered.boundingBox>> };
   await expect.poll(async () => (measured.box = await rendered.boundingBox())).not.toBeNull();
