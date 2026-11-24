@@ -252,6 +252,69 @@ or kind can't be added to a command without its row (#5446):
 - `set` asks "Which provider should this profile use?": codex, openai,
   anthropic and ssh, every slot but GitHub's.
 
+**One picker for `add` and `connect` (not yet built, #6286).** The owner
+decided that `add` and `connect` show the same picker: one row for each of
+the seven credential types, built from the registry below. The verb typed
+doesn't change what a choice does:
+
+- a sign-in row (Codex, GitHub, Claude (sign-in)) runs that sign-in;
+- a key or token row (Claude (token), Anthropic API key, OpenAI API key) runs
+  the hidden paste;
+- SSH key asks whether to generate a key or import a file.
+
+The direct forms take every type the same way: `add codex` signs in, and
+`connect anthropic` asks for the key. A flag that doesn't fit the chosen type
+is refused, naming the flag and the type. The picker's exact text is on
+#6286 for the owner. Until it ships, the two pickers above are what `cw`
+shows.
+
+#### Credential types (not yet built, #6286)
+
+Today each surface keeps its own list. This section describes the change.
+`codewire_access::CREDENTIAL_TYPES` will be the one list of the credential
+types Codewire takes. Each row is one type, in picker order, and holds:
+
+- its word, the CLI argument and the dashboard's form value;
+- its label, the glossary's kind name;
+- its provider, its form (authentication kind) and the profile slots that
+  take it;
+- its flow: sign-in, paste, or SSH generate-or-import;
+- its HTTP destination family;
+- what an agent holds in its place: a placeholder variable, Git's helper,
+  a placeholder in a delivered login, or the SSH agent socket.
+
+The lists people see will read it: the `cw` pickers and accepted words,
+`kind_label` and the dashboard's labels. The docs' "Add and connect" table
+will be generated from it.
+
+The boundary lists stay where they are, each pinned by its own golden test
+and checked against the registry: the provider catalog's forms, the guest
+seed's placeholder slots and their wire codes, the hosted projection's
+slots, and the hosts. The broker selects hosts by a credential's form, and
+the front door by the environment's clients. An OpenAI API key in the codex
+slot is one case where they differ. Making one derive from the other would
+change which hosts are served, so each keeps its own selection and its golden
+tests, and a row's hosts are checked against the broker's selection for its
+form.
+
+One test will fail when:
+
+- a catalog provider and form pair has no row, or a row names a pair the
+  catalog lacks;
+- two rows share a word or a label;
+- a profile-selectable destination family has no row;
+- a row's placeholder variable is not one its family reserves.
+
+| Word | Label | Provider | Form | Slots | Flow | Agent holds |
+| --- | --- | --- | --- | --- | --- | --- |
+| `codex` | Codex | openai | OAuth | codex | sign-in | a placeholder in the delivered login |
+| `github` | GitHub | github | OAuth | github | sign-in | Git's helper and `GH_TOKEN`, while GitHub's hosts are bound |
+| `claude` | Claude (sign-in) | anthropic | Claude sign-in | anthropic | sign-in | a placeholder in the delivered login |
+| `claude-token` | Claude (token) | anthropic | OAuth | anthropic | paste | the `CLAUDE_CODE_OAUTH_TOKEN` placeholder |
+| `anthropic` | Anthropic API key | anthropic | API key | anthropic | paste | the `ANTHROPIC_AUTH_TOKEN` placeholder |
+| `openai` | OpenAI API key | openai | API key | codex, openai | paste | an `OPENAI_API_KEY` stand-in |
+| `ssh` | SSH key | ssh | SSH key | ssh | generate or import | the SSH agent socket |
+
 ```sh
 ```
 

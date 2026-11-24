@@ -1079,6 +1079,23 @@ the first release with the four rows.
   Locally, walk only against a private keyring, as "Before the walk" says.
 - **Observed:** not yet observed. The walk on a Mac and in the cloud, on a
   released `cw` (v0.4.22 or later), is still to do.
+- **One picker for `add` and `connect` (#6286, not yet built; not yet
+  observed):**
+  - `add` and `connect` with no provider show the same picker, in both
+    placements. It has seven rows, one per credential type:
+    `Codex`, `GitHub`, `Claude (sign-in)`, `Claude (token)`,
+    `Anthropic API key`, `OpenAI API key` and `SSH key`. Its title and
+    detail texts are those the owner approves on #6286.
+  - Picking `Codex` from `add` signs in, as step 2 shows. Picking
+    `Anthropic API key` from `connect` asks for the key, as step 4 shows.
+  - Picking `SSH key` asks whether to generate a key or import a file.
+  - `cw credentials add codex` and `cw credentials connect anthropic` do the
+    same without the picker.
+  - `--key-file` with `codex` is refused, naming `--key-file` and Codex.
+  - **Proof:** the same rows from both verbs in both placements, and each
+    choice running its own flow whichever verb was typed.
+    `cargo test -p codewire-access credential_types` fails when a type is
+    added in one place only.
 
 ## 16. `cred-github-notice`: GitHub's pending permissions, on the dashboard's Credentials page
 
