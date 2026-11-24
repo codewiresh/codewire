@@ -1072,6 +1072,22 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
         self.assertNotIn("COPY .git", text)
 
 
+def session_states(session):
+    """The sorted states of the processes in `session`, read as the
+    finalizer reads them."""
+    states = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = Path(f"/proc/{entry.name}/stat").read_text().rsplit(") ", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[3]) == session:
+            states.append(fields[0])
+    return sorted(states)
+
+
 class FinalizerDiagnostic(unittest.TestCase):
     def test_compile_deadline_names_itself_and_shows_each_process_state(self):
         # A family like #4847's: one process spinning, one asleep in the kernel.
@@ -1079,7 +1095,12 @@ class FinalizerDiagnostic(unittest.TestCase):
         family = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
         self.addCleanup(family.wait)
         self.addCleanup(os.killpg, family.pid, 9)
-        time.sleep(0.5)
+        # Until the fork has happened and both have settled: on a loaded host
+        # a fixed half second saw one process, still starting (state D).
+        deadline = time.monotonic() + 10
+        while session_states(family.pid) != ["R", "S"]:
+            self.assertLess(time.monotonic(), deadline, session_states(family.pid))
+            time.sleep(0.05)
         with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": "compile"}), \
                 contextlib.redirect_stderr(io.StringIO()) as stderr:
             finalizer.compile_deadline(family.pid)
