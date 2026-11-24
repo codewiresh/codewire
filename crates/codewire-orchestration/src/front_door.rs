@@ -82,6 +82,8 @@ pub struct FrontDoorEpochs {
     /// The live session of each Pod, by its UID: at most one.
     sessions: Mutex<HashMap<String, LiveSession>>,
     next: AtomicU64,
+    /// Woken at each registration, for a session waiting between epochs.
+    registered: tokio::sync::Notify,
 }
 
 struct LiveSession {
@@ -152,6 +154,7 @@ impl FrontDoorEpochs {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key.clone(), Slot { id, joins });
+        self.registered.notify_waiters();
         Registration {
             epochs: Arc::clone(self),
             key,
@@ -204,6 +207,23 @@ impl FrontDoorEpochs {
             _ended: ended_sender,
         };
         (place, older)
+    }
+
+    /// Waits until `deadline` for `key` to have a current epoch; false when
+    /// none was registered by then (#6099).
+    pub async fn wait_for_epoch(&self, key: &BindingKey, deadline: tokio::time::Instant) -> bool {
+        loop {
+            // Register before looking, so a registration in between wakes it.
+            let registered = self.registered.notified();
+            tokio::pin!(registered);
+            registered.as_mut().enable();
+            if self.current(key).is_some() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, registered).await.is_err() {
+                return false;
+            }
+        }
     }
 
     /// The binding's current epoch, if one is admitted on this process, and

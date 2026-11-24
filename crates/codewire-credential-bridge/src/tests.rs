@@ -273,6 +273,33 @@ async fn admitted_bridge_carries_bounded_request_and_streamed_response() {
     harness.stop().await;
 }
 
+/// #6099: a release ends the relay's epoch and admits its successor about a
+/// second later. A request asked for in that gap is sent once, on the
+/// successor, and answered there.
+#[tokio::test]
+async fn a_request_between_epochs_is_sent_on_the_successor() {
+    let ended = Harness::new().await;
+    let bridge = ended.bridge.clone();
+    drop(ended.end_stream().await);
+    let task = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.respond(request()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !task.is_finished(),
+        "a request between epochs failed at once"
+    );
+    let mut successor = Harness::for_bridge(bridge).await;
+    let Some(GuestPayload::Request(request)) = successor.next().await.payload else {
+        panic!("expected the request on the successor");
+    };
+    successor.send(start(&request.request_id)).await;
+    successor.send(end(&request.request_id)).await;
+    assert_eq!(bounded(task).await.unwrap().status(), StatusCode::OK);
+    successor.stop().await;
+}
+
 #[tokio::test]
 async fn replacement_closes_stale_stream_and_fails_its_pending_request() {
     let mut first = Harness::new().await;
@@ -1126,13 +1153,24 @@ async fn losing_the_draining_epoch_fails_only_its_own_requests() {
         bounded(active_task).await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    // No epoch is active now: new work fails at once, as before.
-    assert_eq!(
-        bounded(bridge.respond(request())).await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
+    // No epoch is active now: new work waits for the next one (#6099), and is
+    // never sent on the draining epoch.
+    let waiting = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.respond(request()).await }
+    });
+    second.quiet().await;
+    assert!(
+        !waiting.is_finished(),
+        "new work with no active epoch failed at once"
     );
     // A later activation finds no active epoch and keeps the draining one.
     let mut fourth = Harness::draining(bridge.clone()).await;
+    let Some(GuestPayload::Request(waited)) = fourth.next().await.payload else {
+        panic!("expected the waiting request on the new epoch");
+    };
+    complete(&fourth, &waited, b"waited").await;
+    assert_eq!(body_of(waiting).await, "waited");
     assert_eq!(
         bridge
             .inner

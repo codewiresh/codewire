@@ -75,6 +75,10 @@ mod ssh_ingress;
 pub use ssh_ingress::{SshAgentRelay, serve_ssh_agent};
 
 const HOST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a request asked for between epochs waits for the next one
+/// (#6099): longer than a release's relay handover, which ends one epoch and
+/// admits its successor, and never past the request's own deadline.
+pub const SUCCESSOR_EPOCH_WAIT: Duration = Duration::from_secs(10);
 const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const HOST_OUTPUT_BUFFER: usize = 32;
 /// How long a replaced epoch may drain. Its host leads the successor by about
@@ -797,6 +801,35 @@ impl CredentialBridge {
         })
     }
 
+    /// Once an epoch has ended, waits at most [`SUCCESSOR_EPOCH_WAIT`], and
+    /// never past `deadline`, for its successor, so a request asked for in a
+    /// release's handover is sent late instead of refused (#6099). Nothing
+    /// has been sent, so nothing is replayed. Before the first admission it
+    /// does not wait. False when no epoch is active; the caller then refuses
+    /// as before.
+    async fn wait_for_active_epoch(&self, deadline: tokio::time::Instant) -> bool {
+        let deadline = deadline.min(tokio::time::Instant::now() + SUCCESSOR_EPOCH_WAIT);
+        loop {
+            // Register before observing state so an activation in between
+            // cannot be missed.
+            let admitted = self.host_admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            {
+                let state = self.inner.lock().await;
+                if state.active.is_some() {
+                    return true;
+                }
+                if state.next_epoch == 0 {
+                    return false;
+                }
+            }
+            if tokio::time::timeout_at(deadline, admitted).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     /// Whether the active epoch's host takes streamed request bodies.
     async fn streams_request_body(&self) -> bool {
         self.inner
@@ -849,6 +882,10 @@ impl CredentialBridge {
         }
         .map_err(|refusal| (refusal, None))?;
         let provider = RefusalProvider::for_slot(classified.capability_slot);
+        // Only a request that would be sent waits, and before its body is
+        // read: whether the body streams depends on the epoch.
+        self.wait_for_active_epoch(tokio::time::Instant::now() + SUCCESSOR_EPOCH_WAIT)
+            .await;
         let streams = match intercepted_host.and_then(intercepted_host_route) {
             Some(_) => request_body::carries_body(request.method()),
             None => request_body::streamable(classified.route, request.method()),

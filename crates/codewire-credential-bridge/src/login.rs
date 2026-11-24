@@ -179,6 +179,7 @@ impl CredentialBridge {
                 .ok_or(LoginFailure::Unavailable)?,
         };
         let request_id = request_id.to_string();
+        self.wait_for_active_epoch(deadline).await;
         let (epoch, output) = {
             let state = self.inner.lock().await;
             let active = state.active.as_ref().ok_or(LoginFailure::Unavailable)?;

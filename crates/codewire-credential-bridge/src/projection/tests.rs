@@ -62,19 +62,50 @@ async fn startup_host_wait_respects_original_deadline_and_rejects_wrong_identity
     );
 }
 
+/// #6099: a release ends the relay's epoch and admits its successor about a
+/// second later; a startup launch in that gap waits for the successor.
 #[tokio::test]
-async fn startup_host_wait_never_waits_for_a_lost_epoch_to_reconnect() {
+async fn startup_host_wait_crosses_a_handoff_to_the_successor_epoch() {
     let bridge = bridge();
     let context = initial_context(&bridge, 5_000);
-    let harness = Harness::new(bridge.clone()).await;
+    let ended = Harness::new(bridge.clone()).await;
     bridge.wait_for_initial_host(&context).await.unwrap();
-    harness.stop().await;
+    ended.stop().await;
+    let wait = bridge.wait_for_initial_host(&context);
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut wait)
+            .await
+            .is_err()
+    );
+    let successor = Harness::new(bridge.clone()).await;
+    bounded(wait).await.unwrap();
+    successor.stop().await;
+}
+
+/// A lost epoch with no successor is waited for only [`SUCCESSOR_EPOCH_WAIT`],
+/// not the launch's whole deadline: an unbound environment's host never
+/// returns.
+#[tokio::test(start_paused = true)]
+async fn startup_host_wait_for_a_successor_ends_at_its_bound() {
+    let bridge = bridge();
+    let context = initial_context(&bridge, 25_000);
+    let ended = Harness::new(bridge.clone()).await;
+    bridge.wait_for_initial_host(&context).await.unwrap();
+    ended.stop().await;
+    let started = tokio::time::Instant::now();
     assert_eq!(
-        bounded(bridge.wait_for_initial_host(&context))
+        bridge
+            .wait_for_initial_host(&context)
             .await
             .unwrap_err()
             .code(),
         tonic::Code::Unavailable
+    );
+    let waited = started.elapsed();
+    assert!(
+        (SUCCESSOR_EPOCH_WAIT..Duration::from_secs(25)).contains(&waited),
+        "waited {waited:?}"
     );
 }
 
@@ -443,6 +474,40 @@ async fn a_projection_answer_on_the_wrong_epoch_leaves_the_other_request() {
         assert!(shared.inner.lock().await.projections.is_empty());
         kept.stop().await;
     }
+}
+
+/// #6099: a projection asked for after one epoch ended and before its
+/// successor is admitted is sent once, on the successor, and answered there.
+#[tokio::test]
+async fn a_projection_asked_for_between_epochs_is_sent_on_the_successor() {
+    let shared = bridge();
+    let ended = Harness::new(shared.clone()).await;
+    ended.stop().await;
+    let context = initial_context(&shared, 5_000);
+    let task = tokio::spawn({
+        let bridge = shared.clone();
+        async move { bridge.project_environment(context).await }
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        !task.is_finished(),
+        "a projection between epochs failed at once"
+    );
+    assert!(shared.inner.lock().await.projections.is_empty());
+    let mut successor = Harness::new(shared).await;
+    let message = bounded(successor.output.next()).await.unwrap().unwrap();
+    let Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) =
+        message.payload
+    else {
+        panic!("expected typed projection on the successor");
+    };
+    successor.reply(&request).await;
+    let opened = bounded(task).await.unwrap().unwrap();
+    assert_eq!(
+        opened.entries().collect::<Vec<_>>(),
+        [("APP_TOKEN", "synthetic-application-value")]
+    );
+    successor.stop().await;
 }
 
 #[tokio::test]

@@ -704,6 +704,67 @@ async fn an_idle_session_follows_a_renewal_without_ending() {
     assert_eq!(new.guests.recv().await.unwrap(), request("r"));
 }
 
+/// #6099: a release ends the relay's epoch and admits its successor about a
+/// second later. A request in that gap waits and is sent on the successor.
+#[tokio::test]
+async fn a_request_between_epochs_is_sent_on_the_successor() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (ended_epoch, asked) = epoch(&front_doors, key());
+    let (joined, ended) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    drop(ended_epoch);
+    drop(ended.host);
+    bounded(ended.ended.cancelled()).await;
+    live.send_message(&request("r")).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (_successor_epoch, successor_asked) = epoch(&front_doors, key());
+    let (successor_joined, mut successor) = upstream();
+    serving(successor_asked, successor_joined);
+    assert_eq!(
+        bounded(successor.guests.recv()).await.unwrap(),
+        request("r"),
+        "the request waited for the successor instead of being refused"
+    );
+    successor.host.send(Ok(response_end("r"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("r"))
+    );
+}
+
+/// With no successor, the request is refused once the wait's bound passes.
+#[tokio::test(start_paused = true)]
+async fn a_request_between_epochs_is_refused_at_the_bound_when_none_follows() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (ended_epoch, asked) = epoch(&front_doors, key());
+    let (joined, ended) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    drop(ended_epoch);
+    drop(ended.host);
+    ended.ended.cancelled().await;
+    let started = tokio::time::Instant::now();
+    live.send_message(&request("r")).await;
+    let answer = live.next().await.unwrap();
+    let frame = STANDARD.decode(answer["bridge"].as_str().unwrap()).unwrap();
+    let message =
+        v1::CredentialBridgeHostMessage::decode(registry::frame_message(&frame).unwrap()).unwrap();
+    assert!(
+        matches!(
+            message.payload,
+            Some(v1::credential_bridge_host_message::Payload::ResponseFailure(ref failure))
+                if failure.request_id == "r"
+        ),
+        "{message:?}"
+    );
+    assert!(started.elapsed() >= codewire_credential_bridge::SUCCESSOR_EPOCH_WAIT);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_session_with_no_epoch_left_ends_so_cw_egress_reads_the_binding_again() {
     let front_doors = Arc::new(FrontDoorEpochs::default());

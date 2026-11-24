@@ -188,8 +188,9 @@ pub(super) async fn relay_accepted_launch(
         channel.read_exact(&mut recipient).await?;
         if wait_for_initial_host {
             // Startup and Hosted setup may wait for the first authenticated host.
-            // Keep the exact context/deadline; never replay a request or wait
-            // for a previously admitted, disconnected host to return.
+            // Keep the exact context/deadline and never replay a request; after
+            // an epoch ended, the bridge waits only briefly for its successor
+            // (#6099).
             bridge
                 .wait_for_initial_host(&context)
                 .await

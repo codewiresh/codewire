@@ -35,6 +35,7 @@ impl CredentialBridge {
         let deadline = tokio::time::Instant::now() + remaining_deadline(deadline_unix_ms)?;
         let request_id = request.request_id.clone();
         let (response_tx, response_rx) = oneshot::channel();
+        self.wait_for_active_epoch(deadline).await;
         let (epoch, output) = {
             let state = self.inner.lock().await;
             let active = state.active.as_ref().ok_or_else(ssh_unavailable)?;

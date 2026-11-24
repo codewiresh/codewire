@@ -1355,6 +1355,18 @@ recipient and deadline. Encryption does not replace sender authorization or
 establish hardware attestation. Bound framing, allocation and actual exec size;
 incomplete, denied, unavailable or oversized projections launch nothing.
 
+Anything asked of the bridge after its epoch ended, before a successor is
+admitted, waits for the successor for at most 10 s and never past its own
+deadline, then is refused as unavailable (#6099): a launch projection, an HTTP
+request from the loopback ingress or a front door, an agent login and an SSH
+agent operation. Before the first admission only the startup launch waits,
+within its own deadline; anything else is refused at once. An epoch ends on
+every orchestration release, when the relay leader moves, and its successor
+is admitted about a second later, so a launch or an agent's API call in that
+gap is late instead of failed. It is sent once, on the epoch it waited for,
+and the successor's host checks it as any other; nothing is replayed, and a
+request already sent on the ended epoch still fails.
+
 Provider credential lifecycle is not a launch fence. In a hosted Sandbox, a
 selected credential whose refresh failed, or that was revoked or expired,
 withholds only its own capability. Sessions, terminals and the environment
@@ -2497,13 +2509,15 @@ above). These rules hold:
   no cache outlives an epoch.
 - **Rotation fails closed, and its drain is bounded.** The authority pairs
   the successor before it ends the predecessor, and a predecessor runs until
-  its open requests have answered or its epoch expires. Nothing is queued
-  between sessions: with no session paired, a request fails closed at the
-  front door. The front door keeps at most two sessions, so a third pairing
-  ends the oldest. A request that outlives two rotations, or its own epoch,
-  is cut: one still waiting for its response gets the error response, and a
-  response already streaming ends early. A long streamed response is the case
-  this reaches.
+  its open requests have answered or its epoch expires. With no session
+  paired and none draining, a request waits at the front door for the next
+  one, at most 10 s, and then fails closed; it is never queued past that or
+  sent twice (#6099). While a predecessor still drains, the front door keeps
+  serving it and refuses a new request at once instead of waiting. The front
+  door keeps at most two sessions, so a third pairing ends the oldest. A
+  request that outlives two rotations, or its own epoch, is cut: one still
+  waiting for its response gets the error response, and a response already
+  streaming ends early. A long streamed response is the case this reaches.
 - **Logins are placeholders from the first request.** The relay of an
   intercepting boot sets `front_door` in its delegation's Open, which the
   admission echoes exactly. The platform then seals that epoch's agent

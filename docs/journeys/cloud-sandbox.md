@@ -1461,7 +1461,10 @@ an error the client can retry.
     deliveries on 2026-11-20 to 2026-11-23, leadership moved 0.5–4.6 s
     after its release, and the relay admitted its first epoch 2.0–6.5 s
     after SIGTERM. Evidence: #6099.
-  - The handover gap with the release notice (#6099): not yet observed.
+  - The handover gap with the release notice (#6099): Dev, 2026-11-23, three
+    deliveries after #6115 (15:29Z, 15:39Z, 15:54Z). Leadership moved
+    13–20 ms after its release, and the relay admitted its first epoch
+    0.4–1.6 s after SIGTERM. Evidence: #6099.
   - Production: not yet observed.
 
 ## `sandbox-amp`: Amp from the image, and its update into the home

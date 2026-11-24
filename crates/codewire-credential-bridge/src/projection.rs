@@ -41,8 +41,9 @@ impl RelayedEnvironmentProjection {
 impl CredentialBridge {
     /// Hold an initial trusted startup launch until the host's authenticated
     /// connection has been activated. Socket readiness alone is not admission.
-    /// This never retries a request or waits for a disconnected host to return;
-    /// the original launch deadline still bounds all subsequent work.
+    /// After an epoch ended it waits only [`SUCCESSOR_EPOCH_WAIT`] for the
+    /// successor (#6099). It never retries a request, and the original launch
+    /// deadline still bounds all subsequent work.
     pub async fn wait_for_initial_host(&self, context: &ProjectionContext) -> Result<(), Status> {
         context
             .validate_at(now_unix_ms()?)
@@ -59,13 +60,14 @@ impl CredentialBridge {
             .filter(|remaining| *remaining > 0)
             .ok_or_else(invalid_projection_context)?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
+        let successor = deadline.min(tokio::time::Instant::now() + SUCCESSOR_EPOCH_WAIT);
         loop {
             // Register before observing state so concurrent activation cannot
             // lose a wake-up. notify_waiters wakes every startup waiter.
             let admitted = self.host_admitted.notified();
             tokio::pin!(admitted);
             admitted.as_mut().enable();
-            {
+            let until = {
                 let state = self.inner.lock().await;
                 context
                     .validate_at(now_unix_ms()?)
@@ -74,10 +76,12 @@ impl CredentialBridge {
                     return Ok(());
                 }
                 if state.next_epoch != 0 {
-                    return Err(projection_unavailable());
+                    successor
+                } else {
+                    deadline
                 }
-            }
-            tokio::time::timeout_at(deadline, admitted)
+            };
+            tokio::time::timeout_at(until, admitted)
                 .await
                 .map_err(|_| projection_unavailable())?;
         }
@@ -146,6 +150,17 @@ impl CredentialBridge {
         }
         let request_id = Uuid::new_v4().to_string();
         let (response_tx, response_rx) = oneshot::channel();
+        let remaining = context
+            .deadline_unix_ms
+            .checked_sub(now_unix_ms()?)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(invalid_projection_context)?;
+        if !self
+            .wait_for_active_epoch(tokio::time::Instant::now() + Duration::from_millis(remaining))
+            .await
+        {
+            return Err(projection_unavailable());
+        }
         let (epoch, output) = {
             let state = self.inner.lock().await;
             let active = state.active.as_ref().ok_or_else(projection_unavailable)?;

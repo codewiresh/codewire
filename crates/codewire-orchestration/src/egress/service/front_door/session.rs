@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_credential_bridge::SUCCESSOR_EPOCH_WAIT;
 use codewire_credential_bridge::front_door_router::{
     FrontDoorRouter, GuestRoute, HostRoute, Refusal, Refusals,
 };
@@ -201,7 +202,7 @@ impl Session {
                         router.guest(message, Instant::now());
                         continue;
                     }
-                    self.follow_current(&mut router, &mut upstreams).await;
+                    self.follow_current_for_frame(&mut router, &mut upstreams).await;
                     match router.guest(message, Instant::now()) {
                         GuestRoute::Forward(id) => {
                             let sent = match upstreams.guests.get(&id) {
@@ -348,6 +349,26 @@ impl Session {
         {
             upstreams.remove(previous);
         }
+    }
+
+    /// Before a new frame is routed: between epochs, with nothing draining,
+    /// wait for the successor instead of refusing the frame (#6099). With a
+    /// predecessor still draining, the loop keeps serving it and the frame is
+    /// routed at once. A stop ends the wait; the frame is then refused and
+    /// the loop returns.
+    async fn follow_current_for_frame(
+        &self,
+        router: &mut FrontDoorRouter<u64>,
+        upstreams: &mut Upstreams,
+    ) {
+        if router.current().is_none() && upstreams.guests.is_empty() {
+            let successor = Instant::now() + SUCCESSOR_EPOCH_WAIT;
+            tokio::select! {
+                () = self.stop.cancelled() => return,
+                _ = self.front_doors.wait_for_epoch(&self.key, successor) => {}
+            }
+        }
+        self.follow_current(router, upstreams).await;
     }
 
     /// One message to cw-egress, framed. False once cw-egress has gone or
