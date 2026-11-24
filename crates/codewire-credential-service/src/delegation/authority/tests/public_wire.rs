@@ -555,3 +555,197 @@ async fn public_connect_owner_oauth_facade_projection_revocation_and_limits() ->
 async fn public_native_grpc_owner_oauth_projection_revocation_and_limits() -> Result<()> {
     journey(Protocol::Grpc).await
 }
+
+/// An unsigned JWT with `payload`, the shape a synthetic Codex sign-in takes.
+fn synthetic_jwt(payload: serde_json::Value) -> String {
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    format!(
+        "{}.{}.synthetic-signature",
+        encode(br#"{"alg":"none"}"#),
+        encode(&serde_json::to_vec(&payload).expect("JSON"))
+    )
+}
+
+/// #6191, through the real owner-local authority and platform bridge on the
+/// public delegation route: a local VM has no `environments` row, and its
+/// delegation declares a front door. Its Codex login is delivered, and the
+/// access token is the placeholder derived under its owner's local root, not
+/// a refusal `no_placeholder_beside_front_door` (Dev, 2026-11-22 and 23). One
+/// root is stored for the owner, and no hosted environment key is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_front_door_delegation_with_no_environment_row_gets_its_owners_local_placeholder()
+-> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let h = Harness::unserved(address).await?;
+    let bridge = PlatformCredentialBridgeService::new(
+        Arc::new(RejectPods),
+        h.store.clone(),
+        PlatformAccessProfileStore::new(h.pool.clone(), builtin_provider_catalog()),
+        NoUpstream,
+    );
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge.clone());
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+    });
+    let result = tokio::time::timeout(BOUND, async {
+        let owner = OwnerId::parse(ALICE)?;
+        let (bundle, _) = codewire_credential_broker::import_codex_tokens(
+            Zeroizing::new(synthetic_jwt(serde_json::json!({
+                "https://api.openai.com/auth": { "chatgpt_account_id": "synthetic-account" }
+            }))),
+            Zeroizing::new(synthetic_jwt(
+                serde_json::json!({ "exp": 4_000_000_000_u64 }),
+            )),
+            Zeroizing::new("synthetic-codex-refresh-token".to_owned()),
+        )?
+        .into_parts();
+        let credential = h
+            .store
+            .create(
+                &Owner::User(owner.clone()),
+                CredentialRegistration {
+                    provider: ProviderId::parse("openai")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "owner-local codex sign-in".into(),
+                    account_hint: None,
+                    expires_at_unix: Some(4_000_000_000),
+                },
+                &ProtectedValue::from_slice(bundle.as_bytes())?,
+            )
+            .await?;
+        let (selection, _) = setup_owner_sources_with_entries(
+            &h,
+            BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await?;
+        let environment = EnvironmentId::parse(selection.local_environment_id.to_string())?;
+        let rows = |table: &'static str| {
+            let pool = h.db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                    .fetch_one(&pool)
+                    .await
+            }
+        };
+        ensure!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environments WHERE id=$1")
+                .bind(environment.as_str())
+                .fetch_one(&h.db.pool)
+                .await?
+                == 0,
+            "the local VM must have no environments row"
+        );
+        ensure!(rows("platform_local_placeholder_roots").await? == 0);
+        let hosted_keys = rows("platform_placeholder_keys").await?;
+
+        let mut open = opening(&selection);
+        open.front_door = true;
+        open.runtime
+            .get_or_insert_default()
+            .capabilities
+            .push(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN.into());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .http2_prior_knowledge()
+            .build()?;
+        let mut stream = connect(
+            &client,
+            &format!("http://{address}"),
+            Protocol::Grpc,
+            open.clone(),
+        )
+        .await?;
+
+        let recipient = ProjectionRecipient::new();
+        let request_id = Uuid::new_v4();
+        let context = codewire_workload_secrets::CodexLoginContext {
+            environment_id: *selection.local_environment_id.as_bytes(),
+            environment_generation: selection.local_environment_generation,
+            request_id: *request_id.as_bytes(),
+            deadline_unix_ms: unix_millis()? + 20_000,
+        };
+        stream
+            .send(frame(
+                public_bridge::credential_bridge_guest_message::Payload::CodexLogin(Box::new(
+                    public_bridge::CodexLoginRequest {
+                        request_id: request_id.to_string(),
+                        recipient_public_key: recipient.public_key().to_vec(),
+                        deadline_unix_ms: context.deadline_unix_ms,
+                        ..Default::default()
+                    },
+                )),
+            ))
+            .await?;
+        let Some(proto::delegate_credentials_response::Output::Frame(answer)) =
+            response(&mut stream).await?.output
+        else {
+            anyhow::bail!("no login frame");
+        };
+        let Some(public_bridge::credential_bridge_host_message::Payload::CodexLogin(login)) =
+            answer.payload
+        else {
+            anyhow::bail!("the answer is not a Codex login");
+        };
+        let Some(public_bridge::codex_login_response::Result::SealedLogin(sealed)) = login.result
+        else {
+            anyhow::bail!("the Codex login was refused: {:?}", login.result);
+        };
+        let opened = recipient.open_codex_login(&sealed, &context, unix_millis()?)?;
+
+        let key = h
+            .store
+            .owner_local_placeholder_key(&owner, &environment)
+            .await?;
+        let profile_revision = selection
+            .platform
+            .profile
+            .as_ref()
+            .map_or(0, |(_, revision)| *revision);
+        let expected = codewire_access::CredentialPlaceholder::derive(
+            &key,
+            &environment,
+            profile_revision,
+            &CapabilitySlot::codex(),
+            &credential.metadata.id,
+        );
+        ensure!(
+            opened.login.access_token() == expected.as_str(),
+            "the access token is the owner-local placeholder"
+        );
+        ensure!(
+            !opened.login.id_token().contains("synthetic-signature"),
+            "the ID token is the placeholder form, not the sign-in's"
+        );
+        ensure!(rows("platform_local_placeholder_roots").await? == 1);
+        ensure!(
+            rows("platform_placeholder_keys").await? == hosted_keys,
+            "no hosted environment key is made for a local VM"
+        );
+        drop(stream);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("bounded owner-local placeholder login")
+    .and_then(|result| result);
+    stop.cancel();
+    let drain = tokio::time::timeout(BOUND, bridge.shutdown())
+        .await
+        .context("public broker drain")
+        .and_then(|result| result.map_err(anyhow::Error::from));
+    let joined = tokio::time::timeout(BOUND, &mut server).await;
+    if joined.is_err() {
+        server.abort();
+        let _ = server.await;
+    }
+    let joined = joined
+        .context("public listener shutdown")
+        .and_then(|result| result.context("public listener join"))
+        .and_then(|result| result.map_err(anyhow::Error::from));
+    h.finish(result.and(drain).and(joined)).await
+}
