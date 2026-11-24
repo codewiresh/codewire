@@ -22,6 +22,8 @@ usage() {
   cat <<'USAGE' >&2
 usage: smoke-local-credentials.sh --cw ABSOLUTE_PATH [--cw-sha256 HEX]
                                   [--runtime-from DIR] --scratch DIR
+                                  [--previous-cw ABSOLUTE_PATH
+                                   [--previous-cw-sha256 HEX]]
 
 Runs the journey steps that need only the cw under test:
   smoke-provider-unresolved
@@ -29,6 +31,10 @@ Runs the journey steps that need only the cw under test:
   smoke-attach-restart
   smoke-proxy-down
 smoke-proxy-down needs HTTPS from the guest to releases.codewire.sh.
+With --previous-cw, a released cw before the candidate, it runs only
+smoke-upgrade's authority-left-running case (#5238) instead: the previous
+release's credential service is left running, then the candidate gives a VM
+a profile.
 --cw-sha256 checks a downloaded release before it runs. --runtime-from
 installs the local VM runtime from a release directory (for a cw built from
 source, which pins none); without it, the first create downloads the runtime
@@ -39,6 +45,8 @@ USAGE
 
 CW=''
 CW_SHA256=''
+PREVIOUS_CW=''
+PREVIOUS_CW_SHA256=''
 RUNTIME_FROM=''
 SCRATCH=''
 SMOKE_DIR=''
@@ -93,6 +101,17 @@ for entry in json.load(sys.stdin):
 ' "$1"
 }
 
+# Fail STEP unless the agent in VM lists FINGERPRINT. ssh-add -l's own output
+# is read, not the log, which already holds the fingerprint from generate.
+agent_holds() {
+  local step="$1" vm="$2" fingerprint="$3" keys
+  printf '$ cw exec --in %s -- ssh-add -l\n' "$vm" >>"$LOG"
+  keys="$(smoke_cw "$CW" exec --in "$vm" -- ssh-add -l 2>>"$LOG")" ||
+    step_fail "$step" "ssh-add -l failed in $vm"
+  printf '%s\n' "$keys" >>"$LOG"
+  grep -qF "$fingerprint" <<<"$keys" || step_fail "$step" "the guest's agent does not hold $fingerprint"
+}
+
 # What `cw ls --local --output json` gives as VM's error: its cause while it
 # is in `error`, else nothing.
 vm_error() {
@@ -121,8 +140,7 @@ step_profile_after_create() {
   step_cw "$step" update --local "$name" --profile "local:$name" --yes
   state="$(vm_state "$name")"
   [[ "$state" == running ]] || step_fail "$step" "after the update the VM is ${state:-missing}, not running"
-  step_cw "$step" exec --in "$name" -- ssh-add -l
-  grep -qF "$fingerprint" "$LOG" || step_fail "$step" "the guest's agent does not hold $fingerprint"
+  agent_holds "$step" "$name" "$fingerprint"
   printf 'ok %s\n' "$step"
 }
 
@@ -300,13 +318,18 @@ readonly PROBE_URL='https://releases.codewire.sh/cw/v1/channels/stable.json'
 # The scope's processes that are the cw under test running ROLE, and for an
 # environment's helper, ENVIRONMENT_ID's: one PID a line.
 role_pids() {
-  local role="$1" environment_id="${2:-}" pid
+  role_pids_of "$CW" "$@"
+}
+
+# The same, for processes BINARY started.
+role_pids_of() {
+  local binary="$1" role="$2" environment_id="${3:-}" pid
   local -a argv
   while read -r pid; do
     argv=()
     mapfile -d '' -t argv 2>/dev/null <"$SMOKE_PROC_ROOT/$pid/cmdline" || continue
     [[ ${#argv[@]} -ge 2 && "${argv[1]}" == "$role" ]] || continue
-    [[ "$(readlink -f -- "${argv[0]}")" == "$(readlink -f -- "$CW")" ]] || continue
+    [[ "$(readlink -f -- "${argv[0]}")" == "$(readlink -f -- "$binary")" ]] || continue
     [[ -z "$environment_id" || ( "${argv[2]:-}" == --environment-id && "${argv[3]:-}" == "$environment_id" ) ]] ||
       continue
     printf '%s\n' "$pid"
@@ -486,6 +509,32 @@ print(next(entry["id"] for entry in json.load(sys.stdin) if entry.get("name") ==
   printf 'ok %s\n' "$step"
 }
 
+# smoke-upgrade, an authority left running (#5238): the previous release's
+# credential service keeps running after an update, and the candidate's first
+# start that needs credentials must replace it and come up with the key, never
+# fail deep in the guest start as egress_broker_exited.
+step_upgrade_authority_left() {
+  local step=smoke-upgrade name=smoke-u key=smoke-u-key fingerprint state
+  printf '$ previous cw credentials --local list\n' >>"$LOG"
+  smoke_cw "$PREVIOUS_CW" credentials --local list >>"$LOG" 2>&1 ||
+    step_fail "$step" 'the previous release did not start its credential service'
+  [[ -n "$(role_pids_of "$PREVIOUS_CW" __local-credential-authority)" ]] ||
+    step_fail "$step" "the previous release's credential service is not running"
+  VMS+=("$name")
+  step_cw "$step" create --local --name "$name" --no-file --no-profile --yes
+  step_cw "$step" credentials --local generate ssh --name "$key"
+  fingerprint="$(grep -o 'SHA256:[A-Za-z0-9+/]*' "$LOG" | tail -n 1)"
+  [[ -n "$fingerprint" ]] || step_fail "$step" 'the generated key printed no fingerprint'
+  step_cw "$step" credentials --local --profile "$name" set ssh "$key"
+  step_cw "$step" update --local "$name" --profile "local:$name" --yes
+  state="$(vm_state "$name")"
+  [[ "$state" == running ]] || step_fail "$step" "after the update the VM is ${state:-missing}, not running"
+  agent_holds "$step" "$name" "$fingerprint"
+  [[ -z "$(role_pids_of "$PREVIOUS_CW" __local-credential-authority)" ]] ||
+    step_fail "$step" "the previous release's credential service still runs"
+  printf 'ok %s\n' "$step"
+}
+
 main() {
   local -a arguments=("$@")
   while [[ $# -gt 0 ]]; do
@@ -494,6 +543,12 @@ main() {
       --cw-sha256) [[ $# -ge 2 && -z "$CW_SHA256" ]] || { usage; exit 2; }; CW_SHA256="$2"; shift 2 ;;
       --runtime-from) [[ $# -ge 2 && -z "$RUNTIME_FROM" ]] || { usage; exit 2; }; RUNTIME_FROM="$2"; shift 2 ;;
       --scratch) [[ $# -ge 2 && -z "$SCRATCH" ]] || { usage; exit 2; }; SCRATCH="$2"; shift 2 ;;
+      --previous-cw) [[ $# -ge 2 && -z "$PREVIOUS_CW" ]] || { usage; exit 2; }; PREVIOUS_CW="$2"; shift 2 ;;
+      --previous-cw-sha256)
+        [[ $# -ge 2 && -z "$PREVIOUS_CW_SHA256" ]] || { usage; exit 2; }
+        PREVIOUS_CW_SHA256="$2"
+        shift 2
+        ;;
       -h | --help) usage; exit 0 ;;
       *) usage; exit 2 ;;
     esac
@@ -503,6 +558,10 @@ main() {
   [[ -z "$RUNTIME_FROM" || ( "$RUNTIME_FROM" == /* && -d "$RUNTIME_FROM" ) ]] ||
     die '--runtime-from must be an existing absolute directory'
   [[ -z "$CW_SHA256" ]] || smoke_require_sha256 "$CW" "$CW_SHA256"
+  [[ -z "$PREVIOUS_CW" || ( "$PREVIOUS_CW" == /* && -f "$PREVIOUS_CW" && -x "$PREVIOUS_CW" ) ]] ||
+    die '--previous-cw must be an absolute path to an executable cw'
+  [[ -n "$PREVIOUS_CW" || -z "$PREVIOUS_CW_SHA256" ]] || die '--previous-cw-sha256 needs --previous-cw'
+  [[ -z "$PREVIOUS_CW_SHA256" ]] || smoke_require_sha256 "$PREVIOUS_CW" "$PREVIOUS_CW_SHA256"
 
   smoke_run_in_scope lcreds -- "$0" "${arguments[@]}"
   SMOKE_DIR="$(mktemp -d "$SCRATCH/smoke-local-credentials.XXXXXX")"
@@ -511,6 +570,10 @@ main() {
   smoke_isolation_begin "$SMOKE_DIR"
   if [[ -n "$RUNTIME_FROM" ]]; then
     step_cw setup setup --local --from "$RUNTIME_FROM"
+  fi
+  if [[ -n "$PREVIOUS_CW" ]]; then
+    step_upgrade_authority_left
+    return
   fi
   # First: it decides the resolver the credential service starts with.
   step_provider_unresolved

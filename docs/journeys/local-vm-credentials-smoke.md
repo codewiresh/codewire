@@ -23,7 +23,7 @@ observed**.
 | `smoke-credential-claude` | not yet observed | no command yet (#5220) |
 | `smoke-credential-codex` | not yet observed | no command yet (#5220) |
 | `smoke-attach-restart` | observed, v0.4.22, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
-| `smoke-upgrade` | not yet observed | no command yet (#5220) |
+| `smoke-upgrade` | authority left running: observed, v0.4.31 over v0.4.21, 2026-11-23; the other two cases not yet observed | `scripts/ci/verify/smoke-local-credentials.sh --previous-cw` (authority left running only) |
 | `smoke-proxy-down` | observed, `main` at 1250f23ed, 2026-11-18 (by hand); the readable refusal (#5359) with a development build of its change, 2026-11-23 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-provider-unresolved` | observed, `main` at 4cae0f601, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 
@@ -196,8 +196,22 @@ same (#5238).
 
   After #5238, each of these passes, or is refused in the spec's words with
   the VM untouched.
-- **Observed:** not yet observed by the smoke. By hand on a Linux local VM
-  host with released binaries, 2026-11-17 (#5238):
+- **Observed, authority left running, by the smoke:** 2026-11-23 on a Linux
+  host with KVM, released binaries only (#5238):
+  - `smoke-local-credentials.sh --cw <v0.4.31> --previous-cw <v0.4.21>
+    --scratch <dir>`, each checked by its release SHA-256, printed
+    `ok smoke-upgrade`. v0.4.21's credential service was running before the
+    candidate's create; after the update the VM ran with the key in its agent
+    and no v0.4.21 credential service was left.
+  - The control, `--cw <v0.4.21> --previous-cw <v0.4.15>`, failed as #5238
+    describes: the update ended
+    `environment_sources_guest_start_failed`.
+  - The other two cases are not run by the smoke. Each needs a fresh HOME of
+    its own, and a stopped VM's move onto the installed runtime fails under
+    the smoke's per-call mount namespace with `start_direct_share_changed`, a
+    walk artifact (#5238).
+- **Observed by hand,** on a Linux local VM host with released binaries,
+  2026-11-17 (#5238):
   - the authority case with v0.4.15, then v0.4.21: failed as described;
   - the same case with v0.4.15, then v0.4.22: passed outright. Every step
     exited 0, the restart came up running at generation 2 with the profile,
