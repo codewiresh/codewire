@@ -82,6 +82,22 @@ The launcher in `crates/codewire-cli/src/platform_cw_runtime/launcher.rs`
 makes the choice before any configuration is read. Private roles and an
 explicit version path still run the executable they name.
 
+The image's copy leaves the choice to the release's whenever it can, so a
+launcher fix reaches every hosted sandbox with the release, at its next
+start, without a new workspace image (#6331, not yet observed). Invoked as
+the image's copy, the launcher opens `/codewire/bin/cw` once and admits that
+open file as below. When it passes, the launcher executes that same file
+descriptor, never the path, before it reads the version Store. The release's
+launcher then makes the choice above. Without an admitted release, as in a
+confidential guest or an image run on its own, the image's copy makes the
+choice itself.
+
+Which copy is running is read from the kernel, never from `argv[0]` or the
+invoked path: the device and inode of `/proc/self/exe`, compared with the
+admitted release's and with `/usr/local/bin/cw`'s. The release never hands
+off. So a link named like the image's copy that leads to the release neither
+loops nor skips the Store check, and an invocation hands off at most once.
+
 The launcher reads that selection from the version Store in the workspace
 home, `~/.local/share/codewire/cli` (#6315). The home is the Pod's volume
 root, which Kubernetes leaves root-owned and writable (local-path 0777) or
