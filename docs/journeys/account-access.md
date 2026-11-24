@@ -9,13 +9,13 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-23.
+Updated 2026-11-24.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80) | not yet observed |
+| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80); the terminal's sign-out leg and its revoked wording observed on Dev 2026-11-24, source 3e020c3405 | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
@@ -135,7 +135,7 @@ terminal and the SSH proxy are `access-websockets`.
 ## `access-websockets`: the dashboard's terminal and the SSH proxy when their authority is lost
 
 Issue: #3586, after its tailnet steps. The terminal half is observed on
-Kind; the SSH proxy is not yet observed.
+Kind, and its sign-out leg on Dev; the SSH proxy is not yet observed.
 
 - **Entry points:** the dashboard's terminal on a Sandbox page, which is
   durable and opened from a browser session; and the SSH proxy's WebSocket, which
@@ -235,6 +235,23 @@ Kind; the SSH proxy is not yet observed.
   again to continue." with no Reconnect. Read every 0.2 s, nothing replaced it
   until the page reached sign-in 8.8 s after the sign-out, later than the
   proof's about five seconds.
+
+  The terminal's sign-out leg (step 3's first half), on Dev, 2026-11-24,
+  Dev's desired source 3e020c3405, in headless Chromium, as the Dev
+  personal-walk identity with one browser session from
+  `with-dev-personal-walk.sh --browser-sessions 1`, a test Sandbox removed by
+  name afterwards, and the socket closes recorded by the walk's browser
+  tooling; twice; recorded on #5660. On the second run the Sandbox page's
+  terminal printed the loop, a second tab of the same browser signed out from
+  Settings, answered 303 at 17:47:52.160Z, and the terminal's socket closed
+  with 1008 "access revoked" at 17:47:53.114; 0.13 s later its footer said
+  "Access revoked. Sign in again to continue." with no Reconnect. Read every
+  0.2 s, nothing replaced it. The page moved to sign-in 6 s after the
+  sign-out on the first run, and on the second it was still on the Sandbox
+  page when the 60 s read ended, later than the proof's about five seconds.
+  The helper signed every session out afterwards
+  (`browser_sessions_ended=1`). Not walked here: the second browser that
+  keeps printing, the reattach after a fresh sign-in, and the account disable.
 
 ## `access-org-deleting`: no new stream into an organization being deleted
 
