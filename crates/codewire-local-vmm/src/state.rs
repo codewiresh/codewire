@@ -907,6 +907,16 @@ pub(crate) const CHECKPOINT_VMM_FILES: [&str; 3] = ["config.json", "state.json",
 #[cfg(target_os = "macos")]
 pub(crate) const CHECKPOINT_VMM_FILES: [&str; 2] =
     [crate::vz::CONFIG_NAME, crate::vz::CHECKPOINT_STATE_NAME];
+/// What a VM checkpoint's `vmm/` or a VM's `checkpoints/in` may hold: those
+/// files and, on a Mac, the saved state's identity pin (#6124).
+#[cfg(target_os = "linux")]
+pub(crate) const CHECKPOINT_VMM_TREE_FILES: [&str; 3] = CHECKPOINT_VMM_FILES;
+#[cfg(target_os = "macos")]
+pub(crate) const CHECKPOINT_VMM_TREE_FILES: [&str; 3] = [
+    crate::vz::CONFIG_NAME,
+    crate::vz::CHECKPOINT_STATE_NAME,
+    crate::checkpoint_pin::PIN_NAME,
+];
 const CHECKPOINT_TREE_LIMIT: usize = 16;
 
 /// The names in a checkpoints directory, each `in` or `out-<uuid>`; anything
@@ -965,12 +975,12 @@ pub(crate) fn remove_checkpoint_tree(
         return Ok(());
     };
     if name == CHECKPOINT_IN {
-        remove_checkpoint_files(&tree, &CHECKPOINT_VMM_FILES)?;
+        remove_checkpoint_files(&tree, &CHECKPOINT_VMM_TREE_FILES)?;
         // A restore's empty stand-in for the captured boot's setup disk.
         remove_checkpoint_files(&tree, &["setup.raw"])?;
     } else {
         if let Some(vmm) = optional_private_directory(&tree, Path::new("vmm"))? {
-            remove_checkpoint_files(&vmm, &CHECKPOINT_VMM_FILES)?;
+            remove_checkpoint_files(&vmm, &CHECKPOINT_VMM_TREE_FILES)?;
             drop(vmm);
             tree.remove_empty_private_directory(Path::new("vmm"))?;
         }

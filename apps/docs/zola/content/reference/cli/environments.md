@@ -460,6 +460,14 @@ unlocked, because macOS releases the key that protects the saved memory only
 then. With FileVault off, the first checkpoint warns
 that a removed checkpoint's memory stays readable on the disk.
 
+A Mac checkpoint records its saved memory's file identity in `state.pin`,
+beside the saved memory, so a restore or fork doesn't read the whole file
+again while that file is unchanged. A `cw` older than this can't use such a
+checkpoint and calls it damaged. To use it with an older `cw`, remove that one
+file, `~/.codewire/native-v1/engine/snapshots/ID/vmm/state.pin`, where `ID` is
+the checkpoint's ID from `cw checkpoint inspect NAME`: the checkpoint itself is
+unchanged, and its saved memory is checked in full instead.
+
 ## Local VMs on an older cw
 
 After an upgrade, local VMs keep running on the `cw` that started them.

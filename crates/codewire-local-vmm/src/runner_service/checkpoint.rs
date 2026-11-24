@@ -196,6 +196,19 @@ pub(super) fn parse_checkpoint_boot(
             .transpose()?,
         daemon_vsock_port: bindings.daemon_vsock_port,
         intercept: bindings.intercept,
+        state_identity: boot.state_identity.as_ref().map(|identity| {
+            crate::checkpoint_pin::StateIdentity {
+                device: identity.device,
+                inode: identity.inode,
+                size: identity.size,
+                birth_seconds: identity.birth_seconds,
+                birth_nanoseconds: identity.birth_nanoseconds,
+                change_seconds: identity.change_seconds,
+                change_nanoseconds: identity.change_nanoseconds,
+                mode: identity.mode,
+                sha256: identity.sha256.clone(),
+            }
+        }),
     }))
 }
 
@@ -263,6 +276,7 @@ mod tests {
                 ..Default::default()
             }),
             source_generation: 3,
+            state_identity: None,
         }
     }
 

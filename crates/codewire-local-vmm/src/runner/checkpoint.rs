@@ -473,6 +473,9 @@ pub struct RestoreBoot {
     pub daemon_vsock_port: u32,
     /// The captured boot intercepted agent hosts (#3999).
     pub intercept: bool,
+    /// On a Mac, the identity the supervisor pinned for the saved state it
+    /// cloned into `checkpoints/in`: a match skips the digest (#6124).
+    pub(crate) state_identity: Option<crate::checkpoint_pin::StateIdentity>,
 }
 
 /// What the guest reported when the restored VM resumed.

@@ -157,22 +157,82 @@ impl CheckpointManifest {
 
     /// Whether a VM tree's `checkpoints/in` files are this checkpoint's.
     pub(in crate::supervisor) fn files_match_in(&self, vm: &Path) -> bool {
-        local::read_vmm_files(
+        self.vmm_files_match(
             &vm.join(crate::state::CHECKPOINTS_DIRECTORY)
                 .join(crate::state::CHECKPOINT_IN),
-            self.memory_bytes,
         )
-        .is_ok_and(|files| {
-            files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
-        })
     }
 
     /// Whether `directory`'s `vmm/` files are the ones this manifest names.
     pub(in crate::supervisor) fn files_match(&self, directory: &Path) -> bool {
-        local::read_vmm_files(&directory.join("vmm"), self.memory_bytes).is_ok_and(|files| {
-            files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
-        })
+        self.vmm_files_match(&directory.join("vmm"))
     }
+
+    /// A Mac's saved state is digested only when its pin doesn't hold
+    /// (#6124).
+    fn vmm_files_match(&self, vmm: &Path) -> bool {
+        local::vmm_files_match(
+            vmm,
+            self.memory_bytes,
+            &self.config_sha256,
+            &self.state_sha256,
+        )
+    }
+}
+
+/// A fork's `checkpoints/in` in its staged VM `tree`: its own sealed
+/// reflinks of the VMM files in the checkpoint directory `source`, checked
+/// against `checkpoint`. The source is checked first, so a Mac can pin the
+/// saved state's clone from its descriptor and skip digesting it (#6124).
+pub(in crate::supervisor) fn place_fork_input(
+    tree_root: &PrivateRoot,
+    tree: &Path,
+    source: &Path,
+    checkpoint: &CheckpointManifest,
+) -> Result<(), SupervisorError> {
+    let checkpoints =
+        tree_root.create_dir(Path::new(crate::state::CHECKPOINTS_DIRECTORY), 0o700)?;
+    let input = PrivateRoot::open(&checkpoints)?
+        .create_dir(Path::new(crate::state::CHECKPOINT_IN), 0o700)?;
+    if !checkpoint.files_match(source) {
+        return Err(SupervisorError::InvalidState);
+    }
+    for name in crate::state::CHECKPOINT_VMM_FILES {
+        let clone = clone_sealed(&source.join("vmm").join(name), &input.join(name))?;
+        local::pin_clone(name, &clone, &input, &checkpoint.state_sha256)?;
+    }
+    if !checkpoint.files_match_in(tree) {
+        return Err(SupervisorError::InvalidState);
+    }
+    for directory in [&input, &checkpoints] {
+        File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| SupervisorError::Io {
+                path: directory.clone(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+/// Clone `source` into the new `destination`, sealed 0400, open.
+fn clone_sealed(source: &Path, destination: &Path) -> Result<File, SupervisorError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
+        path: path.to_owned(),
+        source: error,
+    };
+    let from = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(source)
+        .map_err(|error| io_error(source, error))?;
+    let to = crate::fs_clone::clone_new(&from, destination)
+        .map_err(|error| io_error(destination, error))?;
+    to.sync_all()
+        .and_then(|()| to.set_permissions(fs::Permissions::from_mode(0o400)))
+        .map_err(|error| io_error(destination, error))?;
+    Ok(to)
 }
 
 /// The default name of a VM checkpoint of `environment`: the name and the
@@ -337,8 +397,37 @@ pub(super) fn attach_boot(
             intercept: checkpoint.boot.intercept,
         }),
         source_generation: checkpoint.source_generation,
+        state_identity: placed_state_identity(supervisor, &request.environment_id),
     });
     Ok(request)
+}
+
+/// The pin the supervisor recorded for the saved state it cloned into the
+/// VM's `checkpoints/in`, for the runner to compare (#6124); `None` when
+/// there is none, and the runner then digests.
+fn placed_state_identity(
+    supervisor: &Supervisor,
+    environment_id: &str,
+) -> Option<v1::CheckpointStateIdentity> {
+    let input = supervisor
+        .config
+        .engine_root()
+        .join("vms")
+        .join(Uuid::parse_str(environment_id).ok()?.to_string())
+        .join(crate::state::CHECKPOINTS_DIRECTORY)
+        .join(crate::state::CHECKPOINT_IN);
+    let pin = crate::checkpoint_pin::read(&input)?;
+    Some(v1::CheckpointStateIdentity {
+        device: pin.device,
+        inode: pin.inode,
+        size: pin.size,
+        birth_seconds: pin.birth_seconds,
+        birth_nanoseconds: pin.birth_nanoseconds,
+        change_seconds: pin.change_seconds,
+        change_nanoseconds: pin.change_nanoseconds,
+        mode: pin.mode,
+        sha256: pin.sha256,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -8525,6 +8525,39 @@ fn forbidden_direct_roots_resolve_missing_suffix_beneath_a_symlink() {
     assert!(after_creation.contains(&fs::canonicalize(expected).unwrap()));
 }
 
+/// A VM checkpoint's saved state is kept from the guest by its private
+/// directory, not by its digest (#6124, design condition 7): no direct share
+/// may expose the snapshot store, a VM's checkpoints, or a directory that
+/// holds them.
+#[test]
+fn checkpoint_directories_are_never_shared() {
+    let (_runtime, core) = test_supervisor_core(project_environment());
+    let engine = core.config.engine_root();
+    let snapshots = super::snapshots::snapshots_root(&engine).unwrap();
+    let checkpoints = engine
+        .join("vms")
+        .join(Uuid::new_v4().to_string())
+        .join(crate::state::CHECKPOINTS_DIRECTORY);
+    fs::create_dir_all(&checkpoints).unwrap();
+    let forbidden_roots = core.config.direct_share_forbidden_roots().unwrap();
+    for source in [snapshots.path(), checkpoints.as_path(), engine.as_path()] {
+        let source = fs::canonicalize(source).unwrap();
+        assert!(
+            matches!(
+                prepare_direct_input(
+                    &source,
+                    "/workspace/private",
+                    true,
+                    Vec::new(),
+                    &forbidden_roots
+                ),
+                Err(WorkspacePlanError::DirectShareInvalid)
+            ),
+            "{source:?}"
+        );
+    }
+}
+
 /// The per-user socket directories hold the supervisor's, VMs' and the
 /// credential authority's sockets; no direct share may expose them.
 #[test]

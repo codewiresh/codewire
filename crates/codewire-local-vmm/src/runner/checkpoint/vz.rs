@@ -204,7 +204,11 @@ pub(in crate::runner) fn restore_input(
         ));
     }
     let state = input.join(crate::vz::CHECKPOINT_STATE_NAME);
-    admit_restore_state(&state, &restore.state_sha256)?;
+    admit_restore_state(
+        &state,
+        &restore.state_sha256,
+        restore.state_identity.as_ref(),
+    )?;
     let setup = restore
         .setup_disk_bytes
         .map(|bytes| {
@@ -323,8 +327,14 @@ pub(in crate::runner) fn restore_configuration(
 
 /// Condition 7 (cw-security, #4654): the state a restore reads is this VM's
 /// own copy, a plain `0400` file this user owns with one link, reached
-/// without following a link, with the sha256 its checkpoint recorded.
-fn admit_restore_state(path: &Path, sha256: &str) -> Result<(), RunnerError> {
+/// without following a link, with the sha256 its checkpoint recorded. When
+/// the descriptor opened here has exactly the identity the supervisor pinned
+/// at the clone, it is that content and isn't digested again (#6124).
+fn admit_restore_state(
+    path: &Path,
+    sha256: &str,
+    pinned: Option<&crate::checkpoint_pin::StateIdentity>,
+) -> Result<(), RunnerError> {
     use sha2::{Digest as _, Sha256};
     use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -348,6 +358,9 @@ fn admit_restore_state(path: &Path, sha256: &str) -> Result<(), RunnerError> {
         || metadata.nlink() != 1
     {
         return Err(not_ours());
+    }
+    if pinned.is_some_and(|pin| pin.holds_for(&file, sha256)) {
+        return Ok(());
     }
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
@@ -557,30 +570,82 @@ mod tests {
             |mode| std::fs::set_permissions(&state, std::fs::Permissions::from_mode(mode)).unwrap();
 
         mode(0o400);
-        admit_restore_state(&state, &sha256).unwrap();
+        admit_restore_state(&state, &sha256, None).unwrap();
         assert!(
-            admit_restore_state(&state, &"0".repeat(64)).is_err(),
+            admit_restore_state(&state, &"0".repeat(64), None).is_err(),
             "another sha256"
         );
         mode(0o600);
-        assert!(admit_restore_state(&state, &sha256).is_err(), "writable");
+        assert!(
+            admit_restore_state(&state, &sha256, None).is_err(),
+            "writable"
+        );
         mode(0o400);
         let second = directory.path().join("second");
         std::fs::hard_link(&state, &second).unwrap();
         assert!(
-            admit_restore_state(&state, &sha256).is_err(),
+            admit_restore_state(&state, &sha256, None).is_err(),
             "a second link"
         );
         std::fs::remove_file(&second).unwrap();
         let link = directory.path().join("link");
         std::os::unix::fs::symlink(&state, &link).unwrap();
         assert!(
-            admit_restore_state(&link, &sha256).is_err(),
+            admit_restore_state(&link, &sha256, None).is_err(),
             "a symbolic link"
         );
         assert!(
-            admit_restore_state(&directory.path().join("absent"), &sha256).is_err(),
+            admit_restore_state(&directory.path().join("absent"), &sha256, None).is_err(),
             "absent"
+        );
+    }
+
+    /// #6124: the supervisor's pin of this VM's clone stands for the digest
+    /// only while the descriptor opened here still has that identity; the
+    /// other checks apply either way.
+    #[test]
+    fn a_pin_that_holds_skips_the_digest_and_one_that_doesnt_digests() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.vzsave");
+        std::fs::write(&state, b"saved").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let sha256 = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"saved"));
+        let wrong = "0".repeat(64);
+        let identity =
+            crate::checkpoint_pin::StateIdentity::of(&std::fs::File::open(&state).unwrap())
+                .unwrap();
+        let pin = identity.clone().vouching_for(&sha256);
+
+        // A pin vouching for a digest the file doesn't have passes while it
+        // holds, so nothing was read; it vouches only for that digest.
+        let vouching = identity.vouching_for(&wrong);
+        admit_restore_state(&state, &wrong, Some(&vouching)).unwrap();
+        admit_restore_state(&state, &sha256, Some(&vouching)).unwrap();
+        admit_restore_state(&state, &sha256, Some(&pin)).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&state, b"saves").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(
+            admit_restore_state(&state, &sha256, Some(&pin)).is_err(),
+            "a changed byte"
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&state, b"saved").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o400)).unwrap();
+        admit_restore_state(&state, &sha256, Some(&pin)).unwrap();
+        assert!(
+            admit_restore_state(&state, &wrong, Some(&pin)).is_err(),
+            "a broken pin is digested"
+        );
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&state, &link).unwrap();
+        let held = crate::checkpoint_pin::StateIdentity::of(&std::fs::File::open(&state).unwrap())
+            .unwrap()
+            .vouching_for(&sha256);
+        assert!(
+            admit_restore_state(&link, &sha256, Some(&held)).is_err(),
+            "a symbolic link, pinned or not"
         );
     }
 

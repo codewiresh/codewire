@@ -2,6 +2,8 @@
 //! against the raw image, the manifest, placement, deletion and the store's
 //! reconciliation.
 
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::process::Command as ProcessCommand;
 
 use codewire_ext4_scrub::parse_extent;

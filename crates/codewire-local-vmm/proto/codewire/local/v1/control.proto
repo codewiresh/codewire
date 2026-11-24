@@ -1348,6 +1348,25 @@ message CheckpointBoot {
   CheckpointBootBindings boot = 8;
   // The captured boot's generation: the restored guest moves past it.
   uint64 source_generation = 9;
+  // On a Mac, the identity of the saved state the supervisor cloned into
+  // checkpoints/in, from the clone's open descriptor right after it cloned a
+  // checked source. The runner skips its digest when the file it opens has
+  // exactly this identity (#6124). Absent: the runner digests.
+  CheckpointStateIdentity state_identity = 10;
+}
+
+message CheckpointStateIdentity {
+  uint64 device = 1;
+  uint64 inode = 2;
+  uint64 size = 3;
+  int64 birth_seconds = 4;
+  int64 birth_nanoseconds = 5;
+  int64 change_seconds = 6;
+  int64 change_nanoseconds = 7;
+  uint32 mode = 8;
+  // The saved state's sha256 this identity vouches for: it holds only for
+  // a restore that expects exactly this digest.
+  string sha256 = 9;
 }
 
 message DirectShareAttachment {

@@ -1060,8 +1060,7 @@ impl LocalSnapshotService for SupervisorRpc {
 /// Capture, placement, listing, deletion and reconciliation of the snapshot
 /// directories on this host.
 mod local {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::FileExt as _;
 
     use sha2::Digest as _;
     use std::os::unix::fs::PermissionsExt as _;
@@ -2068,24 +2067,12 @@ mod local {
         // A fork of a VM checkpoint restores from its own reflinks of the
         // VMM files, which its VMM maps for as long as it runs.
         if let Some(checkpoint) = &manifest.checkpoint {
-            let checkpoints =
-                tree_root.create_dir(Path::new(crate::state::CHECKPOINTS_DIRECTORY), 0o700)?;
-            let input = PrivateRoot::open(&checkpoints)?
-                .create_dir(Path::new(crate::state::CHECKPOINT_IN), 0o700)?;
-            for name in crate::state::CHECKPOINT_VMM_FILES {
-                clone_sealed(&source.path().join("vmm").join(name), &input.join(name))?;
-            }
-            if !checkpoint.files_match_in(&tree) {
-                return Err(SupervisorError::InvalidState);
-            }
-            for directory in [&input, &checkpoints] {
-                File::open(directory)
-                    .and_then(|directory| directory.sync_all())
-                    .map_err(|source| SupervisorError::Io {
-                        path: directory.clone(),
-                        source,
-                    })?;
-            }
+            super::super::checkpoints::place_fork_input(
+                &tree_root,
+                &tree,
+                source.path(),
+                checkpoint,
+            )?;
         }
         for directory in [
             generations.join(&storage),
@@ -2103,24 +2090,6 @@ mod local {
         staging_root.move_private_directory_to(Path::new("vm"), &vms, Path::new(&name))?;
         drop(lock);
         Ok(manifest.root_generation)
-    }
-
-    /// Clone `source` into the new `destination`, sealed 0400.
-    fn clone_sealed(source: &Path, destination: &Path) -> Result<(), SupervisorError> {
-        let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
-            path: path.to_owned(),
-            source: error,
-        };
-        let from = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(source)
-            .map_err(|error| io_error(source, error))?;
-        let to = fs_clone::clone_new(&from, destination)
-            .map_err(|error| io_error(destination, error))?;
-        to.sync_all()
-            .and_then(|()| to.set_permissions(fs::Permissions::from_mode(0o400)))
-            .map_err(|error| io_error(destination, error))
     }
 
     struct PlacedFile {
@@ -2760,7 +2729,7 @@ mod local {
         remove_member(&root, MANIFEST_FILE)?;
         remove_member(&root, DELETING_MARKER)?;
         if let Some(vmm) = optional_member_directory(&root, "vmm")? {
-            for name in crate::state::CHECKPOINT_VMM_FILES {
+            for name in crate::state::CHECKPOINT_VMM_TREE_FILES {
                 remove_member(&vmm, name)?;
             }
             drop(vmm);

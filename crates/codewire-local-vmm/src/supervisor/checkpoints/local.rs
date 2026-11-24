@@ -11,7 +11,7 @@ mod host;
 mod proto;
 pub(in crate::supervisor) use host::require_unlocked;
 use host::{CLONING_FILESYSTEMS, pinned_vmm, require_same_host, synced_store_warning};
-pub(in crate::supervisor) use host::{host_identity, read_vmm_files};
+pub(in crate::supervisor) use host::{host_identity, read_vmm_files, vmm_files_match};
 pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
 
 /// The seed bindings a runner reports for the boot it captured; an empty
@@ -635,12 +635,27 @@ pub(super) fn place(
         out.create_dir(Path::new("disks"), 0o700)?;
         PrivateRoot::open(&out.create_dir(Path::new("root"), 0o700)?)?
             .create_dir(Path::new(&storage), 0o700)?;
+        // The source is checked, then its clone pinned from the clone's own
+        // descriptor, which the runner compares (#6124, condition 7).
+        let checkpoint = manifest
+            .checkpoint
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?;
+        if !checkpoint.files_match(source.path()) {
+            return Err(SupervisorError::InvalidState);
+        }
         for name in CHECKPOINT_VMM_FILES {
             let relative = format!("vmm/{name}");
-            clone_file(
+            let clone = clone_file(
                 &source.path().join(&relative),
                 &out_path.join(&relative),
                 0o400,
+            )?;
+            pin_clone(
+                name,
+                &clone,
+                &out_path.join("vmm"),
+                &checkpoint.state_sha256,
             )?;
         }
         let mut disks = vec![("disks/state.raw", paths.state_disk.clone())];
@@ -716,8 +731,8 @@ pub(super) fn place(
     result
 }
 
-/// Clone `source` into the new `destination` with `mode`.
-fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<(), SupervisorError> {
+/// Clone `source` into the new `destination` with `mode`, open.
+fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<fs::File, SupervisorError> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
         path: path.to_owned(),
@@ -733,7 +748,32 @@ fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<(), Superv
     to.sync_all()
         .map_err(|error| io_error(destination, error))?;
     to.set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(|error| io_error(destination, error))
+        .map_err(|error| io_error(destination, error))?;
+    Ok(to)
+}
+
+/// On a Mac, pin the saved state's fresh `clone`, a copy of a source just
+/// checked to have `sha256`, in `vmm`, from its open descriptor (#6124).
+/// Other files, and Linux, pin nothing.
+pub(in crate::supervisor) fn pin_clone(
+    name: &str,
+    clone: &fs::File,
+    vmm: &Path,
+    sha256: &str,
+) -> Result<(), SupervisorError> {
+    #[cfg(target_os = "macos")]
+    if name == crate::vz::CHECKPOINT_STATE_NAME {
+        let io_error = |source| SupervisorError::Io {
+            path: vmm.to_owned(),
+            source,
+        };
+        let identity = crate::checkpoint_pin::StateIdentity::of(clone)
+            .map_err(io_error)?
+            .vouching_for(sha256);
+        crate::checkpoint_pin::write(vmm, &identity).map_err(io_error)?;
+    }
+    let _ = (name, clone, vmm, sha256);
+    Ok(())
 }
 
 /// Removes a staging tree unless its path was taken.
@@ -865,6 +905,16 @@ fn admit_capture(
             return Err(SupervisorError::InvalidRunnerResponse);
         }
         let files = read_vmm_files(&out.path().join("vmm"), memory_bytes)?;
+        // The seal: the one digest of the saved state, and on a Mac its
+        // identity while it was read, which later checks compare (#6124).
+        if let Some(identity) = &files.state_identity {
+            crate::checkpoint_pin::write(&out.path().join("vmm"), identity).map_err(|source| {
+                SupervisorError::Io {
+                    path: out.path().join("vmm"),
+                    source,
+                }
+            })?;
+        }
         let mut disks = vec![admit_disk(
             &out,
             "disks/state.raw",

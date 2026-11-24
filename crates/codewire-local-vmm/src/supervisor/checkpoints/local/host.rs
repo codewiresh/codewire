@@ -13,6 +13,9 @@ use crate::artifact::AdmittedArtifacts;
 pub(in crate::supervisor) struct VmmFiles {
     pub(in crate::supervisor) config_sha256: String,
     pub(in crate::supervisor) state_sha256: String,
+    /// On a Mac, the saved state's identity while it was digested, when it
+    /// didn't change meanwhile: what its pin records (#6124).
+    pub(in crate::supervisor) state_identity: Option<crate::checkpoint_pin::StateIdentity>,
 }
 
 /// The digest of `name` under `root`, sealed 0400 and at most `limit`
@@ -73,6 +76,21 @@ pub(in crate::supervisor) fn read_vmm_files(
     Ok(VmmFiles {
         config_sha256,
         state_sha256,
+        state_identity: None,
+    })
+}
+
+/// Whether `vmm/` holds the files `config_sha256` and `state_sha256` name.
+/// Linux digests them as [`read_vmm_files`] does.
+#[cfg(target_os = "linux")]
+pub(in crate::supervisor) fn vmm_files_match(
+    vmm: &Path,
+    memory_bytes: u64,
+    config_sha256: &str,
+    state_sha256: &str,
+) -> bool {
+    read_vmm_files(vmm, memory_bytes).is_ok_and(|files| {
+        files.config_sha256 == config_sha256 && files.state_sha256 == state_sha256
     })
 }
 
@@ -89,27 +107,94 @@ pub(in crate::supervisor) fn read_vmm_files(
     only_entries(vmm, &CHECKPOINT_VMM_FILES)?;
     let root = PrivateRoot::open(vmm)?;
     let config_sha256 = digest_config(&root, vmm, crate::vz::CONFIG_NAME)?;
+    let (opened, bytes) = open_state(&root, vmm, memory_bytes)?;
+    // The identity on both sides of the digest: one that moved means the
+    // file changed while it was read, and nothing is pinned.
+    let before = crate::checkpoint_pin::StateIdentity::of(opened.file()).ok();
+    let state_sha256 = digest_state(&opened, vmm, bytes)?;
+    let after = crate::checkpoint_pin::StateIdentity::of(opened.file()).ok();
+    let state_identity = match (before, after) {
+        (Some(before), Some(after)) if before == after => Some(before.vouching_for(&state_sha256)),
+        _ => None,
+    };
+    Ok(VmmFiles {
+        config_sha256,
+        state_sha256,
+        state_identity,
+    })
+}
+
+/// Whether `vmm/` holds the files `config_sha256` and `state_sha256` name.
+/// The saved state is digested only when its pin, beside it, is not its
+/// identity now (#6124, design condition 7).
+#[cfg(target_os = "macos")]
+pub(in crate::supervisor) fn vmm_files_match(
+    vmm: &Path,
+    memory_bytes: u64,
+    config_sha256: &str,
+    state_sha256: &str,
+) -> bool {
+    let matches = || -> Result<bool, SupervisorError> {
+        only_entries(vmm, &crate::state::CHECKPOINT_VMM_TREE_FILES)?;
+        let root = PrivateRoot::open(vmm)?;
+        if digest_config(&root, vmm, crate::vz::CONFIG_NAME)? != config_sha256 {
+            return Ok(false);
+        }
+        let (opened, bytes) = open_state(&root, vmm, memory_bytes)?;
+        if crate::checkpoint_pin::read(vmm)
+            .is_some_and(|pin| pin.holds_for(opened.file(), state_sha256))
+        {
+            return Ok(true);
+        }
+        Ok(digest_state(&opened, vmm, bytes)? == state_sha256)
+    };
+    matches().unwrap_or(false)
+}
+
+/// The saved state, sealed 0400 and within its size bounds, with its size.
+#[cfg(target_os = "macos")]
+fn open_state(
+    root: &PrivateRoot,
+    vmm: &Path,
+    memory_bytes: u64,
+) -> Result<(crate::host::path::ConfinedFile, u64), SupervisorError> {
     let state = crate::vz::CHECKPOINT_STATE_NAME;
     let opened = root
         .open_regular(Path::new(state), false, None, false, Some(0o400))
         .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
-    let io_error = |source| SupervisorError::Io {
-        path: vmm.join(state),
-        source,
-    };
-    let bytes = opened.file().metadata().map_err(io_error)?.len();
+    let bytes = opened
+        .file()
+        .metadata()
+        .map_err(|source| SupervisorError::Io {
+            path: vmm.join(state),
+            source,
+        })?
+        .len();
     if !(MIB..=memory_bytes.saturating_add(MAXIMUM_VMM_STATE_BYTES)).contains(&bytes) {
         return Err(SupervisorError::InvalidRunnerResponse);
     }
+    Ok((opened, bytes))
+}
+
+/// The saved state's digest, read in full from its open descriptor.
+#[cfg(target_os = "macos")]
+fn digest_state(
+    opened: &crate::host::path::ConfinedFile,
+    vmm: &Path,
+    bytes: u64,
+) -> Result<String, SupervisorError> {
     let mut digest = sha2::Sha256::new();
-    let read = std::io::copy(&mut opened.file().take(bytes + 1), &mut digest).map_err(io_error)?;
+    let read =
+        std::io::copy(&mut opened.file().take(bytes + 1), &mut digest).map_err(|source| {
+            SupervisorError::Io {
+                path: vmm.join(crate::vz::CHECKPOINT_STATE_NAME),
+                source,
+            }
+        })?;
     if read != bytes {
         return Err(SupervisorError::InvalidRunnerResponse);
     }
-    Ok(VmmFiles {
-        config_sha256,
-        state_sha256: format!("{:x}", digest.finalize()),
-    })
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 /// The first processor's vendor, family, model and stepping, and the
@@ -338,6 +423,78 @@ pub(in crate::supervisor) fn synced_store_warning(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    /// A sealed `vmm/` in `directory`: a configuration, and a saved state of
+    /// `state`.
+    fn sealed_vmm(directory: &Path, state: &[u8]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let vmm = directory.join("vmm");
+        fs::create_dir(&vmm).unwrap();
+        fs::set_permissions(&vmm, fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, bytes) in [
+            (crate::vz::CONFIG_NAME, b"{}".as_slice()),
+            (crate::vz::CHECKPOINT_STATE_NAME, state),
+        ] {
+            fs::write(vmm.join(name), bytes).unwrap();
+            fs::set_permissions(vmm.join(name), fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        vmm
+    }
+
+    fn rewrite(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+    }
+
+    /// The seal pins the saved state; a pin that holds stands for the digest,
+    /// and one that doesn't, or none, means the digest decides (#6124).
+    #[test]
+    fn a_pin_that_holds_skips_the_digest_and_any_change_is_digested() {
+        let directory = tempfile::tempdir().unwrap();
+        let memory = MIB;
+        let state = vec![7_u8; MIB as usize];
+        let vmm = sealed_vmm(directory.path(), &state);
+        let sealed = read_vmm_files(&vmm, memory).unwrap();
+        let identity = sealed.state_identity.expect("the seal's identity");
+        assert_eq!(identity.sha256, sealed.state_sha256);
+        crate::checkpoint_pin::write(&vmm, &identity).unwrap();
+        let config = sealed.config_sha256.as_str();
+        let wrong = "0".repeat(64);
+        assert!(vmm_files_match(&vmm, memory, config, &sealed.state_sha256));
+        // A pin vouches for its own digest only: another is digested, and
+        // refused.
+        assert!(!vmm_files_match(&vmm, memory, config, &wrong));
+
+        // Holding, the pin stands for the digest: one that vouches for a
+        // digest the file doesn't have passes, so nothing was read.
+        let vouching = identity.clone().vouching_for(&wrong);
+        crate::checkpoint_pin::write(&vmm, &vouching).unwrap();
+        assert!(vmm_files_match(&vmm, memory, config, &wrong));
+        crate::checkpoint_pin::write(&vmm, &identity).unwrap();
+
+        // A changed byte breaks the pin, and the digest refuses it.
+        let mut changed = state.clone();
+        changed[MIB as usize / 2] = 8;
+        rewrite(&vmm.join(crate::vz::CHECKPOINT_STATE_NAME), &changed);
+        assert!(!vmm_files_match(&vmm, memory, config, &sealed.state_sha256));
+
+        // The same bytes written back: the pin still doesn't hold, so the
+        // digest decides, and only the right one passes.
+        rewrite(&vmm.join(crate::vz::CHECKPOINT_STATE_NAME), &state);
+        assert!(vmm_files_match(&vmm, memory, config, &sealed.state_sha256));
+        assert!(!vmm_files_match(&vmm, memory, config, &wrong));
+
+        // No pin at all: digested.
+        fs::remove_file(vmm.join(crate::checkpoint_pin::PIN_NAME)).unwrap();
+        assert!(vmm_files_match(&vmm, memory, config, &sealed.state_sha256));
+        assert!(!vmm_files_match(&vmm, memory, config, &wrong));
+
+        // The configuration is always digested.
+        crate::checkpoint_pin::write(&vmm, &identity).unwrap();
+        assert!(!vmm_files_match(&vmm, memory, &wrong, &sealed.state_sha256));
+    }
 
     #[test]
     fn a_state_root_a_sync_service_copies_is_refused_and_one_icloud_may_sync_warned() {

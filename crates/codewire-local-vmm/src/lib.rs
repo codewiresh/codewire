@@ -16,6 +16,8 @@ mod artifact_store;
 pub mod broker_control;
 #[cfg(target_os = "linux")]
 pub mod ch_api;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod checkpoint_pin;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;
 #[cfg(target_os = "linux")]
