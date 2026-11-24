@@ -3,6 +3,7 @@ use std::time::Duration;
 use axum::http::header::AUTHORIZATION;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_stream::StreamExt as _;
+use uuid::Uuid;
 
 use super::*;
 use crate::{CredentialBridgeOutput, PreparedBridgeConnection};

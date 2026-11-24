@@ -30,7 +30,6 @@ use tokio::io::DuplexStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
-use uuid::Uuid;
 
 use super::upgraded_stream::{
     self, StreamClose, StreamControl, StreamCredits, StreamFrame, StreamSink,
@@ -449,7 +448,7 @@ fn upgrade_frame(
     let mut sent = headers.clone();
     sent.remove(HOST);
     Ok(v1::CredentialBridgeUpgrade {
-        request_id: Uuid::new_v4().to_string(),
+        request_id: crate::request_id_of(request).to_string(),
         method: Method::GET.as_str().to_owned(),
         path: classified.path.to_owned(),
         query: classified.query.unwrap_or_default().to_owned(),

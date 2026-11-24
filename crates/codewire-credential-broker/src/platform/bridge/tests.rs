@@ -622,6 +622,48 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
     fixture.finish().await;
 }
 
+/// A request's timing line carries the id its frame carried, which is the id
+/// a front door names to the client in `codewire-request-id` (#6181).
+#[tokio::test]
+async fn a_requests_timing_line_carries_its_frames_id() {
+    let (log, _guard) = crate::timing::tests::TimingLog::install();
+    let fixture = Fixture::new().await;
+    let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let mut output = response.unwrap().into_inner();
+    let id = Uuid::new_v4().to_string();
+    input
+        .send(v1::CredentialBridgeGuestMessage {
+            payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
+                    request_id: id.clone(),
+                    method: "OPTIONS".into(),
+                    path: "/responses".into(),
+                    ..Default::default()
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let frame = output.message().await.unwrap().unwrap();
+    assert!(matches!(
+        frame.payload,
+        Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure))
+            if failure.request_id == id
+    ));
+    drop((input, output));
+    fixture.slots_released().await;
+    fixture.finish().await;
+    let ids = log
+        .lines()
+        .iter()
+        .filter(|line| line["fields"]["event"] == "proxied_request")
+        .map(|line| line["fields"]["request_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [serde_json::Value::from(id)]);
+}
+
 #[tokio::test]
 async fn rpc_disconnect_and_input_half_close_release_idle_epochs() {
     let fixture = Fixture::new().await;

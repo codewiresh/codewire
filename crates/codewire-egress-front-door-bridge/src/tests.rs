@@ -1439,3 +1439,123 @@ fn the_route_table_serves_exactly_the_shared_selection() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The request id (#6181)
+
+/// The response's `codewire-request-id`, which must be one canonical UUID.
+fn named_id<B>(response: &Response<B>) -> Uuid {
+    let values = response
+        .headers()
+        .get_all(REQUEST_ID_HEADER)
+        .iter()
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 1, "one request id");
+    let text = values[0].to_str().unwrap();
+    let id = Uuid::parse_str(text).unwrap();
+    assert_eq!(id.to_string(), text, "a canonical UUID");
+    assert_eq!(id.get_version_num(), 4, "a random UUID");
+    id
+}
+
+/// Each answer names its own random id, the one its bridge frame carried,
+/// so the credential service's line for the request carries it too. The
+/// provider's own value for the header never reaches the client.
+#[tokio::test]
+async fn an_intercepted_answer_names_the_id_its_frame_carried() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let request = Request::get("/v1/models")
+            .header(HOST, "api.anthropic.com")
+            .body(Full::default())
+            .unwrap();
+        let task = tokio::spawn({
+            let backend = backend.clone();
+            async move { backend.forward("api.anthropic.com", request).await }
+        });
+        let seen = host.request().await;
+        host.send(HostPayload::ResponseStart(
+            v1::CredentialBridgeResponseStart {
+                request_id: seen.request_id.clone(),
+                status_code: 401,
+                headers: vec![v1::CredentialHttpHeader {
+                    name: "codewire-request-id".to_owned(),
+                    value: b"the-providers".to_vec(),
+                }],
+            },
+        ))
+        .await;
+        host.end(&seen.request_id).await;
+        let response = bounded(task).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let id = named_id(&response);
+        assert_eq!(id.to_string(), seen.request_id);
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1], "each request has its own id");
+}
+
+/// A client's own `codewire-request-id` goes neither to the frame, and so
+/// the provider, nor back in the answer.
+#[tokio::test]
+async fn a_clients_request_id_is_neither_forwarded_nor_echoed() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    let chosen = Uuid::new_v4().to_string();
+    let request = Request::get("/v1/models")
+        .header(HOST, "api.anthropic.com")
+        .header("codewire-request-id", chosen.as_str())
+        .header("anthropic-version", "2023-06-01")
+        .body(Full::default())
+        .unwrap();
+    let task = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.forward("api.anthropic.com", request).await }
+    });
+    let seen = host.request().await;
+    assert_eq!(header_names(&seen), ["anthropic-version"]);
+    assert_ne!(seen.request_id, chosen);
+    host.answer(&seen.request_id).await;
+    let response = bounded(task).await.unwrap();
+    assert_eq!(named_id(&response).to_string(), seen.request_id);
+}
+
+/// The front door's own refusals name an id too, a fresh one each, whether
+/// the request was refused before its route or on it.
+#[tokio::test]
+async fn a_front_door_refusal_names_a_fresh_id() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    let before = backend.refuse("api.anthropic.com", FrontDoorRefusal::Forbidden);
+    let again = backend.refuse("api.anthropic.com", FrontDoorRefusal::Forbidden);
+    assert_ne!(named_id(&before), named_id(&again));
+    let request = Request::get("/nowhere")
+        .header(HOST, "platform.claude.com")
+        .body(Full::default())
+        .unwrap();
+    let response = bounded(backend.forward("platform.claude.com", request)).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    named_id(&response);
+    host.assert_untouched();
+}
+
+/// The loopback ingress, which no front door stands in front of, answers
+/// without one.
+#[tokio::test]
+async fn a_loopback_answer_names_no_id() {
+    let mut host = Host::start().await;
+    let task = tokio::spawn({
+        let bridge = host.bridge.clone();
+        let request = Request::get("/_codewire/anthropic/v1/models")
+            .header(HOST, LOOPBACK)
+            .body(Body::empty())
+            .unwrap();
+        async move { bridge.respond(request).await }
+    });
+    let seen = host.request().await;
+    host.answer(&seen.request_id).await;
+    let response = bounded(task).await.unwrap();
+    assert!(response.headers().get(REQUEST_ID_HEADER).is_none());
+}

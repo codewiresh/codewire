@@ -61,6 +61,9 @@ pub use projection::RelayedEnvironmentProjection;
 mod refusal;
 pub use refusal::refusal_response;
 mod request_body;
+mod request_id;
+use request_id::request_id_of;
+pub use request_id::{FrontDoorRequestId, REQUEST_ID_HEADER};
 mod upgrade;
 pub use upgrade::{MAX_OPEN_SOCKETS, UpgradeAnswer, UpgradedSocket};
 pub mod upgraded_stream;
@@ -853,7 +856,7 @@ impl CredentialBridge {
         let mut frame = v1::CredentialBridgeRequest {
             capability_slot: classified.capability_slot.to_owned(),
             route: classified.route.to_owned(),
-            request_id: uuid::Uuid::new_v4().to_string(),
+            request_id: request_id_of(&request).to_string(),
             method: request.method().as_str().to_owned(),
             path: classified.path.to_owned(),
             query: classified.query.unwrap_or_default().to_owned(),

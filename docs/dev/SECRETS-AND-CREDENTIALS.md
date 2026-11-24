@@ -2720,6 +2720,20 @@ which its first bind will store, decides its CA.
   its managed credential unselected. An own key on a host a selected
   credential names stays refused; serving both is a later decision with
   its own issue.
+- **The request id** (#6181). Every answer the front door gives an
+  intercepted request, its own refusals included, names the request's id
+  in `codewire-request-id`. The id is a v4 UUID from the OS CSPRNG, minted
+  per request: never a counter, and derived from no environment, Pod,
+  binding, credential or epoch id. The bridge frame for the request carries
+  the same id, and so does the credential service's `proxied_request`
+  timing line, so a check can pick out its own request's line. A refusal
+  given before the request has a frame names a fresh id. A client's own
+  `codewire-request-id` is dropped with Host before the frame is built, so
+  it reaches neither the credential service nor the provider. The answer's
+  header is always the front door's, never the client's or the provider's.
+  Knowing an id grants nothing: the agent never speaks the bridge protocol,
+  and no frame, cancel or route takes an id from it. The loopback ingress
+  and local VMs answer without the header.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 

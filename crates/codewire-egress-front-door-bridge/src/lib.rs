@@ -40,8 +40,8 @@ use codewire_access::{
     OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure,
 };
 use codewire_credential_bridge::{
-    CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
-    intercepted_host_route, refusal_response,
+    CredentialBridge, FrontDoorRequestId, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
+    REQUEST_ID_HEADER, UpgradeAnswer, intercepted_host_route, refusal_response,
 };
 use codewire_egress_front_door::{
     Backend, BoxError, FrontDoorRefusal, Incoming, InterceptedDestination, ResponseBody,
@@ -379,30 +379,33 @@ impl CredentialRouteBackend {
 
     /// [`Backend::respond`] for any request body. The body is not read here:
     /// the bridge reads it whole, within its request bound, exactly as it
-    /// does for the loopback ingress.
+    /// does for the loopback ingress. The answer names the request's id
+    /// (#6181), which the bridge's frame carries too.
     async fn forward<B>(&self, host: &str, request: Request<B>) -> Response<ResponseBody>
     where
         B: HttpBody<Data = Bytes> + Send + 'static,
         B::Error: Into<BoxError>,
     {
-        let request = match self.routed(host, request) {
+        let id = FrontDoorRequestId::mint();
+        let mut request = match self.routed(host, request) {
             Ok(request) => request,
-            Err(refusal) => return refused(refusal, host),
+            Err(refusal) => return id.name_in(refused(refusal, host)),
         };
+        request.extensions_mut().insert(id);
         // The front door sets it from the hand-off, never from the request.
         let destination = request
             .extensions()
             .get::<InterceptedDestination>()
             .map(|destination| destination.0);
-        boxed(
+        id.name_in(boxed(
             self.bridge
                 .respond_intercepted_to(host, destination, request.map(Body::new))
                 .await,
-        )
+        ))
     }
 
-    /// `request` on its credential route, without Host, or the refusal to
-    /// answer with instead. Requests and WebSocket upgrades take the same
+    /// `request` on its credential route, without Host or a client's request
+    /// id, or the refusal to answer with instead. Requests and WebSocket upgrades take the same
     /// route.
     fn routed<B>(&self, host: &str, request: Request<B>) -> Result<Request<B>, Refusal> {
         let uri = self
@@ -417,7 +420,7 @@ impl CredentialRouteBackend {
             })?;
         let (mut parts, body) = request.into_parts();
         parts.uri = uri;
-        parts.headers = without_host(std::mem::take(&mut parts.headers));
+        parts.headers = forwarded_headers(std::mem::take(&mut parts.headers));
         Ok(Request::from_parts(parts, body))
     }
 }
@@ -434,24 +437,29 @@ impl Backend for CredentialRouteBackend {
 
     /// The bridge refuses unless its session's host carries WebSockets.
     async fn upgrade(&self, host: &str, request: Request<()>) -> UpgradeOutcome {
-        let request = self
+        let id = FrontDoorRequestId::mint();
+        let mut request = self
             .routed(host, request)
-            .map_err(|refusal| refused(refusal, host))?;
+            .map_err(|refusal| id.name_in(refused(refusal, host)))?;
+        request.extensions_mut().insert(id);
         match self.bridge.upgrade_intercepted(host, request).await {
-            UpgradeAnswer::Switched { response, socket } => Ok((response, Box::new(socket))),
+            UpgradeAnswer::Switched { response, socket } => {
+                Ok((id.name_in(response), Box::new(socket)))
+            }
             UpgradeAnswer::Refused(refused) => {
                 tracing::debug!(
                     host,
                     outcome = "upgrade_refused",
                     status = refused.status().as_u16()
                 );
-                Err(boxed(refused))
+                Err(id.name_in(boxed(refused)))
             }
         }
     }
 
+    /// A refusal before the request has a frame names a fresh id.
     fn refuse(&self, host: &str, refusal: FrontDoorRefusal) -> Response<ResponseBody> {
-        refused(
+        FrontDoorRequestId::mint().name_in(refused(
             match refusal {
                 FrontDoorRefusal::Malformed => Refusal::RequestNotForwarded(Unforwarded::Malformed),
                 FrontDoorRefusal::Forbidden => Refusal::RequestNotForwarded(Unforwarded::Refused),
@@ -461,7 +469,7 @@ impl Backend for CredentialRouteBackend {
                 FrontDoorRefusal::NotSwitched => Refusal::UpstreamFailed(UpstreamFailure::Failed),
             },
             host,
-        )
+        ))
     }
 }
 
@@ -556,19 +564,25 @@ fn below<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// Every header but Host, in the order received. The rewritten path, or for
-/// GitHub the bound host the front door names, alone selects the route: a
-/// loopback client's Host names the ingress, which the broker drops, but
-/// this one is whatever the environment wrote, and `api.github.com` in it
-/// would select another family. `HeaderMap::remove` would reorder the rest.
-fn without_host(headers: HeaderMap) -> HeaderMap {
+/// Every header but Host and a client's `codewire-request-id`, in the order
+/// received. The rewritten path, or for GitHub the bound host the front door
+/// names, alone selects the route: a loopback client's Host names the
+/// ingress, which the broker drops, but this one is whatever the environment
+/// wrote, and `api.github.com` in it would select another family. The front
+/// door's own id names the request; the client's never reaches the frame,
+/// the provider or the answer (#6181). `HeaderMap::remove` would reorder the
+/// rest.
+fn forwarded_headers(headers: HeaderMap) -> HeaderMap {
     let mut kept = HeaderMap::with_capacity(headers.len());
     let mut current: Option<HeaderName> = None;
     for (name, value) in headers {
         if name.is_some() {
             current = name;
         }
-        if let Some(name) = current.as_ref().filter(|name| **name != HOST) {
+        if let Some(name) = current
+            .as_ref()
+            .filter(|name| **name != HOST && **name != REQUEST_ID_HEADER)
+        {
             kept.append(name.clone(), value);
         }
     }
