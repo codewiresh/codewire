@@ -30,7 +30,7 @@ SIGNED_IN=false
 usage() {
   cat <<'USAGE'
 Usage:
-  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--] COMMAND [ARGS...]
+  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--document-stdin] [--] COMMAND [ARGS...]
 
 Dev only. Runs COMMAND signed in to https://codewire-dev.sh as the synthetic
 personal-walk identity (success+codewire-dev-personal-walk@simulator.amazonses.com),
@@ -38,7 +38,11 @@ whose password is in the OpenBao document apps/codewire/dev/ci-personal-walk
 (provision-dev-personal-walk-user.sh creates and rotates it).
 
   - The document is read once with a short-lived token from the workstation
-    access client, which is revoked before anything else runs.
+    access client, which is revoked before anything else runs. With
+    --document-stdin it is instead OpenBao's KV read response for that path,
+    on stdin, as a CI step that read it with its own role pipes it (#6302):
+    no bao and no access client, the same shape check, and COMMAND gets no
+    stdin.
   - A fresh cw config folder is made under $XDG_RUNTIME_DIR (tmpfs, 0700).
     `cw login` signs in there by device sign-in, and this script approves the
     code with a password session read from a 0600 file that is removed
@@ -172,7 +176,9 @@ finish() {
   local status="$1"
   trap - EXIT HUP INT TERM
   if [[ -n "$PRIVATE" && -d "$PRIVATE" ]]; then
-    openbao_access_cleanup "$PRIVATE/bao" "$OPENBAO_ADDR" 2>/dev/null || status=$((status ? status : 1))
+    if [[ "$DOCUMENT_STDIN" == false ]]; then
+      openbao_access_cleanup "$PRIVATE/bao" "$OPENBAO_ADDR" 2>/dev/null || status=$((status ? status : 1))
+    fi
     end_sign_in || status=$((status ? status : 1))
   fi
   remove_work || { log 'the private folder was not removed'; status=$((status ? status : 1)); }
@@ -181,11 +187,18 @@ finish() {
 
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
+DOCUMENT_STDIN=false
+if [[ "${1:-}" == --document-stdin ]]; then
+  DOCUMENT_STDIN=true
+  shift
+fi
 [[ "${1:-}" != '--' ]] || shift
 [[ "$#" -gt 0 ]] || die 'name the command to run; see --help'
 [[ "$SERVER" == "$DEV_ORIGIN" ]] ||
   die "this identity exists only on Dev; refusing server $SERVER"
-for command in bao cmp curl find grep jq mktemp rm sed shred stat timeout wc; do
+required=(cmp curl find grep head jq mktemp rm sed shred stat timeout wc)
+[[ "$DOCUMENT_STDIN" == true ]] || required+=(bao)
+for command in "${required[@]}"; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 [[ -x "$CW_BIN" ]] || die "Codewire CLI is unavailable: $CW_BIN (set CW_BIN)"
@@ -196,11 +209,13 @@ case "$(stat -f -c %T "$XDG_RUNTIME_DIR")" in
   tmpfs|ramfs) ;;
   *) die 'XDG_RUNTIME_DIR is not on tmpfs; the sign-in must never reach a disk' ;;
 esac
-# shellcheck source=scripts/runtime/dev/openbao-access-token.sh
-source "$ROOT/scripts/runtime/dev/openbao-access-token.sh"
-openbao_access_admit || die 'the workstation access client is not available'
-[[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
-  die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
+if [[ "$DOCUMENT_STDIN" == false ]]; then
+  # shellcheck source=scripts/runtime/dev/openbao-access-token.sh
+  source "$ROOT/scripts/runtime/dev/openbao-access-token.sh"
+  openbao_access_admit || die 'the workstation access client is not available'
+  [[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
+    die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
+fi
 ulimit -c 0 || die 'cannot disable core dumps'
 
 umask 077
@@ -217,19 +232,24 @@ printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/xdg-open"
 chmod 0700 "$WORK/bin/xdg-open"
 DOCUMENT="$PRIVATE/document.json"
 
-# The document, read once; the token is revoked before anything else runs.
-openbao_access_acquire "$PRIVATE/bao" || die 'no OpenBao token from the access client'
-if ! openbao_access_kv_get "$PRIVATE/bao" "$OPENBAO_ADDR" "$OPENBAO_PATH" "$DOCUMENT" \
-    "$PRIVATE/bao.err"; then
-  if grep -Eqi 'permission denied|status code: 403|code 403' "$PRIVATE/bao.err"; then
-    die "the access client token lacks the exact Dev path $OPENBAO_PATH"
-  elif grep -q '^No value found at ' "$PRIVATE/bao.err"; then
-    die "$OPENBAO_PATH does not exist; run provision-dev-personal-walk-user.sh --create-document"
+if [[ "$DOCUMENT_STDIN" == true ]]; then
+  # The document as the CI step read it, on stdin, never more than a page.
+  head -c 4096 >"$DOCUMENT"
+else
+  # The document, read once; the token is revoked before anything else runs.
+  openbao_access_acquire "$PRIVATE/bao" || die 'no OpenBao token from the access client'
+  if ! openbao_access_kv_get "$PRIVATE/bao" "$OPENBAO_ADDR" "$OPENBAO_PATH" "$DOCUMENT" \
+      "$PRIVATE/bao.err"; then
+    if grep -Eqi 'permission denied|status code: 403|code 403' "$PRIVATE/bao.err"; then
+      die "the access client token lacks the exact Dev path $OPENBAO_PATH"
+    elif grep -q '^No value found at ' "$PRIVATE/bao.err"; then
+      die "$OPENBAO_PATH does not exist; run provision-dev-personal-walk-user.sh --create-document"
+    fi
+    die "failed to read $OPENBAO_PATH; output suppressed"
   fi
-  die "failed to read $OPENBAO_PATH; output suppressed"
+  openbao_access_revoke "$PRIVATE/bao" "$OPENBAO_ADDR" ||
+    die 'the OpenBao token was not confirmed revoked; nothing runs'
 fi
-openbao_access_revoke "$PRIVATE/bao" "$OPENBAO_ADDR" ||
-  die 'the OpenBao token was not confirmed revoked; nothing runs'
 [[ "$(stat -c '%a' "$DOCUMENT")" == 600 ]] || die 'the document file is not 0600'
 jq -e --arg email "$WALK_EMAIL" '
   (.data.metadata.version | type == "number" and . > 0) and
@@ -315,7 +335,13 @@ whoami="$("$CW_BIN" --server "$SERVER" whoami --output json 2>/dev/null |
 log "signed in as $WALK_EMAIL in a private cw config folder"
 
 child_status=0
-CODEWIRE_SERVER_URL="$SERVER" CW_BIN="$CW_BIN" EXPECTED_PERSONAL_WALK_USER_EMAIL="$WALK_EMAIL" \
-  "$@" || child_status=$?
+if [[ "$DOCUMENT_STDIN" == true ]]; then
+  # stdin carried the document; the command gets none of it.
+  CODEWIRE_SERVER_URL="$SERVER" CW_BIN="$CW_BIN" EXPECTED_PERSONAL_WALK_USER_EMAIL="$WALK_EMAIL" \
+    "$@" </dev/null || child_status=$?
+else
+  CODEWIRE_SERVER_URL="$SERVER" CW_BIN="$CW_BIN" EXPECTED_PERSONAL_WALK_USER_EMAIL="$WALK_EMAIL" \
+    "$@" || child_status=$?
+fi
 [[ "$child_status" == 0 ]] || log "the command exited $child_status"
 exit "$child_status"

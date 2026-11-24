@@ -247,7 +247,7 @@ run_case() {
     CODEWIRE_API_KEY=cw_owner CODEWIRE_ORG=owner-org CODEWIRE_DEV_SMOKE_API_KEY=cw_smoke \
     CODEWIRE_MESH_AUTH_TOKEN=owner-mesh CW_MESH_DATA_DIR="$CASE/owner-mesh" \
     CW_CONFIG_DIR="$CASE/owner-cw" \
-    bash "$HELPER" "$@" >"$CASE/out" 2>"$CASE/err" || status=$?
+    bash "$HELPER" "$@" <"${STDIN_FILE:-/dev/null}" >"$CASE/out" 2>"$CASE/err" || status=$?
   [[ "$status" == "$expect" ]] ||
     { cat "$CASE/out" "$CASE/err" >&2; fail "$name: exit $status, want $expect"; }
   # The password never reaches output, argv, the child's environment or any
@@ -348,6 +348,29 @@ done
 run_case bao_revoke_refused bao_revoke_refused 1
 expect_events $'bao-read\nbao-revoke'
 expect_err 'not confirmed revoked; nothing runs'
+
+# --document-stdin (#6302): the document a CI step read with its own role
+# arrives on stdin; no bao and no access client run, the same shape check
+# applies, and the sign-in and its end are the same.
+document() { # EMAIL: OpenBao's KV read response for the walk identity
+  jq -n --arg password "$PASSWORD" --arg email "$1" \
+    '{data: {metadata: {version: 2}, data: {password: $password, userEmail: $email}}}'
+}
+document "$EMAIL" >"$TEST_TMP/stdin-document.json"
+STDIN_FILE="$TEST_TMP/stdin-document.json" run_case stdin_success success 0 --document-stdin
+expect_events "${SIGN_IN#$'bao-read\nbao-revoke\n'}"$'\nchild\n'"$CHECKED"
+expect_no_grant
+[[ ! -s "$CASE/state/tokens" ]] || fail 'stdin_success: the access client was asked for a token'
+! grep -q '^bao ' "$CASE/state/argv" || fail 'stdin_success: bao ran'
+expect_err 'PASS cli_sign_in_ended=true logout=confirmed'
+document person@example.test >"$TEST_TMP/stdin-wrong.json"
+STDIN_FILE="$TEST_TMP/stdin-wrong.json" run_case stdin_wrong_email success 1 --document-stdin
+expect_events ''
+expect_err 'has an unexpected shape'
+run_case stdin_empty success 1 --document-stdin
+expect_events ''
+expect_err 'has an unexpected shape'
+rm -f -- "$TEST_TMP/stdin-document.json" "$TEST_TMP/stdin-wrong.json"
 
 # The runtime directory must be the caller's own 0700 tmpfs directory.
 mkdir -m 0700 "$TEST_TMP/disk-runtime"
