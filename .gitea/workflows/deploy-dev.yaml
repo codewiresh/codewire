@@ -654,19 +654,21 @@ jobs:
           echo 'built=true' >>"$GITHUB_OUTPUT"
 
       # The context sits inside this checkout, so the image's provenance names
-      # this commit as every runtime image's does.
+      # this commit as every runtime image's does, under the ignored
+      # .local-runtime/ beside the runtime it is made from: a protected build
+      # refuses any untracked file in its source tree.
       - name: Assemble the image's context
         if: ${{ steps.runtime.outputs.built == 'true' }}
         run: |
           python3 -I scripts/ci/images/pod-runtime-context.py \
             --runtime "$GITHUB_WORKSPACE/.local-runtime/linux/linux-x86_64" \
-            --output "$GITHUB_WORKSPACE/.pod-runtime-context"
+            --output "$GITHUB_WORKSPACE/.local-runtime/pod-runtime-context"
 
       - name: Build and push the pod-runtime image
         id: build
         if: ${{ steps.runtime.outputs.built == 'true' }}
         env:
-          CODEWIRE_POD_RUNTIME_CONTEXT: ${{ github.workspace }}/.pod-runtime-context
+          CODEWIRE_POD_RUNTIME_CONTEXT: ${{ github.workspace }}/.local-runtime/pod-runtime-context
           CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
         run: scripts/ci/images/build-push-runtime-images.sh pod-runtime
 

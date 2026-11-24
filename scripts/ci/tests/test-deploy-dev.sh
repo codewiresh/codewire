@@ -657,6 +657,13 @@ tag_line="$(grep -n 'egress-image-tag.sh tag' <<<"$egress_sign_job" | cut -d: -f
 # also never delivered: its build waits for the publish job, takes the kernels
 # only from the parts cache, and nothing on the delivery path waits for it.
 [[ -n "$pod_build_job" && -n "$pod_sign_job" ]] || fail 'the pod-runtime build or sign job is missing'
+# A protected build refuses any untracked file in its source tree, so the
+# image's context is assembled under the ignored .local-runtime/.
+grep -qF -- '--output "$GITHUB_WORKSPACE/.local-runtime/pod-runtime-context"' <<<"$pod_build_job" &&
+  grep -qF 'CODEWIRE_POD_RUNTIME_CONTEXT: ${{ github.workspace }}/.local-runtime/pod-runtime-context' <<<"$pod_build_job" ||
+  fail 'the pod-runtime context is not assembled under the ignored .local-runtime/'
+git -C "$ROOT" check-ignore -q .local-runtime/pod-runtime-context/Dockerfile ||
+  fail 'the pod-runtime context path is not ignored, so a protected build would refuse it'
 grep -Fxq '    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]' <<<"$pod_build_job" ||
   fail 'the pod-runtime build does not wait for the delivery turn and the publish job'
 grep -Fq '    if: ${{ always() && ' <<<"$pod_build_job" ||
