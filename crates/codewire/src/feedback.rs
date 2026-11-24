@@ -43,7 +43,7 @@ impl FeedbackClient {
         let http = default_http_client(&config)?;
         Ok(Self {
             feedback: FeedbackServiceClient::new(
-                ReqwestConnectTransport(http),
+                ReqwestConnectTransport::new(http, token_provider.clone()),
                 config.connect_config()?,
             ),
             token_provider,

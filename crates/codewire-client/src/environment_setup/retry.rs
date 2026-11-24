@@ -5,9 +5,7 @@
 
 use codewire_proto::codewire::v1::RetryEnvironmentSetupRequest;
 
-use crate::{
-    ClientError, CodewireClient, GeneratedEnvironmentServiceClient, ReqwestConnectTransport,
-};
+use crate::{ClientError, CodewireClient, GeneratedEnvironmentServiceClient};
 
 /// The refusal reason that asks the caller to confirm a retry that clones
 /// the repositories again; its message names the directories it deletes.
@@ -24,21 +22,18 @@ impl CodewireClient {
     ) -> Result<(), ClientError> {
         // Built per call, as `create_options.rs` does: only a retry reads it,
         // and the SDK's `lib.rs` stays as it is.
-        GeneratedEnvironmentServiceClient::new(
-            ReqwestConnectTransport(self.http().clone()),
-            self.config().connect_config()?,
-        )
-        .retry_environment_setup_with_options(
-            RetryEnvironmentSetupRequest {
-                org_id: org_id.to_owned(),
-                environment_id: environment_id.to_owned(),
-                confirm_reclone,
-                ..Default::default()
-            },
-            self.auth_options().await?,
-        )
-        .await
-        .map(drop)
-        .map_err(ClientError::from)
+        GeneratedEnvironmentServiceClient::new(self.transport(), self.config().connect_config()?)
+            .retry_environment_setup_with_options(
+                RetryEnvironmentSetupRequest {
+                    org_id: org_id.to_owned(),
+                    environment_id: environment_id.to_owned(),
+                    confirm_reclone,
+                    ..Default::default()
+                },
+                self.auth_options().await?,
+            )
+            .await
+            .map(drop)
+            .map_err(ClientError::from)
     }
 }

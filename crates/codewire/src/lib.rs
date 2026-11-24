@@ -32,6 +32,7 @@
 mod access_profiles;
 mod auth;
 mod config;
+mod connect_clients;
 mod credentials;
 pub mod cw_runtime;
 pub mod desktop;
@@ -410,100 +411,6 @@ impl CodewireClient {
     ) -> Result<Self, ClientError> {
         let http = default_http_client(&config)?;
         Self::with_http_token_provider(config, token_provider, http)
-    }
-
-    /// Construct with a shared provider and caller-supplied HTTP client for
-    /// tests and custom TLS policy.
-    pub fn with_http_token_provider(
-        config: ClientConfig,
-        token_provider: Arc<dyn TokenProvider>,
-        http: reqwest::Client,
-    ) -> Result<Self, ClientError> {
-        let api_key_config = config.connect_config()?;
-        let environment_config = config.connect_config()?;
-        let session_config = config.environment_session_connect_config()?;
-        let exec_config = config.connect_config()?;
-        let file_config = config.file_transfer_connect_config()?;
-        let organization_config = config.connect_config()?;
-        let preset_config = config.connect_config()?;
-        let port_config = config.connect_config()?;
-        let secret_config = config.connect_config()?;
-        let snapshot_config = config.connect_config()?;
-        let access_profile_config = config.connect_config()?;
-        let network_policy_config = config.connect_config()?;
-        let sandbox_identity_config = config.connect_config()?;
-        let credential_config = config.connect_config()?;
-        let credential_mutation_config = config.connect_config()?;
-        let github_repository_config = config.connect_config()?;
-        let mesh_network_config = config.mesh_connect_config()?;
-        let mesh_node_config = config.mesh_connect_config()?;
-        let mesh_invite_config = config.mesh_connect_config()?;
-        Ok(Self {
-            config,
-            token_provider,
-            http: http.clone(),
-            api_keys: ApiKeyServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                api_key_config,
-            ),
-            environments: EnvironmentServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                environment_config,
-            ),
-            sessions: EnvironmentSessionServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                session_config,
-            ),
-            exec: ExecServiceClient::new(ReqwestConnectTransport(http.clone()), exec_config),
-            files: FileServiceClient::new(ReqwestConnectTransport(http.clone()), file_config),
-            organizations: OrganizationServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                organization_config,
-            ),
-            presets: PresetServiceClient::new(ReqwestConnectTransport(http.clone()), preset_config),
-            ports: PortServiceClient::new(ReqwestConnectTransport(http.clone()), port_config),
-            secrets: SecretServiceClient::new(ReqwestConnectTransport(http.clone()), secret_config),
-            snapshots: SnapshotServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                snapshot_config,
-            ),
-            access_profiles: AccessProfileServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                access_profile_config,
-            ),
-            network_policies: NetworkPolicyServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                network_policy_config,
-            ),
-            sandbox_identity: SandboxIdentityServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                sandbox_identity_config,
-            ),
-            credentials: CredentialServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                credential_config,
-            ),
-            credential_mutations: CredentialMutationServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                credential_mutation_config,
-            ),
-            github_repositories: GithubRepositoryServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                github_repository_config,
-            ),
-            mesh_networks: MeshNetworkServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                mesh_network_config,
-            ),
-            mesh_nodes: MeshNodeServiceClient::new(
-                ReqwestConnectTransport(http.clone()),
-                mesh_node_config,
-            ),
-            mesh_invites: MeshInviteServiceClient::new(
-                ReqwestConnectTransport(http),
-                mesh_invite_config,
-            ),
-        })
     }
 
     pub fn server_url(&self) -> &url::Url {

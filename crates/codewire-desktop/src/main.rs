@@ -83,7 +83,7 @@ impl Default for CodewireSidebarState {
 /// Build the single native Connect client from the desktop's atomic keyring
 /// credential. The desktop never reads browser cookies or legacy REST state.
 pub(crate) fn connected_client() -> Result<Option<CodewireClient>, String> {
-    let store = KeyringCredentialStore::desktop();
+    let store = KeyringCredentialStore::desktop_in(dirs::config_dir().as_deref());
     let Some(credentials) = store
         .load()
         .map_err(|_| "Failed to read Codewire credentials from the system keyring".to_string())?

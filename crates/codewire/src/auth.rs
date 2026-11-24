@@ -60,6 +60,18 @@ impl fmt::Debug for BearerToken {
 #[async_trait]
 pub trait TokenProvider: Send + Sync {
     async fn token(&self) -> Result<BearerToken, ClientError>;
+
+    /// Another bearer to send a unary call with once more, after the
+    /// server's auth layer itself refused `rejected`, or `None`.
+    /// Only a provider that can renew a sign-in has one; an API key or user
+    /// token is sent as it is, and its refusal ends the call
+    /// (docs/dev/AUTH-POLICY.md, "Native sign-in lifetimes").
+    async fn after_refusal(
+        &self,
+        _rejected: &BearerToken,
+    ) -> Result<Option<BearerToken>, ClientError> {
+        Ok(None)
+    }
 }
 
 /// A non-refreshing provider for an already-resolved token or `cw_` API key.

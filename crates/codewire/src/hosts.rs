@@ -79,7 +79,10 @@ impl HostClient {
     ) -> Result<Self, ClientError> {
         let http = default_http_client(&config)?;
         Ok(Self {
-            hosts: HostServiceClient::new(ReqwestConnectTransport(http), config.connect_config()?),
+            hosts: HostServiceClient::new(
+                ReqwestConnectTransport::new(http, Some(Arc::clone(&token_provider))),
+                config.connect_config()?,
+            ),
             token_provider,
         })
     }
@@ -213,7 +216,7 @@ impl HostAgentClient {
         let http = default_http_client(&config)?;
         Ok(Self {
             agent: HostAgentServiceClient::new(
-                ReqwestConnectTransport(http),
+                ReqwestConnectTransport::new(http, None),
                 config.environment_session_connect_config()?,
             ),
         })

@@ -129,10 +129,7 @@ impl CodewireClient {
     }
 
     fn from_sdk(sdk: codewire::CodewireClient) -> Result<Self, ClientError> {
-        let billing = BillingServiceClient::new(
-            ReqwestConnectTransport(sdk.http().clone()),
-            sdk.config().connect_config()?,
-        );
+        let billing = BillingServiceClient::new(sdk.transport(), sdk.config().connect_config()?);
         Ok(Self { sdk, billing })
     }
 

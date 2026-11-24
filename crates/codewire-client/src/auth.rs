@@ -23,6 +23,13 @@ use url::Url;
 
 use crate::{BearerToken, ClientConfig, ClientError, TokenProvider};
 
+mod refreshing;
+
+pub use refreshing::RefreshingTokenProvider;
+
+/// How long before its access token expires a client renews it.
+const REFRESH_AHEAD: Duration = Duration::from_secs(10 * 60);
+
 /// The standard OAuth client registration used by the public Codewire CLI.
 pub const CODEWIRE_CLI_OAUTH_CLIENT_ID: &str = "codewire-cli";
 /// The exact scopes granted to the public Codewire CLI device flow.
@@ -126,6 +133,7 @@ impl DesktopOAuthCancellation {
 pub struct KeyringCredentialStore {
     service: String,
     account: String,
+    refresh_lock: Option<PathBuf>,
 }
 
 #[cfg(feature = "desktop-keyring")]
@@ -134,11 +142,35 @@ impl KeyringCredentialStore {
         Self {
             service: service.into(),
             account: account.into(),
+            refresh_lock: None,
         }
     }
 
     pub fn desktop() -> Self {
         Self::new("codewire-desktop", "oauth")
+    }
+
+    /// The desktop app's entry, refreshed under
+    /// `codewire/desktop-credentials.lock` in `config_dir`: every terminal and
+    /// sidebar builds its own provider, and two refreshes at once would sign
+    /// the user out. Without a configuration directory there is no lock.
+    pub fn desktop_in(config_dir: Option<&Path>) -> Self {
+        let store = Self::desktop();
+        match config_dir {
+            Some(root) => {
+                store.with_refresh_lock(root.join("codewire").join("desktop-credentials.lock"))
+            }
+            None => store,
+        }
+    }
+
+    /// The same entry, refreshed under a lock file at `path`, so every
+    /// provider that uses it, in any process, refreshes one at a time. Two
+    /// refreshes of one refresh token are a reuse, and a reuse signs the user
+    /// out (docs/dev/AUTH-POLICY.md, "One refresh at a time").
+    pub fn with_refresh_lock(mut self, path: impl Into<PathBuf>) -> Self {
+        self.refresh_lock = Some(path.into());
+        self
     }
 
     fn entry(&self) -> Result<keyring::Entry, ClientError> {
@@ -169,6 +201,10 @@ impl CredentialStore for KeyringCredentialStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(credential_error("delete OAuth keyring credentials")),
         }
+    }
+
+    fn refresh_lock_path(&self) -> Option<PathBuf> {
+        self.refresh_lock.clone()
     }
 }
 
@@ -359,8 +395,11 @@ impl OAuthCredentials {
         &self.refresh_token
     }
 
+    /// Whether the access token has more than [`REFRESH_AHEAD`] left: a
+    /// client renews it before then (docs/dev/AUTH-POLICY.md, "Native
+    /// sign-in lifetimes").
     fn is_fresh(&self) -> bool {
-        self.expires_at_unix > now_unix().saturating_add(60)
+        self.expires_at_unix > now_unix().saturating_add(REFRESH_AHEAD.as_secs())
     }
 }
 
@@ -951,122 +990,6 @@ impl OAuthClient {
 
     fn json_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.timeout(self.json_timeout)
-    }
-}
-
-/// A refresh-on-demand provider backed by an atomic credential store. The
-/// mutex coalesces concurrent RPC refreshes so a rotated refresh token is not
-/// replayed by another local request.
-pub struct RefreshingTokenProvider<S = FileCredentialStore> {
-    client: OAuthClient,
-    store: S,
-    credentials: Mutex<OAuthCredentials>,
-    lock_wait: Duration,
-}
-
-/// How long a refresh waits for another process's refresh to finish before
-/// going ahead without the lock: a stuck or suspended process must not stop
-/// every other one from refreshing.
-const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(30);
-const REFRESH_LOCK_POLL: Duration = Duration::from_millis(100);
-
-impl<S: CredentialStore> RefreshingTokenProvider<S> {
-    pub fn from_store(client: OAuthClient, store: S) -> Result<Self, ClientError> {
-        let credentials = store.load()?.ok_or_else(|| {
-            ClientError::new(ErrorCode::Unauthenticated, "OAuth credentials unavailable")
-        })?;
-        if credentials.issuer != client.discovery.issuer {
-            return Err(ClientError::new(
-                ErrorCode::Unauthenticated,
-                "OAuth credentials are not for this Codewire server",
-            ));
-        }
-        Ok(Self {
-            client,
-            store,
-            credentials: Mutex::new(credentials),
-            lock_wait: REFRESH_LOCK_WAIT,
-        })
-    }
-
-    pub fn new(
-        client: OAuthClient,
-        store: S,
-        credentials: OAuthCredentials,
-    ) -> Result<Self, ClientError> {
-        if credentials.issuer != client.discovery.issuer {
-            return Err(ClientError::new(
-                ErrorCode::Unauthenticated,
-                "OAuth credentials are not for this Codewire server",
-            ));
-        }
-        Ok(Self {
-            client,
-            store,
-            credentials: Mutex::new(credentials),
-            lock_wait: REFRESH_LOCK_WAIT,
-        })
-    }
-}
-
-#[async_trait]
-impl<S: CredentialStore> TokenProvider for RefreshingTokenProvider<S> {
-    async fn token(&self) -> Result<BearerToken, ClientError> {
-        let mut credentials = self.credentials.lock().await;
-        if credentials.is_fresh() {
-            return credentials.bearer_token();
-        }
-        // A refresh token is single-use, and presenting a rotated one is
-        // refused. Another process sharing the store may have refreshed since
-        // this one loaded it: under the store's lock, adopt the pair it saved
-        // and refresh only if that is stale too.
-        let _lock = match self.store.refresh_lock_path() {
-            Some(path) => lock_refresh(&path, self.lock_wait).await?,
-            None => None,
-        };
-        if let Some(stored) = self.store.load()?
-            && stored.issuer == credentials.issuer
-            && stored.refresh_token() != credentials.refresh_token()
-        {
-            *credentials = stored;
-            if credentials.is_fresh() {
-                return credentials.bearer_token();
-            }
-        }
-        let refreshed = self
-            .client
-            .refresh(&credentials)
-            .await
-            .map_err(AuthClientError::into_client_error)?;
-        self.store.save(&refreshed)?;
-        *credentials = refreshed;
-        credentials.bearer_token()
-    }
-}
-
-/// An exclusive lock on `path`, held until the returned file is dropped, or
-/// `None` once `wait` passes with another process still holding it: the
-/// caller then refreshes without it, as before this lock existed.
-async fn lock_refresh(path: &Path, wait: Duration) -> Result<Option<fs::File>, ClientError> {
-    let file = credential_lock_file(path)?;
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
-            Err(fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(REFRESH_LOCK_POLL).await;
-            }
-            Err(fs::TryLockError::WouldBlock) => {
-                tracing::warn!(
-                    wait_secs = wait.as_secs(),
-                    "another process kept the OAuth credentials locked; refreshing without the lock"
-                );
-                return Ok(None);
-            }
-            Err(fs::TryLockError::Error(_)) => {
-                return Err(credential_error("lock OAuth credentials for refresh"));
-            }
-        }
     }
 }
 
@@ -1952,6 +1875,108 @@ mod tests {
             .expect(1)
             .mount(server)
             .await;
+    }
+
+    /// The desktop's refresh lock is a file only it may read or write, and
+    /// it holds no token: only its lock is used. A keyring entry given one
+    /// reports it as its lock.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refresh_lock_file_is_private_and_empty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("configuration directory");
+        let path = directory
+            .path()
+            .join("codewire")
+            .join("desktop-credentials.lock");
+        #[cfg(feature = "desktop-keyring")]
+        {
+            assert_eq!(
+                KeyringCredentialStore::desktop_in(Some(directory.path())).refresh_lock_path(),
+                Some(path.clone())
+            );
+            assert_eq!(
+                KeyringCredentialStore::desktop_in(None).refresh_lock_path(),
+                None
+            );
+        }
+        let lock = refreshing::lock_refresh(&path, Duration::from_millis(10))
+            .await
+            .expect("lock")
+            .expect("held");
+        let metadata = std::fs::metadata(&path).expect("lock file");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.len(), 0);
+        let parent = std::fs::metadata(path.parent().unwrap()).expect("directory");
+        assert_eq!(parent.permissions().mode() & 0o777, 0o700);
+        drop(lock);
+    }
+
+    /// A provider over a stored pair whose access token has `left` seconds.
+    fn provider_with(
+        server: &MockServer,
+        directory: &Path,
+        left: u64,
+    ) -> RefreshingTokenProvider<FileCredentialStore> {
+        let store = FileCredentialStore::new(directory);
+        let credentials = OAuthCredentials::new(
+            server.uri(),
+            CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "old-access",
+            "old-refresh",
+            now_unix() + left,
+            CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .expect("credentials");
+        store.save(&credentials).expect("save credentials");
+        RefreshingTokenProvider::from_store(
+            OAuthClient::for_server_url(server.uri()).expect("oauth client"),
+            store,
+        )
+        .expect("refresh provider")
+    }
+
+    /// A client renews its access token in the last 10 minutes, not only
+    /// in the last one (docs/dev/AUTH-POLICY.md, "Native sign-in lifetimes").
+    #[tokio::test]
+    async fn an_access_token_is_renewed_inside_its_last_ten_minutes() {
+        let server = MockServer::start().await;
+        rotate_once(&server).await;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let early = provider_with(&server, &directory.path().join("early"), 11 * 60);
+        assert_eq!(
+            early.token().await.expect("token").expose_secret(),
+            "old-access"
+        );
+        let late = provider_with(&server, &directory.path().join("late"), 9 * 60);
+        assert_eq!(
+            late.token().await.expect("token").expose_secret(),
+            "new-access"
+        );
+    }
+
+    /// A refused access token is renewed once; asked again about the same
+    /// refusal, or by a provider that shares the store, the renewed pair is
+    /// used and the rotated refresh token is never presented again.
+    #[tokio::test]
+    async fn a_refused_access_token_is_renewed_once() {
+        let server = MockServer::start().await;
+        rotate_once(&server).await;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let provider = provider_with(&server, directory.path(), 3600);
+        let other = RefreshingTokenProvider::from_store(
+            OAuthClient::for_server_url(server.uri()).expect("oauth client"),
+            FileCredentialStore::new(directory.path()),
+        )
+        .expect("second provider");
+        let refused = provider.token().await.expect("token");
+        assert_eq!(refused.expose_secret(), "old-access");
+        let renewed = provider.after_refusal(&refused).await.expect("renewed");
+        assert_eq!(renewed.expect("a token").expose_secret(), "new-access");
+        let again = provider.after_refusal(&refused).await.expect("again");
+        assert_eq!(again.expect("a token").expose_secret(), "new-access");
+        let adopted = other.after_refusal(&refused).await.expect("adopted");
+        assert_eq!(adopted.expect("a token").expose_secret(), "new-access");
     }
 
     /// Two providers over one store, as two `cw` processes, both holding the

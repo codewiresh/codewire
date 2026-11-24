@@ -959,11 +959,12 @@ token as the way.
 
 These are the numbers set on #4786 for the three native clients,
 `codewire-cli`, `codewire-desktop` and `codewire-ios`; #6145 builds them.
-Until it ships, each client is registered with a 720-hour access token, and
-`cw` and the desktop app refresh only within 60 seconds of expiry. The iOS app
-refreshes only at launch. The auth layer's `BEARER_REFUSED` and its
-repository check have shipped; nothing retries on them yet. The change that
-ships the rest moves this section into [Client use](#client-use).
+Until it ships, each client is registered with a 720-hour access token. `cw`
+and the desktop app refresh as below, in their last 10 minutes, once after the
+auth layer's `BEARER_REFUSED`, and the desktop under its lock file. The iOS
+app still refreshes only at launch. The auth layer's `BEARER_REFUSED` and its
+repository check have shipped. The change that ships the lifetimes moves this
+section into [Client use](#client-use).
 
 **Lifetimes.** The IdP registers each native client on startup, so a release
 changes them for tokens issued after it.
@@ -990,9 +991,10 @@ changes them for tokens issued after it.
   the desktop app's keyring entry through a lock file beside it. A provider
   that finds a newer saved pair adopts it instead of refreshing. Two
   refreshes of one refresh token would be a reuse, and with
-  `IDP_REFRESH_REUSE_REVOKES` on, a reuse signs the user out. Today only
-  `cw`'s file has that lock. The desktop app builds a provider per call,
-  across threads and instances, with nothing shared between them.
+  `IDP_REFRESH_REUSE_REVOKES` on, a reuse signs the user out. The desktop
+  app builds a provider per call, across threads and instances, and its
+  keyring entry's lock file, `codewire/desktop-credentials.lock` in the
+  configuration directory, is what they share.
 - **Once on a refused bearer.** The shared Connect auth layer
   (`ConnectAuthLayer`) marks its own refusal of a bearer it doesn't accept
   (unknown, expired or revoked) with a `google.rpc.ErrorInfo` of domain

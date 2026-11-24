@@ -60,10 +60,7 @@ impl CodewireClient {
             .connect_config()?
             .with_default_max_message_size(RECORD_BYTES + 32 * 1024)
             .with_default_element_memory_limit(RECORD_BYTES + 64 * 1024);
-        Ok(EnvironmentAgentServiceClient::new(
-            ReqwestConnectTransport(self.http.clone()),
-            config,
-        ))
+        Ok(EnvironmentAgentServiceClient::new(self.transport(), config))
     }
 
     pub async fn get_environment_agent_info(

@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use crate::{
     ClientError, CodewireClient, CredentialDelegationOpen, DelegateCredentialsRequest,
-    DelegateCredentialsResponse, ErrorCode, ReqwestConnectTransport, delegate_credentials_request,
+    DelegateCredentialsResponse, ErrorCode, delegate_credentials_request,
     delegate_credentials_response,
 };
 
@@ -108,7 +108,7 @@ impl CodewireClient {
     ) -> Result<AdmittedCredentialDelegation, ClientError> {
         let deadline = Instant::now() + SETUP_TIMEOUT;
         let client = CredentialDelegationServiceClient::new(
-            ReqwestConnectTransport(self.http().clone()),
+            self.transport(),
             self.config().environment_session_connect_config()?,
         );
         let (stream, accepts_keepalive, front_door_epoch) =
@@ -133,7 +133,7 @@ impl CodewireClient {
         let deadline = Instant::now() + SETUP_TIMEOUT;
         tokio::time::timeout_at(deadline, async {
             let client = CredentialDelegationServiceClient::new(
-                ReqwestConnectTransport(self.http().clone()),
+                self.transport(),
                 self.config().environment_session_connect_config()?,
             );
             let options = self

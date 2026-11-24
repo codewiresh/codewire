@@ -213,7 +213,7 @@ impl CodewireClient {
             .with_default_max_message_size(CHUNK_BYTES + 1024)
             .with_default_element_memory_limit(256 * 1024);
         Ok(EnvironmentCwRuntimeServiceClient::new(
-            ReqwestConnectTransport(self.http.clone()),
+            self.transport(),
             config,
         ))
     }

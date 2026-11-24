@@ -5,9 +5,7 @@ use codewire_proto::codewire::v1::{
     SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse,
 };
 
-use crate::{
-    ClientError, CodewireClient, GeneratedEnvironmentServiceClient, ReqwestConnectTransport,
-};
+use crate::{ClientError, CodewireClient, GeneratedEnvironmentServiceClient};
 
 impl CodewireClient {
     /// Saves `startup_script` as the script every start of the environment
@@ -21,21 +19,18 @@ impl CodewireClient {
     ) -> Result<SetEnvironmentStartupScriptResponse, ClientError> {
         // Built per call, as `environment_setup/retry.rs` does, so the SDK's
         // `lib.rs` stays as it is.
-        GeneratedEnvironmentServiceClient::new(
-            ReqwestConnectTransport(self.http().clone()),
-            self.config().connect_config()?,
-        )
-        .set_environment_startup_script_with_options(
-            SetEnvironmentStartupScriptRequest {
-                org_id: org_id.to_owned(),
-                environment_id: environment_id.to_owned(),
-                startup_script: startup_script.to_owned(),
-                ..Default::default()
-            },
-            self.auth_options().await?,
-        )
-        .await
-        .map(|response| response.into_owned())
-        .map_err(ClientError::from)
+        GeneratedEnvironmentServiceClient::new(self.transport(), self.config().connect_config()?)
+            .set_environment_startup_script_with_options(
+                SetEnvironmentStartupScriptRequest {
+                    org_id: org_id.to_owned(),
+                    environment_id: environment_id.to_owned(),
+                    startup_script: startup_script.to_owned(),
+                    ..Default::default()
+                },
+                self.auth_options().await?,
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
     }
 }

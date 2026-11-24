@@ -25,7 +25,7 @@ impl CodewireClient {
         &self,
     ) -> Result<EnvironmentDesktopServiceClient<ReqwestConnectTransport>, ClientError> {
         Ok(EnvironmentDesktopServiceClient::new(
-            ReqwestConnectTransport(self.http.clone()),
+            self.transport(),
             self.config.connect_config()?,
         ))
     }
