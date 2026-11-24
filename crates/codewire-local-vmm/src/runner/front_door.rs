@@ -76,7 +76,7 @@ impl FrontDoorProcess {
         let descriptors = [(inherited.as_raw_fd(), FRONT_DOOR_CONTROL_FD)];
         // SAFETY: getpid has no preconditions.
         let expected_parent = unsafe { libc::getpid() };
-        let mut command = tokio::process::Command::new(executable);
+        let mut command = crate::swept_tokio_command(executable, &[]);
         command
             .arg("__native-front-door")
             .arg("--environment-id")

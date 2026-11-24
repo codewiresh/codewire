@@ -1268,7 +1268,7 @@ mod tests {
             let (stop, spawned) = (stop.clone(), spawned.clone());
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    let _ = std::process::Command::new("true").status();
+                    let _ = crate::test_command("true").status();
                     spawned.fetch_add(1, Ordering::Relaxed);
                 }
             })

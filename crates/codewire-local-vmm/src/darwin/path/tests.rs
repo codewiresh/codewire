@@ -2,7 +2,7 @@ use super::*;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
@@ -233,7 +233,7 @@ fn fifo_open_is_bounded_in_an_owned_child() {
     let fifo = CString::new(root.path().join("fifo").as_os_str().as_bytes()).unwrap();
     // SAFETY: a new synthetic path below the owned private root, with no device number.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut child = crate::test_command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "darwin::path::tests::fifo_child_open",
@@ -411,7 +411,7 @@ fn all_mount_identity_fields_participate_in_admission() {
 
 #[test]
 fn actual_nested_apfs_mount_is_rejected() {
-    let status = Command::new("/usr/bin/python3")
+    let status = crate::test_command("/usr/bin/python3")
         .arg("-c")
         .arg(include_str!("mount_fixture.py"))
         .arg(std::env::current_exe().unwrap())
@@ -538,7 +538,7 @@ fn high_level_root_and_file_acl_admission_rejects_entries() {
     write(&root, "file", b"private", 0o600);
     let file = root.path().join("file");
     assert!(
-        Command::new("/bin/chmod")
+        crate::test_command("/bin/chmod")
             .args(["+a", "everyone allow readattr"])
             .arg(&file)
             .status()
@@ -550,7 +550,7 @@ fn high_level_root_and_file_acl_admission_rejects_entries() {
             .is_err()
     );
     assert!(
-        Command::new("/bin/chmod")
+        crate::test_command("/bin/chmod")
             .args(["+a", "everyone allow readattr"])
             .arg(root.path())
             .status()
@@ -575,7 +575,7 @@ fn stale_temporary_files_with_aliases_modes_or_acls_are_preserved() {
             "hardlink" => fs::hard_link(&temporary, root.path().join("alias")).unwrap(),
             "mode" => fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap(),
             _ => assert!(
-                Command::new("/bin/chmod")
+                crate::test_command("/bin/chmod")
                     .args(["+a", "everyone allow readattr"])
                     .arg(&temporary)
                     .status()

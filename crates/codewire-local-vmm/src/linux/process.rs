@@ -447,10 +447,7 @@ mod tests {
             .unwrap()
             .join("recorded_runner");
         crate::copy_test_executable(&fs::canonicalize("/bin/sleep").unwrap(), &executable);
-        let mut child = crate::test_child(&mut std::process::Command::new(&executable))
-            .arg("60")
-            .spawn()
-            .unwrap();
+        let mut child = crate::test_child(&executable).arg("60").spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while fs::read_link(format!("/proc/{}/exe", child.id()))
             .ok()

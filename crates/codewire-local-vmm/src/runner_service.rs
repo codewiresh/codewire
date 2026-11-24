@@ -1804,12 +1804,10 @@ mod tests {
     #[tokio::test]
     async fn an_idle_runner_shuts_down_when_its_supervisor_is_gone() {
         let (_parent, rpc) = bootstrap_rpc();
-        let mut supervisor = crate::test_child(&mut std::process::Command::new(
-            std::fs::canonicalize("/bin/sleep").unwrap(),
-        ))
-        .arg("60")
-        .spawn()
-        .unwrap();
+        let mut supervisor = crate::test_child(std::fs::canonicalize("/bin/sleep").unwrap())
+            .arg("60")
+            .spawn()
+            .unwrap();
         let pidfd = rustix::process::pidfd_open(
             rustix::process::Pid::from_raw(i32::try_from(supervisor.id()).unwrap()).unwrap(),
             rustix::process::PidfdFlags::empty(),
@@ -2543,8 +2541,7 @@ mod tests {
         let (_parent, _listener, access) = bootstrap_access();
         let environment_id = Uuid::new_v4();
         let cell = GenerationAccessCell::new(environment_id);
-        let mut command = tokio::process::Command::new("/bin/sleep");
-        crate::test_child(command.as_std_mut());
+        let mut command = crate::swept_tokio_command("/bin/sleep", &[]);
         let mut child = command.arg("60").kill_on_drop(true).spawn().unwrap();
         #[cfg(target_os = "linux")]
         let descriptor = {

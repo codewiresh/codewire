@@ -343,10 +343,7 @@ fn test_leaf(
 }
 
 fn verifier(program: &str, args: &[&std::ffi::OsStr]) -> (bool, String) {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .unwrap();
+    let output = crate::test_command(program).args(args).output().unwrap();
     (
         output.status.success(),
         format!(

@@ -3167,7 +3167,7 @@ async fn spawn_egress_broker_process(
     );
     descriptors.extend(handoff.as_ref().map(egress_spawn::BrokerHandoff::inherited));
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
+    let mut command = crate::swept_tokio_command(context.executable, &[]);
     command
         .arg("__native-egress-broker")
         .arg("--environment-id")
@@ -3360,7 +3360,7 @@ async fn spawn_network_worker_process(
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let bootstrap_fd = inherited_bootstrap.as_raw_fd();
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
+    let mut command = crate::swept_tokio_command(context.executable, &[]);
     command
         .arg(if product_worker {
             "__native-network-worker"
@@ -3636,7 +3636,6 @@ fn prepare_isolated_child(
     if unsafe { libc::getppid() } != expected_parent {
         return Err(io::Error::from_raw_os_error(libc::ECHILD));
     }
-    crate::darwin::process::mark_inherited_descriptors_close_on_exec();
     inherit_descriptors(descriptors)
 }
 
@@ -3697,7 +3696,6 @@ fn prepare_isolated_child_pair(
     if unsafe { libc::getppid() } != expected_parent {
         return Err(io::Error::from_raw_os_error(libc::ECHILD));
     }
-    crate::darwin::process::mark_inherited_descriptors_close_on_exec();
     for (source, target) in [(first_source, first_target), (second_source, second_target)] {
         if source != target && unsafe { libc::dup2(source, target) } == -1 {
             return Err(io::Error::last_os_error());
@@ -5222,8 +5220,7 @@ mod tests {
         let executable = std::fs::canonicalize("/usr/bin/sleep").unwrap();
         #[cfg(target_os = "macos")]
         let executable = std::fs::canonicalize("/bin/sleep").unwrap();
-        let mut command = tokio::process::Command::new(&executable);
-        crate::test_child(command.as_std_mut());
+        let mut command = crate::swept_tokio_command(&executable, &[]);
         let child = command
             .arg(duration)
             .env_clear()

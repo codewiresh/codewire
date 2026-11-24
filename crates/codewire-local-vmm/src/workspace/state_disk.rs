@@ -87,8 +87,7 @@ pub(crate) fn ensure_empty_state_disk(
 /// without fs-verity mounts such a disk read-only.
 pub(super) fn format_state_disk(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
-    let mut command = Command::new(mkfs);
-    crate::sweep_before_exec(&mut command);
+    let mut command = crate::swept_command(mkfs, &[]);
     command
         .args(crate::host::EXT4_FORMAT)
         .args([

@@ -51,7 +51,10 @@ fn the_lock_is_exclusive_per_image() {
         Err(ImageDiskError::LockTimeout(_))
     ));
     drop(held);
-    assert!(store.try_lock(&id).unwrap().is_some());
+    // Released, it can be taken again. A child a parallel test is forking
+    // holds a copy of every descriptor until it execs, the lock's too, so
+    // wait for it rather than expect it at once.
+    assert!(store.lock(&id, deadline()).is_ok());
 }
 
 #[cfg(target_os = "linux")]

@@ -1354,7 +1354,7 @@ async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
     #[cfg(target_os = "linux")]
     let executable = fs::canonicalize("/bin/sh").unwrap();
     let mut child = ShutdownTestChild(
-        crate::test_child(&mut Command::new(&executable))
+        crate::test_child(&executable)
             .args([
                 "-c",
                 "read -r retirement_command; test \"$retirement_command\" = retire",
@@ -1412,12 +1412,7 @@ async fn unresponsive_runner_retains_child_and_exact_pidfd_for_fallback() {
         TestRunnerProtocolReply::Version(crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION),
     );
     let executable = fs::canonicalize("/bin/sleep").unwrap();
-    let mut child = ShutdownTestChild(
-        crate::test_child(&mut Command::new(&executable))
-            .arg("60")
-            .spawn()
-            .unwrap(),
-    );
+    let mut child = ShutdownTestChild(crate::test_child(&executable).arg("60").spawn().unwrap());
     let live = child.capture(&executable);
     let mut client = RunnerClient::connect(&socket).await.unwrap();
     assert!(
@@ -1457,10 +1452,7 @@ fn attach_test_runner_process_running(
     executable: &Path,
 ) -> (Uuid, ProcessIdentity) {
     let executable = executable.to_path_buf();
-    let child = crate::test_child(&mut Command::new(&executable))
-        .arg("60")
-        .spawn()
-        .unwrap();
+    let child = crate::test_child(&executable).arg("60").spawn().unwrap();
     // The core owns the Child, and a test drops the core without killing
     // it; the test process ends it at exit instead (#3813).
     crate::reap_at_exit(child.id());

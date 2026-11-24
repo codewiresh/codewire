@@ -47,7 +47,7 @@ pub(super) async fn spawn_mesh_transport_process(
     let inherited_enrollment = duplicate_inherited_descriptor(enrollment.as_raw_fd())
         .map_err(|_| RunnerError::MeshTransportSpawn)?;
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
+    let mut command = crate::swept_tokio_command(context.executable, &[]);
     command
         .arg("__native-mesh-transport")
         .arg("--environment-id")
@@ -165,7 +165,7 @@ pub(super) async fn spawn_mesh_enrollment_process(
     let inherited_transfer = duplicate_inherited_descriptor(transfer.as_raw_fd())
         .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
+    let mut command = crate::swept_tokio_command(context.executable, &[]);
     command
         .arg("__native-mesh-enrollment-broker")
         .arg("--environment-id")

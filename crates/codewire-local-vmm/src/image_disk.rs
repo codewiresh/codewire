@@ -25,7 +25,7 @@ use std::io;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use codewire_vmm_guest_probe::image_disk::BuildId;
@@ -698,8 +698,7 @@ fn format_empty_ext4(disk: &Path) -> Result<(), ImageDiskError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(ImageDiskError::MkfsUnavailable)?;
     #[cfg(target_os = "macos")]
     let config = crate::host::mke2fs_config().ok_or(ImageDiskError::MkfsUnavailable)?;
-    let mut command = Command::new(mkfs);
-    crate::sweep_before_exec(&mut command);
+    let mut command = crate::swept_command(mkfs, &[]);
     command.args(crate::host::EXT4_FORMAT).args([
         OsStr::new("-q"),
         OsStr::new("-F"),

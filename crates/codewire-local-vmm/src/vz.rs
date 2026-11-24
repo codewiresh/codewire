@@ -230,7 +230,10 @@ pub(crate) fn spawn(
 ) -> Result<tokio::process::Child, RunnerError> {
     let lock = lock.file().as_raw_fd();
     let control = control.map(|descriptor| descriptor.as_raw_fd());
-    let mut command = tokio::process::Command::new(executable);
+    // The lock and the control descriptor are the only descriptors beyond
+    // stdio the helper inherits.
+    let inherited: Vec<_> = std::iter::once(lock).chain(control).collect();
+    let mut command = crate::swept_tokio_command(executable, &inherited);
     command
         .arg("vm")
         .arg("--config")
@@ -240,17 +243,9 @@ pub(crate) fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: scalar fcntl and umask between fork and exec. Clearing
-    // close-on-exec here affects only the child's copies of the lock and the
-    // control descriptor, the only descriptors beyond stdio it inherits.
+    // SAFETY: a scalar umask between fork and exec.
     unsafe {
         command.pre_exec(move || {
-            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
-            for inherited in std::iter::once(lock).chain(control) {
-                if libc::fcntl(inherited, libc::F_SETFD, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
             libc::umask(0o077);
             Ok(())
         });
@@ -270,7 +265,7 @@ pub(crate) async fn probe_protocol(executable: &Path) -> Option<u32> {
 /// [`probe_protocol`] with the time the helper has to answer.
 async fn probe_protocol_within(executable: &Path, timeout: std::time::Duration) -> Option<u32> {
     use tokio::io::AsyncReadExt as _;
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = crate::swept_tokio_command(executable, &[]);
     command
         .arg("protocol")
         .env_clear()
@@ -279,7 +274,6 @@ async fn probe_protocol_within(executable: &Path, timeout: std::time::Duration) 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    crate::sweep_before_exec(command.as_std_mut());
     let mut child = command.spawn().ok()?;
     let probe = async {
         let mut output = Vec::new();

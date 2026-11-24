@@ -682,7 +682,7 @@ mod client_tests {
         assert_ne!(alias, socket);
         assert!(owner_only_connector(&alias).is_err());
         assert!(
-            std::process::Command::new("/bin/chmod")
+            crate::test_command("/bin/chmod")
                 .args(["+a", "everyone allow readattr"])
                 .arg(parent.path())
                 .status()
@@ -692,7 +692,7 @@ mod client_tests {
         assert!(owner_only_connector(&socket).is_err());
         assert!(socket.exists());
         assert!(
-            std::process::Command::new("/bin/chmod")
+            crate::test_command("/bin/chmod")
                 .arg("-N")
                 .arg(parent.path())
                 .status()

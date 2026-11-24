@@ -11,7 +11,7 @@ use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use codewire_cw_release::sha256::Sha256;
 use rustix::fs::{Dir, Mode, OFlags, readlinkat};
@@ -932,8 +932,7 @@ fn git_output(
         .checked_add(1)
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
     let git = host_git()?;
-    let mut command = Command::new(&git.program);
-    crate::sweep_before_exec(&mut command);
+    let mut command = crate::swept_command(&git.program, &[]);
     command
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
@@ -1914,7 +1913,7 @@ fn import_git_bundle(
     template: &Path,
 ) -> Result<(), WorkspaceError> {
     let git = host_git()?;
-    let initialized = crate::sweep_before_exec(&mut Command::new(&git.program))
+    let initialized = crate::swept_command(&git.program, &[])
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1946,7 +1945,7 @@ fn import_git_bundle(
         return Err(WorkspaceError::GitCloneFailed);
     }
 
-    let fetched = crate::sweep_before_exec(&mut Command::new(&git.program))
+    let fetched = crate::swept_command(&git.program, &[])
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1994,7 +1993,7 @@ fn git_clone_output(
     template: &Path,
 ) -> Result<Output, WorkspaceError> {
     let git = host_git()?;
-    crate::sweep_before_exec(&mut Command::new(&git.program))
+    crate::swept_command(&git.program, &[])
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -2231,8 +2230,7 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
-    let mut command = Command::new(mkfs);
-    crate::sweep_before_exec(&mut command);
+    let mut command = crate::swept_command(mkfs, &[]);
     command
         .args(crate::host::EXT4_FORMAT)
         .args(["-q", "-F", "-m", "0"])
@@ -2619,7 +2617,7 @@ mod tests {
     }
 
     fn git(source: &Path, arguments: &[&str]) {
-        let status = Command::new(GIT)
+        let status = crate::swept_command(GIT, &[])
             .args(GIT_FOREGROUND_MAINTENANCE)
             .args(arguments)
             .current_dir(source)
@@ -3090,7 +3088,7 @@ mod tests {
         );
         let staging = tempfile::tempdir().unwrap();
         let bundle = staging.path().join("parent.bundle");
-        let status = Command::new(GIT)
+        let status = crate::swept_command(GIT, &[])
             .args(["bundle", "create"])
             .arg(&bundle)
             .arg("refs/codewire/source")
@@ -3177,7 +3175,7 @@ mod tests {
         );
         let staging = tempfile::tempdir().unwrap();
         let bundle = staging.path().join("root.bundle");
-        let status = Command::new(GIT)
+        let status = crate::swept_command(GIT, &[])
             .args(["bundle", "create"])
             .arg(&bundle)
             .arg("refs/codewire/source")
@@ -3255,7 +3253,7 @@ mod tests {
 
         let staging = tempfile::tempdir().unwrap();
         let bundle = staging.path().join("source.bundle");
-        let status = Command::new(GIT)
+        let status = crate::swept_command(GIT, &[])
             .args(["bundle", "create"])
             .arg(&bundle)
             .arg("refs/codewire/source")

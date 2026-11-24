@@ -12,6 +12,13 @@ files (#4125). The list only shrinks: a file outside it that names one of the
 lints fails, and so does a listed file that no longer does. `unwrap_used` is
 also allowed in integration tests, examples and benches, where clippy's
 `allow-unwrap-in-tests` does not reach.
+
+A crate may carry its own clippy.toml (codewire-local-vmm's disallows every
+spawn but its swept constructors, #4806). Clippy then reads that file instead
+of the workspace's, without merging the two, so the crate's file must repeat
+every workspace setting with the same value. And no call site may opt out of
+that crate's spawn lint: `clippy::disallowed_methods` is named only at the
+places DISALLOWED_METHOD_NAMES lists (allow, expect or cfg_attr alike).
 """
 
 from __future__ import annotations
@@ -52,6 +59,34 @@ DEBT: dict[str, tuple[str, ...]] = {
 }
 
 
+# Where `clippy::disallowed_methods` may be named, and how often (#4806): the
+# swept constructors, the test helpers and the off-macOS crate-root allow in
+# lib.rs, and the root allow of a Linux-only integration test.
+DISALLOWED_METHOD_NAMES: dict[str, int] = {
+    "crates/codewire-local-vmm/src/lib.rs": 6,
+    "crates/codewire-local-vmm/tests/network_worker_process.rs": 1,
+}
+DISALLOWED_METHODS = "clippy::disallowed_methods"
+
+
+def disallowed_method_failures(sources: dict[str, str], listed: dict[str, int]) -> list[str]:
+    """Each Rust source under crates/ naming the spawn lint other than as `listed` says."""
+    failures: list[str] = []
+    for path, text in sorted(sources.items()):
+        count = text.count(DISALLOWED_METHODS)
+        expected = listed.get(path, 0)
+        if count > expected:
+            failures.append(
+                f"{path} names {DISALLOWED_METHODS} {count} times, {expected} allowed: start the child "
+                "through crate::swept_command instead (#4806)"
+            )
+        elif count < expected:
+            failures.append(f"{path} names {DISALLOWED_METHODS} {count} times: lower its count in DISALLOWED_METHOD_NAMES")
+    for path in sorted(set(listed) - set(sources)):
+        failures.append(f"{path} is gone: remove it from DISALLOWED_METHOD_NAMES")
+    return failures
+
+
 def member_failures(manifests: dict[str, dict[str, Any]]) -> list[str]:
     """`manifests` maps each tracked Cargo manifest path to its parsed table."""
     failures: list[str] = []
@@ -83,6 +118,21 @@ def allow_failures(sources: dict[str, str], debt: dict[str, tuple[str, ...]]) ->
         for path in listed:
             if lint not in sources.get(path, ""):
                 failures.append(f"{path} no longer allows {lint}: remove it from DEBT")
+    return failures
+
+
+def clippy_config_failures(configs: dict[str, dict[str, Any]]) -> list[str]:
+    """`configs` maps clippy.toml and each crate's own clippy.toml to its table."""
+    failures: list[str] = []
+    workspace = configs.get("clippy.toml", {})
+    for path, config in sorted(configs.items()):
+        if path == "clippy.toml":
+            continue
+        for key, value in sorted(workspace.items()):
+            if key not in config:
+                failures.append(f"{path} must repeat the workspace's `{key}`: clippy reads it instead of clippy.toml")
+            elif config[key] != value:
+                failures.append(f"{path} sets `{key}` to {config[key]!r}, the workspace to {value!r}")
     return failures
 
 
@@ -122,6 +172,28 @@ def self_test() -> list[str]:
     tests["crates/a/tests/flow.rs"] = f"#![allow({unsafe})]\n"
     expect("undocumented unsafe in an integration test", allow_failures(tests, debt),
            [f"crates/a/tests/flow.rs names {unsafe}: fix the code instead; the allow list only shrinks"])
+
+    workspace = {"clippy.toml": {"allow-unwrap-in-tests": True}}
+    crate = "crates/a/clippy.toml"
+    expect("a crate config repeating the workspace's",
+           clippy_config_failures({**workspace, crate: {"allow-unwrap-in-tests": True, "disallowed-methods": []}}), [])
+    expect("a crate config leaving a setting out", clippy_config_failures({**workspace, crate: {"disallowed-methods": []}}),
+           [f"{crate} must repeat the workspace's `allow-unwrap-in-tests`: clippy reads it instead of clippy.toml"])
+    expect("a crate config changing a setting", clippy_config_failures({**workspace, crate: {"allow-unwrap-in-tests": False}}),
+           [f"{crate} sets `allow-unwrap-in-tests` to False, the workspace to True"])
+
+    root, site = "crates/a/src/lib.rs", "crates/a/src/x.rs"
+    allowed = {root: 1}
+    constructor = f"#[allow({DISALLOWED_METHODS})]\nfn swept() {{}}\n"
+    expect("the listed constructor", disallowed_method_failures({root: constructor}, allowed), [])
+    for name, text in (("an allow", f"#[allow({DISALLOWED_METHODS})]\n"), ("an expect", f"#[expect({DISALLOWED_METHODS})]\n"),
+                       ("a cfg_attr", f"#![cfg_attr(test, allow({DISALLOWED_METHODS}))]\n")):
+        expect(f"{name} at a call site", disallowed_method_failures({root: constructor, site: text}, allowed),
+               [f"{site} names {DISALLOWED_METHODS} 1 times, 0 allowed: start the child through crate::swept_command instead (#4806)"])
+    expect("a second allow in the listed file", disallowed_method_failures({root: constructor * 2}, allowed),
+           [f"{root} names {DISALLOWED_METHODS} 2 times, 1 allowed: start the child through crate::swept_command instead (#4806)"])
+    expect("a listed allow removed", disallowed_method_failures({root: ""}, allowed),
+           [f"{root} names {DISALLOWED_METHODS} 0 times: lower its count in DISALLOWED_METHOD_NAMES"])
     return failures
 
 
@@ -140,7 +212,17 @@ def check_workspace_lints(args: argparse.Namespace) -> int:
     sources = {
         path: read_text(path) for path in files if path.startswith("crates/") and path.endswith(".rs")
     }
-    failures = member_failures(manifests) + allow_failures(sources, DEBT)
+    configs = {
+        path: tomllib.loads(read_text(path))
+        for path in files
+        if path == "clippy.toml" or re.fullmatch(r"crates/[^/]+/clippy\.toml", path)
+    }
+    failures = (
+        member_failures(manifests)
+        + allow_failures(sources, DEBT)
+        + clippy_config_failures(configs)
+        + disallowed_method_failures(sources, DISALLOWED_METHOD_NAMES)
+    )
     if report("workspace lints", failures):
         return 1
     listed = sum(len(paths) for paths in DEBT.values())

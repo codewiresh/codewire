@@ -286,7 +286,7 @@ mod tests {
 
     fn chmod(path: &Path, arguments: &[&str]) {
         assert!(
-            std::process::Command::new("/bin/chmod")
+            crate::test_command("/bin/chmod")
                 .args(arguments)
                 .arg(path)
                 .status()

@@ -709,7 +709,7 @@ mod tests {
     }
 
     fn git(repository: &Path, arguments: &[&str]) {
-        let status = std::process::Command::new("/usr/bin/git")
+        let status = crate::test_command("/usr/bin/git")
             .args([
                 "-c",
                 "maintenance.autoDetach=false",

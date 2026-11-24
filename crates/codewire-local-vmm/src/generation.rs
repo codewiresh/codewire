@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use uuid::Uuid;
 
@@ -155,8 +155,7 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
             return Err(GenerationError::InvalidSeedDirectory(seed.to_owned()));
         }
     }
-    let mut command = Command::new(mkfs);
-    crate::sweep_before_exec(&mut command);
+    let mut command = crate::swept_command(mkfs, &[]);
     command.args(crate::host::EXT4_FORMAT).args([
         OsStr::new("-q"),
         OsStr::new("-F"),

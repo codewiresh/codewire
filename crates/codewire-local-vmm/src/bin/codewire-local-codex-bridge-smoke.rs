@@ -2783,7 +2783,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 "dns-error",
                 "wrong-address",
             ] {
-                let output = std::process::Command::new("node")
+                let output = codewire_local_vmm::swept_command("node", &[])
                     .env_clear()
                     .env(
                         "PATH",
@@ -3355,7 +3355,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             use std::process::Stdio;
             use tokio::io::AsyncReadExt;
 
-            let mut child_command = tokio::process::Command::new(&command[0]);
+            let mut child_command = codewire_local_vmm::swept_tokio_command(&command[0], &[]);
             child_command
                 .args(&command[1..])
                 .env_clear()
@@ -3806,7 +3806,7 @@ handlers.get('data')(Buffer.from('fixture-response'));handlers.get('end')();
 process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,timeout_ms:timeoutMs}));"#;
 
         async fn selected_http_fixture(mode: &str, change: &str) -> Value {
-            let mut command = tokio::process::Command::new("node");
+            let mut command = codewire_local_vmm::swept_tokio_command("node", &[]);
             command
                 .env_clear()
                 .env(
@@ -3971,7 +3971,7 @@ default:throw new Error('invalid fixture case');
 process.stdout.write(JSON.stringify({exit_code:exitCode,stdout,ended,destroyed,timeout_ms:timeoutMs,options}));"#;
 
         async fn general_egress_events(scenario: &str) -> Value {
-            let mut command = tokio::process::Command::new("node");
+            let mut command = codewire_local_vmm::swept_tokio_command("node", &[]);
             command
                 .env_clear()
                 .env(
@@ -4108,7 +4108,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             assert!(script.contains(GENERAL_EGRESS_SCRIPT));
             let output = tokio::time::timeout(
                 Duration::from_secs(5),
-                tokio::process::Command::new("node")
+                codewire_local_vmm::swept_tokio_command("node", &[])
                     .env_clear()
                     .env(
                         "PATH",
@@ -4354,7 +4354,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
         #[tokio::test]
         async fn stack_death_requires_both_original_pidfds_after_authority_is_gone() {
             fn child() -> tokio::process::Child {
-                tokio::process::Command::new("/bin/sh")
+                codewire_local_vmm::swept_tokio_command("/bin/sh", &[])
                     .env_clear()
                     .current_dir("/")
                     .args(["-c", "read -r synthetic"])

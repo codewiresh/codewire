@@ -1635,7 +1635,7 @@ mod tests {
             });
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = crate::test_command(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("mesh_process::tests::system_dns_configuration_starts_no_thread")
             .arg("--nocapture")

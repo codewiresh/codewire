@@ -108,11 +108,7 @@ mod tests {
             let error = std::fs::File::open("/etc/hosts").unwrap_err();
             assert_eq!(error.raw_os_error(), Some(libc::EPERM));
             assert!(std::fs::File::create("/private/tmp/codewire-broker-probe").is_err());
-            assert!(
-                std::process::Command::new("/usr/bin/true")
-                    .status()
-                    .is_err()
-            );
+            assert!(crate::test_command("/usr/bin/true").status().is_err());
             assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
             assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
             return;
@@ -199,15 +195,13 @@ mod tests {
             assert_eq!(error.raw_os_error(), Some(libc::EPERM));
             return;
         }
-        let status = crate::test_child(&mut std::process::Command::new(
-            std::env::current_exe().unwrap(),
-        ))
-        .arg("--exact")
-        .arg("darwin::sandbox::tests::egress_broker_profile_admits_the_front_door_hand_off")
-        .arg("--nocapture")
-        .env(CHILD_MARKER, "1")
-        .status()
-        .unwrap();
+        let status = crate::test_child(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("darwin::sandbox::tests::egress_broker_profile_admits_the_front_door_hand_off")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
         assert!(status.success());
     }
 
@@ -239,11 +233,7 @@ mod tests {
 
             let error = std::fs::File::open("/etc/hosts").unwrap_err();
             assert_eq!(error.raw_os_error(), Some(libc::EPERM));
-            assert!(
-                std::process::Command::new("/usr/bin/true")
-                    .status()
-                    .is_err()
-            );
+            assert!(crate::test_command("/usr/bin/true").status().is_err());
             assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
             assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
             return;
@@ -277,15 +267,11 @@ mod tests {
             );
             let error = std::fs::File::open("/etc/hosts").unwrap_err();
             assert_eq!(error.raw_os_error(), Some(libc::EPERM));
-            assert!(
-                std::process::Command::new("/usr/bin/true")
-                    .status()
-                    .is_err()
-            );
+            assert!(crate::test_command("/usr/bin/true").status().is_err());
             assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = crate::test_command(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("darwin::sandbox::tests::mesh_enrollment_profile_admits_only_its_origin_port")
             .arg("--nocapture")
@@ -312,16 +298,14 @@ mod tests {
     fn run_child_receiving_udp(test: &str, marker: &str) -> std::process::ExitStatus {
         use std::io::BufRead as _;
 
-        let mut child = crate::test_child(&mut std::process::Command::new(
-            std::env::current_exe().unwrap(),
-        ))
-        .arg("--exact")
-        .arg(test)
-        .arg("--nocapture")
-        .env(marker, "1")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+        let mut child = crate::test_child(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test)
+            .arg("--nocapture")
+            .env(marker, "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (port_sender, port_receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -446,16 +430,10 @@ mod tests {
                     .and_then(|socket| socket.send_to(b"x", "127.0.0.1:9"))
                     .is_err()
             );
-            assert!(
-                std::process::Command::new("/usr/bin/true")
-                    .status()
-                    .is_err()
-            );
+            assert!(crate::test_command("/usr/bin/true").status().is_err());
             return;
         }
-        let status = crate::test_child(&mut std::process::Command::new(
-            std::env::current_exe().unwrap(),
-        ))
+        let status = crate::test_child(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("darwin::sandbox::tests::front_door_profile_keeps_received_streams_and_refuses_new_authority")
         .arg("--nocapture")

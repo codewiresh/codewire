@@ -206,7 +206,7 @@ fn a_write_the_filesystem_refuses_mid_copy_fails_the_copy() {
         shared_memory.path().join("source"),
     )
     .unwrap();
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::test_command(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",

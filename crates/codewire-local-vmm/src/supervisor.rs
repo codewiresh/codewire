@@ -49,7 +49,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -4161,7 +4161,7 @@ impl Supervisor {
             .ok_or(SupervisorError::InvalidConfiguration)?;
         runners.remove_private_socket(socket_name)?;
         let expected_parent = unsafe { libc::getpid() };
-        let mut command = Command::new(&self.config.executable);
+        let mut command = crate::swept_command(&self.config.executable, &[]);
         command
             .arg("__native-runner")
             .arg("--environment-id")
@@ -4218,7 +4218,6 @@ impl Supervisor {
                 if libc::getppid() != expected_parent || libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                crate::darwin::process::mark_inherited_descriptors_close_on_exec();
                 libc::umask(0o077);
                 Ok(())
             });
@@ -9615,7 +9614,7 @@ fn spawn_supervisor(
     // Its bounded owner-only log, not /dev/null: the supervisor's exit error or
     // panic and its closed diagnostic events (#2595).
     let (stdout, stderr) = diagnostic_log::child_stdio(root, diagnostic_log::SUPERVISOR_LOG);
-    let mut command = Command::new(&config.executable);
+    let mut command = crate::swept_command(&config.executable, &[]);
     command
         .arg("__native-supervisor")
         .arg("--root")
@@ -9664,7 +9663,6 @@ fn spawn_supervisor(
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
-            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
             libc::umask(0o077);
             Ok(())
         });

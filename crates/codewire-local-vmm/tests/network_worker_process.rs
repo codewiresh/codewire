@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+// Linux only: the close-on-exec sweep `crate::swept_command` installs is a
+// macOS rule, enforced only by the Darwin cross clippy (#4806).
+#![cfg_attr(not(target_os = "macos"), allow(clippy::disallowed_methods))]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
 // Predates this workspace lint; #4125 tracks removing the allow.

@@ -231,7 +231,7 @@ fn the_script_helper_predicts_the_same_directory() {
     let (_holder, _temporary, state_root) = fixture();
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dev/native_socket_dir.py");
-    let output = std::process::Command::new("python3")
+    let output = crate::test_command("python3")
         .arg(&script)
         .arg(&state_root)
         .output()

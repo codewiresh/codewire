@@ -112,7 +112,6 @@ pub(crate) fn admit_retained_version(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::process::Command;
 
     #[test]
     fn a_process_birth_matches_its_identity_without_reading_the_executable() {
@@ -140,7 +139,7 @@ mod tests {
         let executable = directory.path().join("sleeper");
         crate::copy_test_executable(&sleep_binary(), &executable);
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut command = Command::new(&executable);
+        let mut command = crate::test_command(&executable);
         command.arg("30");
         let mut child = command.spawn().unwrap();
         let pid = child.id();

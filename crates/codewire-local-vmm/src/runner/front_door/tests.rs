@@ -43,7 +43,7 @@ impl FakeFrontDoor {
 /// end of its control socket, where passed sockets arrive.
 fn stand_in() -> (FrontDoorProcess, FakeFrontDoor) {
     let (runner_end, front_door_end) = stream_pair().unwrap();
-    let child = tokio::process::Command::new("sleep")
+    let child = crate::test_tokio_command("sleep")
         .arg("30")
         .kill_on_drop(true)
         .spawn()
@@ -765,7 +765,7 @@ async fn a_front_door_that_says_nothing_is_unacknowledged_at_the_limit() {
 
 /// A front-door process that exits by itself, with `status`.
 fn exiting(status: &str) -> FrontDoorProcess {
-    let child = tokio::process::Command::new("sh")
+    let child = crate::test_tokio_command("sh")
         .args(["-c", status])
         .kill_on_drop(true)
         .spawn()

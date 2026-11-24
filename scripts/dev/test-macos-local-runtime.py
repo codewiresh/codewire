@@ -711,7 +711,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("const EXECUTABLE_MODE: u32 = 0o500;", installer)
         self.assertIn("const DATA_MODE: u32 = 0o400;", installer)
         darwin = self.read("crates/codewire-local-vmm/src/darwin/mod.rs")
-        self.assertIn('Command::new("/usr/bin/codesign")', darwin)
+        self.assertIn('swept_command("/usr/bin/codesign"', darwin)
         self.assertRegex(artifact, r"pub vz_runner: ArtifactSpec,(?:\s*///.*)*\s*#\[cfg\(target_os = \"macos\"\)\]"
                                    r"\s*pub e2fsprogs: E2fsprogsSpec,")
         spec = re.search(r"pub struct E2fsprogsSpec \{(.*?)\}", artifact, re.DOTALL).group(1)

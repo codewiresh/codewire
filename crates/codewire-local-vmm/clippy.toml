@@ -1,0 +1,31 @@
+# This crate's clippy configuration. Clippy reads this file instead of the
+# workspace's, so it repeats every workspace setting below its own
+# (the workspace-lints repo check holds them equal, #4806).
+
+# On macOS every child this crate starts must not inherit a descriptor it
+# wasn't meant to: Darwin creates a socket or pipe and only then marks it
+# close-on-exec, so a child started in between inherits it (#4654, cw-security
+# condition 1). Every spawn goes through `crate::swept_command` or
+# `swept_tokio_command`, which install the close-on-exec sweep. The lint is
+# enforced where macOS code compiles: the Darwin cross clippy (#4806).
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "start children with crate::swept_command (#4806)" },
+  { path = "tokio::process::Command::new", reason = "start children with crate::swept_tokio_command (#4806)" },
+  { path = "std::os::unix::process::CommandExt::exec", reason = "exec only a command from crate::swept_command (#4806)" },
+  { path = "libc::fork", reason = "spawn through crate::swept_command (#4806)" },
+  { path = "libc::posix_spawn", reason = "spawn through crate::swept_command (#4806)" },
+  { path = "libc::posix_spawnp", reason = "spawn through crate::swept_command (#4806)" },
+  { path = "libc::execve", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::execv", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::execvp", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::execl", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::execle", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::execlp", reason = "exec through crate::swept_command (#4806)" },
+  { path = "libc::system", reason = "system forks and execs a shell: use crate::swept_command (#4806)" },
+  { path = "libc::popen", reason = "popen forks and execs a shell: use crate::swept_command (#4806)" },
+]
+# The libc crate offers neither vfork nor fexecve on macOS, the only target
+# this list is enforced on, so neither can be called there.
+
+# The workspace's settings, repeated (clippy.toml at the repository root).
+allow-unwrap-in-tests = true

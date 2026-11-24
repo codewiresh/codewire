@@ -41,7 +41,7 @@ fn ext4_image(path: &Path, bytes: u64) {
 /// mke2fs.conf on a Mac, whose built-in default gives a small image 1 KiB
 /// blocks.
 fn mkfs() -> ProcessCommand {
-    let mut command = ProcessCommand::new(tool("mkfs.ext4"));
+    let mut command = crate::test_command(tool("mkfs.ext4"));
     command
         .args(crate::host::EXT4_FORMAT)
         .env_clear()
@@ -56,7 +56,7 @@ fn mkfs() -> ProcessCommand {
 
 /// Run debugfs on `image` unconfined, as a test's own setup.
 fn debugfs_setup(image: &Path, request: &str) -> Vec<u8> {
-    let output = ProcessCommand::new(tool("debugfs"))
+    let output = crate::test_command(tool("debugfs"))
         .args(["-w", "-R", request])
         .arg(image)
         .env_clear()
@@ -1457,7 +1457,7 @@ async fn blocks_past_the_end_of_an_indirect_mapped_file_are_punched() {
     file.set_len(64 * MIB).unwrap();
     drop(file);
     // No extents: every file is mapped by indirect blocks.
-    let status = ProcessCommand::new(tool("mkfs.ext4"))
+    let status = crate::test_command(tool("mkfs.ext4"))
         .args(["-q", "-F", "-b", "4096", "-O", "^extent,^64bit"])
         .arg(&image)
         .env_clear()

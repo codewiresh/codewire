@@ -86,7 +86,7 @@ mod linux {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -3244,7 +3244,7 @@ mod linux {
     fn require_stale_identity_cannot_adopt_replacement(
         old_identity: &ProcessIdentity,
     ) -> SmokeResult<()> {
-        let child = Command::new("/usr/bin/sleep")
+        let child = codewire_local_vmm::swept_command("/usr/bin/sleep", &[])
             .arg("60")
             .env_clear()
             .stdin(Stdio::null())

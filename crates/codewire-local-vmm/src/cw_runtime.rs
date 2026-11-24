@@ -1048,6 +1048,7 @@ fn run_tool(
     arguments: &[std::ffi::OsString],
     operation_deadline: Instant,
 ) -> Result<Vec<u8>, CwRuntimeError> {
+    use std::os::fd::AsRawFd as _;
     check_deadline(operation_deadline)?;
     let output_name = PathBuf::from(format!("tool-{}.log", Uuid::new_v4()));
     let output = temporary
@@ -1058,7 +1059,9 @@ fn run_tool(
         path: Some(output_name.clone()),
         permissions: 0o600,
     };
-    let mut command = Command::new(tool);
+    // The child holds the publication lock until it exits (`publication_custody`).
+    let lock = publication_custody(publication)?;
+    let mut command = crate::swept_command(tool, &[lock.as_raw_fd()]);
     command.args(arguments).env_clear().env("LC_ALL", "C");
     #[cfg(target_os = "macos")]
     command.env(
@@ -1069,9 +1072,10 @@ fn run_tool(
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(output);
-    inherit_publication_custody(&mut command, publication)?;
+    leave_with_parent(&mut command);
     let child = command.spawn()?;
     drop(command);
+    drop(lock);
     let mut child = OwnedToolChild(child);
     let deadline = operation_deadline.min(Instant::now() + TOOL_TIMEOUT);
     let status = loop {
@@ -1111,45 +1115,43 @@ fn run_tool(
     Ok(bytes)
 }
 
-fn inherit_publication_custody(
-    command: &mut Command,
-    publication: &PublicationGuard,
-) -> Result<(), io::Error> {
+/// A descriptor for the publication lock, distinct from and above stdio,
+/// which a tool child inherits (`crate::swept_command`'s keep list) and holds
+/// until it exits.
+///
+/// These trusted tools are leaf children. Retain the same locked open file
+/// description until leaf exit, including the parent-death signal window.
+/// Acquiring the publication lock therefore proves the prior writer exited.
+/// Darwin has no parent-death signal: a leaf whose producer died runs its
+/// bounded format or inspection to completion, still holding the lock.
+fn publication_custody(publication: &PublicationGuard) -> Result<File, io::Error> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
-    use std::os::unix::process::CommandExt as _;
-    let parent = unsafe { libc::getpid() };
     // Stdio is rewritten before pre_exec. Pin a distinct descriptor above it,
     // even if the caller began with stdin/stdout/stderr closed.
     let lock_fd = unsafe { libc::fcntl(publication.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
     if lock_fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    let lock = unsafe { File::from_raw_fd(lock_fd) };
-    // These trusted tools are leaf children. Retain the same locked open file
-    // description until leaf exit, including the parent-death signal window.
-    // Acquiring the publication lock therefore proves the prior writer exited.
-    // Darwin has no parent-death signal: a leaf whose producer died runs its
-    // bounded format or inspection to completion, still holding the lock.
-    // Darwin also marks new descriptors close-on-exec in a second call, so
-    // sweep every inherited descriptor before passing only the lock.
+    Ok(unsafe { File::from_raw_fd(lock_fd) })
+}
+
+/// The tool child ends with this process on Linux, and starts only while
+/// this process is still its parent.
+fn leave_with_parent(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    let parent = unsafe { libc::getpid() };
     unsafe {
         command.pre_exec(move || {
             #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            #[cfg(target_os = "macos")]
-            crate::host::process::mark_inherited_descriptors_close_on_exec();
             if libc::getppid() != parent {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
-            }
-            if libc::fcntl(lock.as_raw_fd(), libc::F_SETFD, 0) < 0 {
-                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    Ok(())
 }
 
 struct OwnedToolChild(std::process::Child);
@@ -1498,7 +1500,7 @@ mod tests {
         );
         disk.revalidate().unwrap();
         // Independently inspect actual ext4 bytes, not the host seed's UID.
-        let read = Command::new(filesystem_tool("debugfs").unwrap())
+        let read = crate::test_command(filesystem_tool("debugfs").unwrap())
             .args(["-R", &format!("cat /{}/cw", old.payload.sha256)])
             .arg(&next.path)
             .env_clear()
@@ -1619,21 +1621,24 @@ mod tests {
 
     #[test]
     fn leaf_tool_holds_publication_lock_until_exit() {
+        use std::os::fd::AsRawFd as _;
         let task = tempfile::tempdir().unwrap();
         fs::set_permissions(task.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let engine = PrivateRoot::create(&task.path().join("engine")).unwrap();
         let store = CwRuntimeStore::create(&engine).unwrap();
         let publication = store.publication_guard().unwrap();
-        let mut command = Command::new(SLEEP);
+        let lock = publication_custody(&publication).unwrap();
+        let mut command = crate::swept_command(SLEEP, &[lock.as_raw_fd()]);
         command
             .arg("30")
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        inherit_publication_custody(&mut command, &publication).unwrap();
+        leave_with_parent(&mut command);
         let mut child = OwnedToolChild(command.spawn().unwrap());
         drop(command);
+        drop(lock);
         drop(publication);
         assert!(matches!(
             store.publication_guard(),

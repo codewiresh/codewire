@@ -730,8 +730,7 @@ fn git_command(working_directory: &Path) -> Command {
     let program = git
         .as_ref()
         .map_or_else(|| PathBuf::from(MISSING_GIT), |git| git.program.clone());
-    let mut command = Command::new(program);
-    crate::sweep_before_exec(command.as_std_mut());
+    let mut command = crate::swept_tokio_command(program, &[]);
     command
         .args([
             "-c",

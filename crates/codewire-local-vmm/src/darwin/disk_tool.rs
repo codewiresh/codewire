@@ -11,9 +11,8 @@
 //! tool and the disk by parameter, so no path is ever spliced into its text.
 //!
 //! The one thing that does run between fork and exec is the close-on-exec
-//! sweep every macOS runner spawn makes
-//! (`darwin::process::mark_inherited_descriptors_close_on_exec`, only
-//! `getdtablesize` and `fcntl`, both async-signal-safe). Darwin creates a
+//! sweep `crate::swept_tokio_command` installs in every child this crate
+//! starts (only `fcntl` calls, async-signal-safe). Darwin creates a
 //! socketpair and only then marks it close-on-exec, so without the sweep a
 //! tool spawned in between would inherit, for one, the runner's end of a VZ
 //! helper's control channel, and the helper would never see that channel
@@ -62,7 +61,7 @@ pub(crate) fn command(
 ) -> io::Result<tokio::process::Command> {
     let tool = std::fs::canonicalize(tool)?;
     let disk = std::fs::canonicalize(disk)?;
-    let mut command = tokio::process::Command::new(SANDBOX_EXEC);
+    let mut command = crate::swept_tokio_command(SANDBOX_EXEC, &[]);
     command
         .arg("-p")
         .arg(PROFILE)
@@ -78,15 +77,6 @@ pub(crate) fn command(
         // sandbox-exec execs the tool in its own process, so a tool its
         // caller gives up on, at a timeout, is killed, as on Linux.
         .kill_on_drop(true);
-    // SAFETY: the sweep makes only getdtablesize and fcntl calls, both
-    // async-signal-safe, between fork and exec. The spawn guard requires
-    // each preparation to run the sweep itself.
-    unsafe {
-        command.pre_exec(|| {
-            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
-            Ok(())
-        });
-    }
     Ok(command)
 }
 
@@ -199,7 +189,7 @@ mod tests {
             .unwrap()
             .set_len(64 << 20)
             .unwrap();
-        let formatted = std::process::Command::new(mkfs)
+        let formatted = crate::test_command(mkfs)
             .args(["-q", "-F", "-t", "ext4"])
             .arg(&disk)
             .env_clear()

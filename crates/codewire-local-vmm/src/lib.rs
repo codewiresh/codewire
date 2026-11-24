@@ -7,6 +7,9 @@
 
 // Predates these workspace lints; #4125 tracks removing the allow.
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
+// Every child starts through `swept_command` (clippy.toml). Only macOS
+// needs the sweep, so only the Darwin cross clippy enforces it (#4806).
+#![cfg_attr(not(target_os = "macos"), allow(clippy::disallowed_methods))]
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod artifact;
@@ -110,31 +113,116 @@ pub(crate) use darwin as host;
 #[cfg(target_os = "linux")]
 pub(crate) use linux as host;
 
-/// Spawn without descriptors that other threads are still creating. Darwin
+/// A child this crate starts, as a `std::process::Command` (#4806). Darwin
 /// creates sockets, pipes and accepted descriptors first and marks them
-/// close-on-exec in a second call, so a child spawned in between keeps one
-/// open; on macOS the child runs the close-on-exec sweep between fork and
-/// exec. Linux creates every descriptor close-on-exec in one call. Every spawn
-/// in this crate runs the sweep, through this or itself (`spawn_guard_tests`,
-/// #4654).
+/// close-on-exec in a second call, so a child forked in between would keep
+/// one open (#4654, cw-security condition 1). On macOS the child therefore
+/// marks every descriptor from 3 up close-on-exec between fork and exec,
+/// then clears the flag on `keep`, the descriptors it is meant to inherit.
+/// Linux creates every descriptor close-on-exec in one call, so there only
+/// `keep` is cleared. The hook runs before any the caller adds.
+///
+/// This and [`swept_tokio_command`] are the crate's only process
+/// constructors: its clippy.toml disallows every other way to fork, spawn
+/// or exec, and the Darwin cross clippy enforces it. A `pre_exec` hook
+/// makes the standard library fork and exec rather than `posix_spawn`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn sweep_before_exec(command: &mut std::process::Command) -> &mut std::process::Command {
-    #[cfg(target_os = "macos")]
-    // SAFETY: the sweep makes only getdtablesize and fcntl calls.
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(command, || {
-            darwin::process::mark_inherited_descriptors_close_on_exec();
-            Ok(())
-        });
+#[allow(clippy::disallowed_methods)]
+#[doc(hidden)]
+pub fn swept_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    keep: &[std::os::fd::RawFd],
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    if let Some(hook) = inheritance_hook(keep) {
+        // SAFETY: the hook makes only async-signal-safe fcntl calls and reads
+        // memory prepared before the fork (`inheritance_hook`).
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, hook);
+        }
     }
     command
 }
 
-/// Spawn a long-lived test child without descriptors that concurrent tests are
-/// still creating, so it cannot keep another test's socket or pipe open.
+/// [`swept_command`] as a `tokio::process::Command`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::disallowed_methods)]
+#[doc(hidden)]
+pub fn swept_tokio_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    keep: &[std::os::fd::RawFd],
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    if let Some(hook) = inheritance_hook(keep) {
+        // SAFETY: as in `swept_command`.
+        unsafe {
+            command.pre_exec(hook);
+        }
+    }
+    command
+}
+
+/// The hook both constructors install: always on macOS, and on Linux only
+/// when something is kept, since a hook makes the child fork and exec
+/// rather than `posix_spawn`. Everything it reads, the descriptor table's
+/// bound and the copy of `keep`, is prepared here in the parent, so between
+/// fork and exec it allocates nothing, takes no lock and opens no directory:
+/// only fcntl calls.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inheritance_hook(
+    keep: &[std::os::fd::RawFd],
+) -> Option<impl FnMut() -> std::io::Result<()> + Send + Sync + 'static> {
+    if cfg!(target_os = "linux") && keep.is_empty() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    let bound = darwin::process::descriptor_bound();
+    let keep = keep.to_vec();
+    Some(move || {
+        #[cfg(target_os = "macos")]
+        darwin::process::mark_inherited_descriptors_close_on_exec_below(bound);
+        for &descriptor in &keep {
+            // SAFETY: a scalar fcntl on a descriptor number.
+            if unsafe { libc::fcntl(descriptor, libc::F_SETFD, 0) } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A long-lived test child, swept like every other child, so it cannot keep
+/// another test's socket or pipe open.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::process::Command {
-    sweep_before_exec(command)
+pub(crate) fn test_child(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    swept_command(program, &[])
+}
+
+/// A short-lived test child, started as `Command::new` starts one: with
+/// `posix_spawn` and no hook, so no fork holds another parallel test's
+/// descriptors (a lock, or an executable it rewrites) while it runs a
+/// sweep. It may inherit a descriptor a parallel test is creating, which a
+/// child that ends within its test can't keep open; one that outlives its
+/// test is a [`test_child`].
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn test_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
+/// [`test_command`] as a `tokio::process::Command`.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn test_tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    tokio::process::Command::new(program)
+}
+
+/// Replace this test process with `command`, which must come from one of
+/// this crate's constructors: the only exec this crate allows.
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn test_exec(command: &mut std::process::Command) -> std::io::Error {
+    std::os::unix::process::CommandExt::exec(command)
 }
 
 /// Copy `source` to `destination`, an executable the test then runs, with a
@@ -145,7 +233,7 @@ pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::proce
 /// file open, and retrying would only wait the race out.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn copy_test_executable(source: &std::path::Path, destination: &std::path::Path) {
-    let status = std::process::Command::new("cp")
+    let status = crate::test_command("cp")
         .arg("--")
         .arg(source)
         .arg(destination)
@@ -217,10 +305,7 @@ fn only_an_owned_running_child_is_reaped_at_exit() {
         clippy::zombie_processes,
         reason = "reap_owned_child reaps it with waitpid, which is what this test checks"
     )]
-    let running = test_child(&mut std::process::Command::new(sleep))
-        .arg("60")
-        .spawn()
-        .unwrap();
+    let running = test_child(sleep).arg("60").spawn().unwrap();
     let pid = libc::pid_t::try_from(running.id()).unwrap();
     assert!(
         reap_owned_child(pid),
@@ -232,10 +317,7 @@ fn only_an_owned_running_child_is_reaped_at_exit() {
         -1,
         "the reaped child still exists"
     );
-    let mut finished = test_child(&mut std::process::Command::new(sleep))
-        .arg("0")
-        .spawn()
-        .unwrap();
+    let mut finished = test_child(sleep).arg("0").spawn().unwrap();
     let finished_pid = libc::pid_t::try_from(finished.id()).unwrap();
     finished.wait().unwrap();
     assert!(
@@ -283,8 +365,6 @@ mod skill_snapshot;
 mod snapshot_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod socket_dir;
-#[cfg(test)]
-mod spawn_guard_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

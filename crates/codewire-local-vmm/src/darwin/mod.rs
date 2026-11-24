@@ -166,7 +166,7 @@ pub(crate) fn vz_helper_problem(helper: &Path) -> Option<VzHelperProblem> {
     if !helper.is_file() {
         return Some(VzHelperProblem::Missing);
     }
-    let output = crate::sweep_before_exec(&mut std::process::Command::new("/usr/bin/codesign"))
+    let output = crate::swept_command("/usr/bin/codesign", &[])
         .args(["-d", "--entitlements", "-", "--xml"])
         .arg(helper)
         .env_clear()

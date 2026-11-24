@@ -763,7 +763,7 @@ mod linux {
         use std::io::Read as _;
         use std::os::unix::net::UnixStream;
         use std::os::unix::process::ExitStatusExt as _;
-        use std::process::{Child, Command, Stdio};
+        use std::process::{Child, Stdio};
 
         use codewire_vmm_guest_probe::cw_runtime::{
             CwImageDescriptor, CwImagePayload, CwRuntimeCatalog, CwRuntimeProvenance,
@@ -1565,7 +1565,7 @@ mod linux {
                 .set_read_timeout(Some(Duration::from_secs(30)))
                 .unwrap();
             let mut child = ChildGuard(
-                Command::new(&executable)
+                codewire_local_vmm::swept_command(&executable, &[])
                     .args([
                         "--exact",
                         "linux::tests::kills_only_the_persisted_process_birth",

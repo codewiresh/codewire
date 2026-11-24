@@ -1,7 +1,6 @@
 use super::*;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -92,7 +91,7 @@ fn current_process_observation_is_stable_and_native() {
 }
 
 fn child_command(phase: &str) -> Command {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::test_command(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
@@ -353,7 +352,7 @@ fn observation_child() {
         "before" => {
             flush_report(&report("before", observe_current().unwrap()));
             require_marker(b'E');
-            let error = child_command("after").exec();
+            let error = crate::test_exec(&mut child_command("after"));
             panic!("fixed test executable exec failed: {error}");
         }
         "after" => {
@@ -432,10 +431,7 @@ fn readable(fd: RawFd) -> bool {
 #[tokio::test]
 async fn owned_child_exit_is_observed_and_a_reaped_child_is_never_signaled() {
     let sleep = std::path::Path::new("/bin/sleep");
-    let mut child = crate::test_child(&mut Command::new(sleep))
-        .arg("30")
-        .spawn()
-        .unwrap();
+    let mut child = crate::test_child(sleep).arg("30").spawn().unwrap();
     assert!(matches!(
         LiveProcess::capture_child(child.id(), std::path::Path::new("/bin/cat")),
         Err(RecoveryError::UnexpectedSpawnedExecutable)
@@ -465,7 +461,7 @@ async fn owned_child_exit_is_observed_and_a_reaped_child_is_never_signaled() {
 fn spawned_child_exits_when_its_parent_exits() {
     // sh starts the fixed child in the background, reports its PID, then
     // becomes `sleep`, which stays the child's parent until killed here.
-    let mut parent = Command::new("/bin/sh")
+    let mut parent = crate::test_command("/bin/sh")
         .args([
             "-c",
             "\"$0\" \"$@\" & echo \"$!\"; exec /bin/sleep 30",
@@ -541,25 +537,18 @@ fn spawned_child_inherits_no_descriptor_beyond_stdio_after_the_sweep() {
         unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFD, 0) },
         0
     );
-    let inherited = |sweep: bool| {
-        let mut command = Command::new("/bin/test");
-        command
+    // `crate::swept_command` sweeps it away unless it is kept (#4806).
+    let inherited = |keep: &[std::os::fd::RawFd]| {
+        crate::swept_command("/bin/test", keep)
             .arg("-e")
-            .arg(format!("/dev/fd/{}", read.as_raw_fd()));
-        if sweep {
-            // SAFETY: the sweep makes only getdtablesize and fcntl calls.
-            unsafe {
-                command.pre_exec(|| {
-                    mark_inherited_descriptors_close_on_exec();
-                    Ok(())
-                });
-            }
-        }
-        command.status().unwrap().success()
+            .arg(format!("/dev/fd/{}", read.as_raw_fd()))
+            .status()
+            .unwrap()
+            .success()
     };
     assert!(
-        inherited(false),
-        "control: an inheritable descriptor reaches the child"
+        inherited(&[read.as_raw_fd()]),
+        "control: a kept descriptor reaches the child"
     );
-    assert!(!inherited(true));
+    assert!(!inherited(&[]), "an inheritable one not kept is swept");
 }

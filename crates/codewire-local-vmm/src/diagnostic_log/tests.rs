@@ -1,6 +1,5 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::process::Command;
 
 use super::*;
 
@@ -139,15 +138,13 @@ fn spawned_child_output_reaches_its_log_instead_of_dev_null() {
     let (_parent, root) = runtime_root();
     let name = runner_log_name(Uuid::new_v4());
     let (stdout, stderr) = child_stdio(&root, &name);
-    let status = crate::test_child(
-        Command::new("/bin/sh")
-            .args(["-c", "echo child-stdout; echo child-stderr >&2"])
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr),
-    )
-    .status()
-    .unwrap();
+    let status = crate::test_child("/bin/sh")
+        .args(["-c", "echo child-stdout; echo child-stderr >&2"])
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
+        .unwrap();
     assert!(status.success());
     let path = root.path().join(LOG_DIRECTORY).join(&name);
     assert_eq!(
