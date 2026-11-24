@@ -18,7 +18,7 @@ Updated 2026-11-23.
 | --- | --- | --- | --- |
 | `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
-| `sandbox-credential-links` | cw-accounts | not yet observed | not yet observed |
+| `sandbox-credential-links` | cw-accounts | partly observed 2026-11-24 (Create's GitHub link, on every delivery) | not yet observed |
 | `sandbox-failure-trace-id` | cw-tracing | observed 2026-11-23 (#5633) | not yet observed |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
@@ -31,7 +31,7 @@ Updated 2026-11-23.
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
-| `sandbox-row-menu` | cw-web | not yet observed | not yet observed |
+| `sandbox-row-menu` | cw-web | partly observed 2026-11-24 (open, held, dialog items and Escape at 1440, on every delivery) | not yet observed |
 | `sandbox-setup-retry` | cw-hosted-runtime | observed 2026-11-23 (the dashboard on every delivery; the CLI on 2026-11-21, all but the 2-minute note) | not yet observed |
 | `sandbox-unplanned-restart` | cw-hosted-runtime | not yet observed | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
@@ -240,7 +240,16 @@ Issue: #4905 (the link opened the credentials list).
     since, lands on the list; that is correct.
   - Create shows no setup link until its choices load, because the
     connection is not known before then.
-- **Observed:** not yet observed on Dev or Production.
+- **Observed:**
+  - Dev, 2026-11-24, partly: promote-dev runs 75308 and 76288 (sources
+    730bb69218 and 5be4124bae). Every delivery's walkthrough
+    (`apps/dashboard/scripts/dev-ux-walkthrough.ts`, stage
+    `sandbox-credential-links`) holds, at 1440, that Create's GitHub link
+    targets the dialog for the walk account's state, that the dialog is open
+    on landing, and that "Return to Create Sandbox" brings the draft back:
+    steps 1 and 2, and whichever of steps 3 and 4 fits that account. Step 5,
+    the "Needs attention" links, is not yet observed.
+  - Production: not yet observed.
 
 ## `sandbox-failure-trace-id`: a failed command prints the id of its trace
 
@@ -1028,11 +1037,25 @@ Issue: #5383. Code: `crates/codewire-dashboard-web/templates/environment-list.ht
   - Delete permanently deletes the Sandbox, and its row leaves the list;
   - fixture specs, at 1440 and 390, in
     `apps/dashboard/e2e/ssr-dashboard.sandbox-inventory.ssr.ts`: "a row menu
-    stays open through the list's refresh until it is closed" and "an open
-    row menu sits above the other rows' menu buttons".
-- **Gotchas:** a check that clicks Delete within a second of opening the
-  menu passes on the broken code; wait past a refresh first.
-- **Observed:** not yet observed.
+    stays open through the list's refresh until it is closed", "a list
+    refresh already on its way when a row menu opens leaves the menu open,
+    and runs once it closes" and "an open row menu sits above the other
+    rows' menu buttons".
+- **Gotchas:**
+  - a check that clicks Delete within a second of opening the menu passes
+    on the broken code; wait past a refresh first.
+  - the live stream's first resync refreshes the list within a second of
+    every page load, so a menu opened at once meets a refresh already on its
+    way. Its answer is dropped while the menu is open (#6235); before that,
+    Dev's walkthrough saw the menu close at once (run 75308).
+- **Observed:**
+  - Dev, 2026-11-24, partly: promote-dev run 76288 (source 5be4124bae).
+    Every delivery's walkthrough (stage `sandbox-row-menu`) holds, at 1440,
+    on its own new Sandbox's row: the menu opens, is still open 6 s later,
+    Secrets and credentials, Resize and Delete each open a dialog with no
+    caret, and Escape closes the menu. Delete carried out, the keyboard
+    path, later rows' buttons and 390 are not yet observed on Dev.
+  - Production: not yet observed.
 
 ## `sandbox-setup-retry`: a failed setup, fixed in a shell and retried
 
