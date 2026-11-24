@@ -975,13 +975,13 @@ async fn the_asking_stops_with_the_pair() {
     let mut pod = harness
         .enforcing(POD, intercepting(Interception::On(spec)))
         .await;
-    // Unavailable: asked at once, then after 5 and 10 more seconds; the
-    // fourth is 20 seconds after the third.
+    // Unavailable: asked at once, then after half a second, doubling: at
+    // 0.5, 1.5, 3.5, 7.5 and 15.5 seconds; the next is at 31.5.
     for _ in 0..20 {
         tokio::time::advance(Duration::from_secs(1)).await;
         settle().await;
     }
-    assert_eq!(harness.fake.world().asks.len(), 3);
+    assert_eq!(harness.fake.world().asks.len(), 6);
 
     pod.changes
         .send(Ok(intercepting(Interception::Off)))
@@ -989,6 +989,6 @@ async fn the_asking_stops_with_the_pair() {
     assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
     tokio::time::advance(Duration::from_secs(3600)).await;
     settle().await;
-    assert_eq!(harness.fake.world().asks.len(), 3);
+    assert_eq!(harness.fake.world().asks.len(), 6);
     assert!(harness.fake.world().installed.is_empty());
 }

@@ -109,6 +109,35 @@ async fn startup_host_wait_for_a_successor_ends_at_its_bound() {
     );
 }
 
+/// #6267: a hosted front door's stream waits for the first epoch, which
+/// the default host wait does not: it sees one that opens meanwhile, and
+/// ends at its deadline when none does. Once an epoch has been admitted it
+/// never waits again, even while none is active.
+#[tokio::test]
+async fn a_wait_for_the_first_epoch_sees_it_open_and_never_waits_after() {
+    let bridge = bridge();
+    let soon = || tokio::time::Instant::now() + Duration::from_millis(20);
+    assert!(!bounded(bridge.wait_for_first_epoch(soon())).await);
+    let wait = bridge.wait_for_first_epoch(tokio::time::Instant::now() + Duration::from_secs(5));
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut wait)
+            .await
+            .is_err()
+    );
+    let host = Harness::new(bridge.clone()).await;
+    assert!(bounded(wait).await);
+    assert!(bounded(bridge.wait_for_first_epoch(soon())).await);
+    host.stop().await;
+    let later = tokio::time::Instant::now() + Duration::from_secs(5);
+    let started = tokio::time::Instant::now();
+    assert!(!bounded(bridge.wait_for_first_epoch(later)).await);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "it did not wait"
+    );
+}
+
 /// #5957: a host that connected but never sent its Open leaves no lost
 /// epoch, so startup goes on waiting and the next host to open serves it. A
 /// platform relay opens only once its delegation is admitted, so a refused

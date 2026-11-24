@@ -7,6 +7,8 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
+use tokio::sync::watch;
+
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::{CertifiedKey, SigningKey};
@@ -29,6 +31,8 @@ pub struct SignedLeaves {
     signing_key: Arc<dyn SigningKey>,
     spki: Vec<u8>,
     installed: RwLock<Vec<Installed>>,
+    /// True from the first install on, for handshakes waiting for it.
+    first_installed: watch::Sender<bool>,
 }
 
 struct Installed {
@@ -62,6 +66,7 @@ impl SignedLeaves {
             signing_key,
             spki,
             installed: RwLock::new(Vec::new()),
+            first_installed: watch::Sender::new(false),
         })
     }
 
@@ -91,6 +96,7 @@ impl SignedLeaves {
             .installed
             .write()
             .unwrap_or_else(PoisonError::into_inner) = installed;
+        self.first_installed.send_replace(true);
         Ok(())
     }
 
@@ -141,6 +147,10 @@ impl SignedLeaves {
 }
 
 impl LeafSource for SignedLeaves {
+    fn first_installed(&self) -> Option<watch::Receiver<bool>> {
+        Some(self.first_installed.subscribe())
+    }
+
     fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError> {
         let host = host.to_ascii_lowercase();
         let installed = self

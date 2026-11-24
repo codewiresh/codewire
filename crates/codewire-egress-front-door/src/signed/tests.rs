@@ -258,3 +258,35 @@ fn a_current_leaf_is_served_beside_an_expired_one_for_the_same_host() {
     let (_, key) = leaves.leaf("api.anthropic.com").unwrap();
     assert_eq!(key.cert[0].as_ref(), new.as_slice());
 }
+
+/// A stream that arrives before the first leaves can wait for them (#6267):
+/// the signal turns on at the first install that succeeds, never at a refused
+/// one, and stays on through a clear.
+#[test]
+fn the_first_install_is_signalled_once_it_succeeds() {
+    let signer = Signer::new();
+    let leaves = SignedLeaves::generate().unwrap();
+    let first = leaves
+        .first_installed()
+        .expect("a signed source reports it");
+    assert!(!*first.borrow());
+
+    let other = SignedLeaves::generate().unwrap();
+    let theirs = signer.leaf(
+        other.public_key_spki(),
+        &["api.anthropic.com"],
+        Duration::hours(1),
+    );
+    assert_eq!(leaves.install([&theirs]), Err(CaError::InvalidLeaf));
+    assert!(!*first.borrow(), "a refused install signals nothing");
+
+    let ours = signer.leaf(
+        leaves.public_key_spki(),
+        &["api.anthropic.com"],
+        Duration::hours(1),
+    );
+    leaves.install([&ours]).unwrap();
+    assert!(*first.borrow());
+    leaves.clear();
+    assert!(*leaves.first_installed().unwrap().borrow());
+}

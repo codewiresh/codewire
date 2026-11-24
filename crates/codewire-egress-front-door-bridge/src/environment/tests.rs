@@ -147,20 +147,7 @@ impl Running {
         stream: tokio::net::UnixStream,
         server_name: &'static str,
     ) -> io::Result<TlsStream<tokio::net::UnixStream>> {
-        let mut roots = RootCertStore::empty();
-        roots.add(CertificateDer::from(self.ca.clone())).unwrap();
-        let mut config =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        bounded(
-            TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from(server_name).unwrap(), stream),
-        )
-        .await
+        tls_trusting(self.ca.clone(), stream, server_name).await
     }
 
     /// Start one request through a fresh handed-over stream. The task ends
@@ -234,6 +221,28 @@ impl Running {
         self.successors.try_send(door_credentials).unwrap();
         open_host(credentials, self.environment_id).await
     }
+}
+
+/// A TLS client on `stream` that trusts only `ca`.
+async fn tls_trusting(
+    ca: Vec<u8>,
+    stream: tokio::net::UnixStream,
+    server_name: &'static str,
+) -> io::Result<TlsStream<tokio::net::UnixStream>> {
+    let mut roots = RootCertStore::empty();
+    roots.add(CertificateDer::from(ca)).unwrap();
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    bounded(
+        TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from(server_name).unwrap(), stream),
+    )
+    .await
 }
 
 async fn open_host(
@@ -691,4 +700,107 @@ async fn a_routed_origin_reaches_the_credential_broker_as_the_agent_sent_it() {
     assert_eq!(seen.intercepted_host, "x.chatgpt.com");
     answer(running.host(), &seen.request_id).await;
     assert_eq!(bounded(call).await.unwrap().0, StatusCode::OK);
+}
+
+/// Leaves that arrive after the front door starts, as a hosted one's do: an
+/// environment CA's, refused for every host until [`Self::install`].
+struct LateLeaves {
+    ca: EnvironmentCa,
+    installed: tokio::sync::watch::Sender<bool>,
+}
+
+impl LateLeaves {
+    fn install(&self) {
+        self.installed.send_replace(true);
+    }
+}
+
+impl LeafSource for LateLeaves {
+    fn leaf(&self, host: &str) -> Result<(String, Arc<rustls::sign::CertifiedKey>), CaError> {
+        if !*self.installed.borrow() {
+            return Err(CaError::UnboundHost);
+        }
+        self.ca.leaf(host)
+    }
+
+    fn first_installed(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        Some(self.installed.subscribe())
+    }
+}
+
+/// A front door with late leaves, waiting at most `places` streams at once,
+/// serving with no credential session yet.
+fn late_door(places: usize) -> (Running, Arc<LateLeaves>) {
+    let environment_id = Uuid::new_v4();
+    let leaves = Arc::new(LateLeaves {
+        ca: EnvironmentCa::generate([BOUND]).unwrap(),
+        installed: tokio::sync::watch::Sender::new(false),
+    });
+    let ca = leaves.ca.certificate_der().to_vec();
+    let door = EnvironmentFrontDoor::with_leaves(
+        environment_id,
+        GENERATION,
+        intercepts(&[BOUND], 443),
+        Arc::clone(&leaves),
+    )
+    .unwrap()
+    .waiting_at_most(places);
+    let (door_handoff, handoff) = stream_pair().unwrap();
+    let handoff = HandoffSender::new(handoff).unwrap();
+    let (successors, later) = tokio::sync::mpsc::channel(4);
+    let serving = tokio::spawn(door.serve(door_handoff, None, later));
+    let running = Running {
+        environment_id,
+        ca,
+        handoff,
+        host: None,
+        door: serving,
+        successors,
+        next_stream: 1,
+    };
+    (running, leaves)
+}
+
+/// Waiting streams are bounded: one with no place to wait is accepted at
+/// once and fails closed, as before, while the one holding a place is
+/// served once the front door can serve.
+#[tokio::test]
+async fn a_stream_with_no_place_to_wait_fails_closed_at_once() {
+    let (mut running, leaves) = late_door(1);
+    let first = running.own_stream(BOUND);
+    let held = tokio::spawn(tls_trusting(running.ca.clone(), first, BOUND));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!held.is_finished());
+    let second = running.own_stream(BOUND);
+    assert!(
+        bounded(tls_trusting(running.ca.clone(), second, BOUND))
+            .await
+            .is_err(),
+        "no leaf yet, and no place to wait"
+    );
+    leaves.install();
+    running.host = Some(running.successor().await);
+    assert!(bounded(held).await.unwrap().is_ok());
+}
+
+/// #6267: a hosted front door's stream that arrives before its first leaves
+/// and its first credential session waits for both, rather than failing, and
+/// is then served.
+#[tokio::test]
+async fn a_stream_before_the_first_leaves_and_session_is_served_once_they_arrive() {
+    let (mut running, leaves) = late_door(codewire_egress_front_door::DEFAULT_MAX_CONNECTIONS);
+    let stream = running.own_stream(BOUND);
+    let early = tokio::spawn(tls_trusting(running.ca.clone(), stream, BOUND));
+    // Held, not refused: no leaf and no session yet.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!early.is_finished());
+    leaves.install();
+    running.host = Some(running.successor().await);
+    let tls = bounded(early)
+        .await
+        .unwrap()
+        .expect("served once the leaves and session arrived");
+    drop(tls);
+    let (_, status, body) = running.request().await;
+    assert_eq!((status, body), (StatusCode::OK, Bytes::from("answered")));
 }

@@ -19,8 +19,12 @@ use tokio::time::Instant;
 
 use crate::orchestration::CallError;
 
-/// The first retry after a failure.
-pub const FIRST_RETRY: Duration = Duration::from_secs(5);
+/// The first retry after a failure. A freshly bound Pod's first ask comes
+/// before its relay epoch exists and is answered `UNAVAILABLE`; the epoch
+/// follows within seconds, and its streams wait for the first leaves
+/// (#6267), so the next asks come soon. Doubling keeps a Pod within the
+/// signer's per-Pod limit of 10 calls a minute.
+pub const FIRST_RETRY: Duration = Duration::from_millis(500);
 /// The longest wait between retries.
 pub const LAST_RETRY: Duration = Duration::from_secs(60);
 /// The furthest ahead a `renew_at` is believed. A leaf lives at most an hour

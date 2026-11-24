@@ -3073,10 +3073,19 @@ credential, and never serves under a CA it made itself.
   the guest's self-check passes, and relays only a P-256 key: any other key
   fails the pair's start at the node. It installs every leaf of an answer at
   once and asks again at `renew_at_unix`. A failed ask or a refused install
-  is retried after 5 seconds, doubling to a minute, never past the end of
-  the leaves installed; a `renew_at_unix` already past or more than an hour
-  ahead is retried the same way, never slept on. Until a set is installed,
-  the front door's hosts fail closed, and the asking ends with the pair.
+  is retried after half a second, doubling to a minute, never past the end
+  of the leaves installed; a `renew_at_unix` already past or more than an
+  hour ahead is retried the same way, never slept on. A freshly bound Pod's
+  epoch is admitted within seconds of its bind, so its first set arrives
+  that soon too. Until its first set is installed and its first credential
+  session is open, the front door holds a stream for a bound host for up to
+  8 seconds and serves it once both are, or accepts it then and fails it
+  closed as before. Once each has happened it is never waited for again: a
+  host no leaf covers fails closed at once, and a gap between credential
+  sessions is the request's own short wait for the next. At most as many
+  streams wait at once as the front door serves connections; one beyond
+  that isn't held and fails closed as before. The asking ends with the pair
+  (#6267, not yet observed).
 - **Which hosts.** Only those in Codewire's interceptable-host table that
   the route of a credential this session is authorized for reaches; a caller
   cannot name one. A session with no such credential, and so an unbound Pod,

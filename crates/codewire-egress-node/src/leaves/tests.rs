@@ -92,6 +92,10 @@ fn after(start: Instant, seconds: u64) -> Instant {
     start + Duration::from_secs(seconds)
 }
 
+fn after_ms(start: Instant, millis: u64) -> Instant {
+    start + Duration::from_millis(millis)
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_first_answer_is_installed_at_once_and_renewed_at_its_renew_at() {
     let start = Instant::now();
@@ -139,10 +143,16 @@ async fn an_unanswered_ask_is_retried_with_backoff_until_it_installs() {
     ));
     assert_eq!(
         signer.asked(),
-        [start, after(start, 5), after(start, 15), after(start, 35)]
+        [
+            start,
+            after_ms(start, 500),
+            after_ms(start, 1_500),
+            after_ms(start, 3_500)
+        ]
     );
-    // Installed, it renews at the answer's renew_at.
-    assert_eq!(renewal.due(), after(start, 900));
+    // Installed, it renews at the answer's renew_at, read in whole seconds
+    // from an install half a second into one.
+    assert_eq!(renewal.due(), after_ms(start, 900_500));
 }
 
 #[tokio::test(start_paused = true)]
@@ -151,15 +161,22 @@ async fn the_backoff_stops_doubling_at_a_minute() {
     let signer = Script::answering([]);
     let mut renewal = renewal(&signer);
     let mut door = Door::default();
-    for _ in 0..7 {
+    for _ in 0..10 {
         step(&mut renewal, &mut door).await;
     }
     let asked = signer.asked();
-    let waits: Vec<u64> = asked
+    let waits: Vec<u128> = asked
         .windows(2)
-        .map(|pair| (pair[1] - pair[0]).as_secs())
+        .map(|pair| (pair[1] - pair[0]).as_millis())
         .collect();
-    assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+    assert_eq!(
+        waits,
+        [
+            500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000
+        ]
+    );
+    // Within the signer's per-Pod limit of 10 calls a minute.
+    assert!(asked.iter().filter(|at| **at < after(start, 60)).count() <= 10);
     assert_eq!(asked[0], start);
 }
 
@@ -180,7 +197,7 @@ async fn a_refused_install_keeps_the_leaves_served_and_is_retried() {
         Settled::Refused("refused")
     ));
     assert_eq!(door.serving, [b"first".to_vec()]);
-    assert_eq!(renewal.due(), after(start, 605));
+    assert_eq!(renewal.due(), after_ms(start, 600_500));
     assert!(matches!(
         step(&mut renewal, &mut door).await,
         Settled::Installed(1)
@@ -194,17 +211,15 @@ async fn a_refused_install_keeps_the_leaves_served_and_is_retried() {
 async fn a_renew_at_out_of_range_is_asked_again_soon() {
     for renew_in in [-30, 0, 3601, i64::MAX - NOW] {
         let start = Instant::now();
-        // The second is asked five seconds on, and is as far out of range.
-        let signer = Script::answering([
-            leaves("first", renew_in),
-            leaves("second", renew_in.saturating_add(5)),
-        ]);
+        // The second is asked half a second on, within the same second, and
+        // is as far out of range.
+        let signer = Script::answering([leaves("first", renew_in), leaves("second", renew_in)]);
         let mut renewal = renewal(&signer);
         let mut door = Door::default();
         step(&mut renewal, &mut door).await;
-        assert_eq!(renewal.due(), after(start, 5), "{renew_in}");
+        assert_eq!(renewal.due(), after_ms(start, 500), "{renew_in}");
         step(&mut renewal, &mut door).await;
-        assert_eq!(renewal.due(), after(start, 15), "{renew_in}");
+        assert_eq!(renewal.due(), after_ms(start, 1_500), "{renew_in}");
     }
 }
 

@@ -69,6 +69,10 @@ pub struct EnvironmentFrontDoor<L = EnvironmentCa> {
     intercepts: InterceptSet,
     bridge: CredentialBridge,
     door: Arc<FrontDoor<CredentialRouteBackend, L>>,
+    /// Places for streams waiting for the front door to be able to serve
+    /// ([`ready`]), as many as its connections: a waiting stream holds no
+    /// connection permit yet, so this bounds them instead.
+    waiting: Arc<tokio::sync::Semaphore>,
 }
 
 impl EnvironmentFrontDoor {
@@ -143,6 +147,9 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
             intercepts,
             bridge,
             door: Arc::new(door),
+            waiting: Arc::new(tokio::sync::Semaphore::new(
+                codewire_egress_front_door::DEFAULT_MAX_CONNECTIONS,
+            )),
         })
     }
 
@@ -152,6 +159,13 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
     #[must_use]
     pub fn handed_off_as(mut self, identity: Uuid) -> Self {
         self.handoff_identity = identity.to_string();
+        self
+    }
+
+    /// At most `places` streams waiting at once, for a test of the bound.
+    #[cfg(test)]
+    fn waiting_at_most(mut self, places: usize) -> Self {
+        self.waiting = Arc::new(tokio::sync::Semaphore::new(places));
         self
     }
 
@@ -267,10 +281,18 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
             }
         };
         let door = Arc::clone(&self.door);
+        let bridge = self.bridge.clone();
+        // A stream with no place to wait is accepted at once, and fails closed
+        // as it would have before the front door could serve.
+        let waiting = Arc::clone(&self.waiting).try_acquire_owned().ok();
         streams.spawn(async move {
             let host = header.hostname;
             let destination = std::net::IpAddr::V4(header.destination_ip);
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            if let Some(place) = waiting {
+                ready(&door, &bridge).await;
+                drop(place);
+            }
             match door.accept_to(stream, &names, Some(destination)).await {
                 Ok(Accepted::Served(_)) => {}
                 // No hand-back: the guest dialled a bound address, so another
@@ -295,6 +317,31 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
 /// The most credential sessions served at once: a renewed broker's
 /// predecessor, draining, and its successor.
 const MAX_SESSIONS: usize = 2;
+
+/// How long a hosted front door's stream waits for it to be able to serve:
+/// the first leaves installed and a credential epoch active (#6267). A
+/// freshly bound Pod has both within seconds of its bind; this stays under
+/// the 10 seconds common TLS clients allow a connection to set up.
+pub const FIRST_SERVE_WAIT: Duration = Duration::from_secs(8);
+
+/// For a front door whose leaves arrive after it starts, as a hosted one's
+/// do, waits at most [`FIRST_SERVE_WAIT`] in all for its first install and
+/// its first credential epoch; once each has happened it is not waited for
+/// again. Then the stream is accepted whatever the outcome: a host with no
+/// leaf still fails closed at its handshake, and a request with no epoch is
+/// still refused. A front door that holds its leaves from the start, as a
+/// local VM's does, never waits.
+async fn ready<L: LeafSource>(
+    door: &FrontDoor<CredentialRouteBackend, L>,
+    bridge: &CredentialBridge,
+) {
+    let Some(mut installed) = door.ca().first_installed() else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + FIRST_SERVE_WAIT;
+    let _ = tokio::time::timeout_at(deadline, installed.wait_for(|installed| *installed)).await;
+    bridge.wait_for_first_epoch(deadline).await;
+}
 
 /// The live credential sessions, oldest first.
 #[derive(Default)]

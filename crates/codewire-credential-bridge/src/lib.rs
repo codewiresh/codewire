@@ -830,6 +830,34 @@ impl CredentialBridge {
         }
     }
 
+    /// Before the first epoch is admitted, waits for it, never past
+    /// `deadline`; once one has been, never waits. True when an epoch is
+    /// active. A front door waits here, bounded, for its first credential
+    /// session, so a stream that arrives before it is served once it opens
+    /// rather than refused (#6267). A later gap between epochs is the
+    /// request's own successor wait ([`SUCCESSOR_EPOCH_WAIT`]).
+    pub async fn wait_for_first_epoch(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            // Register before observing state so an activation in between
+            // cannot be missed.
+            let admitted = self.host_admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            {
+                let state = self.inner.lock().await;
+                if state.active.is_some() {
+                    return true;
+                }
+                if state.next_epoch != 0 {
+                    return false;
+                }
+            }
+            if tokio::time::timeout_at(deadline, admitted).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     /// Whether the active epoch's host takes streamed request bodies.
     async fn streams_request_body(&self) -> bool {
         self.inner

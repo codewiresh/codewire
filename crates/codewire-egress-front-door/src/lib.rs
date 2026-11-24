@@ -244,6 +244,14 @@ pub trait LeafSource: Send + Sync + 'static {
     fn signs(&self, _host: &str) -> bool {
         true
     }
+
+    /// For a source whose leaves arrive after the front door starts, a
+    /// receiver that turns true at its first install, so a stream that
+    /// arrives first can wait for it (#6267). `None` for a source that holds
+    /// its leaves from the start.
+    fn first_installed(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
+    }
 }
 
 impl LeafSource for EnvironmentCa {
@@ -261,6 +269,10 @@ impl LeafSource for EnvironmentCa {
 impl<L: LeafSource> LeafSource for Arc<L> {
     fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError> {
         L::leaf(self, host)
+    }
+
+    fn first_installed(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        L::first_installed(self)
     }
 }
 

@@ -2046,6 +2046,8 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a `cw-egress` rollout, and a `cw-egress` restart, under a running
     Sandbox that has made intercepted calls;
   - a Sandbox claimed from the warm pool;
+  - an intercepted request made at once after `cw create`, before the front
+    door's first leaves are installed (#6267);
   - the switch flipped while warm members are idle, each way, with a member
     created before the flip claimed after it, and a Sandbox started again
     after it (#6200);
@@ -2106,6 +2108,10 @@ arguments hold no real token, and the hosted sign-in exception is not used
     after a `cw-egress` restart, is served under the same CA the Sandbox
     installed at its start. The Sandbox installs nothing new, and a
     process that was already running keeps working;
+  - an intercepted request made at once after `cw create` is answered: its
+    handshake waits for the front door's first leaves rather than failing,
+    and the time from the bind to the first served handshake is recorded
+    (#6267, not yet observed);
   - a Sandbox claimed from the warm pool serves an intercepted host under
     the CA it installed before it was claimed: the CA file's digest is the
     same before and after the claim, and the claim installs nothing new;
