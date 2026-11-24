@@ -757,6 +757,7 @@ async fn a_revocation_closes_the_browser_drops_input_and_waits_for_the_exit() {
             limits(),
             async {
                 let _ = revoked.await;
+                TerminalEnd::Revoked
             },
         )
         .await
@@ -776,4 +777,70 @@ async fn a_revocation_closes_the_browser_drops_input_and_waits_for_the_exit() {
         .unwrap();
     daemon.output.send(Ok(None)).await.unwrap();
     assert!(relay.await.unwrap());
+}
+
+/// #4459: the drain deadline ends a one-off terminal the way a revocation
+/// does, so the kill that follows never resets it: the browser closes with
+/// 1012 "server restarting" and may reconnect, the daemon's input is dropped,
+/// and the relay waits for the run's exit, so its lease is settled proven.
+#[tokio::test]
+async fn the_drain_deadline_closes_with_1012_drops_input_and_waits_for_the_exit() {
+    let drain = crate::drain::Drain::default();
+    let daemon = daemon();
+    daemon
+        .output
+        .try_send(frame(DaemonRunOutput::Stdout(vec![1])))
+        .unwrap();
+    let (_browser, mut input, mut output, probe) = browser();
+    let session = daemon.session;
+    let ended = terminal_ended(std::future::pending(), drain.signal(Restart::Deadline));
+    let relay = tokio::spawn(async move {
+        relay_until_fenced(
+            &mut output,
+            &mut input,
+            async { Ok(session) },
+            limits(),
+            std::future::pending(),
+            ended,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while probe.state.lock().unwrap().sent.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the session never relayed");
+    drain.begin(Duration::ZERO);
+    tokio::time::timeout(Duration::from_secs(30), daemon.lifetime.wait_dropped())
+        .await
+        .expect("the deadline left the daemon's input open");
+    assert!(!relay.is_finished(), "waits for the run's exit");
+    assert_eq!(probe.close_codes(), vec![1012]);
+    assert!(
+        probe
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .any(|message| matches!(
+                message,
+                Message::Close(Some(frame)) if frame.reason == "server restarting"
+            ))
+    );
+    daemon
+        .output
+        .send(frame(DaemonRunOutput::Exit(129)))
+        .await
+        .unwrap();
+    daemon.output.send(Ok(None)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), relay)
+            .await
+            .expect("the relay outlived its run")
+            .unwrap(),
+        "a run that exited after the deadline is proven"
+    );
 }

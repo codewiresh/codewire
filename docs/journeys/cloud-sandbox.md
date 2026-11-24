@@ -12,7 +12,7 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-23.
+Updated 2026-11-24.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -1419,6 +1419,8 @@ an error the client can retry.
     the deadline, which resumes on the new Pod (#4460);
   - a host or session attached when the old Pod drains, which re-attaches to
     the new one;
+  - a dashboard terminal open on the old Pod at the drain deadline, both the
+    durable terminal and the one-off terminal (#4459);
   - API calls throughout, none refused.
 - **Driving it:**
   1. Dev runs a source with #4445, so its orchestration Pods carry a 10 s
@@ -1446,6 +1448,10 @@ an error the client can retry.
     download still open at the deadline ends with Codewire's "download it
     again" error;
   - no `cw org list` call fails at the gateway;
+  - a dashboard terminal open at the deadline closes with WebSocket code 1012,
+    "server restarting", never a reset, and the browser connects again to the
+    new Pod. The one-off terminal's shell ends first and its runtime
+    admission lease is released, not left `resolution_required`;
   - the old Pod logs `draining: releasing leadership, Temporal tasks and
     re-attachable streams`, then `leader: draining, released leadership` and
     `temporal worker stopped`;
@@ -1487,7 +1493,8 @@ an error the client can retry.
     Only an upload slower than about 0.24 MB/s would leave a part open at
     the deadline. The bridge's and the CLI's tests cover it (#4460).
   - `AttachSession` re-attaching through orchestration, and the dashboard's
-    terminal: not yet observed. A `cw run` across the rollout used direct
+    terminals: not yet observed. The one-off terminal closing with 1012 at
+    the deadline is covered by its relay test (#4459). A `cw run` across the rollout used direct
     UDP, not orchestration.
   - `AttachHost` at SIGTERM: not yet observed. It needs a host agent on Dev
     (#4426).

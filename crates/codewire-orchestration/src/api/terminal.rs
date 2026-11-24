@@ -14,6 +14,7 @@ use codewire_daemon_bridge::client::{
     DaemonClient, DaemonClientError, DaemonRunInput, DaemonRunOutput, DaemonRunReceiver,
     DaemonRunSender, DaemonRunSession, DaemonRunStart,
 };
+use codewire_daemon_bridge::drain::{Restart, RestartSignal};
 use codewire_server_core::AppError;
 use codewire_server_core::auth::{AuthUser, CredentialContext};
 use codewire_server_core::org_deletion::{
@@ -219,6 +220,7 @@ pub async fn terminal_websocket(
         Ok(lease) => lease,
         Err(error) => return error.into_response(),
     };
+    let restart = state.drain.signal(Restart::Deadline);
     let pool = state.pool.clone();
     let failed_pool = pool.clone();
     let failed_lease = lease.id.clone();
@@ -234,7 +236,9 @@ pub async fn terminal_websocket(
                 settle_terminal_lease(&failed_pool, &failed_lease, true).await;
             });
         })
-        .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id, fenced, revoked))
+        .on_upgrade(move |socket| {
+            terminal_session(socket, client, pool, lease.id, fenced, revoked, restart)
+        })
 }
 
 /// The user a socket request admits, for a caller that only authenticates.
@@ -296,6 +300,7 @@ async fn terminal_session(
     lease_id: String,
     fenced: impl Future<Output = ()> + Send + 'static,
     revoked: SocketRevoked,
+    restart: RestartSignal,
 ) {
     let (mut browser_output, mut browser_input) = socket.split();
     let proven = relay_until_fenced(
@@ -304,15 +309,27 @@ async fn terminal_session(
         client.start_run(terminal_start()),
         TerminalLimits::default(),
         fenced,
-        revoked.into_future(),
+        terminal_ended(revoked.into_future(), restart),
     )
     .await;
     settle_terminal_lease(&pool, &lease_id, proven).await;
 }
 
-/// Relays until the session ends, its credential is revoked (#3586), or this
-/// process fences (#4523). A
-/// fence drops the relay, which ends the daemon run, and closes the browser
+/// How a one-off terminal ends before its shell does: its credential is
+/// revoked (#3586), or this replica reaches its drain deadline (#4459).
+async fn terminal_ended(
+    revoked: impl Future<Output = ()>,
+    restart: impl Future<Output = ()>,
+) -> TerminalEnd {
+    tokio::select! {
+        () = revoked => TerminalEnd::Revoked,
+        () = restart => TerminalEnd::ServerRestart,
+    }
+}
+
+/// Relays until the session ends, `ended` completes (its credential is
+/// revoked, #3586, or this replica reaches its drain deadline, #4459), or this
+/// process fences (#4523). A fence drops the relay, which ends the daemon run, and closes the browser
 /// with "server restarting" so it can reconnect elsewhere. Whether the run's
 /// child exited is then not proven, and the abandoned-leases sweep may count
 /// this process gone.
@@ -322,7 +339,7 @@ async fn relay_until_fenced<Tx, Rx, E, F, S>(
     start: F,
     limits: TerminalLimits,
     fenced: impl Future<Output = ()>,
-    revoked: impl Future<Output = ()> + Send,
+    ended: impl Future<Output = TerminalEnd> + Send,
 ) -> bool
 where
     Tx: Sink<Message> + Unpin + Send,
@@ -337,7 +354,7 @@ where
             close_browser(browser_output, TerminalEnd::ServerRestart, io).await;
             false
         }
-        proven = relay_terminal_until(browser_output, browser_input, start, limits, revoked) => {
+        proven = relay_terminal_until(browser_output, browser_input, start, limits, ended) => {
             proven
         }
     }
@@ -433,7 +450,8 @@ enum TerminalEnd {
     InputLimit,
     DaemonFailure,
     Natural,
-    /// This server fenced (#4523); the browser may reconnect to another.
+    /// This server fenced (#4523) or reached its drain deadline (#4459); the
+    /// browser may reconnect to another.
     ServerRestart,
     /// The credential that admitted the socket was lost (#3586).
     Revoked,
@@ -523,25 +541,26 @@ where
     .await
 }
 
-/// Relays a one-off terminal until it ends or `revoked` completes. A
-/// revocation ends it through the same path as a browser close: the browser
-/// is closed, the daemon's input dropped, and the run's exit awaited.
+/// Relays a one-off terminal until it ends or `ended` completes with how it
+/// ends. A revocation or the drain deadline ends it through the same path as a
+/// browser close: the browser is closed, the daemon's input dropped, and the
+/// run's exit awaited, so its lease is settled with a known result.
 async fn relay_terminal_until<Tx, Rx, E, F, S, R>(
     browser_output: &mut Tx,
     browser_input: &mut Rx,
     start: F,
     limits: TerminalLimits,
-    revoked: R,
+    ended: R,
 ) -> bool
 where
     Tx: Sink<Message> + Unpin + Send,
     Rx: Stream<Item = Result<Message, E>> + Unpin + Send,
     F: Future<Output = Result<S, DaemonClientError>> + Send,
     S: TerminalSession,
-    R: Future<Output = ()> + Send,
+    R: Future<Output = TerminalEnd> + Send,
 {
     tokio::pin!(start);
-    tokio::pin!(revoked);
+    tokio::pin!(ended);
     let mut pending = PendingInputs::default();
     let start_deadline = tokio::time::Instant::now() + limits.start;
     let attachment = loop {
@@ -556,7 +575,7 @@ where
                 }
             }
             result = &mut start => break Ok(result),
-            () = &mut revoked => break Err(TerminalEnd::Revoked),
+            end = &mut ended => break Err(end),
             _ = tokio::time::sleep_until(start_deadline) => {
                 break Err(TerminalEnd::DaemonFailure);
             }
@@ -590,7 +609,7 @@ where
             Browser(Option<Result<Message, E>>),
             Input(Result<Result<(), DaemonClientError>, tokio::time::error::Elapsed>),
             Output(Result<Option<DaemonRunOutput>, DaemonClientError>),
-            Revoked,
+            Ended(TerminalEnd),
             Ping,
         }
         let event = tokio::select! {
@@ -600,7 +619,7 @@ where
                 tokio::time::timeout(limits.io, input.send_input(message)).await
             }, if !pending.frames.is_empty() => Event::Input(sent),
             message = output.next_output() => Event::Output(message),
-            () = &mut revoked => Event::Revoked,
+            end = &mut ended => Event::Ended(end),
             _ = keepalive.tick() => Event::Ping,
         };
         match event {
@@ -613,7 +632,7 @@ where
                     break (end, None, true);
                 }
             }
-            Event::Revoked => break (TerminalEnd::Revoked, None, true),
+            Event::Ended(end) => break (end, None, true),
             Event::Input(Ok(Ok(()))) => pending.pop(),
             Event::Input(_) => break (TerminalEnd::DaemonFailure, None, true),
             Event::Output(Ok(Some(
