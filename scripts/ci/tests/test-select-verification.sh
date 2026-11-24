@@ -1944,6 +1944,11 @@ run_paths_case runtime_dev_personal_walk_only pull_request refs/pull/6074/head f
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/personal-credentials-walk.sh \
   scripts/runtime/tests/test-personal-credentials-walk.sh
+# The gate handles no secret either: it runs under a sign-in it is given.
+run_paths_case runtime_dev_interception_gate pull_request refs/pull/6302/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/hosted-interception-gate.sh \
+  scripts/runtime/tests/test-hosted-interception-gate.sh
 run_paths_case runtime_dev_scratch_account pull_request refs/pull/4541/head false \
   'policy dev_smoke_script_tests security security_dev_smoke_auth security_js' \
   scripts/runtime/dev/provision-dev-scratch-account.sh \

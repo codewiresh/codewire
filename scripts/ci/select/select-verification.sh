@@ -2158,6 +2158,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provision-dev-personal-walk-user.sh|\
       scripts/runtime/dev/with-dev-personal-walk.sh|\
       scripts/runtime/dev/personal-credentials-walk.sh|\
+      scripts/runtime/dev/hosted-interception-gate.sh|\
       scripts/runtime/dev/provision-dev-scratch-account.sh|\
       scripts/runtime/dev/invitations-journey.sh|\
       scripts/runtime/dev/make-dev-acceptance-unlimited.sh|\
@@ -2194,6 +2195,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-provision-dev-personal-walk-user.sh|\
       scripts/runtime/tests/test-with-dev-personal-walk.sh|\
       scripts/runtime/tests/test-personal-credentials-walk.sh|\
+      scripts/runtime/tests/test-hosted-interception-gate.sh|\
       scripts/runtime/tests/test-provision-dev-scratch-account.sh|\
       scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh|\
       scripts/runtime/tests/test-provision-prod-smoke-user.sh|\

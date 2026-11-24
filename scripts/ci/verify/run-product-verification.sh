@@ -1404,6 +1404,7 @@ run_dev_smoke_script_tests() {
   scripts/runtime/tests/test-provision-dev-invitee-user.sh
   scripts/runtime/tests/test-provision-dev-personal-walk-user.sh
   scripts/runtime/tests/test-personal-credentials-walk.sh
+  scripts/runtime/tests/test-hosted-interception-gate.sh
   scripts/runtime/tests/test-provision-dev-scratch-account.sh
   scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh
   scripts/runtime/tests/test-provision-prod-smoke-user.sh
