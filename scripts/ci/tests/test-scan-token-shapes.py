@@ -8,6 +8,7 @@ parts, so no committed literal reads as a credential."""
 
 import base64
 import gzip
+import hashlib
 import importlib.util
 import json
 import lzma
@@ -102,7 +103,7 @@ class Scanner(unittest.TestCase):
         return result.returncode, lines, result.stderr.decode()
 
     def findings(self, lines):
-        return [line for line in lines if line[0] not in ("placeholder", "missing", "baseline")]
+        return [line for line in lines if line[0] not in ("placeholder", "missing", "baseline", "baseline-image")]
 
     def test_every_shape_is_a_finding_and_no_value_is_printed(self):
         values = {
@@ -259,66 +260,222 @@ class Scanner(unittest.TestCase):
         path.write_text("".join(f"{line}\n" for line in (header, *lines)))
         return path
 
-    def test_a_baseline_excuses_the_same_finding_in_a_declared_image_disk_only(self):
-        disk = self.write("rootfs.raw", f"KEY = '{self.secret('AI' + 'za' + random(35))}'\n")
+    def blob(self, directory, data):
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / hashlib.sha256(data).hexdigest()
+        path.write_bytes(data)
+        return path
+
+    def test_a_blob_named_by_its_sha256_is_image_content_and_a_renamed_one_is_not(self):
+        blobs = self.root / "blobs"
+        shipped = self.secret(github())
+        blob = self.blob(blobs, gzip.compress(f"testdata {shipped}\n".encode()))
         baseline = self.temporary / "baseline"
-        image = ["--image", self.IMAGE, "--image-disk", str(disk)]
+        image = ["--image", self.IMAGE, "--image-blobs", str(blobs)]
         status, lines, _ = self.scan(extra=["--write-baseline", str(baseline), *image])
         self.assertEqual(status, 1)
-        self.assertEqual(baseline.read_text().splitlines()[0], load_scanner().baseline_header(self.IMAGE))
         status, lines, _ = self.scan(extra=["--baseline", str(baseline), *image])
-        self.assertEqual((status, lines), (0, [["baseline", "google-api-key", "1"]]))
-        status, lines, _ = self.scan(extra=["--baseline", str(baseline), "--image", self.IMAGE])
-        self.assertEqual(status, 1, "a disk not declared as the image's is never excused")
+        self.assertEqual(status, 0, lines)
+        self.assertIn(["baseline-image", "github", str(blob), "1"], lines)
         leaked = self.secret(anthropic())
-        disk.write_text(disk.read_text() + f"LEAK = '{leaked}'\n")
+        self.write("state/home/notes", leaked)
+        status, lines, _ = self.scan(extra=["--baseline", str(baseline), *image])
+        self.assertEqual([line[0] for line in self.findings(lines)], ["anthropic"])
+        # A blob whose bytes no longer match its name is not image content.
+        blob.write_bytes(gzip.compress(f"testdata {shipped}\nmore\n".encode()))
         status, lines, _ = self.scan(extra=["--baseline", str(baseline), *image])
         self.assertEqual(status, 1)
-        self.assertEqual([line[0] for line in self.findings(lines)], ["anthropic"])
-        self.assertIn(["baseline", "google-api-key", "1"], lines)
+        self.assertIn("github", [line[0] for line in self.findings(lines)])
 
-    def test_a_baseline_never_excuses_what_is_not_image_content(self):
+    @unittest.skipUnless(tool("mkfs.ext4") and tool("debugfs") and os.path.isdir("/dev/shm"), "needs mkfs.ext4, debugfs and /dev/shm")
+    def test_a_root_disk_excuses_its_lower_layer_raw_and_through_the_filesystem_never_its_upper(self):
+        source = self.temporary / "source"
+        for directory in ("lower/usr/bin", "upper/etc", "work", "merged"):
+            (source / directory).mkdir(parents=True)
+        shipped_key = "AI" + "za" + random(35)
+        shipped_token = github()
+        (source / "lower/usr/bin/tool").write_bytes(
+            os.urandom(9000) + f" {self.secret(shipped_key)} {self.secret(shipped_token)} ".encode() + os.urandom(9000)
+        )
+        (source / "upper/etc/config").write_text(f"key {self.secret('AI' + 'za' + random(35))}\n")
+        disk = self.root / "root.raw"
+        subprocess.run([tool("mkfs.ext4"), "-q", "-F", "-d", str(source), str(disk), "16M"], check=True, timeout=120)
+        spill_parent = Path(tempfile.mkdtemp(prefix="scan-token-shapes-test-", dir="/dev/shm"))
+        baseline = self.temporary / "baseline"
+        image = ["--image", self.IMAGE, "--image-disk", f"{disk}:/lower", "--debugfs", tool("debugfs"),
+                 "--spill-parent", str(spill_parent)]
+        try:
+            status, before, _ = self.scan(extra=["--write-baseline", str(baseline), *image])
+            status, lines, _ = self.scan(extra=["--baseline", str(baseline), *image])
+        finally:
+            shutil.rmtree(spill_parent)
+        self.assertEqual(status, 1)
+        left = {(line[0], line[2]) for line in self.findings(lines)}
+        self.assertEqual(left, {("google-api-key", f"{disk}:/upper/etc/config"), ("google-api-key", str(disk))})
+        self.assertIn(["baseline-image", "github", f"{disk}:/lower/usr/bin/tool", "2"], lines)
+        self.assertIn(["baseline", "google-api-key", "2"], lines)
+        recorded = baseline.read_text()
+        self.assertRegex(recorded, r"sha256\text4-uuid:[0-9a-f-]{36}:/lower/usr/bin/tool\t[0-9a-f]{64}")
+        self.assertNotIn("/upper/", recorded)
+
+    @unittest.skipUnless(tool("mkfs.ext4") and tool("debugfs") and os.path.isdir("/dev/shm"), "needs mkfs.ext4, debugfs and /dev/shm")
+    def test_a_declared_copy_of_the_root_disk_matches_its_baseline_and_an_undeclared_one_does_not(self):
+        source = self.temporary / "source"
+        (source / "lower/usr/bin").mkdir(parents=True)
+        (source / "upper").mkdir()
+        (source / "lower/usr/bin/tool").write_bytes(
+            os.urandom(9000) + f" {self.secret(github())} {self.secret('AI' + 'za' + random(35))} ".encode()
+        )
+        disk = self.root / "vm/root.raw"
+        disk.parent.mkdir()
+        subprocess.run([tool("mkfs.ext4"), "-q", "-F", "-d", str(source), str(disk), "16M"], check=True, timeout=120)
+        copy = self.root / "checkpoint/root.raw"
+        copy.parent.mkdir()
+        shutil.copyfile(disk, copy)
+        spill_parent = Path(tempfile.mkdtemp(prefix="scan-token-shapes-test-", dir="/dev/shm"))
+        baseline = self.temporary / "baseline"
+        common = ["--image", self.IMAGE, "--debugfs", tool("debugfs"), "--spill-parent", str(spill_parent)]
+        try:
+            status, _, _ = self.scan(disk, extra=["--write-baseline", str(baseline), "--image-disk", f"{disk}:/lower", *common])
+            self.assertEqual(status, 1)
+            self.assertNotIn(str(disk), baseline.read_text(), "the baseline names the disk by its UUID")
+            self.assertIn("ext4-uuid:", baseline.read_text())
+            declared = ["--baseline", str(baseline), "--image-disk", f"{disk}:/lower", "--image-disk", f"{copy}:/lower", *common]
+            status, lines, _ = self.scan(disk, copy, extra=declared)
+            self.assertEqual((status, self.findings(lines)), (0, []))
+            self.assertIn(["baseline-image", "github", f"{copy}:/lower/usr/bin/tool", "2"], lines)
+            undeclared = ["--baseline", str(baseline), "--image-disk", f"{disk}:/lower", *common]
+            status, lines, _ = self.scan(disk, copy, extra=undeclared)
+            self.assertEqual(status, 1)
+            self.assertEqual({line[2].split(":/")[0] for line in self.findings(lines)}, {str(copy)})
+        finally:
+            shutil.rmtree(spill_parent)
+
+    def test_excusal_follows_image_content_and_a_bound_shape_its_files_sha256(self):
         scanner = load_scanner()
-        disk = "/vm/disks/rootfs.raw"
+        disk, blobs = "/vm/root.raw", "/engine/content/blobs"
+        name = "ab" * 32
+        content = scanner.ImageContent({disk: "/lower"}, frozenset({blobs}))
+        content.raw_files[("google-api-key", "raw", disk, 4096, 39)] = f"{disk}:/lower/usr/bin/gh"
+        content.raw_files[("google-api-key", "raw", disk, 8192, 39)] = None
+        content.file_digests.update({f"{disk}:/lower/usr/bin/gh": "11" * 32, f"{blobs}/{name}": name})
         places = {
-            f"{disk}:/usr/lib/python3/app.py": True,
-            disk: True,
-            "/vm/disks/state.raw": False,
-            "/vm/disks/state.raw:/codewire/notes": False,
-            f"{disk}:/home/codewire/notes": False,
-            f"{disk}:/workspace/app/config": False,
-            f"{disk}:/root/.bash_history": False,
-            f"{disk}:/tmp/x": False,
-            f"{disk}:/var/tmp/x": False,
-            f"{disk}:/run/codewire/x": False,
-            f"{disk}:/var/log/app.log.1.gz!decompressed": False,
-            "/vm/checkpoint/memory-ranges": False,
-            "/proc/1/environ": False,
-            "/dev/fd/63": False,
-            "/home/user/.codewire/config.toml": False,
+            (f"{disk}:/lower/usr/bin/gh", 10): True,
+            (f"{disk}:/lower/usr/share/doc/x.gz!decompressed", 10): True,
+            (disk, 4096): True,
+            (disk, 8192): False,
+            (disk, 12288): False,
+            (f"{disk}:/upper/etc/config", 10): False,
+            (f"{disk}:/work/x", 10): False,
+            (f"{blobs}/{name}", 10): True,
+            (f"{blobs}/{name}!decompressed", 10): True,
+            (f"{blobs}/not-a-digest", 10): False,
+            ("/vm/state.raw", 10): False,
+            ("/vm/state.raw:/codewire/notes", 10): False,
+            ("/vm/checkpoint/memory-ranges", 10): False,
+            ("/proc/1/environ", 0): False,
+            ("/dev/fd/63", 0): False,
+            ("/vm/supervisor.log.1.gz!decompressed", 0): False,
         }
-        findings = {("google-api-key", "raw", path, 10, 39) for path in places}
-        results = scanner.Results({}, frozenset(findings), frozenset({disk}))
-        for path, excused in places.items():
-            self.assertEqual(results.excused(("google-api-key", "raw", path, 10, 39)), excused, path)
-        self.assertFalse(results.excused(("google-api-key", "raw", disk, 11, 39)), "another offset")
-        bound = scanner.Results({}, frozenset({("anthropic", "raw", disk, 10, 106)}), frozenset({disk}))
-        self.assertFalse(bound.excused(("anthropic", "raw", disk, 10, 106)))
+        findings = {("google-api-key", "raw", path, offset, 39) for path, offset in places}
+        results = scanner.Results({}, scanner.Baseline(frozenset(findings)), content)
+        for (path, offset), excused in places.items():
+            self.assertEqual(results.excusal(("google-api-key", "raw", path, offset, 39)) is not None, excused, path)
+        self.assertIsNone(results.excusal(("google-api-key", "raw", disk, 4097, 39)), "another offset")
+        bound = ("github", "raw", f"{disk}:/lower/usr/bin/gh", 10, 40)
+        pinned = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "11" * 32}), content)
+        self.assertEqual(pinned.excusal(bound), (f"{disk}:/lower/usr/bin/gh", True))
+        changed = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "22" * 32}), content)
+        self.assertIsNone(changed.excusal(bound), "a rewritten image file")
+        unpinned = scanner.Results({}, scanner.Baseline(frozenset({bound})), content)
+        self.assertIsNone(unpinned.excusal(bound), "no recorded SHA-256")
 
-    def test_a_baseline_listing_a_bound_shape_or_a_control_is_refused(self):
-        self.write("rootfs.raw", "nothing")
-        for shape in ("anthropic", "openai", "openai-legacy", "github", "github-pat", "refresh-token-field",
-                      "jwt-openai", "cut:anthropic", "cut:github", "control:planted"):
-            baseline = self.baseline_file(f"{shape}\traw\t{self.root}/rootfs.raw\t0\t40")
-            status, _, error = self.scan(extra=["--baseline", str(baseline), "--image", self.IMAGE])
-            self.assertEqual(status, 2, shape)
+    def test_a_raw_finding_maps_only_when_every_block_is_one_image_file_named_plainly(self):
+        scanner = load_scanner()
+        disk = "/vm/root.raw"
+        target = self.temporary / "dump"
+        for name in ("lower/usr/bin/gh", "lower/usr/bin/other", "upper/etc/x"):
+            (target / name).parent.mkdir(parents=True, exist_ok=True)
+            (target / name).write_bytes(name.encode())
+        (target / "lower/linked").symlink_to(target / "upper/etc")
+        owners = {1: 11, 2: 11, 3: 22, 4: 33, 5: 44, 6: 55, 7: None, 8: 66, 9: 77}
+        names = {
+            11: ["/lower/usr/bin/gh"],
+            22: ["/lower/usr/bin/other"],
+            33: ["/upper/etc/x"],
+            44: ["/lower/usr/bin/gh\n12\t/lower/usr/bin/other"],
+            55: ["/lower/usr/bin/missing"],
+            66: ["/lower/../upper/etc/x"],
+            77: ["/lower/linked/x"],
+        }
+        digests = {11: scanner.sha256_file(target / "lower/usr/bin/gh"), 22: "ff" * 32, 33: "00" * 32,
+                   44: "01" * 32, 55: "02" * 32, 66: "03" * 32, 77: "04" * 32}
+        cases = {
+            ("github", "raw", disk, 4096, 40): ((4096, 8192 + 40), f"{disk}:/lower/usr/bin/gh"),
+            ("github", "raw", disk, 8192 + 100, 40): ((8192 + 100, 8192 + 140), f"{disk}:/lower/usr/bin/gh"),
+            # UTF-16LE takes two bytes a character, so this one runs into block 3.
+            ("github", "utf16le", disk, 8192 + 4050, 40): ((8192 + 4050, 8192 + 4130), None),
+            ("github", "raw", disk, 16384, 40): ((16384, 16424), None),
+            ("github", "raw", disk, 20480, 40): ((20480, 20520), None),
+            ("github", "raw", disk, 24576, 40): ((24576, 24616), None),
+            ("github", "raw", disk, 28672, 40): ((28672, 28712), None),
+            ("github", "raw", disk, 32768, 40): ((32768, 32808), None),
+            ("github", "raw", disk, 36864, 40): ((36864, 36904), None),
+        }
+        results = scanner.Results({}, None, scanner.ImageContent({disk: "/lower"}))
+        results.image.file_digests[f"{disk}:/lower/usr/bin/other"] = "aa" * 32
+        for finding, (span, _label) in cases.items():
+            results.findings.add(finding)
+            results.spans[finding] = span
+        with mock.patch.object(scanner, "block_size_of", return_value=4096), \
+                mock.patch.object(scanner, "icheck", side_effect=lambda _d, _i, blocks: {b: owners.get(b) for b in blocks}), \
+                mock.patch.object(scanner, "ncheck", side_effect=lambda _d, _i, inodes: {i: names[i] for i in inodes if i in names}), \
+                mock.patch.object(scanner, "inode_digest", side_effect=lambda _d, _i, inode, _s: digests[inode]):
+            scanner.map_image_files(disk, "/lower", "debugfs", str(target), results)
+        for finding, (_span, label) in cases.items():
+            self.assertEqual(results.image.raw_files[finding], label, finding)
+
+    @unittest.skipUnless(tool("mkfs.ext4") and tool("debugfs") and os.path.isdir("/dev/shm"), "needs mkfs.ext4, debugfs and /dev/shm")
+    def test_a_file_named_with_a_newline_is_never_image_content(self):
+        source = self.temporary / "source"
+        (source / "lower/usr/bin").mkdir(parents=True)
+        (source / "lower/usr/bin/gh").write_bytes(os.urandom(5000))
+        forged = source / "lower/usr/bin" / "x\n12\tgh"
+        forged.write_bytes(os.urandom(5000) + f" {self.secret(github())} ".encode())
+        disk = self.root / "root.raw"
+        subprocess.run([tool("mkfs.ext4"), "-q", "-F", "-d", str(source), str(disk), "16M"], check=True, timeout=120)
+        spill_parent = Path(tempfile.mkdtemp(prefix="scan-token-shapes-test-", dir="/dev/shm"))
+        baseline = self.temporary / "baseline"
+        image = ["--image", self.IMAGE, "--image-disk", f"{disk}:/lower", "--debugfs", tool("debugfs"),
+                 "--spill-parent", str(spill_parent)]
+        try:
+            self.scan(extra=["--write-baseline", str(baseline), *image])
+            status, lines, _ = self.scan(extra=["--baseline", str(baseline), *image])
+        finally:
+            shutil.rmtree(spill_parent)
+        self.assertEqual(status, 1)
+        self.assertEqual({line[0] for line in self.findings(lines)}, {"github"})
+        self.assertTrue(any(line[2] == str(disk) for line in self.findings(lines)), "raw")
+        self.assertTrue(any("\\x0a" in line[2] for line in self.findings(lines)), "the name is escaped")
+        self.assertTrue(all(len(line) == 5 for line in self.findings(lines)))
+        self.assertNotIn("github", baseline.read_text())
+
+    def test_a_baseline_listing_a_control_or_a_finding_outside_image_content_is_refused(self):
+        disk = self.write("root.raw", "nothing")
+        image = ["--image", self.IMAGE, "--image-disk", f"{disk}:/lower"]
+        for line in (f"control:planted\traw\t{disk}:/lower/x\t0\t40",
+                     f"google-api-key\traw\t{disk}:/upper/x\t0\t39",
+                     f"google-api-key\traw\t{self.root}/state.raw\t0\t39",
+                     f"google-api-key\traw\t/proc/1/environ\t0\t39"):
+            status, _, error = self.scan(extra=["--baseline", str(self.baseline_file(line)), *image])
+            self.assertEqual(status, 2, line)
             self.assertIn("never excuses", error)
-        baseline = self.baseline_file(f"jwt-google\traw\t{self.root}/rootfs.raw\t0\t40")
-        status, _, _ = self.scan(extra=["--baseline", str(baseline), "--image", self.IMAGE])
+        fine = self.baseline_file(f"github\traw\t{disk}:/lower/x\t0\t40", f"sha256\t{disk}:/lower/x\t{'0' * 64}")
+        status, _, _ = self.scan(extra=["--baseline", str(fine), *image])
         self.assertEqual(status, 0)
 
     def test_a_baseline_of_another_image_or_scanner_is_refused(self):
-        self.write("rootfs.raw", "nothing")
+        self.write("root.raw", "nothing")
         other_image = self.baseline_file(image="sha256:" + "cd" * 32)
         status, _, error = self.scan(extra=["--baseline", str(other_image), "--image", self.IMAGE])
         self.assertEqual(status, 2)

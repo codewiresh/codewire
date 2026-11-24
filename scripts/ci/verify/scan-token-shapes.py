@@ -87,9 +87,18 @@ PROVIDER_ISSUERS = {
 BOUND_SHAPES = frozenset(
     {"anthropic", "openai", "openai-legacy", "github", "github-pat", "refresh-token-field", "jwt-openai"}
 )
-# Where in an image a baseline never applies: what a user or a run writes.
-UNEXCUSED_DIRECTORIES = ("/home", "/workspace", "/root", "/tmp", "/var/tmp", "/run")
 BASELINE_HEADER = "# scan-token-shapes baseline"
+BLOB_NAME = re.compile(r"[0-9a-f]{64}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+DECOMPRESSED = "!decompressed"
+ICHECK_BATCH = 512
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def printable(path):
+    """PATH with control characters escaped: a name an image or a guest chose
+    must not break a line of the output or the baseline."""
+    return CONTROL.sub(lambda character: f"\\x{ord(character.group()):02x}", path)
 PLACEHOLDER_JWT_SIGNATURES = frozenset({b"", b"codewire-placeholder"})
 
 PLACEHOLDER = re.compile(rb"cwp1_[A-Za-z0-9_\-]{43}")
@@ -177,41 +186,143 @@ class Where:
 WHERE = Where()
 
 
+def sha256_file(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+class ImageContent:
+    """The bytes a walk declares as the image's own, and nothing else
+    (docs/journeys/network-and-egress.md, "A baseline for what an image
+    ships"): files under an image directory of a declared disk, read through
+    its filesystem or raw where debugfs maps a block to one, and blobs whose
+    name is their SHA-256."""
+
+    def __init__(self, disks=None, blob_dirs=frozenset()):
+        self.disks = disks or {}
+        self.blob_dirs = blob_dirs
+        # A raw finding in a declared disk -> the image file every block of it
+        # is in, or None when they aren't all one image file's, or can't be
+        # mapped.
+        self.raw_files = {}
+        # File label -> SHA-256, for image files holding a finding.
+        self.file_digests = {}
+        # Declared disk -> the name a baseline knows it by: its ext4
+        # filesystem UUID, which a copy of the disk at another path (a
+        # checkpoint's root) shares, or its path when that can't be read.
+        self.names = {disk: disk for disk in self.disks}
+
+    def name_disks(self, debugfs):
+        for disk in self.disks:
+            uuid = filesystem_uuid(debugfs, disk)
+            if uuid is not None:
+                self.names[disk] = f"ext4-uuid:{uuid}"
+
+    def key(self, path):
+        """PATH as a baseline lists it: a declared disk by its name."""
+        for disk, name in self.names.items():
+            if path == disk or path.startswith(disk + ":/") or path.startswith(disk + DECOMPRESSED):
+                return name + path[len(disk):]
+        return path
+
+    def key_finding(self, finding):
+        return (finding[0], finding[1], self.key(finding[2]), finding[3], finding[4])
+
+    def is_blob(self, path):
+        return os.path.dirname(path) in self.blob_dirs and BLOB_NAME.fullmatch(os.path.basename(path)) is not None
+
+    def declared(self, path):
+        """Whether PATH, as a baseline lists it, can be image content."""
+        if CONTROL.search(path):
+            return False
+        path = path.removesuffix(DECOMPRESSED)
+        if self.is_blob(path):
+            return True
+        named = {}
+        for disk, name in self.names.items():
+            named.setdefault(name, set()).add(self.disks[disk])
+        if path.startswith("ext4-uuid:"):
+            image, inside, inner = path[len("ext4-uuid:"):].partition(":/")
+            image = "ext4-uuid:" + image
+        else:
+            image, inside, inner = path.partition(":/")
+        if inside:
+            return any(canaries.within("/" + inner, directory) for directory in named.get(image, ()))
+        return path in named
+
+    def file_of(self, finding):
+        """The image file FINDING is in, or None."""
+        path = finding[2]
+        if CONTROL.search(path):
+            return None
+        label = path.removesuffix(DECOMPRESSED)
+        if self.is_blob(label):
+            return label if self.digest(label) is not None else None
+        image, inside, inner = label.partition(":/")
+        if inside:
+            directory = self.disks.get(image)
+            return label if directory is not None and canaries.within("/" + inner, directory) else None
+        if path in self.disks:
+            return self.raw_files.get(finding)
+        return None
+
+    def digest(self, label):
+        """The SHA-256 of an image file as it is now, or None. A blob is
+        image content only when its name is its SHA-256."""
+        if self.is_blob(label):
+            if label not in self.file_digests:
+                self.file_digests[label] = sha256_file(label)
+            return self.file_digests[label] if self.file_digests[label] == os.path.basename(label) else None
+        return self.file_digests.get(label)
+
+
+class Baseline:
+    def __init__(self, findings=frozenset(), digests=None):
+        self.findings = findings
+        self.digests = digests or {}
+
+
 class Results:
-    def __init__(self, controls, baseline=frozenset(), image_disks=frozenset()):
+    def __init__(self, controls, baseline=None, image=None):
         self.controls = controls
-        self.baseline = baseline
-        self.image_disks = image_disks
+        self.baseline = baseline or Baseline()
+        self.image = image or ImageContent()
         self.found_controls = set()
         self.findings = set()
+        # Finding -> the file bytes [start, end) it was read from.
+        self.spans = {}
         self.placeholders = {}
 
-    def excused(self, finding):
-        """Whether the baseline excuses FINDING: the same finding, of a shape
-        no walk binds, in a declared image disk, read raw or through its
-        filesystem outside what a user or a run writes
-        (docs/journeys/network-and-egress.md, "A baseline for what an image
-        ships"). A state disk is never declared: mounted as a home, its own
-        root holds the user's files."""
-        shape, _form, path, _offset, _length = finding
-        if finding not in self.baseline or shape.removeprefix("cut:") in BOUND_SHAPES:
-            return False
-        if "!decompressed" in path:
-            return False
-        image, inside, inner = path.partition(":/")
-        if image not in self.image_disks:
-            return False
-        return not inside or not any(canaries.within("/" + inner, directory) for directory in UNEXCUSED_DIRECTORIES)
+    def excusal(self, finding):
+        """None when the baseline doesn't excuse FINDING; else the image file
+        it is in, and whether its shape is one a walk binds, which is excused
+        only while that file's SHA-256 is the baseline's."""
+        if self.image.key_finding(finding) not in self.baseline.findings:
+            return None
+        shape = finding[0]
+        label = self.image.file_of(finding)
+        if label is None:
+            return None
+        bound = shape.removeprefix("cut:") in BOUND_SHAPES
+        if bound:
+            now = self.image.digest(label)
+            if now is None or now != self.baseline.digests.get(self.image.key(label)):
+                return None
+        return label, bound
 
     def placeholder(self, shape, key):
         self.placeholders.setdefault(shape, set()).add(key)
 
-    def report(self, shape, form, path, offset, length, matched):
+    def report(self, shape, form, path, offset, length, matched, span):
         name = self.controls.get(matched)
         if name is not None:
             self.found_controls.add(name)
             shape = f"control:{name}"
-        self.findings.add((shape, form, path, offset, length))
+        finding = (shape, form, path, offset, length)
+        self.findings.add(finding)
+        start, end = self.spans.get(finding, span)
+        self.spans[finding] = (min(start, span[0]), max(end, span[1]))
 
 
 def b64url_json(segment):
@@ -274,13 +385,16 @@ def hits(data):
     return sorted(found)
 
 
-def scan_text(data, final, form, path, position, results, cut_unit=None):
+def scan_text(data, final, form, path, position, results, cut_unit=None, extent=None):
     """Find every shape in DATA, a byte string in one form.
 
     POSITION maps an index in DATA to the offset reported. A match that runs
     to DATA's end is left for the next chunk unless FINAL. CUT_UNIT, the
     bytes one character takes in the file, turns on the page-end rule.
+    EXTENT, when POSITION can't map a match's end, is the file bytes DATA
+    came from.
     """
+    span = (lambda start, end: extent) if extent else (lambda start, end: (position(start), position(end)))
     covered = 0
     for at in hits(data):
         if at < covered:
@@ -294,7 +408,7 @@ def scan_text(data, final, form, path, position, results, cut_unit=None):
             if kind == "placeholder":
                 results.placeholder(shape, (form, path, position(at)))
             elif kind == "finding":
-                results.report(shape, form, path, position(at), len(match.group(0)), matched)
+                results.report(shape, form, path, position(at), len(match.group(0)), matched, span(at, match.end()))
             continue
         prefix = PREFIX.match(data, at) if cut_unit is not None else None
         if prefix is None:
@@ -311,7 +425,7 @@ def scan_text(data, final, form, path, position, results, cut_unit=None):
         if data.startswith(b"cwp1_", prefix.end()):
             results.placeholder(shape, (form, path, position(at)))
         else:
-            results.report("cut:" + shape, form, path, position(at), run_end - at, None)
+            results.report("cut:" + shape, form, path, position(at), run_end - at, None, span(at, run_end))
 
 
 def utf16_runs(data, final):
@@ -368,7 +482,15 @@ def scan_forms(data, base, final, path, results, prefix="", cut=False):
         )
     for start, end in json_escaped_runs(data, final):
         unescaped = JSON_ESCAPE.sub(unescape, data[start:end])
-        scan_text(unescaped, True, f"{prefix}json-escaped", path, lambda _index, start=start: base + start, results)
+        scan_text(
+            unescaped,
+            True,
+            f"{prefix}json-escaped",
+            path,
+            lambda _index, start=start: base + start,
+            results,
+            extent=(base + start, base + end),
+        )
 
 
 def base64_runs(data, final):
@@ -409,25 +531,29 @@ def base64_decodings(run):
                 yield decode(usable)
 
 
-def scan_base64(data, base, final, path, results):
+def scan_base64(data, base, final, path, results, unit=1):
+    """Each base64 run in DATA decoded and scanned; UNIT is the file bytes one
+    character of DATA takes (2 for text narrowed from UTF-16LE)."""
     for start, end in base64_runs(data, final):
+        run = _AtRunStart(results, base + unit * start, base + unit * end)
         for decoded in base64_decodings(data[start:end]):
-            scan_forms(decoded, base + start, True, path, _AtRunStart(results, base + start), "base64/")
+            scan_forms(decoded, base + unit * start, True, path, run, "base64/")
 
 
 class _AtRunStart:
     """Results for a decoded run: every offset is the run's own start."""
 
-    def __init__(self, results, start):
+    def __init__(self, results, start, end):
         self._results = results
         self._start = start
+        self._end = end
 
     def placeholder(self, shape, key):
         form, path, _offset = key
         self._results.placeholder(shape, (form, path, self._start))
 
-    def report(self, shape, form, path, _offset, length, matched):
-        self._results.report(shape, form, path, self._start, length, matched)
+    def report(self, shape, form, path, _offset, length, matched, _span):
+        self._results.report(shape, form, path, self._start, length, matched, (self._start, self._end))
 
 
 def carry_start(combined):
@@ -472,7 +598,7 @@ def scan_block(combined, base, final, path, results, cut):
     scan_forms(combined, base, final, path, results, cut=cut)
     scan_base64(combined, base, final, path, results)
     for start, end in utf16_runs(combined, final):
-        scan_base64(combined[start:end:2], base + start, True, path, results)
+        scan_base64(combined[start:end:2], base + start, True, path, results, unit=2)
 
 
 def file_chunks(descriptor):
@@ -622,8 +748,142 @@ def scan_ext4(image, debugfs, spill, results, scanned):
         canaries.open_up(target)
         inside = lambda path: f"{image}:/{os.path.relpath(path, target)}"  # noqa: E731
         scan_tree(target, set(), results, scanned, inside, cut=False)
+        directory = results.image.disks.get(image)
+        if directory is not None:
+            map_image_files(image, directory, debugfs, target, results)
     finally:
         canaries.remove_spill(target)
+
+
+def map_image_files(image, directory, debugfs, target, results):
+    """While IMAGE's files are dumped at TARGET: hash each file under
+    DIRECTORY that holds a finding, and map each raw finding in IMAGE to the
+    one file under DIRECTORY that owns every block of it.
+
+    Names come from the guest's own filesystem, so a raw finding's file is
+    hashed by its inode, and a name with a control character, one not in the
+    dump, or a hash that disagrees with the file's under that name maps the
+    finding to None."""
+    content = results.image
+    for _shape, _form, path, _offset, _length in results.findings:
+        label = path.removesuffix(DECOMPRESSED)
+        inner = label.removeprefix(f"{image}:")
+        if inner != label and canaries.within(inner, directory) and label not in content.file_digests:
+            content.file_digests[label] = sha256_file(os.path.join(target, inner.lstrip("/")))
+    raw = [finding for finding in results.findings if finding[2] == image]
+    if not raw:
+        return
+    block_size = block_size_of(debugfs, image)
+    spans = {}
+    for finding in raw:
+        start, end = results.spans.get(finding, (0, 0))
+        spans[finding] = range(start // block_size, (end - 1) // block_size + 1) if end > start else None
+    owners = icheck(debugfs, image, sorted({block for blocks in spans.values() if blocks for block in blocks}))
+    names = ncheck(debugfs, image, sorted({inode for inode in owners.values() if inode is not None}))
+    digests = {}
+    for finding, blocks in spans.items():
+        label = None
+        found = {owners.get(block) for block in blocks} if blocks else {None}
+        if len(found) == 1 and None not in found:
+            inode = found.pop()
+            label = image_file(image, directory, target, names.get(inode, []))
+            if label is not None:
+                if inode not in digests:
+                    digests[inode] = inode_digest(debugfs, image, inode, os.path.dirname(target))
+                if content.file_digests.setdefault(label, digests[inode]) != digests[inode]:
+                    label = None
+        content.raw_files[finding] = label
+
+
+def image_file(image, directory, target, names):
+    """The label of the image file every one of NAMES calls, or None."""
+    if not names:
+        return None
+    for name in names:
+        # A guest chose the name: no `.` or `..` part may lead the lookup
+        # out of DIR or out of the dump.
+        if CONTROL.search(name) or {".", ".."} & set(name.split("/")) or not canaries.within(name, directory):
+            return None
+        if not regular_file_in(target, name):
+            return None
+    return f"{image}:{min(names)}"
+
+
+def regular_file_in(target, name):
+    """Whether NAME is a regular file in the dump at TARGET with every part
+    before it a real directory there: the dump keeps the image's symlinks,
+    and one in a directory part would lead the lookup out of the dump."""
+    current = target
+    parts = [part for part in name.split("/") if part]
+    try:
+        for index, part in enumerate(parts):
+            current = os.path.join(current, part)
+            mode = os.lstat(current).st_mode
+            if not (stat.S_ISREG(mode) if index == len(parts) - 1 else stat.S_ISDIR(mode)):
+                return False
+    except FileNotFoundError:
+        return False
+    return bool(parts)
+
+
+def inode_digest(debugfs, image, inode, spill):
+    """The SHA-256 of an inode's own bytes, dumped by number, not by name."""
+    out = os.path.join(tempfile.mkdtemp(prefix="inode-", dir=spill), "file")
+    try:
+        canaries.debugfs_run(debugfs, image, f"dump <{inode}> {out}", out)
+        return sha256_file(out)
+    finally:
+        canaries.remove_spill(os.path.dirname(out))
+
+
+def filesystem_uuid(debugfs, image):
+    """An ext4 image's filesystem UUID, or None when it isn't one or debugfs
+    can't read it."""
+    if not canaries.is_ext4(image):
+        return None
+    try:
+        output = canaries.debugfs_run(debugfs, image, "stats")
+    except ScanError:
+        return None
+    for line in output.decode("ascii", "replace").splitlines()[:60]:
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "Filesystem UUID" and UUID.fullmatch(value.strip()):
+            return value.strip()
+    return None
+
+
+def block_size_of(debugfs, image):
+    for line in canaries.debugfs_run(debugfs, image, "stats").decode("ascii", "replace").splitlines()[:60]:
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "Block size":
+            return int(value.strip())
+    raise ScanError(f"{image}: debugfs printed no block size")
+
+
+def icheck(debugfs, image, blocks):
+    """Block -> the inode that owns it, or None."""
+    owners = {}
+    for start in range(0, len(blocks), ICHECK_BATCH):
+        batch = blocks[start:start + ICHECK_BATCH]
+        output = canaries.debugfs_run(debugfs, image, "icheck " + " ".join(map(str, batch)))
+        for line in output.decode("ascii", "replace").splitlines()[1:]:
+            block, _separator, inode = line.partition("\t")
+            if block.strip().isdigit():
+                owners[int(block)] = int(inode) if inode.strip().isdigit() else None
+    return owners
+
+
+def ncheck(debugfs, image, inodes):
+    """Inode -> every path that names it."""
+    names = {}
+    for start in range(0, len(inodes), ICHECK_BATCH):
+        batch = inodes[start:start + ICHECK_BATCH]
+        output = canaries.debugfs_run(debugfs, image, "ncheck " + " ".join(map(str, batch)))
+        for line in output.decode("utf-8", "replace").splitlines()[1:]:
+            inode, _separator, name = line.partition("\t")
+            if inode.strip().isdigit() and name.startswith("/"):
+                names.setdefault(int(inode), []).append(name)
+    return names
 
 
 def read_controls(stream):
@@ -654,33 +914,51 @@ def baseline_header(image):
     return f"{BASELINE_HEADER}\timage={image}\tscanner={scanner_digest()}"
 
 
-def read_baseline(path, image):
-    """The findings of a scan of the same image, by this same scanner, before
-    any credential was bound. A file for another image or scanner, or one
-    listing a bound shape or a control, is refused."""
+def read_baseline(path, image, content):
+    """The findings in image content of a scan of the same image, by this
+    same scanner, before any credential was bound, and the SHA-256 of each
+    image file holding one. A file for another image or scanner, or one
+    listing a control or a finding outside image content, is refused."""
     with open(path, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
     if not lines or lines[0] != baseline_header(image):
         raise ScanError(f"{path}: not a baseline of this image by this scanner")
-    baseline = set()
+    findings, digests = set(), {}
     for line in lines[1:]:
         fields = line.split("\t")
+        if len(fields) == 3 and fields[0] == "sha256":
+            digests[fields[1]] = fields[2]
+            continue
         if len(fields) != 5:
-            raise ScanError(f"{path}: not a findings list")
-        shape = fields[0]
-        if shape.startswith("control:") or shape.removeprefix("cut:") in BOUND_SHAPES:
-            raise ScanError(f"{path}: lists {shape.partition(':')[0] if shape.startswith('control:') else shape}, which a baseline never excuses")
+            raise ScanError(f"{path}: not a baseline")
+        if fields[0].startswith("control:"):
+            raise ScanError(f"{path}: lists a control, which a baseline never excuses")
+        if not content.declared(fields[2]):
+            raise ScanError(f"{path}: lists a finding outside image content, which a baseline never excuses")
         try:
-            baseline.add((shape, fields[1], fields[2], int(fields[3]), int(fields[4])))
+            findings.add((fields[0], fields[1], fields[2], int(fields[3]), int(fields[4])))
         except ValueError:
-            raise ScanError(f"{path}: not a findings list") from None
-    return frozenset(baseline)
+            raise ScanError(f"{path}: not a baseline") from None
+    return Baseline(frozenset(findings), digests)
 
 
 def write_baseline(path, image, results):
+    """This run's findings in image content, and the SHA-256 of each image
+    file holding one."""
+    findings, labels = [], set()
+    for finding in sorted(results.findings):
+        label = results.image.file_of(finding)
+        if label is not None and not finding[0].startswith("control:"):
+            findings.append(finding)
+            labels.add(label)
+    content = results.image
     with open(path, "x", encoding="utf-8") as handle:
         handle.write(baseline_header(image) + "\n")
-        handle.writelines("\t".join(map(str, finding)) + "\n" for finding in sorted(results.findings))
+        handle.writelines("\t".join(map(str, content.key_finding(finding))) + "\n" for finding in findings)
+        for label in sorted(labels):
+            digest = content.digest(label)
+            if digest is not None:
+                handle.write(f"sha256\t{content.key(label)}\t{digest}\n")
 
 
 def stop(_signum, _frame):
@@ -711,8 +989,15 @@ def main(argv=None):
         "--image-disk",
         action="append",
         default=[],
-        metavar="PATH",
-        help="a disk image that holds only the image, never a state disk; its raw findings may be excused",
+        metavar="PATH:DIR",
+        help="a disk whose files under DIR are the image alone, such as a local VM's root disk and /lower",
+    )
+    parser.add_argument(
+        "--image-blobs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="a directory of image blobs, each named by its SHA-256",
     )
     args = parser.parse_args(argv)
     if (args.baseline or args.write_baseline) and not args.image:
@@ -722,9 +1007,18 @@ def main(argv=None):
     scanned = []
     spill = None
     try:
-        baseline = read_baseline(args.baseline, args.image) if args.baseline else frozenset()
-        image_disks = frozenset(os.path.realpath(path) for path in args.image_disk)
-        results = Results(read_controls(sys.stdin.buffer), baseline, image_disks)
+        disks = {}
+        for value in args.image_disk:
+            disk, separator, directory = value.rpartition(":/")
+            if not separator or not os.path.isabs(disk):
+                raise ScanError(f"{value}: --image-disk takes an absolute PATH, a colon and the image's DIR")
+            disks[os.path.realpath(disk)] = "/" + directory.rstrip("/")
+        blob_dirs = frozenset(os.path.realpath(directory) for directory in args.image_blobs)
+        content = ImageContent(disks, blob_dirs)
+        if args.debugfs:
+            content.name_disks(args.debugfs)
+        baseline = read_baseline(args.baseline, args.image, content) if args.baseline else Baseline()
+        results = Results(read_controls(sys.stdin.buffer), baseline, content)
         # Kernel views, not storage; --processes reads what matters in /proc.
         excluded = {"/proc", "/sys", "/dev"}
         for path in args.exclude:
@@ -780,14 +1074,22 @@ def main(argv=None):
 
 
 def report(results):
-    findings = sorted(finding for finding in results.findings if not results.excused(finding))
+    findings, counted, image_files = [], {}, {}
+    for finding in sorted(results.findings):
+        excusal = results.excusal(finding)
+        if excusal is None:
+            findings.append(finding)
+        elif excusal[1]:
+            key = (finding[0], excusal[0])
+            image_files[key] = image_files.get(key, 0) + 1
+        else:
+            counted[finding[0]] = counted.get(finding[0], 0) + 1
     for shape, form, path, offset, length in findings:
-        print(f"{shape}\t{form}\t{path}\t{offset}\t{length}")
-    baseline = {}
-    for shape, *_rest in results.findings - set(findings):
-        baseline[shape] = baseline.get(shape, 0) + 1
-    for shape in sorted(baseline):
-        print(f"baseline\t{shape}\t{baseline[shape]}")
+        print(f"{shape}\t{form}\t{printable(path)}\t{offset}\t{length}")
+    for (shape, label), count in sorted(image_files.items()):
+        print(f"baseline-image\t{shape}\t{printable(label)}\t{count}")
+    for shape in sorted(counted):
+        print(f"baseline\t{shape}\t{counted[shape]}")
     for shape in sorted(results.placeholders):
         print(f"placeholder\t{shape}\t{len(results.placeholders[shape])}")
     missing = sorted(set(results.controls.values()) - results.found_controls)

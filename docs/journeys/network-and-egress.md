@@ -1470,25 +1470,49 @@ The shape scan:
   a finding. Anything else in a provider's shape is a finding. There is no
   other allow-list: a listed direct delivery exception is a finding
   wherever interception is on, because interception replaces it.
-- **A baseline for what an image ships.** Software in an image can carry
+- **A baseline for what an image ships.** Software in an image carries
   values in a provider's shape, such as a public API key inside a package,
-  and the raw disk scan finds them.
+  or a provider's token format in a CLI's tests, and every scan finds them.
+  A baseline excuses only content proven to be the image's:
   - The walk takes the baseline in the same run, before any credential is
-    bound: `--write-baseline FILE --image DIGEST` writes the findings under
-    a first line naming the image's digest and the scanner's SHA-256 (this
-    script and the canary scanner it loads).
+    bound: `--write-baseline FILE --image DIGEST`, where DIGEST is the
+    released image's digest. Its first line names that digest and the
+    scanner's SHA-256 (this script and the canary scanner it loads). The
+    lines after it are the findings in image content, and the SHA-256 of
+    each file of image content holding one.
   - `--baseline FILE --image DIGEST` refuses, with exit 2, a file for
-    another image or scanner, and one listing a control or a shape the walk
-    binds (`anthropic`, `openai`, `openai-legacy`, `github`, `github-pat`,
-    `refresh-token-field` and `jwt-openai`, cut or whole).
-  - It excuses a finding only at the same shape, form, path, offset and
-    length, and only in a disk the walk declares holds the image alone
-    (`--image-disk PATH`, never a state disk), read raw or through its
-    filesystem outside `/home`, `/workspace`, `/root`, `/tmp`, `/var/tmp`
-    and `/run`. Never a process, a stream, a decompressed log, a memory
-    image or checkpoint, or the host's cw directories.
-  - An excused finding is counted as `baseline<TAB>SHAPE<TAB>COUNT`, and the
-    walk records the baseline it used.
+    another image or scanner, and one listing a control or a finding
+    outside image content.
+  - **Image content** is:
+    - in a disk the walk declares as `--image-disk PATH:DIR`, a file under
+      DIR read through the disk's filesystem. For a local VM, PATH is the
+      root disk and DIR is `/lower`, the image under the guest's overlay;
+      the overlay's `/upper`, where the guest writes, never is;
+    - a raw finding in that disk whose block `debugfs` maps to such a file
+      (`icheck`, then `ncheck`). A block that maps to no file, or that
+      can't be mapped, fails closed: it is not image content;
+    - in `--image-blobs DIR`, a file directly in DIR whose name is the
+      SHA-256 of its bytes, which the scan checks, read raw or
+      decompressed.
+  - The baseline names a declared image disk by the ext4 filesystem UUID
+    the scan reads from it with `debugfs`, never from an argument, so a copy
+    of the same disk at another path, such as a checkpoint's root, matches
+    it. Each copy is still declared with its own `--image-disk PATH:DIR`;
+    an undeclared disk with the same UUID excuses nothing. A disk whose UUID
+    can't be read is named by its path.
+  - A finding is excused only at the same shape, form, path, offset and
+    length as in the baseline, and only in image content. Nothing else is
+    ever excused: the state disk, the overlay's upper layer, processes,
+    streams, memory images and checkpoints, logs, and the host's cw
+    directories.
+  - A shape the walk binds (`anthropic`, `openai`, `openai-legacy`,
+    `github`, `github-pat`, `refresh-token-field` and `jwt-openai`, cut or
+    whole) is excused only when its file's SHA-256 also equals the
+    baseline's for that file (a blob's name is its SHA-256), so a guest
+    that rewrites the image's files in place as root is still caught. Each
+    such excusal prints as `baseline-image<TAB>SHAPE<TAB>PATH<TAB>COUNT`,
+    and the walk lists them in its record. Any other excused finding is
+    counted as `baseline<TAB>SHAPE<TAB>COUNT`.
 - **Forms:** raw, UTF-16LE, JSON-escaped (`\u00XX` escapes inside a value),
   and inside base64:
   - a run of 40 or more base64 characters, standard or URL-safe, padding
@@ -1559,8 +1583,9 @@ The shape scan:
   `smoke-native-local-environment.sh --managed-credential-broker` (#4897).
   The shape scan, with the controls on stdin:
   `scan-token-shapes.py [--debugfs DEBUGFS] [--spill-parent DIR]
-  [--processes] [--exclude PATH]... [--image DIGEST [--image-disk PATH]...
-  [--write-baseline FILE | --baseline FILE]] [--scanned FILE] PATH...`. A log streamed from elsewhere is a PATH such as
+  [--processes] [--exclude PATH]... [--image DIGEST [--image-disk PATH:DIR]...
+  [--image-blobs DIR]... [--write-baseline FILE | --baseline FILE]]
+  [--scanned FILE] PATH...`. A log streamed from elsewhere is a PATH such as
   `<(kubectl logs …)`. No walk runs it yet. Searching for a real token
   means reading it, so the scan never shows what it read, and for a real
   sign-in
