@@ -16,7 +16,7 @@ Updated 2026-11-24.
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
-| `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87); a platform profile not yet observed (#6191) | not yet observed |
+| `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87); a platform profile observed on #6279 (75ef753cf3) | not yet observed |
 | `mac-vm-refresh` | a real Claude sign-in observed on a development build of #5957 (6636e3589f), and a synthetic one | not yet observed (#5539) |
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
 | `mac-vm-indexed-root` | the warning observed on a development build of #5831 (84a45bb16); a completed create not yet observed | not yet observed |
@@ -274,7 +274,31 @@ Issues: #3999, #4916, #4909, #6191.
   - A runtime packed from released parts around a newer guest `cw` is
     refused at "Checking the VM runtime" (`SupervisorError::Artifact`), with
     interception on or off. Use a runtime built from the same tree.
+  - Codex's `auth.json` on a platform profile holds one JWT-shaped string by
+    design: the placeholder ID token (#3999), with header `alg: none`, the
+    signature `codewire-placeholder` and an expiry in 2099. A scan for
+    `eyJ` finds it; it is not a real token.
 - **Observed:**
+  - A platform profile, on macOS 27.2.1, 2026-11-24, with `cw` and the guest
+    runtime built from #6279's head (75ef753cf3). The profile held Claude and
+    Codex sign-ins from a test account's platform store. Two VMs were walked,
+    each on its first boot and again after `cw --local stop` and `start`:
+    - `cw --local info` read `placeholders only: agents never hold your
+      tokens`. Before #6279 it read `no placeholders: they come from the
+      platform`, and the VM held the real access tokens.
+    - The supervisor logged `egress_intercept generation=1 switch=on`, then
+      `generation=2` after the restart, with no `skipped` field.
+    - Claude's login file and Codex's `auth.json` each held a 48-character
+      `cwp1_` access placeholder with the placeholder refresh token.
+      `GH_TOKEN` was the `codewire-managed` placeholder.
+    - `codex exec "say ok"` answered `ok`, and `claude -p "say ok"` got the
+      account's own usage-limit reply. A placeholder gets either answer only
+      through the front door.
+    - A scan of the guest's home, `/run`, `/tmp`, `/var/tmp` and `/etc`, which
+      prints names and counts but no values, found no real JWT and no
+      `sk-ant-` shape. Its one JWT-shaped string was the placeholder ID token.
+    - A platform profile holding an Anthropic API key was not walked: it
+      waits for #6266 (#6270). The walk is recorded on #6191.
   - Partly observed: the front door serving a request, on macOS 27.2.1,
     2026-11-16. The tree was a scratch merge, 245992e87: #4916 at 1eeee1872
     with the head that carries the placeholder seed and login (5820971c7),
