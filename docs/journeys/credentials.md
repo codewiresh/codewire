@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21. Every step not listed as observed is **not yet
+Updated 2026-11-24. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -69,6 +69,30 @@ observed**.
     checked. A CLI access token lasts 720 hours, so a walk of minutes never
     refreshes. If the access token changed anyway, the helper fails and says
     to rotate the identity, which revokes every CLI token by id.
+  - `with-dev-personal-walk.sh --browser-sessions N -- COMMAND` also signs
+    a browser in, for a walk that drives the dashboard, such as a sign-out in
+    a second tab (#5660). N is exactly 1 or 2; anything else is refused
+    before OpenBao is read. The browser never sees the password:
+    - Before the password file is removed, the helper makes N password
+      sessions of its own. Each must be the identity's before its
+      second-factor setup is skipped, and its id, never its token, is
+      logged.
+    - Each session's cookie goes into a Playwright storage-state file, 0600
+      in the private folder on tmpfs, and COMMAND gets the paths in
+      `PERSONAL_WALK_BROWSER_STORAGE_STATES`, separated by colons. A token is
+      never on a command line or in an environment; curl reads it from a
+      0600 cookie jar.
+    - COMMAND may overwrite a file with its context's final state and must
+      keep no other copy: no trace, screenshot or saved session. Anything
+      else in the files, such as page storage, goes with the folder.
+    - Afterwards, and on a signal, the helper signs out every Dev session
+      token it made or finds in those files. It fails the run if the server
+      still knows one, naming its id, or if a file can't be read.
+
+    The idp mints a session token only at sign-in, so a walk's sessions
+    never change token. A `kill -9` of the helper skips the sign-out: up to N
+    sessions then live for 8 hours after their last use. Revoke them by the
+    ids the run logged.
   - `scripts/runtime/dev/personal-credentials-walk.sh`, run under it, adds a
     synthetic Anthropic API key, selects it in a profile, creates a Sandbox
     with that profile and deletes all three by id. With `--sweep` it reports

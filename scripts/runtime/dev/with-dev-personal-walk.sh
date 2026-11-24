@@ -26,11 +26,19 @@ PRIVATE=""
 CONFIG=""
 LOGIN_PID=""
 SIGNED_IN=false
+# Browser sessions for a walk that drives the dashboard (--browser-sessions):
+# each sign-in's cookie jar, kept to sign it out, and the storage-state file
+# COMMAND gets.
+BROWSER_SESSIONS=0
+BROWSER_JARS=()
+BROWSER_STATES=()
 
 usage() {
   cat <<'USAGE'
 Usage:
-  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--document-stdin] [--] COMMAND [ARGS...]
+  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--document-stdin] [--browser-sessions N] [--] COMMAND [ARGS...]
+
+The flags may come in either order, each at most once.
 
 Dev only. Runs COMMAND signed in to https://codewire-dev.sh as the synthetic
 personal-walk identity (success+codewire-dev-personal-walk@simulator.amazonses.com),
@@ -51,10 +59,21 @@ whose password is in the OpenBao document apps/codewire/dev/ci-personal-walk
   - COMMAND runs with CW_CONFIG_DIR naming that folder, CODEWIRE_SERVER_URL,
     CW_BIN and EXPECTED_PERSONAL_WALK_USER_EMAIL set, and none of the caller's
     cw or OpenBao environment.
+  - With --browser-sessions N (exactly 1 or 2), it also makes N password
+    sessions for a browser, before the document is removed, and checks that
+    each is this identity's before skipping its second-factor setup. Each
+    session's cookie goes into a Playwright storage-state file, 0600 in the
+    private folder, and COMMAND gets the paths in
+    PERSONAL_WALK_BROWSER_STORAGE_STATES, separated by colons. The browser
+    never sees the password. COMMAND may overwrite a file with its context's
+    final state and keeps no other copy: no trace, screenshot or saved
+    session. Each session's id, never its token, is logged when it is made.
   - Afterwards, whether COMMAND passed or not, `cw logout` runs, and the
     server is asked whether each token of the walk's CLI sign-in is still
     active. One that is gets revoked by its exact token, and the run fails if
-    any stays active. The folder is then removed.
+    any stays active. Every browser session token the helper made or finds in
+    the storage-state files is signed out, and the run fails if the server
+    still knows one or a file can't be read. The folder is then removed.
 
 Synthetic only: give this account synthetic, canary-marked provider
 credentials, never a real one. A real provider key found on it is an
@@ -161,6 +180,103 @@ end_sign_in() {
   return "$status"
 }
 
+# session_lines FILE: the cookie line of every Dev session token in a
+# Playwright storage state, one per line, as a curl cookie jar reads it.
+session_lines() {
+  jq -er --arg host "${SERVER#https://}" '
+    (.cookies | if type == "array" then . else error("no cookies") end)[]
+    | select(.name == "codewire.session_token" and (.domain == $host or .domain == "." + $host))
+    | (.value | if type == "string" and test("^[^\\t\\n\\r ;]+$") then . else error("bad value") end)
+    | "\($host)\tFALSE\t/\tTRUE\t0\tcodewire.session_token\t\(.)"
+  ' "$1"
+}
+
+# jar_lines FILE: the same lines from a curl cookie jar.
+jar_lines() {
+  jq -Rr --arg host "${SERVER#https://}" '
+    split("\t")
+    | select(length == 7 and (.[0] == $host or .[0] == "#HttpOnly_" + $host)
+      and .[5] == "codewire.session_token" and (.[6] | test("^[^\\t\\n\\r ;]+$")))
+    | "\($host)\tFALSE\t/\tTRUE\t0\tcodewire.session_token\t\(.[6])"
+  ' <"$1"
+}
+
+# browser_session I: one more password session, for the browser. The password
+# goes from the 0600 document to curl through a pipe, as the approval
+# session's does, and the cookie stays in files: no token is on argv or in
+# an environment.
+browser_session() {
+  local jar="$PRIVATE/browser-$1.jar" state="$WORK/browser/state-$1.json" status session id
+  status="$(jq '{email: .data.data.userEmail, password: .data.data.password}' "$DOCUMENT" |
+    curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -c "$jar" \
+      -H 'Content-Type: application/json' --data @- "$SERVER/api/auth/sign-in")" || status=unreachable
+  # Kept at once, so that a session this function gives up on is still
+  # signed out.
+  [[ ! -e "$jar" ]] || BROWSER_JARS+=("$jar")
+  [[ "$status" == 200 ]] || die "browser session $1: the password sign-in answered HTTP $status"
+  session="$(curl -sS --max-time 30 -b "$jar" "$SERVER/api/auth/get-session")" ||
+    die "browser session $1: cannot confirm whose it is"
+  # Second-factor setup is skipped only for this synthetic identity.
+  id="$(jq -er --arg email "$WALK_EMAIL" \
+    'select(.user.email == $email) | .session.id | select(type == "string" and length > 0)' \
+    <<<"$session" 2>/dev/null)" || die "browser session $1 is not the personal-walk identity's"
+  log "browser session $1: id $id"
+  status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" \
+    -H 'Content-Type: application/json' -H "Origin: $SERVER" --data '{}' \
+    "$SERVER/api/auth/two-factor/skip-setup")" || status=unreachable
+  [[ "$status" == 200 ]] || die "browser session $1: skipping second-factor setup answered HTTP $status"
+  jq -Rn --arg host "${SERVER#https://}" '{cookies: [inputs | split("\t")
+      | select(length == 7 and (.[0] == $host or .[0] == "#HttpOnly_" + $host)
+        and .[5] == "codewire.session_token")
+      | {name: .[5], value: .[6], domain: $host, path: "/",
+         expires: (if .[4] == "0" then -1 else (.[4] | tonumber) end),
+         httpOnly: true, secure: true, sameSite: "Lax"}], origins: []}
+    | if (.cookies | length) == 1 then . else error("not one session cookie") end' \
+    <"$jar" >"$state" 2>/dev/null || die "browser session $1: the sign-in set no single session cookie"
+  BROWSER_STATES+=("$state")
+  session_lines "$state" >/dev/null 2>&1 || die "browser session $1: its storage state can't be read"
+}
+
+# end_browser_sessions: sign out every session token the helper made or finds
+# in the storage-state files, each from a 0600 cookie jar, and fail if the
+# server still knows one or a file can't be read.
+end_browser_sessions() {
+  local status=0 state file line n=0 ended=0 session id
+  [[ "$BROWSER_SESSIONS" -gt 0 ]] || return 0
+  : >"$PRIVATE/browser-tokens"
+  for file in "${BROWSER_JARS[@]}"; do
+    jar_lines "$file" >>"$PRIVATE/browser-tokens" 2>/dev/null ||
+      { log "a browser cookie jar can't be read"; status=1; }
+  done
+  for state in "${BROWSER_STATES[@]}"; do
+    [[ -e "$state" ]] || continue
+    session_lines "$state" >>"$PRIVATE/browser-tokens" 2>/dev/null ||
+      { log "a browser storage-state file can't be read: $(basename "$state")"; status=1; }
+  done
+  sort -u -o "$PRIVATE/browser-tokens" "$PRIVATE/browser-tokens"
+  while IFS= read -r line; do
+    n=$((n + 1))
+    file="$PRIVATE/sign-out-$n.jar"
+    printf '%s\n' "$line" >"$file"
+    curl -sS --max-time 30 -o /dev/null -b "$file" -H "Origin: $SERVER" \
+      -X POST "$SERVER/api/auth/sign-out" || true
+    if session="$(curl -sS --max-time 30 -b "$file" "$SERVER/api/auth/get-session")" &&
+        [[ "$session" == null ]]; then
+      ended=$((ended + 1))
+    else
+      id="$(jq -r '.session.id // "unknown"' <<<"$session" 2>/dev/null)" || id=unknown
+      log "browser session $id is still signed in; revoke it by id"
+      status=1
+    fi
+  done <"$PRIVATE/browser-tokens"
+  if [[ "$status" == 0 ]]; then
+    log "PASS browser_sessions_ended=$ended secret_values_printed=false"
+  else
+    log "FAIL browser_sessions_ended=$ended; check the account's sessions"
+  fi
+  return "$status"
+}
+
 remove_work() {
   local status=0
   [[ -n "$WORK" && -d "$WORK" ]] || return 0
@@ -180,6 +296,7 @@ finish() {
       openbao_access_cleanup "$PRIVATE/bao" "$OPENBAO_ADDR" 2>/dev/null || status=$((status ? status : 1))
     fi
     end_sign_in || status=$((status ? status : 1))
+    end_browser_sessions || status=$((status ? status : 1))
   fi
   remove_work || { log 'the private folder was not removed'; status=$((status ? status : 1)); }
   exit "$status"
@@ -188,10 +305,20 @@ finish() {
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 DOCUMENT_STDIN=false
-if [[ "${1:-}" == --document-stdin ]]; then
-  DOCUMENT_STDIN=true
-  shift
-fi
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --document-stdin)
+      [[ "$DOCUMENT_STDIN" == false ]] || die '--document-stdin is given twice'
+      DOCUMENT_STDIN=true
+      shift ;;
+    --browser-sessions)
+      [[ "$BROWSER_SESSIONS" == 0 ]] || die '--browser-sessions is given twice'
+      [[ "${2:-}" =~ ^[12]$ ]] || die '--browser-sessions takes 1 or 2'
+      BROWSER_SESSIONS="$2"
+      shift 2 ;;
+    *) break ;;
+  esac
+done
 [[ "${1:-}" != '--' ]] || shift
 [[ "$#" -gt 0 ]] || die 'name the command to run; see --help'
 [[ "$SERVER" == "$DEV_ORIGIN" ]] ||
@@ -225,7 +352,7 @@ WORK="$(mktemp -d "$XDG_RUNTIME_DIR/codewire-personal-walk.XXXXXX")"
 chmod 0700 "$WORK"
 PRIVATE="$WORK/private"
 CONFIG="$WORK/cw-config"
-mkdir -m 0700 "$PRIVATE" "$PRIVATE/bao" "$CONFIG" "$WORK/bin"
+mkdir -m 0700 "$PRIVATE" "$PRIVATE/bao" "$CONFIG" "$WORK/bin" "$WORK/browser"
 # cw opens the device page with xdg-open; this script approves the code
 # itself, so the workstation's browser must never open.
 printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/xdg-open"
@@ -294,9 +421,10 @@ status="$(jq '{email: .data.data.userEmail, password: .data.data.password}' "$DO
   curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -c "$PRIVATE/cookies" \
     -b "$PRIVATE/cookies" -H 'Content-Type: application/json' --data @- \
     "$SERVER/api/auth/sign-in")" || status=unreachable
+[[ "$status" == 200 ]] || die "the password sign-in answered HTTP $status"
+for i in $(seq 1 "$BROWSER_SESSIONS"); do browser_session "$i"; done
 secure_remove "$DOCUMENT"
 [[ ! -e "$DOCUMENT" ]] || die 'the password file was not removed'
-[[ "$status" == 200 ]] || die "the password sign-in answered HTTP $status"
 curl -sS --max-time 30 -o /dev/null -c "$PRIVATE/cookies" -b "$PRIVATE/cookies" \
   -H 'Content-Type: application/json' -H "Origin: $SERVER" --data '{}' \
   "$SERVER/api/auth/two-factor/skip-setup"
@@ -334,6 +462,10 @@ whoami="$("$CW_BIN" --server "$SERVER" whoami --output json 2>/dev/null |
 [[ "$whoami" == "$WALK_EMAIL" ]] || die 'cw is not signed in as the personal-walk identity'
 log "signed in as $WALK_EMAIL in a private cw config folder"
 
+if [[ "$BROWSER_SESSIONS" -gt 0 ]]; then
+  PERSONAL_WALK_BROWSER_STORAGE_STATES="$(IFS=:; printf '%s' "${BROWSER_STATES[*]}")"
+  export PERSONAL_WALK_BROWSER_STORAGE_STATES
+fi
 child_status=0
 if [[ "$DOCUMENT_STDIN" == true ]]; then
   # stdin carried the document; the command gets none of it.

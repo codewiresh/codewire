@@ -59,12 +59,14 @@ FAKE
 
   # Dev's HTTP surface: the OpenBao token revocation, the password sign-in and
   # device approval, and the OAuth introspection and revocation of the CLI
-  # sign-in's tokens, which live in $MOCK_STATE/active.
+  # sign-in's tokens, which live in $MOCK_STATE/active. Each password sign-in
+  # mints a session token (in $MOCK_STATE/minted); the live ones are in
+  # $MOCK_STATE/sessions, and a call's session is the cookie in its -b jar.
   cat >"$bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'curl %s\n' "$*" >>"$MOCK_STATE/argv"
-url="" output="" write_out="" jar_out="" body="" token_file="" header_file="" hint=""
+url="" output="" write_out="" jar_out="" jar_in="" body="" token_file="" header_file="" hint=""
 declare -A form=()
 while (($# > 0)); do
   case "$1" in
@@ -72,7 +74,8 @@ while (($# > 0)); do
     -o|--output) output="$2"; shift 2 ;;
     -w|--write-out) write_out="$2"; shift 2 ;;
     -c) jar_out="$2"; shift 2 ;;
-    -b|--max-time|--connect-timeout|--retry|--max-redirs|--proto|--noproxy|--request|-X|-H) shift 2 ;;
+    -b) jar_in="$2"; shift 2 ;;
+    --max-time|--connect-timeout|--retry|--max-redirs|--proto|--noproxy|--request|-X|-H) shift 2 ;;
     --header) header_file="${2#@}"; shift 2 ;;
     --data) body="$2"; shift 2 ;;
     --data-urlencode)
@@ -89,6 +92,11 @@ done
 respond() { if [[ -n "$output" ]]; then printf '%s' "$1" >"$output"; else printf '%s' "$1"; fi; }
 code() { [[ -z "$write_out" ]] || printf '%s' "$1"; }
 active() { grep -qxF -- "$1" "$MOCK_STATE/active" 2>/dev/null; }
+session_of() {
+  [[ -n "$jar_in" && -f "$jar_in" ]] || return 0
+  awk -F '\t' '$6 == "codewire.session_token" { print $7 }' "$jar_in" | tail -1
+}
+live() { [[ -n "$1" ]] && grep -qxF -- "$1" "$MOCK_STATE/sessions" 2>/dev/null; }
 case "$url" in
   https://openbao.example.invalid/v1/auth/token/revoke-self)
     [[ "$(<"$header_file")" == 'X-Vault-Token: synthetic-bao-token-6074' ]] || exit 97
@@ -106,9 +114,18 @@ case "$url" in
     while IFS= read -r file; do stat -c '%a' "$file"; done <"$MOCK_STATE/password-files" \
       >"$MOCK_STATE/password-file-modes"
     printf 'sign-in\n' >>"$MOCK_STATE/events"
-    printf '#HttpOnly_codewire-dev.sh\tFALSE\t/\tTRUE\t0\tcodewire.session_token\tsession-1\n' >"$jar_out"
+    token="session-$(($(wc -l <"$MOCK_STATE/minted") + 1))"
+    printf '%s\n' "$token" >>"$MOCK_STATE/minted"
+    printf '%s\n' "$token" >>"$MOCK_STATE/sessions"
+    printf '#HttpOnly_codewire-dev.sh\tFALSE\t/\tTRUE\t1795600000\tcodewire.session_token\t%s\n' \
+      "$token" >"$jar_out"
     code 200 ;;
-  https://codewire-dev.sh/api/auth/two-factor/skip-setup) printf 'skip-setup\n' >>"$MOCK_STATE/events" ;;
+  https://codewire-dev.sh/api/auth/two-factor/skip-setup)
+    token="$(session_of)"
+    live "$token" || exit 104
+    if [[ "$token" == session-1 ]]; then printf 'skip-setup\n' >>"$MOCK_STATE/events"
+    else printf 'skip-setup %s\n' "$token" >>"$MOCK_STATE/events"; fi
+    code 200 ;;
   'https://codewire-dev.sh/device?user_code=ABCDEFGH')
     printf 'device-page\n' >>"$MOCK_STATE/events"
     respond '<form><input type="hidden" name="_csrf" value="csrf-1"></form>' ;;
@@ -118,10 +135,20 @@ case "$url" in
     : >"$MOCK_STATE/approved"
     respond 'approved' ;;
   https://codewire-dev.sh/api/auth/sign-out)
-    printf 'browser-sign-out\n' >>"$MOCK_STATE/events"
-    : >"$MOCK_STATE/browser-signed-out" ;;
+    token="$(session_of)"
+    if [[ "$token" == session-1 ]]; then printf 'browser-sign-out\n' >>"$MOCK_STATE/events"
+    else printf 'sign-out %s\n' "$token" >>"$MOCK_STATE/events"; fi
+    if [[ "$MOCK_MODE" != browser_sign_out_ignored || "$token" == session-1 ]]; then
+      grep -vxF -- "$token" "$MOCK_STATE/sessions" >"$MOCK_STATE/sessions.next" || true
+      mv "$MOCK_STATE/sessions.next" "$MOCK_STATE/sessions"
+    fi ;;
   https://codewire-dev.sh/api/auth/get-session)
-    if [[ -e "$MOCK_STATE/browser-signed-out" ]]; then respond null; else respond '{"user":{}}'; fi ;;
+    token="$(session_of)"
+    email="$EMAIL"
+    [[ "$MOCK_MODE" != browser_wrong_identity || "$token" == session-1 ]] || email=someone@example.test
+    if live "$token"; then
+      respond "$(jq -cn --arg email "$email" --arg id "sid${token#session}" '{user: {email: $email}, session: {id: $id}}')"
+    else respond null; fi ;;
   https://codewire-dev.sh/api/oauth/introspect)
     [[ "${form[client_id]:-}" == codewire-cli && -n "$hint" ]] || exit 101
     token="$(cat "$token_file")"
@@ -214,6 +241,33 @@ done
 # The password file is already gone.
 [[ ! -e "$(dirname "$CW_CONFIG_DIR")/private/document.json" ]]
 [[ "${MOCK_MODE:-}" != refresh_in_child ]] || "$CW_BIN" --server "$CODEWIRE_SERVER_URL" refresh
+# Browser sessions: one 0600 storage state per session, each holding only its
+# live session's cookie for the Dev origin.
+if [[ "${MOCK_BROWSER_SESSIONS:-0}" -gt 0 ]]; then
+  IFS=: read -r -a states <<<"$PERSONAL_WALK_BROWSER_STORAGE_STATES"
+  [[ "${#states[@]}" == "$MOCK_BROWSER_SESSIONS" ]]
+  for state in "${states[@]}"; do
+    [[ "$state" == "$(dirname "$CW_CONFIG_DIR")"/browser/state-*.json ]]
+    [[ "$(stat -c '%a' "$state")" == 600 ]]
+    token="$(jq -er '.origins == [] and (.cookies | length == 1) and .cookies[0].name == "codewire.session_token"
+      and .cookies[0].domain == "codewire-dev.sh" and .cookies[0].httpOnly and .cookies[0].secure
+      | if . then "ok" else error("shape") end' "$state")"
+    token="$(jq -r '.cookies[0].value' "$state")"
+    grep -qxF -- "$token" "$MOCK_STATE/sessions"
+  done
+  case "${MOCK_MODE:-}" in
+    browser_writeback)
+      # The browser's final state: another session for the Dev origin, one for
+      # another host, and page storage.
+      printf 'session-extra\n' | tee -a "$MOCK_STATE/minted" >>"$MOCK_STATE/sessions"
+      jq '.cookies += [.cookies[0] + {value: "session-extra"}, .cookies[0] + {domain: "example.test", value: "other-host"}]
+        | .origins = [{origin: "https://codewire-dev.sh", localStorage: [{name: "k", value: "v"}]}]' \
+        "${states[0]}" >"${states[0]}.next"
+      mv "${states[0]}.next" "${states[0]}" ;;
+    browser_bad_state) printf 'not json\n' >"${states[0]}" ;;
+    browser_term) kill -TERM "$PPID" ;;
+  esac
+fi
 printf 'child-ran\n'
 exit "${MOCK_CHILD_STATUS:-0}"
 CHILD
@@ -234,6 +288,8 @@ run_case() {
   : >"$CASE/state/tokens"
   : >"$CASE/state/revokes"
   : >"$CASE/state/active"
+  : >"$CASE/state/minted"
+  : >"$CASE/state/sessions"
   make_fake_tools "$CASE/bin"
   make_child "$CASE/child"
   local status=0
@@ -241,6 +297,7 @@ run_case() {
   env -i PATH="$CASE/bin:$PATH" HOME="$CASE/home" TMPDIR="$CASE/tmp" \
     XDG_RUNTIME_DIR="${CASE_RUNTIME:-$RUNTIME}" MOCK_STATE="$CASE/state" MOCK_MODE="$mode" \
     MOCK_EMAIL="$EMAIL" EMAIL="$EMAIL" MOCK_CHILD_STATUS="${CHILD_STATUS:-0}" \
+    MOCK_BROWSER_SESSIONS="${BROWSER:-0}" \
     CW_BIN="$CASE/bin/cw" CODEWIRE_ACCESS_CLIENT="$CASE/access" \
     ${SERVER_URL:+CODEWIRE_SERVER_URL="$SERVER_URL"} \
     BAO_ADDR=https://openbao.example.invalid BAO_TOKEN=stale-owner-token VAULT_TOKEN=stale \
@@ -260,6 +317,15 @@ run_case() {
     fail "$name: the password reached the child's environment"
   ! grep -rqF -- "$PASSWORD" "$RUNTIME" "$CASE/tmp" "$CASE/home" || fail "$name: the password was left in a file"
   ! grep -qF -- "$BAO_TOKEN_FIXTURE" "$CASE/out" "$CASE/err" || fail "$name: the OpenBao token reached output"
+  # No session token reaches argv, output or the child's environment either.
+  local token
+  while IFS= read -r token; do
+    for file in "$CASE/out" "$CASE/err" "$CASE/state/argv"; do
+      ! grep -qF -- "$token" "$file" || fail "$name: session token $token reached $(basename "$file")"
+    done
+    [[ ! -f "$CASE/state/child.env" ]] || ! grep -qF -- "$token" "$CASE/state/child.env" ||
+      fail "$name: session token $token reached the child's environment"
+  done <"$CASE/state/minted"
   # Every OpenBao token issued was revoked, and nothing is left behind.
   [[ "$(wc -l <"$CASE/state/revokes")" == "$(wc -l <"$CASE/state/tokens")" ]] ||
     fail "$name: an OpenBao token was left unrevoked"
@@ -328,6 +394,65 @@ expect_events "$SIGN_IN"$'\n'"$CHECKED"
 expect_no_grant
 expect_err 'not signed in as the personal-walk identity'
 
+expect_no_session() {
+  [[ ! -s "$CASE/state/sessions" ]] ||
+    fail "$(basename "$CASE"): sessions still signed in: [$(tr '\n' ',' <"$CASE/state/sessions")]"
+}
+
+# Browser sessions are made before the password file is removed, each
+# checked as this identity's before its setup is skipped, and every one is
+# signed out afterwards.
+readonly BROWSER_SIGN_IN=$'bao-read\nbao-revoke\ncw-login\nsign-in\nsign-in\nskip-setup session-2\nsign-in\nskip-setup session-3\nskip-setup\ndevice-page\napprove\nbrowser-sign-out\ncw-whoami'
+BROWSER=2 run_case browser_sessions success 0 --browser-sessions 2
+expect_events "$BROWSER_SIGN_IN"$'\nchild\n'"$CHECKED"$'\nsign-out session-2\nsign-out session-3'
+expect_password_in_one_file
+expect_no_grant
+expect_no_session
+expect_err 'browser session 1: id sid-2'
+expect_err 'browser session 2: id sid-3'
+expect_err 'PASS browser_sessions_ended=2 secret_values_printed=false'
+grep -qx 'child-ran' "$CASE/out" || fail 'browser_sessions: the child did not run'
+
+# A session the browser's final state holds is signed out too; another host's
+# cookie is not the helper's to touch.
+BROWSER=1 run_case browser_writeback browser_writeback 0 --browser-sessions 1
+expect_no_session
+grep -qx 'sign-out session-extra' "$CASE/state/events" || fail 'browser_writeback: the written-back session was not signed out'
+! grep -q 'other-host' "$CASE/state/events" || fail 'browser_writeback: another host cookie was used'
+expect_err 'PASS browser_sessions_ended=2'
+
+# A state file that can't be read fails the run; the sessions still end.
+BROWSER=1 run_case browser_bad_state browser_bad_state 1 --browser-sessions 1
+expect_no_session
+expect_err "a browser storage-state file can't be read: state-1.json"
+expect_err 'FAIL browser_sessions_ended=1'
+
+# A session the server still knows after its sign-out fails the run, by id.
+BROWSER=1 run_case browser_sign_out_ignored browser_sign_out_ignored 1 --browser-sessions 1
+expect_err 'browser session sid-2 is still signed in; revoke it by id'
+expect_err 'FAIL browser_sessions_ended=0'
+
+# A session that is not this identity's: its setup is never skipped, nothing
+# runs, and it is still signed out.
+BROWSER=1 run_case browser_wrong_identity browser_wrong_identity 1 --browser-sessions 1
+expect_no_session
+expect_err "browser session 1 is not the personal-walk identity's"
+! grep -q '^skip-setup session-2' "$CASE/state/events" || fail 'browser_wrong_identity: setup was skipped'
+! grep -qx child "$CASE/state/events" || fail 'browser_wrong_identity: the child ran'
+
+# A signal to the helper still runs the sign-out sweep.
+BROWSER=2 run_case browser_term browser_term 130 --browser-sessions 2
+expect_no_session
+expect_no_grant
+expect_err 'PASS browser_sessions_ended=2'
+
+# N is exactly 1 or 2, refused before anything is read or made.
+for count in 0 3 12 x ''; do
+  run_case "browser_count_${count:-empty}" success 1 --browser-sessions "$count"
+  expect_events ''
+  expect_err '--browser-sessions takes 1 or 2'
+done
+
 # Dev only: another origin is refused before OpenBao is read.
 SERVER_URL=https://codewire.sh run_case production_origin success 1
 expect_events ''
@@ -370,6 +495,26 @@ expect_err 'has an unexpected shape'
 run_case stdin_empty success 1 --document-stdin
 expect_events ''
 expect_err 'has an unexpected shape'
+# --document-stdin and --browser-sessions together, in either order: the
+# browser sessions come from the document on stdin, and every one ends.
+for order in stdin_first browser_first; do
+  if [[ "$order" == stdin_first ]]; then flags=(--document-stdin --browser-sessions 2)
+  else flags=(--browser-sessions 2 --document-stdin); fi
+  BROWSER=2 STDIN_FILE="$TEST_TMP/stdin-document.json" run_case "stdin_browser_$order" success 0 "${flags[@]}"
+  expect_events "${BROWSER_SIGN_IN#$'bao-read\nbao-revoke\n'}"$'\nchild\n'"$CHECKED"$'\nsign-out session-2\nsign-out session-3'
+  expect_no_grant
+  expect_no_session
+  [[ ! -s "$CASE/state/tokens" ]] || fail "stdin_browser_$order: the access client was asked for a token"
+  ! grep -q '^bao ' "$CASE/state/argv" || fail "stdin_browser_$order: bao ran"
+  expect_err 'PASS browser_sessions_ended=2 secret_values_printed=false'
+done
+# Each flag at most once, refused before anything is read.
+STDIN_FILE="$TEST_TMP/stdin-document.json" run_case stdin_twice success 1 --document-stdin --browser-sessions 1 --document-stdin
+expect_events ''
+expect_err '--document-stdin is given twice'
+run_case browser_twice success 1 --browser-sessions 1 --browser-sessions 2
+expect_events ''
+expect_err '--browser-sessions is given twice'
 rm -f -- "$TEST_TMP/stdin-document.json" "$TEST_TMP/stdin-wrong.json"
 
 # The runtime directory must be the caller's own 0700 tmpfs directory.
