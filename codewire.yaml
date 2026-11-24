@@ -12,13 +12,14 @@
 # a repositories entry in a copy of this file. Cloud does not use
 # workspace.vm_only.
 #
-# Resources suit a full workspace build. On a smaller machine, pass lower
-# values to the create command (--cpu, --memory, --disk).
+# Resources suit a full workspace build, and match a Dev warm pool member, so
+# a create from this file starts warm (#6289). On a smaller machine, pass
+# lower values to the create command (--cpu, --memory, --disk).
 version: 1
 image: workspace
 cpu: "8"
 memory: "16Gi"
-disk: "100Gi"
+disk: "120Gi"
 agents:
   tools:
     - claude-code
