@@ -40,6 +40,9 @@ const (
 	// CredentialDelegationServiceFrontDoorDelegationProcedure is the fully-qualified name of the
 	// CredentialDelegationService's FrontDoorDelegation RPC.
 	CredentialDelegationServiceFrontDoorDelegationProcedure = "/codewire.v1.CredentialDelegationService/FrontDoorDelegation"
+	// CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure is the fully-qualified name
+	// of the CredentialDelegationService's EnvironmentCredentialPlaceholders RPC.
+	CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure = "/codewire.v1.CredentialDelegationService/EnvironmentCredentialPlaceholders"
 )
 
 // CredentialDelegationServiceClient is a client for the codewire.v1.CredentialDelegationService
@@ -55,6 +58,14 @@ type CredentialDelegationServiceClient interface {
 	// PERMISSION_DENIED, the same for each; a second join of a live epoch is
 	// ALREADY_EXISTS. It ends with its epoch.
 	FrontDoorDelegation(context.Context) *connect.BidiStreamForClient[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
+	// A local VM's seed placeholders on a platform profile (#4001), asked
+	// before the boot starts: for each requested slot the selected profile
+	// grants, the placeholder that boot's delegation leases carry. The
+	// selection is admitted exactly as DelegateCredentials admits it, before
+	// any key is read; a refused one is PERMISSION_DENIED, the same for each
+	// reason. A key that can't be read or created is UNAVAILABLE, and more
+	// than 30 calls by one user in a minute RESOURCE_EXHAUSTED. Never logged.
+	EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error)
 }
 
 // NewCredentialDelegationServiceClient constructs a client for the
@@ -80,13 +91,20 @@ func NewCredentialDelegationServiceClient(httpClient connect.HTTPClient, baseURL
 			connect.WithSchema(credentialDelegationServiceMethods.ByName("FrontDoorDelegation")),
 			connect.WithClientOptions(opts...),
 		),
+		environmentCredentialPlaceholders: connect.NewClient[v1.EnvironmentCredentialPlaceholdersRequest, v1.EnvironmentCredentialPlaceholdersResponse](
+			httpClient,
+			baseURL+CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure,
+			connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentCredentialPlaceholders")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // credentialDelegationServiceClient implements CredentialDelegationServiceClient.
 type credentialDelegationServiceClient struct {
-	delegateCredentials *connect.Client[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]
-	frontDoorDelegation *connect.Client[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
+	delegateCredentials               *connect.Client[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]
+	frontDoorDelegation               *connect.Client[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
+	environmentCredentialPlaceholders *connect.Client[v1.EnvironmentCredentialPlaceholdersRequest, v1.EnvironmentCredentialPlaceholdersResponse]
 }
 
 // DelegateCredentials calls codewire.v1.CredentialDelegationService.DelegateCredentials.
@@ -97,6 +115,12 @@ func (c *credentialDelegationServiceClient) DelegateCredentials(ctx context.Cont
 // FrontDoorDelegation calls codewire.v1.CredentialDelegationService.FrontDoorDelegation.
 func (c *credentialDelegationServiceClient) FrontDoorDelegation(ctx context.Context) *connect.BidiStreamForClient[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse] {
 	return c.frontDoorDelegation.CallBidiStream(ctx)
+}
+
+// EnvironmentCredentialPlaceholders calls
+// codewire.v1.CredentialDelegationService.EnvironmentCredentialPlaceholders.
+func (c *credentialDelegationServiceClient) EnvironmentCredentialPlaceholders(ctx context.Context, req *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error) {
+	return c.environmentCredentialPlaceholders.CallUnary(ctx, req)
 }
 
 // CredentialDelegationServiceHandler is an implementation of the
@@ -112,6 +136,14 @@ type CredentialDelegationServiceHandler interface {
 	// PERMISSION_DENIED, the same for each; a second join of a live epoch is
 	// ALREADY_EXISTS. It ends with its epoch.
 	FrontDoorDelegation(context.Context, *connect.BidiStream[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]) error
+	// A local VM's seed placeholders on a platform profile (#4001), asked
+	// before the boot starts: for each requested slot the selected profile
+	// grants, the placeholder that boot's delegation leases carry. The
+	// selection is admitted exactly as DelegateCredentials admits it, before
+	// any key is read; a refused one is PERMISSION_DENIED, the same for each
+	// reason. A key that can't be read or created is UNAVAILABLE, and more
+	// than 30 calls by one user in a minute RESOURCE_EXHAUSTED. Never logged.
+	EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error)
 }
 
 // NewCredentialDelegationServiceHandler builds an HTTP handler from the service implementation. It
@@ -133,12 +165,20 @@ func NewCredentialDelegationServiceHandler(svc CredentialDelegationServiceHandle
 		connect.WithSchema(credentialDelegationServiceMethods.ByName("FrontDoorDelegation")),
 		connect.WithHandlerOptions(opts...),
 	)
+	credentialDelegationServiceEnvironmentCredentialPlaceholdersHandler := connect.NewUnaryHandler(
+		CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure,
+		svc.EnvironmentCredentialPlaceholders,
+		connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentCredentialPlaceholders")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.CredentialDelegationService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case CredentialDelegationServiceDelegateCredentialsProcedure:
 			credentialDelegationServiceDelegateCredentialsHandler.ServeHTTP(w, r)
 		case CredentialDelegationServiceFrontDoorDelegationProcedure:
 			credentialDelegationServiceFrontDoorDelegationHandler.ServeHTTP(w, r)
+		case CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure:
+			credentialDelegationServiceEnvironmentCredentialPlaceholdersHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -154,4 +194,8 @@ func (UnimplementedCredentialDelegationServiceHandler) DelegateCredentials(conte
 
 func (UnimplementedCredentialDelegationServiceHandler) FrontDoorDelegation(context.Context, *connect.BidiStream[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.FrontDoorDelegation is not implemented"))
+}
+
+func (UnimplementedCredentialDelegationServiceHandler) EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.EnvironmentCredentialPlaceholders is not implemented"))
 }

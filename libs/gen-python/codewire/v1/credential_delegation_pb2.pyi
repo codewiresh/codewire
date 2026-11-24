@@ -7,6 +7,28 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class EnvironmentCredentialPlaceholdersRequest(_message.Message):
+    __slots__ = ("selection", "capability_slots")
+    SELECTION_FIELD_NUMBER: _ClassVar[int]
+    CAPABILITY_SLOTS_FIELD_NUMBER: _ClassVar[int]
+    selection: CredentialDelegationOpen
+    capability_slots: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, selection: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., capability_slots: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class EnvironmentCredentialPlaceholder(_message.Message):
+    __slots__ = ("capability_slot", "placeholder")
+    CAPABILITY_SLOT_FIELD_NUMBER: _ClassVar[int]
+    PLACEHOLDER_FIELD_NUMBER: _ClassVar[int]
+    capability_slot: str
+    placeholder: str
+    def __init__(self, capability_slot: _Optional[str] = ..., placeholder: _Optional[str] = ...) -> None: ...
+
+class EnvironmentCredentialPlaceholdersResponse(_message.Message):
+    __slots__ = ("placeholders",)
+    PLACEHOLDERS_FIELD_NUMBER: _ClassVar[int]
+    placeholders: _containers.RepeatedCompositeFieldContainer[EnvironmentCredentialPlaceholder]
+    def __init__(self, placeholders: _Optional[_Iterable[_Union[EnvironmentCredentialPlaceholder, _Mapping]]] = ...) -> None: ...
+
 class FrontDoorDelegationRequest(_message.Message):
     __slots__ = ("frame",)
     FRAME_FIELD_NUMBER: _ClassVar[int]

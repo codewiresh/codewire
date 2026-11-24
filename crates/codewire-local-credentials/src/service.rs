@@ -1649,7 +1649,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         request: Request<v1::GetEnvironmentCredentialPlaceholdersRequest>,
     ) -> Result<Response<v1::GetEnvironmentCredentialPlaceholdersResponse>, Status> {
         placeholders::environment_credential_placeholders(
-            Arc::clone(&self.authority),
+            Arc::clone(&self.brokers),
             request.into_inner(),
         )
         .await

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use buffa::Message as _;
+use codewire_access::{CapabilitySlot, CredentialPlaceholder};
 use codewire_client::{
     ClientConfig, ClientError, CodewireClient, CredentialDelegationOpen,
     CredentialDelegationProfile, CredentialDelegationStream, DelegateCredentialsRequest,
@@ -30,6 +31,7 @@ use tonic::Status;
 use crate::config;
 
 mod front_door;
+mod seed_placeholders;
 
 const MAX_AUTH_FILE_BYTES: u64 = 64 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -118,6 +120,35 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
                 let client = authenticated_client(&binding, deadline, connect_timeout).await?;
                 live(deadline)?;
                 account_github_connected(&client).await
+            })
+            .await
+            .map_err(|_| expired())?
+        })
+    }
+
+    fn environment_credential_placeholders(
+        &self,
+        binding: PlatformCredentialBinding,
+        environment_id: String,
+        environment_generation: u64,
+        slots: Vec<CapabilitySlot>,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, Status>> {
+        let connect_timeout = self.connect_timeout;
+        Box::pin(async move {
+            tokio::time::timeout_at(deadline, async move {
+                live(deadline)?;
+                binding.validate()?;
+                // The boot's own Ready, as its delegation will open with it.
+                let ready = bridge::CredentialBridgeReady {
+                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                    environment_id,
+                    environment_generation,
+                };
+                let open = opening(&binding, ready)?;
+                let client = authenticated_client(&binding, deadline, connect_timeout).await?;
+                live(deadline)?;
+                seed_placeholders::ask(&client, open, &slots).await
             })
             .await
             .map_err(|_| expired())?

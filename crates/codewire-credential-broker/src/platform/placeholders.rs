@@ -1,13 +1,14 @@
 //! A hosted epoch's credential placeholders (#4001): the one each lease
 //! carries, and the set an intercepted epoch's Sandbox projects. Both are
 //! derived the same way, through the epoch's one cache, kept by the inputs
-//! each is derived from.
+//! each is derived from. A local VM on a platform profile gets its seed's
+//! placeholders here too, derived as its delegation's leases derive theirs.
 
 use codewire_access::{
-    AvailableGrants, CapabilitySlot, CredentialPlaceholder, DerivedGrant, PlaceholderKey,
-    ProjectedPlaceholders,
+    AvailableGrants, CapabilitySlot, CredentialPlaceholder, DerivedGrant, EnvironmentId, OwnerId,
+    PlaceholderKey, ProjectedPlaceholders,
 };
-use codewire_platform_credentials::PlatformCredentialError;
+use codewire_platform_credentials::{PlatformCredentialError, PlatformCredentialStore};
 
 use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, RuntimeIdentity};
 use crate::BrokerLeaseError;
@@ -132,7 +133,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         };
         match key {
             Ok(key) => {
-                let placeholder = hosted_placeholder(&key, grant);
+                let placeholder = lease_placeholder(&key, grant);
                 placeholders.insert(inputs, placeholder.clone());
                 timing::placeholder(PlaceholderUse::Derived);
                 Ok(placeholder)
@@ -234,7 +235,7 @@ fn projected_grants(available: &AvailableGrants, github_bound: bool) -> Projecte
 /// from the same grant fields, as a local lease's. Like local, it takes the
 /// selected binding's profile revision, not the environment generation, so a
 /// new generation of the same binding keeps its placeholders (#4812).
-pub(super) fn hosted_placeholder(
+pub(super) fn lease_placeholder(
     key: &PlaceholderKey,
     grant: &DerivedGrant,
 ) -> CredentialPlaceholder {
@@ -245,6 +246,55 @@ pub(super) fn hosted_placeholder(
         &grant.capability_slot,
         &grant.credential_id,
     )
+}
+
+/// The seed placeholders of a local VM on a platform profile (#4001;
+/// docs/dev/SECRETS-AND-CREDENTIALS.md, "Its seed placeholders"): for each of
+/// `slots` that `grants` grants, in that order, exactly the placeholder a
+/// lease of that grant carries in an owner-local delegation epoch of
+/// `user`'s `environment`, derived under `user`'s local root as such a lease
+/// derives it. A slot not granted is left out. The key is read only when a
+/// slot is granted, and is dropped here; a key that cannot be read or
+/// created fails the whole answer. `grants` must come from an admission of
+/// `user`'s selection for `environment`, which the caller has made.
+pub(super) async fn owner_local_seed_placeholders(
+    credentials: &PlatformCredentialStore,
+    user: &OwnerId,
+    environment: &EnvironmentId,
+    grants: &AvailableGrants,
+    slots: &[CapabilitySlot],
+) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, PlatformCredentialError> {
+    let granted: Vec<&DerivedGrant> = slots
+        .iter()
+        .filter_map(|slot| {
+            grants
+                .grants
+                .iter()
+                .find(|grant| &grant.capability_slot == slot)
+        })
+        .collect();
+    if granted.is_empty() {
+        return Ok(Vec::new());
+    }
+    // As a lease's: never a grant of another environment.
+    if granted
+        .iter()
+        .any(|grant| &grant.environment_id != environment)
+    {
+        return Err(PlatformCredentialError::NotFound);
+    }
+    let key = credentials
+        .owner_local_placeholder_key(user, environment)
+        .await?;
+    Ok(granted
+        .into_iter()
+        .map(|grant| {
+            (
+                grant.capability_slot.clone(),
+                lease_placeholder(&key, grant),
+            )
+        })
+        .collect())
 }
 
 /// The one closed reason a placeholder key read failed for. The database and

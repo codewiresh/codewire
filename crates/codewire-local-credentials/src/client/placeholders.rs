@@ -1,6 +1,8 @@
 //! A boot's credential placeholders, asked of the authority (#3999).
 
-use codewire_access::{CapabilitySlot, CredentialPlaceholder, EnvironmentAccessBinding};
+use codewire_access::{
+    CapabilitySlot, CredentialPlaceholder, EnvironmentAccessBinding, EnvironmentId,
+};
 use tonic::Status;
 
 use super::LocalCredentialControlClient;
@@ -18,17 +20,52 @@ impl LocalCredentialControlClient {
         slots: &[CapabilitySlot],
     ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, Status> {
         require_placeholders(self.info.protocol_version)?;
+        self.placeholders(v1::GetEnvironmentCredentialPlaceholdersRequest {
+            environment_id: selected.environment_id.to_string(),
+            environment_generation,
+            profile_id: selected.profile_id.to_string(),
+            profile_revision: selected.profile_revision,
+            capability_slots: slot_names(slots),
+            platform: None,
+        })
+        .await
+    }
+
+    /// The placeholders for each of `slots` that a platform boot's selection
+    /// grants this environment generation (#4001), which the authority asks
+    /// of the platform as the selection's creator: the ones that boot's
+    /// delegation leases will carry. An authority that predates the question
+    /// is refused before any call (`FailedPrecondition`); the caller falls
+    /// back as for any other refusal.
+    pub async fn platform_environment_credential_placeholders(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: crate::PlatformCredentialBinding,
+        slots: &[CapabilitySlot],
+    ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, Status> {
+        if !AuthorityFeature::PlatformCredentialPlaceholders.served_by(self.info.protocol_version) {
+            return Err(Status::failed_precondition(
+                "the running credential authority predates platform credential placeholders",
+            ));
+        }
+        self.placeholders(v1::GetEnvironmentCredentialPlaceholdersRequest {
+            environment_id: environment_id.to_string(),
+            environment_generation,
+            capability_slots: slot_names(slots),
+            platform: Some(platform.into_proto()),
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn placeholders(
+        &mut self,
+        request: v1::GetEnvironmentCredentialPlaceholdersRequest,
+    ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, Status> {
         let response = self
             .inner
-            .get_environment_credential_placeholders(
-                v1::GetEnvironmentCredentialPlaceholdersRequest {
-                    environment_id: selected.environment_id.to_string(),
-                    environment_generation,
-                    profile_id: selected.profile_id.to_string(),
-                    profile_revision: selected.profile_revision,
-                    capability_slots: slots.iter().map(|slot| slot.as_str().to_owned()).collect(),
-                },
-            )
+            .get_environment_credential_placeholders(request)
             .await?
             .into_inner();
         response
@@ -43,6 +80,10 @@ impl LocalCredentialControlClient {
             })
             .collect()
     }
+}
+
+fn slot_names(slots: &[CapabilitySlot]) -> Vec<String> {
+    slots.iter().map(|slot| slot.as_str().to_owned()).collect()
 }
 
 /// An older authority's leases carry placeholders of another derivation, so

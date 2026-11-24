@@ -1892,8 +1892,8 @@ above.
   seed and in a hosted epoch's Open, the projection's call and the trust on
   both placements, and the hosted leaves and 401 challenge. A boot or epoch
   that gets no GitHub placeholder binds neither host, and Git and `gh` keep
-  their loopback route. A local VM on a platform profile keeps GitHub on its
-  loopback route until the platform serves its seed placeholders (#4001).
+  their loopback route. A local VM on a platform profile gets its GitHub
+  placeholder from the platform ("Its seed placeholders", below).
   The broker's rule for a request to either host, in order:
   1. The environment's network policy must allow GitHub's hosts by rule, or
      nothing is sent, with or without a credential (#4926). Today that is
@@ -1936,7 +1936,7 @@ init gives it to the workspace's own processes and to the guest daemon, which
 projects it to every session and managed agent. A boot without interception
 carries none. A boot whose credentials come from the platform gets them from
 the platform, derived under its owner's local root ("Its seed placeholders"
-below); until that is built, it carries none.
+below).
 
 - **The value.** `cwp1_` and 43 base64url characters, an HMAC over the
   environment, the selected binding's profile revision, the slot and the
@@ -2084,7 +2084,7 @@ below); until that is built, it carries none.
     references on it. The service does not refuse to start without the
     grant: without it, only a delegation's lease is marked failed, and is
     logged as for a hosted key.
-  - **Its seed placeholders (#4001).** Not yet built. Such a boot needs the
+  - **Its seed placeholders (#4001, #6270).** Such a boot needs the
     placeholders of its variable forms (the `github` slot, and an Anthropic
     API key or subscription token) in its seed before it starts, but its
     delegation epoch opens only after boot, and the local authority holds

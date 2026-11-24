@@ -8,8 +8,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use codewire_proto::codewire::bridge::v1 as bridge;
 use codewire_proto::codewire::v1::{
-    CredentialDelegationServiceClient, DelegateCredentialsResponseView, FrontDoorDelegationRequest,
-    FrontDoorDelegationResponse, FrontDoorDelegationResponseView, front_door_delegation_response,
+    CredentialDelegationServiceClient, DelegateCredentialsResponseView,
+    EnvironmentCredentialPlaceholdersRequest, EnvironmentCredentialPlaceholdersResponse,
+    FrontDoorDelegationRequest, FrontDoorDelegationResponse, FrontDoorDelegationResponseView,
+    front_door_delegation_response,
 };
 use connectrpc::client::{BidiStream, CallOptions, ClientTransport};
 use tokio::time::Instant;
@@ -175,6 +177,26 @@ impl CodewireClient {
         })
         .await
         .map_err(|_| expired())?
+    }
+}
+
+impl CodewireClient {
+    /// A local VM's seed placeholders on a platform profile (#4001): one
+    /// unary call with one current bearer, on the same protocol as the
+    /// delegation. The platform admits `request.selection` exactly as its
+    /// delegation would before it reads any key. The caller bounds the call.
+    pub async fn environment_credential_placeholders(
+        &self,
+        request: EnvironmentCredentialPlaceholdersRequest,
+    ) -> Result<EnvironmentCredentialPlaceholdersResponse, ClientError> {
+        CredentialDelegationServiceClient::new(
+            self.transport(),
+            self.config().environment_session_connect_config()?,
+        )
+        .environment_credential_placeholders_with_options(request, self.auth_options().await?)
+        .await
+        .map(|response| response.into_owned())
+        .map_err(ClientError::from)
     }
 }
 

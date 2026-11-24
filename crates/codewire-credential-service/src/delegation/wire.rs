@@ -25,7 +25,7 @@ use codewire_server_core::connect::{
     oauth_bearer_authority,
 };
 use codewire_workload_secrets::MAX_WORKLOAD_SECRETS;
-use connectrpc::{InboundStream, RequestContext, ServiceResult, ServiceStream};
+use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 use futures::{Stream, StreamExt};
 use prost::Message as _;
 use sqlx::PgPool;
@@ -36,6 +36,7 @@ use uuid::Uuid;
 use super::{OwnerLocalRuntimeAuthority, OwnerLocalSelection};
 
 mod lifetime;
+mod seed;
 
 // One small names-only selection, followed by exactly one existing bridge
 // frame per envelope. Eight bytes covers the enclosing tag/length prefix;
@@ -56,6 +57,7 @@ where
         pool: pool.clone(),
         provider,
         bridge,
+        seed_rate: seed::RateLimit::default(),
     });
     connect_router_with_auth_protocol_and_limits(
         connectrpc::Router::new().add_service(service),
@@ -70,6 +72,8 @@ struct Service<A, U> {
     pool: PgPool,
     provider: Arc<dyn KekProvider>,
     bridge: PlatformCredentialBridgeService<A, U>,
+    /// Seed placeholder calls per user (#4001).
+    seed_rate: seed::RateLimit,
 }
 
 #[allow(refining_impl_trait)]
@@ -222,6 +226,20 @@ where
             futures::stream::once(async { Ok(admitted) })
                 .chain(output.map(|item| encode_front_door_frame(item.map_err(wire_error)?))),
         )
+    }
+
+    async fn environment_credential_placeholders(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::EnvironmentCredentialPlaceholdersRequest>,
+    ) -> ServiceResult<proto::EnvironmentCredentialPlaceholdersResponse> {
+        let oauth = oauth_bearer_authority(&ctx)?.clone();
+        drop(ctx);
+        let answer = self
+            .seed_placeholders(oauth, request)
+            .await
+            .map_err(seed::Refusal::status)?;
+        Ok(connectrpc::Response::new(answer).with_header("cache-control", "private, no-store"))
     }
 }
 

@@ -883,3 +883,114 @@ async fn relay_keepalive_send_timeout_ends_the_epoch_like_a_frame() {
     assert!(relay.output.next().await.is_none());
     drop(relay.requests);
 }
+
+/// A platform boot's seed placeholders are asked as the pinned creator with
+/// exactly the selection its delegation opens with, for the environment and
+/// generation its bridge Ready carries (#4001). The platform's rate limit
+/// keeps its code; another account's login is refused before any request.
+#[tokio::test]
+async fn seed_placeholders_are_asked_with_the_delegations_own_selection() {
+    use codewire_client as rpc;
+    const PATH: &str = "/codewire.v1.CredentialDelegationService/EnvironmentCredentialPlaceholders";
+    let placeholder = format!("cwp1_{}A", "C".repeat(42));
+    let slots = vec![CapabilitySlot::anthropic(), CapabilitySlot::github()];
+    let ask = |server: &MockServer, directory: &Path| {
+        let ready = ready();
+        connector().environment_credential_placeholders(
+            binding(directory, &server.uri()),
+            ready.environment_id,
+            ready.environment_generation,
+            slots.clone(),
+            no_deadline(),
+        )
+    };
+
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "synthetic-owner").await;
+    Mock::given(method("POST"))
+        .and(path(PATH))
+        .and(header("authorization", "Bearer synthetic-access"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/proto")
+                .set_body_bytes(
+                    rpc::EnvironmentCredentialPlaceholdersResponse {
+                        placeholders: vec![rpc::EnvironmentCredentialPlaceholder {
+                            capability_slot: "anthropic".into(),
+                            placeholder: placeholder.clone(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let answer = match ask(&server, directory.path()).await {
+        Ok(answer) => answer,
+        Err(error) => panic!("{error:?}: {}", reached(&server).await),
+    };
+    assert_eq!(answer.len(), 1);
+    assert_eq!(answer[0].0, CapabilitySlot::anthropic());
+    assert_eq!(answer[0].1.as_str(), placeholder);
+    let sent = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == PATH)
+        .expect("the seed question reached the platform");
+    let sent =
+        rpc::EnvironmentCredentialPlaceholdersRequest::decode_from_slice(&sent.body).unwrap();
+    assert_eq!(
+        sent.selection.into_option(),
+        Some(opening(&binding(directory.path(), &server.uri()), ready()).unwrap())
+    );
+    assert_eq!(sent.capability_slots, ["anthropic", "github"]);
+
+    // The platform's rate limit reaches the boot as itself.
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "synthetic-owner").await;
+    Mock::given(method("POST"))
+        .and(path(PATH))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("content-type", "application/json")
+                .set_body_json(serde_json::json!({
+                    "code": "resource_exhausted",
+                    "message": "synthetic rate limit",
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = ask(&server, directory.path()).await.unwrap_err();
+    assert_eq!(
+        error.code(),
+        tonic::Code::ResourceExhausted,
+        "{error:?}: {}",
+        reached(&server).await
+    );
+
+    // Another account's login is refused before the question is sent.
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "another-owner").await;
+    let error = ask(&server, directory.path()).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != PATH)
+    );
+}

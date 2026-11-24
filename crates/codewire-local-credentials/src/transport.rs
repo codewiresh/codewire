@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 34;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 35;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -107,6 +107,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         34,
         "DeleteCredential.revoke_first revokes and deletes as one step that the store refuses before any change while a profile or a local VM's profile revision selects the credential (#6128)",
     ),
+    (
+        35,
+        "GetEnvironmentCredentialPlaceholders with platform asks the platform for a platform boot's seed placeholders (#4001)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -163,10 +167,15 @@ pub enum AuthorityFeature {
     /// profile or a local VM's profile revision blocks before it revokes
     /// anything (#6128). An older authority ignores the field.
     DeleteGate,
+    /// `GetEnvironmentCredentialPlaceholders.platform`: a platform boot's
+    /// seed placeholders, asked of the platform (#4001). An older authority
+    /// ignores the field and evaluates a local binding instead, so it is
+    /// never asked, and the boot falls back as for a refused call.
+    PlatformCredentialPlaceholders,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -180,6 +189,7 @@ impl AuthorityFeature {
         Self::NetworkPolicyHosts,
         Self::FrontDoorDelegation,
         Self::DeleteGate,
+        Self::PlatformCredentialPlaceholders,
     ];
 
     /// The protocol that introduced it.
@@ -198,6 +208,7 @@ impl AuthorityFeature {
             Self::NetworkPolicyHosts => 27,
             Self::FrontDoorDelegation => 28,
             Self::DeleteGate => 34,
+            Self::PlatformCredentialPlaceholders => 35,
         }
     }
 

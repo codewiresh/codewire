@@ -749,3 +749,280 @@ async fn a_front_door_delegation_with_no_environment_row_gets_its_owners_local_p
         .and_then(|result| result.map_err(anyhow::Error::from));
     h.finish(result.and(drain).and(joined)).await
 }
+
+/// One seed placeholder route (#4001) over a fresh database: Alice's profile
+/// selects one Anthropic API key, and the route's rate limit starts empty.
+struct SeedRoute<'a> {
+    h: &'a Harness,
+    key: codewire_access::CredentialId,
+    selection: OwnerLocalSelection,
+    open: proto::CredentialDelegationOpen,
+    url: String,
+    http: reqwest::Client,
+}
+
+impl SeedRoute<'_> {
+    fn client(&self, bearer: String) -> Result<CodewireClient> {
+        Ok(CodewireClient::with_http(
+            ClientConfig::new(&self.url)?,
+            StaticTokenProvider::new(bearer)?,
+            self.http.clone(),
+        )?)
+    }
+}
+
+fn slots(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// Serve the delegation route on its own listener, set up Alice's selection,
+/// run `body` against it within [`BOUND`], and tear everything down.
+async fn with_seed_route(body: impl AsyncFnOnce(&SeedRoute<'_>) -> Result<()>) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let h = Harness::unserved(address).await?;
+    let bridge = PlatformCredentialBridgeService::new(
+        Arc::new(RejectPods),
+        h.store.clone(),
+        PlatformAccessProfileStore::new(h.pool.clone(), builtin_provider_catalog()),
+        NoUpstream,
+    );
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge);
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+    });
+    let result = tokio::time::timeout(BOUND, async {
+        let key = h
+            .store
+            .create(
+                &Owner::User(OwnerId::parse(ALICE)?),
+                CredentialRegistration {
+                    provider: ProviderId::parse("anthropic")?,
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "Anthropic key".into(),
+                    account_hint: None,
+                    expires_at_unix: Some(4_102_444_800),
+                },
+                &ProtectedValue::from_slice(b"sk-ant-synthetic-key-never-public")?,
+            )
+            .await?;
+        let (selection, _) = setup_owner_sources_with_entries(
+            &h,
+            BTreeMap::from([(CapabilitySlot::anthropic(), key.metadata.id.clone())]),
+        )
+        .await?;
+        let route = SeedRoute {
+            h: &h,
+            key: key.metadata.id,
+            open: opening(&selection),
+            selection,
+            url: format!("http://{address}"),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .http2_prior_knowledge()
+                .build()?,
+        };
+        body(&route).await
+    })
+    .await
+    .context("seed placeholder test timed out")
+    .and_then(|result| result);
+    stop.cancel();
+    let joined = tokio::time::timeout(BOUND, &mut server).await;
+    if joined.is_err() {
+        server.abort();
+        let _ = server.await;
+    }
+    let joined = joined
+        .context("public listener shutdown")
+        .and_then(|result| result.context("public listener join"))
+        .and_then(|result| result.map_err(anyhow::Error::from));
+    h.finish(result.and(joined)).await
+}
+
+/// #4001: a granted slot's seed placeholder is its delegation leases'
+/// derivation under the owner's local root (`platform::tests::placeholders`
+/// holds that derivation equal to a lease's), stable across calls; a slot
+/// not granted is left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_seed_placeholder_is_its_delegation_leases_derivation() -> Result<()> {
+    with_seed_route(async |route: &SeedRoute<'_>| {
+        let alice = route.client(oauth(ALICE))?;
+        let answer = seed_call(&alice, route.open.clone(), slots(&["anthropic", "github"])).await?;
+        ensure!(
+            answer.placeholders.len() == 1 && answer.placeholders[0].capability_slot == "anthropic",
+            "only the granted slot is answered"
+        );
+        let environment = codewire_access::EnvironmentId::parse(
+            route.selection.local_environment_id.to_string(),
+        )?;
+        let (_, revision) = route
+            .selection
+            .platform
+            .profile
+            .clone()
+            .context("a profile")?;
+        let derived = codewire_access::CredentialPlaceholder::derive(
+            &route
+                .h
+                .store
+                .owner_local_placeholder_key(&OwnerId::parse(ALICE)?, &environment)
+                .await?,
+            &environment,
+            revision,
+            &CapabilitySlot::anthropic(),
+            &route.key,
+        );
+        ensure!(
+            codewire_access::CredentialPlaceholder::parse(&answer.placeholders[0].placeholder)?
+                .ct_eq(&derived),
+            "the seed's placeholder is its leases' derivation"
+        );
+        let again = seed_call(&alice, route.open.clone(), slots(&["anthropic"])).await?;
+        ensure!(
+            again.placeholders == answer.placeholders,
+            "the value is stable"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// #4001: the seed's selection is admitted exactly as its delegation's Open
+/// is, before any key is read: every refused selection, and every slot list
+/// that is unknown, repeated or past 16, is the same `PERMISSION_DENIED`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_seed_refuses_each_selection_its_delegation_would() -> Result<()> {
+    with_seed_route(async |route: &SeedRoute<'_>| {
+        let alice = route.client(oauth(ALICE))?;
+        let open = &route.open;
+        let mut refused = Vec::new();
+        let mut other_revision = open.clone();
+        other_revision
+            .profile
+            .get_or_insert_default()
+            .profile_revision += 1;
+        refused.push(other_revision);
+        let mut uppercase = open.clone();
+        uppercase.runtime.get_or_insert_default().environment_id = route
+            .selection
+            .local_environment_id
+            .to_string()
+            .to_uppercase();
+        refused.push(uppercase);
+        let mut nil = open.clone();
+        nil.runtime.get_or_insert_default().environment_id = Uuid::nil().to_string();
+        refused.push(nil);
+        let mut no_generation = open.clone();
+        no_generation
+            .runtime
+            .get_or_insert_default()
+            .environment_generation = 0;
+        refused.push(no_generation);
+        let mut no_digest = open.clone();
+        no_digest.selection_sha256 = vec![0; 32];
+        refused.push(no_digest);
+        let mut other_organization = open.clone();
+        other_organization.org_id = "another-organization".into();
+        refused.push(other_organization);
+        for selection in refused {
+            let error = seed_call(&alice, selection, slots(&["anthropic"]))
+                .await
+                .expect_err("a refused selection was answered");
+            ensure!(error.code() == codewire_client::ErrorCode::PermissionDenied);
+        }
+        for bad in [
+            slots(&["not-a-slot"]),
+            slots(&["anthropic", "anthropic"]),
+            vec!["anthropic".to_owned(); 17],
+        ] {
+            let error = seed_call(&alice, open.clone(), bad)
+                .await
+                .expect_err("a bad slot list was answered");
+            ensure!(error.code() == codewire_client::ErrorCode::PermissionDenied);
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// #4001: only the selection's own creator is answered. Another user naming
+/// Alice's selection is refused as any refused selection is, and an
+/// organization API key never reaches the method.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_seed_answers_only_its_selections_owner_over_oauth() -> Result<()> {
+    with_seed_route(async |route: &SeedRoute<'_>| {
+        let error = seed_call(
+            &route.client(oauth(BOB))?,
+            route.open.clone(),
+            slots(&["anthropic"]),
+        )
+        .await
+        .expect_err("another user's selection was answered");
+        ensure!(error.code() == codewire_client::ErrorCode::PermissionDenied);
+        let error = seed_call(
+            &route.client(api_key())?,
+            route.open.clone(),
+            slots(&["anthropic"]),
+        )
+        .await
+        .expect_err("an API key was answered");
+        ensure!(error.code() == codewire_client::ErrorCode::Unauthenticated);
+        Ok(())
+    })
+    .await
+}
+
+/// #4001: a user's 31st seed call in a minute is `RESOURCE_EXHAUSTED`, and
+/// a refused call counts toward the limit as an answered one does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_users_thirty_first_seed_call_in_a_minute_is_rate_limited() -> Result<()> {
+    with_seed_route(async |route: &SeedRoute<'_>| {
+        let alice = route.client(oauth(ALICE))?;
+        let mut other_revision = route.open.clone();
+        other_revision
+            .profile
+            .get_or_insert_default()
+            .profile_revision += 1;
+        let error = seed_call(&alice, other_revision, slots(&["anthropic"]))
+            .await
+            .expect_err("a refused selection was answered");
+        ensure!(error.code() == codewire_client::ErrorCode::PermissionDenied);
+        for _ in 1..30 {
+            seed_call(&alice, route.open.clone(), slots(&["anthropic"])).await?;
+        }
+        let error = seed_call(&alice, route.open.clone(), slots(&["anthropic"]))
+            .await
+            .expect_err("a 31st call was answered");
+        ensure!(error.code() == codewire_client::ErrorCode::ResourceExhausted);
+        Ok(())
+    })
+    .await
+}
+
+async fn seed_call(
+    client: &CodewireClient,
+    selection: proto::CredentialDelegationOpen,
+    capability_slots: Vec<String>,
+) -> std::result::Result<
+    codewire_client::EnvironmentCredentialPlaceholdersResponse,
+    codewire_client::ClientError,
+> {
+    client
+        .environment_credential_placeholders(
+            codewire_client::EnvironmentCredentialPlaceholdersRequest {
+                selection: Some(selection).into(),
+                capability_slots,
+                ..Default::default()
+            },
+        )
+        .await
+}

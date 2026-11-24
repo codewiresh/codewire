@@ -1027,8 +1027,9 @@ request adds.
     `Credentials` row (`"reason": "no_credentials"`).
   - With the switch on and only a GitHub sign-in selected, a front door
     runs for GitHub's two hosts and `cw --local info` shows `intercepted`
-    (#4001). A platform profile's boot gets no GitHub placeholder yet, so
-    there no front door runs, and `cw --local info` shows `no placeholders:
+    (#4001), on a local profile and, through the platform, on a platform
+    profile. A boot whose GitHub selection gets no placeholder (no GitHub
+    grant) runs no front door, and `cw --local info` shows `no placeholders:
     none of its credentials is intercepted yet`
     (`"reason": "nothing_to_intercept"`), never `intercepted` (#5670).
   - Known limit, tracked on #3999: a restore gives the VM a new certificate
@@ -1088,7 +1089,7 @@ session through a relay".
 - **States to exercise:**
   - a Claude sign-in and a Codex login, both from the platform profile;
   - an Anthropic API key and GitHub from the platform profile, whose
-    placeholders the seed carries from the platform (#4001, not yet built),
+    placeholders the seed carries from the platform (#4001, #6270),
     and the profile changed while the VM runs, then the VM restarted;
   - a token forced to expire mid-session;
   - the platform credential revoked, then selected again;

@@ -45,6 +45,10 @@ pub use codewire_proto::codewire::console::v1::{
     BillingLimitUsage, BillingLimits, GetBillingOverviewRequest, GetBillingOverviewResponse,
     UsageSummary,
 };
+pub use codewire_proto::codewire::v1::{
+    EnvironmentCredentialPlaceholder, EnvironmentCredentialPlaceholdersRequest,
+    EnvironmentCredentialPlaceholdersResponse,
+};
 pub use coordinator::{
     COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Error as CoordinatorError,
     Handlers as CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession,

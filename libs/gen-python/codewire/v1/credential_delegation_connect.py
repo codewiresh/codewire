@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_delegation_pb2 import DelegateCredentialsRequest, DelegateCredentialsResponse, FrontDoorDelegationRequest, FrontDoorDelegationResponse
+from .credential_delegation_pb2 import DelegateCredentialsRequest, DelegateCredentialsResponse, EnvironmentCredentialPlaceholdersRequest, EnvironmentCredentialPlaceholdersResponse, FrontDoorDelegationRequest, FrontDoorDelegationResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -39,6 +39,9 @@ class CredentialDelegationService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def front_door_delegation(self, request: AsyncIterator[FrontDoorDelegationRequest], ctx: RequestContext[FrontDoorDelegationRequest, FrontDoorDelegationResponse]) -> AsyncIterator[FrontDoorDelegationResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def environment_credential_placeholders(self, request: EnvironmentCredentialPlaceholdersRequest, ctx: RequestContext[EnvironmentCredentialPlaceholdersRequest, EnvironmentCredentialPlaceholdersResponse]) -> EnvironmentCredentialPlaceholdersResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -74,6 +77,16 @@ class CredentialDelegationServiceASGIApplication(ConnectASGIApplication[Credenti
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.front_door_delegation,
+                ),
+                "/codewire.v1.CredentialDelegationService/EnvironmentCredentialPlaceholders": Endpoint.unary(
+                    method=MethodInfo(
+                        name="EnvironmentCredentialPlaceholders",
+                        service_name="codewire.v1.CredentialDelegationService",
+                        input=EnvironmentCredentialPlaceholdersRequest,
+                        output=EnvironmentCredentialPlaceholdersResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.environment_credential_placeholders,
                 ),
             },
             interceptors=interceptors,
@@ -153,11 +166,34 @@ class CredentialDelegationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def environment_credential_placeholders(
+        self,
+        request: EnvironmentCredentialPlaceholdersRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> EnvironmentCredentialPlaceholdersResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="EnvironmentCredentialPlaceholders",
+                service_name="codewire.v1.CredentialDelegationService",
+                input=EnvironmentCredentialPlaceholdersRequest,
+                output=EnvironmentCredentialPlaceholdersResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class CredentialDelegationServiceSync(Protocol):
     def delegate_credentials(self, request: Iterator[DelegateCredentialsRequest], ctx: RequestContext[DelegateCredentialsRequest, DelegateCredentialsResponse]) -> Iterator[DelegateCredentialsResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def front_door_delegation(self, request: Iterator[FrontDoorDelegationRequest], ctx: RequestContext[FrontDoorDelegationRequest, FrontDoorDelegationResponse]) -> Iterator[FrontDoorDelegationResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def environment_credential_placeholders(self, request: EnvironmentCredentialPlaceholdersRequest, ctx: RequestContext[EnvironmentCredentialPlaceholdersRequest, EnvironmentCredentialPlaceholdersResponse]) -> EnvironmentCredentialPlaceholdersResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -191,6 +227,16 @@ class CredentialDelegationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.front_door_delegation,
+                ),
+                "/codewire.v1.CredentialDelegationService/EnvironmentCredentialPlaceholders": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="EnvironmentCredentialPlaceholders",
+                        service_name="codewire.v1.CredentialDelegationService",
+                        input=EnvironmentCredentialPlaceholdersRequest,
+                        output=EnvironmentCredentialPlaceholdersResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.environment_credential_placeholders,
                 ),
             },
             interceptors=interceptors,
@@ -263,6 +309,25 @@ class CredentialDelegationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialDelegationService",
                 input=FrontDoorDelegationRequest,
                 output=FrontDoorDelegationResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def environment_credential_placeholders(
+        self,
+        request: EnvironmentCredentialPlaceholdersRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> EnvironmentCredentialPlaceholdersResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="EnvironmentCredentialPlaceholders",
+                service_name="codewire.v1.CredentialDelegationService",
+                input=EnvironmentCredentialPlaceholdersRequest,
+                output=EnvironmentCredentialPlaceholdersResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

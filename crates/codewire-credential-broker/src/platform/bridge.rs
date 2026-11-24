@@ -17,7 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use codewire_access::ProjectedPlaceholders;
+use codewire_access::{
+    AvailableGrants, CapabilitySlot, CredentialPlaceholder, EnvironmentId, OwnerId,
+    ProjectedPlaceholders,
+};
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_daemon_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
@@ -28,7 +31,8 @@ use codewire_daemon_proto::broker::v1::{
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{
-    EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialStore,
+    EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialError,
+    PlatformCredentialStore,
 };
 use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -250,6 +254,29 @@ where
                 ssh: None,
             }),
         }
+    }
+
+    /// A local VM's seed placeholders on a platform profile (#4001): for
+    /// each of `slots` that `grants` grants, the placeholder this service's
+    /// owner-local leases of that grant carry, derived under `user`'s local
+    /// root for `environment` from this service's own credential store. The
+    /// caller has admitted `user`'s selection for `environment`, and `grants`
+    /// are that admission's.
+    pub async fn owner_local_seed_placeholders(
+        &self,
+        user: &OwnerId,
+        environment: &EnvironmentId,
+        grants: &AvailableGrants,
+        slots: &[CapabilitySlot],
+    ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, PlatformCredentialError> {
+        super::placeholders::owner_local_seed_placeholders(
+            &self.state.credentials,
+            user,
+            environment,
+            grants,
+            slots,
+        )
+        .await
     }
 
     /// Tests reach the idle end without waiting two minutes.

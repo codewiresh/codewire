@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+use codewire_access::{CapabilitySlot, CredentialPlaceholder};
 use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use codewire_project::PlatformProjectionSelection;
 use futures::{Stream, future::BoxFuture};
@@ -218,6 +219,29 @@ pub trait PlatformCredentialConnector: Send + Sync + 'static {
         Box::pin(async {
             Err(Status::unavailable(
                 "platform GitHub connection state is unavailable",
+            ))
+        })
+    }
+
+    /// The seed placeholders of a boot whose credentials come from the
+    /// platform (#4001): for each of `slots` the selection's profile grants,
+    /// the placeholder that boot's delegation leases will carry, asked of the
+    /// platform as the selection's creator under `deadline`.
+    /// `environment_id` and `environment_generation` are the ones the boot's
+    /// bridge Ready will carry, and the selection is sent exactly as the
+    /// delegation's Open sends it. Only requested slots are answered, each at
+    /// most once. A connector that cannot ask reports unavailable.
+    fn environment_credential_placeholders(
+        &self,
+        _binding: PlatformCredentialBinding,
+        _environment_id: String,
+        _environment_generation: u64,
+        _slots: Vec<CapabilitySlot>,
+        _deadline: Instant,
+    ) -> BoxFuture<'static, Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, Status>> {
+        Box::pin(async {
+            Err(Status::unavailable(
+                "platform credential placeholders are unavailable",
             ))
         })
     }

@@ -141,7 +141,7 @@ fn a_hosted_lease_derives_the_shared_known_answer() {
         expires_at_unix: None,
         permissions: Default::default(),
     };
-    let placeholder = super::super::placeholders::hosted_placeholder(
+    let placeholder = super::super::placeholders::lease_placeholder(
         &PlaceholderKey::from_slice(&known_answer::KEY).unwrap(),
         &grant,
     );
@@ -269,6 +269,103 @@ async fn an_owner_local_lease_carries_a_placeholder_from_its_owners_local_root()
             local_root_rows(&fixture.pool).await? == 1,
             "one root per owner"
         );
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}
+
+/// #4001: a local VM's seed placeholder on a platform profile is exactly the
+/// one its delegation's leases carry for the same environment, profile
+/// revision, slot and credential, so the agent's seeded placeholder is the
+/// one the broker swaps. A slot the grants don't name is left out, and with
+/// none granted no key is read or created.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_seed_placeholder_is_the_one_its_delegations_leases_carry() -> Result<()> {
+    let fixture = Fixture::create_for_bridge().await?;
+    let result = async {
+        let local = EnvironmentId::parse(Uuid::new_v4().to_string())?;
+        let user = fixture.context.user_id.clone();
+        let seed = |grants: AvailableGrants, slots: Vec<CapabilitySlot>| {
+            let fixture = &fixture;
+            let user = user.clone();
+            let local = local.clone();
+            async move {
+                super::super::placeholders::owner_local_seed_placeholders(
+                    &fixture.store,
+                    &user,
+                    &local,
+                    &grants,
+                    &slots,
+                )
+                .await
+            }
+        };
+
+        // Nothing granted: nothing answered, and no root is created.
+        let none = seed(
+            AvailableGrants::default(),
+            vec![CapabilitySlot::anthropic()],
+        )
+        .await?;
+        anyhow::ensure!(none.is_empty());
+        anyhow::ensure!(local_root_rows(&fixture.pool).await? == 0);
+
+        let binding = EnvironmentAccessBinding {
+            environment_id: local.clone(),
+            ..fixture.current_binding().await?
+        };
+        let adapter = fixture
+            .owner_local_in(
+                local.clone(),
+                fixture.owner.clone(),
+                true,
+                Some(binding),
+                CapabilitySlot::codex(),
+                &fixture.record,
+                permission(),
+            )
+            .await?
+            .map_err(|error| anyhow::anyhow!("owner-local delegation refused: {error:?}"))?;
+        let adapter = Adapter {
+            placeholders: Some(EpochPlaceholders::default()),
+            ..adapter
+        };
+        let leased = lease(&adapter).await?;
+        let grant = leased.grant().clone();
+        let carried = BrokerCredentialLease::placeholder(&leased)
+            .context("the lease carries a placeholder")?
+            .clone();
+        let grants = AvailableGrants {
+            grants: vec![grant.clone()],
+            ..AvailableGrants::default()
+        };
+        let seeded = seed(
+            grants.clone(),
+            vec![CapabilitySlot::anthropic(), CapabilitySlot::codex()],
+        )
+        .await?;
+        anyhow::ensure!(
+            seeded.len() == 1 && seeded[0].0 == CapabilitySlot::codex(),
+            "only the granted slot is answered"
+        );
+        anyhow::ensure!(
+            seeded[0].1.ct_eq(&carried),
+            "the seed's placeholder is the lease's"
+        );
+
+        // A grant of another environment is never answered under this one.
+        let other = EnvironmentId::parse(Uuid::new_v4().to_string())?;
+        let refused = super::super::placeholders::owner_local_seed_placeholders(
+            &fixture.store,
+            &user,
+            &other,
+            &grants,
+            &[CapabilitySlot::codex()],
+        )
+        .await;
+        anyhow::ensure!(refused.is_err());
         Ok(())
     }
     .await;

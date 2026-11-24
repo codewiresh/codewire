@@ -172,6 +172,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.v1.CreateInvitationResponse" => v1::CreateInvitationResponse,
         "codewire.v1.CreateMeshInviteResponse" => v1::CreateMeshInviteResponse,
         "codewire.v1.DelegateCredentialsResponse" => v1::DelegateCredentialsResponse,
+        "codewire.v1.EnvironmentCredentialPlaceholder" => v1::EnvironmentCredentialPlaceholder,
         "codewire.v1.EnvironmentDesktopRunning" => v1::EnvironmentDesktopRunning,
         "codewire.v1.ExecRequest" => v1::ExecRequest,
         "codewire.v1.CreateMeshNodeEnrollmentResponse" => v1::CreateMeshNodeEnrollmentResponse,

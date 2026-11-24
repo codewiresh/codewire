@@ -240,6 +240,15 @@ impl OwnerLocalRuntimeAuthority {
     }
 }
 
+impl OwnerLocalRuntimeAuthority {
+    /// The grants of this authority's first admission: what a seed of the
+    /// same boot may answer for (#4001). A capability withheld at admission
+    /// is not among them.
+    pub(crate) fn admitted_grants(&self) -> &AvailableGrants {
+        &self.initial.grants
+    }
+}
+
 impl OwnerLocalSource {
     async fn admit(&self) -> Result<Admission, Error> {
         self.ensure_live()?;
