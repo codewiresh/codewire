@@ -1301,7 +1301,8 @@ message StartVmRequest {
   string cw_runtime_moved_from_generation = 27;
 
   // With intercept, this environment's placeholder for each Anthropic form
-  // its binding grants (#3999), which the seed carries beside the CA. Empty
+  // its binding grants (#3999), and the github slot's while the boot binds
+  // GitHub's hosts (#4001), which the seed carries beside the CA. Empty
   // otherwise. Not a credential: it only names one to the environment's own
   // broker.
   repeated SeedCredentialPlaceholder credential_placeholders = 28;
@@ -1324,7 +1325,9 @@ message StartVmRequest {
 
 message SeedCredentialPlaceholder {
   // 1: the Anthropic API key (ANTHROPIC_AUTH_TOKEN); 2: the Claude
-  // subscription token (CLAUDE_CODE_OAUTH_TOKEN).
+  // subscription token (CLAUDE_CODE_OAUTH_TOKEN); 3: the github slot (Git's
+  // credential helper and GH_TOKEN), sent only for a boot that binds
+  // GitHub's hosts, and the runner binds them only with it (#4001).
   uint32 slot = 1;
   string placeholder = 2;
 }

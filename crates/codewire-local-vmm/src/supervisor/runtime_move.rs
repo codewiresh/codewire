@@ -69,7 +69,7 @@ impl Supervisor {
     }
 
     /// What a runtime's guest init declares, such as
-    /// `seed=11;cw_catalog=1;net=2`.
+    /// `seed=12;cw_catalog=1;net=2`.
     pub(super) async fn guest_abi_for_generation(
         &self,
         generation: &str,

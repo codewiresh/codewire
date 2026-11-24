@@ -21,7 +21,7 @@ fn seed_round_trip_is_exact_and_stable() {
     assert_eq!(&encoded[..8], MAGIC);
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "169f0b6ec3c6d32b03e2a4e34fc15a5d551cf24c7ebf3c395aca25896b6a16c9"
+        "ae9e5fd2e3a18a9202525ef4286c341654b47e9b1c919670d693c32b3a1c666b"
     );
     assert_eq!(Seed::decode(&encoded).unwrap(), seed);
     assert_eq!(seed.encode(), encoded);
@@ -248,7 +248,7 @@ fn current_seed_binds_one_boot_setup_with_source_compatible_constructor() {
     let encoded = seed.encode();
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "a25b6677da015db4db896ae816582b40558608d8775fece09ceb0d683b917742"
+        "9b12890fe33a552a53bb451ca559763fa2ed9e86c5cc4bde1ff6d27a9c07a341"
     );
     assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
     assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
@@ -653,8 +653,8 @@ fn ca_bytes_without_their_flag_or_beyond_their_length_are_refused() {
 }
 
 #[test]
-fn a_checksum_valid_v9_or_v10_seed_is_refused() {
-    for version in [9, 10] {
+fn a_checksum_valid_v9_v10_or_v11_seed_is_refused() {
+    for version in [9, 10, 11] {
         let mut encoded = sample_seed().encode();
         put_u16(&mut encoded, VERSION_OFFSET, version);
         refresh_checksum(&mut encoded);
@@ -745,6 +745,24 @@ fn both_placeholders() -> SeedPlaceholders {
     .unwrap()
 }
 
+fn every_placeholder() -> SeedPlaceholders {
+    SeedPlaceholders::new([
+        (
+            PlaceholderSlot::GitHub,
+            placeholder("github", "cred-github"),
+        ),
+        (
+            PlaceholderSlot::AnthropicSubscriptionToken,
+            placeholder("anthropic", "cred-subscription"),
+        ),
+        (
+            PlaceholderSlot::AnthropicApiKey,
+            placeholder("anthropic", "cred-api-key"),
+        ),
+    ])
+    .unwrap()
+}
+
 #[test]
 fn a_real_ca_and_every_placeholder_fit_beside_the_longest_token() {
     let longest_token = "a".repeat(TOKEN_MAX_LEN);
@@ -756,12 +774,12 @@ fn a_real_ca_and_every_placeholder_fit_beside_the_longest_token() {
     )
     .unwrap()
     .with_egress_ca(front_door_ca())
-    .with_credential_placeholders(both_placeholders())
+    .with_credential_placeholders(every_placeholder())
     .unwrap();
     let decoded = Seed::decode(&seed.encode()).unwrap();
     assert_eq!(decoded, seed);
     let entries = decoded.credential_placeholders().entries();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].0, PlaceholderSlot::AnthropicApiKey);
     assert!(
         entries[0]
@@ -769,6 +787,53 @@ fn a_real_ca_and_every_placeholder_fit_beside_the_longest_token() {
             .ct_eq(&placeholder("anthropic", "cred-api-key"))
     );
     assert_eq!(entries[1].0, PlaceholderSlot::AnthropicSubscriptionToken);
+    assert_eq!(entries[2].0, PlaceholderSlot::GitHub);
+}
+
+/// Seed format 12 carries the `github` slot's placeholder as code 3 (#4001).
+#[test]
+fn a_github_placeholder_round_trips() {
+    let github = SeedPlaceholders::new([(
+        PlaceholderSlot::GitHub,
+        placeholder("github", "cred-github"),
+    )])
+    .unwrap();
+    let seed = sample_seed()
+        .with_egress_ca(front_door_ca())
+        .with_credential_placeholders(github)
+        .unwrap();
+    let encoded = seed.encode();
+    assert_eq!(encoded[PLACEHOLDERS_OFFSET], 1);
+    assert_eq!(encoded[PLACEHOLDERS_OFFSET + 1], 3);
+    let decoded = Seed::decode(&encoded).unwrap();
+    assert_eq!(decoded, seed);
+    let entries = decoded.credential_placeholders().entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PlaceholderSlot::GitHub);
+    assert!(entries[0].1.ct_eq(&placeholder("github", "cred-github")));
+}
+
+/// A slot code past the known ones is refused, never skipped, so an older or
+/// newer guest can't quietly drop or misread a placeholder (cw-security).
+#[test]
+fn a_region_with_an_unknown_slot_code_is_refused() {
+    let mut encoded = sample_seed()
+        .with_egress_ca(front_door_ca())
+        .with_credential_placeholders(every_placeholder())
+        .unwrap()
+        .encode();
+    let entry = 1 + codewire_access::CREDENTIAL_PLACEHOLDER_LENGTH;
+    // The last entry is GitHub's, code 3; make it code 4.
+    assert_eq!(encoded[PLACEHOLDERS_OFFSET + 1 + 2 * entry], 3);
+    for code in [0, 4, u8::MAX] {
+        encoded[PLACEHOLDERS_OFFSET + 1 + 2 * entry] = code;
+        refresh_checksum(&mut encoded);
+        assert_eq!(
+            Seed::decode(&encoded),
+            Err(SeedError::InvalidPlaceholders),
+            "{code}"
+        );
+    }
 }
 
 #[test]
@@ -810,11 +875,12 @@ fn a_malformed_placeholder_region_is_refused() {
     for (case, change) in [
         (
             "count past the slot kinds",
-            &(|bytes: &mut [u8; SEED_LEN]| bytes[PLACEHOLDERS_OFFSET] = 3)
+            &(|bytes: &mut [u8; SEED_LEN]| bytes[PLACEHOLDERS_OFFSET] = 4)
                 as &dyn Fn(&mut [u8; SEED_LEN]),
         ),
+        // Code 4 names no slot: decode refuses it rather than skip it.
         ("an unknown kind", &|bytes: &mut [u8; SEED_LEN]| {
-            bytes[PLACEHOLDERS_OFFSET + 1] = 3
+            bytes[PLACEHOLDERS_OFFSET + 1] = 4
         }),
         ("a duplicate kind", &|bytes: &mut [u8; SEED_LEN]| {
             bytes[PLACEHOLDERS_OFFSET + 1 + entry] = bytes[PLACEHOLDERS_OFFSET + 1]

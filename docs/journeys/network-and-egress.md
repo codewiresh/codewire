@@ -1352,7 +1352,8 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
     only when the GitHub hosts are bound.
   - An `SSL_CERT_DIR` that the image or project already sets is kept. `gh`
     then fails its TLS check against GitHub until that directory includes
-    the CA; the boot log names the variable.
+    the CA; the boot log names the variable. A `GIT_SSL_CAINFO` the image or
+    project sets does the same to Git, and the boot log names it too.
   - In a hosted Sandbox, a Git request without a credential is answered with
     GitHub's own 401 challenge, so Git asks its helper and an anonymous clone
     of a public repository uses the GitHub connection. Locally it reaches

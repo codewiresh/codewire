@@ -1826,9 +1826,14 @@ above.
       serves only those names.
 
     On both, the key never enters the guest.
-  - A value of either name that the image or project already sets is kept
-    and logged, as for Node; then that tool's intercepted connections fail
-    their TLS handshake.
+  - An `SSL_CERT_DIR` that the image or project already sets is kept and
+    logged, as for Node; then `gh`'s intercepted connections fail their TLS
+    handshake. Git's setting arrives as `GIT_CONFIG_*` entries, which
+    override every Git config file, so the image's and the project's Git
+    configuration never replace it. Git reads `GIT_SSL_CAINFO` after its
+    configuration, so one the image or project sets does replace it; the
+    boot log names it, and Git's intercepted connections fail their TLS
+    handshake.
 - **The agent's login.** A broker paired with the boot's front door seals
   Claude's and Codex's logins with this environment's placeholders, never the
   sign-in's tokens. One started with a front door it can't pair with seals no
@@ -1839,10 +1844,11 @@ above.
   `github.com` and `api.github.com` whole, so that Git and `gh` use GitHub's
   own names. A boot binds them when its profile has a GitHub connection
   (`front_door_hosts`, #5463), and then hands Git and `gh` the GitHub
-  placeholder and trust in the boot's CA (below). Not yet built: the
-  placeholder's delivery, the projection's call and the trust (#4001 comment
-  136112); until they are, `GITHUB_INTERCEPTED` stays off and GitHub stays on
-  its loopback route on both placements. The broker's rule for a request to
+  placeholder and trust in the boot's CA (below). Built for a local VM: the
+  placeholder's delivery in the seed, the projection's call and the trust.
+  Not yet built: the hosted placeholder, leaves and 401 challenge (#4001
+  comment 136112). Until they are, `GITHUB_INTERCEPTED` stays off and GitHub
+  stays on its loopback route on both placements. The broker's rule for a request to
   either host, in order:
   1. The environment's network policy must allow GitHub's hosts by rule, or
      nothing is sent, with or without a credential (#4926). Today that is

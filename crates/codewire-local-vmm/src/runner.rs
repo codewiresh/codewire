@@ -113,9 +113,9 @@ mod intercept;
 mod mesh_processes;
 use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process};
 
+pub(crate) use intercept::boot_interception;
 pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
 pub use intercept::{FrontDoorFailure, FrontDoorStop, InterceptRefusal};
-pub(crate) use intercept::{boot_intercepts, boot_placeholders};
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
 mod egress_spawn;

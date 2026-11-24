@@ -1487,8 +1487,11 @@ fn intercepted_github(
     let selected = clients(slots);
     selected
         .for_placement(placement)
-        .intercepted_github(selected, placeholder)
+        .intercepted_github(selected, placeholder, TRUST_BUNDLE)
 }
+
+/// A placement's published trust bundle, as the local guest names it.
+const TRUST_BUNDLE: &str = "/run/codewire-host/ca-certificates.crt";
 
 /// Intercepted, nothing sends Git or `gh` to the loopback ingress: no
 /// rewrite names the managed route, `gh`'s file names no socket, and the
@@ -1514,7 +1517,15 @@ fn intercepted_github_uses_githubs_own_names_and_only_the_placeholder() {
         ] {
             let projection = intercepted_github(slots, placement, Some(&placeholder));
             let entries = git_entries(&projection.environment);
-            let (rewrites, helpers) = entries.split_at(rewritten.len());
+            let (rewrites, rest) = entries.split_at(rewritten.len());
+            let (trust, helpers) = rest.split_at(1);
+            assert_eq!(
+                trust,
+                [(
+                    "http.https://github.com/.sslCAInfo".to_owned(),
+                    TRUST_BUNDLE.to_owned()
+                )]
+            );
             assert_eq!(
                 rewrites,
                 rewritten
@@ -1556,8 +1567,9 @@ fn intercepted_github_without_a_placeholder_projects_no_credential() {
         intercepted_github(&["github"], ManagedCredentialClientPlacement::Native, None);
     assert!(!projection.environment.contains_key("GH_TOKEN"));
     let entries = git_entries(&projection.environment);
-    assert_eq!(entries.len(), 3);
-    assert!(entries.iter().all(|(key, _)| key.starts_with("url.")));
+    assert_eq!(entries.len(), 4);
+    assert!(entries[..3].iter().all(|(key, _)| key.starts_with("url.")));
+    assert_eq!(entries[3].0, "http.https://github.com/.sslCAInfo");
     assert_eq!(projection.gh.unwrap().config_yml(), "version: 1\n");
 }
 
@@ -1574,9 +1586,10 @@ fn github_interception_changes_only_the_github_names() {
     ] {
         let selected = clients(slots);
         let plain = selected.for_placement(ManagedCredentialClientPlacement::Native);
+        let github = Some(&placeholder);
         let intercepted = plain
             .clone()
-            .intercepted_github(selected, Some(&placeholder));
+            .intercepted_github(selected, github, TRUST_BUNDLE);
         if !selected.contains(ManagedCredentialClient::GitHub) {
             assert_eq!(intercepted, plain, "{slots:?}");
             continue;
@@ -1715,6 +1728,90 @@ fn stock_git_offers_the_placeholder_to_github_com_alone() {
     ] {
         assert!(!fill(host).contains(placeholder.as_str()), "{host}");
     }
+}
+
+/// Stock Git trusts the bundle for `https://github.com/` URLs alone: every
+/// other host, `api.github.com` and `gist.github.com` included, keeps the
+/// trust it had (#4001).
+#[cfg(unix)]
+#[test]
+fn stock_git_trusts_the_bundle_for_github_com_alone() {
+    let environment = intercepted_github(
+        &["github"],
+        ManagedCredentialClientPlacement::Native,
+        Some(&placeholder()),
+    )
+    .environment;
+    let ca_info = |url: &str| {
+        let output = stock_git(&environment)
+            .args(["-C", "/", "config", "--get-urlmatch", "http.sslCAInfo", url])
+            .output()
+            .expect("stock git is installed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(ca_info("https://github.com/org/app.git"), TRUST_BUNDLE);
+    for other in [
+        "https://api.github.com/repos",
+        "https://gist.github.com/org/app.git",
+        "https://gitlab.com/org/app.git",
+        "http://github.com/org/app.git",
+    ] {
+        assert_eq!(ca_info(other), "", "{other}");
+    }
+}
+
+/// An interception holding GitHub's placeholder projects GitHub as
+/// [`ManagedCredentialClientProjection::intercepted_github`] does, after the
+/// Anthropic change; without it, GitHub keeps its loopback route.
+#[test]
+fn an_interception_with_githubs_placeholder_projects_github_intercepted() {
+    let placeholder = placeholder();
+    let selected = clients(&["anthropic", "github"]);
+    let interception = Interception::new(None).with_github(placeholder.clone(), TRUST_BUNDLE);
+    assert!(
+        interception
+            .github()
+            .is_some_and(|held| held.ct_eq(&placeholder))
+    );
+    assert_eq!(interception.github_trust_bundle(), Some(TRUST_BUNDLE));
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        let projected = selected.for_placement_intercepted(placement, Some(&interception));
+        let expected = selected
+            .for_placement(placement)
+            .intercepted(selected, None)
+            .intercepted_github(selected, Some(&placeholder), TRUST_BUNDLE);
+        assert_eq!(projected, expected);
+        let without = selected.for_placement_intercepted(placement, Some(&Interception::new(None)));
+        assert_eq!(
+            without.environment["GIT_CONFIG_VALUE_0"],
+            "https://github.com/"
+        );
+        assert_eq!(without.environment["GH_TOKEN"], GH_TOKEN_PLACEHOLDER);
+    }
+}
+
+/// GitHub's placeholder and bundle are part of equality, compared in
+/// constant time, and a new Anthropic placeholder keeps them.
+#[test]
+fn an_interception_keeps_githubs_part_across_anthropic_placeholders() {
+    let placeholder = placeholder();
+    let github = Interception::new(None).with_github(placeholder.clone(), TRUST_BUNDLE);
+    assert_ne!(github, Interception::new(None));
+    assert_ne!(
+        github,
+        Interception::new(None).with_github(placeholder.clone(), "/elsewhere")
+    );
+    assert_eq!(
+        github,
+        Interception::new(None).with_github(placeholder.clone(), TRUST_BUNDLE)
+    );
+    let launch = github.with_anthropic(Some(placeholder.clone()));
+    assert!(launch.github().is_some_and(|held| held.ct_eq(&placeholder)));
+    assert_eq!(launch.github_trust_bundle(), Some(TRUST_BUNDLE));
+    assert!(!format!("{github:?}").contains(placeholder.as_str()));
 }
 
 /// Every shipped managed-clients encoding (#6092). A binding records one of

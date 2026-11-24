@@ -84,3 +84,44 @@ fn the_selected_anthropic_form_names_the_placeholder() {
             .is_none()
     );
 }
+
+/// A seed with the `github` slot's placeholder gives the interception
+/// GitHub's part, with the workspace's bundle for Git; without one, GitHub
+/// keeps its loopback route (#4001).
+#[test]
+fn a_github_placeholder_in_the_seed_intercepts_github() {
+    let selected = ManagedCredentialClients::from_profile_slots(["anthropic", "github"]).unwrap();
+    assert!(from_seed(&seed(selected, true)).unwrap().github().is_none());
+
+    let github = seed(selected, false)
+        .with_egress_ca(ca())
+        .with_credential_placeholders(
+            SeedPlaceholders::new([
+                (PlaceholderSlot::AnthropicApiKey, placeholder("api-key")),
+                (PlaceholderSlot::GitHub, placeholder("github")),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+    let interception = from_seed(&github).unwrap();
+    assert!(
+        interception
+            .anthropic()
+            .unwrap()
+            .ct_eq(&placeholder("api-key"))
+    );
+    assert!(interception.github().unwrap().ct_eq(&placeholder("github")));
+    assert_eq!(
+        interception.github_trust_bundle(),
+        Some("/run/codewire-host/ca-certificates.crt")
+    );
+    let projection = selected.for_placement_intercepted(
+        codewire_access::ManagedCredentialClientPlacement::Native,
+        Some(&interception),
+    );
+    assert_eq!(projection.gh.unwrap().config_yml(), "version: 1\n");
+    assert_eq!(
+        projection.environment["GH_TOKEN"],
+        placeholder("github").as_str()
+    );
+}

@@ -131,6 +131,9 @@ const GITHUB_NON_HTTPS_FORMS: [&str; 3] = [GITHUB_GIT_URL, GITHUB_SCP_URL, GITHU
 /// Git's credential setting for `https://github.com` alone: no other host
 /// is ever offered the placeholder.
 const GITHUB_CREDENTIAL_HELPER_KEY: &str = "credential.https://github.com.helper";
+/// Git's trust setting for `https://github.com/` URLs alone: the bundle that
+/// holds the front door's CA, while GitHub's hosts are bound (#4001).
+const GITHUB_SSL_CA_INFO_KEY: &str = "http.https://github.com/.sslCAInfo";
 /// The user name GitHub expects beside an App or OAuth token as a password.
 const GITHUB_TOKEN_USERNAME: &str = "x-access-token";
 /// Destinations a workspace process must reach directly, whatever proxy it is
@@ -676,17 +679,29 @@ pub struct ManagedCredentialClientProjection {
 /// An environment whose agent hosts the TLS front door intercepts (#3999),
 /// with the placeholder of its selected Anthropic form, if that form takes
 /// one: the API-key and subscription-token forms do; the sign-in form's
-/// placeholder travels in its delivered login instead.
+/// placeholder travels in its delivered login instead. With GitHub's hosts
+/// bound, it also holds the `github` slot's placeholder (#4001).
 #[derive(Clone, Debug)]
 pub struct Interception {
     anthropic: Option<CredentialPlaceholder>,
+    github: Option<GitHubInterception>,
     hosted_ca_installed: bool,
+}
+
+/// GitHub's part of an [`Interception`]: the placeholder, and the trust
+/// bundle Git names for `https://github.com/`, which each placement
+/// publishes at its own path.
+#[derive(Clone, Debug)]
+struct GitHubInterception {
+    placeholder: CredentialPlaceholder,
+    trust_bundle: &'static str,
 }
 
 impl Interception {
     pub fn new(anthropic: Option<CredentialPlaceholder>) -> Self {
         Self {
             anthropic,
+            github: None,
             hosted_ca_installed: false,
         }
     }
@@ -700,8 +715,32 @@ impl Interception {
     pub fn with_anthropic(&self, anthropic: Option<CredentialPlaceholder>) -> Self {
         Self {
             anthropic,
+            github: self.github.clone(),
             hosted_ca_installed: self.hosted_ca_installed,
         }
+    }
+
+    /// The same interception with GitHub's hosts bound: `placeholder` is
+    /// the `github` slot's, and `trust_bundle` the placement's published
+    /// bundle of the image's roots and the front door's CA (#4001).
+    pub fn with_github(
+        mut self,
+        placeholder: CredentialPlaceholder,
+        trust_bundle: &'static str,
+    ) -> Self {
+        self.github = Some(GitHubInterception {
+            placeholder,
+            trust_bundle,
+        });
+        self
+    }
+
+    pub fn github(&self) -> Option<&CredentialPlaceholder> {
+        self.github.as_ref().map(|github| &github.placeholder)
+    }
+
+    pub fn github_trust_bundle(&self) -> Option<&'static str> {
+        self.github.as_ref().map(|github| github.trust_bundle)
     }
 
     /// A hosted daemon installed its egress CA before serving (#6072), so
@@ -720,11 +759,20 @@ impl Interception {
 impl PartialEq for Interception {
     fn eq(&self, other: &Self) -> bool {
         self.hosted_ca_installed == other.hosted_ca_installed
-            && match (&self.anthropic, &other.anthropic) {
-                (None, None) => true,
-                (Some(left), Some(right)) => left.ct_eq(right),
-                _ => false,
-            }
+            && same_placeholder(self.anthropic(), other.anthropic())
+            && same_placeholder(self.github(), other.github())
+            && self.github_trust_bundle() == other.github_trust_bundle()
+    }
+}
+
+fn same_placeholder(
+    left: Option<&CredentialPlaceholder>,
+    right: Option<&CredentialPlaceholder>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.ct_eq(right),
+        _ => false,
     }
 }
 
@@ -732,17 +780,24 @@ impl Eq for Interception {}
 
 impl ManagedCredentialClients {
     /// [`Self::for_placement`], then, for an environment whose agent hosts
-    /// are intercepted, [`ManagedCredentialClientProjection::intercepted`].
-    /// Without an interception the projection is exactly
-    /// [`Self::for_placement`]'s.
+    /// are intercepted, [`ManagedCredentialClientProjection::intercepted`],
+    /// and [`ManagedCredentialClientProjection::intercepted_github`] too
+    /// when it holds GitHub's placeholder. Without an interception the
+    /// projection is exactly [`Self::for_placement`]'s.
     pub fn for_placement_intercepted(
         self,
         placement: ManagedCredentialClientPlacement,
         interception: Option<&Interception>,
     ) -> ManagedCredentialClientProjection {
         let projection = self.for_placement(placement);
-        match interception {
-            Some(interception) => projection.intercepted(self, interception.anthropic()),
+        let Some(interception) = interception else {
+            return projection;
+        };
+        let projection = projection.intercepted(self, interception.anthropic());
+        match &interception.github {
+            Some(github) => {
+                projection.intercepted_github(self, Some(&github.placeholder), github.trust_bundle)
+            }
             None => projection,
         }
     }
@@ -799,7 +854,11 @@ impl ManagedCredentialClientProjection {
     ///   credential, which the broker swaps for the credential. An earlier
     ///   helper for that URL is cleared first, so nothing else is asked;
     /// - `GH_TOKEN` is the placeholder, and `gh`'s configuration names no
-    ///   socket.
+    ///   socket;
+    /// - Git trusts `trust_bundle`, the image's roots and the front door's
+    ///   CA, for `https://github.com/` URLs alone
+    ///   (`http.https://github.com/.sslCAInfo`), so no other host's trust
+    ///   changes. `gh`'s trust is the guest's `SSL_CERT_DIR`.
     ///
     /// Without a placeholder neither the helper nor `GH_TOKEN` is projected,
     /// so the fixed managed value never reaches the real host; Git and `gh`
@@ -809,6 +868,7 @@ impl ManagedCredentialClientProjection {
         mut self,
         clients: ManagedCredentialClients,
         github: Option<&CredentialPlaceholder>,
+        trust_bundle: &str,
     ) -> Self {
         if !clients.contains(ManagedCredentialClient::GitHub) {
             return self;
@@ -832,6 +892,10 @@ impl ManagedCredentialClientProjection {
                 )
             })
             .collect();
+        // Entries passed this way override every Git config file, for
+        // `https://github.com/` URLs only. Only `GIT_SSL_CAINFO` in the
+        // environment beats it; the guest logs one the image sets.
+        entries.push((GITHUB_SSL_CA_INFO_KEY.into(), trust_bundle.into()));
         match github {
             Some(placeholder) => {
                 // An empty value clears the helpers configured before it.

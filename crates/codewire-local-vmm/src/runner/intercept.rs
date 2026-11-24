@@ -308,8 +308,9 @@ pub(super) async fn boot_front_door(
 }
 
 /// The seed's placeholders, from the supervisor's request: none unless the
-/// boot intercepts, and then each a known Anthropic form at most once with a
-/// well-formed placeholder. Anything else is refused.
+/// boot intercepts, and then each a known slot (an Anthropic form, or the
+/// `github` slot) at most once with a well-formed placeholder. Anything else
+/// is refused.
 pub(crate) fn boot_placeholders(
     intercept: bool,
     entries: Vec<crate::control::v1::SeedCredentialPlaceholder>,
@@ -323,6 +324,7 @@ pub(crate) fn boot_placeholders(
             let slot = match entry.slot {
                 1 => PlaceholderSlot::AnthropicApiKey,
                 2 => PlaceholderSlot::AnthropicSubscriptionToken,
+                3 => PlaceholderSlot::GitHub,
                 _ => return Err(RunnerError::InvalidRequest),
             };
             let placeholder = CredentialPlaceholder::parse(&entry.placeholder)
@@ -331,6 +333,36 @@ pub(crate) fn boot_placeholders(
         })
         .collect::<Result<Vec<_>, _>>()?;
     SeedPlaceholders::new(entries).map_err(|_| RunnerError::InvalidRequest)
+}
+
+/// The boot's bound names and seed placeholders together, so that GitHub's
+/// hosts are bound exactly when the seed carries the `github` slot's
+/// placeholder (#4001): without one, `clients` binds no GitHub host, and Git
+/// and `gh` keep their loopback route; a GitHub placeholder for a boot that
+/// binds no GitHub host is refused, so no guest sends it to GitHub itself.
+pub(crate) fn boot_interception(
+    intercept: bool,
+    clients: codewire_access::ManagedCredentialClients,
+    entries: Vec<crate::control::v1::SeedCredentialPlaceholder>,
+) -> Result<(InterceptSet, SeedPlaceholders), RunnerError> {
+    let placeholders = boot_placeholders(intercept, entries)?;
+    let github = placeholders
+        .entries()
+        .iter()
+        .any(|(slot, _)| *slot == PlaceholderSlot::GitHub);
+    let clients = if github {
+        clients
+    } else {
+        clients.without_github()
+    };
+    let intercepts = boot_intercepts(intercept, clients);
+    let binds_github = codewire_access::GITHUB_HOSTS
+        .iter()
+        .all(|host| intercepts.binds(host, codewire_access::INTERCEPT_PORT));
+    if github && !binds_github {
+        return Err(RunnerError::InvalidRequest);
+    }
+    Ok((intercepts, placeholders))
 }
 
 /// A restore across a change of the switch is refused: the restored
@@ -468,7 +500,7 @@ mod tests {
     }
 
     /// The seed's placeholders come only with interception, each a known
-    /// Anthropic form at most once with a well-formed value.
+    /// slot at most once with a well-formed value.
     #[test]
     fn boot_placeholders_are_refused_unless_well_formed_and_intercepted() {
         let decoded = boot_placeholders(true, vec![entry(1, &placeholder())]).unwrap();
@@ -478,9 +510,12 @@ mod tests {
         assert_eq!(*slot, PlaceholderSlot::AnthropicApiKey);
         assert_eq!(value.as_str(), placeholder());
         assert!(boot_placeholders(false, Vec::new()).unwrap().is_empty());
+        let github = boot_placeholders(true, vec![entry(3, &placeholder())]).unwrap();
+        assert_eq!(github.entries()[0].0, PlaceholderSlot::GitHub);
         for (intercept, entries) in [
             (false, vec![entry(1, &placeholder())]),
-            (true, vec![entry(3, &placeholder())]),
+            (true, vec![entry(4, &placeholder())]),
+            (false, vec![entry(3, &placeholder())]),
             (true, vec![entry(1, "codewire-managed")]),
             (
                 true,
@@ -495,6 +530,52 @@ mod tests {
                 "{intercept}"
             );
         }
+    }
+
+    /// GitHub's hosts are bound only for a boot whose seed carries the
+    /// `github` slot's placeholder (#4001), and such a placeholder is
+    /// refused for a boot that binds no GitHub host.
+    #[test]
+    fn githubs_hosts_are_bound_only_with_a_github_placeholder() {
+        let selected = clients(&["anthropic", "github"]);
+        let binds_github = |intercepts: &InterceptSet| {
+            codewire_access::GITHUB_HOSTS
+                .iter()
+                .any(|host| intercepts.binds(host, 443))
+        };
+        let (without, placeholders) =
+            boot_interception(true, selected, vec![entry(1, &placeholder())]).unwrap();
+        assert!(!binds_github(&without));
+        assert!(without.binds("api.anthropic.com", 443));
+        assert_eq!(placeholders.entries().len(), 1);
+        let with = boot_interception(
+            true,
+            selected,
+            vec![entry(1, &placeholder()), entry(3, &placeholder())],
+        );
+        if codewire_access::GITHUB_INTERCEPTED {
+            let (intercepts, placeholders) = with.unwrap();
+            assert!(
+                codewire_access::GITHUB_HOSTS
+                    .iter()
+                    .all(|host| intercepts.binds(host, 443))
+            );
+            assert_eq!(placeholders.entries().len(), 2);
+        } else {
+            // Nothing binds GitHub's hosts yet, so its placeholder is refused.
+            assert!(matches!(with, Err(RunnerError::InvalidRequest)));
+        }
+        // Without the GitHub client its hosts are never bound.
+        assert!(matches!(
+            boot_interception(
+                true,
+                clients(&["anthropic"]),
+                vec![entry(3, &placeholder())]
+            ),
+            Err(RunnerError::InvalidRequest)
+        ));
+        let (off, placeholders) = boot_interception(false, selected, Vec::new()).unwrap();
+        assert!(off.is_empty() && placeholders.is_empty());
     }
 
     /// Off, the default: no front door is started and the seed carries no

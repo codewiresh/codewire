@@ -924,6 +924,12 @@ impl EnvironmentRunnerService for RunnerRpc {
             state.cw_runtime_catalog_generation(),
         )?;
         let network_policy = start_network_policy(&request.network_policy_document)?;
+        let (intercepts, credential_placeholders) = crate::runner::boot_interception(
+            request.intercept,
+            managed_credential_clients,
+            request.credential_placeholders,
+        )
+        .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?;
         let prepared = match state
             .runner
             .prepare(CreateVmRequest {
@@ -949,15 +955,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 cw_runtime_moved_from_generation,
                 image_disk: None,
                 network_policy,
-                intercepts: crate::runner::boot_intercepts(
-                    request.intercept,
-                    managed_credential_clients,
-                ),
-                credential_placeholders: crate::runner::boot_placeholders(
-                    request.intercept,
-                    request.credential_placeholders,
-                )
-                .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?,
+                intercepts,
+                credential_placeholders,
                 checkpoint,
             })
             .await

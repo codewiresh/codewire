@@ -298,7 +298,7 @@ fn resume(request: &CheckpointRequest) -> Result<Option<(ResumeReport, i64)>> {
     }
     // This boot's own trust in its front door, before the workload thaws:
     // the checkpoint's files name the captured boot's CA (#3999).
-    super::egress_trust::publish(seed.egress_ca(), Path::new(super::ROOT_MERGED_PATH))
+    super::egress_trust::publish(&seed, Path::new(super::ROOT_MERGED_PATH))
         .context("publish the restored boot's egress trust")?;
     drop(seed);
     if fork {

@@ -23,15 +23,23 @@ pub enum PlaceholderSlot {
     AnthropicApiKey,
     /// `CLAUDE_CODE_OAUTH_TOKEN`, a Claude subscription token.
     AnthropicSubscriptionToken,
+    /// The `github` slot: Git's credential helper and `GH_TOKEN`, only while
+    /// GitHub's hosts are bound (seed format 12).
+    GitHub,
 }
 
 impl PlaceholderSlot {
-    const ALL: [Self; 2] = [Self::AnthropicApiKey, Self::AnthropicSubscriptionToken];
+    const ALL: [Self; 3] = [
+        Self::AnthropicApiKey,
+        Self::AnthropicSubscriptionToken,
+        Self::GitHub,
+    ];
 
     fn code(self) -> u8 {
         match self {
             Self::AnthropicApiKey => 1,
             Self::AnthropicSubscriptionToken => 2,
+            Self::GitHub => 3,
         }
     }
 
