@@ -2757,15 +2757,17 @@ if [ "$event_selected" = false ]; then
     esac
 
     # The workspace agents check installs the pinned agents, starts each and
-    # runs the pinned Claude Code against the login file recorded for it
-    # (#3999). Its own inputs select it in a general change too: a pin moved
+    # runs the pinned Claude Code and Codex against the login files recorded
+    # for them (#3999, #6197). Its own inputs select it in a general change too: a pin moved
     # together with its recorded version is not the lockfile-only class, and
     # is the change the check exists for.
     case "$path" in
       images/workspace/agents/package.json|images/workspace/agents/package-lock.json|\
       crates/codewire-daemon/fixtures/agent-formats/*|\
       crates/codewire-access/tests/fixtures/claude-oauth-token/refresh-response.json|\
-      scripts/ci/verify/workspace-agents.sh|scripts/ci/verify/claude-login-compat.py)
+      crates/codewire-access/tests/fixtures/codex-oauth-token/*|\
+      scripts/ci/verify/workspace-agents.sh|scripts/ci/verify/claude-login-compat.py|\
+      scripts/ci/verify/codex-login-compat.py)
         select_token workspace_agents
         recognized=true
         ;;

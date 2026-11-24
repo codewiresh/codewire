@@ -36,7 +36,7 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
-    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, GITHUB_HOSTS,
+    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, GITHUB_HOSTS,
     MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
     OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure, one_label_under,
 };
@@ -71,8 +71,9 @@ const CODEX_PREFIX: &str = "/v1";
 // (#3999).
 /// The OpenAI API route's base.
 const OPENAI_API_PATH: &str = "/v1";
-// Claude's token host is routed on every path, and the broker forwards every
-// request that is not a managed refresh untouched. GitHub's hosts each select
+// Claude's and Codex's token hosts are routed on every path, Codex's on its
+// own route like chatgpt.com, and the broker forwards every request that is
+// not a managed refresh untouched (#6197). GitHub's hosts each select
 // their route by host, so every path maps as received. Which hosts an
 // environment gets is `codewire_access::front_door_hosts`.
 
@@ -198,8 +199,9 @@ impl RouteTable {
     }
 
     /// The routes the credential bridge serves today: the Anthropic API on
-    /// every path, the OpenAI API under `/v1`, and Codex on a ChatGPT
-    /// sign-in on every path, whole, which the broker narrows to Codex's own.
+    /// every path, the OpenAI API under `/v1`, Codex on a ChatGPT sign-in on
+    /// every path, whole, which the broker narrows to Codex's own, and
+    /// Codex's token host on every path.
     pub fn defaults() -> Self {
         Self::with_optional_hosts(false, false)
     }
@@ -263,6 +265,7 @@ impl RouteTable {
             .chain([
                 HostRoute::new(OPENAI_API_HOST, OPENAI_API_PATH, MANAGED_OPENAI_API_PREFIX),
                 HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
+                HostRoute::new(CODEX_TOKEN_HOST, "/", CODEX_PREFIX),
             ])
             .chain(github),
         )

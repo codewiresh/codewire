@@ -2,9 +2,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use codewire_access::{CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX, CapabilitySlot};
 use codewire_daemon_proto::codewire::bridge::v1;
 use futures::StreamExt as _;
+use http::{HeaderMap, HeaderValue, header};
 use serde_json::{Value, json};
 
 use super::*;
@@ -13,7 +15,7 @@ use crate::claude_oauth::CanonicalClaudeOAuthBundle;
 use crate::http_test_support::Lease;
 use crate::{
     BrokerCredentialRefreshRequest, BrokerLeaseError, BrokerRefreshAdmission, BrokerRefreshError,
-    BrokerUpstreamError, BrokerUpstreamResponse, CanonicalCodexOAuthBundle,
+    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, CanonicalCodexOAuthBundle,
 };
 
 /// The body Claude Code 2.1.308 sends, shared with the other crates' tests.

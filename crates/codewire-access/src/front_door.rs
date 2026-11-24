@@ -46,6 +46,9 @@ pub fn one_label_under(host: &str, suffix: &str) -> bool {
 /// Claude's token host, on every path: the pinned Claude Code refreshes its
 /// sign-in at `/v1/oauth/token`. Served only for a Claude sign-in.
 pub const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
+/// Codex's token host, on every path: the pinned Codex refreshes its ChatGPT
+/// sign-in at `/oauth/token` (#6197). Served only for the Codex slot.
+pub const CODEX_TOKEN_HOST: &str = "auth.openai.com";
 /// GitHub over Git and the GitHub API. Served only for a GitHub connection,
 /// and only once [`GITHUB_INTERCEPTED`] is on.
 pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
@@ -81,7 +84,7 @@ impl FrontDoorHost {
 /// the table [`front_door_hosts`] selects from. Its one suffix is
 /// `chatgpt.com`, for Codex's routed workspace origin, and only the Codex
 /// slot selects it (#6195).
-pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 4] = [
+pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 5] = [
     FrontDoorHost {
         host: ANTHROPIC_API_HOST,
         suffix: false,
@@ -98,16 +101,20 @@ pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 4] = [
         host: CHATGPT_HOST,
         suffix: true,
     },
+    FrontDoorHost {
+        host: CODEX_TOKEN_HOST,
+        suffix: false,
+    },
 ];
 
 /// The hosts the front door serves for an environment whose stock clients are
 /// `clients`, and only those its selected credentials name: the Anthropic API
 /// for an Anthropic client, and Claude's token host as well for a Claude
-/// sign-in; the OpenAI API for an OpenAI API key; `chatgpt.com` and every
-/// name one label under it for Codex; and GitHub's two hosts for a GitHub
-/// connection once [`GITHUB_INTERCEPTED`]. Each is exact but Codex's suffix.
-/// Every other host, an unselected provider's included, is reached as it
-/// would be without a front door.
+/// sign-in; the OpenAI API for an OpenAI API key; `chatgpt.com`, every name
+/// one label under it and Codex's token host for Codex; and GitHub's two
+/// hosts for a GitHub connection once [`GITHUB_INTERCEPTED`]. Each is exact
+/// but Codex's suffix. Every other host, an unselected provider's included,
+/// is reached as it would be without a front door.
 pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost> {
     let exact = |host| FrontDoorHost {
         host,
@@ -126,6 +133,7 @@ pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost>
             host: CHATGPT_HOST,
             suffix: true,
         });
+        hosts.push(exact(CODEX_TOKEN_HOST));
     }
     if clients.anthropic_sign_in() {
         hosts.push(exact(CLAUDE_TOKEN_HOST));
@@ -181,10 +189,10 @@ mod tests {
         assert!(names(clients(&["ssh"])).is_empty());
         assert_eq!(names(clients(&["anthropic"])), [ANTHROPIC_API_HOST]);
         assert_eq!(names(clients(&["openai"])), [OPENAI_API_HOST]);
-        assert_eq!(names(clients(&["codex"])), [CHATGPT_HOST]);
+        assert_eq!(names(clients(&["codex"])), [CHATGPT_HOST, CODEX_TOKEN_HOST]);
         assert_eq!(
             names(clients(&["openai", "codex", "ssh"])),
-            [OPENAI_API_HOST, CHATGPT_HOST]
+            [OPENAI_API_HOST, CHATGPT_HOST, CODEX_TOKEN_HOST]
         );
         let token = clients(&["anthropic"])
             .with_anthropic_subscription_token()
@@ -278,6 +286,41 @@ mod tests {
     fn claude_token_host_is_served_for_a_claude_sign_in_only() {
         let sign_in = clients(&["anthropic"]).with_anthropic_sign_in().unwrap();
         assert_eq!(names(sign_in), [ANTHROPIC_API_HOST, CLAUDE_TOKEN_HOST]);
+    }
+
+    /// Codex's token host is one of the Codex slot's exact names, and no
+    /// other selection's, whatever else it holds (#6197).
+    #[test]
+    fn codex_token_host_is_served_for_the_codex_slot_only() {
+        let slots = ["anthropic", "openai", "codex", "ssh", "github"];
+        for bits in 0..(1_u8 << slots.len()) {
+            let chosen: Vec<&str> = (0..slots.len())
+                .filter(|bit| bits & (1 << bit) != 0)
+                .map(|bit| slots[bit])
+                .collect();
+            let base = clients(&chosen);
+            let forms = [
+                Some(base),
+                base.with_anthropic_subscription_token().ok(),
+                base.with_anthropic_sign_in().ok(),
+            ];
+            for selection in forms.into_iter().flatten() {
+                let served = front_door_hosts(selection);
+                assert_eq!(
+                    served.contains(&FrontDoorHost {
+                        host: CODEX_TOKEN_HOST,
+                        suffix: false,
+                    }),
+                    chosen.contains(&"codex"),
+                    "{chosen:?}"
+                );
+                assert!(
+                    served
+                        .iter()
+                        .all(|host| host.host != CODEX_TOKEN_HOST || !host.suffix)
+                );
+            }
+        }
     }
 
     #[test]

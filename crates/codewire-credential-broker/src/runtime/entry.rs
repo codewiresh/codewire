@@ -123,8 +123,9 @@ where
     /// at `chatgpt.com` and GitHub's two hosts have it; any other front-door
     /// request is refused before a lease, never served by always injecting.
     /// Claude's token host is answered or forwarded by its own rule
-    /// (`claude_token.rs`), and GitHub's hosts by theirs
-    /// (`github_front_door.rs`). Only a GitHub request may stream its body.
+    /// (`claude_token.rs`), Codex's by its own (`codex_token.rs`), and
+    /// GitHub's hosts by theirs (`github_front_door.rs`). Only a GitHub
+    /// request may stream its body.
     async fn execute_intercepted(
         &self,
         request: ValidatedGuestRequest,
@@ -145,6 +146,7 @@ where
             }
             ("anthropic", _) => self.execute_swap(request).await,
             ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request, session).await,
+            ("codex", Some(RouteHost::CodexToken)) => self.execute_codex_token(request).await,
             _ => Err(BrokerRequestError::InvalidRequest),
         }
     }

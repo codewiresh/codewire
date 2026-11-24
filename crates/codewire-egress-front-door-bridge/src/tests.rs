@@ -224,14 +224,22 @@ fn header_names(request: &v1::CredentialBridgeRequest) -> Vec<&str> {
 // ---------------------------------------------------------------------------
 // The default routes
 
+/// One default route's request: (bound host, method, path and query, the
+/// loopback form, slot, route, provider path, query).
+type RouteCase = (
+    &'static str,
+    Method,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
 #[tokio::test]
 async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
-    let mut host = Host::start().await;
-    // The defaults and Claude's token host, as a Claude sign-in binds them.
-    let backend = host.backend(RouteTable::with_optional_hosts(true, false));
-    // (bound host, method, path and query, the loopback form, slot, route,
-    // provider path, query)
-    let cases = [
+    reach_the_bridge_as_their_loopback_forms_do([
         (
             "api.anthropic.com",
             Method::POST,
@@ -323,7 +331,43 @@ async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
             "/backend-api/wham/usage",
             "",
         ),
-    ];
+    ])
+    .await;
+}
+
+/// Codex's token host maps whole on the Codex route too (#6197).
+#[tokio::test]
+async fn codexs_token_host_reaches_the_bridge_as_its_loopback_form_does() {
+    reach_the_bridge_as_their_loopback_forms_do([
+        (
+            "auth.openai.com",
+            Method::POST,
+            "/oauth/token",
+            "/v1/oauth/token",
+            "codex",
+            "openai-api",
+            "/oauth/token",
+            "",
+        ),
+        (
+            "auth.openai.com",
+            Method::GET,
+            "/oauth/authorize?response_type=code",
+            "/v1/oauth/authorize?response_type=code",
+            "codex",
+            "openai-api",
+            "/oauth/authorize",
+            "response_type=code",
+        ),
+    ])
+    .await;
+}
+
+/// Each case reaches the bridge, through the defaults and Claude's token host
+/// as a Claude sign-in binds them, exactly as its loopback form does.
+async fn reach_the_bridge_as_their_loopback_forms_do(cases: impl IntoIterator<Item = RouteCase>) {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::with_optional_hosts(true, false));
     for (bound, method, uri, loopback_uri, slot, route, path, query) in cases {
         let build = |uri: &str, authority: &str| {
             Request::builder()
@@ -380,7 +424,7 @@ async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
 }
 
 #[test]
-fn the_defaults_bind_three_hosts() {
+fn the_defaults_bind_four_hosts() {
     let defaults = RouteTable::defaults();
     assert_eq!(
         defaults.routes(),
@@ -388,11 +432,17 @@ fn the_defaults_bind_three_hosts() {
             HostRoute::new("api.anthropic.com", "/", "/_codewire/anthropic"),
             HostRoute::new("api.openai.com", "/v1", "/_codewire/openai/v1"),
             HostRoute::new("chatgpt.com", "/", "/v1"),
+            HostRoute::new("auth.openai.com", "/", "/v1"),
         ]
     );
     assert_eq!(
         defaults.hosts(),
-        ["api.anthropic.com", "api.openai.com", "chatgpt.com"]
+        [
+            "api.anthropic.com",
+            "api.openai.com",
+            "chatgpt.com",
+            "auth.openai.com"
+        ]
     );
     assert_eq!(defaults.suffixes(), ["chatgpt.com"]);
     EnvironmentCa::generate_with_suffixes(defaults.hosts(), defaults.suffixes())
@@ -402,6 +452,7 @@ fn the_defaults_bind_three_hosts() {
         "api.anthropic.com",
         "api.openai.com",
         "chatgpt.com",
+        "auth.openai.com",
         "routed.chatgpt.com",
     ] {
         assert!(intercepts.binds(host, 443), "{host}");
@@ -546,9 +597,9 @@ fn only_a_selected_providers_hosts_are_routed() {
     assert_eq!(RouteTable::for_clients(clients(&[])), None);
     assert_eq!(RouteTable::for_clients(clients(&["ssh"])), None);
     for (slot, hosts) in [
-        ("anthropic", ["api.anthropic.com"]),
-        ("openai", ["api.openai.com"]),
-        ("codex", ["chatgpt.com"]),
+        ("anthropic", &["api.anthropic.com"][..]),
+        ("openai", &["api.openai.com"][..]),
+        ("codex", &["chatgpt.com", "auth.openai.com"][..]),
     ] {
         let routes = RouteTable::for_clients(clients(&[slot, "ssh"])).unwrap();
         assert_eq!(routes.hosts(), hosts, "{slot}");
@@ -581,12 +632,13 @@ fn githubs_hosts_are_routed_only_with_a_github_connection() {
             "api.anthropic.com",
             "api.openai.com",
             "chatgpt.com",
+            "auth.openai.com",
             "github.com",
             "api.github.com"
         ]
     );
     assert_eq!(
-        routes.routes()[3..],
+        routes.routes()[4..],
         [
             HostRoute::by_host("github.com"),
             HostRoute::by_host("api.github.com")

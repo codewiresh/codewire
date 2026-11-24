@@ -1,0 +1,5 @@
+{
+  "id_token": "<the login file's placeholder ID token>",
+  "access_token": "cwp1_<43 base64url characters>",
+  "refresh_token": "codewire-managed-no-refresh-token"
+}

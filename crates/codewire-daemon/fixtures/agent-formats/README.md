@@ -37,3 +37,14 @@ What fails, and what to do:
   of the API host, so the script's path lists are its alarm for a new pin,
   not a rule the broker enforces: look at what a new path is before adding
   it.
+- **Codex no longer refreshes as Codewire answers it**
+  (`scripts/ci/verify/codex-login-compat.py`, run by
+  `scripts/ci/verify/workspace-agents.sh`): the pinned Codex is run with no
+  network against a fake provider, starting from `codex.auth.json` with an
+  old `last_refresh`, a refused refresh, a recent login, and a provider that
+  answers 401 until a refresh. Each case must end with its turn answered
+  (`ok`, exit 0), and each refresh must be the request
+  `crates/codewire-access/tests/fixtures/codex-oauth-token/refresh-request.json`
+  records, at `POST auth.openai.com/oauth/token`: the only request the
+  broker answers on Codex's token host (#6197). A new endpoint, host or
+  grant means the token host's rule must change before the pin moves.

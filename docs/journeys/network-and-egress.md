@@ -1124,10 +1124,13 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
   - the TUI's `/status`: account, plan and limits;
   - an account whose `accounts/check` names a routed origin under
     `chatgpt.com`, and one naming an origin outside the list;
-  - a token refresh the broker makes, and one Codex starts itself. Until
-    change 7 of #3999 captures the provider's token endpoint, the second
-    sends the managed marker to the real endpoint and fails; the far-future
-    `exp` makes it rare;
+  - a token refresh the broker makes, and one Codex starts itself: with
+    `last_refresh` in its `auth.json` more than eight days old, Codex
+    refreshes at `auth.openai.com/oauth/token` with the managed marker
+    before its next request, which the front door answers (#6197); the
+    same refresh with the credential revoked; a request to its token
+    endpoint without the marker; and one to another path of
+    `auth.openai.com`;
   - the credential revoked while Codex runs;
   - a stopped and started environment, and a restored VM checkpoint.
 - **Driving it:** with interception on:
@@ -1162,6 +1165,18 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
     not on its disk, not in a checkpoint, a hosted volume or a snapshot, and
     not in the daemon's or the egress processes' logs;
   - Codex keeps working past the real token's expiry;
+  - Codex's own refresh is answered with the placeholder access token, the
+    placeholder ID token and the managed marker, and nothing reaches
+    OpenAI: the next model call answers, and `auth.json` holds the same
+    placeholders with a new `last_refresh`. Not yet observed (#6197);
+  - with the credential revoked, Codex's own refresh is answered
+    `invalid_grant` and Codex asks to sign in again. Not yet observed
+    (#6197);
+  - another request to `auth.openai.com/oauth/token` carries nothing of
+    Codewire's and follows the network policy: forwarded untouched where a
+    rule allows the host, refused otherwise, and always refused on a hosted
+    Sandbox (#5555). A request to any other path of the host is refused
+    and never sent. Not yet observed (#6197);
   - after `cw credentials revoke`, the next call fails and none succeeds after
     it.
 - **Terminal UI:** `cw run codex --in ENV` (Codex's own terminal UI), local
@@ -1955,7 +1970,12 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - after a change to the bound hosts, the new set is intercepted and a
     host no longer bound is ordinary egress again;
   - once a Sandbox is destroyed, its environment's placeholder key row is
-    gone, and every other environment's key is unchanged.
+    gone, and every other environment's key is unchanged;
+  - with the Codex slot selected, `auth.openai.com` is bound and has a leaf
+    beside `chatgpt.com`; Codex's own refresh there is answered as in
+    `agent-codex`, and a request there without the managed marker is
+    refused 403 `invalid_request` with nothing sent. Without the Codex slot
+    it is ordinary egress. Not yet observed (#6197).
 - **Gotchas:**
   - The search for the real token is done by its holder, without
     printing it; the tool is owned by #3999.

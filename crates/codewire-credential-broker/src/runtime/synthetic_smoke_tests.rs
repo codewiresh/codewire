@@ -1,5 +1,7 @@
 //! Synthetic upstream fixtures, never a network or credential-store test.
 
+use http::HeaderName;
+
 use super::*;
 use crate::http_test_support::Lease;
 

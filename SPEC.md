@@ -797,7 +797,11 @@ such request, whatever the policy, until one can leave through the Sandbox's
 own egress. A refused request gets the same answer whether it carried no
 credential, the user's own key or another environment's placeholder, and
 nothing is dialled; one with no placeholder-shaped value is refused before
-any lease (#5555). Codex's routed workspace origins, one label under
+any lease (#5555). On an agent's token host, Claude's `platform.claude.com`
+for a Claude sign-in and Codex's `auth.openai.com` for the Codex slot, the
+one request the broker serves is the agent's refresh carrying Codewire's
+managed refresh token: it is answered with placeholders, outside the
+environment, and never reaches the provider (#3999, #6197). Codex's routed workspace origins, one label under
 `chatgpt.com`, can't be named ahead, so for them the supervisor's answer is
 whether a rule covers every such name (`*.chatgpt.com`): it asks the policy
 about a fresh random name under the suffix each time, so a rule for one name

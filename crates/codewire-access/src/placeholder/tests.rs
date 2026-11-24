@@ -361,20 +361,25 @@ fn derivation_matches_a_known_answer() {
     assert_eq!(placeholder.as_str(), known_answer::PLACEHOLDER);
 }
 
-/// The Claude Code compatibility check makes its placeholders up in the shape
-/// this fixture states for `access_token`
-/// (`scripts/ci/verify/claude-login-compat.py`), so the fixture states the
+/// The Claude Code and Codex compatibility checks make their placeholders up
+/// in the shape these fixtures state for `access_token`
+/// (`scripts/ci/verify/claude-login-compat.py`,
+/// `scripts/ci/verify/codex-login-compat.py`), so the fixtures state the
 /// shape minted here.
 #[test]
 fn the_token_answer_fixture_states_the_shape_minted_here() {
-    let answer: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/claude-oauth-token/refresh-response.json"
-    ))
-    .unwrap();
-    assert_eq!(
-        answer["access_token"],
-        format!("{CREDENTIAL_PLACEHOLDER_TAG}<{PLACEHOLDER_ENCODED_BYTES} base64url characters>")
-    );
+    for fixture in [
+        include_str!("../../tests/fixtures/claude-oauth-token/refresh-response.json"),
+        include_str!("../../tests/fixtures/codex-oauth-token/refresh-response.json"),
+    ] {
+        let answer: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(
+            answer["access_token"],
+            format!(
+                "{CREDENTIAL_PLACEHOLDER_TAG}<{PLACEHOLDER_ENCODED_BYTES} base64url characters>"
+            )
+        );
+    }
 }
 
 /// An owner-local environment's key (#6191) is RFC 5869 HKDF-SHA256 Expand,

@@ -11,8 +11,9 @@
 # the manifest pins. It also runs the support-images contract, which reads
 # the same two files.
 #
-# It then runs the pinned Claude Code against a fake provider with the login
-# file Codewire writes (claude-login-compat.py). The agent runs with no
+# It then runs the pinned Claude Code and the pinned Codex against a fake
+# provider with the login file Codewire writes for each
+# (claude-login-compat.py, codex-login-compat.py). Each agent runs with no
 # network but loopback: in a user and network namespace of its own where one
 # can be made, and otherwise, in a CI job that may not make one, in a
 # container with no network that the job's Docker daemon starts from the
@@ -160,6 +161,45 @@ case "$LOOPBACK_ONLY" in
     timeout 180 docker start -a "$login_container" || status=$?
     [[ "$status" -ne 124 ]] || die 'the Claude Code login check did not finish within 180 s'
     [[ "$status" -eq 0 ]] || die "$MOVED"
+    # The cleanup removes one container: this one goes before the next.
+    docker rm -f "$login_container" >/dev/null || die 'the Claude Code login check container could not be removed'
+    login_container=''
     ;;
 esac
-echo "workspace-agents: the lockfile installs, every agent starts at its pinned version, and Claude Code reads its login file (loopback only by $LOOPBACK_ONLY)"
+
+# The pinned Codex, given the recorded login file, refreshes only as
+# Codewire's answer on its token host expects (#6197).
+readonly CODEX_COMPAT="$ROOT/scripts/ci/verify/codex-login-compat.py"
+readonly CODEX_LOGIN="$ROOT/crates/codewire-daemon/fixtures/agent-formats/codex.auth.json"
+readonly CODEX_TOKEN="$ROOT/crates/codewire-access/tests/fixtures/codex-oauth-token"
+readonly CODEX_MOVED='the pinned Codex no longer refreshes as Codewire answers it: see crates/codewire-access/tests/fixtures/codex-oauth-token/README.md'
+mkdir "$work/codex-login"
+case "$LOOPBACK_ONLY" in
+  namespace)
+    unshare -rn python3 -I "$CODEX_COMPAT" --agent "$work/node_modules/.bin/codex" \
+      --login "$CODEX_LOGIN" --token-request "$CODEX_TOKEN/refresh-request.json" \
+      --token-answer "$CODEX_TOKEN/refresh-response.json" --work "$work/codex-login" ||
+      die "$CODEX_MOVED"
+    ;;
+  container)
+    cp "$CODEX_COMPAT" "$work/codex-login/codex-login-compat.py"
+    cp "$CODEX_LOGIN" "$work/codex-login/login.json"
+    cp "$CODEX_TOKEN/refresh-request.json" "$work/codex-login/token-request.json"
+    cp "$CODEX_TOKEN/refresh-response.json" "$work/codex-login/token-answer.json"
+    mkdir "$work/codex-login/work" "$work/codex-login/agents"
+    login_container="$(docker create --network none --pids-limit 2048 --entrypoint python3 "$job_image" \
+      -I /codex-login/codex-login-compat.py --agent /codex-login/agents/node_modules/.bin/codex \
+      --login /codex-login/login.json --token-request /codex-login/token-request.json \
+      --token-answer /codex-login/token-answer.json --work /codex-login/work)" ||
+      die 'the container for the Codex login check could not be made'
+    if ! docker cp -q "$work/codex-login" "$login_container":/codex-login ||
+      ! docker cp -q "$work/node_modules" "$login_container":/codex-login/agents/; then
+      die 'the agent could not be copied into the container for the Codex login check'
+    fi
+    status=0
+    timeout 600 docker start -a "$login_container" || status=$?
+    [[ "$status" -ne 124 ]] || die 'the Codex login check did not finish within 600 s'
+    [[ "$status" -eq 0 ]] || die "$CODEX_MOVED"
+    ;;
+esac
+echo "workspace-agents: the lockfile installs, every agent starts at its pinned version, and Claude Code and Codex read their login files (loopback only by $LOOPBACK_ONLY)"

@@ -86,3 +86,29 @@ fn the_shared_token_endpoint_fixtures_keep_their_shape() {
             .starts_with(CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX)
     );
 }
+
+/// Codex's request fixture is the refresh the pinned Codex sends with the
+/// marker Codewire writes, and its response fixture has exactly the members
+/// Codex reads, the marker returned as it is (#6197).
+#[test]
+fn the_codex_token_endpoint_fixtures_keep_their_shape() {
+    let request: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/codex-oauth-token/refresh-request.json"
+    ))
+    .unwrap();
+    let mut members: Vec<_> = request.as_object().unwrap().keys().cloned().collect();
+    members.sort_unstable();
+    assert_eq!(members, ["client_id", "grant_type", "refresh_token"]);
+    assert_eq!(request["grant_type"], "refresh_token");
+    assert_eq!(request["refresh_token"], CODEX_MANAGED_REFRESH_TOKEN);
+    assert!(request["client_id"].is_string());
+
+    let response: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/codex-oauth-token/refresh-response.json"
+    ))
+    .unwrap();
+    let mut members: Vec<_> = response.as_object().unwrap().keys().cloned().collect();
+    members.sort_unstable();
+    assert_eq!(members, ["access_token", "id_token", "refresh_token"]);
+    assert_eq!(response["refresh_token"], CODEX_MANAGED_REFRESH_TOKEN);
+}

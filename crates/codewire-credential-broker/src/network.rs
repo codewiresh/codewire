@@ -656,16 +656,18 @@ fn provider_host(target: &url::Url) -> &'static str {
 
 /// A provider host a credential route sends its requests to: the only hosts a
 /// front-door request may name as the one it was intercepted for. The hosts
-/// the broker calls only to refresh a token are no route's, except Claude's
-/// token host, which a Claude sign-in's front door also routes: Claude Code
-/// refreshes through it. `github.com` is both a route's host and where a
-/// GitHub App token is exchanged; the route admits only its Git paths.
+/// the broker calls only to refresh a token are no route's, except the
+/// agents' token hosts, which their front door also routes: Claude Code
+/// refreshes through Claude's, and Codex through Codex's (#6197).
+/// `github.com` is both a route's host and where a GitHub App token is
+/// exchanged; the route admits only its Git paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RouteHost {
     OpenAiApi,
     ChatGpt,
     AnthropicApi,
     ClaudeToken,
+    CodexToken,
     GitHubApi,
     GitHub,
 }
@@ -677,6 +679,7 @@ impl RouteHost {
             Self::ChatGpt => CHATGPT_HOST,
             Self::AnthropicApi => ANTHROPIC_HOST,
             Self::ClaudeToken => CLAUDE_TOKEN_HOST,
+            Self::CodexToken => OPENAI_AUTH_HOST,
             Self::GitHubApi => GITHUB_API_HOST,
             Self::GitHub => GITHUB_GIT_HOST,
         }
@@ -687,7 +690,7 @@ impl RouteHost {
     /// codex slot may hold a ChatGPT sign-in; an API key goes to the API.
     fn of_route(slot: &str, route: &str) -> &'static [Self] {
         match (slot, route) {
-            ("codex", "openai-api") => &[Self::OpenAiApi, Self::ChatGpt],
+            ("codex", "openai-api") => &[Self::OpenAiApi, Self::ChatGpt, Self::CodexToken],
             ("openai", "openai-api") => &[Self::OpenAiApi],
             ("anthropic", "anthropic-api") => &[Self::AnthropicApi],
             ("anthropic", "claude-oauth-token") => &[Self::ClaudeToken],
@@ -781,6 +784,9 @@ fn validate_target(
                 && transparent_method(method)
                 && chatgpt_path(target.path())
         }
+        // A sign-in's refresh endpoint is also where its front door forwards
+        // the user's own token requests untouched (#6197); no other path of
+        // the host is sent for a sign-in.
         Some(OPENAI_AUTH_HOST) => {
             method == Method::POST
                 && target.query().is_none()
@@ -1168,7 +1174,12 @@ mod tests {
         );
         assert_eq!(
             RouteHost::interceptable(&grants(&[("codex", "openai-api")])),
-            BTreeSet::from(["*.chatgpt.com", "api.openai.com", "chatgpt.com"])
+            BTreeSet::from([
+                "*.chatgpt.com",
+                "api.openai.com",
+                "auth.openai.com",
+                "chatgpt.com"
+            ])
         );
         assert_eq!(
             RouteHost::interceptable(&grants(&[("openai", "openai-api")])),
@@ -1786,6 +1797,18 @@ mod tests {
                 &BTreeSet::from([HttpProvider::CodexOAuth]),
             )
             .is_ok()
+        );
+        // Only the token endpoint: the front door's untouched forward of any
+        // other path of the token host, the sign-in page among them, is
+        // never sent (#6197).
+        assert_eq!(
+            validate_target(
+                &url::Url::parse("https://auth.openai.com/oauth/authorize?response_type=code")
+                    .unwrap(),
+                &Method::GET,
+                &BTreeSet::from([HttpProvider::CodexOAuth]),
+            ),
+            Err(BrokerUpstreamError::DestinationDenied)
         );
         for allowed in [
             "https://api.openai.com/v1/responses?stream=true",

@@ -113,6 +113,35 @@ is now their one home, and `AGENTS.md` points here.
     forwarded. A sign-in that can't be used is answered `invalid_grant`,
     and a passing failure `temporarily_unavailable`, so a short outage
     doesn't make the agent drop its login.
+  - **Codex's own token refresh** (#6197). When the environment's Codex
+    slot is selected, the front door also terminates Codex's token host,
+    `auth.openai.com`. On it, only `POST /oauth/token` with
+    `grant_type=refresh_token`, in a JSON or form body, whose refresh token
+    is Codewire's managed marker (`codewire-managed-no-refresh-token`, alone
+    or followed by `-` and a 32-character nonce) is answered by Codewire, and
+    it never reaches OpenAI. The answer holds exactly what the pinned Codex
+    reads: the environment's placeholder access token, the login file's
+    unsigned placeholder ID token (the same allow-listed claims), and the
+    bare marker again as the refresh token, by which the daemon still knows
+    the file as Codewire's. Before answering, the broker refreshes the stored
+    sign-in itself, outside the environment, through its usual refresh
+    journal, if that sign-in is near expiry; the answer never carries a real
+    token. Every other request there carries no Codewire value. One to the
+    token endpoint, with another grant or a refresh token that isn't
+    Codewire's (a user's own ChatGPT login), follows the network policy as on
+    Claude's token host: it's forwarded untouched where the policy allows the
+    host, and refused otherwise (#5555). A request to any other path of the
+    host, the sign-in pages among them, is refused and never sent: for a
+    Codex sign-in the broker's transport sends only to the token endpoint,
+    which keeps a guest's requests off OpenAI's revocation and device-login
+    paths. A request carrying
+    a placeholder or a marker anywhere else is refused, never forwarded. A
+    sign-in that can't be used, revoked or needing Reconnect, is answered
+    `invalid_grant`, and a passing failure `temporarily_unavailable`. The
+    pinned Codex refreshes when its `last_refresh` is more than eight days
+    old, or after its provider answers 401;
+    `scripts/ci/verify/codex-login-compat.py` runs it against a stand-in and
+    fails if it refreshes anywhere else or with another grant.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
@@ -1695,7 +1724,8 @@ above.
   never through the front door. Today's credential kinds name fixed hosts:
   an Anthropic credential `api.anthropic.com`, and a Claude sign-in Claude's
   token host as well; an OpenAI API key `api.openai.com`; a Codex sign-in
-  `chatgpt.com` and the Codex names under it; a GitHub connection GitHub's
+  `chatgpt.com`, the Codex names under it, and Codex's token host
+  `auth.openai.com`; a GitHub connection GitHub's
   two hosts, once they are intercepted. A later kind, or a secret selected
   for proxying, names its own hosts under the same rule. The set is the
   union of the hosts the environment's managed-client selection names,
@@ -2069,13 +2099,14 @@ it.
 `Codewire-Refusal: <reason>`. Claude Code shows the body as it is.
 
 One exception: where the client parses the answer as a protocol's error, the
-body keeps that protocol's shape. The OAuth token endpoint
-(`platform.claude.com/v1/oauth/token`) answers an RFC 6749 error, which
-Claude Code acts on (`invalid_grant` ends its login,
+body keeps that protocol's shape. The OAuth token endpoints
+(`platform.claude.com/v1/oauth/token`, and Codex's
+`auth.openai.com/oauth/token`) answer an RFC 6749 error, which Claude Code
+and Codex act on (`invalid_grant` ends the login,
 `temporarily_unavailable` keeps it running): `invalid_request`
 (`request_not_forwarded`), `invalid_grant` with the description "Codewire:
-this environment's Claude sign-in needs to be renewed"
-(`credential_needs_reconnect`), and `temporarily_unavailable`
+this environment's Claude sign-in needs to be renewed", or "Codex sign-in"
+on Codex's (`credential_needs_reconnect`), and `temporarily_unavailable`
 (`upstream_failed`). The same header and body rules apply. Its rows come
 with #4971.
 
@@ -2749,6 +2780,18 @@ which its first bind will store, decides its CA.
 - **The sign-in exception ends.** With the switch on, the two hosted rows of
   [Direct delivery exceptions](#direct-delivery-exceptions) no longer apply:
   no real Codex or Claude sign-in token is written into the Sandbox (#4002).
+- **Codex's own refresh** (#6197). With the Codex slot selected,
+  `auth.openai.com` is one of the Sandbox's exact bound names, and its leaf
+  is signed beside `chatgpt.com`'s, for the same grant. Codex's refresh
+  there carrying Codewire's managed marker is answered by the credential
+  service exactly as a local broker answers it ("Codex's own token refresh"
+  above): placeholders and the marker, never a real token, and nothing sent
+  to OpenAI. The managed sign-in's real refresh is the credential service's
+  own. Any other request to `auth.openai.com` is the user's own and is
+  refused before anything is sent, as every own key on a bound host is
+  (below), with 403 `invalid_request` as on Claude's token host. So on a
+  hosted Sandbox with the Codex slot selected, a user's own ChatGPT sign-in
+  inside it does not reach OpenAI.
 - **Own keys** (#5555). A request to a bound host that carries
   none of the Sandbox's placeholders (the user's own key, another
   Sandbox's placeholder, or no credential) is refused
