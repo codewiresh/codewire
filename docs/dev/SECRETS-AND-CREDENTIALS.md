@@ -2236,6 +2236,8 @@ below).
     take:
     - an expired owner login: `cw login`;
     - `RESOURCE_EXHAUSTED`: wait a minute and start again;
+    - `PERMISSION_DENIED`: the platform refused this VM's credential
+      profile; check the profile, then start again;
     - `UNAVAILABLE`, the deadline or a transport error: start again once
       the platform is reachable.
 
