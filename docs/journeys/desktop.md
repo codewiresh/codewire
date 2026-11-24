@@ -219,8 +219,11 @@ panel comment.
 - **Observed:** partly, in the 2026-11-22 walks on Dev and a Linux local VM:
   `DISPLAY=:1`, and `:7` when the request set it; `xdotool` found the
   `desk-mark` window and its keys wrote `drawn`; the two pictures differ and
-  the copied-out one shows the window. The shell opened before the desktop and
-  an agent driving it are not yet observed.
+  the copied-out one shows the window. On Dev on 2026-11-23 (#6161 has the
+  walk): a shell opened with `cw shell` before the desktop started printed
+  `DISPLAY` unset before the start, after it and at the end, while a command
+  started after the start printed `:1`. An agent driving it is not yet
+  observed: it needs an agent signed in, which the smoke identity has not.
 
 ## `desktop-look`: a started desktop looks like Codewire
 
@@ -258,9 +261,15 @@ panel comment.
   a Linux local VM: the Codewire wordmark on a dark background, one dark panel
   along the top with the menu, a terminal, Chromium, the file manager and a
   clock, one terminal in `/workspace`, no desktop icons. The terminal's prompt
-  is plain on Dev and coloured on the local VM; whether either matches the
-  dashboard terminal's colours, the restart after a change and a resize are
-  not yet observed.
+  is plain on Dev and coloured on the local VM. On Dev on 2026-11-23 (#6161):
+  the first start's terminal was found before any input; the file manager
+  opened from the panel has a dark frame and dark controls; the panel's size,
+  changed from 36 to 44, was still 44 after a stop and start. Two proofs
+  fail. The terminal's background is the dashboard terminal's, but its text
+  is cream and its cursor purple, where the dashboard's are `#e4e4e7`. The
+  wallpaper fills the screen at every size tried, but the wordmark is whole
+  only at 16:10 (1600x1000, 1280x800, 1920x1200), and cut at 1920x1080 and
+  1024x768.
 
 ## `desktop-browser`: Chromium runs sandboxed, and an agent can drive it
 
