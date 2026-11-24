@@ -1434,12 +1434,111 @@ own call and leaves these selections alone. Selection changes use a confirmed ma
 invalidate old grants and retain workspace data. Secret-value changes affect
 the next managed launch; existing processes retain inherited values. Install
 completion follows the existing setup identity/marker rules; startup runs per
-boot. Profile edits alone never rebind an environment.
+boot. Profile edits alone never rebind an environment. That changes under
+[Profile edits reach running environments](#profile-edits-reach-running-environments-approved-not-yet-shipped).
 
 `cw use` selects execution only. Saved platform selections must bind the exact
 server/organization; stale local or platform selections must not fall back to a
 different environment. Cached local-only environments retain offline operation;
 platform-backed material needs its platform authority online.
+
+### Profile edits reach running environments (approved, not yet shipped)
+
+**Approved, not yet shipped** (owner, 2026-11-24; #6339). An edit to a personal
+profile takes effect in every environment that selects it, hosted Sandboxes
+and local VMs alike, on that environment's next request. No restart and no
+second command are needed. A stopped environment picks it up when it starts.
+This section is the design. The change that ships it rewrites the passages it
+names and removes this heading.
+
+- **An environment selects a profile, not a revision.** Today a bind records
+  the profile revision it was made from, and the environment keeps that
+  revision until it is rebound. Instead, the bind records the profile, and
+  every lease reads that profile's current revision. Revisions are still
+  written and listed (`profile-revisions`) as the profile's history, but no
+  environment holds an old one.
+- **One placeholder per provider slot per environment.** For a provider
+  slot of a personal profile, the placeholder's derivation (`cwp1_`, below) drops its profile
+  revision and credential inputs. It is an HMAC over the environment and the
+  slot only, under the same key. A host-bound secret's slot is not a profile
+  slot and keeps its own derivation: the credential, its `binding_id` and
+  its `binding_generation` (see [Host-bound application secrets](#host-bound-application-secrets-not-yet-built-4003)). A running
+  process therefore keeps a valid placeholder across any edit. The front
+  door's swap resolves the slot's credential from the profile's current
+  revision when each request arrives, not when the process launched.
+- **What an edit does, per slot:**
+  - *Another credential of the same kind and form* (one Anthropic API key
+    for another, one GitHub connection for another): the next request swaps
+    in the new credential.
+  - *Slot cleared* (`unset`): the next request carrying that slot's
+    placeholder is refused with `no_credential_selected`, which already
+    exists for this case. Nothing is swapped in.
+  - *Slot filled that the environment didn't carry at launch:* new launches
+    get its placeholder, and so do processes after their next launch. A
+    process started before the slot existed has no variable for it and
+    isn't changed.
+  - *The same slot in another form*, such as an Anthropic API key
+    (`ANTHROPIC_AUTH_TOKEN`) replaced by a Claude sign-in
+    (`CLAUDE_CODE_OAUTH_TOKEN`), or a hosted GitHub selection that changes
+    the intercepted hosts: new launches get the new form at once. A request
+    in the old form is refused with `no_credential_selected` until its
+    process restarts, since the old form's variable no longer names a
+    credential.
+  - *An edit that starts or changes a direct delivery* (an API key replaced
+    by a Claude or Codex sign-in, or one sign-in replaced by another; see
+    [Direct delivery exceptions](#direct-delivery-exceptions)): the real
+    token then reaches every selecting environment, where anyone with
+    terminal access can read it. Binding used to confirm that for each
+    environment. So before such an edit commits, the CLI and the dashboard
+    name each environment it reaches, mark the ones other people can open,
+    and ask for confirmation: a prompt, or `--yes`. Nothing is delivered
+    until the edit commits. An edit that stays behind the front door, in the
+    same form, asks nothing. The wording is the owner's.
+- **When "next request" holds.** The lease's grant evaluation already reads
+  the credential's generations on every request, so revocation and Reconnect
+  apply at once (the table below). It also reads the profile's current
+  revision id, one indexed read. An epoch's reused authority (`authority=reused`)
+  and its value cache are keyed by that revision, so an edit is never served
+  from a decision made before it. The epoch placeholder cache is keyed by
+  environment and slot, and no edit invalidates it. A request whose lease was
+  evaluated before the edit committed may finish on the old credential.
+  Every request evaluated after the commit uses the new revision.
+- **Who may edit.** This covers personal profiles. Only their owner edits
+  them, with the same sign-in rules as binding a personal profile (below).
+  An edit therefore needs no new consent: it changes only the owner's own
+  environments that already selected the profile with that person's
+  confirmation. An organization API key still can't read or edit a profile.
+- **Organization profiles keep rebind-only semantics.** A profile an
+  organization owns (`Owner::Organization`) is selected by other members'
+  environments. An edit to one would change the credential under their
+  running agents, so it keeps today's rule: environments keep the revision
+  they were bound to, and an edit reaches them only through a rebind. Who
+  may edit an organization profile, what its editor sees and
+  confirms, and how it is audited as an organization edit are a separate
+  decision (#6354).
+- **Deleting a credential.** A credential the current revision of any
+  profile selects can't be deleted, as a bound credential can't be today.
+  Neither can one selected by a revision that an old-derivation binding
+  still holds (below). One that only other older revisions name can be.
+- **Audit.** Every profile edit writes one audit-log event: the profile, the
+  slot, the credential before and after by id and kind (never a value), the
+  actor, and how many running environments it reached. The dashboard shows
+  each environment's profile and when that profile last changed.
+- **Moving existing environments.** A binding made before this change keeps
+  its old derivation and its pinned revision until its next restart, and its
+  running agents keep working. An edit doesn't reach it: the edit counts it
+  as "at next restart", never as "applied". The binding records which
+  derivation it uses. A new bind, or a restart, moves it to the slot-only
+  derivation and the profile's current revision. The old derivation is
+  removed once no binding uses it.
+- **What users see.** The CLI and the dashboard say where an edit applied,
+  for example "Applied to 3 running Sandboxes" and "2 stopped Sandboxes pick
+  it up when they start". The final wording is the owner's, and goes to them
+  before it ships.
+
+A local VM does the same through its owner-local authority and its own front
+door. Its seed carries the slot-only placeholder, and its broker resolves the
+profile's current revision per request (local passages to follow).
 
 ### Who may bind a personal profile
 
@@ -1586,6 +1685,7 @@ What applies when, for a running hosted Sandbox:
 | Rotate or replace material, Reconnect, revoke, delete, an OAuth refresh | The next request |
 | Organization membership or role, organization deletion, rebinding the running environment, personal-credential confirmation, environment state, Pod lineage | Within 60 seconds |
 | Switch to a different profile | Through the restart it already triggers |
+| Edit the selected profile: change, add or clear a slot (approved, not yet shipped; #6339) | The next request; a slot added or a form changed reaches each process at its next launch |
 | SSH key change or revocation | The next signature |
 | Codex or Claude login direct delivery | Unchanged: every delivery runs full checks |
 
@@ -2034,7 +2134,9 @@ below).
   generation. A VM checkpoint restored in place boots a new generation with
   the same binding, so its running agents keep their placeholder. A fork is
   another environment and gets new placeholders. Any rebind to another
-  revision or credential changes them.
+  revision or credential changes them. #6339 drops the revision and
+  credential inputs, so only the environment and the slot change them
+  ([Profile edits reach running environments](#profile-edits-reach-running-environments-approved-not-yet-shipped)).
 - **Who can ask for one.** The authority's
   `GetEnvironmentCredentialPlaceholders` call returns, for each requested
   slot the environment's selected binding grants, the placeholder that

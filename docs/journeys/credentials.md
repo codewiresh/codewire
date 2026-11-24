@@ -24,6 +24,7 @@ observed**.
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-revisions` | not yet observed | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
+| `profile-edit-live` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20, and main 8880d56e7, 2026-11-21 (a local VM from a `file` root is served a lease on both routes; a new `file` root keeps its key in `protected-v1` alone, 0700 and 0600; a root with nothing set uses Secret Service and says so first; the upgraded root, the 0644 refusal and a due refresh not yet observed) | the macOS file store; not part of this check | local stores only |
@@ -1201,3 +1202,69 @@ appears after the page has loaded.
   the same-origin refusal.
 - **Observed:** not yet observed.
 
+## 17. `profile-edit-live`: a profile edit reaches a running agent
+
+Approved, not yet shipped (#6339). Written first.
+
+- **Entry points:** `cw credentials --local --profile NAME set|unset SLOT`
+  and `cw credentials --cloud --profile NAME set|unset SLOT`; the
+  dashboard's profile editor; `cw --PLACEMENT ls` and the environment's
+  page, which show its profile and when that profile last changed.
+- **States to exercise:**
+  - a running environment whose agent is mid-session when its profile's
+    Anthropic API key is switched to another;
+  - the same profile then cleared of Anthropic;
+  - a profile selected by two running environments and one stopped one;
+  - an edit that starts a direct delivery (the Anthropic API key replaced by
+    a Claude sign-in) on a profile one of whose environments another
+    organization member can open;
+  - an environment bound before this change, across the release that ships
+    it;
+  - an organization profile selected by a running environment of another
+    member, edited while that environment runs (cloud only).
+- **Driving it:** with a throwaway `HOME` and two synthetic, canary-marked
+  Anthropic API keys named `parity-live-a` and `parity-live-b`, for each
+  placement:
+
+  ```sh
+  cw credentials --PLACEMENT --profile parity-live set anthropic parity-live-a
+  cw --PLACEMENT create --name parity-live-env --profile parity-live --yes
+  # in the environment: one request every 0.5 s with the placeholder,
+  # logging status and the refusal header, as the interception gate does
+  cw credentials --PLACEMENT --profile parity-live set anthropic parity-live-b
+  cw credentials --PLACEMENT --profile parity-live unset anthropic
+  ```
+
+  Then delete the environment, the profile and both credentials by id.
+- **Proof:**
+  - The edit prints where it applied ("Applied to N running …"). The
+    owner's final wording is checked here.
+  - Requests before the switch reach the provider with `parity-live-a`'s
+    swap, and those after it with `parity-live-b`'s. Each provider refusal
+    names its key's last four characters where the provider echoes them.
+    No process restarts and the placeholder in the environment doesn't
+    change.
+  - From the first request after the unset, every request is 403
+    `no_credential_selected`, and none reaches the provider.
+  - Both edits are in the audit log with the profile, slot, credential ids
+    before and after, and the count of running environments reached.
+  - The stopped environment, started afterwards, uses the profile's current
+    revision.
+  - The direct-delivery edit names every environment it reaches, marks the
+    one another member can open, and asks for confirmation; declined, it
+    changes nothing and delivers nothing, and with `--yes` it commits. An
+    edit in the same form behind the front door asks nothing.
+  - The environment bound before the release keeps working on its old
+    placeholder and its pinned revision. The edit counts it as "at next
+    restart", not "applied", and the credential its revision selects can't
+    be deleted. After its restart it follows the profile's current
+    revision.
+  - The organization profile's edit doesn't reach the other member's
+    running environment: its requests keep the swap of the revision it was
+    bound to, and its placeholder is unchanged, until it is rebound, and a
+    stop and start keeps them too (#6354 decides live organization
+    edits).
+- **Gotchas:** an Anthropic API key replaced by a Claude sign-in changes the
+  form, so it reaches each process only at its next launch. Walk that
+  separately.
+- **Observed:** not yet observed.
