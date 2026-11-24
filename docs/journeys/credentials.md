@@ -52,6 +52,30 @@ observed**.
   account already holds a GitHub connection, a Codex sign-in, a Claude
   sign-in and an SSH key; a hosted walk uses those through a profile and adds
   only synthetic credentials.
+- **Hosted, with no person:** a walk that needs only synthetic credentials
+  runs as the synthetic Dev personal-walk identity, a password account that
+  owns one organization of its own on the regular rate card and has no API
+  key (#6074):
+  - `scripts/runtime/dev/provision-dev-personal-walk-user.sh` creates and
+    rotates it, with its password in the OpenBao document
+    `apps/codewire/dev/ci-personal-walk`. A rotation proves the new password,
+    then revokes the account's other sessions and CLI sign-ins by id.
+  - `CW_BIN=… scripts/runtime/dev/with-dev-personal-walk.sh -- COMMAND` signs
+    `cw` in as it, through device sign-in in a fresh config folder on tmpfs,
+    and runs the command. Afterwards it signs out and asks the server whether
+    the sign-in's tokens are gone, revoking any that is not. The server
+    revokes a CLI token only by the token itself and can't list an account's
+    CLI grants (#6180), so a token from a refresh in between would never be
+    checked. A CLI access token lasts 720 hours, so a walk of minutes never
+    refreshes. If the access token changed anyway, the helper fails and says
+    to rotate the identity, which revokes every CLI token by id.
+  - `scripts/runtime/dev/personal-credentials-walk.sh`, run under it, adds a
+    synthetic Anthropic API key, selects it in a profile, creates a Sandbox
+    with that profile and deletes all three by id. With `--sweep` it reports
+    what the account holds that is older than a day, and deletes nothing.
+  - It holds only synthetic, canary-marked credentials. A real provider key
+    on it is an incident: revoke it at the provider and delete it here by
+    id.
 - **Secrets:** nobody pastes a real API key or token into a chat or a
   command line. API keys and the Claude setup token are walked with synthetic
   values, which prove every step up to the provider refusing them. Only the
