@@ -1757,10 +1757,14 @@ mod tests {
         use codewire_local_credentials::AuthorityFeature;
         let connect = |provider| {
             CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+                credential_type: None,
                 provider: Some(provider),
                 name: Some("work".into()),
                 yes: false,
                 output: crate::commands::OutputFormat::Text,
+                expires_at: None,
+                key_file: None,
+                account_hint: None,
                 guided: false,
             }))
         };
@@ -2095,10 +2099,14 @@ mod tests {
         let error = connect_credential(
             &mut client,
             CredentialConnectArgs {
+                credential_type: None,
                 provider: Some(CredentialConnectProviderArg::Github),
                 name: Some("other".into()),
                 yes: true,
                 output: crate::commands::OutputFormat::Text,
+                expires_at: None,
+                key_file: None,
+                account_hint: None,
                 guided: false,
             },
             &mut execution,
@@ -2463,9 +2471,9 @@ mod tests {
             assert!(
                 matches!(parsed.command, Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: Some(CredentialConnectProviderArg::ClaudeToken), name, ..
+                    credential_type: Some(word), name, ..
                 }), ..
-            }) if name.as_deref() == Some("claude"))
+            }) if word == "claude-token" && name.as_deref() == Some("claude"))
             );
             assert!(
                 Cli::try_parse_from([
@@ -2482,10 +2490,14 @@ mod tests {
         }
         let token =
             CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+                credential_type: None,
                 provider: Some(CredentialConnectProviderArg::ClaudeToken),
                 name: Some("claude".into()),
                 yes: false,
                 output: crate::commands::OutputFormat::Text,
+                expires_at: None,
+                key_file: None,
+                account_hint: None,
                 guided: false,
             }));
         let (feature, _) = authority_feature_needed(&token).expect("a token needs its feature");
@@ -2505,6 +2517,8 @@ mod tests {
             account_hint: None,
             expires_at,
             key_file: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
             guided: false,
         };
         let connect = claude_token_from_alias("local", &add(None)).unwrap();
@@ -2539,11 +2553,11 @@ mod tests {
             connect.command,
             Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: Some(CredentialConnectProviderArg::Codex),
+                    credential_type: Some(word),
                     ..
                 }),
                 ..
-            })
+            }) if word == "codex"
         ));
 
         let connect_github = Cli::try_parse_from([
@@ -2561,11 +2575,11 @@ mod tests {
             connect_github.command,
             Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: Some(CredentialConnectProviderArg::Github),
+                    credential_type: Some(word),
                     ..
                 }),
                 ..
-            })
+            }) if word == "github"
         ));
 
         let add = Cli::try_parse_from([

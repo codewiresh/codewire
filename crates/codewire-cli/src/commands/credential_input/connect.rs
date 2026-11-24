@@ -14,25 +14,32 @@ use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationF
 use super::CredentialExecution;
 use crate::commands::{OutputFormat, prompt_confirm_default_no};
 
-/// `cw credentials connect`'s arguments.
+/// `cw credentials connect`'s arguments, the same flags as `add`'s. The
+/// type's word is parsed into `credential_type`; [`super::types::route`]
+/// hands a sign-in or token to this flow as `provider`, and any other type to
+/// its own.
 #[derive(Debug, Args)]
 pub(crate) struct CredentialConnectArgs {
     #[arg(
-        value_enum,
         value_name = "PROVIDER",
-        help = "codex, github, claude or claude-token"
+        value_parser = super::types::type_parser(false),
+        help = super::types::TYPE_HELP
     )]
+    pub(crate) credential_type: Option<String>,
+    #[arg(skip)]
     pub(crate) provider: Option<CredentialConnectProviderArg>,
     #[arg(long, value_name = "NAME", help = super::NAME_HELP)]
     pub(crate) name: Option<String>,
-    #[arg(
-        short,
-        long,
-        help = "Confirm reconnecting an existing named credential"
-    )]
+    #[arg(short, long, help = super::types::YES_HELP)]
     pub(crate) yes: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
+    #[arg(long, value_name = "DATE", value_parser = super::expiry_arg, help = super::EXPIRES_AT_HELP)]
+    pub(crate) expires_at: Option<u64>,
+    #[arg(long, value_name = "PATH", help = super::types::KEY_FILE_HELP)]
+    pub(crate) key_file: Option<std::path::PathBuf>,
+    #[arg(long, value_name = "HINT", hide = true)]
+    pub(crate) account_hint: Option<String>,
     #[arg(skip)]
     pub(crate) guided: bool,
 }
@@ -77,10 +84,14 @@ pub(in crate::commands) fn claude_token_from_alias(
         "a Claude token expires one year after it is saved; --expires-at is not accepted"
     );
     Ok(CredentialConnectArgs {
+        credential_type: None,
         provider: Some(CredentialConnectProviderArg::ClaudeToken),
         name: args.name.clone(),
         yes: false,
         output: crate::commands::OutputFormat::Text,
+        expires_at: None,
+        key_file: None,
+        account_hint: None,
         guided: args.guided,
     })
 }
@@ -203,8 +214,8 @@ pub(in crate::commands) fn provider_label(provider: CredentialConnectProviderArg
     credential_type_of_arg(provider).label
 }
 
-/// The registry's row for a `connect` provider (#6286). Every provider clap
-/// takes is the word of a registry `connect` type, as a test checks.
+/// The registry's row for a `connect` provider (#6286). Each provider is the
+/// word of a registry `connect` type, as a test checks.
 pub(in crate::commands) fn credential_type_of_arg(
     provider: CredentialConnectProviderArg,
 ) -> &'static codewire_access::CredentialType {

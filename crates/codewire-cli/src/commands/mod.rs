@@ -399,9 +399,9 @@ pub(crate) struct CredentialsArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialsCommand {
-    #[command(about = "Connect a provider by signing in; asks for anything missing at a terminal")]
+    #[command(about = credential_input::types::ADD_AND_CONNECT_ABOUT)]
     Connect(CredentialConnectArgs),
-    #[command(about = "Add an API key, token or SSH key; asks for anything missing at a terminal")]
+    #[command(about = credential_input::types::ADD_AND_CONNECT_ABOUT)]
     Add(CredentialAddArgs),
     #[command(about = "Generate a protected SSH identity; asks for a missing name at a terminal")]
     Generate(CredentialGenerateArgs),
@@ -431,29 +431,7 @@ pub(crate) enum CredentialsCommand {
 }
 
 pub(crate) use credential_input::connect::{CredentialConnectArgs, CredentialConnectProviderArg};
-
-#[derive(Debug, Args)]
-pub(crate) struct CredentialAddArgs {
-    #[arg(
-        value_name = "PROVIDER",
-        help = "openai or anthropic (API key read from stdin), or ssh; a Claude (token) is `connect claude-token`"
-    )]
-    pub(crate) provider: Option<String>,
-    #[arg(long, value_name = "NAME", help = NAME_HELP)]
-    pub(crate) name: Option<String>,
-    #[arg(long, value_name = "HINT", hide = true)]
-    pub(crate) account_hint: Option<String>,
-    #[arg(long, value_name = "DATE", value_parser = expiry_arg, help = EXPIRES_AT_HELP)]
-    pub(crate) expires_at: Option<u64>,
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Explicit OpenSSH private-key file; required only for add ssh"
-    )]
-    pub(crate) key_file: Option<PathBuf>,
-    #[arg(skip)]
-    pub(crate) guided: bool,
-}
+pub(crate) use credential_input::types::CredentialAddArgs;
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGenerateArgs {

@@ -9,8 +9,8 @@ use std::path::Path;
 use anyhow::Context as _;
 use codewire_access::{
     AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
-    CredentialFlow, CredentialId, CredentialType, CredentialVerb, ProviderId,
-    builtin_provider_catalog, credential_types_for,
+    CredentialFlow, CredentialId, CredentialVerb, ProviderId, builtin_provider_catalog,
+    credential_types_for,
 };
 use codewire_protected_store::{MAX_PROTECTED_VALUE_BYTES, ProtectedStoreBackend, ProtectedValue};
 use zeroize::{Zeroize as _, Zeroizing};
@@ -787,16 +787,15 @@ pub(super) enum AddKind {
     SshKey,
 }
 
-/// The providers `cw credentials add` takes, the same in both placements,
-/// each with its row in the guided picker, in the picker's order: the
-/// registry's `add` types (#6286). Both placements accept a provider only
-/// through [`add_kind`], so this is the whole accepted set, and the picker is
-/// built from it (#5446).
+/// The types `add`'s own flow runs, the same in both placements, each with
+/// its label, in picker order: the registry's `add` types (#6286). Both
+/// placements accept a provider only through [`add_kind`], so this is the
+/// whole set `add`'s flow takes; `route` hands every other type to its own
+/// flow before a placement sees it.
 ///
 /// `claude-subscription`, the one-release alias of `connect claude-token`
-/// (#4945), is deliberately not here: it is hidden, both placements turn it
-/// into that `connect` before they ask this list, and the guided pickers
-/// offer Claude under `connect`.
+/// (#4945), is deliberately not here: it is hidden, and both placements turn
+/// it into that `connect` before they ask this list.
 pub(super) fn add_providers() -> Vec<(&'static str, AddKind, &'static str)> {
     credential_types_for(CredentialVerb::Add)
         .map(|row| {
@@ -804,18 +803,9 @@ pub(super) fn add_providers() -> Vec<(&'static str, AddKind, &'static str)> {
                 CredentialFlow::SshKey => AddKind::SshKey,
                 CredentialFlow::Paste | CredentialFlow::SignIn => AddKind::ApiKey,
             };
-            (row.word, kind, add_picker_label(row))
+            (row.word, kind, row.label)
         })
         .collect()
-}
-
-/// The `add` picker's row label: the type's label, but for SSH, whose row
-/// keeps "SSH private key" until the owner settles its text on #6286.
-fn add_picker_label(row: &CredentialType) -> &'static str {
-    match row.flow {
-        CredentialFlow::SshKey => "SSH private key",
-        CredentialFlow::Paste | CredentialFlow::SignIn => row.label,
-    }
 }
 
 /// What `add` takes for `provider`, or `None` when `add` refuses it.
@@ -1427,6 +1417,7 @@ fn read_ssh_passphrase(
 }
 
 pub(super) mod connect;
+pub(super) mod types;
 
 #[cfg(test)]
 mod tests {
@@ -2038,6 +2029,10 @@ mod tests {
             account_hint: None,
             expires_at: None,
             key_file: Some("/deliberately-absent-key".into()),
+
+            yes: false,
+
+            output: crate::commands::OutputFormat::Text,
 
             guided: false,
         };

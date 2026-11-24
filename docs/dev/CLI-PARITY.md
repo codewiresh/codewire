@@ -103,7 +103,7 @@ Second pass: 2026-11-21, `cw` v0.4.26, for the other command groups:
 | Layer | Local | Cloud | Shared today |
 | --- | --- | --- | --- |
 | Command handler | `commands/credentials.rs` | `commands/platform_credentials.rs`, `commands/platform_profiles.rs` | no: two handlers |
-| Guided choices | `commands/guided_credentials.rs` | same file | yes: one list per picker, the set its command takes in both placements, and a test holds them equal (#5446) |
+| Guided choices | `commands/guided_credentials.rs` | same file | yes: one picker for `add` and `connect`, from the registry of credential types, and one for `set`; each is the set its command takes in both placements, and a test holds them equal (#5446, #6286) |
 | Prompts and parsing | `commands/credential_input.rs` | same file | yes |
 | Codex and GitHub device login | the CLI, `commands/provider_login.rs` | the credential service | yes: both call `codewire-credential-broker` `provider_oauth::{codex, github}` |
 | Claude sign-in | none | the credential service, `mutation/claude.rs` | `provider_oauth::claude` exists, only the cloud calls it |

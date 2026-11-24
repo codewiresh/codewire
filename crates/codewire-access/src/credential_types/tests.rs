@@ -183,7 +183,7 @@ fn reserved_name_prefixes_are_the_rows_providers() {
 }
 
 #[test]
-fn the_verbs_take_todays_types() {
+fn each_type_runs_one_subcommands_flow() {
     let words = |verb| {
         credential_types_for(verb)
             .map(|row| row.word)
@@ -193,7 +193,7 @@ fn the_verbs_take_todays_types() {
         words(CredentialVerb::Connect),
         ["codex", "github", "claude", "claude-token"]
     );
-    assert_eq!(words(CredentialVerb::Add), ["openai", "anthropic", "ssh"]);
+    assert_eq!(words(CredentialVerb::Add), ["anthropic", "openai", "ssh"]);
 }
 
 /// The glossary names each type once, by its label.

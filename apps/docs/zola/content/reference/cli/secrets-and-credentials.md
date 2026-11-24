@@ -96,11 +96,18 @@ cw credentials --local|--cloud [--profile NAME] SUBCOMMAND
 ### Add and connect
 
 ```sh
-cw credentials --cloud connect codex|github|claude|claude-token --name NAME [-y]
-cw credentials --cloud add openai|anthropic --name NAME [--expires-at DATE]
-cw credentials --cloud add ssh --name NAME --key-file PATH
+cw credentials --cloud add|connect codex|github|claude|claude-token --name NAME [-y]
+cw credentials --cloud add|connect anthropic|openai --name NAME [--expires-at DATE]
+cw credentials --cloud add|connect ssh --name NAME [--key-file PATH] [--expires-at DATE]
 cw credentials --cloud generate ssh --name NAME [--expires-at DATE]
 ```
+
+`add` and `connect` take every type below and run that type's own flow,
+whichever you typed: `add codex` signs in, and `connect anthropic` asks for the
+key. Without a type, at a terminal, both show one picker of all seven. `ssh`
+without `--key-file` asks whether to generate a key or import a file; without a
+terminal it needs `--key-file`. A flag the type doesn't take, such as
+`--key-file` with `codex` or `-y` with an API key, is refused.
 
 <!-- credential-types: generated from codewire_access::CREDENTIAL_TYPES; UPDATE_CREDENTIAL_TYPES_DOCS=1 cargo test -p codewire-access credential_types -->
 
@@ -110,7 +117,7 @@ cw credentials --cloud generate ssh --name NAME [--expires-at DATE]
 | `github` | Device-code sign-in to the Codewire GitHub App; prints the installation link |
 | `claude` | Claude (sign-in): your Claude subscription; browser sign-in, paste the code shown |
 | `claude-token` | Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded |
-| `openai`, `anthropic` | API key from stdin |
+| `anthropic`, `openai` | API key from stdin |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
 
 <!-- /credential-types -->

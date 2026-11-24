@@ -1125,21 +1125,27 @@ the first release with the four rows.
   Locally, walk only against a private keyring, as "Before the walk" says.
 - **Observed:** not yet observed. The walk on a Mac and in the cloud, on a
   released `cw` (v0.4.22 or later), is still to do.
-- **One picker for `add` and `connect` (#6286, not yet built; not yet
-  observed):**
-  - `add` and `connect` with no provider show the same picker, in both
-    placements. It has seven rows, one per credential type:
+- **One picker for `add` and `connect` (#6286; not yet observed):**
+  - `add` and `connect` with no type show the same picker, in both
+    placements: "Which credential?", with seven rows, one per credential
+    type, and the details the owner approved on #6286:
     `Codex`, `GitHub`, `Claude (sign-in)`, `Claude (token)`,
-    `Anthropic API key`, `OpenAI API key` and `SSH key`. Its title and
-    detail texts are those the owner approves on #6286.
+    `Anthropic API key`, `OpenAI API key` and `SSH key`.
   - Picking `Codex` from `add` signs in, as step 2 shows. Picking
     `Anthropic API key` from `connect` asks for the key, as step 4 shows.
-  - Picking `SSH key` asks whether to generate a key or import a file.
+  - Picking `SSH key` asks "SSH key": `Generate a new key` or
+    `Import a key file`.
   - `cw credentials add codex` and `cw credentials connect anthropic` do the
     same without the picker.
-  - `--key-file` with `codex` is refused, naming `--key-file` and Codex.
+  - `--key-file` with `codex` is refused: `--key-file doesn't apply to
+    Codex`. `-y` with an API key is refused the same way.
+  - `connect ssh --name NAME` piped, with no `--key-file`: `SSH key needs a
+    key file without a terminal`, then a `→` line naming
+    `cw credentials generate ssh --name NAME` and `--key-file PATH`.
   - **Proof:** the same rows from both verbs in both placements, and each
     choice running its own flow whichever verb was typed.
+    `cargo test -p codewire-cli credential_input::types` holds both verbs to
+    every type and the picker to the approved rows, and
     `cargo test -p codewire-access credential_types` fails when a type is
     added in one place only.
 

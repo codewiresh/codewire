@@ -21,8 +21,8 @@ pub enum CredentialFlow {
     SshKey,
 }
 
-/// The `cw credentials` subcommand that takes a type today. #6286 step 3
-/// makes both take every type; until then, each takes these.
+/// The `cw credentials` subcommand whose flow runs a type. `add` and
+/// `connect` both take every type and hand each to its own flow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialVerb {
     Add,
@@ -66,7 +66,7 @@ pub struct CredentialType {
     pub agent: AgentHolds,
     /// The hosts the broker serves for `http`.
     pub hosts: &'static [&'static str],
-    /// The picker's second column; empty where the picker shows none.
+    /// The picker's second column.
     pub detail: &'static str,
     /// The docs' "How" cell. Adjacent rows with the same text share a row.
     pub how: &'static str,
@@ -135,21 +135,6 @@ pub const CREDENTIAL_TYPES: [CredentialType; 7] = [
         how: "Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded",
     },
     CredentialType {
-        word: "openai",
-        label: "OpenAI API key",
-        short: "OpenAI",
-        provider: "openai",
-        form: CredentialAuthKind::ApiKey,
-        slots: &["codex", "openai"],
-        verb: CredentialVerb::Add,
-        flow: CredentialFlow::Paste,
-        http: Some(HttpProvider::OpenAiApiKey),
-        agent: AgentHolds::StandIn("OPENAI_API_KEY"),
-        hosts: &[OPENAI_API_HOST],
-        detail: "",
-        how: "API key from stdin",
-    },
-    CredentialType {
         word: "anthropic",
         label: "Anthropic API key",
         short: "Anthropic",
@@ -161,7 +146,22 @@ pub const CREDENTIAL_TYPES: [CredentialType; 7] = [
         http: Some(HttpProvider::AnthropicApiKey),
         agent: AgentHolds::Placeholder("ANTHROPIC_AUTH_TOKEN"),
         hosts: &[ANTHROPIC_API_HOST],
-        detail: "",
+        detail: "paste a key from console.anthropic.com",
+        how: "API key from stdin",
+    },
+    CredentialType {
+        word: "openai",
+        label: "OpenAI API key",
+        short: "OpenAI",
+        provider: "openai",
+        form: CredentialAuthKind::ApiKey,
+        slots: &["codex", "openai"],
+        verb: CredentialVerb::Add,
+        flow: CredentialFlow::Paste,
+        http: Some(HttpProvider::OpenAiApiKey),
+        agent: AgentHolds::StandIn("OPENAI_API_KEY"),
+        hosts: &[OPENAI_API_HOST],
+        detail: "paste a key from platform.openai.com",
         how: "API key from stdin",
     },
     CredentialType {
@@ -176,7 +176,7 @@ pub const CREDENTIAL_TYPES: [CredentialType; 7] = [
         http: None,
         agent: AgentHolds::SshAgent,
         hosts: &[],
-        detail: "",
+        detail: "generate one, or import an OpenSSH key file",
         how: "an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file",
     },
 ];
@@ -196,7 +196,7 @@ pub fn credential_type_of(
         .find(|row| row.provider == provider && row.form == form)
 }
 
-/// The types `verb` takes today, in picker order.
+/// The types whose flow is `verb`'s, in picker order.
 pub fn credential_types_for(verb: CredentialVerb) -> impl Iterator<Item = &'static CredentialType> {
     CREDENTIAL_TYPES.iter().filter(move |row| row.verb == verb)
 }

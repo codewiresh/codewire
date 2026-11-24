@@ -262,43 +262,40 @@ cw credentials --cloud --profile=work set ssh work-ssh
 There is no `github` slot: the account's GitHub connection is part of every
 profile, and `set github` is refused.
 
-At a terminal, `connect` and `add` with no provider, and `set` with no slot,
-ask with a guided picker. Each picker offers exactly what its command takes,
-in that placement, and nothing it refuses; both placements take the same set,
-so their pickers are the same rows in the same order. A test holds each
-picker's rows to its command's accepted set in each placement, so a provider
-or kind can't be added to a command without its row (#5446):
+`add` and `connect` take every credential type, by the same words and flags,
+and run each type's own flow whichever verb was typed (#6286):
 
-- `connect` asks "What do you want to connect?": Codex, GitHub, Claude
-  (sign-in) and Claude (token), as the approved credentials screens show
-  them (owner, 2026-11-15, #4717). API keys are not `connect` rows.
-- `add` asks "Which provider?": OpenAI API key, Anthropic API key and SSH
-  private key. `add claude-subscription`, the one-release alias of
-  `connect claude-token`, is not a row.
+- a sign-in (Codex, GitHub, Claude (sign-in)) runs that sign-in;
+- a key or token (Claude (token), Anthropic API key, OpenAI API key) runs the
+  hidden paste;
+- an SSH key with `--key-file` imports it. Without one, at a terminal, it
+  asks whether to generate a key, which is `generate ssh`'s flow, or import a
+  file; without a terminal it is refused, naming both.
+
+So `add codex` signs in, and `connect anthropic` asks for the key. A flag the
+type's flow doesn't take is refused, naming the flag and the type: `--key-file`
+with anything but an SSH key, `--expires-at` with a sign-in or Claude (token),
+and `-y` or `--output` with a key. `add claude-subscription`, the one-release
+alias of `connect claude-token`, is `add`'s alone.
+
+At a terminal, `add` and `connect` with no type, and `set` with no slot, ask
+with a guided picker. Each picker offers exactly what its command takes, in
+that placement, and nothing it refuses; both placements take the same set, so
+their pickers are the same rows in the same order. A test holds each picker's
+rows to its command's accepted set in each placement, so a type or slot can't
+be added to a command without its row (#5446):
+
+- `add` and `connect` ask "Which credential?", with one row per type from the
+  registry below, in its order, as the owner approved them on #6286: Codex,
+  GitHub, Claude (sign-in), Claude (token), Anthropic API key, OpenAI API key
+  and SSH key.
 - `set` asks "Which provider should this profile use?": codex, openai,
   anthropic and ssh, every slot but GitHub's.
 
-**One picker for `add` and `connect` (not yet built, #6286).** The owner
-decided that `add` and `connect` show the same picker: one row for each of
-the seven credential types, built from the registry below. The verb typed
-doesn't change what a choice does:
+#### Credential types (#6286)
 
-- a sign-in row (Codex, GitHub, Claude (sign-in)) runs that sign-in;
-- a key or token row (Claude (token), Anthropic API key, OpenAI API key) runs
-  the hidden paste;
-- SSH key asks whether to generate a key or import a file.
-
-The direct forms take every type the same way: `add codex` signs in, and
-`connect anthropic` asks for the key. A flag that doesn't fit the chosen type
-is refused, naming the flag and the type. The picker's exact text is on
-#6286 for the owner. Until it ships, the two pickers above are what `cw`
-shows.
-
-#### Credential types (not yet built, #6286)
-
-Today each surface keeps its own list. This section describes the change.
-`codewire_access::CREDENTIAL_TYPES` will be the one list of the credential
-types Codewire takes. Each row is one type, in picker order, and holds:
+`codewire_access::CREDENTIAL_TYPES` is the one list of the credential types
+Codewire takes. Each row is one type, in picker order, and holds:
 
 - its word, the CLI argument and the dashboard's form value;
 - its label, the glossary's kind name;
@@ -309,9 +306,9 @@ types Codewire takes. Each row is one type, in picker order, and holds:
 - what an agent holds in its place: a placeholder variable, Git's helper,
   a placeholder in a delivered login, or the SSH agent socket.
 
-The lists people see will read it: the `cw` pickers and accepted words,
-`kind_label` and the dashboard's labels. The docs' "Add and connect" table
-will be generated from it.
+The lists people see in `cw` read it: its picker, the words `add` and
+`connect` take, and `kind_label`. The docs' "Add and connect" table is
+generated from it. The dashboard's labels don't read it yet (#6286 step 4).
 
 The boundary lists stay where they are, each pinned by its own golden test
 and checked against the registry: the provider catalog's forms, the guest
@@ -323,7 +320,7 @@ change which hosts are served, so each keeps its own selection and its golden
 tests, and a row's hosts are checked against the broker's selection for its
 form.
 
-One test will fail when:
+One test fails when:
 
 - a catalog provider and form pair has no row, or a row names a pair the
   catalog lacks;
@@ -340,9 +337,6 @@ One test will fail when:
 | `anthropic` | Anthropic API key | anthropic | API key | anthropic | paste | the `ANTHROPIC_AUTH_TOKEN` placeholder |
 | `openai` | OpenAI API key | openai | API key | codex, openai | paste | an `OPENAI_API_KEY` stand-in |
 | `ssh` | SSH key | ssh | SSH key | ssh | generate or import | the SSH agent socket |
-
-```sh
-```
 
 The first profile `set` creates the profile if absent. Enrollment does not
 silently select an identity. Profiles retain immutable revisions and current

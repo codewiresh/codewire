@@ -123,10 +123,14 @@ fn press(interrupt: &mut Interrupt) {
 
 fn args(provider: CredentialConnectProviderArg, name: &str, yes: bool) -> CredentialConnectArgs {
     CredentialConnectArgs {
+        credential_type: None,
         provider: Some(provider),
         name: Some(name.into()),
         yes,
         output: crate::commands::OutputFormat::Text,
+        expires_at: None,
+        key_file: None,
+        account_hint: None,
         guided: false,
     }
 }

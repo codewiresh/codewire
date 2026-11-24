@@ -1529,6 +1529,8 @@ mod tests {
             account_hint: None,
             expires_at: None,
             key_file: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
             guided: false,
         };
         assert!(validate_key_arguments(&args).is_err());
@@ -1553,6 +1555,8 @@ mod tests {
                 account_hint: None,
                 expires_at: None,
                 key_file: None,
+                yes: false,
+                output: crate::commands::OutputFormat::Text,
                 guided: false,
             };
             assert_eq!(
@@ -2317,6 +2321,10 @@ mod tests {
             expires_at: None,
             key_file: None,
 
+            yes: false,
+
+            output: crate::commands::OutputFormat::Text,
+
             guided: false,
         });
         assert!(execute(&client, command).await.is_err());
@@ -2414,10 +2422,14 @@ mod tests {
         let error = execute(
             &client(&server),
             CredentialsCommand::Connect(CredentialConnectArgs {
+                credential_type: None,
                 provider: Some(CredentialConnectProviderArg::Github),
                 name: Some("other".into()),
                 yes: true,
                 output: crate::commands::OutputFormat::Text,
+                expires_at: None,
+                key_file: None,
+                account_hint: None,
                 guided: false,
             }),
         )

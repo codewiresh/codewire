@@ -4,8 +4,8 @@ use codewire_access::{AccessProfileName, CredentialStatus, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    PROFILE_SLOTS, add_providers, execute_credential_operation, resolve_credential_operation,
-    supported_profile_slot,
+    PROFILE_SLOTS, execute_credential_operation, resolve_credential_operation,
+    supported_profile_slot, types,
 };
 use super::guided::{self, Choice};
 use super::storage_placement::StoragePlacement;
@@ -13,12 +13,10 @@ use super::*;
 
 pub(super) fn missing(args: &CredentialsArgs) -> bool {
     match &args.command {
-        CredentialsCommand::Add(a) => {
-            a.provider.is_none()
-                || a.name.is_none()
-                || (a.provider.as_deref() == Some("ssh") && a.key_file.is_none())
+        CredentialsCommand::Add(a) => a.provider.is_none() || a.name.is_none(),
+        CredentialsCommand::Connect(a) => {
+            (a.credential_type.is_none() && a.provider.is_none()) || a.name.is_none()
         }
-        CredentialsCommand::Connect(a) => a.provider.is_none() || a.name.is_none(),
         CredentialsCommand::Generate(a) => a.provider.is_none() || a.name.is_none(),
         CredentialsCommand::Set(a) => {
             args.profile.is_none() || a.slot.is_none() || a.credential.is_none()
@@ -40,21 +38,14 @@ pub(super) async fn complete(
             "supply the provider, --name NAME, and any required --profile/credential selector (see `cw credentials --help`)",
         )?;
     }
+    // `add` and `connect` show one picker and take every type (#6286).
+    types::choose_missing_type(&mut args.command)?;
+    types::route(&mut args.command)?;
+    types::ssh_source(&mut args.command)?;
+    let guided = was_missing || storage_missing;
     match &mut args.command {
         CredentialsCommand::Add(a) => {
-            a.guided = was_missing || storage_missing;
-            if a.provider.is_none() {
-                let providers = add_providers();
-                let choices = providers
-                    .iter()
-                    .map(|(_, _, label)| Choice::new(*label, ""))
-                    .collect::<Vec<_>>();
-                a.provider = Some(
-                    providers[guided::choose("Which provider?", &choices)?]
-                        .0
-                        .into(),
-                );
-            }
+            a.guided |= guided;
             fill_name(&mut a.name)?;
             if a.provider.as_deref() == Some("ssh") && a.key_file.is_none() {
                 a.key_file = Some(
@@ -74,20 +65,11 @@ pub(super) async fn complete(
             }
         }
         CredentialsCommand::Connect(a) => {
-            a.guided = was_missing || storage_missing;
-            if a.provider.is_none() {
-                let providers = connect_rows();
-                let choices = providers
-                    .iter()
-                    .map(|(_, label, detail)| Choice::new(*label, *detail))
-                    .collect::<Vec<_>>();
-                a.provider =
-                    Some(providers[guided::choose("What do you want to connect?", &choices)?].0);
-            }
+            a.guided |= guided;
             fill_name(&mut a.name)?;
         }
         CredentialsCommand::Generate(a) => {
-            a.guided = was_missing || storage_missing;
+            a.guided |= guided;
             // SSH is the only identity Codewire generates.
             a.provider.get_or_insert_with(|| "ssh".into());
             fill_name(&mut a.name)?;
@@ -111,23 +93,6 @@ pub(super) async fn complete(
         complete_profile(globals, args, placement).await?;
     }
     Ok(())
-}
-
-/// The `connect` picker's rows: each provider `connect` takes, with its
-/// label and detail, as the approved credentials screen 2 shows them
-/// (owner, 2026-11-15, #4717), from the registry (#6286). The rows are
-/// clap's own providers in their declared order, so a provider can't be
-/// added to `connect` without its row (#5446); a test holds clap's providers
-/// to the registry's `connect` types. `connect` takes the same providers in
-/// both placements.
-fn connect_rows() -> Vec<(CredentialConnectProviderArg, &'static str, &'static str)> {
-    CredentialConnectProviderArg::value_variants()
-        .iter()
-        .map(|&provider| {
-            let row = super::credential_input::connect::credential_type_of_arg(provider);
-            (provider, row.label, row.detail)
-        })
-        .collect()
 }
 
 /// The `set` picker's rows: every slot `set` takes, in [`PROFILE_SLOTS`]'s
@@ -326,10 +291,14 @@ async fn enroll_for_profile(
             )?;
             if method == 0 {
                 CredentialsCommand::Connect(CredentialConnectArgs {
+                    credential_type: None,
                     provider: Some(CredentialConnectProviderArg::Codex),
                     name: None,
                     yes: false,
                     output: crate::commands::OutputFormat::Text,
+                    expires_at: None,
+                    key_file: None,
+                    account_hint: None,
                     guided: false,
                 })
             } else {
@@ -339,36 +308,23 @@ async fn enroll_for_profile(
                     account_hint: None,
                     expires_at: None,
                     key_file: None,
+                    yes: false,
+                    output: crate::commands::OutputFormat::Text,
                     guided: false,
                 })
             }
         }
-        "ssh" => {
-            let action = guided::choose(
-                "Set up an SSH identity",
-                &[
-                    Choice::new("Generate a key", "Codewire keeps the private key protected"),
-                    Choice::new("Import a key", "Choose an existing private-key file"),
-                ],
-            )?;
-            if action == 0 {
-                CredentialsCommand::Generate(CredentialGenerateArgs {
-                    provider: Some("ssh".into()),
-                    name: None,
-                    expires_at: None,
-                    guided: false,
-                })
-            } else {
-                CredentialsCommand::Add(CredentialAddArgs {
-                    provider: Some("ssh".into()),
-                    name: None,
-                    account_hint: None,
-                    expires_at: None,
-                    key_file: None,
-                    guided: false,
-                })
-            }
-        }
+        // `complete` asks whether to generate a key or import one.
+        "ssh" => CredentialsCommand::Add(CredentialAddArgs {
+            provider: Some("ssh".into()),
+            name: None,
+            account_hint: None,
+            expires_at: None,
+            key_file: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
+            guided: false,
+        }),
         "anthropic" => {
             let options = [
                 (Some(CredentialConnectProviderArg::Claude), "anthropic"),
@@ -388,10 +344,14 @@ async fn enroll_for_profile(
             ];
             match options[guided::choose("Connect Anthropic access", &labels)?] {
                 (Some(provider), _) => CredentialsCommand::Connect(CredentialConnectArgs {
+                    credential_type: None,
                     provider: Some(provider),
                     name: None,
                     yes: false,
                     output: crate::commands::OutputFormat::Text,
+                    expires_at: None,
+                    key_file: None,
+                    account_hint: None,
                     guided: false,
                 }),
                 (None, provider) => CredentialsCommand::Add(CredentialAddArgs {
@@ -400,6 +360,8 @@ async fn enroll_for_profile(
                     account_hint: None,
                     expires_at: None,
                     key_file: None,
+                    yes: false,
+                    output: crate::commands::OutputFormat::Text,
                     guided: false,
                 }),
             }
@@ -410,6 +372,8 @@ async fn enroll_for_profile(
             account_hint: None,
             expires_at: None,
             key_file: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
             guided: false,
         }),
         _ => anyhow::bail!("unsupported provider; use codex, openai, github, anthropic or ssh"),
@@ -580,7 +544,9 @@ pub(super) async fn choose_profile_reference(
 
 #[cfg(test)]
 mod tests {
-    use super::super::credential_input::{PROVIDER_WORDS_FOR_TESTS, profile_set_credential};
+    use super::super::credential_input::{
+        PROVIDER_WORDS_FOR_TESTS, add_providers, profile_set_credential,
+    };
     use super::*;
 
     #[test]
@@ -613,47 +579,19 @@ mod tests {
         assert!(!missing(&args));
     }
 
-    /// Each picker shows the rows, in the order, it showed before #5446.
+    /// `add`'s own flow runs the registry's key types, in picker order, and
+    /// the `set` picker keeps the rows it showed before #5446.
     #[test]
-    fn each_picker_keeps_its_rows_and_their_order() {
-        let connect = connect_rows()
-            .into_iter()
-            .map(|(provider, label, detail)| (word(provider), label, detail))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            connect,
-            [
-                (
-                    "codex".to_owned(),
-                    "Codex",
-                    "sign in with your ChatGPT account"
-                ),
-                (
-                    "github".to_owned(),
-                    "GitHub",
-                    "sign in with your GitHub account"
-                ),
-                (
-                    "claude".to_owned(),
-                    "Claude (sign-in)",
-                    "your subscription; shows your plan and usage"
-                ),
-                (
-                    "claude-token".to_owned(),
-                    "Claude (token)",
-                    "your subscription; lasts a year, for automation, model requests only"
-                ),
-            ]
-        );
+    fn adds_flow_and_the_set_picker_keep_their_rows() {
         assert_eq!(
             add_providers()
                 .into_iter()
                 .map(|(provider, _, label)| (provider, label))
                 .collect::<Vec<_>>(),
             [
-                ("openai", "OpenAI API key"),
                 ("anthropic", "Anthropic API key"),
-                ("ssh", "SSH private key"),
+                ("openai", "OpenAI API key"),
+                ("ssh", "SSH key"),
             ]
         );
         assert_eq!(set_slots(), ["codex", "openai", "anthropic", "ssh"]);
@@ -673,40 +611,25 @@ mod tests {
         assert_eq!(taken, registry);
     }
 
-    /// `connect` takes, in either placement, exactly the providers its
-    /// picker offers (#5446).
+    /// `add` and `connect` take, in either placement, exactly the types the
+    /// picker offers, and `add` the hidden alias too (#5446, #6286).
     #[test]
-    fn the_connect_picker_offers_every_provider_connect_takes() {
-        let offered = connect_rows()
-            .into_iter()
-            .map(|(provider, ..)| word(provider))
-            .collect::<Vec<_>>();
+    fn both_verbs_take_exactly_the_types_the_picker_offers() {
+        let offered = codewire_access::CREDENTIAL_TYPES.map(|row| row.word);
         for placement in ["--local", "--cloud"] {
-            for provider in PROVIDER_WORDS_FOR_TESTS {
-                let taken = match Cli::try_parse_from([
-                    "cw",
-                    "credentials",
-                    placement,
-                    "connect",
-                    provider,
-                ]) {
-                    Ok(Cli {
-                        command:
-                            Command::Credentials(CredentialsArgs {
-                                command: CredentialsCommand::Connect(args),
-                                ..
-                            }),
-                        ..
-                    }) => args.provider.map(word),
-                    _ => None,
-                };
-                assert_eq!(
-                    taken.is_some(),
-                    offered.iter().any(|row| row == provider),
-                    "{placement} connect {provider}"
-                );
-                if let Some(taken) = taken {
-                    assert_eq!(taken, provider);
+            for verb in ["add", "connect"] {
+                for provider in PROVIDER_WORDS_FOR_TESTS {
+                    let taken =
+                        Cli::try_parse_from(["cw", "credentials", placement, verb, provider])
+                            .is_ok();
+                    let alias = verb == "add"
+                        && provider
+                            == super::super::credential_input::connect::CLAUDE_SUBSCRIPTION_ALIAS;
+                    assert_eq!(
+                        taken,
+                        offered.contains(&provider) || alias,
+                        "{placement} {verb} {provider}"
+                    );
                 }
             }
         }

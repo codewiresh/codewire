@@ -225,10 +225,14 @@ fn only_a_name_another_provider_has_needs_names_per_provider() {
     let claude = walk_records()[..1].to_vec();
     let connect = |provider, name: &str| {
         CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+            credential_type: None,
             provider: Some(provider),
             name: Some(name.into()),
             yes: false,
             output: crate::commands::OutputFormat::Text,
+            expires_at: None,
+            key_file: None,
+            account_hint: None,
             guided: false,
         }))
     };
@@ -262,6 +266,8 @@ fn only_a_name_another_provider_has_needs_names_per_provider() {
             account_hint: None,
             expires_at: None,
             key_file: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
             guided: false,
         }))
     };
