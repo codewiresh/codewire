@@ -3284,15 +3284,14 @@ rules:
         assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
     }
 
-    /// A dropped guest datagram crosses on the admission session and is
-    /// folded as a UDP refusal, and the session carries on (#3997).
-    #[tokio::test]
-    async fn a_dropped_datagram_is_recorded_over_the_admission_session() {
-        // `web` refuses TCP 25, so the session's next decision is a denial.
-        let (binding, broker) = policy_broker(
-            codewire_egress_policy::BuiltinPolicy::Web.compile(),
-            Arc::default(),
-        );
+    /// A client served by a broker that folds its refusals into the
+    /// returned fold, and the broker's serving task.
+    fn recording_session() -> (
+        BrokerIpcClient,
+        Arc<crate::refusals::RefusalFold>,
+        tokio::task::JoinHandle<Result<(), BrokerIpcError>>,
+    ) {
+        let (binding, broker) = developer_broker(Arc::default());
         let fold = Arc::new(crate::refusals::RefusalFold::new());
         let broker = Arc::into_inner(broker)
             .unwrap()
@@ -3304,29 +3303,106 @@ rules:
             key(),
             Arc::new(broker),
         ));
-        let client = client(client_streams, binding);
+        (client(client_streams, binding), fold, server)
+    }
+
+    fn udp_rows(fold: &crate::refusals::RefusalFold) -> Vec<(Destination, Transport, u64)> {
+        fold.take()
+            .rows
+            .iter()
+            .filter(|row| row.reason == RefusalReason::UdpNotCarried)
+            .map(|row| (row.destination.clone(), row.transport, row.count))
+            .collect()
+    }
+
+    /// A dropped guest datagram crosses on the admission session and is
+    /// folded as a UDP refusal, and the session carries on (#3997).
+    #[tokio::test]
+    async fn a_dropped_datagram_is_recorded_over_the_admission_session() {
+        let (client, fold, server) = recording_session();
         let destination = SocketAddr::new(PUBLIC_V4, 3478);
         for _ in 0..2 {
             client.refuse_udp(destination).await.unwrap();
         }
         assert_eq!(
-            client.authorize_tcp(SocketAddr::new(PUBLIC_V4, 25)).await,
+            // A protected address is denied under every policy, so this holds
+            // whatever the default allows.
+            client
+                .authorize_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443))
+                .await,
             Err(BrokerIpcError::Denied)
         );
-        let rows = fold.take().rows;
-        let udp: Vec<_> = rows
-            .iter()
-            .filter(|row| row.reason == RefusalReason::UdpNotCarried)
-            .map(|row| (row.destination.clone(), row.transport, row.count))
-            .collect();
         assert_eq!(
-            udp,
+            udp_rows(&fold),
             [(
                 Destination::Address(PUBLIC_V4),
                 Transport::Udp { port: 3478 },
                 2
             )]
         );
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
+    }
+
+    /// A report finds the admission session busy and is dropped at once,
+    /// unsent: it never waits for the session.
+    #[tokio::test]
+    async fn a_report_is_dropped_unsent_while_the_admission_session_is_busy() {
+        let (client, fold, server) = recording_session();
+        let held = hold_all(&client.admission).await;
+        let dropped = {
+            let report = client.refuse_udp(SocketAddr::new(PUBLIC_V4, 3478));
+            tokio::pin!(report);
+            tokio::select! {
+                biased;
+                result = &mut report => result,
+                () = tokio::task::yield_now() => panic!("a report waited for the admission session"),
+            }
+        };
+        assert_eq!(dropped, Err(BrokerIpcError::SessionBusy));
+        drop(held);
+        assert_eq!(client.admission.len(), 1);
+        assert!(udp_rows(&fold).is_empty());
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
+    }
+
+    /// Reports sent while the admission session is busy hold nothing up:
+    /// the admission that waits for it is the next request it carries.
+    #[tokio::test]
+    async fn a_tcp_admission_never_waits_behind_udp_reports() {
+        let (client, fold, server) = recording_session();
+        let client = Arc::new(client);
+        let held = hold_all(&client.admission).await;
+        let mut reports = JoinSet::new();
+        for port in 0..32 {
+            let client = Arc::clone(&client);
+            reports.spawn(async move {
+                client
+                    .refuse_udp(SocketAddr::new(PUBLIC_V4, 10_000 + port))
+                    .await
+            });
+        }
+        // Every report reaches the pool before the admission does.
+        tokio::task::yield_now().await;
+        let admission = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.authorize_tcp(SocketAddr::new(PUBLIC_V4, 443)).await })
+        };
+        tokio::task::yield_now().await;
+        drop(held);
+        assert_eq!(admission.await.unwrap(), Ok(()));
+        assert!(
+            udp_rows(&fold).is_empty(),
+            "the admission waited behind reports"
+        );
+        while let Some(report) = reports.join_next().await {
+            assert_eq!(report.unwrap(), Err(BrokerIpcError::SessionBusy));
+        }
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(2), server)
             .await

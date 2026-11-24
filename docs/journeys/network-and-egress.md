@@ -755,9 +755,12 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
   - UDP other than DNS to the resolver (not yet observed): `nslookup` waits
     out its timeout with no answer, and the log has a `udp` row for
     `8.8.8.8` port 53 and one for `1.1.1.1` port 3478, each `UDP not
-    carried`, with no `→` step, since no rule carries UDP. A datagram sent
-    again while the broker is still recording the last one to the same
-    destination is not counted, as a retransmitted connection attempt isn't;
+    carried`, with no `→` step, since no rule carries UDP. Recording them
+    is best effort and never delays a connection: a datagram sent again
+    while the broker is still recording the last one to the same
+    destination is not counted, as a retransmitted connection attempt
+    isn't, and neither is one sent while the broker is admitting a
+    connection;
   - the rows are most recently seen first; at a terminal the table fits its
     width, the policy column giving way first and an address never cut, and
     piped it is whole;

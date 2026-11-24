@@ -734,7 +734,8 @@ UDP: a well-formed IPv4 datagram that is not a DNS A or AAAA question to the
 environment's resolver (`192.0.2.1:53`), such as DNS sent to another server or
 STUN, is dropped with no reply, so its sender waits out its own timeout, and
 is recorded as refused, `udp_not_carried`, against its address and port in
-the refusal log below (#3997). ICMP, IPv6, and malformed or fragmented
+the refusal log below (#3997). The record is best effort: it is skipped
+rather than delay a TCP admission. ICMP, IPv6, and malformed or fragmented
 packets are dropped with no record. The egress broker
 (`cw __native-egress-broker`, on `crates/codewire-egress-broker`) dials on the
 guest's behalf under the VM's selected network policy, from

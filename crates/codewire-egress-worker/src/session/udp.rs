@@ -17,9 +17,10 @@ use tokio::task::{Id, JoinSet};
 
 use super::{EgressBroker, GUEST_IP};
 
-/// Reports in flight at once. A report is a local step in the broker that
-/// shares the admission session with every TCP admission, so a datagram
-/// flood queues at most this many requests ahead of one.
+/// Reports in flight at once, so a datagram flood spawns no more tasks than
+/// this. A report shares the broker's admission session with every TCP
+/// admission, but is best effort: the IPC client drops it unsent unless the
+/// session is idle, so it never waits for the session or delays one.
 pub(super) const MAX_UDP_REFUSALS_IN_FLIGHT: usize = 32;
 
 /// The reports in flight, one per destination: a datagram to a destination
