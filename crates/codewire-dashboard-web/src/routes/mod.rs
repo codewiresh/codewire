@@ -251,6 +251,16 @@ fn admin_routes() -> Router<AppState> {
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/feedback", get(slash_redirect))
         .route("/admin/feedback/", get(admin::feedback::list))
+        .route("/admin/pricing", get(slash_redirect))
+        .route("/admin/pricing/", get(admin::pricing::page))
+        .route(
+            "/admin/pricing/_actions/review",
+            post(admin::pricing::review),
+        )
+        .route(
+            "/admin/pricing/_actions/update",
+            post(admin::pricing::update),
+        )
         .route("/admin/billing", get(slash_redirect))
         .route("/admin/billing/", get(admin::billing))
         .route(

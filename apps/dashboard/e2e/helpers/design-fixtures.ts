@@ -5,6 +5,7 @@
 export const designFixtureSpecs = [
   "ssr-dashboard.account-dialogs.ssr.ts",
   "ssr-dashboard.account-home.ssr.ts",
+  "ssr-dashboard.admin-pricing.ssr.ts",
   "ssr-dashboard.anchor-lines.ssr.ts",
   "ssr-dashboard.billing-banner.ssr.ts",
   "ssr-dashboard.billing-cards.ssr.ts",

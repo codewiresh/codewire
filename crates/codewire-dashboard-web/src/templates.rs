@@ -3,7 +3,7 @@ use askama::Template;
 use crate::account_home::Balance;
 use crate::admin_connect::{
     AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
-    FeedbackFilter, FeedbackRow, FeedbackSenderView, QuotaView,
+    FeedbackFilter, FeedbackRow, FeedbackSenderView, QuotaView, pricing::PricingPageView,
 };
 use crate::billing_banner::BillingBannerView;
 use crate::billing_connect::BillingPageView;
@@ -146,6 +146,13 @@ pub(crate) struct AdminFeedbackTemplate<'a> {
 pub(crate) struct AdminBillingTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) catalog: &'a AdminCatalogView,
+}
+
+#[derive(Template)]
+#[template(path = "admin-pricing.html")]
+pub(crate) struct AdminPricingTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a PricingPageView,
 }
 
 #[derive(Template)]

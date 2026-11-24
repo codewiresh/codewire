@@ -34,6 +34,7 @@ mod account_suspension;
 pub(super) use account_suspension::{suspend_account, unsuspend_account};
 pub(super) mod account_list;
 pub(super) mod feedback;
+pub(super) mod pricing;
 
 const ADMIN_PATH: &str = "/admin/";
 const ACCOUNTS_PATH: &str = "/admin/accounts/";

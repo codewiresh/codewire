@@ -59,10 +59,8 @@ included. A start opens a new session.
 
 ## Prices
 
-**Partly built (#5782).** The storage rate, the admin-only call
-(`UpdateRateCard` on the admin `BillingCatalogService`), its audit entry and
-the public pricing page's live read exist. There's no Pricing page yet. What
-follows is the rule #5782 builds.
+**Built (#5782), not yet observed.** The `billing-admin-prices` journey
+hasn't been walked on Dev.
 
 Every price is a row of `billing_rate_cards`, one per rate card: Regular,
 Discounted and Unlimited (#5782).

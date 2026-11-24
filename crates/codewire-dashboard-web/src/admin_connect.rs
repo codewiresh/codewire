@@ -22,6 +22,8 @@ use crate::{
     mailto::mailto, state::AppState, time_display::calendar_datetime, transport::BrowserTransport,
 };
 
+pub(crate) mod pricing;
+
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]

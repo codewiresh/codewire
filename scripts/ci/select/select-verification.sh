@@ -1554,6 +1554,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       apps/dashboard/e2e/ssr-dashboard.account-dialogs.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.account-home.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.admin-pricing.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.anchor-lines.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.billing-banner.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.billing-cards.ssr.ts|\

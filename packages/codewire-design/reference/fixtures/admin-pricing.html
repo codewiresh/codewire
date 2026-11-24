@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin, pricing fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/billing-admin.css">
+  <script src="../../dashboard.js" defer></script>
+</head>
+<body class="cw-body" data-route="admin" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>pricing</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+        <header class="cw-admin-heading"><div><h1 class="cw-page-title">Pricing</h1><p>A change applies from the next metering draw and never re-prices past usage.</p></div></header>
+        <section class="cw-card" aria-labelledby="rate-card-regular-title">
+          <header class="cw-card-header"><h2 id="rate-card-regular-title" class="cw-card-title">Regular</h2><p class="cw-card-description">Updated <time datetime="2026-11-23T00:00:00Z">Nov 23, 2026, 00:00 UTC</time></p></header>
+          <div class="cw-card-body">
+            <form class="cw-form" method="post" action="/admin/pricing/_actions/review">
+              <input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="rate_card" value="regular"><input type="hidden" name="display_name" value="Regular"><input type="hidden" name="expected_updated_at" value="1795392000.123456000"><input type="hidden" name="now_cpu" value="43800000"><input type="hidden" name="now_memory" value="14100000"><input type="hidden" name="now_disk" value="87000"><input type="hidden" name="now_storage" value="0">
+              <div class="cw-form-grid"><div class="cw-field"><label class="cw-label" for="rate-regular-cpu">vCPU, per hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-regular-cpu" name="cpu" type="text" inputmode="decimal" value="0.0438" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-regular-memory">Memory, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-regular-memory" name="memory" type="text" inputmode="decimal" value="0.0141" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-regular-disk">Disk, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-regular-disk" name="disk" type="text" inputmode="decimal" value="0.000087" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-regular-storage">Storage while suspended or hibernated, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-regular-storage" name="storage" type="text" inputmode="decimal" value="0" required maxlength="32" autocomplete="off" spellcheck="false"></span></div></div>
+              <button class="cw-button" type="submit">Review</button>
+            </form>
+          </div>
+        </section>
+        <section class="cw-card" aria-labelledby="rate-card-discounted-title">
+          <header class="cw-card-header"><h2 id="rate-card-discounted-title" class="cw-card-title">Discounted</h2><p class="cw-card-description">Updated <time datetime="2026-11-23T00:00:00Z">Nov 23, 2026, 00:00 UTC</time></p></header>
+          <div class="cw-card-body">
+            <form class="cw-form" method="post" action="/admin/pricing/_actions/review">
+              <input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="rate_card" value="discounted"><input type="hidden" name="display_name" value="Discounted"><input type="hidden" name="expected_updated_at" value="1795392000.123456000"><input type="hidden" name="now_cpu" value="21900000"><input type="hidden" name="now_memory" value="7050000"><input type="hidden" name="now_disk" value="43500"><input type="hidden" name="now_storage" value="0">
+              <div class="cw-form-grid"><div class="cw-field"><label class="cw-label" for="rate-discounted-cpu">vCPU, per hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-discounted-cpu" name="cpu" type="text" inputmode="decimal" value="0.0219" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-discounted-memory">Memory, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-discounted-memory" name="memory" type="text" inputmode="decimal" value="0.00705" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-discounted-disk">Disk, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-discounted-disk" name="disk" type="text" inputmode="decimal" value="0.0000435" required maxlength="32" autocomplete="off" spellcheck="false"></span></div><div class="cw-field"><label class="cw-label" for="rate-discounted-storage">Storage while suspended or hibernated, per GiB-hour<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-discounted-storage" name="storage" type="text" inputmode="decimal" value="0" required maxlength="32" autocomplete="off" spellcheck="false"></span></div></div>
+              <button class="cw-button" type="submit">Review</button>
+            </form>
+          </div>
+        </section>
+        <section class="cw-card" aria-labelledby="rate-card-unlimited-title">
+          <header class="cw-card-header"><h2 id="rate-card-unlimited-title" class="cw-card-title">Unlimited</h2><p class="cw-card-description">Updated <time datetime="2026-11-23T00:00:00Z">Nov 23, 2026, 00:00 UTC</time></p></header>
+          <div class="cw-card-body">
+            <div class="cw-admin-section">
+              <dl class="cw-stat-grid"><div class="cw-stat"><dt>vCPU, per hour</dt><dd>€0</dd></div><div class="cw-stat"><dt>Memory, per GiB-hour</dt><dd>€0</dd></div><div class="cw-stat"><dt>Disk, per GiB-hour</dt><dd>€0</dd></div><div class="cw-stat"><dt>Storage while suspended or hibernated, per GiB-hour</dt><dd>€0</dd></div></dl>
+              <p class="cw-muted">Unlimited is never charged.</p>
+            </div>
+          </div>
+        </section>
+</div></div></main>
+</body>
+</html>
