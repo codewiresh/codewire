@@ -30,6 +30,9 @@
 //!    is wrong or late: on macOS a socket can die in flight (#4916), and the
 //!    name is what tells that from a peer that misbehaved.
 //!
+//! 6. front door, once it serves: its refusal reports ([`refusals`], #5058),
+//!    at most one a second, which the runner reads as untrusted.
+//!
 //! Each of those sockets first carries a role tag from its peer, which
 //! the front door checks before it serves anything, so a swapped pair is
 //! refused at once rather than detected later:
@@ -62,6 +65,8 @@ use rustix::net::SocketType;
 use uuid::Uuid;
 
 use crate::broker_control::{ControlFrame, read_control_frame};
+
+pub mod refusals;
 pub(crate) use codewire_egress_front_door_bridge::control::ControlChannel;
 
 /// The control socket's descriptor in the front-door process.
@@ -232,8 +237,14 @@ async fn start_and_serve(
 ) -> Result<(), FrontDoorProcessError> {
     let intercepts = receive_bindings(control).await?;
     confine().map_err(|_| FrontDoorProcessError::Confinement)?;
-    let door = EnvironmentFrontDoor::start(environment_id, generation, intercepts)
-        .map_err(|_| FrontDoorProcessError::Start)?;
+    let reported = refusals::FrontDoorRefusals::new();
+    let door = EnvironmentFrontDoor::start_reporting(
+        environment_id,
+        generation,
+        intercepts,
+        Some(reported.clone()),
+    )
+    .map_err(|_| FrontDoorProcessError::Start)?;
     let mut ready = FRONT_DOOR_READY_MESSAGE.to_vec();
     ready.extend_from_slice(door.ca_certificate_der());
     control
@@ -248,14 +259,39 @@ async fn start_and_serve(
     let (successors, later) = tokio::sync::mpsc::channel(1);
     let serve = door.serve(handoff, Some(credentials), later);
     tokio::pin!(serve);
+    let (words, mut reports) = tokio::sync::mpsc::channel(1);
+    // It ends once the control channel can't take a word.
+    let reporter = tokio::spawn(async move {
+        codewire_egress_broker::refusals::report_folded(reported.fold(), |batch| {
+            let word = refusals::encode_report(&batch);
+            let words = words.clone();
+            async move { words.send(word).await }
+        })
+        .await
+    });
     // Once the control channel closes or misbehaves, no successor can pair:
     // dropping the sender lets the front door end.
     let feed = async move {
         // The sockets frame was the generation's first pairing frame.
         let mut pairing = 1_u64;
-        while let Some(credentials) = receive_credentials(control, &mut pairing).await {
-            if successors.send(credentials).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                received = control.receive(MAX_CONTROL_MESSAGE, 1) => {
+                    match receive_credentials(control, received, &mut pairing).await {
+                        Some(Some(credentials)) => {
+                            if successors.send(credentials).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(None) => {}
+                        None => break,
+                    }
+                }
+                Some(word) = reports.recv() => {
+                    if control.send(&word, &[]).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     };
@@ -263,40 +299,44 @@ async fn start_and_serve(
         ended = &mut serve => ended,
         () = feed => serve.await,
     };
+    reporter.abort();
     Err(FrontDoorProcessError::Ended(ended))
 }
 
-/// The next later credential broker's admitted session; none once the
-/// control channel closes or carries anything but a credentials frame.
-/// `pairing` counts the generation's pairing frames, each credentials frame
-/// received among them.
+/// A later credential broker's admitted session from the frame `received`:
+/// `Some(None)` when the front door dropped its socket and said why, and
+/// `None` once the control channel fails or carries anything but a
+/// credentials frame. `pairing` counts the generation's pairing frames, each
+/// credentials frame received among them.
 async fn receive_credentials(
     control: &mut ControlChannel,
+    received: std::io::Result<(Vec<u8>, Vec<OwnedFd>)>,
     pairing: &mut u64,
-) -> Option<tokio::net::UnixStream> {
-    loop {
-        let (message, descriptors) = control.receive(MAX_CONTROL_MESSAGE, 1).await.ok()?;
-        let Ok([credentials]) = <[OwnedFd; 1]>::try_from(descriptors) else {
-            return None;
-        };
-        if message != FRONT_DOOR_CREDENTIALS_MESSAGE {
-            return None;
+) -> Option<Option<tokio::net::UnixStream>> {
+    let (message, descriptors) = received.ok()?;
+    let Ok([credentials]) = <[OwnedFd; 1]>::try_from(descriptors) else {
+        return None;
+    };
+    if message != FRONT_DOOR_CREDENTIALS_MESSAGE {
+        return None;
+    }
+    *pairing = pairing.checked_add(1)?;
+    // One broker's failed checks drop only its socket. The front door says
+    // which pairing and why, and the next broker pairs.
+    match admitted_credentials(credentials).await {
+        Ok(credentials) => {
+            control
+                .send(&front_door_serving_message(*pairing), &[])
+                .await
+                .ok()?;
+            Some(Some(credentials))
         }
-        *pairing = pairing.checked_add(1)?;
-        // One broker's failed checks drop only its socket. The front door
-        // says which pairing and why, and the next broker pairs.
-        match admitted_credentials(credentials).await {
-            Ok(credentials) => {
-                control
-                    .send(&front_door_serving_message(*pairing), &[])
-                    .await
-                    .ok()?;
-                return Some(credentials);
-            }
-            Err(why) => control
+        Err(why) => {
+            control
                 .send(&front_door_dropped_message(*pairing, why), &[])
                 .await
-                .ok()?,
+                .ok()?;
+            Some(None)
         }
     }
 }

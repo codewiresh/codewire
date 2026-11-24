@@ -7,6 +7,8 @@
 mod boot_egress;
 mod broker_ensure;
 use broker_ensure::ensure_credential_broker;
+mod broker_request;
+use broker_request::CredentialBrokerEnsureRequest;
 mod bootstrap;
 mod cached_image;
 mod checkpoints;
@@ -211,22 +213,6 @@ struct PreparedWorkspaceBoot {
     setup_total_bytes: u64,
     setup_header_sha256: String,
     skill_snapshot_sha256: String,
-}
-
-#[derive(Clone)]
-struct CredentialBrokerEnsureRequest {
-    authority: AuthorityRuntimeConfig,
-    environment_id: EnvironmentId,
-    environment_generation: u64,
-    environment_name: String,
-    runner_socket: PathBuf,
-    projection: Option<codewire_local_credentials::LocalEnvironmentProjectionBinding>,
-    platform: Option<codewire_local_credentials::PlatformCredentialBinding>,
-    local_profile: Option<EnvironmentAccessBinding>,
-    network_policy_allows_github: bool,
-    /// The bound hosts the network policy allows by rule on 443 (#5555).
-    network_policy_allowed_hosts: std::collections::BTreeSet<String>,
-    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -4472,6 +4458,7 @@ impl Supervisor {
         let start_request = v1::StartVmRequest {
             network_policy_document: egress.network_policy_document,
             network_policy_label: Some(egress.network_policy_label),
+            credential_policy_label: Some(broker_request.network_policy_label.clone()),
             intercept: egress.intercept,
             interception: Some(egress.interception),
             credential_placeholders,
@@ -4528,8 +4515,6 @@ impl Supervisor {
                 progress,
             },
         ));
-        // The broker starts while the runner waits for install and startup: its owner-only
-        // seam takes neither lifecycle mutex, and the selection is admitted first.
         let (start, broker) = while_holding_direct_shares(
             checked_direct_shares,
             Box::pin(bootstrap::start_beside_broker(
@@ -5075,18 +5060,25 @@ impl Supervisor {
         let mut runner = self
             .runner_client_for_artifact(name, &artifact_generation)
             .await?;
+        // The credential broker takes the policy's answer for GitHub before
+        // the change is recorded as enforced. The authority stops the broker
+        // that served under the earlier answer first, so a replacement that
+        // fails leaves none serving, and the change reports as not taken.
+        // The runner learns the answer's label first (#5058).
+        let broker_request = self.core().credential_broker_ensure_request(name)?;
+        let label = &broker_request.network_policy_label;
         let enforced = runner
-            .replace_network_policy(environment.id, environment.generation, &current.selected)
+            .replace_network_policy(
+                environment.id,
+                environment.generation,
+                &current.selected,
+                label,
+            )
             .await
             .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
         if enforced != policy.digest() {
             return Err(SupervisorError::InvalidRunnerResponse);
         }
-        // The credential broker takes the policy's answer for GitHub before
-        // the change is recorded as enforced. The authority stops the broker
-        // that served under the earlier answer first, so a replacement that
-        // fails leaves none serving, and the change reports as not taken.
-        let broker_request = self.core().credential_broker_ensure_request(name)?;
         ensure_credential_broker(broker_request).await?;
         store
             .record_enforced(environment.id, &current.selected)
@@ -5755,70 +5747,6 @@ impl Supervisor {
             .daemon_access()
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)
-    }
-}
-
-impl SupervisorCore {
-    fn credential_broker_ensure_request(
-        &self,
-        name: &str,
-    ) -> Result<CredentialBrokerEnsureRequest, SupervisorError> {
-        let environment = self.environment(name)?;
-        if environment.state != StoredEnvironmentState::Running
-            || environment.generation == 0
-            || environment.runner.is_none()
-        {
-            return Err(SupervisorError::NotRunning);
-        }
-        self.credential_broker_request_for_environment(environment, environment.generation)
-    }
-
-    fn credential_broker_request_for_environment(
-        &self,
-        environment: &EnvironmentRecord,
-        generation: u64,
-    ) -> Result<CredentialBrokerEnsureRequest, SupervisorError> {
-        if generation == 0 {
-            return Err(SupervisorError::InvalidState);
-        }
-        let mut platform =
-            sources::platform::broker_binding(environment, &self.config.platform_config_dir)?;
-        if let Some(binding) = platform.as_mut() {
-            sources::platform::resolve_config_directory(binding)?;
-        }
-        let projection = sources::local_launch_projection(environment)?;
-        let local_profile = if platform
-            .as_ref()
-            .is_some_and(|binding| binding.selection.profile.is_some())
-        {
-            None
-        } else {
-            environment.access_binding.clone()
-        };
-        let policy = self
-            .network_policies
-            .environment_policy(environment.id)
-            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
-            .selected
-            .compile();
-        Ok(CredentialBrokerEnsureRequest {
-            authority: self.config.credential_authority_config(),
-            environment_id: access_environment_id(environment.id)?,
-            environment_generation: generation,
-            environment_name: environment.name.clone(),
-            runner_socket: self.config.runner_socket(environment.id),
-            enabled: environment.access_binding.is_some()
-                || projection.is_some()
-                || platform.is_some(),
-            projection,
-            platform,
-            local_profile,
-            // The credential broker never sees the network policy, so its
-            // answers are decided here, from the same selection this
-            // environment's egress broker enforces (#4926, #5555).
-            network_policy_allows_github: policy.allows_managed_github(),
-            network_policy_allowed_hosts: broker_ensure::allowed_bound_hosts(&policy),
-        })
     }
 }
 

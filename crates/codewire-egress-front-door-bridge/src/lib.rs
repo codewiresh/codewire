@@ -24,13 +24,15 @@ pub mod confine;
 pub mod control;
 mod environment;
 pub mod handoff;
+mod refusals;
+pub use refusals::RefusalSink;
 
 pub use codewire_access::ROUTED_SUFFIXES;
 pub use codewire_credential_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
 pub use environment::{Ended, EnvironmentFrontDoor, INTERCEPT_PORT, StartError};
 
 use std::pin::Pin;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use axum::body::Body;
@@ -373,11 +375,31 @@ impl RouteTable {
 pub struct CredentialRouteBackend {
     routes: RouteTable,
     bridge: CredentialBridge,
+    refusals: Option<Arc<dyn RefusalSink>>,
 }
 
 impl CredentialRouteBackend {
     pub fn new(routes: RouteTable, bridge: CredentialBridge) -> Self {
-        Self { routes, bridge }
+        Self {
+            routes,
+            bridge,
+            refusals: None,
+        }
+    }
+
+    /// Report every refusal this back end answers to `sink` (#5058).
+    #[must_use]
+    pub fn reporting_refusals(mut self, sink: Arc<dyn RefusalSink>) -> Self {
+        self.refusals = Some(sink);
+        self
+    }
+
+    /// `response`, reported to the sink when it is a refusal on `host`.
+    fn noted(&self, host: &str, response: Response<Body>) -> Response<Body> {
+        if let Some(code) = refusals::refusal_of(&response) {
+            refusals::note(self.refusals.as_ref(), &self.routes, host, code);
+        }
+        response
     }
 
     pub fn routes(&self) -> &RouteTable {
@@ -396,7 +418,7 @@ impl CredentialRouteBackend {
         let id = FrontDoorRequestId::mint();
         let mut request = match self.routed(host, request) {
             Ok(request) => request,
-            Err(refusal) => return id.name_in(refused(refusal, host)),
+            Err(refusal) => return id.name_in(boxed(self.noted(host, refused(refusal, host)))),
         };
         request.extensions_mut().insert(id);
         // The front door sets it from the hand-off, never from the request.
@@ -405,9 +427,12 @@ impl CredentialRouteBackend {
             .get::<InterceptedDestination>()
             .map(|destination| destination.0);
         id.name_in(boxed(
-            self.bridge
-                .respond_intercepted_to(host, destination, request.map(Body::new))
-                .await,
+            self.noted(
+                host,
+                self.bridge
+                    .respond_intercepted_to(host, destination, request.map(Body::new))
+                    .await,
+            ),
         ))
     }
 
@@ -447,7 +472,7 @@ impl Backend for CredentialRouteBackend {
         let id = FrontDoorRequestId::mint();
         let mut request = self
             .routed(host, request)
-            .map_err(|refusal| id.name_in(refused(refusal, host)))?;
+            .map_err(|refusal| id.name_in(boxed(self.noted(host, refused(refusal, host)))))?;
         request.extensions_mut().insert(id);
         match self.bridge.upgrade_intercepted(host, request).await {
             UpgradeAnswer::Switched { response, socket } => {
@@ -459,14 +484,14 @@ impl Backend for CredentialRouteBackend {
                     outcome = "upgrade_refused",
                     status = refused.status().as_u16()
                 );
-                Err(id.name_in(boxed(refused)))
+                Err(id.name_in(boxed(self.noted(host, refused))))
             }
         }
     }
 
     /// A refusal before the request has a frame names a fresh id.
     fn refuse(&self, host: &str, refusal: FrontDoorRefusal) -> Response<ResponseBody> {
-        FrontDoorRequestId::mint().name_in(refused(
+        let refusal = refused(
             match refusal {
                 FrontDoorRefusal::Malformed => Refusal::RequestNotForwarded(Unforwarded::Malformed),
                 FrontDoorRefusal::Forbidden => Refusal::RequestNotForwarded(Unforwarded::Refused),
@@ -476,7 +501,8 @@ impl Backend for CredentialRouteBackend {
                 FrontDoorRefusal::NotSwitched => Refusal::UpstreamFailed(UpstreamFailure::Failed),
             },
             host,
-        ))
+        );
+        FrontDoorRequestId::mint().name_in(boxed(self.noted(host, refusal)))
     }
 }
 
@@ -591,8 +617,8 @@ fn forwarded_headers(headers: HeaderMap) -> HeaderMap {
 /// The front door's answer for a refusal on the bound `host`. Before the
 /// request reaches the bridge its provider isn't known, and no body here
 /// names one.
-fn refused(refusal: Refusal, host: &str) -> Response<ResponseBody> {
-    boxed(refusal_response(refusal, None, Some(host)))
+fn refused(refusal: Refusal, host: &str) -> Response<Body> {
+    refusal_response(refusal, None, Some(host))
 }
 
 /// The bridge's response body is `Send` but not `Sync`, which the front

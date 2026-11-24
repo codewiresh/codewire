@@ -89,9 +89,26 @@ impl RunningVm {
             .and_then(|broker| broker.refusals.as_ref())
     }
 
-    /// Names the policy this boot started with in its refusal log.
-    pub(crate) fn label_start_policy(&self, label: Option<&v1::NetworkPolicyLabel>) {
-        self.label_policy(&self.request.network_policy, label);
+    /// Names in its refusal log the policy this boot started with, and the
+    /// policy of the allowed hosts the supervisor sends its credential
+    /// authority.
+    pub(crate) fn label_policies(
+        &self,
+        network_policy: Option<v1::NetworkPolicyLabel>,
+        credential_policy: Option<v1::NetworkPolicyLabel>,
+    ) {
+        self.label_policy(&self.request.network_policy, network_policy.as_ref());
+        self.label_intercepted(credential_policy.as_ref());
+    }
+
+    /// Names the policy of the allowed hosts the supervisor sends the
+    /// credential authority: the only label an intercepted host's refusal by
+    /// the network policy takes from now on (#5058). Never from the front
+    /// door.
+    pub(crate) fn label_intercepted(&self, label: Option<&v1::NetworkPolicyLabel>) {
+        if let (Some(log), Some(label)) = (self.egress_refusals(), label) {
+            log.label_intercepted(label.name.clone(), u64::from(label.revision));
+        }
     }
 
     fn label_policy(&self, policy: &CompiledPolicy, label: Option<&v1::NetworkPolicyLabel>) {

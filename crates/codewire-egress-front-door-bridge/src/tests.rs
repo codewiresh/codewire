@@ -1628,3 +1628,169 @@ async fn a_loopback_answer_names_no_id() {
     let response = bounded(task).await.unwrap();
     assert!(response.headers().get(REQUEST_ID_HEADER).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Reported refusals (#5058)
+
+/// What a sink was told: the bound name, its port and the code, which is all
+/// a sink can be told.
+#[derive(Default)]
+struct Collected(std::sync::Mutex<Vec<(String, u16, codewire_access::RefusalCode)>>);
+
+impl RefusalSink for Collected {
+    fn refused(&self, host: &str, port: u16, code: codewire_access::RefusalCode) {
+        self.0.lock().unwrap().push((host.to_owned(), port, code));
+    }
+}
+
+impl Collected {
+    fn take(&self) -> Vec<(String, u16, codewire_access::RefusalCode)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+fn reporting(host: &Host) -> (Arc<CredentialRouteBackend>, Arc<Collected>) {
+    let sink = Arc::new(Collected::default());
+    let backend = CredentialRouteBackend::new(
+        RouteTable::with_optional_hosts(true, false),
+        host.bridge.clone(),
+    )
+    .reporting_refusals(sink.clone());
+    (Arc::new(backend), sink)
+}
+
+fn row(
+    host: &str,
+    code: codewire_access::RefusalCode,
+) -> (String, u16, codewire_access::RefusalCode) {
+    (host.to_owned(), 443, code)
+}
+
+/// A request that names everything it can: another host, a method, a path,
+/// a query, headers, a placeholder-shaped value and a body.
+fn crafted(path: &str) -> Request<Full<Bytes>> {
+    Request::post(format!("{path}?secret-query=q1"))
+        .header(HOST, "evil.example.org")
+        .header("x-secret-header", "h1")
+        .header("authorization", format!("Bearer cwp1_{}A", "D".repeat(42)))
+        .body(Full::new(Bytes::from_static(b"secret-body")))
+        .unwrap()
+}
+
+/// The front door's own refusals are reported under the route's bound host,
+/// whatever the request's Host said, with their code and nothing else.
+#[tokio::test]
+async fn the_front_doors_own_refusals_are_reported_under_the_bound_host() {
+    use codewire_access::RefusalCode;
+    let mut host = Host::start().await;
+    let (backend, sink) = reporting(&host);
+
+    let response = bounded(backend.forward("api.openai.com", crafted("/v2/secret-path"))).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    host.assert_untouched();
+    let _ = backend.refuse("api.anthropic.com", FrontDoorRefusal::Misdirected);
+    let response = bounded(backend.forward("api.anthropic.com", crafted("/a/../b"))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sink.take(),
+        [
+            row("api.openai.com", RefusalCode::PathNotServed),
+            row("api.anthropic.com", RefusalCode::RequestNotForwarded),
+            row("api.anthropic.com", RefusalCode::RequestNotForwarded),
+        ]
+    );
+}
+
+/// A name under a bound suffix is reported as the suffix, the table's own
+/// name, never the name the connection was for.
+#[tokio::test]
+async fn a_name_under_a_suffix_is_reported_as_the_suffix() {
+    use codewire_access::RefusalCode;
+    let host = Host::start().await;
+    let (backend, sink) = reporting(&host);
+    let _ = backend.refuse("workspace-1.chatgpt.com", FrontDoorRefusal::Forbidden);
+    // A host the table doesn't route is never reported.
+    let _ = backend.refuse("example.org", FrontDoorRefusal::Forbidden);
+    assert_eq!(
+        sink.take(),
+        [row("chatgpt.com", RefusalCode::RequestNotForwarded)]
+    );
+}
+
+/// The broker's refusals are reported by their code: one in a failure
+/// frame, and one it answers as a 403 with its header. A provider's answer
+/// is not a refusal, whatever header it carries, and a 403 claims only the
+/// codes the broker answers that way.
+#[tokio::test]
+async fn the_brokers_refusals_are_reported_and_a_providers_answers_are_not() {
+    use codewire_access::RefusalCode;
+    let mut host = Host::start().await;
+    let (backend, sink) = reporting(&host);
+    let answers = [
+        (403, "name_not_allowed", None),
+        (200, "no_credential_selected", None),
+        (
+            403,
+            "no_credential_selected",
+            Some(RefusalCode::NoCredentialSelected),
+        ),
+    ];
+    for (status, header, expected) in answers {
+        let task = tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                backend
+                    .forward("api.anthropic.com", crafted("/v1/messages"))
+                    .await
+            }
+        });
+        let seen = host.request().await;
+        host.send(HostPayload::ResponseStart(
+            v1::CredentialBridgeResponseStart {
+                request_id: seen.request_id.clone(),
+                status_code: status,
+                headers: vec![v1::CredentialHttpHeader {
+                    name: "codewire-refusal".to_owned(),
+                    value: header.as_bytes().to_vec(),
+                }],
+            },
+        ))
+        .await;
+        host.end(&seen.request_id).await;
+        let response = bounded(task).await.unwrap();
+        assert_eq!(response.status().as_u16(), u16::try_from(status).unwrap());
+        assert_eq!(
+            sink.take(),
+            expected
+                .map(|code| row("api.anthropic.com", code))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{status} {header}"
+        );
+    }
+
+    let task = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .forward("api.anthropic.com", crafted("/v1/messages"))
+                .await
+        }
+    });
+    let seen = host.request().await;
+    host.send(HostPayload::ResponseFailure(
+        v1::CredentialBridgeResponseFailure {
+            request_id: seen.request_id,
+            reason: v1::CredentialBridgeFailureReason::Denied as i32,
+            refusal: v1::CredentialBridgeRefusal::NameNotAllowed as i32,
+            retry_after_seconds: 0,
+        },
+    ))
+    .await;
+    let response = bounded(task).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        sink.take(),
+        [row("api.anthropic.com", RefusalCode::NameNotAllowed)]
+    );
+}

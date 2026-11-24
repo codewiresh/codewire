@@ -7,6 +7,8 @@
 //! one log per environment.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::net::IpAddr;
 
 use crate::PolicyDigest;
@@ -66,6 +68,20 @@ pub enum Outcome {
     Refused(RefusalReason),
 }
 
+/// What a log's records are folded by besides their destination and
+/// transport: [`Outcome`] for a broker's own log, or another closed set for
+/// a log that merges other sources' refusals (#5058).
+pub trait RecordOutcome: Copy + Debug + Eq + Hash + Ord {
+    /// Whether this is a pass, which a log keeps only while learning.
+    fn is_pass(self) -> bool;
+}
+
+impl RecordOutcome for Outcome {
+    fn is_pass(self) -> bool {
+        self == Self::Passed
+    }
+}
+
 /// The policy a decision was made under, as its owner names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyLabel {
@@ -76,23 +92,23 @@ pub struct PolicyLabel {
 
 /// One decision as the broker reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EgressObservation {
+pub struct EgressObservation<O = Outcome> {
     pub destination: Destination,
     /// The address dialled or answered, when there is one.
     pub address: Option<IpAddr>,
     pub transport: Transport,
-    pub outcome: Outcome,
+    pub outcome: O,
 }
 
 /// Every observation with the same destination, transport and outcome,
 /// folded into one record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EgressRecord {
+pub struct EgressRecord<O = Outcome> {
     pub destination: Destination,
     /// The address of the latest observation that had one.
     pub address: Option<IpAddr>,
     pub transport: Transport,
-    pub outcome: Outcome,
+    pub outcome: O,
     /// The policy of the latest observation.
     pub policy: PolicyLabel,
     pub first_seen_unix_ms: u64,
@@ -101,18 +117,18 @@ pub struct EgressRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct RecordKey {
+struct RecordKey<O> {
     destination: Destination,
     transport: Transport,
-    outcome: Outcome,
+    outcome: O,
 }
 
 /// One environment's bounded log. Refusals are always recorded; passes only
 /// while learning, so a lock can propose exactly what was reached since
 /// learning began.
 #[derive(Debug)]
-pub struct EgressRecordLog {
-    records: HashMap<RecordKey, EgressRecord>,
+pub struct EgressRecordLog<O = Outcome> {
+    records: HashMap<RecordKey<O>, EgressRecord<O>>,
     policy: PolicyLabel,
     learning_since_unix_ms: Option<u64>,
     generation: u64,
@@ -121,6 +137,13 @@ pub struct EgressRecordLog {
 
 impl EgressRecordLog {
     pub fn new(policy: PolicyLabel) -> Self {
+        Self::with_policy(policy)
+    }
+}
+
+impl<O: RecordOutcome> EgressRecordLog<O> {
+    /// An empty log of `O` outcomes, recording under `policy`.
+    pub fn with_policy(policy: PolicyLabel) -> Self {
         Self {
             records: HashMap::new(),
             policy,
@@ -139,8 +162,7 @@ impl EgressRecordLog {
     /// Starts learning at `now_unix_ms`, dropping passes recorded before, so
     /// every pass in the log was seen since learning began.
     pub fn start_learning(&mut self, now_unix_ms: u64) {
-        self.records
-            .retain(|key, _| !matches!(key.outcome, Outcome::Passed));
+        self.records.retain(|key, _| !key.outcome.is_pass());
         self.learning_since_unix_ms = Some(now_unix_ms);
         self.bump();
     }
@@ -158,7 +180,7 @@ impl EgressRecordLog {
 
     /// Records one observation. Returns false for a pass while not learning,
     /// which is not recorded.
-    pub fn record(&mut self, observation: EgressObservation, now_unix_ms: u64) -> bool {
+    pub fn record(&mut self, observation: EgressObservation<O>, now_unix_ms: u64) -> bool {
         let policy = self.policy.clone();
         self.fold(observation, policy, 1, now_unix_ms)
     }
@@ -168,14 +190,12 @@ impl EgressRecordLog {
     /// nothing.
     pub fn fold(
         &mut self,
-        observation: EgressObservation,
+        observation: EgressObservation<O>,
         policy: PolicyLabel,
         count: u64,
         now_unix_ms: u64,
     ) -> bool {
-        if count == 0
-            || (observation.outcome == Outcome::Passed && self.learning_since_unix_ms.is_none())
-        {
+        if count == 0 || (observation.outcome.is_pass() && self.learning_since_unix_ms.is_none()) {
             return false;
         }
         let key = RecordKey {
@@ -209,8 +229,8 @@ impl EgressRecordLog {
     }
 
     /// At most `limit` records, the most recently seen first.
-    pub fn list(&self, limit: usize) -> Vec<EgressRecord> {
-        let mut records: Vec<&EgressRecord> = self.records.values().collect();
+    pub fn list(&self, limit: usize) -> Vec<EgressRecord<O>> {
+        let mut records: Vec<&EgressRecord<O>> = self.records.values().collect();
         records.sort_by(|a, b| {
             b.last_seen_unix_ms
                 .cmp(&a.last_seen_unix_ms)
@@ -227,6 +247,23 @@ impl EgressRecordLog {
 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Whether a record of `destination`, `transport` and `outcome` is held.
+    pub fn holds(&self, destination: &Destination, transport: Transport, outcome: O) -> bool {
+        self.records.contains_key(&RecordKey {
+            destination: destination.clone(),
+            transport,
+            outcome,
+        })
+    }
+
+    /// How many records match `outcome`.
+    pub fn count_where(&self, matches: impl Fn(O) -> bool) -> usize {
+        self.records
+            .keys()
+            .filter(|key| matches(key.outcome))
+            .count()
     }
 
     /// Records dropped to keep the log within [`EGRESS_RECORD_LIMIT`].

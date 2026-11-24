@@ -29,8 +29,9 @@ use crate::host_addresses::{
 
 mod refusals;
 pub use refusals::{
-    MAX_REFUSAL_FRAME_BYTES, MAX_REFUSAL_FRAME_ROWS, REFUSAL_REPORT_INTERVAL, RefusalLogSnapshot,
-    RunnerRefusalLog, decode_refusal_body, encode_refusal_frame, now_unix_ms, report_refusals,
+    INTERCEPTED_ROW_LIMIT, InterceptedRow, LoggedRefusal, MAX_REFUSAL_FRAME_BYTES,
+    MAX_REFUSAL_FRAME_ROWS, REFUSAL_REPORT_INTERVAL, RefusalLogSnapshot, RunnerRefusalLog,
+    decode_refusal_body, encode_refusal_frame, now_unix_ms, report_refusals,
 };
 
 const POLICY_FRAME_MAGIC: [u8; 4] = *b"CWPR";

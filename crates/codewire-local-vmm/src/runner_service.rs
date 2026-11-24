@@ -97,6 +97,8 @@ pub struct RunnerEntrypointConfig {
 mod checkpoint;
 mod egress_refusals;
 mod egress_status;
+mod error;
+pub use error::RunnerServiceError;
 mod events;
 mod network_policy;
 use events::RunnerEvents;
@@ -971,9 +973,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                     &error,
                     started,
                 );
-                // A failed attempt consumes its generation as a prepared one
-                // does (below), so the generation this runner reports matches
-                // its last event, which a retry compares it with (#2579).
+                // A failed attempt consumes its generation as a prepared one does
+                // (below): a retry compares this runner's generation with its last event (#2579).
                 state.generation = state.generation.max(request.generation);
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some(error_code);
@@ -988,10 +989,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
-        // Preparing a launch consumes its monotonically increasing generation.
-        // This keeps a failed pre-readiness attempt visible to the supervisor
-        // and prevents a later start from replaying a generation already bound
-        // into persisted VMM state and the one-boot guest seed.
+        // Preparing a launch consumes its rising generation, so a failed attempt stays
+        // visible and no later start replays one bound into VMM state and the guest seed.
         state.generation = request.generation;
         self.events.publish(
             v1::EnvironmentState::Starting,
@@ -1175,7 +1174,10 @@ impl EnvironmentRunnerService for RunnerRpc {
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
         state.error_code = None;
-        running.label_start_policy(request.network_policy_label.as_ref());
+        running.label_policies(
+            request.network_policy_label,
+            request.credential_policy_label,
+        );
         state.running = Some(running);
         state.interception = interception;
         state.generation_access = Some(generation_access);
@@ -1676,39 +1678,6 @@ fn clear_parent_death_signal() -> Result<(), Status> {
         return Err(Status::internal("runner adoption failed"));
     }
     Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RunnerServiceError {
-    #[error(transparent)]
-    Runner(#[from] RunnerError),
-    #[error(transparent)]
-    Uds(#[from] UdsError),
-    #[error("runtime artifact store operation failed")]
-    ArtifactStore,
-    #[error("serve private environment runner failed")]
-    Serve,
-    #[error("adopt private environment runner failed")]
-    Adoption,
-    #[error("private environment runner configuration is invalid")]
-    Configuration,
-    #[error("the native environment runner does not implement the required compatibility protocol")]
-    RunnerProtocolUnavailable,
-    #[error(
-        "native environment runner protocol version mismatch: expected {expected}, running runner reported {actual}"
-    )]
-    RunnerProtocolMismatch { expected: u32, actual: u32 },
-    #[error("query native environment runner compatibility failed")]
-    RunnerProtocolInfoUnavailable,
-}
-
-impl RunnerServiceError {
-    pub(crate) fn incompatible_protocol(&self) -> bool {
-        matches!(
-            self,
-            Self::RunnerProtocolUnavailable | Self::RunnerProtocolMismatch { .. }
-        )
-    }
 }
 
 #[cfg(test)]

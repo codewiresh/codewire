@@ -10208,3 +10208,40 @@ fn live_runner_mismatch_is_rejected_before_artifact_replacement() {
         );
     }
 }
+
+/// #5058: the allowed hosts the supervisor sends the credential authority
+/// carry the label of the policy they were decided under, which is what the
+/// runner labels an intercepted host's `name_not_allowed` with: the built-in
+/// `open` by default, then the selection the hosts came from.
+#[tokio::test]
+async fn the_credential_brokers_answer_carries_the_label_of_its_policy() {
+    use crate::network_policy_store::{PolicyBase, PolicySelection, PolicySelector};
+    use codewire_egress_policy::reference::PolicyName;
+    use codewire_egress_policy::typed::{AllowRule, AllowTarget};
+    let environment = project_environment_with_access();
+    let (_parent, core) = test_supervisor_core(environment.clone());
+    let label = |core: &SupervisorCore| {
+        let request = core
+            .credential_broker_request_for_environment(&environment, 1)
+            .unwrap();
+        (
+            request.network_policy_label.name,
+            request.network_policy_label.revision,
+            request.network_policy_allowed_hosts.len(),
+        )
+    };
+    let (name, revision, _) = label(&core);
+    assert_eq!((name.as_str(), revision), ("open", 0));
+    let policy = PolicyName::parse("walk-log").unwrap();
+    let rule = AllowRule::new(AllowTarget::parse("api.anthropic.com").unwrap(), [443]).unwrap();
+    core.network_policies
+        .create(&policy, &PolicyBase::Locked, vec![rule])
+        .unwrap();
+    core.network_policies
+        .select(
+            environment.id,
+            Some(&PolicySelection::Stored(PolicySelector::Name(policy))),
+        )
+        .unwrap();
+    assert_eq!(label(&core), ("walk-log".to_owned(), 1, 1));
+}

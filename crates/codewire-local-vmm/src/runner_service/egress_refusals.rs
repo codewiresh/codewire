@@ -1,12 +1,13 @@
-//! The running generation's refusal log (#5058): what its egress broker
-//! refused since it started, as the runner filed the broker's reports. Every
-//! report on a runner's control channel is from the broker it started for
-//! this boot, so the log is this environment's and no other.
+//! The running generation's refusal log (#5058): what its egress broker and
+//! its intercepted hosts' front door refused since it started, as the runner
+//! filed their reports. Every report on a runner's control channels is from
+//! a process it started for this boot, so the log is this environment's and
+//! no other.
 
-use codewire_egress_policy::record::{Destination, EgressRecord, Outcome, Transport};
+use codewire_egress_policy::record::{Destination, EgressRecord, Transport};
 
 use super::*;
-use crate::broker_control::RefusalLogSnapshot;
+use crate::broker_control::{LoggedRefusal, RefusalLogSnapshot};
 
 impl RunnerClient {
     /// The running `generation`'s refusal log; FailedPrecondition when the
@@ -68,25 +69,26 @@ fn summary(snapshot: &RefusalLogSnapshot) -> Option<v1::EgressRefusalSummary> {
 
 pub(super) fn refusals_proto(snapshot: &RefusalLogSnapshot) -> v1::EgressRefusals {
     v1::EgressRefusals {
-        refusals: snapshot.records.iter().filter_map(refusal_proto).collect(),
+        refusals: snapshot.records.iter().map(refusal_proto).collect(),
         dropped: snapshot.dropped,
         started_unix_ms: unix_ms(snapshot.started_unix_ms),
         summary: summary(snapshot),
+        rejected: snapshot.rejected,
     }
 }
 
-/// One row, or `None` for a pass, which the broker never reports.
-fn refusal_proto(record: &EgressRecord) -> Option<v1::EgressRefusal> {
+fn refusal_proto(record: &EgressRecord<LoggedRefusal>) -> v1::EgressRefusal {
     use v1::egress_refusal::Destination as Wire;
-    let Outcome::Refused(reason) = record.outcome else {
-        return None;
+    let (source, reason) = match record.outcome {
+        LoggedRefusal::Network(reason) => (v1::EgressRefusalSource::Network, reason.code()),
+        LoggedRefusal::Intercepted(code) => (v1::EgressRefusalSource::Credentials, code.as_str()),
     };
     let (protocol, port) = match record.transport {
         Transport::Dns => (v1::EgressRefusalProtocol::Dns, 0),
         Transport::Tcp { port } => (v1::EgressRefusalProtocol::Tcp, port),
         Transport::Udp { port } => (v1::EgressRefusalProtocol::Udp, port),
     };
-    Some(v1::EgressRefusal {
+    v1::EgressRefusal {
         destination: Some(match &record.destination {
             Destination::Name(name) => Wire::Name(name.clone()),
             Destination::Address(address) => Wire::AddressOnly(address.to_string()),
@@ -98,13 +100,14 @@ fn refusal_proto(record: &EgressRecord) -> Option<v1::EgressRefusal> {
             .unwrap_or_default(),
         protocol: protocol as i32,
         port: u32::from(port),
-        reason: reason.code().to_owned(),
+        reason: reason.to_owned(),
         policy_name: record.policy.name.clone(),
         policy_revision: u32::try_from(record.policy.revision).unwrap_or(u32::MAX),
         first_seen_unix_ms: unix_ms(record.first_seen_unix_ms),
         last_seen_unix_ms: unix_ms(record.last_seen_unix_ms),
         count: record.count,
-    })
+        source: source as i32,
+    }
 }
 
 fn unix_ms(value: u64) -> i64 {
@@ -178,6 +181,7 @@ mod tests {
                 ("walk-log", 1)
             );
             assert_eq!(refusal.count, 2);
+            assert_eq!(refusal.source, v1::EgressRefusalSource::Network as i32);
         }
         let protected = proto
             .refusals
@@ -216,6 +220,55 @@ mod tests {
             (lookup.protocol, lookup.port, lookup.address.as_str()),
             (v1::EgressRefusalProtocol::Dns as i32, 0, "")
         );
+    }
+
+    /// An intercepted host's row reads as the credential routes' source, by
+    /// its bound host on 443 with no address; only its `name_not_allowed`
+    /// carries a policy, the supervisor's label; and what the runner
+    /// rejected is counted beside the rows.
+    #[test]
+    fn an_intercepted_hosts_rows_carry_their_source_and_only_the_supervisors_label() {
+        use crate::broker_control::InterceptedRow;
+        use codewire_access::RefusalCode;
+        let log = RunnerRefusalLog::new(1_000);
+        log.label_intercepted("walk-log".to_owned(), 3);
+        let row = |code| InterceptedRow {
+            host: "api.anthropic.com".to_owned(),
+            port: 443,
+            code,
+            count: 2,
+        };
+        log.file_intercepted(
+            vec![
+                row(RefusalCode::NameNotAllowed),
+                row(RefusalCode::PathNotServed),
+            ],
+            0,
+            2_000,
+        );
+        log.reject(4);
+        let proto = refusals_proto(&log.snapshot());
+        assert_eq!(proto.rejected, 4);
+        assert_eq!(proto.summary.unwrap().refused, 4);
+        for refusal in &proto.refusals {
+            assert_eq!(refusal.source, v1::EgressRefusalSource::Credentials as i32);
+            assert_eq!(
+                refusal.destination,
+                Some(v1::egress_refusal::Destination::Name(
+                    "api.anthropic.com".to_owned()
+                ))
+            );
+            assert_eq!(
+                (refusal.protocol, refusal.port, refusal.address.as_str()),
+                (v1::EgressRefusalProtocol::Tcp as i32, 443, "")
+            );
+            let label = (refusal.policy_name.as_str(), refusal.policy_revision);
+            match refusal.reason.as_str() {
+                "name_not_allowed" => assert_eq!(label, ("walk-log", 3)),
+                "path_not_served" => assert_eq!(label, ("", 0)),
+                other => panic!("unexpected reason {other}"),
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,12 @@
 use codewire_egress_policy::handoff::{HandoffReceiver, HandoffSender};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use std::sync::Arc;
+
+use codewire_egress_policy::intercept::InterceptSet;
+
 use super::*;
+use crate::broker_control::RunnerRefusalLog;
 use crate::front_door::{front_door_dropped_message, front_door_serving_message};
 
 /// Generous, so a loaded CI host fails only a missing frame.
@@ -84,13 +89,26 @@ struct Pairing {
     /// The front door's end, until [`Self::hand_off`] passes it.
     front_door_handoff: Option<OwnedFd>,
     running: RunningFrontDoor,
+    /// Where the front door's refusal reports are filed.
+    refusals: Arc<RunnerRefusalLog>,
 }
 
 impl Pairing {
     fn hand_off(&mut self) -> Result<(), RunnerError> {
+        let reports = FrontDoorReports::new(Arc::clone(&self.refusals), bound_routes());
         self.running
-            .hand_off(self.front_door_handoff.take().unwrap())
+            .hand_off(self.front_door_handoff.take().unwrap(), Some(reports))
     }
+}
+
+/// The bindings the runner gave the front door in these tests.
+fn bound_routes() -> InterceptSet {
+    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSuffix};
+    InterceptSet::with_suffixes(
+        vec![InterceptBinding::new("api.anthropic.com", 443).unwrap()],
+        vec![InterceptSuffix::new("chatgpt.com", 443).unwrap()],
+    )
+    .unwrap()
 }
 
 /// A bound pairing whose egress broker is not up yet.
@@ -114,6 +132,7 @@ fn listening() -> Pairing {
         handoff,
         front_door_handoff: Some(front_door_handoff),
         running,
+        refusals: Arc::new(RunnerRefusalLog::new(0)),
     }
 }
 
@@ -146,7 +165,7 @@ async fn the_handoff_end_is_given_once_and_refused_by_a_front_door_already_gone(
     let mut pairing = pairing();
     let (_, spare) = stream_pair().unwrap();
     assert!(matches!(
-        pairing.running.hand_off(spare),
+        pairing.running.hand_off(spare, None),
         Err(RunnerError::FrontDoor(FrontDoorFailure::Sockets))
     ));
 
@@ -166,7 +185,7 @@ async fn the_handoff_end_is_given_once_and_refused_by_a_front_door_already_gone(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(matches!(
-        running.hand_off(front_door_handoff.unwrap()),
+        running.hand_off(front_door_handoff.unwrap(), None),
         Err(RunnerError::FrontDoor(FrontDoorFailure::Sockets))
     ));
     let mut byte = [0_u8; 1];
@@ -661,6 +680,7 @@ fn recording_pairing() -> (Pairing, tempfile::NamedTempFile) {
         handoff,
         front_door_handoff: Some(front_door_handoff),
         running,
+        refusals: Arc::new(RunnerRefusalLog::new(0)),
     };
     pairing.hand_off().unwrap();
     (pairing, file)
@@ -757,7 +777,7 @@ async fn a_front_door_that_says_nothing_is_unacknowledged_at_the_limit() {
     let mut control = ControlChannel::new(runner_end).unwrap();
     let asked = tokio::time::Instant::now();
     assert!(matches!(
-        acknowledgement(&mut control, None, 1, &mut Unanswered::default()).await,
+        acknowledgement(&mut control, None, 1, &mut Unanswered::default(), &mut None).await,
         Acknowledgement::Silent
     ));
     assert_eq!(asked.elapsed(), SERVING_TIMEOUT);
@@ -816,4 +836,67 @@ async fn stopping_reaps_the_front_door_and_records_no_exit() {
     let mut gone = FrontDoorWatch::start(exiting("exit 0"), Some(log), stopped);
     recorded(&file, "front_door_exited", "exit_code=0").await;
     gone.stop().await.unwrap();
+}
+
+/// A word whose rows the front door's fold folded: one host and code.
+fn report(host: &str, code: codewire_access::RefusalCode, count: u64) -> Vec<u8> {
+    let mut word = crate::front_door::refusals::FRONT_DOOR_REFUSALS_PREFIX.to_vec();
+    word.extend_from_slice(&0_u16.to_be_bytes());
+    word.push(1);
+    word.push(u8::try_from(host.len()).unwrap());
+    word.extend_from_slice(host.as_bytes());
+    word.extend_from_slice(&443_u16.to_be_bytes());
+    word.push(code.index());
+    word.extend_from_slice(&count.to_be_bytes());
+    word
+}
+
+/// Waits until the log holds `rows` rows.
+async fn filed(log: &RunnerRefusalLog, rows: usize) -> crate::broker_control::RefusalLogSnapshot {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let snapshot = log.snapshot();
+            if snapshot.records.len() >= rows {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// A refusal report on the control channel is filed under this boot's log,
+/// before the front door's word for a pairing and between pairings alike,
+/// and is never read as the front door failing: the next broker still
+/// pairs. A malformed one is rejected and counted, and pairing goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_front_doors_reports_are_filed_and_pairing_goes_on() {
+    use codewire_access::RefusalCode;
+    let mut pairing = pairing();
+    let _first = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, _descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_SOCKETS_MESSAGE);
+    pairing.front_door.reply(&report(
+        "api.anthropic.com",
+        RefusalCode::NoCredentialSelected,
+        2,
+    ));
+    pairing.front_door.reply(&front_door_serving_message(1));
+    filed(&pairing.refusals, 1).await;
+
+    let mut malformed = report("api.anthropic.com", RefusalCode::Busy, 1);
+    malformed.push(0);
+    pairing.front_door.reply(&malformed);
+    pairing
+        .front_door
+        .reply(&report("chatgpt.com", RefusalCode::PathNotServed, 1));
+    let snapshot = filed(&pairing.refusals, 2).await;
+    assert_eq!(snapshot.rejected, 1);
+    assert_eq!(snapshot.refused, 3);
+
+    let _successor = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_CREDENTIALS_MESSAGE);
+    assert_eq!(descriptors.len(), 1);
 }

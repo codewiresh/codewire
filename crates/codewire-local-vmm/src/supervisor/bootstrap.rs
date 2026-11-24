@@ -7,14 +7,17 @@ use tokio::sync::Notify;
 use tokio_stream::StreamExt;
 
 /// The runner's start beside the credential broker's wait for the guest's
-/// bootstrap. A start the runner refuses ends that wait at once: the
-/// bootstrap it waits for can no longer come, and the wait would otherwise
-/// hold the start, and every operation queued behind it, for its full 20
-/// minutes (#4953). Once the wait is over the broker's launch runs to its end
-/// whatever the start does, so no broker starts after the cleanup that
-/// follows a failed start. It holds all three futures at once, so a caller
-/// that is itself a large future boxes it: unboxed in `ensure_vm_started`, it
-/// overflowed the stack of the supervisor tests that start an environment.
+/// bootstrap. The broker starts while the runner waits for install and
+/// startup: its owner-only seam takes neither lifecycle mutex, and the
+/// selection is admitted before. A start the runner refuses ends that wait at
+/// once: the bootstrap it waits for can no longer come, and the wait would
+/// otherwise hold the start, and every operation queued behind it, for its
+/// full 20 minutes (#4953). Once the wait is over the broker's launch runs to
+/// its end whatever the start does, so no broker starts after the cleanup
+/// that follows a failed start. It holds all three futures at once, so a
+/// caller that is itself a large future boxes it: unboxed in
+/// `ensure_vm_started`, it overflowed the stack of the supervisor tests that
+/// start an environment.
 pub(super) async fn start_beside_broker<T, U>(
     start: impl Future<Output = Result<T, Status>>,
     wait: Option<impl Future<Output = Result<(), SupervisorError>>>,

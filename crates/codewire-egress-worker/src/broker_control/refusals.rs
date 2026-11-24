@@ -20,14 +20,15 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use codewire_access::RefusalCode;
 use codewire_egress_broker::refusals::{RefusalBatch, RefusalFold, RefusedRow};
 use codewire_egress_policy::PolicyDigest;
 use codewire_egress_policy::lease::RefusalReason;
 use codewire_egress_policy::record::{
-    Destination, EGRESS_RECORD_LIMIT, EgressObservation, EgressRecord, EgressRecordLog, Outcome,
-    PolicyLabel, Transport,
+    Destination, EGRESS_RECORD_LIMIT, EgressObservation, EgressRecord, EgressRecordLog,
+    PolicyLabel, RecordOutcome, Transport,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
@@ -40,8 +41,7 @@ pub const MAX_REFUSAL_FRAME_ROWS: usize = EGRESS_RECORD_LIMIT;
 /// The longest body a report has: its counts and as many of the longest
 /// row (a 253-byte name and an IPv6 address, 316 bytes) as it may carry.
 pub const MAX_REFUSAL_FRAME_BYTES: usize = 320 * 1024;
-/// The broker sends at most one report in this long.
-pub const REFUSAL_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+pub use codewire_egress_broker::refusals::REFUSAL_REPORT_INTERVAL;
 
 pub fn encode_refusal_frame(batch: &RefusalBatch) -> io::Result<Vec<u8>> {
     if batch.rows.len() > MAX_REFUSAL_FRAME_ROWS {
@@ -272,28 +272,56 @@ impl<'a> Body<'a> {
 }
 
 /// The broker's reporter: each time a refusal is folded, send everything
-/// folded since the last report, then wait a second before the next. It
-/// ends when the channel fails.
+/// folded since the last report, at most once a second
+/// ([`codewire_egress_broker::refusals::report_folded`]). It ends when the
+/// channel fails.
 pub async fn report_refusals<W: AsyncWrite + Unpin>(
     fold: &RefusalFold,
     writer: &tokio::sync::Mutex<W>,
 ) -> io::Result<()> {
-    loop {
-        fold.changed().await;
-        let batch = fold.take();
-        if !batch.is_empty() {
-            let frame = encode_refusal_frame(&batch)?;
-            let mut writer = writer.lock().await;
-            writer.write_all(&frame).await?;
-            writer.flush().await?;
-        }
-        tokio::time::sleep(REFUSAL_REPORT_INTERVAL).await;
+    codewire_egress_broker::refusals::report_folded(fold.fold(), |batch| async move {
+        let frame = encode_refusal_frame(&RefusalBatch::from(batch))?;
+        let mut writer = writer.lock().await;
+        writer.write_all(&frame).await?;
+        writer.flush().await
+    })
+    .await
+}
+
+/// The most rows an intercepted host's front door may hold in the log
+/// (#5058): its rows never grow past this, and never evict the egress
+/// broker's.
+pub const INTERCEPTED_ROW_LIMIT: usize = 128;
+
+/// Why a row of the merged log was refused, by its source: the egress
+/// broker's raw reason, or the code an intercepted host's front door
+/// answered with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LoggedRefusal {
+    Network(RefusalReason),
+    Intercepted(RefusalCode),
+}
+
+impl RecordOutcome for LoggedRefusal {
+    fn is_pass(self) -> bool {
+        false
     }
 }
 
+/// One row of a front door's report, as the runner admitted it: a host on
+/// the routes it bound for this boot, its port, a code and a count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterceptedRow {
+    pub host: String,
+    pub port: u16,
+    pub code: RefusalCode,
+    pub count: u64,
+}
+
 /// One environment's refusals for this run of its VM, as its runner keeps
-/// them from its broker's reports: in memory only, bounded at
-/// [`EGRESS_RECORD_LIMIT`] rows with the least recently seen dropped.
+/// them from its egress broker's and its front door's reports: in memory
+/// only, bounded at [`EGRESS_RECORD_LIMIT`] rows with the least recently
+/// seen dropped.
 #[derive(Debug)]
 pub struct RunnerRefusalLog {
     inner: Mutex<LogInner>,
@@ -301,11 +329,16 @@ pub struct RunnerRefusalLog {
 
 #[derive(Debug)]
 struct LogInner {
-    log: EgressRecordLog,
+    log: EgressRecordLog<LoggedRefusal>,
     /// The policies the runner sent the broker, by digest.
     labels: HashMap<PolicyDigest, (String, u64)>,
+    /// The policy of the allowed hosts the supervisor last sent the
+    /// credential authority, as it told the runner: the only label an
+    /// intercepted host's `name_not_allowed` row takes.
+    intercepted_label: Option<(String, u64)>,
     started_unix_ms: u64,
-    dropped_by_broker: u64,
+    dropped_by_reporters: u64,
+    rejected: u64,
     refused: u64,
     last_unix_ms: Option<u64>,
 }
@@ -313,13 +346,16 @@ struct LogInner {
 /// What the log holds when it is read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefusalLogSnapshot {
-    /// The most recently seen first, each labelled with the policy the
-    /// runner sent for its digest; a digest it sent none for has an empty
-    /// name.
-    pub records: Vec<EgressRecord>,
-    /// Rows dropped, by the broker's fold or by this log, to stay within
+    /// The most recently seen first. The egress broker's are labelled with
+    /// the policy the runner sent for their digest, a digest it sent none
+    /// for with an empty name; an intercepted host's `name_not_allowed`
+    /// with the supervisor's label, and every other one with none.
+    pub records: Vec<EgressRecord<LoggedRefusal>>,
+    /// Rows dropped, by a reporter's fold or by this log, to stay within
     /// their bounds.
     pub dropped: u64,
+    /// The front door's reports and rows the runner rejected.
+    pub rejected: u64,
     pub started_unix_ms: u64,
     /// Every refusal reported since the VM started, dropped rows included.
     pub refused: u64,
@@ -330,10 +366,12 @@ impl RunnerRefusalLog {
     pub fn new(started_unix_ms: u64) -> Self {
         Self {
             inner: Mutex::new(LogInner {
-                log: EgressRecordLog::new(unlabelled(PolicyDigest::from_bytes([0; 32]))),
+                log: EgressRecordLog::with_policy(unlabelled(PolicyDigest::from_bytes([0; 32]))),
                 labels: HashMap::new(),
+                intercepted_label: None,
                 started_unix_ms,
-                dropped_by_broker: 0,
+                dropped_by_reporters: 0,
+                rejected: 0,
                 refused: 0,
                 last_unix_ms: None,
             }),
@@ -346,11 +384,18 @@ impl RunnerRefusalLog {
         self.lock().labels.insert(digest, (name, revision));
     }
 
+    /// Names the policy of the allowed hosts the supervisor sent the
+    /// credential authority: an intercepted host's `name_not_allowed` filed
+    /// from now on carries it.
+    pub fn label_intercepted(&self, name: String, revision: u64) {
+        self.lock().intercepted_label = Some((name, revision));
+    }
+
     /// Files one report at `now_unix_ms`, the runner's clock when it
     /// arrived: every row's first and last seen.
     pub fn file(&self, batch: RefusalBatch, now_unix_ms: u64) {
         let mut inner = self.lock();
-        inner.dropped_by_broker = inner.dropped_by_broker.saturating_add(batch.dropped);
+        inner.dropped_by_reporters = inner.dropped_by_reporters.saturating_add(batch.dropped);
         for row in batch.rows {
             inner.refused = inner.refused.saturating_add(row.count);
             inner.last_unix_ms = Some(now_unix_ms);
@@ -359,13 +404,64 @@ impl RunnerRefusalLog {
                     destination: row.destination,
                     address: row.address,
                     transport: row.transport,
-                    outcome: Outcome::Refused(row.reason),
+                    outcome: LoggedRefusal::Network(row.reason),
                 },
                 unlabelled(row.policy_digest),
                 row.count,
                 now_unix_ms,
             );
         }
+    }
+
+    /// Files a front door's admitted rows at `now_unix_ms`. A row that would
+    /// take the front door past [`INTERCEPTED_ROW_LIMIT`] rows, or need a
+    /// row dropped from a full log, is rejected and counted instead: the
+    /// front door's rows never evict the egress broker's.
+    pub fn file_intercepted(&self, rows: Vec<InterceptedRow>, dropped: u64, now_unix_ms: u64) {
+        let mut inner = self.lock();
+        inner.dropped_by_reporters = inner.dropped_by_reporters.saturating_add(dropped);
+        for row in rows {
+            let destination = Destination::Name(row.host);
+            let transport = Transport::Tcp { port: row.port };
+            let outcome = LoggedRefusal::Intercepted(row.code);
+            if !inner.log.holds(&destination, transport, outcome)
+                && (inner.log.len() >= EGRESS_RECORD_LIMIT
+                    || inner
+                        .log
+                        .count_where(|held| matches!(held, LoggedRefusal::Intercepted(_)))
+                        >= INTERCEPTED_ROW_LIMIT)
+            {
+                inner.rejected = inner.rejected.saturating_add(1);
+                continue;
+            }
+            let label = match (row.code, &inner.intercepted_label) {
+                (RefusalCode::NameNotAllowed, Some((name, revision))) => PolicyLabel {
+                    name: name.clone(),
+                    revision: *revision,
+                    digest: PolicyDigest::from_bytes([0; 32]),
+                },
+                _ => unlabelled(PolicyDigest::from_bytes([0; 32])),
+            };
+            inner.refused = inner.refused.saturating_add(row.count);
+            inner.last_unix_ms = Some(now_unix_ms);
+            inner.log.fold(
+                EgressObservation {
+                    destination,
+                    address: None,
+                    transport,
+                    outcome,
+                },
+                label,
+                row.count,
+                now_unix_ms,
+            );
+        }
+    }
+
+    /// Counts `count` of the front door's reports or rows as rejected.
+    pub fn reject(&self, count: u64) {
+        let mut inner = self.lock();
+        inner.rejected = inner.rejected.saturating_add(count);
     }
 
     pub fn snapshot(&self) -> RefusalLogSnapshot {
@@ -375,7 +471,9 @@ impl RunnerRefusalLog {
             .list(EGRESS_RECORD_LIMIT)
             .into_iter()
             .map(|mut record| {
-                if let Some((name, revision)) = inner.labels.get(&record.policy.digest) {
+                if let (LoggedRefusal::Network(_), Some((name, revision))) =
+                    (record.outcome, inner.labels.get(&record.policy.digest))
+                {
                     record.policy.name.clone_from(name);
                     record.policy.revision = *revision;
                 }
@@ -384,7 +482,11 @@ impl RunnerRefusalLog {
             .collect();
         RefusalLogSnapshot {
             records,
-            dropped: inner.log.dropped().saturating_add(inner.dropped_by_broker),
+            dropped: inner
+                .log
+                .dropped()
+                .saturating_add(inner.dropped_by_reporters),
+            rejected: inner.rejected,
             started_unix_ms: inner.started_unix_ms,
             refused: inner.refused,
             last_unix_ms: inner.last_unix_ms,

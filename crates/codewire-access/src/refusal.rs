@@ -8,6 +8,9 @@
 
 use std::borrow::Cow;
 
+mod code;
+pub use code::RefusalCode;
+
 /// The response header that carries [`Refusal::reason`].
 pub const REFUSAL_HEADER: &str = "codewire-refusal";
 
@@ -108,26 +111,7 @@ impl Refusal {
     /// The `Codewire-Refusal` value: one reason from the spec's list, never
     /// free text.
     pub const fn reason(self) -> &'static str {
-        match self {
-            Self::CredentialRevoked => "credential_revoked",
-            Self::CredentialExpired => "credential_expired",
-            Self::CredentialNeedsReconnect => "credential_needs_reconnect",
-            Self::NoCredentialSelected => "no_credential_selected",
-            Self::CredentialUnavailable => "credential_unavailable",
-            Self::CredentialConflict => "credential_conflict",
-            Self::PathNotServed => "path_not_served",
-            Self::WebsocketNotServed => "websocket_not_served",
-            Self::RouteNotServed => "route_not_served",
-            Self::RequestNotForwarded(_) => "request_not_forwarded",
-            Self::BodyTooLarge => "body_too_large",
-            Self::Busy => "busy",
-            Self::UpstreamFailed(_) => "upstream_failed",
-            Self::NameNotAllowed => "name_not_allowed",
-            Self::SelectedCredentialOnly => "selected_credential_only",
-            Self::CredentialRefreshRateLimited { .. } => "credential_refresh_rate_limited",
-            Self::Unavailable => "unavailable",
-            Self::Denied => "denied",
-        }
+        self.code().as_str()
     }
 
     /// The headers every refusal carries besides its length.

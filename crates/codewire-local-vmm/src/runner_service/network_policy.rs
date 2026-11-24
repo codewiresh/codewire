@@ -15,13 +15,15 @@ pub(crate) fn policy_label(
 }
 
 impl RunnerClient {
-    /// Enforce `selected` on the running generation's egress broker; the
-    /// digest it acknowledged.
+    /// Enforce `selected` on the running generation's egress broker, and name
+    /// `credential_policy` as the policy of the allowed hosts the supervisor
+    /// sends the credential authority next; the digest it acknowledged.
     pub async fn replace_network_policy(
         &mut self,
         environment_id: Uuid,
         generation: u64,
         selected: &crate::network_policy_store::SelectedPolicy,
+        credential_policy: &v1::NetworkPolicyLabel,
     ) -> Result<codewire_egress_policy::PolicyDigest, Status> {
         let document = selected
             .compile()
@@ -34,6 +36,7 @@ impl RunnerClient {
                 generation,
                 network_policy_document: document,
                 network_policy_label: Some(policy_label(selected)),
+                credential_policy_label: Some(credential_policy.clone()),
             })
             .await?
             .into_inner();
@@ -77,6 +80,9 @@ impl RunnerRpc {
             .replace_network_policy(policy, request.network_policy_label.as_ref())
             .await
             .map_err(|error| Status::unavailable(error.to_string()))?;
+        // Before the supervisor sends the credential authority the allowed
+        // hosts this label names, which it does only once this answers.
+        running.label_intercepted(request.credential_policy_label.as_ref());
         Ok(v1::ReplaceNetworkPolicyResponse {
             enforced_digest: enforced.as_bytes().to_vec(),
         })

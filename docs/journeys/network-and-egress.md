@@ -37,7 +37,7 @@ separately.
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | observed 2026-11-24, Dev source 7862128013 (#4000 comment 137354) | not yet observed |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
-| `refusal-log` | #5058, #4000, #3997 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet built; the UDP rows not yet observed) | not yet observed | no command yet (#4000) | no command yet (#4000) |
+| `refusal-log` | #5058, #4000, #3997 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet observed; the UDP rows not yet observed) | not yet observed | no command yet (#4000) | no command yet (#4000) |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |

@@ -29,7 +29,7 @@ use codewire_egress_policy::handoff::InterceptedStreamHeader;
 
 use crate::handoff::{HandoffSocket, Received};
 
-use crate::{CredentialRouteBackend, RouteTable};
+use crate::{CredentialRouteBackend, RefusalSink, RouteTable};
 
 /// The only port a binding may name: the front door serves TLS.
 pub const INTERCEPT_PORT: u16 = codewire_access::INTERCEPT_PORT;
@@ -83,6 +83,17 @@ impl EnvironmentFrontDoor {
         environment_generation: u64,
         intercepts: InterceptSet,
     ) -> Result<Self, StartError> {
+        Self::start_reporting(environment_id, environment_generation, intercepts, None)
+    }
+
+    /// [`Self::start`], reporting every refusal to `refusals` when given
+    /// (#5058).
+    pub fn start_reporting(
+        environment_id: Uuid,
+        environment_generation: u64,
+        intercepts: InterceptSet,
+        refusals: Option<Arc<dyn RefusalSink>>,
+    ) -> Result<Self, StartError> {
         check_intercepts(&intercepts)?;
         // Bindings are sorted by name, so each name is listed once.
         let mut names: Vec<&str> = intercepts
@@ -93,7 +104,13 @@ impl EnvironmentFrontDoor {
         names.dedup();
         let suffixes = intercepts.suffixes().iter().map(|suffix| suffix.suffix());
         let ca = EnvironmentCa::generate_with_suffixes(names, suffixes)?;
-        Self::with_leaves(environment_id, environment_generation, intercepts, ca)
+        Self::build(
+            environment_id,
+            environment_generation,
+            intercepts,
+            ca,
+            refusals,
+        )
     }
 
     /// The CA certificate the guest trusts, in DER: all the supervisor gets.
@@ -132,6 +149,22 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         intercepts: InterceptSet,
         leaves: L,
     ) -> Result<Self, StartError> {
+        Self::build(
+            environment_id,
+            environment_generation,
+            intercepts,
+            leaves,
+            None,
+        )
+    }
+
+    fn build(
+        environment_id: Uuid,
+        environment_generation: u64,
+        intercepts: InterceptSet,
+        leaves: L,
+        refusals: Option<Arc<dyn RefusalSink>>,
+    ) -> Result<Self, StartError> {
         check_intercepts(&intercepts)?;
         let bridge = CredentialBridge::new(environment_id, environment_generation)
             .map_err(|_| StartError::Identity)?;
@@ -141,6 +174,10 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         let routes = RouteTable::serving(|host| intercepts.binds(host, INTERCEPT_PORT))
             .ok_or(StartError::NoBindings)?;
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
+        let backend = match refusals {
+            Some(sink) => backend.reporting_refusals(sink),
+            None => backend,
+        };
         let door = FrontDoor::new(leaves, backend, FrontDoorConfig::default());
         Ok(Self {
             handoff_identity: environment_id.to_string(),

@@ -9,6 +9,7 @@ description = "Codewire's confined host egress processes: the network worker, it
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 async-trait = { workspace = true }
+codewire-access = { workspace = true }
 codewire-confinement = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-policy = { workspace = true }

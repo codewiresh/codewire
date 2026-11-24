@@ -222,3 +222,159 @@ fn past_its_bound_the_runner_log_drops_the_least_recently_seen_and_says_so() {
         Destination::Name("h1099.example.com".to_owned())
     );
 }
+
+fn intercepted(host: &str, code: RefusalCode, count: u64) -> InterceptedRow {
+    InterceptedRow {
+        host: host.to_owned(),
+        port: 443,
+        code,
+        count,
+    }
+}
+
+/// An intercepted host's `name_not_allowed` takes the label the supervisor
+/// gave for the allowed hosts it sent, from the time it was given; every
+/// other code takes none, and no row takes an egress policy's label.
+#[test]
+fn an_intercepted_policy_refusal_takes_only_the_supervisors_label() {
+    let log = RunnerRefusalLog::new(0);
+    log.label(digest(1), "egress-policy".to_owned(), 7);
+    log.file_intercepted(
+        vec![intercepted(
+            "api.anthropic.com",
+            RefusalCode::NameNotAllowed,
+            1,
+        )],
+        0,
+        1_000,
+    );
+    assert_eq!(log.snapshot().records[0].policy.name, "");
+    log.label_intercepted("walk-log".to_owned(), 2);
+    log.file_intercepted(
+        vec![
+            intercepted("api.anthropic.com", RefusalCode::NameNotAllowed, 4),
+            intercepted("api.openai.com", RefusalCode::PathNotServed, 2),
+        ],
+        3,
+        2_000,
+    );
+    let snapshot = log.snapshot();
+    assert_eq!(snapshot.refused, 7);
+    assert_eq!(snapshot.dropped, 3);
+    assert_eq!(snapshot.rejected, 0);
+    let row = |code| {
+        snapshot
+            .records
+            .iter()
+            .find(|record| record.outcome == LoggedRefusal::Intercepted(code))
+            .unwrap()
+    };
+    let policy = row(RefusalCode::NameNotAllowed);
+    assert_eq!(
+        (
+            policy.policy.name.as_str(),
+            policy.policy.revision,
+            policy.count
+        ),
+        ("walk-log", 2, 5)
+    );
+    assert_eq!(
+        (policy.destination.clone(), policy.transport, policy.address),
+        (
+            Destination::Name("api.anthropic.com".to_owned()),
+            Transport::Tcp { port: 443 },
+            None
+        )
+    );
+    assert_eq!(row(RefusalCode::PathNotServed).policy.name, "");
+}
+
+/// The front door's counts are taken as given, so the largest it can state,
+/// twice, saturates rather than wraps.
+#[test]
+fn a_front_doors_largest_counts_saturate() {
+    let log = RunnerRefusalLog::new(0);
+    for at in [1_000, 2_000] {
+        log.file_intercepted(
+            vec![intercepted(
+                "api.anthropic.com",
+                RefusalCode::NoCredentialSelected,
+                u64::MAX,
+            )],
+            u64::MAX,
+            at,
+        );
+    }
+    let snapshot = log.snapshot();
+    assert_eq!(
+        (
+            snapshot.refused,
+            snapshot.dropped,
+            snapshot.records[0].count
+        ),
+        (u64::MAX, u64::MAX, u64::MAX)
+    );
+}
+
+/// A full log of the egress broker's rows keeps them all: a new intercepted
+/// row is rejected and counted, never filed by dropping one. A row it
+/// already holds still counts.
+#[test]
+fn an_intercepted_row_never_evicts_the_egress_brokers_rows() {
+    let log = RunnerRefusalLog::new(0);
+    log.file_intercepted(
+        vec![intercepted("api.anthropic.com", RefusalCode::Busy, 1)],
+        0,
+        1,
+    );
+    for index in 0..999_u64 {
+        log.file(
+            RefusalBatch {
+                rows: vec![RefusedRow {
+                    count: 1,
+                    ..row(
+                        Destination::checked_name(&format!("h{index}.example.com")),
+                        Transport::Dns,
+                        RefusalReason::NameNotAllowed,
+                    )
+                }],
+                dropped: 0,
+            },
+            10 + index,
+        );
+    }
+    log.file_intercepted(
+        vec![
+            intercepted("api.openai.com", RefusalCode::PathNotServed, 50),
+            intercepted("api.anthropic.com", RefusalCode::Busy, 2),
+        ],
+        0,
+        5_000,
+    );
+    let snapshot = log.snapshot();
+    assert_eq!(snapshot.records.len(), 1_000);
+    assert_eq!(snapshot.rejected, 1);
+    assert_eq!(snapshot.dropped, 0);
+    let network = snapshot
+        .records
+        .iter()
+        .filter(|record| matches!(record.outcome, LoggedRefusal::Network(_)))
+        .count();
+    assert_eq!(network, 999);
+    assert_eq!(snapshot.records[0].count, 3);
+}
+
+/// The front door's rows stop at their own limit, whatever the log holds.
+#[test]
+fn the_front_doors_rows_stop_at_their_limit() {
+    let log = RunnerRefusalLog::new(0);
+    let rows = (0..=INTERCEPTED_ROW_LIMIT)
+        .map(|index| intercepted(&format!("h{index}.example.com"), RefusalCode::Busy, 1))
+        .collect();
+    log.file_intercepted(rows, 0, 1);
+    let snapshot = log.snapshot();
+    assert_eq!(snapshot.records.len(), INTERCEPTED_ROW_LIMIT);
+    assert_eq!(snapshot.rejected, 1);
+    log.reject(2);
+    assert_eq!(log.snapshot().rejected, 3);
+}

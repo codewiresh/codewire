@@ -400,6 +400,27 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
     let response = read_response(&mut tls).await;
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
 
+    // A path the route doesn't serve is refused at the front door, which
+    // reports it on its control channel by the route's bound host, its port
+    // and the code alone: nothing of the request reaches the runner (#5058).
+    tls.write_all(
+        b"GET /v2/secret-path?secret-query=1 HTTP/1.1\r\nhost: api.openai.com\r\nx-secret-header: secret-value\r\nauthorization: Bearer secret-token\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let response = read_response(&mut tls).await;
+    assert!(response.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+    let word = receive_message(&runner);
+    assert!(!word.windows(6).any(|window| window == b"secret"));
+    let report = codewire_local_vmm::front_door::refusals::decode_report(&word).unwrap();
+    let [row] = report.rows.as_slice() else {
+        panic!("one row: {report:?}");
+    };
+    assert_eq!(
+        (row.host.as_str(), row.port, row.code.as_str(), row.count),
+        (BOUND, 443, "path_not_served", 1)
+    );
+
     // A successor whose role tag never comes stalls nothing: a request on
     // the first session is answered well inside the tag's deadline.
     let (_silent, silent_door_end) = std::os::unix::net::UnixStream::pair().unwrap();

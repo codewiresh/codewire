@@ -69,16 +69,16 @@ service LocalSupervisorService {
   // enforces it at its next start; a running one keeps enforcing what it
   // started with and reports restart_required.
   rpc UpdateEnvironmentNetworkPolicy(UpdateEnvironmentNetworkPolicyRequest) returns (Environment);
-  // What a running VM's egress broker refused since the VM started (#5058,
-  // protocol 26), from its runner's log: the owner's view, with the raw
-  // reasons the guest never sees. A VM that isn't running answers
+  // What a running VM's egress broker and its intercepted hosts' front door
+  // refused since the VM started (#5058, protocol 26), from its runner's
+  // log: the owner's view, with the raw reasons the guest never sees. A VM that isn't running answers
   // FAILED_PRECONDITION and nothing else does.
   rpc GetEgressRefusals(EnvironmentSelector) returns (EgressRefusals);
 }
 
 // One row of a refusal log: every refusal of one destination, protocol,
 // port and reason since the VM started (#5058). It names a host and port
-// only, never a request's contents.
+// only, never a request's method, contents or any text of its answer.
 message EgressRefusal {
   oneof destination {
     // A name the runner checked: printable ASCII, at most 253 bytes.
@@ -102,6 +102,17 @@ message EgressRefusal {
   int64 first_seen_unix_ms = 10;
   int64 last_seen_unix_ms = 11;
   uint64 count = 12;
+  // Which refused it: the egress broker, or an intercepted host's front
+  // door, whose reason is a refusal code of the credential routes and whose
+  // destination is the route's bound host. Unspecified from a runner before
+  // the front door reported, and read as the egress broker.
+  EgressRefusalSource source = 13;
+}
+
+enum EgressRefusalSource {
+  EGRESS_REFUSAL_SOURCE_UNSPECIFIED = 0;
+  EGRESS_REFUSAL_SOURCE_NETWORK = 1;
+  EGRESS_REFUSAL_SOURCE_CREDENTIALS = 2;
 }
 
 enum EgressRefusalProtocol {
@@ -120,10 +131,15 @@ message EgressRefusals {
   // When the log began: when this run's egress broker started.
   int64 started_unix_ms = 3;
   EgressRefusalSummary summary = 4;
+  // The front door's reports and rows the runner rejected since the VM
+  // started: malformed, past the runner's rate or row limit, or for a host
+  // it didn't bind. None of it is kept.
+  uint64 rejected = 5;
 }
 
-// How many requests a running VM's egress broker refused since it started,
-// dropped rows included, and when the last was (#5058).
+// How many requests a running VM's egress broker and its intercepted hosts'
+// front door refused since it started, dropped rows included, and when the
+// last was (#5058).
 message EgressRefusalSummary {
   uint64 refused = 1;
   int64 last_unix_ms = 2;
@@ -1119,7 +1135,7 @@ message RunnerInfo {
   RunnerExit exit = 7;
   EgressUnavailable egress_unavailable = 8;
   Interception interception = 9;
-  // Absent unless the running VM's egress broker refused something (#5058).
+  // Absent unless the running VM refused something (#5058).
   EgressRefusalSummary egress_refusals = 10;
 }
 
@@ -1321,6 +1337,10 @@ message StartVmRequest {
 
   // How the supervisor names network_policy_document (#5058).
   NetworkPolicyLabel network_policy_label = 31;
+  // The policy of the allowed hosts the supervisor sends this boot's
+  // credential authority, as it recorded them: the only label an
+  // intercepted host's refusal by the network policy takes (#5058).
+  NetworkPolicyLabel credential_policy_label = 32;
 }
 
 message SeedCredentialPlaceholder {
@@ -1411,6 +1431,9 @@ message ReplaceNetworkPolicyRequest {
   bytes network_policy_document = 3;
   // How the supervisor names it (#5058).
   NetworkPolicyLabel network_policy_label = 4;
+  // The policy of the allowed hosts the supervisor sends the credential
+  // authority next, as in StartVmRequest (#5058).
+  NetworkPolicyLabel credential_policy_label = 5;
 }
 message ReplaceNetworkPolicyResponse {
   // The digest the broker acknowledged.

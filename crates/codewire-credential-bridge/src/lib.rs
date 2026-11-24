@@ -59,7 +59,7 @@ use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
 mod refusal;
-pub use refusal::refusal_response;
+pub use refusal::{AnsweredRefusal, refusal_response};
 mod request_body;
 mod request_id;
 use request_id::request_id_of;

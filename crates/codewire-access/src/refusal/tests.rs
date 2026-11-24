@@ -212,3 +212,23 @@ fn a_slot_names_its_provider() {
     );
     assert_eq!(RefusalProvider::for_slot("other"), None);
 }
+
+/// A log keeps a refusal's code alone: every refusal has the code its
+/// header names, and every code round-trips through its text and its index.
+#[test]
+fn each_refusal_has_the_code_its_header_names() {
+    for (refusal, _, _) in table() {
+        assert_eq!(refusal.code().as_str(), refusal.reason(), "{refusal:?}");
+        assert_eq!(
+            RefusalCode::from_code(refusal.reason()),
+            Some(refusal.code())
+        );
+    }
+    for code in RefusalCode::ALL {
+        assert_eq!(RefusalCode::from_code(code.as_str()), Some(code));
+        assert_eq!(RefusalCode::at(code.index()), Some(code));
+        assert!(!code.description().contains('_'), "{code:?}");
+    }
+    assert_eq!(RefusalCode::from_code("Path_Not_Served"), None);
+    assert_eq!(RefusalCode::at(18), None);
+}

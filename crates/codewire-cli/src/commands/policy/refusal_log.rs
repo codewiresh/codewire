@@ -1,13 +1,15 @@
 //! `cw --local policy log ENV` (#5058; journey step `refusal-log`): what a
-//! running local VM's egress broker refused since it started, one row per
-//! destination, protocol, port and reason, most recently seen first, and the
-//! one `cw policy` step that would allow the latest refusal a rule can.
+//! running local VM's egress broker and its intercepted hosts' front door
+//! refused since it started, one row per destination, protocol, port and
+//! reason, most recently seen first, and the one `cw policy` step that would
+//! allow the latest refusal a rule can.
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Args;
+use codewire_access::RefusalCode;
 use codewire_egress_policy::BuiltinPolicy;
 use codewire_egress_policy::lease::RefusalReason;
 use codewire_egress_policy::record::Destination;
@@ -50,6 +52,62 @@ impl Protocol {
     }
 }
 
+/// Why a row was refused: the egress broker's raw reason, or the code an
+/// intercepted host's front door answered with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reason {
+    Network(RefusalReason),
+    Credentials(RefusalCode),
+}
+
+impl Reason {
+    fn parse(source: i32, code: &str) -> Option<Self> {
+        use codewire_local_vmm::control::v1::EgressRefusalSource as Source;
+        match Source::try_from(source).ok()? {
+            Source::Unspecified | Source::Network => RefusalReason::ALL
+                .into_iter()
+                .find(|reason| reason.code() == code)
+                .map(Self::Network),
+            Source::Credentials => RefusalCode::from_code(code).map(Self::Credentials),
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::Network(reason) => reason.code(),
+            Self::Credentials(code) => code.as_str(),
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Network(reason) => reason.description(),
+            Self::Credentials(code) => code.description(),
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::Network(_) => "network",
+            Self::Credentials(_) => "credentials",
+        }
+    }
+
+    /// Whether a rule of the policy could allow it: a name, address or port
+    /// not allowed. Never a protected, expired or intercepted one, nor any
+    /// other reason on an intercepted host.
+    fn a_rule_allows(self) -> bool {
+        matches!(
+            self,
+            Self::Network(
+                RefusalReason::NameNotAllowed
+                    | RefusalReason::PortNotAllowed
+                    | RefusalReason::AddressNotAllowed
+            ) | Self::Credentials(RefusalCode::NameNotAllowed)
+        )
+    }
+}
+
 /// One row as the CLI shows it, parsed once from the supervisor's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
@@ -59,7 +117,7 @@ struct Row {
     address: Option<String>,
     protocol: Protocol,
     port: Option<u16>,
-    reason: RefusalReason,
+    reason: Reason,
     policy: Option<(String, u32)>,
     first_unix_ms: i64,
     last_unix_ms: i64,
@@ -94,9 +152,7 @@ impl Row {
             (Wire::Udp, port) if port != 0 => (Protocol::Udp, Some(u16::try_from(port).ok()?)),
             _ => return None,
         };
-        let reason = RefusalReason::ALL
-            .into_iter()
-            .find(|reason| reason.code() == refusal.reason)?;
+        let reason = Reason::parse(refusal.source, &refusal.reason)?;
         let policy = Destination::checked_name(&refusal.policy_name);
         let policy = match policy {
             Destination::Name(_) => Some((refusal.policy_name.clone(), refusal.policy_revision)),
@@ -128,16 +184,10 @@ impl Row {
         }
     }
 
-    /// The `cw policy` target that would allow this row, when a rule can:
-    /// a name or address not allowed, or a port not allowed. Never a
-    /// protected, expired or intercepted one.
+    /// The `cw policy` target that would allow this row, when a rule can
+    /// ([`Reason::a_rule_allows`]).
     fn allow_target(&self) -> Option<String> {
-        if !matches!(
-            self.reason,
-            RefusalReason::NameNotAllowed
-                | RefusalReason::PortNotAllowed
-                | RefusalReason::AddressNotAllowed
-        ) {
+        if !self.reason.a_rule_allows() {
             return None;
         }
         let destination = self.destination.as_deref()?;
@@ -169,6 +219,7 @@ struct RowJson<'a> {
 struct LogJson<'a> {
     refusals: Vec<RowJson<'a>>,
     dropped: u64,
+    rejected: u64,
 }
 
 fn rfc3339(unix_ms: i64) -> String {
@@ -177,7 +228,15 @@ fn rfc3339(unix_ms: i64) -> String {
         .unwrap_or_default()
 }
 
-fn json(rows: &[Row], dropped: u64) -> anyhow::Result<String> {
+/// What the log says beside its rows: the rows it dropped to stay within its
+/// bound, and the front door's reports or rows the runner rejected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LogCounts {
+    dropped: u64,
+    rejected: u64,
+}
+
+fn json(rows: &[Row], counts: LogCounts) -> anyhow::Result<String> {
     let refusals = rows
         .iter()
         .map(|row| RowJson {
@@ -187,7 +246,7 @@ fn json(rows: &[Row], dropped: u64) -> anyhow::Result<String> {
             port: row.port,
             protocol: row.protocol,
             reason: row.reason.code(),
-            source: "network",
+            source: row.reason.source(),
             policy: row.policy.as_ref().map(|(name, _)| name.as_str()),
             revision: row.policy.as_ref().map(|(_, revision)| *revision),
             first: rfc3339(row.first_unix_ms),
@@ -197,7 +256,8 @@ fn json(rows: &[Row], dropped: u64) -> anyhow::Result<String> {
         .collect();
     Ok(serde_json::to_string_pretty(&LogJson {
         refusals,
-        dropped,
+        dropped: counts.dropped,
+        rejected: counts.rejected,
     })?)
 }
 
@@ -334,16 +394,24 @@ fn next_step(rows: &[Row], current: &HashMap<String, u32>) -> Option<String> {
 fn text(
     environment: &str,
     rows: &[Row],
-    dropped: u64,
+    counts: LogCounts,
     now_unix_ms: i64,
     columns: usize,
     style: Style,
     current: &HashMap<String, u32>,
 ) -> String {
+    let rejected = match counts.rejected {
+        0 => String::new(),
+        1 => "\n1 report or row from the front door was rejected and not kept.\n".to_owned(),
+        many => {
+            format!("\n{many} reports or rows from the front door were rejected and not kept.\n")
+        }
+    };
     if rows.is_empty() {
-        return format!("Nothing refused since {environment} started.\n");
+        return format!("Nothing refused since {environment} started.\n{rejected}");
     }
     let mut output = table(rows, now_unix_ms, columns);
+    let dropped = counts.dropped;
     if dropped > 0 {
         output.push_str(&format!(
             "\n{dropped} {} seen least recently {} dropped; the log keeps the 1,000 seen last.\n",
@@ -351,6 +419,7 @@ fn text(
             if dropped == 1 { "was" } else { "were" },
         ));
     }
+    output.push_str(&rejected);
     if let Some(step) = next_step(rows, current) {
         output.push_str(&format!("\n{} {step}\n", style.status(Status::Next)));
     }
@@ -388,8 +457,12 @@ pub(super) async fn handle(args: PolicyLogArgs) -> anyhow::Result<()> {
         Err(status) => anyhow::bail!("read the refusal log: {}", status.message()),
     };
     let rows: Vec<Row> = log.refusals.iter().filter_map(Row::parse).collect();
+    let counts = LogCounts {
+        dropped: log.dropped,
+        rejected: log.rejected,
+    };
     match args.output {
-        OutputFormat::Json => println!("{}", json(&rows, log.dropped)?),
+        OutputFormat::Json => println!("{}", json(&rows, counts)?),
         OutputFormat::Text => {
             let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
             // Only a terminal cuts the table to its width; a pipe gets it whole.
@@ -414,7 +487,7 @@ pub(super) async fn handle(args: PolicyLogArgs) -> anyhow::Result<()> {
                 text(
                     &environment,
                     &rows,
-                    log.dropped,
+                    counts,
                     now_unix_ms(),
                     columns,
                     caps.stdout_style(),

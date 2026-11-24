@@ -28,10 +28,20 @@ use crate::front_door::{
     ROLE_TAG_TIMEOUT, front_door_dropped_pairing, front_door_serving_pairing,
 };
 
+mod reports;
+pub(crate) use reports::FrontDoorReports;
+
+/// The egress broker's hand-off end, and where the front door's refusal
+/// reports go once it serves.
+type HandedOff = (OwnedFd, Option<FrontDoorReports>);
+
 /// How long the front door has to confine itself and make its CA.
 const FRONT_DOOR_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// A ready message: the prefix and a DER certificate of well under 4 KiB.
 const MAX_READY_MESSAGE: usize = 8 * 1024;
+/// What the front door may say once it serves: a word, or a refusal report
+/// (#5058), the longer.
+const MAX_SERVING_MESSAGE: usize = crate::front_door::refusals::MAX_FRONT_DOOR_REPORT_BYTES;
 /// How long the front door has, once a pairing's sockets reach it, to check
 /// their role tags and say it serves. It reads each of a pairing's two role
 /// tags within `ROLE_TAG_TIMEOUT` before it can say so, hence twice that and
@@ -168,7 +178,7 @@ pub(crate) struct RunningFrontDoor {
     stopped: StopRecord,
     watch: FrontDoorWatch,
     socket: std::path::PathBuf,
-    handoff: Option<tokio::sync::oneshot::Sender<OwnedFd>>,
+    handoff: Option<tokio::sync::oneshot::Sender<HandedOff>>,
     _pairing: FrontDoorPairing,
     secrets: BootSecrets,
 }
@@ -241,13 +251,18 @@ impl RunningFrontDoor {
         &self.socket
     }
 
-    /// Give the pairing the egress broker's hand-off end, once. A front door
+    /// Give the pairing the egress broker's hand-off end, once, and where
+    /// the front door's refusal reports go from then on. A front door
     /// already gone fails the boot, and the end closes here.
-    pub(crate) fn hand_off(&mut self, handoff: OwnedFd) -> Result<(), RunnerError> {
+    pub(crate) fn hand_off(
+        &mut self,
+        handoff: OwnedFd,
+        reports: Option<FrontDoorReports>,
+    ) -> Result<(), RunnerError> {
         self.handoff
             .take()
             .ok_or(FrontDoorFailure::Sockets)?
-            .send(handoff)
+            .send((handoff, reports))
             .map_err(|_| RunnerError::FrontDoor(FrontDoorFailure::Sockets))
     }
 }
@@ -269,7 +284,12 @@ impl super::RunningVm {
             .as_mut()
             .and_then(EgressBrokerProcess::take_front_door_handoff)
             .ok_or(FrontDoorFailure::Sockets)?;
-        front_door.hand_off(handoff)
+        let reports = worker
+            .broker
+            .as_ref()
+            .and_then(|broker| broker.refusals.clone())
+            .map(|log| FrontDoorReports::new(log, self.request.intercepts.clone()));
+        front_door.hand_off(handoff, reports)
     }
 
     /// Stop and reap the generation's front door, when it has one.
@@ -483,16 +503,23 @@ impl Unanswered {
 
 /// The front door's answer for `pairing`, within the serving limit. Its word
 /// for an earlier pairing is recorded for that one and the wait goes on with
-/// the time left, so only this pairing's own word or the limit ends it.
+/// the time left, so only this pairing's own word or the limit ends it; so
+/// does a refusal report, which goes to `reports`.
 async fn acknowledgement(
     control: &mut ControlChannel,
     log: Option<&DiagnosticLog>,
     pairing: u64,
     unanswered: &mut Unanswered,
+    reports: &mut Option<FrontDoorReports>,
 ) -> Acknowledgement {
     let limit = tokio::time::Instant::now() + SERVING_TIMEOUT;
     loop {
-        let reply = tokio::time::timeout_at(limit, control.receive(MAX_READY_MESSAGE, 0)).await;
+        let reply = tokio::time::timeout_at(limit, control.receive(MAX_SERVING_MESSAGE, 0)).await;
+        if let Ok(Ok((message, _))) = &reply
+            && reports::taken(reports, message)
+        {
+            continue;
+        }
         let Ok(said) = reply.map(Acknowledgement::of) else {
             return Acknowledgement::Silent;
         };
@@ -560,14 +587,14 @@ impl FrontDoorPairing {
         capability: zeroize::Zeroizing<Vec<u8>>,
         log: Option<std::sync::Arc<DiagnosticLog>>,
         stopped: StopRecord,
-    ) -> Result<(tokio::sync::oneshot::Sender<OwnedFd>, Self), RunnerError> {
+    ) -> Result<(tokio::sync::oneshot::Sender<HandedOff>, Self), RunnerError> {
         let (mut listener, identity) =
             crate::uds::bind_owner_only_listener(socket).map_err(|_| FrontDoorFailure::Sockets)?;
         let socket = socket.to_owned();
-        let (handoff_sender, handoff_receiver) = tokio::sync::oneshot::channel::<OwnedFd>();
+        let (handoff_sender, handoff_receiver) = tokio::sync::oneshot::channel::<HandedOff>();
         let task = tokio::spawn(async move {
             // A runner that drops the sender has failed the boot.
-            let mut handoff = tokio::select! {
+            let handed_off = tokio::select! {
                 handoff = handoff_receiver => handoff.ok(),
                 _ = control.receive(MAX_READY_MESSAGE, 0) => {
                     stopped.note(FrontDoorStop::Gone);
@@ -579,6 +606,8 @@ impl FrontDoorPairing {
                     None
                 }
             };
+            let (mut handoff, mut reports) =
+                handed_off.map_or((None, None), |(end, reports)| (Some(end), reports));
             let mut pairings = 0_u64;
             let mut unanswered = Unanswered::default();
             while handoff.is_some() || pairings > 0 {
@@ -590,9 +619,12 @@ impl FrontDoorPairing {
                 let stream = tokio::select! {
                     (stream, _) = axum::serve::Listener::accept(&mut listener) => stream,
                     // Between pairings the front door says only that a
-                    // pairing it was slow to check serves after all, or that
-                    // it has failed.
-                    reply = control.receive(MAX_READY_MESSAGE, 0) => {
+                    // pairing it was slow to check serves after all, that it
+                    // has failed, or what it refused.
+                    reply = control.receive(MAX_SERVING_MESSAGE, 0) => {
+                        if let Ok((message, _)) = &reply && reports::taken(&mut reports, message) {
+                            continue;
+                        }
                         let said = Acknowledgement::of(reply);
                         let failed = match said.pairing() {
                             Some(earlier) if earlier <= pairings => {
@@ -662,8 +694,14 @@ impl FrontDoorPairing {
                 // its own word says the pairing took. For a later broker's
                 // socket it does not take, it says so and why, and the next
                 // broker pairs.
-                let said =
-                    acknowledgement(&mut control, log.as_deref(), pairings, &mut unanswered).await;
+                let said = acknowledgement(
+                    &mut control,
+                    log.as_deref(),
+                    pairings,
+                    &mut unanswered,
+                    &mut reports,
+                )
+                .await;
                 // After its word or the limit the runner keeps no copy of any
                 // end: a front door that dies takes them with it, and the
                 // egress broker sees the close.

@@ -858,8 +858,8 @@ network policy limits. The managed GitHub credential is the exception: it is
 served only where a rule allows the GitHub hosts, because its grant cannot be
 limited to an environment's own repositories.
 
-Target, not shipped (#5058): `cw --local policy log ENV` shows what a running
-local VM has had refused since it started, most recently seen first. Rows fold
+`cw --local policy log ENV` (#5058) shows what a running local VM has had
+refused since it started, most recently seen first. Rows fold
 by destination, protocol, port and reason, so TCP and UDP to one port are two
 rows, and each row says: the name, or the address where no name leads to it;
 the latest address seen; the protocol and the port; the reason; the policy and
@@ -877,18 +877,20 @@ the reason codes of "Refusals an agent or a person can read" in
   refusals, so the owner's log never shows a pass;
 - an intercepted host's front door's refusals, with the reason the agent
   received: its own (a path the route doesn't serve, a request it doesn't
-  forward) and each refusal the credential broker answers with. The front
-  door reports them, not the broker, which keeps its confinement and gains
-  no output. A row holds only the route's bound host and its port, the
-  reason, a count and the times, never the request's method, `Host` header,
-  path, query, other headers, body, credential or placeholder, nor any text
-  of the response, so a crafted request can't put another name or any of its
-  content in the log. A
+  forward) and each refusal the credential broker answers with. The front door
+  reports them, not the broker, which keeps its confinement and gains no
+  output. The broker's answers it knows only by their `Codewire-Refusal`
+  header (no credential selected and the three credential reasons), so such a
+  row says what the agent received, not proof that the broker sent it. A row
+  holds only the route's bound host and its port, the reason, a count and the
+  times, never the request's method, `Host` header, path, query, other
+  headers, body, credential or placeholder, nor any text of the response, so a
+  crafted request can't put another name or any of its content in the log. A
   request refused by the network policy (`name_not_allowed`) carries the
   policy and revision the supervisor recorded when it last sent that
   environment's allowed hosts to the credential authority, taken only from
-  that record and never from the front door; any other reason here has `-`
-  for the policy.
+  that record and never from the front door; any other reason here has `-` for
+  the policy.
 
 The workload chooses the hosts and the volume, so the egress broker and the
 front door each fold their refusals before they report, and send the rows

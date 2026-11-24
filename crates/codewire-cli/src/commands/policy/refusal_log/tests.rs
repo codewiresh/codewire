@@ -35,6 +35,14 @@ fn refusal(
         first_seen_unix_ms: NOW - 600_000,
         last_seen_unix_ms: NOW - last_seconds_ago * 1_000,
         count: 6,
+        source: v1::EgressRefusalSource::Network as i32,
+    }
+}
+
+fn dropped(dropped: u64) -> LogCounts {
+    LogCounts {
+        dropped,
+        rejected: 0,
     }
 }
 
@@ -82,7 +90,15 @@ fn walk_log() -> Vec<Row> {
 #[test]
 fn each_refusal_is_one_row_most_recent_first_with_the_next_step_for_the_latest_a_rule_allows() {
     assert_eq!(
-        text("walk-log", &walk_log(), 0, NOW, 120, PLAIN, &current()),
+        text(
+            "walk-log",
+            &walk_log(),
+            LogCounts::default(),
+            NOW,
+            120,
+            PLAIN,
+            &current()
+        ),
         "\
 DESTINATION      PROTOCOL  PORT  REASON             POLICY            COUNT  FIRST    LAST
 169.254.169.254  tcp       80    protected address  walk-log · rev 1  6      10m ago  5s ago
@@ -107,13 +123,22 @@ fn a_refused_datagram_is_a_udp_row_with_its_port_and_no_step() {
         5,
     )]);
     assert_eq!(
-        text("walk-log", &refusals, 0, NOW, 120, PLAIN, &current()),
+        text(
+            "walk-log",
+            &refusals,
+            LogCounts::default(),
+            NOW,
+            120,
+            PLAIN,
+            &current()
+        ),
         "\
 DESTINATION   PROTOCOL  PORT  REASON           POLICY            COUNT  FIRST    LAST
 198.51.100.7  udp       3478  UDP not carried  walk-log · rev 1  6      10m ago  5s ago
 "
     );
-    let json: serde_json::Value = serde_json::from_str(&json(&refusals, 0).unwrap()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&json(&refusals, LogCounts::default()).unwrap()).unwrap();
     assert_eq!(json["refusals"][0]["protocol"], "udp");
     assert_eq!(json["refusals"][0]["port"], 3478);
     assert_eq!(json["refusals"][0]["reason"], "udp_not_carried");
@@ -122,7 +147,15 @@ DESTINATION   PROTOCOL  PORT  REASON           POLICY            COUNT  FIRST   
 #[test]
 fn nothing_refused_reads_as_empty() {
     assert_eq!(
-        text("walk-log", &[], 0, NOW, 80, PLAIN, &current()),
+        text(
+            "walk-log",
+            &[],
+            LogCounts::default(),
+            NOW,
+            80,
+            PLAIN,
+            &current()
+        ),
         "Nothing refused since walk-log started.\n"
     );
 }
@@ -188,7 +221,15 @@ fn a_name_carrying_an_escape_is_withheld_and_never_printed() {
         ("walk-log", 1),
         1,
     )]);
-    let shown = text("walk-log", &refusals, 0, NOW, 120, PLAIN, &current());
+    let shown = text(
+        "walk-log",
+        &refusals,
+        LogCounts::default(),
+        NOW,
+        120,
+        PLAIN,
+        &current(),
+    );
     assert!(shown.contains("(a name cw won't show)"), "{shown}");
     assert!(
         !shown.contains('\u{1b}') && !shown.contains("evil"),
@@ -196,7 +237,7 @@ fn a_name_carrying_an_escape_is_withheld_and_never_printed() {
     );
     // A withheld name has nothing a rule could allow.
     assert!(!shown.contains('→'), "{shown}");
-    let json = json(&refusals, 0).unwrap();
+    let json = json(&refusals, LogCounts::default()).unwrap();
     assert!(
         !json.contains("evil") && !json.contains("\\u001b"),
         "{json}"
@@ -208,7 +249,7 @@ fn piped_text_has_no_escapes_and_ascii_names_the_step_plainly() {
     let ascii = text(
         "walk-log",
         &walk_log(),
-        0,
+        LogCounts::default(),
         NOW,
         120,
         Style::new(false, Charset::Ascii),
@@ -230,7 +271,15 @@ fn the_table_fits_the_terminal() {
         ("a-long-policy-name", 12),
         1,
     )]);
-    let shown = text("walk-log", &refusals, 0, NOW, 100, PLAIN, &current());
+    let shown = text(
+        "walk-log",
+        &refusals,
+        LogCounts::default(),
+        NOW,
+        100,
+        PLAIN,
+        &current(),
+    );
     let mut lines = shown.lines();
     for line in lines.by_ref().take(2) {
         assert!(line.chars().count() <= 100, "{line}");
@@ -242,7 +291,15 @@ fn the_table_fits_the_terminal() {
 
 #[test]
 fn dropped_rows_are_said() {
-    let shown = text("walk-log", &walk_log(), 100, NOW, 120, PLAIN, &current());
+    let shown = text(
+        "walk-log",
+        &walk_log(),
+        dropped(100),
+        NOW,
+        120,
+        PLAIN,
+        &current(),
+    );
     assert!(
         shown.contains(
             "\n100 rows seen least recently were dropped; the log keeps the 1,000 seen last.\n"
@@ -253,7 +310,8 @@ fn dropped_rows_are_said() {
 
 #[test]
 fn json_holds_every_row_and_nothing_else() {
-    let value: serde_json::Value = serde_json::from_str(&json(&walk_log(), 3).unwrap()).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&json(&walk_log(), dropped(3)).unwrap()).unwrap();
     assert_eq!(value["dropped"], 3);
     let refusals = value["refusals"].as_array().unwrap();
     assert_eq!(refusals.len(), 3);
@@ -277,7 +335,9 @@ fn json_holds_every_row_and_nothing_else() {
     assert_eq!(refusals[2]["protocol"], "dns");
     assert!(refusals[2]["port"].is_null());
     assert!(refusals[2]["address"].is_null());
-    assert_eq!(value.as_object().unwrap().len(), 2);
+    let mut keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["dropped", "refusals", "rejected"]);
 }
 
 #[test]
@@ -383,7 +443,130 @@ fn a_refusal_under_an_older_revision_gets_no_step_since_an_edit_may_allow_it() {
 
 #[test]
 fn a_narrow_terminal_cuts_the_policy_first_and_never_an_address() {
-    let shown = text("walk-log", &walk_log(), 0, NOW, 70, PLAIN, &current());
+    let shown = text(
+        "walk-log",
+        &walk_log(),
+        LogCounts::default(),
+        NOW,
+        70,
+        PLAIN,
+        &current(),
+    );
     assert!(shown.contains("169.254.169.254"), "{shown}");
     assert!(shown.contains("example.com"), "{shown}");
+}
+
+/// An intercepted host's row, as the runner gives it: the bound host on 443
+/// with no address, the code its front door answered with, and its source.
+fn intercepted(reason: &str, policy: (&str, u32), last_seconds_ago: i64) -> v1::EgressRefusal {
+    v1::EgressRefusal {
+        address: String::new(),
+        source: v1::EgressRefusalSource::Credentials as i32,
+        ..refusal(
+            name("api.anthropic.com"),
+            v1::EgressRefusalProtocol::Tcp,
+            443,
+            reason,
+            policy,
+            last_seconds_ago,
+        )
+    }
+}
+
+/// An intercepted host's rows read in words, say their source in JSON, and
+/// only a refusal by the network policy carries a policy and gets a step.
+#[test]
+fn an_intercepted_hosts_rows_read_in_words_with_their_source() {
+    let refusals = rows(&[
+        intercepted("no_credential_selected", ("", 0), 5),
+        intercepted("path_not_served", ("", 0), 8),
+        intercepted("name_not_allowed", ("walk-log", 1), 30),
+    ]);
+    assert_eq!(refusals.len(), 3);
+    let shown = text(
+        "walk-log",
+        &refusals,
+        LogCounts::default(),
+        NOW,
+        120,
+        PLAIN,
+        &current(),
+    );
+    for words in [
+        "no credential selected",
+        "path not served",
+        "name not allowed",
+    ] {
+        assert!(shown.contains(words), "{words}: {shown}");
+    }
+    assert!(shown.contains("walk-log · rev 1"), "{shown}");
+    assert!(
+        shown.ends_with("→ cw --local policy allow walk-log api.anthropic.com:443\n"),
+        "{shown}"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&json(&refusals, LogCounts::default()).unwrap()).unwrap();
+    let rows = value["refusals"].as_array().unwrap();
+    assert!(rows.iter().all(|row| row["source"] == "credentials"));
+    assert_eq!(rows[0]["reason"], "no_credential_selected");
+    assert!(rows[0]["policy"].is_null() && rows[0]["address"].is_null());
+    assert_eq!(
+        (rows[0]["port"].as_u64(), rows[0]["protocol"].as_str()),
+        (Some(443), Some("tcp"))
+    );
+}
+
+/// A code the front door can't have sent under its source is left out, as a
+/// network reason claimed by the front door is, and the other way round.
+#[test]
+fn a_reason_is_read_only_under_its_own_source() {
+    let mut network_code_as_credentials = intercepted("protected_address", ("", 0), 1);
+    network_code_as_credentials.reason = "protected_address".to_owned();
+    let mut credentials_code_as_network = intercepted("path_not_served", ("", 0), 1);
+    credentials_code_as_network.source = v1::EgressRefusalSource::Network as i32;
+    assert!(rows(&[network_code_as_credentials, credentials_code_as_network]).is_empty());
+}
+
+/// What the runner rejected is one line when it isn't 0, empty log or not,
+/// and `rejected` in JSON always.
+#[test]
+fn what_the_runner_rejected_is_said_when_it_isnt_zero() {
+    let rejected = |rejected| LogCounts {
+        dropped: 0,
+        rejected,
+    };
+    let shown = text("walk-log", &[], rejected(3), NOW, 80, PLAIN, &current());
+    assert_eq!(
+        shown,
+        "Nothing refused since walk-log started.\n\n3 reports or rows from the front door were rejected and not kept.\n"
+    );
+    let shown = text(
+        "walk-log",
+        &walk_log(),
+        rejected(1),
+        NOW,
+        120,
+        PLAIN,
+        &current(),
+    );
+    assert!(
+        shown.contains("\n1 report or row from the front door was rejected and not kept.\n"),
+        "{shown}"
+    );
+    let none = text(
+        "walk-log",
+        &walk_log(),
+        rejected(0),
+        NOW,
+        120,
+        PLAIN,
+        &current(),
+    );
+    assert!(!none.contains("rejected"), "{none}");
+    let value: serde_json::Value =
+        serde_json::from_str(&json(&walk_log(), rejected(4)).unwrap()).unwrap();
+    assert_eq!(value["rejected"], 4);
+    let value: serde_json::Value =
+        serde_json::from_str(&json(&walk_log(), rejected(0)).unwrap()).unwrap();
+    assert_eq!(value["rejected"], 0);
 }

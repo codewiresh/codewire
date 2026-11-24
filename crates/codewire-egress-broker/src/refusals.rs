@@ -1,8 +1,10 @@
-//! The broker's refusals, folded until its reporter sends them (#5058): one
-//! row per destination, protocol, port and reason, with the latest address
-//! and the policy it was last refused under. The workload chooses the
-//! destinations and how often, so a refusal only raises a count, and the
-//! fold never holds more than [`REFUSAL_FOLD_LIMIT`] rows.
+//! Refusals folded until a reporter sends them (#5058): the egress broker's
+//! here, one row per destination, protocol, port and reason, with the latest
+//! address and the policy it was last refused under, and an intercepted
+//! host's front door's through the same [`Fold`]. The workload chooses the
+//! destinations and how often, so a refusal only raises a count, a fold never
+//! holds more rows than its limit, and [`report_folded`] sends at most once a
+//! second.
 //!
 //! Only refusals are folded, never a pass, so the owner's log shows no pass
 //! even while learn mode records them (#4015). Nor the refusals a worker
@@ -10,17 +12,23 @@
 //! which are its own, not the workload's.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use codewire_egress_policy::PolicyDigest;
 use codewire_egress_policy::lease::RefusalReason;
 use codewire_egress_policy::record::{Destination, EGRESS_RECORD_LIMIT, Transport};
 use tokio::sync::Notify;
 
-/// The most rows the fold holds between reports: as many as the runner's
-/// log keeps, so one report can carry them all.
+/// The most rows the egress broker's fold holds between reports: as many as
+/// the runner's log keeps, so one report can carry them all.
 pub const REFUSAL_FOLD_LIMIT: usize = EGRESS_RECORD_LIMIT;
+
+/// A reporter sends at most one report in this long.
+pub const REFUSAL_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The dial a worker proves each IPC session with: a protected loopback
 /// destination the policy refuses before any upstream effect.
@@ -38,6 +46,152 @@ fn is_session_probe(destination: &Destination, transport: Transport) -> bool {
             SocketAddr::new(*address, port) == SESSION_PROBE_ADDRESS
         }
         _ => false,
+    }
+}
+
+/// One folded row: its key, what its latest refusal carried, and how many
+/// refusals since the last report, a delta, never a running total.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folded<K, V> {
+    pub key: K,
+    pub value: V,
+    pub count: u64,
+}
+
+/// What changed since the last report: the rows, and how many rows the fold
+/// dropped to stay within its limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldBatch<K, V> {
+    pub rows: Vec<Folded<K, V>>,
+    pub dropped: u64,
+}
+
+impl<K, V> FoldBatch<K, V> {
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.dropped == 0
+    }
+}
+
+#[derive(Debug)]
+struct PendingRow<V> {
+    value: V,
+    count: u64,
+    /// When the row was last refused, in refusals since the fold began.
+    last_seen: u64,
+}
+
+#[derive(Debug)]
+struct Pending<K, V> {
+    rows: HashMap<K, PendingRow<V>>,
+    dropped: u64,
+    seen: u64,
+}
+
+/// Refusals folded by key until [`Self::take`], at most `limit` rows: a new
+/// key in a full fold drops the least recently refused row first and counts
+/// it.
+#[derive(Debug)]
+pub struct Fold<K, V> {
+    pending: Mutex<Pending<K, V>>,
+    changed: Notify,
+    limit: usize,
+}
+
+impl<K: Eq + Hash + Clone, V> Fold<K, V> {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            pending: Mutex::new(Pending {
+                rows: HashMap::new(),
+                dropped: 0,
+                seen: 0,
+            }),
+            changed: Notify::new(),
+            limit,
+        }
+    }
+
+    /// Folds one refusal of `key`. A row already held takes `value` through
+    /// `merge`, which is given the row's value and the new one.
+    pub fn add(&self, key: K, value: V, merge: impl FnOnce(&mut V, V)) {
+        let mut pending = self.lock();
+        pending.seen = pending.seen.wrapping_add(1);
+        let seen = pending.seen;
+        if let Some(row) = pending.rows.get_mut(&key) {
+            merge(&mut row.value, value);
+            row.count = row.count.saturating_add(1);
+            row.last_seen = seen;
+        } else {
+            if pending.rows.len() >= self.limit {
+                let oldest = pending
+                    .rows
+                    .iter()
+                    .min_by_key(|(_, row)| row.last_seen)
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    pending.rows.remove(&oldest);
+                    pending.dropped = pending.dropped.saturating_add(1);
+                }
+            }
+            pending.rows.insert(
+                key,
+                PendingRow {
+                    value,
+                    count: 1,
+                    last_seen: seen,
+                },
+            );
+        }
+        drop(pending);
+        self.changed.notify_one();
+    }
+
+    /// Everything since the last call, which starts the fold empty.
+    pub fn take(&self) -> FoldBatch<K, V> {
+        let mut pending = self.lock();
+        let rows = std::mem::take(&mut pending.rows);
+        let dropped = std::mem::take(&mut pending.dropped);
+        FoldBatch {
+            rows: rows
+                .into_iter()
+                .map(|(key, row)| Folded {
+                    key,
+                    value: row.value,
+                    count: row.count,
+                })
+                .collect(),
+            dropped,
+        }
+    }
+
+    /// Resolves once something was folded since the last wait, or at once
+    /// when that happened before the wait began.
+    pub async fn changed(&self) {
+        self.changed.notified().await;
+    }
+
+    /// The fold stays consistent if a holder panicked: every change is one
+    /// map operation plus counters.
+    fn lock(&self) -> MutexGuard<'_, Pending<K, V>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The reporter for `fold`: each time a refusal is folded, `send` everything
+/// folded since the last report, then wait [`REFUSAL_REPORT_INTERVAL`]
+/// before the next. It returns only when `send` fails.
+pub async fn report_folded<K, V, E, F, Fut>(fold: &Fold<K, V>, mut send: F) -> Result<(), E>
+where
+    K: Eq + Hash + Clone,
+    F: FnMut(FoldBatch<K, V>) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    loop {
+        fold.changed().await;
+        let batch = fold.take();
+        if !batch.is_empty() {
+            send(batch).await?;
+        }
+        tokio::time::sleep(REFUSAL_REPORT_INTERVAL).await;
     }
 }
 
@@ -70,38 +224,54 @@ impl RefusalBatch {
     }
 }
 
+/// An egress refusal's key in the fold.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct RowKey {
+pub struct RowKey {
     destination: Destination,
     transport: Transport,
     reason: RefusalReason,
 }
 
-#[derive(Debug)]
-struct PendingRow {
+/// What an egress refusal's latest observation carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Latest {
     address: Option<IpAddr>,
     policy_digest: PolicyDigest,
-    count: u64,
-    /// When the row was last refused, in refusals since the fold began.
-    last_seen: u64,
 }
 
-#[derive(Debug, Default)]
-struct Pending {
-    rows: HashMap<RowKey, PendingRow>,
-    dropped: u64,
-    seen: u64,
+impl From<FoldBatch<RowKey, Latest>> for RefusalBatch {
+    fn from(batch: FoldBatch<RowKey, Latest>) -> Self {
+        Self {
+            rows: batch
+                .rows
+                .into_iter()
+                .map(|row| RefusedRow {
+                    destination: row.key.destination,
+                    address: row.value.address,
+                    transport: row.key.transport,
+                    reason: row.key.reason,
+                    policy_digest: row.value.policy_digest,
+                    count: row.count,
+                })
+                .collect(),
+            dropped: batch.dropped,
+        }
+    }
 }
 
-#[derive(Debug, Default)]
-pub struct RefusalFold {
-    pending: Mutex<Pending>,
-    changed: Notify,
+/// The egress broker's fold, bounded at [`REFUSAL_FOLD_LIMIT`] rows.
+#[derive(Debug)]
+pub struct RefusalFold(Fold<RowKey, Latest>);
+
+impl Default for RefusalFold {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RefusalFold {
     pub fn new() -> Self {
-        Self::default()
+        Self(Fold::new(REFUSAL_FOLD_LIMIT))
     }
 
     /// Folds one refusal. A full fold drops its least recently refused row
@@ -117,76 +287,37 @@ impl RefusalFold {
         if is_session_probe(&destination, transport) {
             return;
         }
-        let mut pending = self.lock();
-        pending.seen = pending.seen.wrapping_add(1);
-        let seen = pending.seen;
-        let key = RowKey {
-            destination,
-            transport,
-            reason,
-        };
-        if let Some(row) = pending.rows.get_mut(&key) {
-            row.address = address.or(row.address);
-            row.policy_digest = policy_digest;
-            row.count = row.count.saturating_add(1);
-            row.last_seen = seen;
-        } else {
-            if pending.rows.len() >= REFUSAL_FOLD_LIMIT {
-                let oldest = pending
-                    .rows
-                    .iter()
-                    .min_by_key(|(_, row)| row.last_seen)
-                    .map(|(key, _)| key.clone());
-                if let Some(oldest) = oldest {
-                    pending.rows.remove(&oldest);
-                    pending.dropped = pending.dropped.saturating_add(1);
-                }
-            }
-            pending.rows.insert(
-                key,
-                PendingRow {
-                    address,
-                    policy_digest,
-                    count: 1,
-                    last_seen: seen,
-                },
-            );
-        }
-        drop(pending);
-        self.changed.notify_one();
+        self.0.add(
+            RowKey {
+                destination,
+                transport,
+                reason,
+            },
+            Latest {
+                address,
+                policy_digest,
+            },
+            |held, newer| {
+                held.address = newer.address.or(held.address);
+                held.policy_digest = newer.policy_digest;
+            },
+        );
     }
 
     /// Everything since the last call, which starts the fold empty.
     pub fn take(&self) -> RefusalBatch {
-        let mut pending = self.lock();
-        let rows = std::mem::take(&mut pending.rows);
-        let dropped = std::mem::take(&mut pending.dropped);
-        RefusalBatch {
-            rows: rows
-                .into_iter()
-                .map(|(key, row)| RefusedRow {
-                    destination: key.destination,
-                    address: row.address,
-                    transport: key.transport,
-                    reason: key.reason,
-                    policy_digest: row.policy_digest,
-                    count: row.count,
-                })
-                .collect(),
-            dropped,
-        }
+        self.0.take().into()
     }
 
     /// Resolves once something was recorded since the last wait, or at once
     /// when that happened before the wait began.
     pub async fn changed(&self) {
-        self.changed.notified().await;
+        self.0.changed().await;
     }
 
-    /// The fold stays consistent if a holder panicked: every change is one
-    /// map operation plus counters.
-    fn lock(&self) -> MutexGuard<'_, Pending> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The fold underneath, for [`report_folded`].
+    pub fn fold(&self) -> &Fold<RowKey, Latest> {
+        &self.0
     }
 }
 

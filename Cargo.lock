@@ -2113,6 +2113,7 @@ name = "codewire-egress-worker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "codewire-access",
  "codewire-confinement",
  "codewire-egress-broker",
  "codewire-egress-policy",

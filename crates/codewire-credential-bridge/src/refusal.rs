@@ -8,6 +8,12 @@ use axum::http::{Response, StatusCode};
 use codewire_access::{Refusal, RefusalProvider, Unforwarded, UpstreamFailure};
 use codewire_daemon_proto::codewire::bridge::v1;
 
+/// Set on every response [`refusal_response`] makes, and on no other: the
+/// refusal it answers, for a front door that reports its refusals (#5058).
+/// Nothing a host or a provider sends can set it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnsweredRefusal(pub Refusal);
+
 /// The answer to a refused request. `host` is the canonical bound name the
 /// front door intercepted, `None` on the loopback ingress.
 pub fn refusal_response(
@@ -25,6 +31,7 @@ pub fn refusal_response(
         response = response.header("retry-after", seconds.to_string());
     }
     response
+        .extension(AnsweredRefusal(refusal))
         .body(Body::from(refusal.body(provider, host)))
         .expect("a refusal response is valid")
 }

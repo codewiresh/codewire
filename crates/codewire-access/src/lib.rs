@@ -70,7 +70,9 @@ pub use projection::{
     ManagedCredentialClients, NO_PROXY_NAMES, ProjectionError, SSH_NATIVE_AUTH_SOCK,
     SSH_PLATFORM_AUTH_SOCK, github_known_hosts_additions,
 };
-pub use refusal::{REFUSAL_HEADER, Refusal, RefusalProvider, Unforwarded, UpstreamFailure};
+pub use refusal::{
+    REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider, Unforwarded, UpstreamFailure,
+};
 
 use thiserror::Error;
 
