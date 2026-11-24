@@ -46,9 +46,10 @@ PRODUCTS = {"dashboard", "services", "mesh", "daemon", "derp"}
 RECIPES = {"deployments/docker/daemon.Dockerfile", "images/workspace/Dockerfile"}
 BOUND = 10800
 GROUPS = {"default": sorted(PRODUCTS), "kind": [name + "-ci" for name in ("dashboard", "services", "mesh", "daemon")]}
-# cw-egress is a Bake product outside the runtime set: Dev delivery builds and
-# signs it but never delivers it, so it is in no group.
-BAKE_TARGETS = PRODUCTS | {"egress"} | {name + "-ci" for name in PRODUCTS if name != "derp"}
+# cw-egress and the /dev/kvm device plugin (#6202) are Bake products outside
+# the runtime set: Dev delivery builds and signs them but never delivers them,
+# so they are in no group.
+BAKE_TARGETS = PRODUCTS | {"egress", "kvm-device-plugin"} | {name + "-ci" for name in PRODUCTS if name != "derp"}
 BUILD_ARGS = {"BASE_IMAGE_REF", "DEBIAN_IMAGE", "CODEWIRE_RUST_PROFILE", "CODEWIRE_SCCACHE_MODE",
               "SCCACHE_BUCKET", "SCCACHE_ENDPOINT", "CODEWIRE_SCCACHE_PREFIX", "NODE_VERSION", "GO_VERSION",
               "CODEWIRE_ORCHESTRATION_FEATURES", "CARGO_BUILD_JOBS"}

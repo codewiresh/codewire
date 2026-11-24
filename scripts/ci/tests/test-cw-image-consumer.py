@@ -85,6 +85,16 @@ class Consumer(unittest.TestCase):
             with self.subTest(extra=extra), self.assertRaises(consumer.asset.Refused):
                 self.validate(extra + self.command[3:])
 
+    def test_side_image_bake_targets_are_accepted_and_unknown_ones_refused(self):
+        # cw-egress and the /dev/kvm device plugin build alone, outside the
+        # runtime set's groups; any other unlisted target is refused.
+        prefix = ["docker", "buildx", "bake", "--file", str(self.source / "docker-bake.hcl")]
+        for target in ("egress", "kvm-device-plugin"):
+            with self.subTest(target=target):
+                self.validate(command=prefix + [target])
+        with self.assertRaises(consumer.asset.Refused):
+            self.validate(command=prefix + ["kvm-device-plugin-extra"])
+
     def test_reserved_bake_context_and_profile_overrides(self):
         for key in ("daemon.contexts.codewire-verified-cw", "*.contexts.codewire-verified-cw",
                     "daemon.contexts.*", "*.contexts", "daemon.args.CODEWIRE_RUST_PROFILE"):
