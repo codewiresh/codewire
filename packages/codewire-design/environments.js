@@ -726,6 +726,14 @@
   document.addEventListener("close", (event) => {
     if (event.target instanceof HTMLDialogElement) settleLive();
   }, true);
+  // A list refresh asked for before a menu or dialog opened, such as the
+  // stream's first resync on page load, is dropped when it arrives and owed.
+  document.addEventListener("htmx:beforeSwap", (event) => {
+    const list = event.target instanceof Element && event.target.id === "environment-list" ? event.target : null;
+    if (!list || !anyOpen(list)) return;
+    event.detail.shouldSwap = false;
+    owedList = true;
+  });
   // An active resize card re-reads itself on its Sandbox's resize events and
   // on resync. htmx can't filter an event by its detail without eval, so the
   // card listens for this page's own event instead.

@@ -192,14 +192,28 @@ test("a refresh under a different search compares nothing and announces nothing"
 });
 
 // The list's poll as htmx runs it: a cancelable htmx:beforeRequest on the
-// list, then, unless a listener cancelled the request, the fragment swap.
+// list, then, unless a listener cancelled the request, its answer.
 async function poll(page: Page): Promise<boolean> {
-  const sent = await page.locator("#environment-list").evaluate((list) =>
-    list.dispatchEvent(new CustomEvent("htmx:beforeRequest", {
-      bubbles: true, cancelable: true, detail: { elt: list, target: list },
-    })));
-  if (sent) await refresh(page);
+  const sent = await ask(page);
+  if (sent) await answer(page);
   return sent;
+}
+
+const ask = (page: Page) => page.locator("#environment-list").evaluate((list) =>
+  list.dispatchEvent(new CustomEvent("htmx:beforeRequest", {
+    bubbles: true, cancelable: true, detail: { elt: list, target: list },
+  })));
+
+// The answer as htmx takes it: htmx:beforeSwap on the list, then the fragment
+// swap unless a listener set shouldSwap to false. Whether it swapped.
+async function answer(page: Page): Promise<boolean> {
+  const swap = await page.locator("#environment-list").evaluate((list) => {
+    const detail = { elt: list, target: list, shouldSwap: true };
+    return list.dispatchEvent(new CustomEvent("htmx:beforeSwap", { bubbles: true, cancelable: true, detail }))
+      && detail.shouldSwap;
+  });
+  if (swap) await refresh(page);
+  return swap;
 }
 
 test("a row menu stays open through the list's refresh until it is closed", async ({ page }) => {
@@ -215,6 +229,23 @@ test("a row menu stays open through the list's refresh until it is closed", asyn
   await expect(menu()).toHaveJSProperty("open", false);
   expect(await poll(page)).toBe(true);
   await expect(menu()).toHaveJSProperty("open", false);
+});
+
+// The list's own request goes out before a menu opens, as the live stream's
+// first resync does on every page load; its answer must not replace the menu
+// that opened while it was on its way (#5383, seen on Dev).
+test("a list refresh already on its way when a row menu opens leaves the menu open, and runs once it closes", async ({ page }) => {
+  await openLiveInventory(page);
+  const menu = () => page.locator(`tr[data-environment-id="${quietMesa}"] details.cw-row-menu`);
+  expect(await ask(page)).toBe(true);
+  await menu().locator(":scope > summary").click();
+  await expect(menu()).toHaveJSProperty("open", true);
+  expect(await answer(page)).toBe(false);
+  await expect(menu()).toHaveJSProperty("open", true);
+  // Closing it runs the refresh it held, once.
+  await page.locator("main h1").click();
+  await expect(menu()).toHaveJSProperty("open", false);
+  await expect.poll(() => listRefreshes(page)).toBe(1);
 });
 
 test("an open row menu sits above the other rows' menu buttons", { tag: "@mobile" }, async ({ page }) => {
