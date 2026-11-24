@@ -46,6 +46,11 @@ HOSTED = (
     # Codewire's own VM runtime in the Pod (#5602).
     "standard-sandboxtemplate",
 )
+# Hosted templates whose golden a pending change adds (#5602): checked like
+# HOSTED when the golden is present, not required while it is absent, so the
+# change that adds one passes this check run from main. Each moves to HOSTED
+# once main has its golden.
+HOSTED_WHEN_PRESENT = ("warm-pool-standard-sandboxtemplate",)
 # Rendered for local Kind only (runc), which the shared policy refuses.
 LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
 PLACEHOLDER_REGISTRY = "registry.example.invalid/"
@@ -145,7 +150,7 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
         raise Refused("the goldens directory is not a directory of the tree")
     templates = sorted(path.name.removesuffix(".golden.json")
                        for path in goldens.glob("*sandboxtemplate*.golden.json"))
-    unknown = sorted(set(templates) - set(HOSTED) - set(LOCAL_ONLY))
+    unknown = sorted(set(templates) - set(HOSTED) - set(HOSTED_WHEN_PRESENT) - set(LOCAL_ONLY))
     if unknown:
         raise Refused(f"unclassified SandboxTemplate goldens: {', '.join(unknown)}")
     missing = sorted(set(HOSTED) - set(templates))
@@ -156,7 +161,8 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
     def load(stem: str) -> dict:
         return json.loads(read_golden(goldens / f"{stem}.golden.json"))
 
-    built = {f"pass-{stem}": pod(load(stem), f"pass-{stem}", dind, registry) for stem in HOSTED}
+    checked = HOSTED + tuple(stem for stem in HOSTED_WHEN_PRESENT if stem in templates)
+    built = {f"pass-{stem}": pod(load(stem), f"pass-{stem}", dind, registry) for stem in checked}
 
     def mutated(name: str, change, stem: str = "warm-pool-sandboxtemplate") -> None:
         case = pod(load(stem), name, dind, registry)

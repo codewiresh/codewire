@@ -125,6 +125,15 @@ cp "$work/goldens/warm-pool-sandboxtemplate.golden.json" "$work/goldens/new-sand
 python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/unknown" 2>"$work/err" &&
   fail 'an unclassified golden was accepted'
 grep -q 'unclassified SandboxTemplate goldens: new-sandboxtemplate' "$work/err" || fail 'unclassified golden not named'
+# A hosted-when-present golden is built and checked when it exists, and not
+# required while it doesn't (the goldens above have none).
+mkdir "$work/present"
+cp "$GOLDENS"/*sandboxtemplate*.golden.json "$work/present/"
+cp "$work/present/standard-sandboxtemplate.golden.json" "$work/present/warm-pool-standard-sandboxtemplate.golden.json"
+python3 -I -B "$BUILDER" "$work/present" "$work/policy.yaml" "$REGISTRY" "$work/present-out" 2>"$work/err" ||
+  fail 'a present hosted-when-present golden was refused'
+[ -f "$work/present-out/pass-warm-pool-standard-sandboxtemplate.json" ] ||
+  fail 'a present hosted-when-present golden was not checked'
 rm "$work/goldens/new-sandboxtemplate.golden.json" "$work/goldens/confidential-sandboxtemplate.golden.json"
 python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/missing" 2>"$work/err" &&
   fail 'a missing hosted golden was accepted'
