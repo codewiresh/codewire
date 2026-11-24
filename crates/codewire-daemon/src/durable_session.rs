@@ -90,68 +90,6 @@ impl std::fmt::Debug for SessionEngine {
     }
 }
 
-/// Host sessions' wall-clock bounds. Each one that runs out leaves its
-/// outcome unknown, never retried.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HostBounds {
-    /// A host process group's whole cleanup after its TERM grace:
-    /// descendants settling after KILL, the leader's reap, and the control and
-    /// output joins spend it together (#3777).
-    pub(crate) cleanup: Duration,
-    /// A host-control input's or stop's dispatch: queueing and the
-    /// monitor's write and flush, or its whole cleanup. Host control is
-    /// Linux only.
-    #[cfg(target_os = "linux")]
-    pub(crate) control_dispatch: Duration,
-    /// The daemon's whole shutdown: its launches' cleanup, then every host
-    /// session's pause and stop, together.
-    pub(crate) shutdown: Duration,
-    /// How long a host-control RPC waits for its request's outcome before it
-    /// answers with the receipt it has. The request goes on either way. Zero,
-    /// a test bound, answers at once with the receipt as admitted.
-    #[cfg(target_os = "linux")]
-    pub(crate) rpc_join: Duration,
-}
-
-impl HostBounds {
-    pub(crate) const PRODUCT: Self = Self {
-        cleanup: crate::host_process::CLEANUP_BUDGET,
-        #[cfg(target_os = "linux")]
-        control_dispatch: SESSION_INPUT_TIMEOUT,
-        shutdown: LAUNCH_SHUTDOWN_TIMEOUT,
-        #[cfg(target_os = "linux")]
-        rpc_join: HOST_CONTROL_RPC_JOIN,
-    };
-
-    /// Every host bound replaced by `bound`: the Linux host-control
-    /// entrypoint's test seam and the tests' hang guard.
-    #[cfg(target_os = "linux")]
-    pub(crate) const fn all(bound: Duration) -> Self {
-        Self {
-            cleanup: bound,
-            #[cfg(target_os = "linux")]
-            control_dispatch: bound,
-            shutdown: bound,
-            #[cfg(target_os = "linux")]
-            rpc_join: bound,
-        }
-    }
-
-    /// The product's bounds, except the two that only bound how long a
-    /// caller waits for an outcome, the daemon's whole shutdown and a
-    /// host-control RPC's join, which become `bound`. For a test whose
-    /// subject may be a host session's own bounds but is never those waits.
-    #[cfg(test)]
-    pub(crate) const fn waits_within(bound: Duration) -> Self {
-        Self {
-            shutdown: bound,
-            #[cfg(target_os = "linux")]
-            rpc_join: bound,
-            ..Self::PRODUCT
-        }
-    }
-}
-
 struct SessionEngineInner {
     config: Config,
     credential_bridge: CredentialBridge,
@@ -655,7 +593,7 @@ impl SessionEngine {
         } else {
             (
                 crate::host_process::GUEST_TERM_GRACE,
-                crate::host_process::GUEST_CLEANUP_BUDGET,
+                self.inner.host_bounds.guest_cleanup,
             )
         };
         crate::host_process::OwnedProcessGroup::new(pid, grace, cleanup)
@@ -7048,3 +6986,7 @@ use pipe_process::prepare_pipe_process;
 
 #[path = "durable_session/desktop_session.rs"]
 mod desktop_session;
+
+#[path = "durable_session/host_bounds.rs"]
+mod host_bounds;
+pub(crate) use host_bounds::HostBounds;

@@ -3076,7 +3076,13 @@ async fn a_server_that_traps_term_gets_one_term_and_kill_only_after_the_grace() 
         .flat_map(|owner| [(owner, false), (owner, true)])
     {
         let temp = tempfile::tempdir().unwrap();
-        let engine = engine_for(temp.path());
+        // The subject is the signals and the grace, not the cleanup budget
+        // after them, which a loaded runner can spend (#6243).
+        let engine = SessionEngine::with_host_bounds(
+            &engine_for(temp.path()).inner.config,
+            CredentialBridge::new(None),
+            HostBounds::cleanup_within(HANG),
+        );
         let grace = if owner == "host" {
             crate::host_process::TERM_GRACE
         } else {
