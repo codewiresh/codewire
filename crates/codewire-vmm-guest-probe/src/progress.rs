@@ -43,6 +43,9 @@ pub enum GuestBootStage {
     WorkspaceFailed = 18,
     /// Docker is enabled but the workspace image has no Docker tooling.
     DockerToolingMissing = 19,
+    /// The daemon refused a workspace launch before it ran: the host side it
+    /// waits for never came, or the launch expired (#6281).
+    WorkspaceLaunchRefused = 20,
 }
 
 impl GuestBootStage {
@@ -65,6 +68,7 @@ impl GuestBootStage {
             "workspace-running" => Some(Self::WorkspaceRunning),
             "daemon-started" => Some(Self::DaemonStarted),
             "workspace-docker-tooling-missing" => Some(Self::DockerToolingMissing),
+            "workspace-launch-refused" => Some(Self::WorkspaceLaunchRefused),
             value if value.starts_with("setup-") => Some(Self::SetupFailed),
             value if value.starts_with("workspace-") || value == "workspace-container-exited" => {
                 Some(Self::WorkspaceFailed)
@@ -80,13 +84,17 @@ impl GuestBootStage {
                 | Self::SetupFailed
                 | Self::WorkspaceFailed
                 | Self::DockerToolingMissing
+                | Self::WorkspaceLaunchRefused
         )
     }
 
     pub fn is_failure(self) -> bool {
         matches!(
             self,
-            Self::SetupFailed | Self::WorkspaceFailed | Self::DockerToolingMissing
+            Self::SetupFailed
+                | Self::WorkspaceFailed
+                | Self::DockerToolingMissing
+                | Self::WorkspaceLaunchRefused
         )
     }
 
@@ -120,6 +128,7 @@ impl TryFrom<u16> for GuestBootStage {
             17 => Ok(Self::SetupFailed),
             18 => Ok(Self::WorkspaceFailed),
             19 => Ok(Self::DockerToolingMissing),
+            20 => Ok(Self::WorkspaceLaunchRefused),
             _ => Err(ProgressError::InvalidStage),
         }
     }
@@ -406,9 +415,22 @@ mod tests {
         let stage = stage.unwrap();
         assert!(stage.is_failure() && stage.is_terminal());
         assert_eq!(GuestBootStage::try_from(19).unwrap(), stage);
-        assert!(GuestBootStage::try_from(20).is_err());
         assert_eq!(
             GuestBootStage::from_persisted("workspace-docker-root-failed"),
+            Some(GuestBootStage::WorkspaceFailed)
+        );
+    }
+
+    #[test]
+    fn a_refused_launch_is_its_own_terminal_failure() {
+        let stage = GuestBootStage::from_persisted("workspace-launch-refused");
+        assert_eq!(stage, Some(GuestBootStage::WorkspaceLaunchRefused));
+        let stage = stage.unwrap();
+        assert!(stage.is_failure() && stage.is_terminal());
+        assert_eq!(GuestBootStage::try_from(20).unwrap(), stage);
+        assert!(GuestBootStage::try_from(21).is_err());
+        assert_eq!(
+            GuestBootStage::from_persisted("workspace-install-failed"),
             Some(GuestBootStage::WorkspaceFailed)
         );
     }

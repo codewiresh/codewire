@@ -83,6 +83,8 @@ mod oci_config;
 mod shutdown;
 mod vm_only;
 mod workload_execution;
+mod workspace_failure;
+use workspace_failure::{WORKSPACE_FAILURE_FRAMES, fail_workspace_init};
 
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
@@ -208,40 +210,6 @@ const WORKSPACE_READY_LIMIT: usize = 96;
 const CREDENTIAL_FORWARDER_READY: &[u8] = b"CWCREDS1 ready\n";
 const CREDENTIAL_FORWARDER_START_TIMEOUT: Duration = Duration::from_secs(5);
 const CREDENTIAL_FORWARDER_CONNECTION_LIMIT: usize = 32;
-const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
-    (
-        b"CWFAIL1 workspace-identity-failed\n",
-        "workspace-identity-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-confinement-failed\n",
-        "workspace-confinement-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-plan-invalid\n",
-        "workspace-plan-invalid",
-    ),
-    (
-        b"CWFAIL1 workspace-signal-failed\n",
-        "workspace-signal-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-install-failed\n",
-        "workspace-install-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-workload-failed\n",
-        "workspace-workload-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-startup-failed\n",
-        "workspace-startup-failed",
-    ),
-    (
-        b"CWFAIL1 workspace-credential-forwarder-failed\n",
-        "workspace-credential-forwarder-failed",
-    ),
-];
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
 const DEV_PATH: &str = "/dev";
@@ -1741,27 +1709,6 @@ fn read_container_workspace_plan() -> Result<WorkspacePlan> {
     plan.require_active()
         .context("container workspace execution plan must bind installation intent")?;
     Ok(plan)
-}
-
-fn fail_workspace_init<T>(stage: &'static str, error: anyhow::Error) -> Result<T> {
-    let _ = publish_workspace_failure(stage);
-    Err(error)
-}
-
-fn publish_workspace_failure(stage: &'static str) -> Result<()> {
-    let frame = WORKSPACE_FAILURE_FRAMES
-        .iter()
-        .find_map(|(frame, admitted)| (*admitted == stage).then_some(*frame))
-        .ok_or_else(|| anyhow::anyhow!("workspace failure stage is invalid"))?;
-    ensure!(
-        unsafe { libc::fcntl(WORKSPACE_READY_FD, libc::F_GETFD) } != -1,
-        "workspace readiness descriptor is absent"
-    );
-    let mut stream = unsafe { UnixStream::from_raw_fd(WORKSPACE_READY_FD) };
-    stream
-        .write_all(frame)
-        .context("publish trusted workspace failure")?;
-    stream.flush().context("flush trusted workspace failure")
 }
 
 fn run_workspace_install(

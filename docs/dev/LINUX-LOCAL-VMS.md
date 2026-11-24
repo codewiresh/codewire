@@ -704,8 +704,15 @@ a VM that this cw starts its credentials.
     answered, which is where the guest starts waiting for its broker; no
     broker had connected; and what the runner saw is not a failure the guest
     reported about itself (its setup, its workspace, missing Docker
-    tooling). What the runner saw stays beside it, as `detail=` on the
-    runner's line and as `observed=` on the supervisor's
+    tooling). A workspace launch the guest's daemon refused before it ran
+    (`detail=guest_workspace_launch_refused`, guest stage
+    `workspace_launch_refused`) is not one of those: the launch waits for
+    the broker, so with `broker=never` it names the broker, and otherwise it
+    is `guest_start_failed`. The guest tells it from a command that ran by
+    the launcher's status: a failure with no "exec pending" before it means
+    the launch was never committed (#6281). What the runner saw stays
+    beside it, as `detail=` on the runner's line and as `observed=` on the
+    supervisor's
     `operation_failed` line, for example `observed=egress_broker_exited`:
     the guest gives up when its broker never comes, and the other helpers
     end as it goes down. `cw` then fails with

@@ -159,9 +159,9 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
         GuestBootStage::WorkspaceRunning => v1::GuestBootStage::WorkspaceRunning,
         GuestBootStage::DaemonStarted => v1::GuestBootStage::DaemonStarted,
         GuestBootStage::SetupFailed => v1::GuestBootStage::SetupFailed,
-        GuestBootStage::WorkspaceFailed | GuestBootStage::DockerToolingMissing => {
-            v1::GuestBootStage::WorkspaceFailed
-        }
+        GuestBootStage::WorkspaceFailed
+        | GuestBootStage::DockerToolingMissing
+        | GuestBootStage::WorkspaceLaunchRefused => v1::GuestBootStage::WorkspaceFailed,
     }
 }
 

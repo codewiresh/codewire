@@ -50,10 +50,14 @@ pub(super) fn network_start_error_code(error: &RunnerError) -> &'static str {
     }
 }
 
+/// A workspace launch the guest's daemon refused before it ran (#6281).
+pub(crate) const GUEST_WORKSPACE_LAUNCH_REFUSED: &str = "guest_workspace_launch_refused";
+
 pub(super) fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
     match stage {
         GuestBootStage::SetupFailed => GUEST_SETUP_FAILED,
         GuestBootStage::DockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
+        GuestBootStage::WorkspaceLaunchRefused => GUEST_WORKSPACE_LAUNCH_REFUSED,
         _ => GUEST_WORKSPACE_FAILED,
     }
 }

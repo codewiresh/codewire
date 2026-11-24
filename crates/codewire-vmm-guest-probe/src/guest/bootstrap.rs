@@ -289,10 +289,26 @@ fn receive_descriptor(control: &UnixStream, phase: u8, deadline: Instant) -> Res
     }
 }
 
+/// A projected launch that failed before the daemon committed it, so nothing
+/// ran: the launcher reported Failed with no Pending before it (#6281). The
+/// daemon refused or let it expire, which is what a launch waiting for a host
+/// side that never came gets, or the launcher's own checks refused it.
+#[derive(Debug)]
+pub(super) struct LaunchRefused;
+
+impl std::fmt::Display for LaunchRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("projected workspace command was refused before it ran")
+    }
+}
+
+impl std::error::Error for LaunchRefused {}
+
 /// Equivalent to a bounded exec-error pipe: Pending followed by CLOEXEC EOF
 /// admits the target exec, not application health. Any explicit failure closes
-/// startup. As with ordinary spawn, a fatal signal at the final exec boundary
-/// can race observation; this is not an application-readiness protocol.
+/// startup; one before Pending is [`LaunchRefused`]. As with ordinary spawn, a
+/// fatal signal at the final exec boundary can race observation; this is not
+/// an application-readiness protocol.
 pub(super) fn wait_exec_status(
     child: &mut std::process::Child,
     mut status: UnixStream,
@@ -318,6 +334,9 @@ pub(super) fn wait_exec_status(
                         return Ok(());
                     }
                     Ok(1) if byte[0] == LAUNCH_EXEC_PENDING && !pending => pending = true,
+                    Ok(1) if byte[0] == LAUNCH_EXEC_FAILED && !pending => {
+                        return Err(LaunchRefused.into());
+                    }
                     Ok(1) if byte[0] == LAUNCH_EXEC_FAILED => {
                         bail!("projected workspace command admission failed")
                     }

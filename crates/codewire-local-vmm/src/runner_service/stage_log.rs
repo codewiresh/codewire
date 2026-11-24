@@ -124,6 +124,7 @@ fn guest_stage_ms_field(stage: GuestBootStage) -> &'static str {
         GuestBootStage::SetupFailed => "setup_failed_ms",
         GuestBootStage::WorkspaceFailed => "workspace_failed_ms",
         GuestBootStage::DockerToolingMissing => "docker_tooling_missing_ms",
+        GuestBootStage::WorkspaceLaunchRefused => "workspace_launch_refused_ms",
     }
 }
 
@@ -149,6 +150,7 @@ pub(super) fn guest_stage_name(stage: GuestBootStage) -> &'static str {
         GuestBootStage::SetupFailed => "setup_failed",
         GuestBootStage::WorkspaceFailed => "workspace_failed",
         GuestBootStage::DockerToolingMissing => "docker_tooling_missing",
+        GuestBootStage::WorkspaceLaunchRefused => "workspace_launch_refused",
     }
 }
 

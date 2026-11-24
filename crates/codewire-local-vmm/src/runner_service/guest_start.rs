@@ -247,7 +247,8 @@ fn ended_before_readiness(exit: ExitClass) -> Option<Seen> {
 /// So is a credential broker that never came once the guest's daemon had
 /// answered (`waited`), which is where the guest starts waiting for it: the guest gives
 /// up, and the other processes end as it goes down. Only a failure the guest
-/// reported itself stays the guest's.
+/// reported itself stays the guest's; a workspace launch its daemon refused
+/// before it ran is not one, since the launch waits for the broker (#6281).
 fn start_failure(
     stopped: Option<crate::runner::InterceptRefusal>,
     waited: (bool, BrokerSeen),
@@ -275,6 +276,7 @@ fn start_failure(
 mod tests {
     use super::*;
     use crate::runner::{FrontDoorStop, InterceptRefusal};
+    use crate::runner_service::start_error::GUEST_WORKSPACE_LAUNCH_REFUSED;
 
     /// The guest's daemon answered and the broker started for it never came.
     const NEVER_CAME: (bool, BrokerSeen) = (true, BrokerSeen::Never);
@@ -464,5 +466,45 @@ mod tests {
             );
             assert_eq!(error_code, "guest_start_failed", "{reported}");
         }
+    }
+
+    /// A workspace launch the guest's daemon refused before it ran names the
+    /// broker only when the broker never came; a launched command that failed
+    /// stays the guest's whatever the broker did (#6281).
+    #[test]
+    fn a_refused_launch_names_the_broker_only_when_it_never_came() {
+        for (waited, expected) in [
+            (NEVER_CAME, CREDENTIAL_BROKER_UNAVAILABLE),
+            ((false, BrokerSeen::Never), "guest_start_failed"),
+            ((true, BrokerSeen::Connected), "guest_start_failed"),
+            ((true, BrokerSeen::None), "guest_start_failed"),
+        ] {
+            let (error_code, status) = start_failure(
+                None,
+                waited,
+                GUEST_WORKSPACE_LAUNCH_REFUSED,
+                Status::failed_precondition("refused"),
+            );
+            assert_eq!(
+                (error_code, status.message()),
+                (expected, "refused"),
+                "{waited:?}"
+            );
+            let (error_code, _) = start_failure(
+                None,
+                waited,
+                GUEST_WORKSPACE_FAILED,
+                Status::failed_precondition("ran and failed"),
+            );
+            assert_eq!(error_code, "guest_start_failed", "{waited:?}");
+        }
+        assert_eq!(
+            guest_failure_detail(GuestBootStage::WorkspaceLaunchRefused),
+            GUEST_WORKSPACE_LAUNCH_REFUSED
+        );
+        assert_eq!(
+            guest_failure_detail(GuestBootStage::WorkspaceFailed),
+            GUEST_WORKSPACE_FAILED
+        );
     }
 }

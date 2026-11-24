@@ -175,6 +175,33 @@ fn exec_status_requires_pending_then_close_and_failure_kills_exact_child_group()
 }
 
 #[test]
+fn only_a_failure_before_pending_is_a_refused_launch() {
+    use codewire_workload_secrets::launcher::{LAUNCH_EXEC_FAILED, LAUNCH_EXEC_PENDING};
+    for (bytes, refused) in [
+        (&[LAUNCH_EXEC_FAILED][..], true),
+        (&[LAUNCH_EXEC_PENDING, LAUNCH_EXEC_FAILED][..], false),
+        (&[][..], false),
+        (&[99][..], false),
+    ] {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let (status, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(bytes).unwrap();
+        drop(writer);
+        let error = wait_exec_status(&mut child, status, deadline()).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<LaunchRefused>().is_some(),
+            refused,
+            "{bytes:?}: {error:#}"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
+}
+
+#[test]
 fn exec_status_wait_has_a_deadline_and_reaps_the_helper() {
     let mut child = Command::new("/bin/sleep")
         .arg("30")
