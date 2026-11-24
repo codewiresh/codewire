@@ -30,9 +30,9 @@ separately.
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- | --- |
 | `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 (under the old `open`; the port rule under its new name, `web`, not yet observed) | not yet observed | n/a | n/a |
-| `policy-builtins` | #3997 | not yet observed | not yet observed | not yet observed | not yet observed |
+| `policy-builtins` | #3997 | not yet observed | not yet observed | partly observed 2026-11-24, Dev source d9abce139c (cloud: list, check, the default, web, locked, the widening notice, UDP) | not yet observed |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
-| `policy-hosted` | #4000, #4211 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (steps 1 to 5 and 8, and the enforcement half; step 6 not walked) | not yet observed |
+| `policy-hosted` | #4000, #4211 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (steps 1 to 5 and 8, and the enforcement half; step 6 not walked); the built-ins under their new names 2026-11-24, d9abce139c | not yet observed |
 | `policy-dashboard` | #5114, #5116, #5117 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | observed 2026-11-24, Dev source 7862128013 (#4000 comment 137354) | not yet observed |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
@@ -53,7 +53,7 @@ separately.
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
-| `hosted-enforcement` | #4000 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (`cw info` on a running Sandbox's selected and changed revision, and on `locked`) | not yet observed |
+| `hosted-enforcement` | #4000 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (`cw info` on a selected and a changed revision and on `locked`), and 2026-11-24, Dev source d9abce139c (a lockdown not applied fails closed) | not yet observed |
 
 #2537's status comment of 2026-10-24 records an earlier host walk of
 `policy-select` (select at create and update, and a live edit across two VMs).
@@ -273,7 +273,25 @@ isn't enforced can read.
   - Under `open` no TCP connection is refused for its port.
   - A UDP send gets no answer either way, so only the refusal log shows it
     was refused.
-- **Observed:** not yet observed.
+- **Observed:** on Dev, 2026-11-24, Dev source d9abce139c, with `cw` built
+  from #6224, as the Dev smoke identity (#4000 comment 138001, section 1):
+  - `cw --cloud policy ls` listed `open` (built-in, the default, any TCP
+    port), `web` (TCP 22, 80 and 443) and `locked`, and "UDP other than DNS
+    is blocked under every policy.";
+  - `check open example.com:8443` allowed it, and `check web
+    example.com:8443` refused it `(port not allowed)`;
+  - a Sandbox created with no policy read `open (default) · enforced`, and
+    reached ports 443, 8080 and 2222. Under `web` only 443 answered, and
+    8080 and 2222 could not connect (curl exit 7). Under `locked` the
+    terminal worked, and `example.com` got no answer for its name (curl
+    exit 6);
+  - under `web`, a UDP datagram to 1.1.1.1:53 got no answer (a python3
+    socket with a 3 s timeout);
+  - an explicit `--policy open` printed the widening line, and `cw info`
+    showed it as a Notice.
+
+  Not yet observed: local VMs, the dashboard (#6226), an old `open`
+  selection read after the upgrade, and the two enforcement sentences.
 
 ## `policy-project-file`: `codewire.yaml` names a policy
 
@@ -2368,3 +2386,12 @@ Issue: #4000.
       or refusal lines at info level, and `cw policy log` shows no hosted
       refusals until #6144.
     - **Every other state above:** not yet observed.
+  - on Dev, 2026-11-24, Dev source d9abce139c (#4000 comment 138001,
+    section 2): a Sandbox whose lockdown is not applied. A scratch
+    NetworkPolicy allowing all egress and selecting only that Sandbox's Pod
+    (#4964) made its next admission fail closed. `cw info` read `no egress:
+    enforcement failed` and `Egress: blocked: the platform's egress lockdown
+    is not in place`, and the daemon didn't serve. Orchestration logged
+    `policy_differs`, naming the scratch policy, with `self_check_failed`.
+    With the policy deleted, the same Pod's next admission passed: `Egress:
+    enforced`, with no restart.
