@@ -1146,10 +1146,12 @@ spec:
     # stop, resize, the VM state) keeps the stored run directory, and is
     # admitted as it was, so a Sandbox rendered before this, disk-backed
     # included, keeps its own until it is made again. A snapshot's clearing
-    # Sandbox, made by the controller, has none and is only ever suspended.
+    # Sandbox, made by the controller, has no volumes at all and is only ever
+    # suspended; a missing list holds no codewire-run, as variables.volumes
+    # reads it, so the suspend keeps the stored run directory (codewire#6344).
     - expression: >-
-        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) &&
-        oldObject.spec.podTemplate.spec.volumes.filter(v, v.name == 'codewire-run') ==
+        request.operation == 'UPDATE' &&
+        (has(oldObject.spec.podTemplate.spec.volumes) ? oldObject.spec.podTemplate.spec.volumes : []).filter(v, v.name == 'codewire-run') ==
         variables.volumes.filter(v, v.name == 'codewire-run') ||
         size(variables.volumes.filter(v, v.name == 'codewire-run')) == 1 &&
         variables.volumes.all(v, v.name != 'codewire-run' ||

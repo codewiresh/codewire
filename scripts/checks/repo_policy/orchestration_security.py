@@ -611,8 +611,13 @@ RUN_MOUNT_RULE = (
 )
 # The member policy holds a Sandbox's run directory to the same two rules. A
 # Sandbox is never a clearing template (its clearing variable is false), so
-# neither carries that exception; an unchanged update keeps a stored one.
-MEMBER_RUN_VOLUME_RULE = RUN_VOLUME_RULE.removeprefix("variables.clearing || ")
+# neither carries that exception; an unchanged update keeps a stored one, and
+# a stored Sandbox with no volumes, as a snapshot's clearing Sandbox is, has
+# no codewire-run to keep (codewire#6344).
+MEMBER_RUN_VOLUME_RULE = RUN_VOLUME_RULE.removeprefix("variables.clearing || ").replace(
+    "has(oldObject.spec.podTemplate.spec.volumes) && oldObject.spec.podTemplate.spec.volumes.filter(",
+    "(has(oldObject.spec.podTemplate.spec.volumes) ? oldObject.spec.podTemplate.spec.volumes : []).filter(",
+)
 MEMBER_RUN_MOUNT_RULE = RUN_MOUNT_RULE.removeprefix("variables.clearing || ")
 HOSTED_EGRESS_FRAGMENTS = [
     # codewire#4000: a broker-mode Pod shares no host namespace, mounts no host

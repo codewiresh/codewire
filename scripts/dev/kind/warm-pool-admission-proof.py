@@ -752,7 +752,25 @@ def member_run_cases(cluster: "Cluster", env_today: dict, env_broker: dict) -> l
          move_to(env_broker), ON, None),
     ]:
         results.append(check(name, sandbox_change(cluster, before, change, param), expected))
+    # A snapshot's clearing Sandbox has no volumes at all, and orchestration
+    # only ever suspends it (stop_clearing_pod), which keeps its run directory,
+    # none, as stored; giving it one is held to the rule like any other
+    # (codewire#6344).
+    for block in (False, True):
+        kind = "Block" if block else "Filesystem"
+        clearing = clearing_sandbox(block)
+        for name, change, param, expected in [
+            (f"on, clearing Sandbox ({kind}): suspended", mode("Suspended"), ON, None),
+            (f"off, clearing Sandbox ({kind}): suspended", mode("Suspended"), OFF, None),
+            (f"off, clearing Sandbox ({kind}): a disk codewire-run added", add_volume(disk), OFF, MEMBER_RUN),
+        ]:
+            results.append(check(name, sandbox_change(cluster, clearing, change, param), expected))
     return results
+
+
+def add_volume(volume: dict) -> Callable[[dict], object]:
+    """Add `volume` to the pod's volumes, making the list if it has none."""
+    return lambda s: pod(s).setdefault("volumes", []).append(copy.deepcopy(volume))
 
 
 def template_change(cluster: "Cluster", before: dict, change: Callable[[dict], object],
@@ -951,9 +969,23 @@ def clearing_template(block: bool) -> dict:
                      "networkPolicy": {"ingress": [], "egress": []}}}
 
 
+def clearing_sandbox(block: bool) -> dict:
+    """The Sandbox the controller makes from a snapshot's clearing template:
+    its pod template and volume claim, under the template's name, and no
+    volumes in the pod."""
+    template = clearing_template(block)
+    return {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {"name": template["metadata"]["name"], "namespace": SANDBOXES,
+                         "labels": dict(template["metadata"]["labels"])},
+            "spec": {"podTemplate": copy.deepcopy(template["spec"]["podTemplate"]),
+                     "volumeClaimTemplates": copy.deepcopy(template["spec"]["volumeClaimTemplates"])}}
+
+
 def clearing_cases() -> list[tuple[str, dict | None, str, dict, str | None]]:
     """codewire#4000: with hosted egress on, a snapshot's clearing template,
-    exactly as rendered, is excepted from the broker arm's shape."""
+    exactly as rendered, is excepted from the broker arm's shape. A template
+    that is not quite one has no exception: the run directory rule, which
+    excepts only a clearing template too, comes first and reports it (#6310)."""
     filesystem, block = clearing_template(False), clearing_template(True)
     dns = {"ports": [{"port": 53, "protocol": "UDP"}], "to": [
         {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}]}
@@ -961,17 +993,17 @@ def clearing_cases() -> list[tuple[str, dict | None, str, dict, str | None]]:
         ("on, clearing: Filesystem", ON, "create", filesystem, None),
         ("on, clearing: Block", ON, "create", block, None),
         ("on, clearing: an egress rule added", ON, "create",
-         mutate(filesystem, lambda t: egress(t).append(dns)), GATE),
+         mutate(filesystem, lambda t: egress(t).append(dns)), RUN),
         ("on, clearing: an ingress rule added", ON, "create", mutate(block, lambda t: t["spec"]["networkPolicy"][
-            "ingress"].append({"from": [{"namespaceSelector": {}}]})), GATE),
+            "ingress"].append({"from": [{"namespaceSelector": {}}]})), RUN),
         ("on, clearing: the template's type changed", ON, "create",
-         mutate(filesystem, lambda t: t["metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
+         mutate(filesystem, lambda t: t["metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), RUN),
         ("on, clearing: the Pod's type changed", ON, "create", mutate(block, lambda t: t["spec"]["podTemplate"][
-            "metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
+            "metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), RUN),
         ("on, clearing: another name", ON, "create",
-         mutate(filesystem, lambda t: t["metadata"].__setitem__("name", "cw-snap-x-clear")), GATE),
+         mutate(filesystem, lambda t: t["metadata"].__setitem__("name", "cw-snap-x-clear")), RUN),
         ("on, clearing: with the egress label", ON, "create", mutate(filesystem, lambda t: t["spec"]["podTemplate"][
-            "metadata"]["labels"].__setitem__("codewire.sh/egress", "broker")), ADDRESSES),
+            "metadata"]["labels"].__setitem__("codewire.sh/egress", "broker")), RUN),
         ("off, clearing: Filesystem", OFF, "create", filesystem, None),
         ("off, clearing: Block", OFF, "create", block, None),
     ]
