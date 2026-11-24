@@ -246,9 +246,8 @@ Issues: #3999, #4916.
 
 - **Entry points:** `cw create --local --profile local:P` or
   `cw --local start` of a VM bound to a local profile: interception is on by
-  default. Until the switch-on lands (#3999), the file `egress-intercept` in
-  the local VM state root (`~/.codewire/native-v1` by default) holding `on`
-  turns it on.
+  default. The file `egress-intercept` in the local VM state root
+  (`~/.codewire/native-v1` by default) holding `off` switches it off.
 - **States to exercise:** a boot with interception on, and the same VM
   stopped and started after `off` is written to the file.
 - **Driving it:** create a VM bound to a local profile, find its front-door process (`cw __native-front-door`), and in the

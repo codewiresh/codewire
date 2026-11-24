@@ -39,13 +39,14 @@ fn shell_word(path: &str) -> String {
 /// The command that undoes the switch's refusal named by `code`, given the
 /// switch file's path as a shell word.
 fn switch_step(code: &str, switch: impl FnOnce() -> Option<String>) -> Option<String> {
-    let remove = code.ends_with("_intercept_unavailable")
+    // Interception is on unless the file holds exactly `off` (#3999).
+    let switch_off = code.ends_with("_intercept_unavailable")
         || code.ends_with("_restore_interception_switched_on");
-    if remove {
-        return switch().map(|path| format!("rm {path}"));
+    if switch_off {
+        return switch().map(|path| format!("printf off > {path}"));
     }
     if code.ends_with("_restore_interception_switched_off") {
-        return switch().map(|path| format!("printf on > {path}"));
+        return switch().map(|path| format!("rm {path}"));
     }
     None
 }
@@ -69,13 +70,13 @@ mod tests {
         ] {
             assert_eq!(
                 step(code).as_deref(),
-                Some("rm /home/u/.codewire/native-v1/egress-intercept"),
+                Some("printf off > /home/u/.codewire/native-v1/egress-intercept"),
                 "{code}"
             );
         }
         assert_eq!(
             step("start_restore_interception_switched_off").as_deref(),
-            Some("printf on > /home/u/.codewire/native-v1/egress-intercept")
+            Some("rm /home/u/.codewire/native-v1/egress-intercept")
         );
     }
 

@@ -1,13 +1,15 @@
 //! The temporary per-host switch for intercepting agent hosts in local VMs
-//! (#3999), until interception becomes the default (D3, #3997).
+//! (#3999). Interception is on by default; the switch is its one-release
+//! rollback, removed once no local VM gets a real agent login (D3, #4002).
 //!
-//! The file `egress-intercept` in the native root turns it on for every boot
-//! the supervisor starts while its whole content is exactly `on`, with an
-//! optional trailing newline. A missing file is off. Anything else, an empty
-//! or stray file, a symlink, a FIFO or other non-regular file, or something
-//! unreadable, is also off and logged,
-//! so nothing half-enables it. The supervisor reads it once per boot and logs
-//! what the boot was started with.
+//! The file `egress-intercept` in the native root turns it off for every boot
+//! the supervisor starts while its whole content is exactly `off`, with an
+//! optional trailing newline. A missing file, or exactly `on`, is on.
+//! Anything else, an empty or stray file, a symlink, a FIFO or other
+//! non-regular file, or something unreadable, is also on and logged: odd
+//! content lands on the safe default, placeholders, never on real tokens.
+//! The supervisor reads it once per boot and logs what the boot was started
+//! with.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read as _};
@@ -18,20 +20,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::control::v1;
 use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::supervisor_config::EGRESS_INTERCEPT_SWITCH;
-/// Enough to tell `on\n` from anything longer.
+/// Enough to tell `off\n` from anything longer.
 const MAX_READ: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterceptSwitch {
     On,
     Off,
-    /// A file that is not exactly `on`: off.
+    /// A file that is neither exactly `on` nor exactly `off`: on.
     Unrecognized,
 }
 
 impl InterceptSwitch {
     pub(crate) fn intercepts(self) -> bool {
-        self == Self::On
+        self != Self::Off
     }
 
     fn name(self) -> &'static str {
@@ -52,7 +54,7 @@ pub(crate) fn read_switch(root: &Path) -> InterceptSwitch {
         .open(root.join(EGRESS_INTERCEPT_SWITCH));
     let mut file = match file {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return InterceptSwitch::Off,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return InterceptSwitch::On,
         Err(_) => return InterceptSwitch::Unrecognized,
     };
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
@@ -68,6 +70,7 @@ pub(crate) fn read_switch(root: &Path) -> InterceptSwitch {
     }
     match content.as_slice() {
         b"on" | b"on\n" => InterceptSwitch::On,
+        b"off" | b"off\n" => InterceptSwitch::Off,
         _ => InterceptSwitch::Unrecognized,
     }
 }
@@ -225,14 +228,18 @@ mod tests {
             name(skipped(On, true, false, AuthorityServes::default())),
             Some("authority_predates_boot_secrets")
         );
-        for switch in [Off, Unrecognized] {
-            for (has_broker, platform) in [(true, false), (false, false), (true, true)] {
-                assert_eq!(
-                    skipped(switch, has_broker, platform, AuthorityServes::default()),
-                    None
-                );
-            }
+        for (has_broker, platform) in [(true, false), (false, false), (true, true)] {
+            assert_eq!(
+                skipped(Off, has_broker, platform, AuthorityServes::default()),
+                None
+            );
         }
+        // An unrecognized file is on: it decides as `on` does.
+        assert_eq!(skipped(Unrecognized, true, false, SECRETS_ONLY), None);
+        assert_eq!(
+            name(skipped(Unrecognized, false, false, SECRETS_ONLY)),
+            Some("no_credential_broker")
+        );
     }
 
     /// A platform boot intercepts only against an authority that joins the
@@ -252,8 +259,8 @@ mod tests {
         assert_eq!(skipped(On, true, true, BOTH), expected);
     }
 
-    /// The boot's report says what its log says (#4912): off for an
-    /// unrecognized switch too, and each skip as its reason.
+    /// The boot's report says what its log says (#4912): intercepted for an
+    /// unrecognized switch, as for `on`, and each skip as its reason.
     #[test]
     fn a_boot_reports_what_it_starts_with() {
         use InterceptSwitch::{Off, On, Unrecognized};
@@ -268,7 +275,7 @@ mod tests {
         assert_eq!(report(Off, None), (State::Off, Reason::Unspecified));
         assert_eq!(
             report(Unrecognized, None),
-            (State::Off, Reason::Unspecified)
+            (State::Intercepted, Reason::Unspecified)
         );
         assert_eq!(report(On, None), (State::Intercepted, Reason::Unspecified));
         for (skip, reason) in [
@@ -291,36 +298,42 @@ mod tests {
         read_switch(root.path())
     }
 
+    /// Only exactly `off` switches interception off (#3999's switch-on).
     #[test]
-    fn only_exactly_on_switches_it_on() {
+    fn only_exactly_off_switches_it_off() {
+        assert_eq!(switch_with(Some(b"off")), InterceptSwitch::Off);
+        assert_eq!(switch_with(Some(b"off\n")), InterceptSwitch::Off);
+        assert!(!switch_with(Some(b"off")).intercepts());
         assert_eq!(switch_with(Some(b"on")), InterceptSwitch::On);
         assert_eq!(switch_with(Some(b"on\n")), InterceptSwitch::On);
         assert!(switch_with(Some(b"on")).intercepts());
     }
 
     #[test]
-    fn a_missing_file_is_off() {
-        assert_eq!(switch_with(None), InterceptSwitch::Off);
-        assert!(!InterceptSwitch::Off.intercepts());
+    fn a_missing_file_is_on() {
+        assert_eq!(switch_with(None), InterceptSwitch::On);
+        assert!(InterceptSwitch::On.intercepts());
     }
 
+    /// Odd content lands on the safe default, placeholders.
     #[test]
-    fn any_other_content_is_off_and_unrecognized() {
+    fn any_other_content_is_on_and_unrecognized() {
         for content in [
             &b""[..],
             b"\n",
             b"ON",
+            b"OFF",
             b"on\n\n",
-            b" on",
-            b"on ",
-            b"yes",
-            b"1",
-            b"off",
-            b"on\non",
+            b"off\n\n",
+            b" off",
+            b"off ",
+            b"no",
+            b"0",
+            b"off\noff",
         ] {
             let switch = switch_with(Some(content));
             assert_eq!(switch, InterceptSwitch::Unrecognized, "{content:?}");
-            assert!(!switch.intercepts());
+            assert!(switch.intercepts(), "{content:?}");
         }
     }
 
@@ -328,8 +341,9 @@ mod tests {
     fn a_symlink_is_never_followed() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("target");
-        std::fs::write(&target, b"on").unwrap();
+        std::fs::write(&target, b"off").unwrap();
         std::os::unix::fs::symlink(&target, root.path().join(EGRESS_INTERCEPT_SWITCH)).unwrap();
+        // Unrecognized, so on: a link can't switch interception off.
         assert_eq!(read_switch(root.path()), InterceptSwitch::Unrecognized);
     }
 
@@ -343,13 +357,13 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert_eq!(read_switch(root.path()), InterceptSwitch::Unrecognized);
 
-        // Even a FIFO whose writer has sent exactly `on` is off.
+        // Even a FIFO whose writer has sent exactly `off` stays on.
         let mut writer = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
             .unwrap();
-        std::io::Write::write_all(&mut writer, b"on").unwrap();
+        std::io::Write::write_all(&mut writer, b"off").unwrap();
         assert_eq!(read_switch(root.path()), InterceptSwitch::Unrecognized);
     }
 }

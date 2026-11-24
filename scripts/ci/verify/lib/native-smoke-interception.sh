@@ -35,8 +35,7 @@ require_boot_intercepts() {
 require_info_interception() {
   # cw info says what the running boot's agents hold (#4912): its JSON
   # carries the state, and its text the note on the line under the
-  # Credentials row, or nothing under it when the note is empty, as with the
-  # switch off.
+  # Credentials row, or nothing under it when the note is empty.
   local label="$1" state="$2" note="$3" under
   run_cw info --local "$NAME" --output json
   jq -e --arg state "$state" '.state == "running" and .interception.state == $state' \

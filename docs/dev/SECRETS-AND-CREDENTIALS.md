@@ -1668,9 +1668,8 @@ its signer and executor.
 
 A local VM has a TLS front door outside the VM that terminates connections
 to the agent hosts and swaps a per-environment placeholder for the credential
-(Program #3997). It will be on by default for every local VM boot that can
-intercept (below); **not yet built** (#3999's switch-on), so today it is off
-unless switched on. A boot that doesn't intercept is exactly as described
+(Program #3997). It is on by default for every local VM boot that can
+intercept (below). A boot that doesn't intercept is exactly as described
 above.
 
 - **The switch, temporary and per host.** The file `egress-intercept` in the
@@ -1682,8 +1681,7 @@ above.
   file, `on`, or anything else is on; anything but `on` or `off` is logged
   once. Unreadable or odd content leaves the safe default, placeholders. The
   supervisor reads it once per boot and logs `egress_intercept` with what the
-  boot used. **Not yet built** (#3999's switch-on): today the default is off,
-  and only a file holding exactly `on` turns interception on.
+  boot used.
 - **What a boot with it on does.** The runner binds the hosts the boot's
   selected credentials name (below) on 443 in the egress broker and carries
   the front door's CA certificate, never its key, to the guest in the seed.

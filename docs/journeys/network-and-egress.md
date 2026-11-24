@@ -761,8 +761,7 @@ request adds.
 
 - **Entry points:** `cw create --local` or `cw start` as usual, for a VM
   with a selected credential: interception is on by default. Nothing inside
-  the VM turns it on or off. Until the switch-on lands (#3999), the file
-  `egress-intercept` holding `on` turns it on.
+  the VM turns it on or off.
 - **States to exercise:**
   - the switch on, with a Claude credential selected: an API key, and the
     owner's Claude sign-in;

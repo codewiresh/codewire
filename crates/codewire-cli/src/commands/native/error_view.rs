@@ -110,10 +110,19 @@ impl InterceptionView {
     }
 
     /// What the boot's agents hold, in the user's terms, for the
-    /// `Credentials` line; none while the switch is off.
+    /// `Credentials` line. A boot the switch turned off names the switch's
+    /// file, so a rollback left in place is visible (#3999).
     pub(crate) fn note(self) -> Option<CredentialsNote> {
+        self.note_with(switch_path)
+    }
+
+    /// [`Self::note`], with the switch file's path from `switch`.
+    fn note_with(self, switch: impl FnOnce() -> Option<String>) -> Option<CredentialsNote> {
         let text = match (self.state, self.reason) {
-            (InterceptionStateView::Off, _) => return None,
+            (InterceptionStateView::Off, _) => format!(
+                "no placeholders: interception is switched off in {}",
+                switch()?
+            ),
             (InterceptionStateView::Lost, _) => {
                 return Some(CredentialsNote::attention(
                     "agents can't reach their providers; restart the VM".to_owned(),
@@ -139,6 +148,14 @@ impl InterceptionView {
         };
         Some(CredentialsNote::plain(text))
     }
+}
+
+/// The interception switch's file, as `cw` would name it, if the local VM
+/// runtime's configuration can be read.
+fn switch_path() -> Option<String> {
+    crate::commands::native_runtime_config()
+        .ok()
+        .map(|config| config.egress_intercept_switch().display().to_string())
 }
 
 /// How a runner's process ended: its exit status, absent when a signal
@@ -236,14 +253,23 @@ impl ErrorView {
     }
 
     /// What a running boot's agents hold, for the lines under `cw info`'s
-    /// `Credentials` row, with `style`'s glyphs and colour: none while the
-    /// switch is off, and a next step only once interception is lost.
+    /// `Credentials` row, with `style`'s glyphs and colour, and a next step
+    /// only once interception is lost.
     pub(crate) fn credentials_note(&self, style: Style) -> Vec<String> {
+        self.credentials_note_with(style, switch_path)
+    }
+
+    /// [`Self::credentials_note`], with the switch file's path from `switch`.
+    fn credentials_note_with(
+        &self,
+        style: Style,
+        switch: impl FnOnce() -> Option<String>,
+    ) -> Vec<String> {
         let Some(interception) = self.interception else {
             return Vec::new();
         };
         let mut lines: Vec<String> = interception
-            .note()
+            .note_with(switch)
             .map(|note| note.render(style))
             .into_iter()
             .collect();
@@ -530,14 +556,19 @@ mod tests {
             (
                 State::Off,
                 Reason::Unspecified,
-                None,
+                Some(
+                    "no placeholders: interception is switched off in \
+                     /home/u/.codewire/native-v1/egress-intercept",
+                ),
                 serde_json::json!({"state": "off"}),
             ),
         ] {
             let view = ErrorView::of(&intercepting(Some(state), reason));
             assert_eq!(view.line_at(UNIX_EPOCH), "", "{state:?} {reason:?}");
             assert_eq!(
-                view.credentials_note(PLAIN),
+                view.credentials_note_with(PLAIN, || Some(
+                    "/home/u/.codewire/native-v1/egress-intercept".to_owned()
+                )),
                 line.map(str::to_owned).into_iter().collect::<Vec<_>>(),
                 "{state:?} {reason:?}"
             );

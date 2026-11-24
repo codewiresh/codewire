@@ -258,8 +258,10 @@ must keep serving.
 --egress-interception requires --managed-credential-broker alone and replaces
 its application-secret, managed-agent and credential-broker scenarios, whose
 provider requests use the loopback route an intercepting boot removes. It
-turns interception on for the VM (the egress-intercept file in the native
-state root) and proves, with the synthetic Anthropic API key:
+boots the VM with interception on, the default; without it the smoke
+switches interception off for its scenarios with `off` in the
+egress-intercept file in the native state root, the one-release rollback.
+It proves, with the synthetic Anthropic API key:
 the boot intercepts and its front door is paired; each credential broker is
 told where the boot's secrets are by a descriptor number and keeps nothing
 open under it; the guest holds only the environment's placeholder and trusts
@@ -3567,9 +3569,11 @@ else
   CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
   EXPECTED_OWNED_OBJECT_COUNT=4
 fi
-if [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
-  # The supervisor reads the switch once at each boot.
-  printf 'on\n' >"$STATE_ROOT/egress-intercept"
+if [[ "$EGRESS_INTERCEPTION" -eq 0 ]]; then
+  # Interception is on by default (#3999). The scenarios that use the
+  # loopback routes switch it off, the rollback; the supervisor reads the
+  # switch once at each boot.
+  printf 'off\n' >"$STATE_ROOT/egress-intercept"
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
@@ -3716,7 +3720,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   elif [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
     run_egress_interception_smoke
   else
-    require_info_interception 'switch off' off ''
+    require_info_interception 'switch off' off \
+      "no placeholders: interception is switched off in $STATE_ROOT/egress-intercept"
     run_application_secret_smoke
     if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
       log 'checking actual guest managed sessions and parent continuation'
