@@ -386,6 +386,12 @@ source = "content/secrets/application-secrets.md"
 output = "secrets/application-secrets/index.html"
 
 [[routes]]
+canonical = "/docs/secrets/sandbox-identity"
+redirect_from = "/docs/secrets/sandbox-identity/"
+source = "content/secrets/sandbox-identity.md"
+output = "secrets/sandbox-identity/index.html"
+
+[[routes]]
 canonical = "/docs/secrets/credentials"
 redirect_from = "/docs/secrets/credentials/"
 source = "content/secrets/credentials.md"

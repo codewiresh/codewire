@@ -12,6 +12,7 @@ Codewire keeps two kinds of sensitive value, and they go to different places.
 | --- | --- | --- |
 | a value your application reads, such as `DATABASE_URL` | an [application secret](@/secrets/application-secrets.md) | into the environment's processes, as an environment variable |
 | a key or sign-in a tool uses to reach a provider: a model API key, your GitHub connection, an SSH key | a [provider credential](@/secrets/credentials.md) | nowhere near the environment: Codewire uses it on the environment's behalf |
+| infrastructure of yours that code in a cloud Sandbox must reach, such as a Kubernetes cluster | a [Sandbox identity token](@/secrets/sandbox-identity.md), not yet released | minted inside the Sandbox for 10 minutes at most; your system trusts your organization's issuer |
 
 Storing either does nothing by itself. An environment gets only the secrets and
 the credential profile you select for it.
