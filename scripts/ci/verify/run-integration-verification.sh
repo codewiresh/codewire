@@ -1323,6 +1323,18 @@ database_lane_orchestration_workspaces() {
       'api::create::identity_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "sandbox identity mint subject and records" sandbox-identity-mint \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'identity::mint::store::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "sandbox identity mint row retention" sandbox-identity-mint-retention \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::identity_mints::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "failed create listing" failed-create-listing \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

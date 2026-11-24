@@ -1938,6 +1938,8 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/tests/credentials.rs|\
       crates/codewire-orchestration/tests/credentials_support/*|\
       crates/codewire-billing/src/subscription_migration.rs|\
+      crates/codewire-orchestration/src/identity/mint/store.rs|\
+      crates/codewire-orchestration/src/worker/identity_mints.rs|\
       crates/codewire-orchestration/src/api/identity.rs|\
       crates/codewire-orchestration/src/api/identity/*)
         # Store/teardown and restricted public-profile tests need PostgreSQL;

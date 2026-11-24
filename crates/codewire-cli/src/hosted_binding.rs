@@ -19,11 +19,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use codewire_daemon::access::{AccessFields, MeshFields, WorkspaceAccessGrant};
+#[cfg(any(target_os = "linux", test))]
+use codewire_daemon::identity_socket::{IdentityRefusal, IssuedIdentityToken};
 use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConfig};
 #[cfg(any(target_os = "linux", test))]
 use codewire_proto::codewire::internal::v1::{
-    AllocatePeerRelayRequest, AllocatePeerRelayResponse, IssueMeshEnrollmentRequest,
-    MeshAttachmentReport, RecordHostKeyRequest, RefreshAccessRequest, ReportMeshAttachmentRequest,
+    AllocatePeerRelayRequest, AllocatePeerRelayResponse, IssueIdentityTokenRequest,
+    IssueMeshEnrollmentRequest, MeshAttachmentReport, RecordHostKeyRequest, RefreshAccessRequest,
+    ReportMeshAttachmentRequest,
 };
 use codewire_proto::codewire::internal::v1::{
     BindWorkspaceRequest, BindWorkspaceResponse, WorkspaceAccess, WorkspaceBindingServiceClient,
@@ -142,6 +145,11 @@ pub(crate) struct BindingClient {
     /// The listener admits one in-flight request per Pod: every call holds
     /// this for its whole duration.
     in_flight: tokio::sync::Mutex<()>,
+    /// Identity tokens have limits of their own and take no Pod slot, so
+    /// they never queue behind the binding's calls. One at a time keeps this
+    /// Pod within the listener's two connections per peer.
+    #[cfg(any(target_os = "linux", test))]
+    identity_in_flight: tokio::sync::Mutex<()>,
     /// A guest-carried daemon's passed self-check (#5602), sent with its
     /// host key; none for any other daemon.
     #[cfg(target_os = "linux")]
@@ -202,6 +210,8 @@ impl BindingClient {
             token_path: token_path.to_owned(),
             timing,
             in_flight: tokio::sync::Mutex::new(()),
+            #[cfg(any(target_os = "linux", test))]
+            identity_in_flight: tokio::sync::Mutex::new(()),
             #[cfg(target_os = "linux")]
             guest_carried_self_check: std::sync::Mutex::new(None),
         })
@@ -422,6 +432,84 @@ impl BindingClient {
             .map(|_| ())
             .map_err(|error| classify(&error))
     }
+}
+
+impl BindingClient {
+    /// A sandbox identity token for `resource`, or the refusal orchestration
+    /// named. The token is never logged.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn issue_identity_token(
+        &self,
+        resource: &str,
+    ) -> Result<IssuedIdentityToken, IdentityRefusal> {
+        let _in_flight = self.identity_in_flight.lock().await;
+        let options = self
+            .authorized()
+            .await
+            .map_err(|_| IdentityRefusal::IdentityUnavailable)?
+            .with_timeout(IDENTITY_CALL_TIMEOUT);
+        let mut response = self
+            .client
+            .issue_identity_token_with_options(
+                IssueIdentityTokenRequest {
+                    resource: resource.to_owned(),
+                    ..Default::default()
+                },
+                options,
+            )
+            .await
+            .map_err(|error| identity_refusal(&error))?
+            .into_owned();
+        let token = Zeroizing::new(std::mem::take(&mut response.token));
+        let well_formed = token.len() <= MAX_IDENTITY_TOKEN_BYTES
+            && token.split('.').count() == 3
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|now| i64::try_from(now.as_secs()).ok())
+            .unwrap_or(i64::MAX);
+        if !well_formed || response.expires_at <= now {
+            return Err(IdentityRefusal::IdentityUnavailable);
+        }
+        Ok(IssuedIdentityToken {
+            token,
+            expires_at: response.expires_at,
+        })
+    }
+}
+
+/// A token is a few hundred bytes of claims; this leaves room for many
+/// groups.
+#[cfg(any(target_os = "linux", test))]
+const MAX_IDENTITY_TOKEN_BYTES: usize = 16 * 1024;
+/// Inside the socket client's own bound.
+#[cfg(any(target_os = "linux", test))]
+const IDENTITY_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The refusal a Connect error names. A refusal's message is its name; any
+/// other failure, authentication's included, is `identity_unavailable`.
+#[cfg(any(target_os = "linux", test))]
+fn identity_refusal(error: &ConnectError) -> IdentityRefusal {
+    let named = error
+        .message
+        .as_deref()
+        .and_then(IdentityRefusal::from_name)
+        .filter(|refusal| match refusal {
+            IdentityRefusal::InvalidTarget => error.code == ErrorCode::InvalidArgument,
+            IdentityRefusal::NotRunning => error.code == ErrorCode::FailedPrecondition,
+            IdentityRefusal::IdentityStopped => error.code == ErrorCode::PermissionDenied,
+            IdentityRefusal::ResourceExhausted => error.code == ErrorCode::ResourceExhausted,
+            IdentityRefusal::IdentityUnavailable | IdentityRefusal::KeyNotYetPublished => {
+                error.code == ErrorCode::Unavailable
+            }
+        });
+    named.unwrap_or(match error.code {
+        ErrorCode::ResourceExhausted => IdentityRefusal::ResourceExhausted,
+        _ => IdentityRefusal::IdentityUnavailable,
+    })
 }
 
 fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, AttemptError> {

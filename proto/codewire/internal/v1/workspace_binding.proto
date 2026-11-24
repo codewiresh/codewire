@@ -49,6 +49,13 @@ service WorkspaceBindingService {
   rpc ReportMeshAttachment(ReportMeshAttachmentRequest) returns (ReportMeshAttachmentResponse) {
     option idempotency_level = IDEMPOTENT;
   }
+
+  // Issues a sandbox identity token for the bound environment and one
+  // audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
+  // "Minting"). A refusal's message is its name: invalid_target,
+  // not_running, identity_stopped, resource_exhausted, identity_unavailable
+  // or key_not_yet_published.
+  rpc IssueIdentityToken(IssueIdentityTokenRequest) returns (IssueIdentityTokenResponse);
 }
 
 message BindWorkspaceRequest {
@@ -229,3 +236,16 @@ message ReportMeshAttachmentRequest {
 }
 
 message ReportMeshAttachmentResponse {}
+
+message IssueIdentityTokenRequest {
+  // The audience: an absolute https URI, canonicalised before it is matched
+  // against the organization's registrations. At most 1024 bytes.
+  string resource = 1;
+}
+
+message IssueIdentityTokenResponse {
+  // A compact JWS, ES256.
+  string token = 1 [debug_redact = true];
+  // Unix seconds: the token's exp.
+  int64 expires_at = 2;
+}

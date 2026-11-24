@@ -156,6 +156,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.internal.v1.BindWorkspaceResponse" => internal::v1::BindWorkspaceResponse,
         "codewire.internal.v1.CoordinateProof" => internal::v1::CoordinateProof,
         "codewire.internal.v1.GitIdentity" => internal::v1::GitIdentity,
+        "codewire.internal.v1.IssueIdentityTokenResponse" => internal::v1::IssueIdentityTokenResponse,
         "codewire.internal.v1.IssueMeshEnrollmentResponse" => internal::v1::IssueMeshEnrollmentResponse,
         "codewire.internal.v1.RedeemEnvironmentEnrollmentRequest" => internal::v1::RedeemEnvironmentEnrollmentRequest,
         "codewire.internal.v1.WorkspaceAccess" => internal::v1::WorkspaceAccess,

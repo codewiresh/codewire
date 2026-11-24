@@ -267,6 +267,6 @@ fn main() {
             std::process::exit(exit_code);
         }
         codewire_cli::report_error(&err);
-        std::process::exit(codewire_cli::interrupted_exit_code(&err).unwrap_or(1));
+        std::process::exit(codewire_cli::failure_exit_code(&err));
     }
 }

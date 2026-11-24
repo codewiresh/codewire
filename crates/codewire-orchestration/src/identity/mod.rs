@@ -1,11 +1,12 @@
 //! Sandbox identity: Codewire as a per-org OIDC issuer, so a sandbox can prove
 //! which org's sandbox it is to a verifier that org trusts.
 //!
-//! This part publishes each org's issuer: OIDC discovery and the JWKS on a
-//! dedicated listener ([`discovery`]), from an OpenBao transit key that never
-//! leaves OpenBao ([`transit`]), with the rotation job's rules ([`keys`],
-//! [`rotate`]). Nothing here mints a token. It is off unless
-//! `CODEWIRE_IDENTITY_ENABLED=true` ([`config`]).
+//! Each org's issuer is published on a dedicated listener: OIDC discovery and
+//! the JWKS ([`discovery`]), from an OpenBao transit key that never leaves
+//! OpenBao ([`transit`]), with the rotation job's rules ([`keys`],
+//! [`rotate`]). A Sandbox's tokens ([`token`]) are minted for registered
+//! audiences through `WorkspaceBindingService.IssueIdentityToken` ([`mint`]).
+//! It is off unless `CODEWIRE_IDENTITY_ENABLED=true` ([`config`]).
 //!
 //! [`audience`] and [`groups`] are the names a registration and a Sandbox's
 //! groups hold, parsed once for the records API and for minting alike.
@@ -15,7 +16,9 @@ pub mod config;
 pub mod discovery;
 pub mod groups;
 pub mod keys;
+pub mod mint;
 pub mod rotate;
+pub mod token;
 pub mod transit;
 
 use std::sync::Arc;
@@ -23,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 
-pub use config::{IdentityConfig, IdentitySettings, SignerConfig, TransitKeyConfig};
+pub use config::{IdentityConfig, IdentitySettings, MintingSwitch, SignerConfig, TransitKeyConfig};
 use transit::TransitKeyClient;
 
 /// The transit key client for this Pod's role, logging in with a Pod-bound
@@ -54,6 +57,27 @@ pub fn discovery_router(
         orgs,
         keys,
     )))
+}
+
+/// Minting for enabled settings, served by the binding listener's
+/// `IssueIdentityToken`. It reads the operator's `CODEWIRE_IDENTITY_MINTING`
+/// and the deployment's public origin, `FRONTEND_URL`, whose host is the
+/// trust domain's; either malformed, or no cluster, fails startup.
+pub fn minting(
+    settings: &IdentitySettings,
+    kube: Option<kube::Client>,
+    database_url: &str,
+) -> anyhow::Result<mint::IdentityMinting> {
+    let kube = kube.context("sandbox identity is enabled but no Kubernetes client is available")?;
+    let public_origin = std::env::var("FRONTEND_URL").unwrap_or_default();
+    mint::IdentityMinting::from_settings(
+        settings,
+        MintingSwitch::from_env()?,
+        kube,
+        database_url,
+        &public_origin,
+    )
+    .context("configure sandbox identity minting")
 }
 
 /// Serve the issuer on its own listener, under its own limits, until shutdown;

@@ -30,6 +30,8 @@ pub mod host_control;
 mod host_process;
 #[cfg(unix)]
 pub mod hosted_state;
+#[cfg(unix)]
+pub mod identity_socket;
 mod launch;
 mod lifecycle;
 pub mod local_transport;

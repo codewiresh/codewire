@@ -290,6 +290,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
                 tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
             }
         });
+        crate::hosted_identity::spawn(&paths.identity_socket, client.clone());
     }
     // Only the Linux access server uses the connector, paths and client.
     #[cfg(not(target_os = "linux"))]

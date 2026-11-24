@@ -16,7 +16,7 @@ use super::*;
 use crate::commands::progress::terminal_text;
 use crate::output::{Capabilities, OutputMode, Status, Style, render_next};
 
-pub(crate) const IDENTITY_LONG_ABOUT: &str = "Sandbox identity: short-lived tokens a cloud Sandbox gets to prove which organization's Sandbox it is, for one verifier the organization registered.\n\nAn organization's owners and admins set each Sandbox's identity groups, register audiences, and stop or resume minting.\n\n  cw identity groups app\n  cw identity groups set app data-readers\n  cw identity audience add https://k8s.example.com --lifetime 5m\n  cw identity audience list\n  cw identity stop app\n  cw identity resume app";
+pub(crate) const IDENTITY_LONG_ABOUT: &str = "Sandbox identity: short-lived tokens a cloud Sandbox gets to prove which organization's Sandbox it is, for one verifier the organization registered.\n\nAn organization's owners and admins set each Sandbox's identity groups, register audiences, and stop or resume minting. Inside a cloud Sandbox, `cw identity token --resource URI` prints a token.\n\n  cw identity groups app\n  cw identity groups set app data-readers\n  cw identity audience add https://k8s.example.com --lifetime 5m\n  cw identity audience list\n  cw identity stop app\n  cw identity resume app\n  cw identity token --resource https://k8s.example.com";
 
 #[derive(Debug, Args)]
 pub(crate) struct IdentityArgs {
@@ -37,6 +37,11 @@ pub(crate) enum IdentityCommand {
     Stop(IdentityMintingArgs),
     #[command(about = "Resume minting tokens for a Sandbox, or the whole organization")]
     Resume(IdentityMintingArgs),
+    #[command(
+        about = "Print this Sandbox's token for one audience; inside a cloud Sandbox only",
+        long_about = "Print this Sandbox's identity token for one audience its organization registered, on standard output with no newline. Inside a cloud Sandbox only; it needs no sign-in or organization.\n\n  kubectl --token \"$(cw identity token --resource https://k8s.example.com)\" get pods"
+    )]
+    Token(crate::identity_token::IdentityTokenArgs),
 }
 
 #[derive(Debug, Args)]
@@ -201,6 +206,7 @@ pub(crate) async fn handle_identity_command(
         IdentityCommand::Audience(command) => audience(globals, command).await,
         IdentityCommand::Stop(args) => minting(globals, args, Switch::Stop).await,
         IdentityCommand::Resume(args) => minting(globals, args, Switch::Resume).await,
+        IdentityCommand::Token(args) => crate::identity_token::identity_token(args).await,
     }
 }
 

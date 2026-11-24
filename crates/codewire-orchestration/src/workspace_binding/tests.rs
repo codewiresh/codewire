@@ -48,11 +48,11 @@ const OTHER_POD_UID: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
 const SANDBOX_NAME: &str = "sandbox-workspace-1";
 const SANDBOX_UID: &str = "5a4db0c5-6d1e-4b0f-9b3c-2f0e7c1d9a11";
 const CLAIM_UID: &str = "c0ffee00-1d2e-4f3a-8b4c-5d6e7f8a9b0c";
-const ENVIRONMENT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+pub(super) const ENVIRONMENT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SECRET: &str = "synthetic-session-secret";
-const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 244, 0, 9));
+pub(super) const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 244, 0, 9));
 /// Another tenant workload holding the same projected token.
-const OTHER_PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 244, 0, 10));
+pub(super) const OTHER_PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 244, 0, 10));
 const ENVIRONMENT_GENERATION: i64 = 9;
 const NODE_NAME: &str = "runtime-node-1";
 const ZONE: &str = "dev-hel1";
@@ -66,14 +66,14 @@ const OTHER_HOST_KEY: &str =
 
 // ---------------------------------------------------------------- fixtures
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
 
-fn token_expiring_at(exp: u64) -> String {
+pub(super) fn token_expiring_at(exp: u64) -> String {
     format!(
         "{}.{}.{}",
         URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
@@ -82,7 +82,7 @@ fn token_expiring_at(exp: u64) -> String {
     )
 }
 
-fn bearer(token: &str) -> HeaderMap {
+pub(super) fn bearer(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -91,7 +91,7 @@ fn bearer(token: &str) -> HeaderMap {
     headers
 }
 
-fn valid_bearer() -> HeaderMap {
+pub(super) fn valid_bearer() -> HeaderMap {
     bearer(&token_expiring_at(unix_now() + 600))
 }
 
@@ -274,7 +274,7 @@ impl<T: Clone> Sequence<T> {
     }
 }
 
-struct FakeCluster {
+pub(super) struct FakeCluster {
     review: TokenReviewStatus,
     reviews: AtomicUsize,
     pods: Sequence<Option<Pod>>,
@@ -309,7 +309,7 @@ impl FakeCluster {
 
     /// How many requests of each kind it served: reviews, Pods, Sandboxes,
     /// Nodes and Services.
-    fn served(&self) -> [usize; 5] {
+    pub(super) fn served(&self) -> [usize; 5] {
         let mut counts = [0; 5];
         for (method, path) in self.requests.lock().unwrap().iter() {
             let kind = if method == "POST" && path.ends_with("/tokenreviews") {
@@ -341,7 +341,7 @@ impl FakeCluster {
         cluster
     }
 
-    fn valid() -> Arc<Self> {
+    pub(super) fn valid() -> Arc<Self> {
         Self::new(
             valid_review(),
             vec![Some(workspace_pod())],
@@ -456,7 +456,7 @@ fn not_found() -> Response<Body> {
 
 // ------------------------------------------------------------ fake store
 
-struct FakeStore {
+pub(super) struct FakeStore {
     results: Sequence<Result<Option<LiveBinding>, BindingStoreUnavailable>>,
     available_after: Option<tokio::time::Instant>,
     queries: AtomicUsize,
@@ -506,7 +506,7 @@ impl FakeStore {
         self
     }
 
-    fn bound(scope: WorkspaceCredentialScope) -> Arc<Self> {
+    pub(super) fn bound(scope: WorkspaceCredentialScope) -> Arc<Self> {
         Self::returning(vec![Ok(Some(binding(scope)))])
     }
 
@@ -718,19 +718,19 @@ impl RelayAllocator for FakeAllocator {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     cluster: Arc<FakeCluster>,
     store: Arc<FakeStore>,
     notifications: Arc<BindingNotifications>,
     allocator: Arc<FakeAllocator>,
-    state: Arc<WorkspaceBindingState>,
+    pub(super) state: Arc<WorkspaceBindingState>,
 }
 
 fn fixture(cluster: Arc<FakeCluster>, store: Arc<FakeStore>) -> Fixture {
     fixture_with(cluster, store, |state| state)
 }
 
-fn fixture_with(
+pub(super) fn fixture_with(
     cluster: Arc<FakeCluster>,
     store: Arc<FakeStore>,
     configure: impl FnOnce(WorkspaceBindingState) -> WorkspaceBindingState,
@@ -790,7 +790,7 @@ impl Fixture {
             .await
     }
 
-    fn reviews(&self) -> usize {
+    pub(super) fn reviews(&self) -> usize {
         self.cluster.reviews.load(Ordering::SeqCst)
     }
 }
@@ -2176,6 +2176,7 @@ async fn each_method_has_the_smallest_body_limit_that_fits_it() {
         ("RefreshAccess", super::DEFAULT_BODY_BYTES),
         ("RecordHostKey", super::RECORD_HOST_KEY_BODY_BYTES),
         ("AllocatePeerRelay", super::ALLOCATE_PEER_RELAY_BODY_BYTES),
+        ("IssueIdentityToken", super::ISSUE_IDENTITY_TOKEN_BODY_BYTES),
     ] {
         let oversized = format!(r#"{{"x":"{}"}}"#, "a".repeat(limit));
         assert_eq!(

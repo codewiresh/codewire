@@ -202,3 +202,17 @@ class ReportMeshAttachmentRequest(_message.Message):
 class ReportMeshAttachmentResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class IssueIdentityTokenRequest(_message.Message):
+    __slots__ = ("resource",)
+    RESOURCE_FIELD_NUMBER: _ClassVar[int]
+    resource: str
+    def __init__(self, resource: _Optional[str] = ...) -> None: ...
+
+class IssueIdentityTokenResponse(_message.Message):
+    __slots__ = ("token", "expires_at")
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
+    token: str
+    expires_at: int
+    def __init__(self, token: _Optional[str] = ..., expires_at: _Optional[int] = ...) -> None: ...

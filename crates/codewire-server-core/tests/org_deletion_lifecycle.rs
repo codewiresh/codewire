@@ -1770,6 +1770,26 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
         .unwrap();
     }
 
+    // Sandbox identity's mint log: this organization's row goes, another's
+    // stays.
+    let other_org = format!("org_orgdel_other_{suffix}");
+    for (jti, org_id) in [
+        (format!("jti-orgdel-{suffix}"), fixture.org_id.as_str()),
+        (format!("jti-orgdel-other-{suffix}"), other_org.as_str()),
+    ] {
+        sqlx::query(
+            "INSERT INTO identity_mints \
+             (jti, environment_id, org_id, audience, kid, groups_version, audience_version) \
+             VALUES ($1, $2, $3, 'https://verifier.example.test', 'sandbox-identity-1', 0, 1)",
+        )
+        .bind(jti)
+        .bind(&environment_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
     let requester_id = fixture.alternate_owner.user_id.clone();
     let operation = begin_organization_deletion(&pool, &fixture.alternate_owner, &fixture.org_id)
         .await
@@ -1811,6 +1831,7 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
         "secret_projects",
         "org_invitations",
         "org_members",
+        "identity_mints",
     ] {
         let count: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM {table} WHERE {} = $1",
@@ -1836,6 +1857,15 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     .await
     .unwrap();
     assert_eq!(secret_count, 0);
+    let other_mints: i64 = sqlx::query_scalar(
+        "WITH removed AS (DELETE FROM identity_mints WHERE org_id = $1 RETURNING 1) \
+         SELECT count(*) FROM removed",
+    )
+    .bind(&other_org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(other_mints, 1, "another organization's mint log stays");
     let audit_user: Option<String> = sqlx::query_scalar(
         r#"SELECT user_id FROM audit_logs
            WHERE action = 'org.deleted' AND metadata->>'operation_id' = $1"#,

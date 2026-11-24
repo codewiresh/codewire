@@ -28,6 +28,7 @@ pub mod environment_auth;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
 pub(crate) mod host_lifecycle;
+pub mod identity_mints;
 pub mod idle_stop;
 #[cfg(test)]
 mod idle_stop_database_tests;

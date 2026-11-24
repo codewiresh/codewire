@@ -10,6 +10,7 @@
 //!   each counted for [`RELAY_PAIR_LIFETIME`] (#5962).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -99,14 +100,17 @@ struct Bucket {
 }
 
 /// Token bucket per peer IP.
-pub struct PeerRateLimiter {
+pub type PeerRateLimiter = RateLimiter<IpAddr>;
+
+/// Token bucket per key, tracking a bounded number of keys.
+pub struct RateLimiter<K> {
     rate: f64,
     burst: f64,
     max_peers: usize,
-    buckets: Mutex<HashMap<IpAddr, Bucket>>,
+    buckets: Mutex<HashMap<K, Bucket>>,
 }
 
-impl PeerRateLimiter {
+impl<K: Hash + Eq> RateLimiter<K> {
     pub fn new(rate: f64, burst: f64, max_peers: usize) -> Self {
         Self {
             rate,
@@ -122,7 +126,7 @@ impl PeerRateLimiter {
         bucket.updated = now;
     }
 
-    pub fn try_take(&self, peer: IpAddr, now: Instant) -> bool {
+    pub fn try_take(&self, peer: K, now: Instant) -> bool {
         let mut buckets = self
             .buckets
             .lock()

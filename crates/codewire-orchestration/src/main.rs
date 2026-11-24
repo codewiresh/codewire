@@ -541,6 +541,25 @@ fn sandbox_identity_router(
     codewire_orchestration::connect::sandbox_identity::router(api_state.pool.clone(), denylist)
 }
 
+/// The issuer's discovery router and the binding listener's minting, both
+/// `None` unless identity is enabled.
+fn identity_serving(
+    identity: Option<&(Box<IdentitySettings>, SocketAddr)>,
+    kube: Option<kube::Client>,
+    database_url: &str,
+) -> anyhow::Result<(
+    Option<axum::Router>,
+    Option<Arc<codewire_orchestration::identity::mint::IdentityMinting>>,
+)> {
+    let Some((settings, _)) = identity else {
+        return Ok((None, None));
+    };
+    let discovery =
+        codewire_orchestration::identity::discovery_router(settings, kube.clone(), database_url)?;
+    let minting = codewire_orchestration::identity::minting(settings, kube, database_url)?;
+    Ok((Some(discovery), Some(Arc::new(minting))))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if codewire_orchestration::identity::rotate_requested(std::env::args().skip(1))? {
@@ -652,16 +671,8 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
-    let identity_app = identity
-        .as_ref()
-        .map(|(settings, _)| {
-            codewire_orchestration::identity::discovery_router(
-                settings,
-                kube.clone(),
-                &cfg.database_url,
-            )
-        })
-        .transpose()?;
+    let (identity_app, identity_minting) =
+        identity_serving(identity.as_ref(), kube.clone(), &cfg.database_url)?;
     let confidential_storage = ConfidentialStorageManager::from_env(
         pool.clone(),
         confidential_storage_flags,
@@ -930,7 +941,8 @@ async fn main() -> anyhow::Result<()> {
         .with_disco_admission(disco_admission()?)
         .with_interception(egress_settings.interception)
         .with_hosted_egress(egress_settings.enabled)
-        .with_server_url(&api_state.frontend_url),
+        .with_server_url(&api_state.frontend_url)
+        .with_identity(identity_minting),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
     // internal identity, and outside one no workspace exists to call it, so

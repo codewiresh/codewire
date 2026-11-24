@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 use codewire_proto::codewire::internal::v1::{
     AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest,
-    BindWorkspaceResponse, GitIdentity, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
+    BindWorkspaceResponse, GitIdentity, IssueIdentityTokenRequest, IssueIdentityTokenResponse,
+    IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
     MeshAttachmentReport as ProtoMeshAttachmentReport, RecordHostKeyRequest, RecordHostKeyResponse,
     RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest,
     ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService, WorkspaceDefaults,
@@ -46,11 +47,16 @@ use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
 use crate::environment_mesh::{
     ENROLLMENT_LIFETIME_SECS, enrollment_code_sha256, generate_enrollment_code,
 };
+use crate::identity::mint::IdentityMinting;
 use crate::runtime::{MemberFacts, Placement, RuntimeDriver, RuntimeFacts};
 use crate::runtime_transport::RuntimeTransportZone;
 use crate::worker::environment_auth::{
     WorkspaceCredentialScope, issue_workspace_daemon_credential,
 };
+
+mod identity;
+#[cfg(test)]
+pub(crate) use identity::IdentityCallError;
 
 /// Value-blind failures (design §3.7). The daemon calls `BindWorkspace` again
 /// at once on `NotFound` and backs off on everything else.
@@ -130,17 +136,20 @@ pub struct WorkspaceBindingState {
     requery_interval: Duration,
     /// The deployment's hosted interception setting (#4001).
     interception: bool,
+    /// Sandbox identity minting; `None` while identity is off.
+    identity: Option<Arc<IdentityMinting>>,
     /// The deployment's hosted egress switch (#4000).
     hosted_egress: bool,
 }
 
 /// A caller authenticated as a live workspace Pod, calling from that Pod's
-/// own address (S1). Holds the Pod's only request slot.
+/// own address (S1). A binding method's caller holds the Pod's only request
+/// slot; an identity mint holds none, so it never waits on the binding's.
 struct Caller {
     identity: VerifiedPodIdentity,
     peer: IpAddr,
     member: MemberFacts,
-    _slot: PodSlot,
+    _slot: Option<PodSlot>,
 }
 
 /// A caller whose recorded binding and live chain were confirmed.
@@ -171,8 +180,16 @@ impl WorkspaceBindingState {
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
             interception: false,
+            identity: None,
             hosted_egress: false,
         }
+    }
+
+    /// Mints sandbox identity tokens with `minting`; without it every
+    /// `IssueIdentityToken` is `identity_unavailable`.
+    pub fn with_identity(mut self, minting: Option<Arc<IdentityMinting>>) -> Self {
+        self.identity = minting;
+        self
     }
 
     /// Turns hosted interception on for broker-mode sandboxes (#4001): the
@@ -272,24 +289,44 @@ impl WorkspaceBindingState {
                 .review_slot()
                 .await
                 .ok_or(BindError::Unavailable)?;
-            metrics::observe_token_review();
-            self.runtime()?
-                .review_member_credential(headers)
-                .await
-                .map_err(identity_error)?
+            self.review(headers).await?
         };
 
         // §4.3: the sandbox namespace only, one request per reviewed Pod.
-        if identity.namespace() != self.sandbox_namespace || !canonical_uid(identity.pod_uid()) {
-            return Err(BindError::PermissionDenied);
-        }
+        self.in_sandbox_namespace(&identity)?;
         let slot = self
             .limits
             .pod_slot(identity.pod_uid())
             .ok_or(BindError::ResourceExhausted)?;
+        self.attest(identity, peer, Some(slot)).await
+    }
 
-        // §4.4: the live Pod by the reviewed name and UID, called from its
-        // own address (S1).
+    /// The TokenReview of the request's bearer. The caller holds a review
+    /// slot.
+    async fn review(&self, headers: &HeaderMap) -> Result<VerifiedPodIdentity, BindError> {
+        metrics::observe_token_review();
+        self.runtime()?
+            .review_member_credential(headers)
+            .await
+            .map_err(identity_error)
+    }
+
+    /// §4.3: a reviewed Pod of the sandbox namespace with a canonical UID.
+    fn in_sandbox_namespace(&self, identity: &VerifiedPodIdentity) -> Result<(), BindError> {
+        if identity.namespace() != self.sandbox_namespace || !canonical_uid(identity.pod_uid()) {
+            return Err(BindError::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    /// §4.4: the live Pod by the reviewed name and UID, called from its own
+    /// address (S1).
+    async fn attest(
+        &self,
+        identity: VerifiedPodIdentity,
+        peer: IpAddr,
+        slot: Option<PodSlot>,
+    ) -> Result<Caller, BindError> {
         let member = self
             .attested_member(&identity)
             .await?
@@ -359,6 +396,12 @@ impl WorkspaceBindingState {
         peer: Option<IpAddr>,
     ) -> Result<BoundCaller, BindError> {
         let caller = self.authenticate(headers, peer).await?;
+        self.bound_caller(caller).await
+    }
+
+    /// The recorded binding of an authenticated caller, confirmed against
+    /// the live chain.
+    async fn bound_caller(&self, caller: Caller) -> Result<BoundCaller, BindError> {
         let identity = &caller.identity;
         let binding = self
             .store
@@ -999,5 +1042,17 @@ impl WorkspaceBindingService for WorkspaceBindingConnectService {
             .report_mesh_attachment(ctx.headers(), peer_of(&ctx), report)
             .await;
         observe("report_mesh_attachment", result)
+    }
+
+    async fn issue_identity_token(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, IssueIdentityTokenRequest>,
+    ) -> ServiceResult<IssueIdentityTokenResponse> {
+        let result = self
+            .state
+            .issue_identity_token(ctx.headers(), peer_of(&ctx), request.resource)
+            .await;
+        identity::observe(result)
     }
 }

@@ -28,7 +28,10 @@ mod hosted_daemon;
 pub mod hosted_egress;
 mod hosted_exec;
 #[cfg(target_os = "linux")]
+mod hosted_identity;
+#[cfg(target_os = "linux")]
 pub mod hosted_listener;
+mod identity_token;
 mod local_runtime_pin;
 mod mesh;
 mod organization_client;
@@ -863,12 +866,16 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
         .map(codewire_local_vmm::network_worker::NetworkWorkerError::exit_code)
 }
 
-/// 130 when Ctrl-C ended a lifecycle wait (`cw start`, `cw create` and the
-/// like): the error's text already says what continues in the background.
 pub use error_report::report_error;
 
-pub fn interrupted_exit_code(error: &anyhow::Error) -> Option<i32> {
+/// The exit status for an error `main` reports: 130 when Ctrl-C ended a
+/// lifecycle wait (`cw start`, `cw create` and the like), whose text already
+/// says what continues in the background; 2 when `cw identity token` ran
+/// outside a cloud Sandbox; otherwise 1.
+pub fn failure_exit_code(error: &anyhow::Error) -> i32 {
     commands::lifecycle_output::interrupted_exit_code(error)
+        .or_else(|| identity_token::exit_code(error))
+        .unwrap_or(1)
 }
 
 /// Preserve the fixed private broker failure taxonomy across the thin binary

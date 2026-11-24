@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use codewire_protected_store::openbao_workload_identity::OpenBaoWorkloadIdentity;
 
 use super::config::{TRANSIT_KEY_NAME, TransitKeyConfig};
-use super::keys::{KeyRead, KeySet, KeySetError};
+use super::keys::{KeyRead, KeySet, KeySetError, SigningKey};
 use crate::openbao::restricted_http_client;
 
 /// A key read lists a few versions of a few hundred bytes each.
@@ -33,6 +33,7 @@ pub enum TransitStage {
     ReadKey,
     Rotate,
     RaiseMinimums,
+    Sign,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +86,44 @@ struct HealthResponse {
 #[derive(Deserialize)]
 struct DataResponse<T> {
     data: T,
+}
+
+/// A transit sign request. `key_version` is not optional: an unversioned
+/// request can't be built. The hash is OpenBao's default for an
+/// `ecdsa-p256` key, SHA-256, which ES256 needs; the request never names
+/// one, so OpenBao's policy may pin its parameters.
+#[derive(Serialize)]
+struct SignRequest<'a> {
+    /// The JWS signing input, base64 as OpenBao takes it.
+    input: String,
+    key_version: u32,
+    marshaling_algorithm: &'a str,
+}
+
+#[derive(Deserialize)]
+struct SignResponse {
+    signature: String,
+}
+
+/// An ES256 JWS signature: base64url of the 64-byte `r || s`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JwsSignature(String);
+
+impl JwsSignature {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The signature from OpenBao's `vault:v<version>:<signature>`, made by
+    /// exactly `version`.
+    fn from_transit(value: &str, version: u32) -> Option<Self> {
+        use base64::Engine as _;
+        let signature = value.strip_prefix(&format!("vault:v{version}:"))?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(signature)
+            .ok()?;
+        (bytes.len() == 64).then(|| Self(signature.to_owned()))
+    }
 }
 
 #[derive(Serialize)]
@@ -153,6 +192,37 @@ impl TransitKeyClient {
             .await
             .map_err(|_| TransitError::Unavailable(stage))?;
         checked(response, stage).map(drop)
+    }
+
+    /// Sign `input`, a JWS signing input, with exactly `key`'s version, in
+    /// JWS marshaling.
+    pub(crate) async fn sign(
+        &self,
+        key: SigningKey,
+        input: &[u8],
+    ) -> Result<JwsSignature, TransitError> {
+        use base64::Engine as _;
+        let stage = TransitStage::Sign;
+        let token = self.authenticate().await?;
+        let url = self.endpoint(
+            &["v1", &self.config.transit_mount, "sign", TRANSIT_KEY_NAME],
+            stage,
+        )?;
+        let response = self
+            .http
+            .post(url)
+            .header("X-Vault-Token", token.as_str())
+            .json(&SignRequest {
+                input: base64::engine::general_purpose::STANDARD.encode(input),
+                key_version: key.version(),
+                marshaling_algorithm: "jws",
+            })
+            .send()
+            .await
+            .map_err(|_| TransitError::Unavailable(stage))?;
+        let signed: DataResponse<SignResponse> = decode(checked(response, stage)?, stage).await?;
+        JwsSignature::from_transit(&signed.data.signature, key.version())
+            .ok_or(TransitError::InvalidResponse(stage))
     }
 
     fn endpoint(&self, segments: &[&str], stage: TransitStage) -> Result<Url, TransitError> {
@@ -262,150 +332,4 @@ async fn decode<T: for<'de> Deserialize<'de>>(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Mutex as StdMutex;
-
-    use axum::Router;
-    use axum::body::to_bytes;
-    use axum::extract::Request;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse as _;
-    use serde_json::json;
-
-    use super::*;
-    use crate::identity::keys::tests::key_read;
-    use codewire_protected_store::openbao_workload_identity::static_workload_identity;
-
-    type Recorded = Arc<StdMutex<Vec<(String, String, String)>>>;
-
-    /// An OpenBao that answers only the calls this client may make, and
-    /// records each one as (method and path, token, body).
-    async fn fake_openbao(cluster_id: &'static str) -> (Url, Recorded) {
-        let recorded: Recorded = Arc::default();
-        let captured = recorded.clone();
-        let app = Router::new().fallback(move |request: Request| {
-            let captured = captured.clone();
-            async move {
-                let call = format!("{} {}", request.method(), request.uri().path());
-                let token = request
-                    .headers()
-                    .get("X-Vault-Token")
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                let body = to_bytes(request.into_body(), 4096).await.unwrap();
-                let body = String::from_utf8(body.to_vec()).unwrap();
-                captured.lock().unwrap().push((call.clone(), token.clone(), body.clone()));
-                let authorized = token == "bao-token";
-                match call.as_str() {
-                    "GET /v1/sys/health" => axum::Json(json!({"cluster_id": cluster_id})).into_response(),
-                    "POST /v1/auth/cw-dev-k8s/login"
-                        if serde_json::from_str::<serde_json::Value>(&body).unwrap()
-                            == json!({"role": "sandbox-identity-signer-cw-dev", "jwt": "projected-jwt"}) =>
-                    {
-                        axum::Json(json!({"auth": {"client_token": "bao-token", "lease_duration": 300}}))
-                            .into_response()
-                    }
-                    "GET /v1/codewire-identity-dev/keys/sandbox-identity" if authorized => axum::Json(
-                        json!({"data": key_read(&[(4, "2026-11-01T00:00:00Z"), (5, "2026-11-13T00:00:00Z")], 4, 4)}),
-                    )
-                    .into_response(),
-                    "POST /v1/codewire-identity-dev/keys/sandbox-identity/rotate"
-                    | "POST /v1/codewire-identity-dev/keys/sandbox-identity/config"
-                        if authorized =>
-                    {
-                        StatusCode::NO_CONTENT.into_response()
-                    }
-                    _ => StatusCode::FORBIDDEN.into_response(),
-                }
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        (Url::parse(&format!("http://{address}")).unwrap(), recorded)
-    }
-
-    fn client(address: Url) -> TransitKeyClient {
-        TransitKeyClient::new(
-            TransitKeyConfig {
-                address,
-                auth_mount: "cw-dev-k8s".to_owned(),
-                role: "sandbox-identity-signer-cw-dev".to_owned(),
-                transit_mount: "codewire-identity-dev".to_owned(),
-                expected_cluster_id: "cluster-dev".to_owned(),
-            },
-            static_workload_identity("projected-jwt"),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn the_client_reads_rotates_and_raises_minimums_on_its_own_key_only() {
-        let (address, recorded) = fake_openbao("cluster-dev").await;
-        let client = client(address);
-
-        let key_set = client.read_key().await.unwrap();
-        assert_eq!(
-            serde_json::to_value(key_set.jwks()).unwrap()["keys"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        client.rotate().await.unwrap();
-        client.raise_minimums(5).await.unwrap();
-
-        let calls = recorded.lock().unwrap().clone();
-        let without_health: Vec<_> = calls
-            .iter()
-            .filter(|(call, ..)| call != "GET /v1/sys/health")
-            .map(|(call, token, body)| (call.as_str(), token.as_str(), body.as_str()))
-            .collect();
-        assert_eq!(
-            without_health,
-            [
-                (
-                    "POST /v1/auth/cw-dev-k8s/login",
-                    "",
-                    r#"{"role":"sandbox-identity-signer-cw-dev","jwt":"projected-jwt"}"#
-                ),
-                (
-                    "GET /v1/codewire-identity-dev/keys/sandbox-identity",
-                    "bao-token",
-                    ""
-                ),
-                (
-                    "POST /v1/codewire-identity-dev/keys/sandbox-identity/rotate",
-                    "bao-token",
-                    ""
-                ),
-                (
-                    "POST /v1/codewire-identity-dev/keys/sandbox-identity/config",
-                    "bao-token",
-                    r#"{"min_decryption_version":5,"min_encryption_version":5}"#
-                ),
-            ],
-            "one login, then exactly the key's own read, rotate and minimums"
-        );
-        // Every call first checks it is talking to the configured cluster.
-        assert_eq!(calls.len() - without_health.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn another_cluster_is_refused_before_any_login() {
-        let (address, recorded) = fake_openbao("some-other-cluster").await;
-        let error = client(address).read_key().await.unwrap_err();
-        assert!(matches!(
-            error,
-            TransitError::InvalidResponse(TransitStage::Authority)
-        ));
-        let calls: Vec<_> = recorded
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(call, ..)| call.clone())
-            .collect();
-        assert_eq!(calls, ["GET /v1/sys/health"]);
-    }
-}
+pub(crate) mod tests;

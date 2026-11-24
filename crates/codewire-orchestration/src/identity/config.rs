@@ -15,6 +15,8 @@ pub const IDENTITY_ENABLED_ENV: &str = "CODEWIRE_IDENTITY_ENABLED";
 pub const IDENTITY_ISSUER_BASE_ENV: &str = "CODEWIRE_IDENTITY_ISSUER_BASE";
 pub const IDENTITY_SIGNER_ENV: &str = "CODEWIRE_IDENTITY_SIGNER";
 pub const ORCHESTRATION_IDENTITY_PORT_ENV: &str = "ORCHESTRATION_IDENTITY_PORT";
+/// The operator's circuit breaker for minting: `off` stops every mint.
+pub const IDENTITY_MINTING_ENV: &str = "CODEWIRE_IDENTITY_MINTING";
 /// The identity listener's default port, beside 8084 (public), 8087
 /// (workspace binding) and 8088 (internal TLS).
 pub const IDENTITY_PORT: u16 = 8089;
@@ -45,6 +47,29 @@ pub enum IdentityConfigError {
     UnsupportedSigner(String),
     #[error("invalid sandbox identity OpenBao configuration: {0}")]
     InvalidOpenBao(String),
+    #[error("{IDENTITY_MINTING_ENV} must be `on` or `off`")]
+    InvalidMintingSwitch,
+}
+
+/// The operator's switch for minting. Unset or empty is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MintingSwitch {
+    On,
+    Off,
+}
+
+impl MintingSwitch {
+    pub fn from_env() -> Result<Self, IdentityConfigError> {
+        Self::parse(std::env::var(IDENTITY_MINTING_ENV).ok().as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Result<Self, IdentityConfigError> {
+        match value.map(str::trim) {
+            None | Some("" | "on") => Ok(Self::On),
+            Some("off") => Ok(Self::Off),
+            Some(_) => Err(IdentityConfigError::InvalidMintingSwitch),
+        }
+    }
 }
 
 /// Whether this install issues sandbox identity, and how.
@@ -208,6 +233,28 @@ mod tests {
         env: &HashMap<&'static str, &'static str>,
     ) -> Result<IdentityConfig, IdentityConfigError> {
         IdentityConfig::from_lookup(|name| env.get(name).map(|value| (*value).to_owned()))
+    }
+
+    #[test]
+    fn minting_is_on_unless_switched_off() {
+        for (value, switch) in [
+            (None, MintingSwitch::On),
+            (Some(""), MintingSwitch::On),
+            (Some("on"), MintingSwitch::On),
+            (Some("off"), MintingSwitch::Off),
+            (Some(" off "), MintingSwitch::Off),
+        ] {
+            assert_eq!(MintingSwitch::parse(value).unwrap(), switch, "{value:?}");
+        }
+        for value in ["OFF", "false", "0", "disabled"] {
+            assert!(
+                matches!(
+                    MintingSwitch::parse(Some(value)),
+                    Err(IdentityConfigError::InvalidMintingSwitch)
+                ),
+                "{value}"
+            );
+        }
     }
 
     #[test]

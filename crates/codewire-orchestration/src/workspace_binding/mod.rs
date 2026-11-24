@@ -9,8 +9,9 @@
 //!
 //! Once bound, the same Pod refreshes its tailnet access grant, records its
 //! SSH host key and asks for UDP peer-relay slots here (daemon-hosted access
-//! §3 and §5). Every method requires the TCP peer to be the bound Pod's own
-//! address.
+//! §3 and §5), and for sandbox identity tokens under limits of their own
+//! (`docs/dev/SANDBOX-IDENTITY.md`). Every method requires the TCP peer to be
+//! the bound Pod's own address.
 //!
 //! The port stays reachable from every tenant workload for the Pod's life, so
 //! the listener serves this one service and nothing else, over TLS with
@@ -72,7 +73,7 @@ pub const LISTENER_LIMITS: BoundedHttp1Limits = BoundedHttp1Limits {
     max_headers: 16,
     // hyper accepts a head below twice its read buffer.
     max_header_bytes: 16 * 1024,
-    max_body_bytes: ALLOCATE_PEER_RELAY_BODY_BYTES,
+    max_body_bytes: ISSUE_IDENTITY_TOKEN_BODY_BYTES,
     request_read_timeout: Duration::from_secs(5),
     connection_deadline: Duration::from_secs(35),
 };
@@ -105,10 +106,16 @@ pub const DEFAULT_BODY_BYTES: usize = 64;
 pub const RECORD_HOST_KEY_BODY_BYTES: usize = 1024;
 /// Two disco public keys (73 bytes each) and a generation in either encoding.
 pub const ALLOCATE_PEER_RELAY_BODY_BYTES: usize = 256;
+/// One identity token `resource` at its longest, and its field's framing in
+/// either encoding.
+pub const ISSUE_IDENTITY_TOKEN_BODY_BYTES: usize =
+    codewire_daemon_proto::IDENTITY_RESOURCE_MAX_BYTES + 64;
 
 const RECORD_HOST_KEY_PATH: &str = "/codewire.internal.v1.WorkspaceBindingService/RecordHostKey";
 const ALLOCATE_PEER_RELAY_PATH: &str =
     "/codewire.internal.v1.WorkspaceBindingService/AllocatePeerRelay";
+const ISSUE_IDENTITY_TOKEN_PATH: &str =
+    "/codewire.internal.v1.WorkspaceBindingService/IssueIdentityToken";
 
 /// The request body limit of the method at `path` (daemon-hosted access
 /// N5): the smallest that fits its largest valid request.
@@ -116,6 +123,7 @@ pub fn max_body_bytes(path: &str) -> usize {
     match path {
         RECORD_HOST_KEY_PATH => RECORD_HOST_KEY_BODY_BYTES,
         ALLOCATE_PEER_RELAY_PATH => ALLOCATE_PEER_RELAY_BODY_BYTES,
+        ISSUE_IDENTITY_TOKEN_PATH => ISSUE_IDENTITY_TOKEN_BODY_BYTES,
         _ => DEFAULT_BODY_BYTES,
     }
 }
@@ -163,3 +171,6 @@ mod tests;
 
 #[cfg(test)]
 mod fairness_tests;
+
+#[cfg(test)]
+mod identity_tests;

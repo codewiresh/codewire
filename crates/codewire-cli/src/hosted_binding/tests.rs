@@ -7,9 +7,10 @@ use axum::Router;
 use codewire_daemon::HostedDaemonMode;
 use codewire_daemon::config::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
 use codewire_proto::codewire::internal::v1::{
-    GitIdentity, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyResponse,
-    RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse,
-    WorkspaceBindingService, WorkspaceDefaults,
+    GitIdentity, IssueIdentityTokenResponse, IssueMeshEnrollmentRequest,
+    IssueMeshEnrollmentResponse, RecordHostKeyResponse, RefreshAccessResponse,
+    ReportMeshAttachmentRequest, ReportMeshAttachmentResponse, WorkspaceBindingService,
+    WorkspaceDefaults,
 };
 use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
@@ -72,6 +73,9 @@ enum Answer {
     Error(ErrorCode),
 }
 
+/// A token and its expiry, or an error code and message.
+type IdentityAnswer = Result<(&'static str, i64), (ErrorCode, &'static str)>;
+
 #[derive(Default)]
 struct Recorded {
     authorizations: Vec<String>,
@@ -83,6 +87,10 @@ struct Recorded {
     /// The code `IssueMeshEnrollment` answers with; `None` refuses.
     mesh_code: Option<String>,
     mesh_reports: Vec<i32>,
+    /// What `IssueIdentityToken` answers: a token and its expiry, or an
+    /// error code and message. `None` is unavailable with no name.
+    identity: Option<IdentityAnswer>,
+    identity_resources: Vec<String>,
 }
 
 struct ScriptedService {
@@ -272,6 +280,36 @@ impl WorkspaceBindingService for ScriptedService {
             .mesh_reports
             .push(request.report.to_i32());
         connectrpc::Response::ok(ReportMeshAttachmentResponse::default())
+    }
+
+    async fn issue_identity_token(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<
+            '_,
+            codewire_proto::codewire::internal::v1::IssueIdentityTokenRequest,
+        >,
+    ) -> ServiceResult<IssueIdentityTokenResponse> {
+        let mut recorded = self.recorded.lock().unwrap();
+        recorded.authorizations.push(
+            ctx.headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        recorded
+            .identity_resources
+            .push(request.resource.to_owned());
+        match recorded.identity {
+            None => Err(ConnectError::unavailable("no identity")),
+            Some(Err((code, message))) => Err(ConnectError::new(code, message)),
+            Some(Ok((token, expires_at))) => connectrpc::Response::ok(IssueIdentityTokenResponse {
+                token: token.into(),
+                expires_at,
+                ..Default::default()
+            }),
+        }
     }
 }
 
@@ -870,5 +908,114 @@ async fn mesh_enrollment_returns_one_code_and_its_network_and_refuses_malformed_
     assert_eq!(
         fixture.recorded.lock().unwrap().mesh_reports,
         [MeshAttachmentReport::NotAMember as i32]
+    );
+}
+
+#[tokio::test]
+async fn an_identity_token_comes_back_and_a_refusal_keeps_its_name() {
+    let fixture = fixture(Vec::new()).await;
+    let issue = || async {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture
+                .client
+                .issue_identity_token("https://k8s.walk.example"),
+        )
+        .await
+        .unwrap()
+    };
+    let later = i64::try_from(
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+        + 600;
+    fixture.recorded.lock().unwrap().identity = Some(Ok(("aGVhZA.Y2xhaW1z.c2ln", later)));
+    let issued = issue().await.unwrap();
+    assert_eq!(
+        (issued.token.as_str(), issued.expires_at),
+        ("aGVhZA.Y2xhaW1z.c2ln", later)
+    );
+    assert_eq!(
+        fixture
+            .recorded
+            .lock()
+            .unwrap()
+            .authorizations
+            .last()
+            .map(String::as_str),
+        Some(format!("Bearer {SYNTHETIC_PROJECTED_TOKEN}").as_str())
+    );
+
+    for (answer, refusal) in [
+        (
+            (ErrorCode::InvalidArgument, "invalid_target"),
+            IdentityRefusal::InvalidTarget,
+        ),
+        (
+            (ErrorCode::FailedPrecondition, "not_running"),
+            IdentityRefusal::NotRunning,
+        ),
+        (
+            (ErrorCode::PermissionDenied, "identity_stopped"),
+            IdentityRefusal::IdentityStopped,
+        ),
+        (
+            (ErrorCode::ResourceExhausted, "resource_exhausted"),
+            IdentityRefusal::ResourceExhausted,
+        ),
+        (
+            (ErrorCode::Unavailable, "identity_unavailable"),
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            (ErrorCode::Unavailable, "key_not_yet_published"),
+            IdentityRefusal::KeyNotYetPublished,
+        ),
+        // Authentication's own refusals name nothing of identity's.
+        (
+            (
+                ErrorCode::PermissionDenied,
+                "workspace binding is not permitted",
+            ),
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            (ErrorCode::Unauthenticated, "identity_stopped"),
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            (
+                ErrorCode::ResourceExhausted,
+                "workspace binding request limit reached",
+            ),
+            IdentityRefusal::ResourceExhausted,
+        ),
+    ] {
+        fixture.recorded.lock().unwrap().identity = Some(Err(answer));
+        assert_eq!(issue().await.err(), Some(refusal), "{answer:?}");
+    }
+    for (token, expires_at) in [
+        ("not a token", later),
+        ("a.b", later),
+        ("aGVhZA.Y2xhaW1z.c2ln", 1),
+    ] {
+        fixture.recorded.lock().unwrap().identity = Some(Ok((token, expires_at)));
+        assert_eq!(
+            issue().await.err(),
+            Some(IdentityRefusal::IdentityUnavailable),
+            "{token}"
+        );
+    }
+    assert!(
+        fixture
+            .recorded
+            .lock()
+            .unwrap()
+            .identity_resources
+            .iter()
+            .all(|resource| resource == "https://k8s.walk.example")
     );
 }

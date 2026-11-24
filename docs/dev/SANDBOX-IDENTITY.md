@@ -123,22 +123,30 @@ enforced here, never in the daemon.
     Sandbox can't probe which audiences another organization registered;
   - `failed_precondition`, `not_running`: the Sandbox isn't running;
   - `permission_denied`, `identity_stopped`: the organization is suspended or
-    being deleted, or the Sandbox's access is suspended. Like the kill
-    switches, this is checked before the cache;
+    being deleted (its deletion state is anything but active, a failed
+    deletion included), or the Sandbox's access is suspended: its creator's
+    account is suspended. Like the kill switches, this is checked before the
+    cache;
   - `permission_denied`, `identity_stopped`: a kill switch is on for the
     Sandbox or its organization;
-  - `resource_exhausted`: a limit below;
+  - `resource_exhausted`, `resource_exhausted`: a limit below;
   - `unavailable`, `identity_unavailable`: the circuit breaker is open,
     identity is off, or OpenBao can't sign;
   - `unavailable`, `key_not_yet_published`: no key version has been published
     for 24 hours yet. A new key signs nothing for a day, and minting never falls
     back to a younger version.
 - **Limits**, separate from the binding's, so minting can't starve binding
-  renewals. Excess requests are refused before any TokenReview:
-  - per Sandbox: 30 a minute, burst 10;
-  - per organization: 3,000 a minute;
-  - per replica: 500 a second;
-  - a TokenReview semaphore of 16 of its own.
+  renewals:
+  - per Sandbox: 30 a minute, burst 10, keyed by the caller's address, which
+    authentication requires to be the bound Pod's;
+  - per replica: 500 a second, burst 500;
+  - a TokenReview semaphore of 16 of its own;
+  - per organization: 3,000 a minute, burst 1,000.
+
+  The per-Sandbox and per-replica limits, and the semaphore, refuse excess
+  requests before any TokenReview. The organization is known only once the
+  caller is authenticated, so its limit applies after the review and before
+  the cache.
 - **Cache:** keyed by Sandbox, canonical audience, the Sandbox's groups
   version and the registration's version. A cached token is returned until half
   its lifetime, so a repeat costs a TokenReview but no signature. A change to
@@ -148,7 +156,8 @@ enforced here, never in the daemon.
   OpenBao's own policy refuses a sign without `key_version`.
 - **Mint log:** every mint, but not a cache hit, appends a row to
   `identity_mints`: environment, organization, audience, `jti`, `kid`, groups
-  version and time. Never the token. Rows are kept 30 days.
+  version and time. Never the token. Rows are deleted 30 days after the mint,
+  and with their organization.
 
 ## In the Sandbox
 
@@ -156,9 +165,9 @@ enforced here, never in the daemon.
   as a platform socket that SSH socket forwards refuse. `GET
   /token?resource=URI` answers the token as `text/plain`. A refusal is a status
   with the refusal's name as the body: 400 for `invalid_target`, 403 for
-  `identity_stopped`, 429 for a limit, and 503 for `identity_unavailable` or
-  `key_not_yet_published`. It caches one token per audience until half its
-  lifetime.
+  `identity_stopped`, 429 for a limit, and 503 for `identity_unavailable`,
+  `key_not_yet_published` or `not_running`. It caches one token per audience
+  until half its lifetime.
 - **`cw identity token --resource URI`** prints the token on stdout with no
   newline. A refusal goes to stderr with its name and exits non-zero. Outside a
   cloud Sandbox, it says so and exits 2.

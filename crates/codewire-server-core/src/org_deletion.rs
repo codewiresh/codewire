@@ -21,6 +21,7 @@ use crate::auth::AuthUser;
 use crate::error::AppError;
 
 mod lease_admission;
+mod rows;
 use lease_admission::admit_mutation_lease_in;
 
 const DELETION_REQUESTED_ACTION: &str = "org.deletion_requested";
@@ -1542,24 +1543,9 @@ pub async fn finalize_organization_deletion_database(
     .await
     .map_err(AppError::from)?;
 
-    for statement in [
-        "DELETE FROM repo_configs WHERE org_id = $1",
-        "DELETE FROM environments WHERE org_id = $1",
-        "DELETE FROM environment_presets WHERE org_id = $1",
-        "DELETE FROM api_keys WHERE org_id = $1",
-        "DELETE FROM environment_quotas WHERE org_id = $1",
-        "DELETE FROM environment_usage_billing WHERE org_id = $1",
-        "DELETE FROM environment_usage_billing_tiers WHERE org_id = $1",
-        "DELETE FROM secret_projects WHERE org_id = $1",
-        "DELETE FROM org_invitations WHERE org_id = $1",
-        "DELETE FROM org_members WHERE org_id = $1",
-    ] {
-        sqlx::query(statement)
-            .bind(organization_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::from)?;
-    }
+    rows::delete_organization_rows(&mut tx, organization_id)
+        .await
+        .map_err(AppError::from)?;
 
     let removed = sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(organization_id)

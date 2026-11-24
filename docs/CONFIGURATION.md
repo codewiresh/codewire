@@ -578,7 +578,11 @@ them on a listener of its own, and nothing else answers there. The signing key
 is an OpenBao transit key (`ecdsa-p256`, never exportable) that orchestration
 can only read through its own Kubernetes-auth role. The feature is off unless
 switched on, and switching it on needs every value below; a missing or
-malformed one stops orchestration at startup. Nothing mints tokens yet.
+malformed one stops orchestration at startup. With it on, orchestration also
+mints each Sandbox's tokens through the binding listener's
+`IssueIdentityToken` ([dev/SANDBOX-IDENTITY.md](dev/SANDBOX-IDENTITY.md)).
+The Sandbox's SPIFFE trust domain is `sandboxes.` and the host of
+`FRONTEND_URL`, which must then be an `https` URL with a DNS host name.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
@@ -586,6 +590,7 @@ malformed one stops orchestration at startup. Nothing mints tokens yet.
 | `CODEWIRE_IDENTITY_ISSUER_BASE` | When enabled | The `https` URL every issuer starts with: a DNS host name, an optional port and path, no credentials, query, fragment or trailing slash, and never an IP address. Issuers and key URLs are built from it alone, never from a request's headers. The listener serves `/orgs/…` paths, so a base with a path needs the TLS front to strip it. | `https://identity.example.com` |
 | `CODEWIRE_IDENTITY_SIGNER` | When enabled | Where the signing key lives. Only `openbao-transit` exists; there is no default. | `openbao-transit` |
 | `ORCHESTRATION_IDENTITY_PORT` | No | The identity listener's TCP port. Unset or empty means `8089`. | `8089` |
+| `CODEWIRE_IDENTITY_MINTING` | No | The operator's circuit breaker for minting. `off` refuses every token with `identity_unavailable` and asks OpenBao nothing; unset, empty or `on` mints. Any other value stops orchestration at startup while identity is enabled. Separately, 20 signing failures in a row stop minting by themselves for 60 seconds. It is read at startup, so a change takes effect when orchestration restarts. | `off` |
 | `SANDBOX_IDENTITY_BAO_ADDR` | When enabled | The OpenBao origin, `https` only; an in-cluster `http` address is refused (#4853). | `https://openbao.example.com` |
 | `SANDBOX_IDENTITY_BAO_EXPECTED_CLUSTER_ID` | When enabled | The OpenBao cluster ID every call checks first, so a misrouted address is refused before login. | `b7c2…` |
 | `SANDBOX_IDENTITY_BAO_AUTH_MOUNT` | When enabled | The Kubernetes auth mount the Pod logs in through. | `kubernetes` |

@@ -51,6 +51,9 @@ const (
 	// WorkspaceBindingServiceReportMeshAttachmentProcedure is the fully-qualified name of the
 	// WorkspaceBindingService's ReportMeshAttachment RPC.
 	WorkspaceBindingServiceReportMeshAttachmentProcedure = "/codewire.internal.v1.WorkspaceBindingService/ReportMeshAttachment"
+	// WorkspaceBindingServiceIssueIdentityTokenProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's IssueIdentityToken RPC.
+	WorkspaceBindingServiceIssueIdentityTokenProcedure = "/codewire.internal.v1.WorkspaceBindingService/IssueIdentityToken"
 )
 
 // WorkspaceBindingServiceClient is a client for the codewire.internal.v1.WorkspaceBindingService
@@ -81,6 +84,12 @@ type WorkspaceBindingServiceClient interface {
 	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
 	// Records how far this Pod's Mesh network membership has come.
 	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
+	// Issues a sandbox identity token for the bound environment and one
+	// audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
+	// "Minting"). A refusal's message is its name: invalid_target,
+	// not_running, identity_stopped, resource_exhausted, identity_unavailable
+	// or key_not_yet_published.
+	IssueIdentityToken(context.Context, *connect.Request[v1.IssueIdentityTokenRequest]) (*connect.Response[v1.IssueIdentityTokenResponse], error)
 }
 
 // NewWorkspaceBindingServiceClient constructs a client for the
@@ -135,6 +144,12 @@ func NewWorkspaceBindingServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyIdempotent),
 			connect.WithClientOptions(opts...),
 		),
+		issueIdentityToken: connect.NewClient[v1.IssueIdentityTokenRequest, v1.IssueIdentityTokenResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceIssueIdentityTokenProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("IssueIdentityToken")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -146,6 +161,7 @@ type workspaceBindingServiceClient struct {
 	allocatePeerRelay    *connect.Client[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse]
 	issueMeshEnrollment  *connect.Client[v1.IssueMeshEnrollmentRequest, v1.IssueMeshEnrollmentResponse]
 	reportMeshAttachment *connect.Client[v1.ReportMeshAttachmentRequest, v1.ReportMeshAttachmentResponse]
+	issueIdentityToken   *connect.Client[v1.IssueIdentityTokenRequest, v1.IssueIdentityTokenResponse]
 }
 
 // BindWorkspace calls codewire.internal.v1.WorkspaceBindingService.BindWorkspace.
@@ -178,6 +194,11 @@ func (c *workspaceBindingServiceClient) ReportMeshAttachment(ctx context.Context
 	return c.reportMeshAttachment.CallUnary(ctx, req)
 }
 
+// IssueIdentityToken calls codewire.internal.v1.WorkspaceBindingService.IssueIdentityToken.
+func (c *workspaceBindingServiceClient) IssueIdentityToken(ctx context.Context, req *connect.Request[v1.IssueIdentityTokenRequest]) (*connect.Response[v1.IssueIdentityTokenResponse], error) {
+	return c.issueIdentityToken.CallUnary(ctx, req)
+}
+
 // WorkspaceBindingServiceHandler is an implementation of the
 // codewire.internal.v1.WorkspaceBindingService service.
 type WorkspaceBindingServiceHandler interface {
@@ -206,6 +227,12 @@ type WorkspaceBindingServiceHandler interface {
 	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
 	// Records how far this Pod's Mesh network membership has come.
 	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
+	// Issues a sandbox identity token for the bound environment and one
+	// audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
+	// "Minting"). A refusal's message is its name: invalid_target,
+	// not_running, identity_stopped, resource_exhausted, identity_unavailable
+	// or key_not_yet_published.
+	IssueIdentityToken(context.Context, *connect.Request[v1.IssueIdentityTokenRequest]) (*connect.Response[v1.IssueIdentityTokenResponse], error)
 }
 
 // NewWorkspaceBindingServiceHandler builds an HTTP handler from the service implementation. It
@@ -255,6 +282,12 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyIdempotent),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceBindingServiceIssueIdentityTokenHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceIssueIdentityTokenProcedure,
+		svc.IssueIdentityToken,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("IssueIdentityToken")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.WorkspaceBindingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceBindingServiceBindWorkspaceProcedure:
@@ -269,6 +302,8 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 			workspaceBindingServiceIssueMeshEnrollmentHandler.ServeHTTP(w, r)
 		case WorkspaceBindingServiceReportMeshAttachmentProcedure:
 			workspaceBindingServiceReportMeshAttachmentHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceIssueIdentityTokenProcedure:
+			workspaceBindingServiceIssueIdentityTokenHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -300,4 +335,8 @@ func (UnimplementedWorkspaceBindingServiceHandler) IssueMeshEnrollment(context.C
 
 func (UnimplementedWorkspaceBindingServiceHandler) ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) IssueIdentityToken(context.Context, *connect.Request[v1.IssueIdentityTokenRequest]) (*connect.Response[v1.IssueIdentityTokenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.IssueIdentityToken is not implemented"))
 }

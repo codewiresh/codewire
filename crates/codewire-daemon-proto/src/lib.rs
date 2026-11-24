@@ -177,6 +177,14 @@ pub const HOSTED_DAEMON_STATE_DIRECTORY: &str = "/codewire/run/daemon";
 /// process in the workspace asks for one TCP stream to another member of the
 /// environment's Mesh network. It lives in the owner-only state directory.
 pub const HOSTED_DAEMON_MESH_SOCKET: &str = "/codewire/run/daemon/mesh.sock";
+/// The daemon's sandbox identity socket (`docs/dev/SANDBOX-IDENTITY.md`, "In
+/// the Sandbox"): `GET /token?resource=URI` answers a token for that
+/// audience. Mode 0600, and SSH socket forwards refuse it.
+pub const HOSTED_DAEMON_IDENTITY_SOCKET: &str = "/codewire/run/identity.sock";
+/// The longest `resource` an identity token request names, in bytes: the
+/// daemon refuses a longer one, and orchestration's body limit for the
+/// method fits one this long.
+pub const IDENTITY_RESOURCE_MAX_BYTES: usize = 1024;
 
 /// The one request line on [`HOSTED_DAEMON_MESH_SOCKET`]:
 /// `CWMESHCONNECT1 <node> <port>\n`. The daemon answers `OK\n` and then
