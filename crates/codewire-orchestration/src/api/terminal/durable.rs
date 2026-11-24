@@ -20,6 +20,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codewire_daemon_bridge::drain::Restart;
 use codewire_daemon_proto::daemon::v1;
 use codewire_server_core::auth::{SESSION_COOKIE_NAME, hash_session_token};
+use codewire_server_core::revocation::Revocation;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -30,7 +31,7 @@ use crate::api::environment_daemon::{
     attach_environment_daemon_session_core, get_environment_daemon_session_core,
 };
 use crate::api::proxy::resolve_running_sandbox_target;
-use crate::api::socket_fence::{SocketAdmission, access_revoked_close, site};
+use crate::api::socket_fence::{SocketAdmission, revoked_close, site};
 use crate::api::socket_keepalive::{ping, pings};
 use crate::runtime::Placement;
 
@@ -269,6 +270,7 @@ pub(super) async fn websocket(
                 &state.auth,
                 &state.pool,
                 &state.revocation,
+                &org_id,
                 site("terminal", &target.environment_id),
             )
             .await?;
@@ -349,11 +351,11 @@ pub(super) async fn websocket(
                     &stats,
                 ) => end,
                 () = restart => End::Restarting,
-                () = revoked.into_future() => End::Revoked,
+                revocation = revoked.into_future() => End::Revoked(revocation),
             };
             if !matches!(
                 end,
-                End::PeerClosed | End::Complete | End::Restarting | End::Revoked
+                End::PeerClosed | End::Complete | End::Restarting | End::Revoked(_)
             ) {
                 let stats = stats.into_inner().unwrap_or_default();
                 tracing::warn!(
@@ -516,9 +518,10 @@ enum End {
     /// This replica reached its drain deadline (#4426). The saved shell keeps
     /// running; the browser attaches to it again through the next replica.
     Restarting,
-    /// The credential that admitted the browser was lost (#3586). The saved
-    /// shell keeps running.
-    Revoked,
+    /// The credential that admitted the browser, or its user's membership
+    /// of the organization, was lost, or the organization's deletion started
+    /// (#3586). The saved shell keeps running.
+    Revoked(Revocation),
 }
 
 /// The close the browser gets for `end`. 1012 is "service restart": the
@@ -531,7 +534,7 @@ fn close_for(end: End) -> Message {
             code: 1012,
             reason: "server restarting; attach again".into(),
         })),
-        End::Revoked => access_revoked_close(),
+        End::Revoked(revocation) => revoked_close(revocation),
         _ => detach(1008),
     }
 }
@@ -554,7 +557,7 @@ impl End {
             Self::DaemonInputStalled => "daemon_input_stalled",
             Self::DaemonClosed => "daemon_closed",
             Self::Restarting => "restarting",
-            Self::Revoked => "revoked",
+            Self::Revoked(_) => "revoked",
         }
     }
 }

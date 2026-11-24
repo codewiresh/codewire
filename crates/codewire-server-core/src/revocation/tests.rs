@@ -95,6 +95,7 @@ fn an_oauth_stream_ends_on_its_token_or_its_grant_and_an_api_key_stream_on_its_k
             token_hash: hash.into(),
             client_id: "cli".into(),
         },
+        organization: None,
     };
     let token = fence.register(&oauth("h1"), snapshot("1:1:"));
     let grant = fence.register(&oauth("h2"), snapshot("1:1:"));
@@ -104,6 +105,7 @@ fn an_oauth_stream_ends_on_its_token_or_its_grant_and_an_api_key_stream_on_its_k
             credential: AdmittedCredential::ApiKey {
                 key_id: "k1".into(),
             },
+            organization: None,
         },
         snapshot("1:1:"),
     );
@@ -161,4 +163,105 @@ fn the_cursor_reads_skipped_numbers_again_until_they_appear_or_age_out() {
 
     cursor.record(std::iter::empty(), start + GAP_LIFETIME);
     assert!(cursor.gaps.is_empty());
+}
+
+#[test]
+fn a_stream_into_an_organization_ends_on_its_users_removal_or_the_deletion_start() {
+    let fence = Fence::new();
+    let in_a = |user: &str, session_id: &str| session(user, session_id).in_organization("org-a");
+    let removed = fence.register(&in_a("u1", "s1"), snapshot("1:1:"));
+    let deleted = fence.register(&in_a("u2", "s2"), snapshot("1:1:"));
+    let elsewhere = fence.register(
+        &session("u1", "s3").in_organization("org-b"),
+        snapshot("1:1:"),
+    );
+    let unscoped = fence.register(&session("u1", "s4"), snapshot("1:1:"));
+
+    fence.dispatch(&[row(
+        Authority::Membership {
+            user_id: "u1".into(),
+            org_id: "org-a".into(),
+        },
+        Revocation::Membership,
+        5,
+    )]);
+    assert_eq!(revoked_now(&removed), Some(Revocation::Membership));
+    assert_eq!(
+        revoked_now(&deleted),
+        None,
+        "another member's stream runs on"
+    );
+    assert_eq!(
+        revoked_now(&elsewhere),
+        None,
+        "the user's other organization runs on"
+    );
+    assert_eq!(revoked_now(&unscoped), None);
+
+    fence.dispatch(&[row(
+        Authority::Organization("org-a".into()),
+        Revocation::Organization,
+        6,
+    )]);
+    assert_eq!(revoked_now(&deleted), Some(Revocation::Organization));
+    assert_eq!(revoked_now(&elsewhere), None);
+    assert_eq!(revoked_now(&unscoped), None);
+}
+
+#[test]
+fn the_log_reads_the_two_organization_kinds_by_their_own_column() {
+    let log = |kind: &str, user_id: &str, org_id: Option<&str>| LogRow {
+        seq: 1,
+        kind: kind.into(),
+        credential_id: org_id.unwrap_or("x").into(),
+        user_id: user_id.into(),
+        org_id: org_id.map(Into::into),
+        xact: "7".into(),
+    };
+    let membership = log("membership", "u1", Some("org-a"))
+        .entry()
+        .expect("read");
+    assert_eq!(
+        membership.key,
+        Authority::Membership {
+            user_id: "u1".into(),
+            org_id: "org-a".into(),
+        }
+    );
+    assert_eq!(membership.revocation, Revocation::Membership);
+    let organization = log("organization", "", Some("org-a"))
+        .entry()
+        .expect("read");
+    assert_eq!(organization.key, Authority::Organization("org-a".into()));
+    assert!(log("organization", "", None).entry().is_none());
+}
+
+#[test]
+fn only_the_deletion_ends_a_connect_stream_saying_the_organization_is_being_deleted() {
+    let deleting = ended_error(Revocation::Organization);
+    assert_eq!(deleting.code, connectrpc::ErrorCode::FailedPrecondition);
+    assert_eq!(
+        deleting.message.as_deref(),
+        Some(crate::org::ORGANIZATION_DELETING)
+    );
+    for revocation in [
+        Revocation::Membership,
+        Revocation::Session,
+        Revocation::User,
+    ] {
+        let revoked = ended_error(revocation);
+        assert_eq!(revoked.code, connectrpc::ErrorCode::PermissionDenied);
+        assert_eq!(revoked.message.as_deref(), Some("access revoked"));
+    }
+}
+
+/// A stream's admission is run again for the same request, which yields no
+/// organization; the admission still matches when the user and credential
+/// do, and not when either differs.
+#[test]
+fn the_admission_run_again_matches_on_user_and_credential_not_organization() {
+    let admitted = session("user-a", "session-a").in_organization("org-a");
+    assert!(session("user-a", "session-a").same_credential(&admitted));
+    assert!(!session("user-a", "session-b").same_credential(&admitted));
+    assert!(!session("user-b", "session-a").same_credential(&admitted));
 }

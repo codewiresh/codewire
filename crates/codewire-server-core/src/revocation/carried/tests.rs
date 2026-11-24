@@ -32,6 +32,7 @@ fn an_id_out_of_bounds_admits_nothing() {
         credential: CarriedCredential::ApiKey {
             key_id: "key".into(),
         },
+        org_id: None,
         through: 0,
     };
     assert!(carried("user".into()).admitted().is_some());
@@ -65,4 +66,28 @@ fn a_stream_already_ended_is_never_vouched_for() {
         xact: 5,
     }]);
     assert_eq!(fence.carry(&admitted, &watch), None);
+}
+
+#[test]
+fn the_organization_travels_and_an_older_admission_without_it_still_reads() {
+    let fence = Fence::new();
+    let admitted = Admitted::session("user", "session").in_organization("org-a");
+    let watch = fence.register(&admitted, Snapshot::parse("1:1:").expect("snapshot"));
+    fence.through.store(7, std::sync::atomic::Ordering::Release);
+    let wire = serde_json::to_string(&fence.carry(&admitted, &watch).expect("carried"))
+        .expect("serialize");
+    let back: CarriedAdmission = serde_json::from_str(&wire).expect("deserialize");
+    assert_eq!(back.admitted(), Some(admitted));
+
+    // An older process's admission names no organization.
+    let older =
+        r#"{"user_id":"user","credential":{"kind":"session","session_id":"session"},"through":7}"#;
+    let back: CarriedAdmission = serde_json::from_str(older).expect("deserialize");
+    assert_eq!(back.admitted(), Some(Admitted::session("user", "session")));
+    // And one with no organization serializes as it did.
+    let plain = Admitted::session("user", "session");
+    let plain_watch = fence.register(&plain, Snapshot::parse("1:1:").expect("snapshot"));
+    let wire = serde_json::to_string(&fence.carry(&plain, &plain_watch).expect("carried"))
+        .expect("serialize");
+    assert!(!wire.contains("org_id"), "{wire}");
 }

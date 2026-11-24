@@ -80,3 +80,15 @@ Issue: #4823. Code: `crates/codewire-cli/src/commands/organizations.rs`.
     asks, so deleting "Scratch k4" that way needs --yes", and nothing
     deleted;
   - no output mentioned credit or money.
+
+## `org-delete-streams`: open streams end when the deletion starts
+
+Issue: #3586. Not yet observed.
+
+- **Entry points:** `cw org delete`, while the organization's members have
+  streams open into its Sandboxes, and a public port's preview.
+- **States to exercise, driving it and proof:** as `access-org-deleting` in
+  [account-access.md](account-access.md). In short, every open stream ends
+  within 30 seconds of the deletion starting and says the organization is
+  being deleted, and every new one is refused, including a public preview,
+  a new Mesh Dial and the desktop viewer.

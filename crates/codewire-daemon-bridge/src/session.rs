@@ -66,6 +66,7 @@ pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
     async fn admit_stream(
         &self,
         _ctx: &RequestContext,
+        _org_id: &str,
         _environment_id: &str,
     ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
         Ok(None)
@@ -437,7 +438,7 @@ where
         }
         let revoked = self
             .backend
-            .admit_stream(&ctx, &open.environment_id)
+            .admit_stream(&ctx, &open.org_id, &open.environment_id)
             .await?;
         let attachment = self
             .backend

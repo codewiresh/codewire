@@ -1,7 +1,9 @@
 //! The dashboard's terminal and the SSH proxy's WebSocket on the revocation
 //! fence (#3586; `docs/dev/AUTH-POLICY.md`, "Account access revocation"): a
 //! socket is admitted by the credential its handshake carried, and closes
-//! with 1008, "access revoked", when that credential is lost.
+//! with 1008, "access revoked", when that credential or its user's membership
+//! of the environment's organization is lost, or with 1008, "organization is
+//! being deleted", when that organization's deletion starts.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -10,7 +12,9 @@ use axum::extract::ws::{CloseFrame, Message};
 use axum::http::{HeaderMap, StatusCode};
 use codewire_server_core::AppError;
 use codewire_server_core::auth::{AuthState, AuthUser, authenticate_headers_with_context};
-use codewire_server_core::revocation::{Admitted, Fence, Refused, StreamSite, record_revoked};
+use codewire_server_core::revocation::{
+    Admitted, Fence, Refused, Revocation, StreamSite, record_revoked,
+};
 use sqlx::PgPool;
 
 /// The close a revoked socket sends.
@@ -19,6 +23,24 @@ pub(crate) fn access_revoked_close() -> Message {
         code: 1008,
         reason: "access revoked".into(),
     }))
+}
+
+/// The close a socket sends when its organization's deletion starts: the
+/// reason a new socket's refusal gives, so the page shows its organization
+/// line.
+pub(crate) fn organization_deleting_close() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: 1008,
+        reason: codewire_server_core::org::ORGANIZATION_DELETING.into(),
+    }))
+}
+
+/// The close for a socket that ended on `revocation`.
+pub(crate) fn revoked_close(revocation: Revocation) -> Message {
+    match revocation {
+        Revocation::Organization => organization_deleting_close(),
+        _ => access_revoked_close(),
+    }
 }
 
 /// The user a socket's handshake admitted, the credential that admitted it,
@@ -64,13 +86,16 @@ impl SocketAdmission {
         })
     }
 
-    /// Registers the socket on the fence before it is upgraded, then re-reads
-    /// its admission. After this only the credential's id or hash is held.
+    /// Registers the socket on the fence before it is upgraded, under its
+    /// credential and `org_id`, the organization of the environment it goes
+    /// into, then re-reads its admission and membership. After this only the
+    /// credential's id or hash is held.
     pub(crate) async fn fence(
         self,
         auth: &AuthState,
         pool: &PgPool,
         fence: &Fence,
+        org_id: &str,
         site: StreamSite,
     ) -> Result<(AuthUser, SocketRevoked), StatusCode> {
         let Self {
@@ -104,30 +129,35 @@ impl SocketAdmission {
                 }
             }
         };
-        let watch =
-            fence
-                .admit(pool, &admitted, recheck)
-                .await
-                .map_err(|refused| match refused {
-                    Refused::Revoked => StatusCode::UNAUTHORIZED,
-                    Refused::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                })?;
+        // The re-read compares the credential alone, so the organization
+        // joins only the registration.
+        let fenced = admitted.clone().in_organization(org_id);
+        let watch = fence
+            .admit(pool, &fenced, recheck)
+            .await
+            .map_err(|refused| match refused {
+                Refused::Revoked | Refused::NotMember | Refused::OrganizationDeleting => {
+                    StatusCode::UNAUTHORIZED
+                }
+                Refused::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            })?;
         let pool = pool.clone();
         let revoked = Box::pin(async move {
             let mut watch = watch;
             let revocation = watch.revoked().await;
-            record_revoked(&pool, &admitted, revocation, &site).await;
+            record_revoked(&pool, &fenced, revocation, &site).await;
+            revocation
         });
         Ok((user, SocketRevoked(revoked)))
     }
 }
 
-/// Completes when the socket's credential is lost, after recording it. The
-/// registration ends when this is dropped with the socket.
-pub(crate) struct SocketRevoked(Pin<Box<dyn Future<Output = ()> + Send>>);
+/// Completes when the socket's admission is lost, after recording it, with
+/// what was lost. The registration ends when this is dropped with the socket.
+pub(crate) struct SocketRevoked(Pin<Box<dyn Future<Output = Revocation> + Send>>);
 
 impl SocketRevoked {
-    pub(crate) fn into_future(self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    pub(crate) fn into_future(self) -> Pin<Box<dyn Future<Output = Revocation> + Send>> {
         self.0
     }
 }

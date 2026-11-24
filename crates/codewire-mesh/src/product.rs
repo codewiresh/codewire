@@ -394,19 +394,27 @@ impl MeshProductService {
         Ok(context)
     }
 
+    /// A new Dial session into `network_id`. Refused once its organization's
+    /// deletion has started or failed, as every new stream into the
+    /// organization is (#3586); the organization's other Mesh calls go on.
     pub(crate) async fn authorize_coordinate(
         &self,
         organization_id: &str,
         network_id: &str,
         credential: ForwardedMeshCredential,
     ) -> AppResult<MeshAuthorizationContext> {
-        self.authorize_network(
-            organization_id,
-            network_id,
-            credential,
-            RequiredRole::Member,
-        )
-        .await
+        let context = self
+            .authorize_network(
+                organization_id,
+                network_id,
+                credential,
+                RequiredRole::Member,
+            )
+            .await?;
+        if context.organization_deleting {
+            return Err(codewire_server_core::org::organization_deleting_error());
+        }
+        Ok(context)
     }
 
     pub(crate) async fn organization_for_network(&self, network_id: &str) -> AppResult<String> {

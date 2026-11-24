@@ -2147,6 +2147,24 @@ test("an open terminal keeps the organization line when the Sandbox then stops o
 // A socket the server closes because the sign-in, key or account behind it was
 // revoked says so in the CLI's words, and offers no Reconnect (#5660). Any other
 // close keeps "Disconnected." and its Reconnect.
+// The deletion starting ends an open terminal's socket on the server (#3586):
+// it closes with the deletion's reason, and the page says so and stops.
+test("a terminal closed because its organization is being deleted says why and stops", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.connections[0].route.close({ code: 1008, reason: "organization is being deleted" });
+  await expect(connectionStatus(page, sessionId(1))).toHaveText(organizationDeleting);
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.launches).toBe(0);
+});
+
 test("a terminal whose access is revoked says so and offers no Reconnect", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];

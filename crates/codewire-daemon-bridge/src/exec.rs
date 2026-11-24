@@ -51,6 +51,7 @@ pub trait ExecBackend: Clone + Send + Sync + 'static {
     async fn admit_stream(
         &self,
         _ctx: &RequestContext,
+        _org_id: &str,
         _environment_id: &str,
     ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
         Ok(None)
@@ -205,7 +206,7 @@ where
         }
         let revoked = self
             .backend
-            .admit_stream(&ctx, &request.environment_id)
+            .admit_stream(&ctx, &request.org_id, &request.environment_id)
             .await?;
         let daemon = self
             .backend
@@ -297,7 +298,7 @@ where
         })?;
         let revoked = self
             .backend
-            .admit_stream(&ctx, &start.environment_id)
+            .admit_stream(&ctx, &start.org_id, &start.environment_id)
             .await?;
         let daemon = self
             .backend
@@ -690,6 +691,7 @@ mod tests {
         async fn admit_stream(
             &self,
             _ctx: &RequestContext,
+            _org_id: &str,
             _environment_id: &str,
         ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
             Ok(self

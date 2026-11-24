@@ -38,15 +38,17 @@ class ResolveMeshAuthorizationResponse(_message.Message):
     def __init__(self, context: _Optional[_Union[MeshAuthorizationContext, _Mapping]] = ...) -> None: ...
 
 class MeshAuthorizationContext(_message.Message):
-    __slots__ = ("principal_id", "principal_kind", "org_id", "role", "credential_kind")
+    __slots__ = ("principal_id", "principal_kind", "org_id", "role", "credential_kind", "organization_deleting")
     PRINCIPAL_ID_FIELD_NUMBER: _ClassVar[int]
     PRINCIPAL_KIND_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ROLE_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_KIND_FIELD_NUMBER: _ClassVar[int]
+    ORGANIZATION_DELETING_FIELD_NUMBER: _ClassVar[int]
     principal_id: str
     principal_kind: MeshAuthorizationPrincipalKind
     org_id: str
     role: _organization_pb2.OrgRole
     credential_kind: MeshAuthorizationCredentialKind
-    def __init__(self, principal_id: _Optional[str] = ..., principal_kind: _Optional[_Union[MeshAuthorizationPrincipalKind, str]] = ..., org_id: _Optional[str] = ..., role: _Optional[_Union[_organization_pb2.OrgRole, str]] = ..., credential_kind: _Optional[_Union[MeshAuthorizationCredentialKind, str]] = ...) -> None: ...
+    organization_deleting: bool
+    def __init__(self, principal_id: _Optional[str] = ..., principal_kind: _Optional[_Union[MeshAuthorizationPrincipalKind, str]] = ..., org_id: _Optional[str] = ..., role: _Optional[_Union[_organization_pb2.OrgRole, str]] = ..., credential_kind: _Optional[_Union[MeshAuthorizationCredentialKind, str]] = ..., organization_deleting: _Optional[bool] = ...) -> None: ...

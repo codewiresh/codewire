@@ -50,4 +50,8 @@ message MeshAuthorizationContext {
   string org_id = 3;
   codewire.v1.OrgRole role = 4;
   MeshAuthorizationCredentialKind credential_kind = 5;
+  // The organization's deletion has started or failed, so it admits no new
+  // stream: Mesh refuses a new Dial into its networks (#3586). Its other
+  // product calls go on, as the organization's own pages do.
+  bool organization_deleting = 6;
 }

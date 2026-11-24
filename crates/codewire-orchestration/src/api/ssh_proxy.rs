@@ -12,6 +12,7 @@ use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{
     RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,
 };
+use codewire_server_core::revocation::Revocation;
 use futures_util::{Sink, SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ use uuid::Uuid;
 use super::ApiState;
 use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
-use super::socket_fence::{SocketRevoked, access_revoked_close, site};
+use super::socket_fence::{SocketRevoked, revoked_close, site};
 use super::socket_keepalive::{ping, pings};
 use super::terminal::{
     admit_socket_request, authenticate_socket_request, require_sandbox_claim_ready,
@@ -81,6 +82,7 @@ pub async fn ssh_proxy_websocket(
             &state.auth,
             &state.pool,
             &state.revocation,
+            &org_id,
             site("ssh_proxy", &target.environment_id),
         )
         .await
@@ -264,7 +266,7 @@ pub async fn ssh_proxy_check(
 async fn to_client<Tx>(
     mut ws_tx: Tx,
     mut tcp_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    revoked: impl Future<Output = ()>,
+    revoked: impl Future<Output = Revocation>,
     restart: RestartSignal,
 ) where
     Tx: Sink<Message> + Unpin,
@@ -277,8 +279,8 @@ async fn to_client<Tx>(
         // ends either way.
         tokio::select! {
             biased;
-            () = &mut revoked => {
-                let _ = ws_tx.send(access_revoked_close()).await;
+            revocation = &mut revoked => {
+                let _ = ws_tx.send(revoked_close(revocation)).await;
                 return;
             }
             () = &mut restart => {

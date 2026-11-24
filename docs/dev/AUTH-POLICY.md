@@ -521,7 +521,8 @@ introspection instead of offline ID-token validation.
 Disablement is checked when Codewire authenticates a new request or begins a
 new stream. A stream already admitted ends when the authority that admitted it
 is lost (#3586). An exec, file, attach or log-follow stream, and the
-dashboard's terminal or the SSH proxy's WebSocket, ends in four cases:
+dashboard's terminal, the SSH proxy's WebSocket or the desktop viewer's, ends
+in six cases:
 
 - its user is disabled, which covers suspension and account deletion;
 - the browser session that admitted it is deleted before it expired: a
@@ -529,11 +530,15 @@ dashboard's terminal or the SSH proxy's WebSocket, ends in four cases:
 - the OAuth access token that admitted it is deleted before it expired, by
   revocation or a password reset, or refresh-token reuse revokes its grant
   (the user and the client);
-- the API key that admitted it is disabled or deleted.
+- the API key that admitted it is disabled or deleted;
+- its user leaves, or is removed from, the organization its environment
+  belongs to: the `membership` kind;
+- that organization's deletion starts: the `organization` kind, which ends
+  every member's streams into it at once.
 
 Such a stream ends within seconds normally, and within 30 seconds at most.
 Expiry never ends a stream (#3827): one whose credential expired runs on until
-one of the four cases applies to its user, grant or key. A sign-out ends only
+one of the six cases applies to its user, grant, key or organization. A sign-out ends only
 the streams its own session admitted, so another machine's stream keeps
 running.
 
@@ -549,26 +554,48 @@ environment, and whether it is refused:
   the preview of a port shared with the organization; and the operations
   that reach a running Sandbox through its daemon (a repair, a runtime
   update).
-- **Not yet:** a public port's preview, which has no caller to check and
-  ends when the deletion stops the environment; a Mesh Dial into the
-  organization's networks, with the Mesh step; and the desktop viewer's
-  WebSocket, which joins this rule when it lands (#5574).
+- **Also refused:** every request to a public port's preview, from anyone,
+  since it has no caller to check: it gets the preview's unavailable page;
+  a new Mesh Dial into the organization's networks; and the desktop
+  viewer's WebSocket.
 
-A tailnet client session already open ends at the coordinator's next
-re-check, within 60 seconds, since that re-check is the same admission. Any
-other stream already open keeps running until the deletion stops its
-environment; ending it at once is the next step, the `membership` kind
-(`private-docs: designs/stream-revocation.md`, "Next").
+A stream already open into the organization ends when its deletion starts,
+through the `organization` kind above. A tailnet client session also ends at
+the coordinator's next re-check, within 60 seconds, as before. **Not yet:** a
+Mesh Dial session already open, which ends with the Mesh relay step
+(`private-docs: designs/stream-revocation.md`, "Mesh sessions"); and a
+request already being proxied to a public port, such as a WebSocket opened
+through a public preview, which has no caller to end and runs until the
+deletion stops its environment.
+
+Some changes to access end no open stream yet; each is checked again at the
+next admission:
+- a lowered role in the organization, such as an admin made a member;
+- a removed per-environment grant, a direct loss of access, which is the next
+  kind, `grant`.
+
+An environment moved to another organization is not built: no Sandbox changes
+owner. If it is ever built, it comes to cw-security first.
 
 The database records each loss in `credential_revocations`:
 - **Writers:** only database code. Triggers on `users`, `sessions`,
   `oidc_access_tokens` and `api_keys` write it, and the refresh-token reuse
   path calls `codewire_revoke_oauth_grant` inside its own transaction. A
+  trigger on deleting an `org_members` row writes the `membership` kind
+  (the user and the organization), whatever removed it: a removal, leaving,
+  an account deletion or the end of an organization's deletion. A trigger on
+  `organizations` writes one `organization` row, naming only the
+  organization, when its `deletion_state` becomes `deleting`; that one row
+  matches every member's streams into it. A
   repository policy check refuses service code that inserts, updates or
   deletes log rows. A new way of ending a credential adds its trigger, or
   calls the log's function, in the same change.
 - **Contents:** a row holds ids and token hashes, never a credential. The
-  writing function removes rows older than an hour.
+  organization has its own column; a check on the table says which columns
+  each kind sets. The existing columns stay required, so both organization
+  kinds repeat the organization as the credential, and an `organization`
+  row names no user. The writing function removes rows older than an
+  hour.
 - **Threat:** a forged row can only end streams, never grant access. Whoever
   holds the services' database role can already delete sessions or disable
   users, so the check guards against a bug in service code, not against
@@ -577,7 +604,13 @@ The database records each loss in `credential_revocations`:
   the log by its sequence every 30 seconds, so a missed wake-up costs at most
   that.
 - **Admission:** a stream registers first, then re-reads the same check that
-  admitted it, so a revocation and a new admission can't race. A revocation
+  admitted it, so a revocation and a new admission can't race. A stream into
+  an organization's environment registers under that organization too, and
+  its re-read, on the primary, also checks again that its user is a member
+  and that the organization admits streams, so a removal or a deletion
+  between admission and registration refuses it. A carried admission (a
+  tailnet session moving between replicas) carries the organization as
+  well. A revocation
   committed before the re-read refuses the stream, and one after it ends the
   stream. A row the re-read already saw never ends the stream, so an account
   disabled and enabled again, or signed in again after a revoked grant, opens
@@ -585,7 +618,11 @@ The database records each loss in `credential_revocations`:
   `unavailable`.
 
 A revoked Connect stream ends with `permission_denied`, "access revoked". A
-WebSocket closes with code 1008, "access revoked". Each writes a
+WebSocket closes with code 1008, "access revoked". A stream the `organization`
+kind ends says why as a new stream's refusal does: a Connect stream ends with
+the same error, "organization is being deleted", and a WebSocket closes with
+1008 and that reason, so the dashboard's terminal shows its organization line
+(#5677) rather than the revoked one. Each writes a
 `stream.revoked` audit event naming the user, the kind of loss, the surface
 and the environment, never a credential or the stream's contents. The kind
 of loss is the key that matched: when several land in one transaction, as a
@@ -680,8 +717,8 @@ connection, and it ends in the same four cases (#3586):
   keep another off the environment until it leaves; it grants nothing.
   Coordinator-assigned addresses would close it (#5563).
 
-Mesh sessions and removal from an organization don't end a stream yet. Expiry ends no tailnet connection
-either (#3827).
+An open Mesh session doesn't end a stream yet. Expiry ends no tailnet
+connection either (#3827).
 
 ## Account suspension
 

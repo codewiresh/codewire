@@ -1000,7 +1000,18 @@ fn a_revocation_closes_the_viewer_as_access_revoked() {
         Message::Close(Some(frame)) => (frame.code, frame.reason.to_string()),
         other => panic!("expected a close, got {other:?}"),
     };
-    assert_eq!(frame(End::Revoked), (1008, "access revoked".to_owned()));
+    assert_eq!(
+        frame(End::Revoked(Revocation::Session)),
+        (1008, "access revoked".to_owned())
+    );
+    assert_eq!(
+        frame(End::Revoked(Revocation::Membership)),
+        (1008, "access revoked".to_owned())
+    );
+    assert_eq!(
+        frame(End::Revoked(Revocation::Organization)),
+        (1008, "organization is being deleted".to_owned())
+    );
     assert_eq!(
         frame(End::DaemonClosed),
         (1008, "terminal detached".to_owned())

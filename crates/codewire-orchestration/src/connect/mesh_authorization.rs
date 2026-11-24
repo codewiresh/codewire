@@ -77,12 +77,17 @@ async fn resolve_mesh_authorization(
     let role = user_org_role(pool, user, org_id)
         .await?
         .ok_or(AppError::Forbidden)?;
+    // Asked after the caller's own access, as every stream admission asks it;
+    // Mesh refuses only a new Dial on it (#3586).
+    let organization_deleting =
+        !codewire_server_core::org::org_admits_streams(pool, org_id).await?;
     Ok(MeshAuthorizationContext {
         principal_id: user.user_id.clone(),
         principal_kind: MeshAuthorizationPrincipalKind::User.into(),
         org_id: org_id.to_owned(),
         role: proto_role(&role)?.into(),
         credential_kind: credential_kind(credential).into(),
+        organization_deleting,
         ..Default::default()
     })
 }
@@ -364,6 +369,73 @@ mod tests {
         .await;
 
         assert_metadata_rejections(&client, address, &fixture).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the bounded PostgreSQL integration harness"]
+    async fn an_organization_being_deleted_still_resolves_and_says_so() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set by the bounded PostgreSQL integration harness");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect database");
+        let fixture = seed_fixture(&pool).await;
+        let address = start_receiver(pool.clone()).await;
+        let generated = generated_client(
+            address,
+            forwarded_session(&fixture.session),
+            hmac(MESH_AUTHORIZATION_CALLER, MESH_AUTHORIZATION_METHOD),
+        );
+        let resolve = || {
+            generated.resolve_mesh_authorization(ResolveMeshAuthorizationRequest {
+                org_id: fixture.org_id.clone(),
+                ..Default::default()
+            })
+        };
+        let active = resolve().await.expect("an active organization resolves");
+        assert!(
+            !active
+                .view()
+                .context
+                .as_option()
+                .expect("typed context")
+                .organization_deleting
+        );
+
+        // An organization being deleted still resolves, for its other Mesh
+        // calls, and says so, so Mesh refuses a new Dial (#3586).
+        sqlx::query(
+            "UPDATE organizations SET deletion_state = 'deleting', deletion_generation = 1, \
+             deletion_operation_id = 'synthetic-operation', \
+             deletion_workflow_id = 'synthetic-workflow', deletion_requested_at = NOW(), \
+             deletion_phase = 'synthetic_phase' WHERE id = $1",
+        )
+        .bind(&fixture.org_id)
+        .execute(&pool)
+        .await
+        .expect("start the deletion");
+        let deleting = resolve()
+            .await
+            .expect("an organization being deleted still resolves");
+        assert!(
+            deleting
+                .view()
+                .context
+                .as_option()
+                .expect("typed context")
+                .organization_deleting
+        );
+        sqlx::query(
+            "UPDATE organizations SET deletion_state = 'active', deletion_operation_id = NULL, \
+             deletion_workflow_id = NULL, deletion_requested_by = NULL, \
+             deletion_requested_at = NULL, deletion_phase = NULL WHERE id = $1",
+        )
+        .bind(&fixture.org_id)
+        .execute(&pool)
+        .await
+        .expect("end the deletion");
     }
 
     async fn start_receiver(pool: PgPool) -> SocketAddr {

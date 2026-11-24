@@ -124,7 +124,7 @@ impl RemoteClients {
                 self.fenced.insert(peer_id, watch);
                 true
             }
-            Err(Refused::Revoked) => {
+            Err(Refused::Revoked | Refused::NotMember | Refused::OrganizationDeleting) => {
                 self.refused.insert(peer_id);
                 false
             }

@@ -843,11 +843,11 @@ async fn removed_creator_proxy_requests_are_refused_for_old_grants_and_bearers()
 
 #[tokio::test]
 #[ignore = "requires disposable TEST_DATABASE_URL"]
-async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
+async fn an_organization_being_deleted_opens_no_preview() -> Result<()> {
     // AUTH-POLICY.md, #3586: a preview with a caller to check is refused once
     // its organization's deletion has started or failed, and the reason
-    // reaches only a caller the access check admits. A public one is left to
-    // the deletion stopping its environment.
+    // reaches only a caller the access check admits. A public one has no
+    // caller to check, so the proxy refuses every request to it.
     let f = Fixture::create(2).await?;
     let result = async {
         let user = |user_id: &str| AuthUser {
@@ -864,6 +864,7 @@ async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
             .execute(&f.pool)
             .await?;
         anyhow::ensure!(f.proxied_as(&user("preview-user"), &no_cookie).await? == StatusCode::OK);
+        anyhow::ensure!(f.target().await?.1.org_admits_streams);
         for (deletion, failure) in [("deleting", None), ("delete_failed", Some("synthetic_failure"))] {
             sqlx::query("UPDATE organizations SET deletion_state=$1, deletion_generation=1, deletion_operation_id='synthetic-operation', deletion_workflow_id='synthetic-workflow', deletion_requested_at=NOW(), deletion_phase='synthetic_phase', deletion_failure_code=$2 WHERE id='preview-org'")
                 .bind(deletion)
@@ -902,7 +903,20 @@ async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
             sqlx::query("UPDATE environment_ports SET access='public' WHERE id='preview-port'")
                 .execute(&f.pool)
                 .await?;
-            anyhow::ensure!(f.proxied_as(&user("stranger-user"), &no_cookie).await? == StatusCode::OK);
+            anyhow::ensure!(
+                !f.target().await?.1.org_admits_streams,
+                "{deletion}: the proxy would open a public preview"
+            );
+            let page = organization_deleting(&f.context(), &Method::GET, &navigation);
+            let page = axum::body::to_bytes(page.into_body(), 64 * 1024).await?;
+            anyhow::ensure!(
+                String::from_utf8(page.to_vec())?.contains(
+                    "This organization is being deleted, so its Sandboxes' previews can't open."
+                ),
+                "{deletion}: a public preview's visitor wasn't told why"
+            );
+            let refused = organization_deleting(&f.context(), &Method::GET, &no_cookie);
+            anyhow::ensure!(refused.status() == StatusCode::FORBIDDEN);
         }
         Ok(())
     }

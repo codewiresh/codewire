@@ -57,6 +57,7 @@ use crate::api::logs::{
 use crate::api::network_policies::NetworkPolicyFlags;
 use crate::api::prepare::{PrepareResponse, PrepareStreamEvent, RepoConfig, start_prepare_stream};
 use crate::api::trust_report::{EnvironmentTrustReport, get_environment_trust_report_core};
+use crate::connect::fenced_stream;
 use crate::connect::presets::proto_preset;
 
 mod create_body;
@@ -784,11 +785,9 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
         // A follow lasts; a read of what is there ends by itself.
+        let (org_id, environment_id) = (&request.org_id, &request.environment_id);
         let revoked = if request.follow {
-            Some(
-                crate::connect::fenced_stream(&self.state, &ctx, "logs", &request.environment_id)
-                    .await?,
-            )
+            Some(fenced_stream(&self.state, &ctx, "logs", org_id, environment_id).await?)
         } else {
             None
         };

@@ -23,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use codewire_daemon::client::SessionClientError;
 use codewire_daemon_bridge::drain::Restart;
 use codewire_daemon_proto::DESKTOP_VNC_PORT;
+use codewire_server_core::revocation::Revocation;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
@@ -34,7 +35,7 @@ use super::durable::{
 use super::{ApiState, require_sandbox_claim_ready, terminal_error};
 use crate::api::environment_daemon::streaming_daemon_client;
 use crate::api::proxy::resolve_running_sandbox_target;
-use crate::api::socket_fence::{SocketAdmission, access_revoked_close, site};
+use crate::api::socket_fence::{SocketAdmission, revoked_close, site};
 use crate::api::socket_keepalive::{ping, pings};
 use crate::runtime::Placement;
 
@@ -90,6 +91,7 @@ pub(crate) async fn desktop_stream_websocket(
                 &state.auth,
                 &state.pool,
                 &state.revocation,
+                &org_id,
                 site("desktop", &target.environment_id),
             )
             .await?;
@@ -153,11 +155,11 @@ pub(crate) async fn desktop_stream_websocket(
                             }
                         } => end,
                         () = restart => End::Restarting,
-                        () = revoked.into_future() => End::Revoked,
+                        revocation = revoked.into_future() => End::Revoked(revocation),
                     }
                 }
             };
-            if !matches!(end, End::ViewerLeft | End::Restarting | End::Revoked) {
+            if !matches!(end, End::ViewerLeft | End::Restarting | End::Revoked(_)) {
                 tracing::info!(
                     environment_id = %target.environment_id,
                     reason = end.as_str(),
@@ -258,8 +260,9 @@ enum End {
     TooManyViewers,
     /// This replica reached its drain deadline; the viewer connects again.
     Restarting,
-    /// The credential that admitted the browser was lost.
-    Revoked,
+    /// The credential that admitted the browser, or its user's membership
+    /// of the organization, was lost, or the organization's deletion started.
+    Revoked(Revocation),
 }
 
 impl End {
@@ -274,7 +277,7 @@ impl End {
             Self::DaemonUnreachable => "daemon_unreachable",
             Self::TooManyViewers => "too_many_viewers",
             Self::Restarting => "restarting",
-            Self::Revoked => "revoked",
+            Self::Revoked(_) => "revoked",
         }
     }
 }
@@ -285,7 +288,7 @@ fn close_for(end: End) -> Message {
     let (code, reason) = match end {
         End::ViewerLeft => (1000, "viewer left"),
         End::Restarting => (1012, "server restarting; connect again"),
-        End::Revoked => return access_revoked_close(),
+        End::Revoked(revocation) => return revoked_close(revocation),
         End::Invalid => (1008, "the viewer sent something other than desktop bytes"),
         End::Stalled => (1008, "the connection stalled"),
         End::DesktopEnded => (1008, "the desktop ended"),

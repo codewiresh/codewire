@@ -75,6 +75,7 @@ mod tests {
     mod lease_owner_incarnation;
     mod live_changes;
     mod local_placeholder_roots;
+    mod membership_revocations;
     mod network_policies;
     mod network_policy_web;
     mod oauth_sign_in;
@@ -110,9 +111,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0053.
+    // (which equals the 41-migration history it replaced), 0002 to 0054.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "62c165235fe3c38e83f54e8a8d95001e87df25ae2f1547e814fe00cd689bdbd7";
+        "eae38583d112b73c09758f4783b2b10198660a04697dfa6905267990267e2787";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -240,6 +241,8 @@ mod tests {
     const APPLIED_SANDBOX_POD_INTERCEPTION_TRUST_CHECKSUM: &str = "47b562730c130ade8691a214e7947ddf9f872e18b68c5ff597374c0c3a40332db8baddb31727814fc5091205b2b43516";
     // SHA-384 of 0053_network_policy_web.sql (#3997).
     const APPLIED_NETWORK_POLICY_WEB_CHECKSUM: &str = "90d5f230122f9b9617c62a3d419d8f35a9254f686bef60b1cfc94e00530987ccd47b49cdd9c1a5e93bc3e020805d54d4";
+    // SHA-384 of 0054_membership_revocations.sql (#3586).
+    const APPLIED_MEMBERSHIP_REVOCATIONS_CHECKSUM: &str = "f572abecbbf55ece933cde7bb7b6f2f363c7f04db8959afe13608b8bf15087a557cd1ae96105d41076b8b637f2811590";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1374,6 +1377,7 @@ mod tests {
             (51, APPLIED_PLATFORM_LOCAL_PLACEHOLDER_ROOTS_CHECKSUM),
             (52, APPLIED_SANDBOX_POD_INTERCEPTION_TRUST_CHECKSUM),
             (53, APPLIED_NETWORK_POLICY_WEB_CHECKSUM),
+            (54, APPLIED_MEMBERSHIP_REVOCATIONS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1404,11 +1408,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 53
+                first.len() == 54
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53
+                        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54
                     ])
                     && first.iter().all(|migration| migration.2)
             );

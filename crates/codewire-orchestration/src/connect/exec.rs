@@ -40,9 +40,10 @@ impl ExecBackend for PlatformExecBackend {
     async fn admit_stream(
         &self,
         ctx: &RequestContext,
+        org_id: &str,
         environment_id: &str,
     ) -> Result<Option<codewire_daemon_bridge::drain::EndSignal>, connectrpc::ConnectError> {
-        crate::connect::fenced_stream(&self.state, ctx, "exec", environment_id)
+        crate::connect::fenced_stream(&self.state, ctx, "exec", org_id, environment_id)
             .await
             .map(Some)
     }

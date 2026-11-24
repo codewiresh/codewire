@@ -461,9 +461,8 @@ otherwise, with a reason the page shows: the desktop ended or is not
 running, the viewer limit, a stall, a frame that is not desktop bytes, a
 Sandbox too old for the stream or one that could not be reached, or access
 revoked. It writes the `stream.revoked` audit event when the fence ended
-it. Removing a member from an organization does not end an open stream yet,
-on this surface or any other ([AUTH-POLICY.md](AUTH-POLICY.md)); the next
-admission refuses them.
+it. Removing its user from the organization, or the organization's deletion
+starting, ends it the same way ([AUTH-POLICY.md](AUTH-POLICY.md)).
 
 ## What this does not protect
 

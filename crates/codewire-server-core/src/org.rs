@@ -9,6 +9,16 @@ use crate::error::AppError;
 /// failed is refused with (AUTH-POLICY.md, "Account access revocation").
 pub const ORGANIZATION_DELETING: &str = "organization is being deleted";
 
+/// [`ORGANIZATION_DELETING`] as the error a request is refused with, and a
+/// stream ended with when the deletion starts.
+pub fn organization_deleting_error() -> AppError {
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "organization_deleting",
+        detail: ORGANIZATION_DELETING.into(),
+    }
+}
+
 /// Whether `org_id` admits a new stream or connection into its environments:
 /// not once its deletion has started or failed, until it is retried to the
 /// end. Callers ask after the caller's own access check, so only a caller who

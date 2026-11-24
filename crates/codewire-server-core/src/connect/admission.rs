@@ -130,7 +130,7 @@ impl AdmissionRecheck {
                     &auth.credential,
                     auth.oauth_bearer_authority.as_ref(),
                 );
-                if again.as_ref() == Some(admitted) {
+                if again.is_some_and(|again| again.same_credential(admitted)) {
                     Ok(())
                 } else {
                     Err(Refused::Revoked)
@@ -152,13 +152,15 @@ impl AdmissionRecheck {
 }
 
 /// Admits a stream this request opens to `fence`: registers it under the
-/// request's user and credential, then runs the request's admission again,
+/// request's user and credential, and under `org_id` when the stream goes
+/// into one of its environments, then runs the request's admission again,
 /// so a revocation either refuses it here or ends it later. Refused as
 /// `unauthenticated` when the credential no longer admits it, and as
 /// `unavailable` when that couldn't be checked; never admitted unchecked.
 pub async fn admit_stream(
     ctx: &connectrpc::RequestContext,
     fence: &Fence,
+    org_id: Option<&str>,
 ) -> Result<(Admitted, Watch), connectrpc::ConnectError> {
     let recheck = ctx
         .extensions()
@@ -170,6 +172,10 @@ pub async fn admit_stream(
         ctx.extensions().get::<OAuthBearerAuthority>(),
     )
     .ok_or_else(|| connectrpc::ConnectError::unauthenticated("access revoked"))?;
+    let admitted = match org_id {
+        Some(org_id) => admitted.in_organization(org_id),
+        None => admitted,
+    };
     let watch = fence
         .admit(
             &recheck.layer.state.pool,
@@ -179,6 +185,12 @@ pub async fn admit_stream(
         .await
         .map_err(|refused| match refused {
             Refused::Revoked => connectrpc::ConnectError::unauthenticated("access revoked"),
+            // As the request's own access check answers, which a stream's
+            // admission runs before (#3586).
+            Refused::NotMember => connectrpc::ConnectError::not_found("organization not found"),
+            Refused::OrganizationDeleting => {
+                crate::revocation::ended_error(crate::revocation::Revocation::Organization)
+            }
             Refused::Unavailable => {
                 connectrpc::ConnectError::unavailable("stream admission is unavailable; try again")
             }

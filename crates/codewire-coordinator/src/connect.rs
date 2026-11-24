@@ -16,7 +16,7 @@ use codewire_server_core::auth::{
 };
 use codewire_server_core::connect::app_error_to_wire;
 use codewire_server_core::error::AppError;
-use codewire_server_core::revocation::{Admitted, Refused};
+use codewire_server_core::revocation::{Admitted, Refused, ended_error};
 use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -245,7 +245,9 @@ impl ProductionAuthorizer {
             Ok(environment_id) => environment_id,
             Err(response) => return Err(response_to_connect_error(response).await),
         };
-        let fenced = self.fence_client(headers, &authentication).await?;
+        let fenced = self
+            .fence_client(headers, &authentication, hello.org_id.trim())
+            .await?;
         Ok(AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             principal: Principal::User(authentication.user.user_id.clone()),
@@ -262,13 +264,16 @@ impl ProductionAuthorizer {
         })
     }
 
-    /// Admits a client's session to the fence: registers it under its user
-    /// and credential, then authenticates the hello's headers again, so a
-    /// revocation either refuses it here or ends it later (#3586).
+    /// Admits a client's session to the fence: registers it under its user,
+    /// credential and `org_id`, then authenticates the hello's headers and
+    /// re-reads its membership again, so a revocation, a removal or the
+    /// organization's deletion either refuses it here or ends it later
+    /// (#3586).
     async fn fence_client(
         &self,
         headers: &HeaderMap,
         authentication: &Authentication,
+        org_id: &str,
     ) -> Result<FencedClient, ConnectError> {
         let admitted = admitted_by(authentication)
             .ok_or_else(|| ConnectError::unauthenticated(CREDENTIAL_REVOKED))?;
@@ -279,18 +284,23 @@ impl ProductionAuthorizer {
                 Err(_) => Err(Refused::Unavailable),
             }
         };
+        // The re-read compares the credential alone, so the organization
+        // joins only the registration.
+        let fenced = admitted.clone().in_organization(org_id);
         let watch = self
             .state
             .revocation
-            .admit(&self.state.pool, &admitted, recheck)
+            .admit(&self.state.pool, &fenced, recheck)
             .await
             .map_err(|refused| match refused {
-                Refused::Revoked => ConnectError::unauthenticated(CREDENTIAL_REVOKED),
+                Refused::Revoked | Refused::NotMember | Refused::OrganizationDeleting => {
+                    ConnectError::unauthenticated(CREDENTIAL_REVOKED)
+                }
                 Refused::Unavailable => ConnectError::unavailable(
                     "coordinator session admission is unavailable; try again",
                 ),
             })?;
-        Ok(FencedClient::new(admitted, watch))
+        Ok(FencedClient::new(fenced, watch))
     }
 }
 
@@ -441,9 +451,7 @@ impl SessionSink for ConnectSink {
     async fn send(&mut self, output: SessionOutput) -> bool {
         let response = match output {
             SessionOutput::AccessRevoked => Err(ConnectError::permission_denied(ACCESS_REVOKED)),
-            SessionOutput::CredentialRevoked => {
-                Err(ConnectError::permission_denied(CREDENTIAL_REVOKED))
-            }
+            SessionOutput::CredentialRevoked(revocation) => Err(ended_error(revocation)),
             SessionOutput::NodeKeyRefused(refusal) => Err(node_key_refused(refusal)),
             SessionOutput::AddressRefused(refusal) => {
                 Err(ConnectError::invalid_argument(refusal.message()))
@@ -485,9 +493,7 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
         SessionOutput::AccessRevoked => {
             return Err(ConnectError::permission_denied(ACCESS_REVOKED));
         }
-        SessionOutput::CredentialRevoked => {
-            return Err(ConnectError::permission_denied(CREDENTIAL_REVOKED));
-        }
+        SessionOutput::CredentialRevoked(revocation) => return Err(ended_error(revocation)),
         SessionOutput::NodeKeyRefused(refusal) => return Err(node_key_refused(refusal)),
         SessionOutput::AddressRefused(refusal) => {
             return Err(ConnectError::invalid_argument(refusal.message()));

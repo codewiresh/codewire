@@ -4,7 +4,8 @@
 //! The database logs each loss in `credential_revocations` and wakes every
 //! process on [`CHANNEL`]. One listener per process reads the log by sequence
 //! on each wake-up and every [`BACKSTOP`], and ends the streams registered
-//! under the lost user, session, OAuth token or grant, or API key.
+//! under the lost user, session, OAuth token or grant, or API key, and the
+//! streams into an organization its user left or whose deletion started.
 //!
 //! Admission ([`Fence::admit`]) takes a database snapshot, registers the
 //! stream, then re-reads the check that admitted it. A log row whose
@@ -52,6 +53,10 @@ pub enum Revocation {
     OAuthToken,
     OAuthGrant,
     ApiKey,
+    /// The user left the stream's organization or was removed from it.
+    Membership,
+    /// The stream's organization started to be deleted.
+    Organization,
 }
 
 impl Revocation {
@@ -62,6 +67,8 @@ impl Revocation {
             "oauth_token" => Self::OAuthToken,
             "oauth_grant" => Self::OAuthGrant,
             "api_key" => Self::ApiKey,
+            "membership" => Self::Membership,
+            "organization" => Self::Organization,
             _ => return None,
         })
     }
@@ -74,6 +81,8 @@ impl Revocation {
             Self::OAuthToken => "oauth_token",
             Self::OAuthGrant => "oauth_grant",
             Self::ApiKey => "api_key",
+            Self::Membership => "membership",
+            Self::Organization => "organization",
         }
     }
 }
@@ -87,14 +96,22 @@ pub enum Refused {
     /// The snapshot or the re-read could not be read; never an admission.
     #[error("the stream's admission could not be checked")]
     Unavailable,
+    /// The user is not a member of the stream's organization, or it doesn't
+    /// exist: a surface answers as its own access check does for one.
+    #[error("the user is not a member of the stream's organization")]
+    NotMember,
+    /// The stream's organization is being deleted.
+    #[error("the stream's organization is being deleted")]
+    OrganizationDeleting,
 }
 
-/// The user and the credential a stream was admitted with: the keys it ends
-/// under.
+/// The user and the credential a stream was admitted with, and the
+/// organization its environment belongs to: the keys it ends under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
     user_id: String,
     credential: AdmittedCredential,
+    organization: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +137,7 @@ impl Admitted {
             credential: AdmittedCredential::Session {
                 session_id: session_id.into(),
             },
+            organization: None,
         }
     }
 
@@ -148,14 +166,47 @@ impl Admitted {
         Some(Self {
             user_id: user.user_id.clone(),
             credential,
+            organization: None,
         })
+    }
+
+    /// The stream goes into an environment of `org_id`, so it also ends when
+    /// its user leaves that organization or the organization's deletion
+    /// starts, and its admission checks both again.
+    #[must_use]
+    pub fn in_organization(mut self, org_id: impl Into<String>) -> Self {
+        self.organization = Some(org_id.into());
+        self
     }
 
     pub fn user_id(&self) -> &str {
         &self.user_id
     }
 
+    pub fn organization(&self) -> Option<&str> {
+        self.organization.as_deref()
+    }
+
+    /// Whether `other` names the same user and credential. A request's
+    /// admission run again yields no organization, which only the stream's
+    /// surface knows, so the organization is not compared.
+    pub fn same_credential(&self, other: &Admitted) -> bool {
+        self.user_id == other.user_id && self.credential == other.credential
+    }
+
     fn keys(&self) -> Vec<Authority> {
+        let mut keys = self.credential_keys();
+        if let Some(org_id) = &self.organization {
+            keys.push(Authority::Membership {
+                user_id: self.user_id.clone(),
+                org_id: org_id.clone(),
+            });
+            keys.push(Authority::Organization(org_id.clone()));
+        }
+        keys
+    }
+
+    fn credential_keys(&self) -> Vec<Authority> {
         let user = Authority::User(self.user_id.clone());
         match &self.credential {
             AdmittedCredential::Session { session_id } => {
@@ -184,6 +235,8 @@ enum Authority {
     OAuthToken(String),
     OAuthGrant { user_id: String, client_id: String },
     ApiKey(String),
+    Membership { user_id: String, org_id: String },
+    Organization(String),
 }
 
 /// A `pg_current_snapshot()`: which transactions had committed when it was
@@ -268,6 +321,17 @@ pub fn revoked_error() -> connectrpc::ConnectError {
     connectrpc::ConnectError::permission_denied("access revoked")
 }
 
+/// What a Connect stream ends with on `revocation`: the refusal a new stream
+/// gets when its organization's deletion started, else [`revoked_error`].
+pub fn ended_error(revocation: Revocation) -> connectrpc::ConnectError {
+    match revocation {
+        Revocation::Organization => {
+            crate::connect::app_error_to_wire(&crate::org::organization_deleting_error(), None)
+        }
+        _ => revoked_error(),
+    }
+}
+
 impl Watch {
     /// Completes when the stream's authority is lost, after recording it,
     /// with the Connect error the stream ends on.
@@ -281,7 +345,7 @@ impl Watch {
             let mut watch = self;
             let revocation = watch.revoked().await;
             record_revoked(&pool, &admitted, revocation, &site).await;
-            revoked_error()
+            ended_error(revocation)
         })
     }
 }
@@ -407,6 +471,33 @@ impl Registry {
     }
 }
 
+/// Whether `user_id` is still a member of `org_id` and the organization
+/// still admits streams (`org_admits_streams`).
+pub(crate) async fn recheck_membership(
+    pool: &PgPool,
+    user_id: &str,
+    org_id: &str,
+) -> Result<(), Refused> {
+    let admits: Option<bool> = sqlx::query_scalar(
+        "SELECT o.deletion_state = 'active' FROM organizations o \
+         JOIN org_members m ON m.org_id = o.id AND m.user_id = $2 \
+         WHERE o.id = $1",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "stream admission could not re-read its membership");
+        Refused::Unavailable
+    })?;
+    match admits {
+        Some(true) => Ok(()),
+        Some(false) => Err(Refused::OrganizationDeleting),
+        None => Err(Refused::NotMember),
+    }
+}
+
 async fn current_snapshot(pool: &PgPool) -> Result<Snapshot, Refused> {
     let text: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
         .fetch_one(pool)
@@ -434,6 +525,10 @@ impl Fence {
     /// snapshot taken when it starts, so never older than the one registered:
     /// a revocation the registered snapshot doesn't see either reaches the
     /// registration or is seen by the re-read, which refuses.
+    ///
+    /// A stream into an organization's environment also has its membership
+    /// and the organization re-read here, on `pool`, the primary: a removal
+    /// or a deletion between admission and registration refuses it.
     pub async fn admit(
         &self,
         pool: &PgPool,
@@ -442,6 +537,9 @@ impl Fence {
     ) -> Result<Watch, Refused> {
         let watch = self.register(admitted, current_snapshot(pool).await?);
         recheck.await?;
+        if let Some(org_id) = &admitted.organization {
+            recheck_membership(pool, &admitted.user_id, org_id).await?;
+        }
         Ok(watch)
     }
 
@@ -523,7 +621,7 @@ impl Fence {
     ) -> Result<(), sqlx::Error> {
         let gaps: Vec<i64> = cursor.gaps.keys().copied().collect();
         let rows: Vec<LogRow> = sqlx::query_as(
-            "SELECT seq, kind, credential_id, user_id, xact::text AS xact \
+            "SELECT seq, kind, credential_id, user_id, org_id, xact::text AS xact \
              FROM credential_revocations \
              WHERE seq > $1 OR seq = ANY($2) \
              ORDER BY seq",
@@ -554,6 +652,7 @@ struct LogRow {
     kind: String,
     credential_id: String,
     user_id: String,
+    org_id: Option<String>,
     xact: String,
 }
 
@@ -580,6 +679,20 @@ impl LogRow {
                 client_id: id,
             },
             Revocation::ApiKey => Authority::ApiKey(id),
+            Revocation::Membership | Revocation::Organization => {
+                let Some(org_id) = self.org_id.clone() else {
+                    tracing::warn!(seq = self.seq, kind = %self.kind, "unreadable credential revocation row");
+                    return None;
+                };
+                if revocation == Revocation::Membership {
+                    Authority::Membership {
+                        user_id: self.user_id.clone(),
+                        org_id,
+                    }
+                } else {
+                    Authority::Organization(org_id)
+                }
+            }
         };
         Some(LogEntry {
             key,

@@ -618,6 +618,11 @@
           // Reconnecting can't succeed; the page moves to sign-in instead.
           tab.revoked = true;
           detach(tab);
+        } else if (event.code === 1008 && event.reason === "organization is being deleted") {
+          // The deletion ended the stream (#3586): as a refusal no retry can
+          // change, every open terminal says so and stops.
+          organizationDeleted();
+          announce(organizationDeleting);
         } else lose(tab, "Disconnected.");
       });
     }

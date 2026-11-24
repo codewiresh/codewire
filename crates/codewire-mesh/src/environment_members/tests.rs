@@ -67,6 +67,8 @@ struct Script {
     statuses: HashMap<(String, String), MemberStatus>,
     unavailable: bool,
     checks: usize,
+    /// Orchestration says the organization's deletion has started.
+    organization_deleting: bool,
 }
 
 #[derive(Clone)]
@@ -145,7 +147,7 @@ impl EnvironmentMeshService for EnvironmentMesh {
 }
 
 /// Resolves `cw_owner` and `cw_member` API keys to the network's users.
-struct Authorization;
+struct Authorization(Arc<Mutex<Script>>);
 
 #[allow(refining_impl_trait)]
 impl MeshAuthorizationService for Authorization {
@@ -176,6 +178,7 @@ impl MeshAuthorizationService for Authorization {
                 org_id: request.view().org_id.to_owned(),
                 role: OrgRole::Member.into(),
                 credential_kind: MeshAuthorizationCredentialKind::ApiKey.into(),
+                organization_deleting: self.0.lock().unwrap().organization_deleting,
                 ..Default::default()
             })
             .into(),
@@ -214,7 +217,9 @@ async fn harness() -> Harness {
             connectrpc::Router::new().add_service(Arc::new(EnvironmentMesh(script.clone()))),
             InternalServiceLayer::new(key, ENVIRONMENT_MESH_CALLER, [REDEEM_METHOD, CHECK_METHOD]),
         )
-        .with_connect_routes(connectrpc::Router::new().add_service(Arc::new(Authorization)))
+        .with_connect_routes(
+            connectrpc::Router::new().add_service(Arc::new(Authorization(script.clone()))),
+        )
         .into_router();
     let orchestration_address = pki.serve(orchestration).await;
 
@@ -397,6 +402,25 @@ async fn an_environment_joins_once_with_its_own_name_and_owner() {
     admitted(&mut reconnect).await;
     // The newer stream replaced the older one, which ends.
     ended(&mut stream).await;
+}
+
+/// An organization whose deletion has started admits no new Dial (#3586),
+/// while its other Mesh calls, such as listing its networks, go on.
+#[tokio::test]
+async fn a_new_dial_into_an_organization_being_deleted_is_refused() {
+    let harness = harness().await;
+    let mut before = harness
+        .peer("cw_member", ORG, MeshCoordinateRole::Dial)
+        .await;
+    admitted(&mut before).await;
+    harness.script().organization_deleting = true;
+    let mut during = harness
+        .peer("cw_member", ORG, MeshCoordinateRole::Dial)
+        .await;
+    assert_eq!(
+        first(&mut during).await.unwrap_err(),
+        ErrorCode::FailedPrecondition
+    );
 }
 
 #[tokio::test]

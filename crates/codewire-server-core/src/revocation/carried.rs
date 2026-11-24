@@ -11,7 +11,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use super::{Admitted, AdmittedCredential, Fence, LogRow, Refused, Watch, current_snapshot};
+use super::{
+    Admitted, AdmittedCredential, Fence, LogRow, Refused, Watch, current_snapshot,
+    recheck_membership,
+};
 
 /// Longest id or hash a carried admission may hold. Users, sessions and keys
 /// are 32-hex or UUID ids, token hashes 64 hex characters, client ids short
@@ -24,6 +27,10 @@ const MAX_ID_LEN: usize = 128;
 pub struct CarriedAdmission {
     user_id: String,
     credential: CarriedCredential,
+    /// The organization the stream's environment belongs to. Absent from an
+    /// older process's admission, which then ends only on its credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    org_id: Option<String>,
     through: i64,
 }
 
@@ -59,9 +66,14 @@ impl CarriedAdmission {
                 key_id: bounded(key_id)?,
             },
         };
+        let organization = match &self.org_id {
+            Some(org_id) => Some(bounded(org_id)?),
+            None => None,
+        };
         Some(Admitted {
             user_id: bounded(&self.user_id)?,
             credential,
+            organization,
         })
     }
 }
@@ -121,13 +133,14 @@ impl Fence {
         Some(CarriedAdmission {
             user_id: admitted.user_id.clone(),
             credential,
+            org_id: admitted.organization.clone(),
             through,
         })
     }
 
     /// Fences a stream another process admitted: registers it, then refuses
-    /// it if the log names its user or credential after the carried
-    /// position. The position comes from a message, so it is refused when it
+    /// it if the log names its user, credential or organization after the
+    /// carried position, or its user is no longer in that organization. The position comes from a message, so it is refused when it
     /// lies beyond the log's newest row or before its oldest, where rows may
     /// have been removed: an absent row is read as clean only where none can
     /// be missing. A registered stream is fenced from then on, as any other.
@@ -149,11 +162,13 @@ impl Fence {
         }
         let keys = admitted.keys();
         let rows: Vec<LogRow> = sqlx::query_as(
-            "SELECT seq, kind, credential_id, user_id, xact::text AS xact \
-             FROM credential_revocations WHERE seq > $1 AND user_id = $2",
+            "SELECT seq, kind, credential_id, user_id, org_id, xact::text AS xact \
+             FROM credential_revocations \
+             WHERE seq > $1 AND (user_id = $2 OR (kind = 'organization' AND org_id = $3))",
         )
         .bind(carried.through)
         .bind(&admitted.user_id)
+        .bind(admitted.organization.as_deref())
         .fetch_all(pool)
         .await
         .map_err(unavailable)?;
@@ -163,6 +178,9 @@ impl Fence {
             .any(|row| keys.contains(&row.key));
         if named {
             return Err(Refused::Revoked);
+        }
+        if let Some(org_id) = &admitted.organization {
+            recheck_membership(pool, &admitted.user_id, org_id).await?;
         }
         Ok((admitted, watch))
     }

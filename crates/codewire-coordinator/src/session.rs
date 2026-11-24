@@ -54,8 +54,10 @@ pub(crate) enum SessionOutput {
     Heartbeat,
     /// The client lost its access to the environment; the session ends.
     AccessRevoked,
-    /// The credential that admitted the client was lost; the session ends.
-    CredentialRevoked,
+    /// The credential that admitted the client, or its user's membership of
+    /// the organization, was lost, or the organization's deletion started;
+    /// the session ends.
+    CredentialRevoked(Revocation),
     /// The session's node key could not be bound to it; the session ends.
     NodeKeyRefused(Refusal),
     /// The session's node carried an address it may not; the session ends.
@@ -688,7 +690,9 @@ impl PeerSession {
         );
         let reason = match ended {
             Some(PeerEnd::AccessRevoked) => Some(SessionOutput::AccessRevoked),
-            Some(PeerEnd::CredentialRevoked(_)) => Some(SessionOutput::CredentialRevoked),
+            Some(PeerEnd::CredentialRevoked(revocation)) => {
+                Some(SessionOutput::CredentialRevoked(revocation))
+            }
             Some(PeerEnd::NodeKeyRefused(refusal)) => Some(SessionOutput::NodeKeyRefused(refusal)),
             Some(PeerEnd::AddressRefused(refusal)) => Some(SessionOutput::AddressRefused(refusal)),
             _ => None,

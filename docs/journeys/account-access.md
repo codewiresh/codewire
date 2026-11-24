@@ -17,6 +17,7 @@ Updated 2026-11-24.
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80); the terminal's sign-out leg and its revoked wording observed on Dev 2026-11-24, source 3e020c3405 | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); not on Dev | not yet observed |
+| `access-org-removal` | not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -272,24 +273,29 @@ comment 123530). Not yet observed.
     deleted;
   - a deletion that failed: new streams stay refused, with the same words,
     until it is retried to the end;
-  - a stream opened before the deletion started: a tailnet `cw shell` ends
-    within 60 seconds, at the coordinator's re-check; a
-    `CW_SSH_TRANSPORT=websocket` shell keeps running until the deletion stops
-    its environment.
+  - streams opened before the deletion started, by the owner and by the
+    member: a tailnet `cw shell`, a `CW_SSH_TRANSPORT=websocket` shell, a
+    browser terminal, the desktop viewer and `cw logs --follow`; each ends
+    when the deletion starts (the `organization` kind);
+  - a public port's preview, opened by anyone, and a new Mesh Dial into the
+    organization's networks: refused.
 - **Driving it:** a walk organization with one running Sandbox and two
   members. Open a tailnet `cw shell` and a `CW_SSH_TRANSPORT=websocket cw
   shell` as the second member, then start `cw org delete` as the owner, and at once try a new `cw exec`, `cw shell`, terminal and
   `cw logs --follow` as each.
 - **Proof:** every new stream is refused with a message that the
-  organization is being deleted, and none reaches the Sandbox; the tailnet
-  shell opened before ends within 60 seconds and the WebSocket one keeps
-  printing until the deletion stops the Sandbox; another organization's
-  streams are unaffected. In the dashboard (#5677), the
+  organization is being deleted, and none reaches the Sandbox; every stream
+  opened before ends within 30 seconds and says the organization is being
+  deleted (`cw shell --stdio`: `the connection ended: organization is being
+  deleted`), with a `stream.revoked` audit event of kind `organization`; a
+  public preview shows its unavailable page and a new Mesh Dial is refused;
+  another organization's streams are unaffected. In the dashboard (#5677), the
   Sandbox page's terminal area says "This organization is being deleted, so
   its Sandboxes can't open terminals." with no Retry; an open terminal
-  keeps printing, and while the Sandbox still runs, Refresh sessions, a
-  dropped socket's check at every third retry or a return to the page shows
-  the same line with no Reconnect and stops reconnecting; once the deletion
+  stops within 30 seconds, its socket closed with 1008 "organization is being
+  deleted", and shows the same line with no Reconnect and stops
+  reconnecting, as Refresh sessions, a dropped socket's check at every third
+  retry or a return to the page also do; once the deletion
   stops the Sandbox the page says "This Sandbox is being deleted." and shows
   no terminal, as for any Sandbox being deleted (#5944); a member opening a
   shared
@@ -363,6 +369,36 @@ comment 123530). Not yet observed.
   "preview authorization unavailable"; their database tests and fixtures hold
   them. An organization API key read the preview before the deletion and got
   401 during it, so a Bearer request never reached the deleting check.
+
+## `access-org-removal`: a member removed from an organization
+
+Issue: #3586, the `membership` kind. Not yet observed.
+
+- **Entry points:** `cw org member rm USER --org ORG` and the dashboard's
+  Members page, as an owner; `cw org leave`, as the member.
+- **States to exercise:**
+  - a member signed in with a browser session and with `cw login`, with
+    streams open into the organization's Sandbox: a browser terminal, the
+    desktop viewer, a `CW_SSH_TRANSPORT=websocket` `cw shell`, a tailnet
+    `cw shell`, a `cw exec` that prints every second and `cw logs
+    --follow`; then the owner removes them, and in a second run they leave;
+  - the same member's streams into another organization: they keep running;
+  - another member's streams into the same organization: they keep running;
+  - the member invited back: new streams open at once.
+- **Driving it:** a walk organization with one running Sandbox, its owner
+  and a second member, both test accounts. Open the streams as the member,
+  remove them as the owner, and time when each stream ends.
+- **Proof:** every stream of the removed member into the organization ends
+  within 30 seconds: a WebSocket closes with 1008 "access revoked", the
+  dashboard's terminal shows its revoked line, and a Connect stream ends
+  `permission_denied`, "access revoked". A `stream.revoked` audit event
+  names the member, the kind `membership`, the surface and the environment.
+  The other member's streams and the member's other organization keep
+  running. After the member is invited back, new streams open.
+- **Gotchas:** a stream opened with one of the organization's API keys ended
+  before this kind, because a removal disables the member's keys for that
+  organization; walk with a browser session and `cw login` to see the new
+  kind.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 

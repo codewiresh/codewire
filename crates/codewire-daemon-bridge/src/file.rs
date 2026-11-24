@@ -103,6 +103,7 @@ pub trait FileBackend: Clone + Send + Sync + 'static {
     async fn admit_stream(
         &self,
         _ctx: &RequestContext,
+        _org_id: &str,
         _environment_id: &str,
     ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
         Ok(None)
@@ -300,7 +301,7 @@ where
         }
         let revoked = self
             .backend
-            .admit_stream(&ctx, &request.environment_id)
+            .admit_stream(&ctx, &request.org_id, &request.environment_id)
             .await?;
         let daemon = self
             .backend
@@ -394,7 +395,7 @@ where
         })?;
         let revoked = self
             .backend
-            .admit_stream(&ctx, &header.environment_id)
+            .admit_stream(&ctx, &header.org_id, &header.environment_id)
             .await?;
         let daemon = self
             .backend
@@ -488,7 +489,7 @@ where
         })?;
         let revoked = self
             .backend
-            .admit_stream(&ctx, &header.environment_id)
+            .admit_stream(&ctx, &header.org_id, &header.environment_id)
             .await?;
         let daemon = self
             .backend

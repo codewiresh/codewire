@@ -412,24 +412,32 @@ pub(super) async fn authorize_proxy_user(
             Err(_) => return Err(unavailable()),
         }
     }
-    // Only a preview with a caller to check: a public one ends when the
-    // deletion stops the environment (AUTH-POLICY.md).
-    if target.access != "public" {
-        match codewire_server_core::org::org_admits_streams(state.pool, &matched.org_id).await {
-            Ok(true) => {}
-            Ok(false) if top_level_navigation(method, headers) => {
-                return Err(denial_page(state, Denial::OrganizationDeleting));
-            }
-            Ok(false) => {
-                return Err(preview_error(
-                    StatusCode::FORBIDDEN,
-                    codewire_server_core::org::ORGANIZATION_DELETING,
-                ));
-            }
-            Err(_) => return Err(unavailable()),
-        }
+    // After the caller's own access, so only a caller who would be admitted
+    // learns why. A public preview without one is refused in the proxy
+    // (AUTH-POLICY.md).
+    match codewire_server_core::org::org_admits_streams(state.pool, &matched.org_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err(organization_deleting(state, method, headers)),
+        Err(_) => return Err(unavailable()),
     }
     Ok(())
+}
+
+/// A preview of an organization being deleted: the page that says so to a
+/// browser navigating to it, else a 403 naming it.
+pub(super) fn organization_deleting(
+    state: &PreviewContext<'_>,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Response {
+    if top_level_navigation(method, headers) {
+        denial_page(state, Denial::OrganizationDeleting)
+    } else {
+        preview_error(
+            StatusCode::FORBIDDEN,
+            codewire_server_core::org::ORGANIZATION_DELETING,
+        )
+    }
 }
 
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]

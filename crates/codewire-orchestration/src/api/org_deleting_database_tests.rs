@@ -3,8 +3,8 @@
 //! admits (`docs/dev/AUTH-POLICY.md`, #3586). The preview proxy's half is in
 //! `preview::authorization::database_tests` and the coordinator's in its own
 //! crate; this walks the runtime target lookup every daemon-reaching surface
-//! shares (terminal, SSH proxy, exec, file, attach, repair, runtime update)
-//! and log-follow.
+//! shares (terminal, SSH proxy, the desktop viewer, exec, file, attach,
+//! repair, runtime update) and log-follow.
 
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;

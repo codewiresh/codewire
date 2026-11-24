@@ -23,6 +23,7 @@ struct Account {
     fence: Fence,
     listener: tokio::task::JoinHandle<()>,
     user_id: String,
+    org_id: String,
     sessions: [(String, String); 2],
     api_key: String,
     api_key_id: String,
@@ -98,6 +99,7 @@ async fn account(name: &str) -> Account {
         fence,
         listener,
         user_id,
+        org_id,
         sessions: sessions.try_into().unwrap(),
         api_key,
         api_key_id,
@@ -122,6 +124,7 @@ impl Account {
                 &self.auth,
                 &self.pool,
                 &self.fence,
+                &self.org_id,
                 site(surface, "env-socket"),
             )
             .await
@@ -217,6 +220,7 @@ async fn a_ticket_whose_session_signed_out_before_it_registered_is_refused() {
             &account.auth,
             &account.pool,
             &account.fence,
+            &account.org_id,
             site("terminal", "env-socket"),
         )
         .await
@@ -280,6 +284,89 @@ async fn a_sign_out_ends_only_the_socket_its_own_session_admitted() {
             .await
             .is_err(),
         "the other session's socket keeps running"
+    );
+    account.remove().await;
+}
+
+/// The stream.revoked audit event's kind of loss, once written.
+async fn revoked_kind(account: &Account) -> Option<String> {
+    for _ in 0..50 {
+        let kind: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT metadata->>'revocation' FROM audit_logs \
+             WHERE action = 'stream.revoked' AND user_id = $1",
+        )
+        .bind(&account.user_id)
+        .fetch_optional(&account.pool)
+        .await
+        .unwrap();
+        if let Some(kind) = kind {
+            return kind;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_socket_ends_when_its_user_leaves_the_organization() {
+    let account = account("membership").await;
+    let revoked = account
+        .fence(
+            SocketAdmission::headers(&account.auth, &cookie(&account.sessions[0].1))
+                .await
+                .expect("the session authenticates"),
+            "terminal",
+        )
+        .await;
+    sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
+        .bind(&account.org_id)
+        .bind(&account.user_id)
+        .execute(&account.pool)
+        .await
+        .unwrap();
+    let revocation = tokio::time::timeout(REVOCATION_BOUND, revoked.into_future())
+        .await
+        .expect("the socket ends within the bound");
+    assert_eq!(revocation, Revocation::Membership);
+    assert_eq!(revoked_close(revocation), access_revoked_close());
+    assert_eq!(revoked_kind(&account).await.as_deref(), Some("membership"));
+    account.remove().await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_socket_ends_saying_why_when_its_organizations_deletion_starts() {
+    let account = account("deletion").await;
+    let revoked = account
+        .fence(
+            SocketAdmission::ticket(account.user(), account.sessions[0].0.clone()),
+            "desktop",
+        )
+        .await;
+    sqlx::query(
+        "UPDATE organizations SET deletion_state = 'deleting', deletion_generation = 1, \
+         deletion_operation_id = 'synthetic-operation', deletion_workflow_id = 'synthetic-workflow', \
+         deletion_requested_at = NOW(), deletion_phase = 'synthetic_phase' WHERE id = $1",
+    )
+    .bind(&account.org_id)
+    .execute(&account.pool)
+    .await
+    .unwrap();
+    let revocation = tokio::time::timeout(REVOCATION_BOUND, revoked.into_future())
+        .await
+        .expect("the socket ends within the bound");
+    assert_eq!(revocation, Revocation::Organization);
+    assert_eq!(
+        revoked_close(revocation),
+        Message::Close(Some(CloseFrame {
+            code: 1008,
+            reason: "organization is being deleted".into(),
+        }))
+    );
+    assert_eq!(
+        revoked_kind(&account).await.as_deref(),
+        Some("organization")
     );
     account.remove().await;
 }

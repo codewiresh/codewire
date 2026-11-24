@@ -44,6 +44,9 @@ struct PreviewTarget {
     /// The Pod's namespace, which names its daemon's Service.
     namespace: String,
     isolation_tier: String,
+    /// Whether the organization admits streams: not once its deletion has
+    /// started or failed (#3586).
+    org_admits_streams: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,83 +140,12 @@ async fn preview_proxy_middleware(
         );
     }
 
-    // Whether the proxy authenticated with the request's Bearer credential;
-    // that credential then stops here instead of reaching the workload.
-    let mut platform_bearer = false;
-    if target.access != "public" || target.isolation_tier == "confidential" {
-        if browser::service_worker_script(&headers) {
-            return preview_error(
-                StatusCode::FORBIDDEN,
-                "service workers are not available on private previews",
-            );
-        }
-        let grant = match authorization::grant_user(
-            &authorization::PreviewContext::from(&state),
-            &headers,
-            &host,
-            &host_match,
-            &target,
-        )
-        .await
+    let platform_bearer =
+        match authorize_request(&state, &method, &uri, &headers, &host, &host_match, &target).await
         {
-            Ok(user) => user,
+            Ok(platform_bearer) => platform_bearer,
             Err(response) => return response,
         };
-        if grant.is_some()
-            && !browser::safe_cookie_request(&method, &headers, &format!("https://{host}"))
-        {
-            return preview_error(StatusCode::FORBIDDEN, "preview request origin denied");
-        }
-        // The account session cookie is host-only on the dashboard origin, so
-        // one sent to a preview host was planted by another preview. Only the
-        // preview grant or a Bearer credential authenticates here.
-        let authenticated = match grant {
-            Some(user) => Ok(user),
-            None => {
-                let mut bearer_only = headers.clone();
-                bearer_only.remove(header::COOKIE);
-                platform_bearer = bearer_only.contains_key(header::AUTHORIZATION);
-                authenticate_socket_request(&state, &bearer_only, "").await
-            }
-        };
-        let user = match authenticated {
-            Ok(user) => user,
-            Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
-                // Only an actual top-level browser navigation starts sign-in.
-                // API requests, POST bodies and upgrade handshakes fail closed.
-                if !browser::top_level_navigation(&method, &headers) {
-                    return preview_sign_in_required();
-                }
-                return match authorization::start(
-                    &authorization::PreviewContext::from(&state),
-                    &host_match,
-                    &target,
-                    &host,
-                    uri.path_and_query()
-                        .map(|value| value.as_str())
-                        .unwrap_or("/"),
-                )
-                .await
-                {
-                    Ok(response) | Err(response) => response,
-                };
-            }
-            Err(response) => return response,
-        };
-
-        if let Err(response) = authorization::authorize_proxy_user(
-            &authorization::PreviewContext::from(&state),
-            &method,
-            &headers,
-            &user,
-            &host_match,
-            &target,
-        )
-        .await
-        {
-            return response;
-        }
-    }
 
     proxy_to_preview_target(
         &state,
@@ -226,6 +158,110 @@ async fn preview_proxy_middleware(
         &target,
     )
     .await
+}
+
+/// The proxy's decision on who may make this request, before it reaches the
+/// workload. A private or confidential preview authenticates and authorizes
+/// its caller; a public one has no caller to check. `Ok(true)` when the proxy
+/// authenticated with the request's Bearer credential, which then stops here
+/// instead of reaching the workload; `Err` is the refusal.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+async fn authorize_request(
+    state: &ApiState,
+    method: &axum::http::Method,
+    uri: &axum::http::Uri,
+    headers: &HeaderMap,
+    host: &str,
+    host_match: &PreviewHostMatch,
+    target: &PreviewTarget,
+) -> Result<bool, Response> {
+    if target.access == "public" && target.isolation_tier != "confidential" {
+        // A public preview has no caller to check, so once its organization's
+        // deletion starts every request to it is refused (#3586).
+        if !target.org_admits_streams {
+            return Err(authorization::organization_deleting(
+                &authorization::PreviewContext::from(state),
+                method,
+                headers,
+            ));
+        }
+        return Ok(false);
+    }
+    let mut platform_bearer = false;
+    if browser::service_worker_script(headers) {
+        return Err(preview_error(
+            StatusCode::FORBIDDEN,
+            "service workers are not available on private previews",
+        ));
+    }
+    let grant = match authorization::grant_user(
+        &authorization::PreviewContext::from(state),
+        headers,
+        host,
+        host_match,
+        target,
+    )
+    .await
+    {
+        Ok(user) => user,
+        Err(response) => return Err(response),
+    };
+    if grant.is_some() && !browser::safe_cookie_request(method, headers, &format!("https://{host}"))
+    {
+        return Err(preview_error(
+            StatusCode::FORBIDDEN,
+            "preview request origin denied",
+        ));
+    }
+    // The account session cookie is host-only on the dashboard origin, so
+    // one sent to a preview host was planted by another preview. Only the
+    // preview grant or a Bearer credential authenticates here.
+    let authenticated = match grant {
+        Some(user) => Ok(user),
+        None => {
+            let mut bearer_only = headers.clone();
+            bearer_only.remove(header::COOKIE);
+            platform_bearer = bearer_only.contains_key(header::AUTHORIZATION);
+            authenticate_socket_request(state, &bearer_only, "").await
+        }
+    };
+    let user = match authenticated {
+        Ok(user) => user,
+        Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
+            // Only an actual top-level browser navigation starts sign-in.
+            // API requests, POST bodies and upgrade handshakes fail closed.
+            if !browser::top_level_navigation(method, headers) {
+                return Err(preview_sign_in_required());
+            }
+            return Err(
+                match authorization::start(
+                    &authorization::PreviewContext::from(state),
+                    host_match,
+                    target,
+                    host,
+                    uri.path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or("/"),
+                )
+                .await
+                {
+                    Ok(response) | Err(response) => response,
+                },
+            );
+        }
+        Err(response) => return Err(response),
+    };
+
+    authorization::authorize_proxy_user(
+        &authorization::PreviewContext::from(state),
+        method,
+        headers,
+        &user,
+        host_match,
+        target,
+    )
+    .await?;
+    Ok(platform_bearer)
 }
 
 /// A request on a preview host that names no preview, as the API router gets
@@ -419,9 +455,11 @@ async fn resolve_preview_target(
         r#"SELECT ep.id AS port_id, ep.port, e.id,
                   ep.access, e.created_by, e.state, e.isolation_tier,
                   COALESCE(b.pod_ip, '') AS pod_ip,
-                  COALESCE(b.namespace, '') AS namespace
+                  COALESCE(b.namespace, '') AS namespace,
+                  o.deletion_state = 'active' AS org_admits_streams
              FROM environment_ports ep
              JOIN environments e ON e.id = ep.environment_id
+             JOIN organizations o ON o.id = e.org_id
              LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
             WHERE ep.label = $1
               AND starts_with(e.id, $2)
@@ -485,6 +523,9 @@ async fn resolve_preview_target(
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
         isolation_tier: row
             .try_get("isolation_tier")
+            .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
+        org_admits_streams: row
+            .try_get("org_admits_streams")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
     })
 }

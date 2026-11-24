@@ -83,7 +83,14 @@ fn each_end_closes_with_its_code_and_a_reason() {
     };
     assert_eq!(close(End::ViewerLeft).0, 1000);
     assert_eq!(close(End::Restarting).0, 1012);
-    assert_eq!(close(End::Revoked), (1008, "access revoked".to_owned()));
+    assert_eq!(
+        close(End::Revoked(Revocation::ApiKey)),
+        (1008, "access revoked".to_owned())
+    );
+    assert_eq!(
+        close(End::Revoked(Revocation::Organization)),
+        (1008, "organization is being deleted".to_owned())
+    );
     for end in [
         End::Invalid,
         End::Stalled,

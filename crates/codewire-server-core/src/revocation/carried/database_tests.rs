@@ -6,7 +6,8 @@
 //! `credential_revocations`.
 
 use super::super::database_tests::{
-    Account, account, admitted, backstop, database, execute, revoked_now,
+    Account, account, admitted, backstop, database, execute, organization_of, revoked_now,
+    start_deletion,
 };
 use super::*;
 use crate::revocation::{LogCursor, Revocation};
@@ -18,6 +19,7 @@ fn by_token(a: &Account) -> Admitted {
             token_hash: a.token_hash.clone(),
             client_id: "codewire-cli".into(),
         },
+        organization: None,
     }
 }
 
@@ -110,5 +112,31 @@ async fn a_position_beyond_the_log_is_refused() {
     assert_eq!(
         serving.admit_carried(&pool, &carried).await.err(),
         Some(Refused::Revoked)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_carried_peer_whose_organization_started_deletion_after_the_position_is_refused() {
+    let pool = database().await;
+    let (origin, _) = replica(&pool).await;
+    let (serving, mut serving_cursor) = replica(&pool).await;
+    let a = account(&pool, "carried_org").await;
+    let org_id = organization_of(&pool, &[&a]).await;
+    let token = by_token(&a).in_organization(&org_id);
+    let at_origin = admitted(&origin, &pool, &token).await;
+    let carried = origin.carry(&token, &at_origin).expect("carried");
+    let (_, peer) = serving
+        .admit_carried(&pool, &carried)
+        .await
+        .expect("nothing names the organization yet");
+
+    start_deletion(&pool, &org_id).await;
+    backstop(&serving, &pool, &mut serving_cursor).await;
+    assert_eq!(revoked_now(&peer), Some(Revocation::Organization));
+    assert_eq!(
+        serving.admit_carried(&pool, &carried).await.err(),
+        Some(Refused::Revoked),
+        "the carried organization travels with the peer"
     );
 }

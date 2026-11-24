@@ -228,6 +228,9 @@ def proto_package_boundary_failures(
         "org_id",
         "role",
         "credential_kind",
+        # A new Mesh Dial into an organization being deleted is refused
+        # (#3586, docs/dev/AUTH-POLICY.md).
+        "organization_deleting",
     }
     if auth_context_fields != expected_auth_context_fields:
         failures.append(

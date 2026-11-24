@@ -126,6 +126,7 @@ async fn each_loss_ends_its_streams_through_the_backstop_alone() {
                 token_hash: a.token_hash.clone(),
                 client_id: "codewire-cli".into(),
             },
+            organization: None,
         },
     )
     .await;
@@ -137,6 +138,7 @@ async fn each_loss_ends_its_streams_through_the_backstop_alone() {
             credential: AdmittedCredential::ApiKey {
                 key_id: a.key_id.clone(),
             },
+            organization: None,
         },
     )
     .await;
@@ -190,6 +192,7 @@ async fn a_revoked_grant_ends_streams_of_its_client_only() {
             token_hash: format!("expired_{client}"),
             client_id: client.into(),
         },
+        organization: None,
     };
     let cli = admitted(&fence, &pool, &token("codewire-cli")).await;
     let desktop = admitted(&fence, &pool, &token("codewire-desktop")).await;
@@ -375,6 +378,7 @@ async fn an_admission_that_cannot_be_checked_is_refused_as_unavailable() {
 struct FencedPing {
     fence: Fence,
     pool: PgPool,
+    organization: Option<String>,
 }
 
 #[allow(refining_impl_trait)]
@@ -424,7 +428,8 @@ impl codewire_proto::codewire::testing::v1::PingService for FencedPing {
     > {
         use futures::StreamExt as _;
 
-        let (admitted, watch) = crate::connect::admit_stream(&ctx, &self.fence).await?;
+        let (admitted, watch) =
+            crate::connect::admit_stream(&ctx, &self.fence, self.organization.as_deref()).await?;
         let end = watch.into_connect_end(
             self.pool.clone(),
             admitted,
@@ -477,11 +482,71 @@ async fn next_frame(
 async fn a_connect_stream_ends_when_the_session_that_admitted_it_signs_out() {
     let pool = database().await;
     let a = account(&pool, "connect").await;
+    let session = a.session_id.clone();
+    fenced_connect_stream(
+        &pool,
+        &a,
+        None,
+        "session",
+        "permission_denied",
+        "access revoked",
+        || async {
+            execute(&pool, "DELETE FROM sessions WHERE id = $1", &session).await;
+        },
+    )
+    .await;
+}
+
+/// A stream into one of its organization's environments is admitted through
+/// the request's admission run again, which knows no organization, and ends
+/// when its user is removed from the organization.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_connect_stream_into_an_organization_is_admitted_and_ends_on_its_users_removal() {
+    let pool = database().await;
+    let a = account(&pool, "connect_org").await;
+    let org_id = organization_of(&pool, &[&a]).await;
+    let (member_org, member_user) = (org_id.clone(), a.user_id.clone());
+    fenced_connect_stream(
+        &pool,
+        &a,
+        Some(org_id),
+        "membership",
+        "permission_denied",
+        "access revoked",
+        || async {
+            sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
+                .bind(&member_org)
+                .bind(&member_user)
+                .execute(&pool)
+                .await
+                .expect("remove the member");
+        },
+    )
+    .await;
+}
+
+/// Opens a fenced Connect stream as `a`'s session, into `organization` when
+/// given, checks it is admitted, runs `revoke`, and checks the stream ends
+/// with `code` and `message`, audited as `revocation`.
+async fn fenced_connect_stream<F, R>(
+    pool: &PgPool,
+    a: &Account,
+    organization: Option<String>,
+    revocation: &str,
+    code: &str,
+    message: &str,
+    revoke: F,
+) where
+    F: FnOnce() -> R,
+    R: std::future::Future<Output = ()>,
+{
     let fence = Fence::new();
     let listener = fence.spawn_listener_every(pool.clone(), Duration::from_secs(3600));
     let connect = connectrpc::Router::new().add_service(std::sync::Arc::new(FencedPing {
         fence: fence.clone(),
         pool: pool.clone(),
+        organization,
     }));
     let app = crate::connect::connect_router_with_auth(
         connect,
@@ -525,9 +590,9 @@ async fn a_connect_stream_ends_when_the_session_that_admitted_it_signs_out() {
     .expect("the first message");
     assert_eq!((flags, first["total"].as_i64()), (0, Some(1)));
 
-    // Give the listener its subscription, then sign the session out.
+    // Give the listener its subscription, then revoke.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    execute(&pool, "DELETE FROM sessions WHERE id = $1", &a.session_id).await;
+    revoke().await;
     let (flags, end) = tokio::time::timeout(
         Duration::from_secs(10),
         next_frame(&mut response, &mut buffer),
@@ -535,18 +600,304 @@ async fn a_connect_stream_ends_when_the_session_that_admitted_it_signs_out() {
     .await
     .expect("the stream ended within the bound, through the wake-up");
     assert_eq!(flags & 0x02, 0x02, "an end-of-stream frame: {end}");
-    assert_eq!(end["error"]["code"], "permission_denied");
-    assert_eq!(end["error"]["message"], "access revoked");
+    assert_eq!(end["error"]["code"], code);
+    assert_eq!(end["error"]["message"], message);
 
     let audited: Vec<(String, String)> = sqlx::query_as(
         "SELECT metadata->>'revocation', metadata->>'surface' FROM audit_logs \
          WHERE action = 'stream.revoked' AND user_id = $1",
     )
     .bind(&a.user_id)
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .unwrap();
-    assert_eq!(audited, vec![("session".to_owned(), "test".to_owned())]);
+    assert_eq!(audited, vec![(revocation.to_owned(), "test".to_owned())]);
     listener.abort();
     server.abort();
+}
+
+/// A stream's admission into an organization answers as the request's own
+/// access check does when it reads the membership first: a non-member is
+/// told the organization isn't found, and a member of an organization being
+/// deleted is told so, never "access revoked".
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_connect_stream_into_an_organization_is_refused_as_its_access_check_would_be() {
+    let pool = database().await;
+    let a = account(&pool, "connect_refused").await;
+    let b = account(&pool, "connect_other").await;
+    let others = organization_of(&pool, &[&b]).await;
+    let end = fenced_connect_refusal(&pool, &a, others).await;
+    assert_eq!(end["error"]["code"], "not_found", "{end}");
+    assert_eq!(end["error"]["message"], "organization not found");
+
+    let own = organization_of(&pool, &[&a]).await;
+    start_deletion(&pool, &own).await;
+    let end = fenced_connect_refusal(&pool, &a, own).await;
+    let expected = crate::revocation::ended_error(Revocation::Organization);
+    assert_eq!(end["error"]["code"], expected.code.as_str(), "{end}");
+    assert_eq!(end["error"]["message"], crate::org::ORGANIZATION_DELETING);
+}
+
+/// Opens a fenced Connect stream as `a`'s session into `organization` and
+/// returns the end that refuses it.
+async fn fenced_connect_refusal(
+    pool: &PgPool,
+    a: &Account,
+    organization: String,
+) -> serde_json::Value {
+    let connect = connectrpc::Router::new().add_service(std::sync::Arc::new(FencedPing {
+        fence: Fence::new(),
+        pool: pool.clone(),
+        organization: Some(organization),
+    }));
+    let app = crate::connect::connect_router_with_auth(
+        connect,
+        crate::connect::ConnectAuthLayer::authenticated(crate::auth::AuthState {
+            pool: pool.clone(),
+        }),
+    );
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(socket, app).await });
+    let payload = b"{}";
+    let mut frame = vec![0u8];
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(payload);
+    let mut response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{address}/{}/StreamPing",
+            codewire_proto::codewire::testing::v1::PING_SERVICE_SERVICE_NAME
+        ))
+        .header("content-type", "application/connect+json")
+        .header("connect-protocol-version", "1")
+        .header(
+            "cookie",
+            format!("{}={}", crate::auth::SESSION_COOKIE_NAME, a.session_id),
+        )
+        .body(frame)
+        .send()
+        .await
+        .unwrap();
+    let mut buffer = Vec::new();
+    let (flags, end) = tokio::time::timeout(
+        Duration::from_secs(10),
+        next_frame(&mut response, &mut buffer),
+    )
+    .await
+    .expect("the refusal");
+    assert_eq!(flags & 0x02, 0x02, "an end-of-stream frame: {end}");
+    server.abort();
+    end
+}
+
+/// An organization with these accounts as members, the first its owner.
+pub(super) async fn organization_of(pool: &PgPool, members: &[&Account]) -> String {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let org_id = format!("org_members_{suffix}");
+    sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $1, $2, $3)")
+        .bind(&org_id)
+        .bind(format!("members-{suffix}"))
+        .bind(&members[0].user_id)
+        .execute(pool)
+        .await
+        .expect("org");
+    for (index, member) in members.iter().enumerate() {
+        add_member(
+            pool,
+            &org_id,
+            &member.user_id,
+            if index == 0 { "owner" } else { "member" },
+        )
+        .await;
+    }
+    org_id
+}
+
+pub(super) async fn add_member(pool: &PgPool, org_id: &str, user_id: &str, role: &str) {
+    sqlx::query("INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1, $2, $3, $4)")
+        .bind(uuid::Uuid::new_v4().simple().to_string())
+        .bind(org_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("member");
+}
+
+pub(super) async fn remove_member(pool: &PgPool, org_id: &str, user_id: &str) {
+    sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
+        .bind(org_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("removal");
+}
+
+pub(super) async fn start_deletion(pool: &PgPool, org_id: &str) {
+    execute(
+        pool,
+        "UPDATE organizations SET deletion_state = 'deleting', deletion_generation = 1, \
+         deletion_operation_id = 'synthetic-operation', deletion_workflow_id = 'synthetic-workflow', \
+         deletion_requested_at = NOW(), deletion_phase = 'synthetic_phase' WHERE id = $1",
+        org_id,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_removal_ends_only_that_members_streams_into_that_organization() {
+    let pool = database().await;
+    let fence = Fence::new();
+    let mut cursor = LogCursor::default();
+    backstop(&fence, &pool, &mut cursor).await;
+    let owner = account(&pool, "removal_owner").await;
+    let member = account(&pool, "removal_member").await;
+    let shared = organization_of(&pool, &[&owner, &member]).await;
+    let other = organization_of(&pool, &[&member]).await;
+    let removed = admitted(
+        &fence,
+        &pool,
+        &session(&member.user_id, &member.session_id).in_organization(&shared),
+    )
+    .await;
+    let elsewhere = admitted(
+        &fence,
+        &pool,
+        &session(&member.user_id, &member.session_id).in_organization(&other),
+    )
+    .await;
+    let owners = admitted(
+        &fence,
+        &pool,
+        &session(&owner.user_id, &owner.session_id).in_organization(&shared),
+    )
+    .await;
+
+    remove_member(&pool, &shared, &member.user_id).await;
+    backstop(&fence, &pool, &mut cursor).await;
+    assert_eq!(revoked_now(&removed), Some(Revocation::Membership));
+    assert_eq!(
+        revoked_now(&elsewhere),
+        None,
+        "the member's other organization runs on"
+    );
+    assert_eq!(
+        revoked_now(&owners),
+        None,
+        "another member's stream runs on"
+    );
+
+    // Removed, the member is refused at admission; invited back, admitted at
+    // once, and the old row ends nothing.
+    assert_eq!(
+        fence
+            .admit(
+                &pool,
+                &session(&member.user_id, &member.session_id).in_organization(&shared),
+                async { Ok(()) },
+            )
+            .await
+            .err(),
+        Some(Refused::NotMember)
+    );
+    add_member(&pool, &shared, &member.user_id, "member").await;
+    let back = admitted(
+        &fence,
+        &pool,
+        &session(&member.user_id, &member.session_id).in_organization(&shared),
+    )
+    .await;
+    let mut fresh = LogCursor::default();
+    backstop(&fence, &pool, &mut fresh).await;
+    assert_eq!(
+        revoked_now(&back),
+        None,
+        "a row the admission saw never ends it"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_deletion_start_ends_every_members_streams_into_the_organization() {
+    let pool = database().await;
+    let fence = Fence::new();
+    let mut cursor = LogCursor::default();
+    backstop(&fence, &pool, &mut cursor).await;
+    let owner = account(&pool, "deletion_owner").await;
+    let member = account(&pool, "deletion_member").await;
+    let deleted = organization_of(&pool, &[&owner, &member]).await;
+    let other = organization_of(&pool, &[&member]).await;
+    let owners = admitted(
+        &fence,
+        &pool,
+        &session(&owner.user_id, &owner.session_id).in_organization(&deleted),
+    )
+    .await;
+    let members = admitted(
+        &fence,
+        &pool,
+        &Admitted {
+            user_id: member.user_id.clone(),
+            credential: AdmittedCredential::ApiKey {
+                key_id: member.key_id.clone(),
+            },
+            organization: Some(deleted.clone()),
+        },
+    )
+    .await;
+    let elsewhere = admitted(
+        &fence,
+        &pool,
+        &session(&member.user_id, &member.session_id).in_organization(&other),
+    )
+    .await;
+
+    start_deletion(&pool, &deleted).await;
+    backstop(&fence, &pool, &mut cursor).await;
+    assert_eq!(revoked_now(&owners), Some(Revocation::Organization));
+    assert_eq!(revoked_now(&members), Some(Revocation::Organization));
+    assert_eq!(revoked_now(&elsewhere), None);
+    assert_eq!(
+        fence
+            .admit(
+                &pool,
+                &session(&owner.user_id, &owner.session_id).in_organization(&deleted),
+                async { Ok(()) },
+            )
+            .await
+            .err(),
+        Some(Refused::OrganizationDeleting),
+        "an organization being deleted admits no stream"
+    );
+}
+
+/// A removal committed between the caller's admission and the stream's
+/// registration is seen by the registration's re-read (cw-security, ruling
+/// (c)), on the pool the admission registers with.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_removal_between_admission_and_registration_refuses_the_stream() {
+    let pool = database().await;
+    let fence = Fence::new();
+    let owner = account(&pool, "race_owner").await;
+    let member = account(&pool, "race_member").await;
+    let shared = organization_of(&pool, &[&owner, &member]).await;
+    // The caller's own check admitted the member; the removal commits while
+    // the stream's credential is read again.
+    let refused = fence
+        .admit(
+            &pool,
+            &session(&member.user_id, &member.session_id).in_organization(&shared),
+            async {
+                remove_member(&pool, &shared, &member.user_id).await;
+                Ok(())
+            },
+        )
+        .await;
+    assert_eq!(refused.err(), Some(Refused::NotMember));
 }

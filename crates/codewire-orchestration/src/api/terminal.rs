@@ -33,6 +33,7 @@ use super::proxy::resolve_running_sandbox_target;
 use super::socket_fence::{SocketAdmission, SocketRevoked, site};
 use super::socket_keepalive::{ping, pings};
 use crate::runtime::{ClaimReadiness, Placement, RuntimeDriver};
+use codewire_server_core::revocation::Revocation;
 
 const MSG_TYPE_STDIN: u8 = 0x00;
 const MSG_TYPE_RESIZE: u8 = 0x01;
@@ -176,6 +177,7 @@ pub async fn terminal_websocket(
             &state.auth,
             &state.pool,
             &state.revocation,
+            &org_id,
             site("terminal", &target.environment_id),
         )
         .await
@@ -318,11 +320,11 @@ async fn terminal_session(
 /// How a one-off terminal ends before its shell does: its credential is
 /// revoked (#3586), or this replica reaches its drain deadline (#4459).
 async fn terminal_ended(
-    revoked: impl Future<Output = ()>,
+    revoked: impl Future<Output = Revocation>,
     restart: impl Future<Output = ()>,
 ) -> TerminalEnd {
     tokio::select! {
-        () = revoked => TerminalEnd::Revoked,
+        revocation = revoked => TerminalEnd::Revoked(revocation),
         () = restart => TerminalEnd::ServerRestart,
     }
 }
@@ -453,8 +455,10 @@ enum TerminalEnd {
     /// This server fenced (#4523) or reached its drain deadline (#4459); the
     /// browser may reconnect to another.
     ServerRestart,
-    /// The credential that admitted the socket was lost (#3586).
-    Revoked,
+    /// The credential that admitted the socket, or its user's membership of
+    /// the organization, was lost, or the organization's deletion started
+    /// (#3586).
+    Revoked(Revocation),
 }
 
 #[derive(Default)]
@@ -781,7 +785,10 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
                     TerminalEnd::Natural => (1000, "session ended"),
                     TerminalEnd::InputLimit => (1009, "terminal input limit exceeded"),
                     TerminalEnd::ServerRestart => (1012, "server restarting"),
-                    TerminalEnd::Revoked => (1008, "access revoked"),
+                    TerminalEnd::Revoked(Revocation::Organization) => {
+                        (1008, codewire_server_core::org::ORGANIZATION_DELETING)
+                    }
+                    TerminalEnd::Revoked(_) => (1008, "access revoked"),
                     _ => (1011, "terminal unavailable"),
                 };
                 let _ = browser_output

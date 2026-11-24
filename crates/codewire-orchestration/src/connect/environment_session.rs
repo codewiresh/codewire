@@ -62,9 +62,10 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
     async fn admit_stream(
         &self,
         ctx: &RequestContext,
+        org_id: &str,
         environment_id: &str,
     ) -> Result<Option<codewire_daemon_bridge::drain::EndSignal>, connectrpc::ConnectError> {
-        crate::connect::fenced_stream(&self.state, ctx, "attach", environment_id)
+        crate::connect::fenced_stream(&self.state, ctx, "attach", org_id, environment_id)
             .await
             .map(Some)
     }
