@@ -1,7 +1,7 @@
 # The workspace support image: it ships only `cw`, the workspace daemon that
 # every sandbox Pod runs (from an image volume or an init-container copy).
 
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 # The shared reviewed Rust build base. The static amd64 asset stage has no
 # certificate store, so the image takes its public trust bundle from here.
