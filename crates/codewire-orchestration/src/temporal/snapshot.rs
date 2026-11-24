@@ -8,10 +8,10 @@ use super::*;
 /// One hosted snapshot's workflow input. The row holds everything else.
 ///
 /// `trace_context` is the starter's W3C trace context, as in
-/// [`EnvironmentCommand::trace_context`]. A worker accepts it before any
-/// starter sends it, because a worker from the release before refuses an
-/// unknown field; until then it is empty and absent from the payload
-/// (docs/CONFIGURATION.md, "Tracing").
+/// [`EnvironmentCommand::trace_context`]. Workers accepted it a release
+/// before the starters sent it, because a worker from the release before
+/// refuses an unknown field (docs/CONFIGURATION.md, "Tracing"). An input
+/// recorded without one still reads as untraced.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCommand {
@@ -288,10 +288,9 @@ impl TemporalTrigger {
         )
         .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
         .build();
-        // No trace context yet: see `SnapshotCommand::trace_context`.
         let input = SnapshotCommand {
             snapshot_id: snapshot_id.to_owned(),
-            trace_context: TraceContext::default(),
+            trace_context: TraceContext::current(),
         };
         let client = self.client.clone();
         codewire_server_core::span_free::detached(async move {
@@ -324,10 +323,9 @@ impl TemporalTrigger {
         )
         .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
         .build();
-        // No trace context yet: see `SnapshotCommand::trace_context`.
         let input = SnapshotCommand {
             snapshot_id: snapshot_id.to_owned(),
-            trace_context: TraceContext::default(),
+            trace_context: TraceContext::current(),
         };
         let client = self.client.clone();
         codewire_server_core::span_free::detached(async move {

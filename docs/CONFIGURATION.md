@@ -834,12 +834,12 @@ the capture's objects (`keep_and_finish`, `stop_clearing`,
 (`delete_snapshot_objects`). A create from a snapshot records
 `source_snapshot_id` on its `create_environment` span. A span carries
 `snapshot_id`, `environment_id` or `source_snapshot_id`, and nothing else. The
-API does not yet put its trace context in a snapshot workflow's input: a worker
-from the release before refuses an input field it does not know, so the worker
-learns to accept it first. Until it is sent, each activity is a trace of its
-own named by its `snapshot_id`, and the request's trace ends at starting the
-workflow. The leader's sweep that restarts a quiet capture or deletion starts
-one trace for each snapshot it restarts.
+starter puts its trace context in the workflow's input, so a snapshot's
+activities join the request's trace and its slowest step can be read there.
+Workers accepted that field a release before starters sent it, because a worker
+from the release before refuses an input field it does not know. The leader's
+sweep that restarts a quiet capture or deletion starts one trace for each
+snapshot it restarts.
 
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
 do not appear in the JSON logs.
