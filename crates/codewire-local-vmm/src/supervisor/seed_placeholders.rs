@@ -64,15 +64,7 @@ impl Supervisor {
                 .ask_platform_placeholders(platform, environment, generation, &wanted.slots())
                 .await
                 .map_err(|refusal| {
-                    diagnostic_log::record(
-                        self.log.as_deref(),
-                        "platform_seed_refused",
-                        &[
-                            ("generation", LogField::Count(generation)),
-                            ("reason", LogField::Name(refusal.code())),
-                            ("status", LogField::Name(refusal.status_name())),
-                        ],
-                    );
+                    refusal.record(self.log.as_deref(), generation);
                     SupervisorError::PlatformPlaceholders(refusal)
                 })?;
             return seed_entries(wanted, placeholders);
@@ -144,21 +136,36 @@ impl PlatformPlaceholdersRefusal {
         }
     }
 
-    /// The canonical gRPC name of the call's status, or `none`.
+    /// The call's status as a log token, the canonical gRPC name in lower
+    /// case, or `none`. The supervisor log admits only lower-case names; the
+    /// error text prints it upper case.
     fn status_name(self) -> &'static str {
         let Self::Unavailable(code) = self else {
             return "none";
         };
         match code {
-            tonic::Code::Unauthenticated => "UNAUTHENTICATED",
-            tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
-            tonic::Code::Unavailable => "UNAVAILABLE",
-            tonic::Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
-            tonic::Code::PermissionDenied => "PERMISSION_DENIED",
-            tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
-            tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
-            _ => "OTHER",
+            tonic::Code::Unauthenticated => "unauthenticated",
+            tonic::Code::ResourceExhausted => "resource_exhausted",
+            tonic::Code::Unavailable => "unavailable",
+            tonic::Code::DeadlineExceeded => "deadline_exceeded",
+            tonic::Code::PermissionDenied => "permission_denied",
+            tonic::Code::FailedPrecondition => "failed_precondition",
+            tonic::Code::InvalidArgument => "invalid_argument",
+            _ => "other",
         }
+    }
+
+    /// The supervisor log's `platform_seed_refused` line.
+    fn record(self, log: Option<&diagnostic_log::DiagnosticLog>, generation: u64) {
+        diagnostic_log::record(
+            log,
+            "platform_seed_refused",
+            &[
+                ("generation", LogField::Count(generation)),
+                ("reason", LogField::Name(self.code())),
+                ("status", LogField::Name(self.status_name())),
+            ],
+        );
     }
 
     /// What the person does next.
@@ -194,7 +201,7 @@ impl std::fmt::Display for PlatformPlaceholdersRefusal {
                 f,
                 "the platform did not give this VM's credential placeholders ({}, status {}): {}",
                 self.code(),
-                self.status_name(),
+                self.status_name().to_ascii_uppercase(),
                 self.step()
             ),
         }
@@ -447,5 +454,48 @@ mod tests {
             assert!(text.contains(step), "{text}");
             assert!(!text.contains("cwp1_"), "{text}");
         }
+    }
+
+    /// The log line names the refusal and the call's status, read back from
+    /// the log, never `invalid` (#6266).
+    #[test]
+    fn a_platform_refusal_is_logged_with_its_status() {
+        use tonic::Code;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let log = diagnostic_log::DiagnosticLog::adopt(file.reopen().unwrap()).unwrap();
+        for refusal in [
+            PlatformPlaceholdersRefusal::Unavailable(Code::Unauthenticated),
+            PlatformPlaceholdersRefusal::Unavailable(Code::ResourceExhausted),
+            PlatformPlaceholdersRefusal::Unavailable(Code::Unavailable),
+            PlatformPlaceholdersRefusal::Unavailable(Code::DeadlineExceeded),
+            PlatformPlaceholdersRefusal::Unavailable(Code::PermissionDenied),
+            PlatformPlaceholdersRefusal::Unavailable(Code::FailedPrecondition),
+            PlatformPlaceholdersRefusal::Unavailable(Code::InvalidArgument),
+            PlatformPlaceholdersRefusal::Unavailable(Code::Internal),
+            PlatformPlaceholdersRefusal::Unsupported,
+        ] {
+            refusal.record(Some(&log), 7);
+        }
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        let fields = text
+            .lines()
+            .map(|line| line.split_once(" event=").unwrap().1)
+            .collect::<Vec<_>>();
+        let unavailable =
+            "platform_seed_refused generation=7 reason=platform_placeholders_unavailable";
+        assert_eq!(
+            fields,
+            [
+                format!("{unavailable} status=unauthenticated"),
+                format!("{unavailable} status=resource_exhausted"),
+                format!("{unavailable} status=unavailable"),
+                format!("{unavailable} status=deadline_exceeded"),
+                format!("{unavailable} status=permission_denied"),
+                format!("{unavailable} status=failed_precondition"),
+                format!("{unavailable} status=invalid_argument"),
+                format!("{unavailable} status=other"),
+                "platform_seed_refused generation=7 reason=platform_placeholders_unsupported status=none".to_owned(),
+            ]
+        );
     }
 }
