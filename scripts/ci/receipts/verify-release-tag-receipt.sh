@@ -7,7 +7,8 @@
 # uncertainty returns a fallback receipt, which release selection refuses.
 #
 # The full receipt (no argument) adds the tag's signature in the caller's
-# keyring and Dev acceptance; a release tag push no longer asks for it, since
+# keyring and Dev acceptance, with the continuity Sandbox's Pod held through
+# that delivery (#6095); a release tag push no longer asks for it, since
 # it checks only local facts and release selection reverifies the rest (#2892).
 # --source-evidence proves the source evidence alone: main CI on the exact
 # commit, not superseded, verifying something, and the dry run (and Kind, while
@@ -147,12 +148,31 @@ api_get() {
 }
 
 # The run fields the checks below read, in one shape for a listed run and a
-# viewed one: Forgejo's commit_sha, workflow_id and prettyref.
-readonly run_fields='{id, head_sha: .commit_sha, workflow: .workflow_id, status, event, ref: .prettyref}'
+# viewed one: Forgejo's commit_sha, workflow_id, prettyref and created.
+readonly run_fields='{id, head_sha: .commit_sha, workflow: .workflow_id, status, event, ref: .prettyref, created}'
+
+# jq's epoch: seconds since the epoch of an RFC 3339 time, such as a run's
+# created; nothing when it is not shaped like one, and null when it names no
+# real date (2099-13-45), which fromdateiso8601 would otherwise fail on.
+readonly jq_epoch='
+  def epoch:
+    capture("^(?<at>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([.][0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$")
+    | try (
+        (.at + "Z" | fromdateiso8601)
+        - (if .zone == "Z" then 0
+           else (.zone[0:1] + "1" | tonumber)
+             * ((.zone[1:3] | tonumber) * 3600 + (.zone[4:6] | tonumber) * 60)
+           end)
+      ) catch null;
+'
+
+# list_runs reads one page of this many runs; a check that a page is full
+# reads it too.
+readonly runs_page_size=50
 
 # list_runs REPO QUERY FILE: the runs QUERY selects, newest first.
 list_runs() {
-  api_get "$1" "/actions/runs?$2&page=1&limit=50" "$3.raw" || return 1
+  api_get "$1" "/actions/runs?$2&page=1&limit=$runs_page_size" "$3.raw" || return 1
   jq "{schema_version: 1, runs: [.workflow_runs[] | $run_fields]}" "$3.raw" >"$3" 2>/dev/null
 }
 
@@ -181,7 +201,8 @@ view_run() {
 # RELEASE_REQUIRES_KIND is true, a green Kind run of ci.yaml, from a push, a
 # dispatch or a schedule. Dev evidence is read from
 # the deploy-owned promotion itself: a green promote-dev run whose release
-# commit job and acceptance job both checked out this exact source.
+# commit job and acceptance job both checked out this exact source, and whose
+# acceptance job saw the continuity Sandbox keep its Pod (#6095).
 readonly source_repo=codewire/codewire deploy_repo=codewire/deploy
 runs_json="$tmp/runs.json"
 list_runs "$source_repo" "head_sha=$tag_commit&workflow_id=ci.yaml" "$runs_json" \
@@ -459,11 +480,13 @@ jq -e '.schema_version == 1 and (.runs | type == "array")' \
 # source they use; the workflow requires the smoke source to equal the
 # promoted runtime source. Re-dispatches of an existing release keep both.
 checkout_line="^[0-9T:.-]+Z Checked out exact Codewire source ${tag_commit}\$"
+readonly commit_job='Commit one complete dev release'
+readonly acceptance_job='Run exact-source Dev acceptance smokes'
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   view="$tmp/deploy-view-$candidate.json"
   view_run "$deploy_repo" "$candidate" "$view" || continue
-  jq -e --argjson id "$candidate" '
+  jq -e --argjson id "$candidate" --arg commit "$commit_job" --arg acceptance "$acceptance_job" '
       .schema_version == 1
       and .run.id == $id
       and .run.workflow == "promote-dev.yaml"
@@ -471,20 +494,17 @@ while read -r candidate; do
       and .run.status == "success"
       and (.jobs | length > 0)
       and all(.jobs[]; .status == "success")
-      and ([.jobs[] | select(.name == "Commit one complete dev release")] | length == 1)
-      and ([.jobs[] | select(.name == "Run exact-source Dev acceptance smokes")] | length == 1)
+      and ([.jobs[] | select(.name == $commit)] | length == 1)
+      and ([.jobs[] | select(.name == $acceptance)] | length == 1)
     ' "$view" >/dev/null 2>&1 || continue
-  job_text="$tmp/deploy-$candidate-job.txt"
-  proven=true
-  for job in 'Commit one complete dev release' 'Run exact-source Dev acceptance smokes'; do
-    rm -f "$job_text" "$job_text.raw"
-    if ! job_log "$deploy_repo" "$view" "$job" "$job_text" \
-      || ! grep -Eq "$checkout_line" "$job_text"; then
-      proven=false
-      break
-    fi
-  done
-  [ "$proven" = true ] || continue
+  commit_text="$tmp/deploy-$candidate-commit.txt"
+  acceptance_text="$tmp/deploy-$candidate-acceptance.txt"
+  if ! { job_log "$deploy_repo" "$view" "$commit_job" "$commit_text" \
+      && grep -Eq "$checkout_line" "$commit_text" \
+      && job_log "$deploy_repo" "$view" "$acceptance_job" "$acceptance_text" \
+      && grep -Eq "$checkout_line" "$acceptance_text"; }; then
+    continue
+  fi
   dev_run_id="$candidate"
   break
 done < <(jq -r '
@@ -492,6 +512,94 @@ done < <(jq -r '
     | sort | reverse | .[]
   ' "$deploy_runs")
 [ -n "$dev_run_id" ] || fallback 'exact-source-dev-acceptance-not-successful'
+
+# Pod continuity (#6095). promote-dev's acceptance job reads the long-lived
+# continuity Sandbox's Pod after the delivery converged and prints exactly one
+# line: `held`, `replaced cause=...` or `not-observed reason=...` (a planned
+# node window reads `not-observed reason=planned-...`). A candidate needs
+# positive evidence:
+# - no promote-dev run of this source logged `replaced`. promote-dev fails
+#   such a run, so the run accepted above may be a later green one that hides
+#   it. The newest failed and cancelled runs, one page of each as above, are
+#   read too; a run whose release commit job checked out this source is this
+#   source's. A run created before the source's commit time cannot have
+#   delivered it and is not read, so an old run whose log has expired blocks
+#   nothing; a run whose creation time does not parse is read. A full page
+#   may hide a run of this source on the next page when any of its runs'
+#   creation times does not parse or the earliest is at or after the
+#   source's commit time, so it refuses rather than paging on. The earliest
+#   is taken over the whole page, whatever order the API lists it in;
+# - the accepted run was created at or after the source's commit time;
+# - the accepted run logged `held` and no other result. A missing line or
+#   `not-observed` is no evidence, so a release waits for a held delivery.
+readonly continuity_line='^[0-9T:.-]+Z \[dev-acceptance\] pod-continuity '
+source_time="$(git show -s --format=%ct "$tag_commit" 2>/dev/null)" \
+  || fallback 'release-tag-commit-unavailable'
+[[ "$source_time" =~ ^[0-9]+$ ]] || fallback 'release-tag-commit-unavailable'
+# The accepted run cannot predate its source. The source's commit time anchors
+# the search below, so a commit dated in the future would otherwise move that
+# anchor past every real run. A creation time that does not parse refuses too.
+jq -e --argjson since "$source_time" "$jq_epoch"'
+    [.run.created | strings | epoch][0] as $created
+    | $created != null and $created >= $since
+  ' "$tmp/deploy-view-$dev_run_id.json" >/dev/null 2>&1 \
+  || fallback 'dev-acceptance-before-source'
+logged_replaced() { # LOG
+  grep -Eq "${continuity_line}replaced( |\$)" "$1"
+}
+if logged_replaced "$tmp/deploy-$dev_run_id-acceptance.txt"; then
+  fallback 'dev-pod-replaced'
+fi
+for status in failure cancelled; do
+  other_runs="$tmp/deploy-runs-$status.json"
+  list_runs "$deploy_repo" "workflow_id=promote-dev.yaml&status=$status" "$other_runs" \
+    || fallback 'dev-acceptance-runs-unavailable'
+  jq -e '.schema_version == 1 and (.runs | type == "array")' \
+    "$other_runs" >/dev/null 2>&1 || fallback 'dev-acceptance-runs-ambiguous'
+  jq -e --argjson page "$runs_page_size" --argjson since "$source_time" "$jq_epoch"'
+      (.runs | length) < $page
+      or ([.runs[] | [.created | strings | epoch][0]] as $created
+        | all($created[]; . != null) and ($created | min) < $since)
+    ' "$other_runs" >/dev/null 2>&1 || fallback 'dev-acceptance-runs-truncated'
+  # The runs to read, listed into a file first: a jq that fails here must
+  # refuse, not leave nothing to read.
+  candidates="$tmp/deploy-candidates-$status.txt"
+  jq -r --arg status "$status" --argjson since "$source_time" "$jq_epoch"'
+      [.runs[]
+        | select(.workflow == "promote-dev.yaml" and .status == $status)
+        | select(([.created | strings | epoch][0]) as $created
+            | $created == null or $created >= $since)
+        | .id]
+      | sort | reverse | .[]
+    ' "$other_runs" >"$candidates" 2>/dev/null || fallback 'dev-acceptance-runs-ambiguous'
+  while read -r candidate; do
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
+    view="$tmp/deploy-view-$candidate.json"
+    view_run "$deploy_repo" "$candidate" "$view" || fallback 'dev-acceptance-runs-unavailable'
+    # Only a run whose acceptance job started can have logged a result, and
+    # that job starts only after the release commit job succeeded.
+    jq -e --arg commit "$commit_job" --arg acceptance "$acceptance_job" '
+        ([.jobs[] | select(.name == $commit)] | length == 1 and .[0].status == "success")
+        and ([.jobs[] | select(.name == $acceptance)]
+          | length == 1 and (.[0].status | IN("success", "failure", "cancelled")))
+      ' "$view" >/dev/null 2>&1 || continue
+    commit_text="$tmp/deploy-$candidate-commit.txt"
+    acceptance_text="$tmp/deploy-$candidate-acceptance.txt"
+    job_log "$deploy_repo" "$view" "$commit_job" "$commit_text" \
+      || fallback 'dev-acceptance-runs-unavailable'
+    grep -Eq "$checkout_line" "$commit_text" || continue
+    job_log "$deploy_repo" "$view" "$acceptance_job" "$acceptance_text" \
+      || fallback 'dev-acceptance-runs-unavailable'
+    if logged_replaced "$acceptance_text"; then
+      fallback 'dev-pod-replaced'
+    fi
+  done <"$candidates"
+done
+continuity_results="$(grep -Ec "$continuity_line" "$tmp/deploy-$dev_run_id-acceptance.txt")" || true
+if [ "$continuity_results" != 1 ] \
+    || ! grep -Eq "${continuity_line}held\$" "$tmp/deploy-$dev_run_id-acceptance.txt"; then
+  fallback 'dev-pod-continuity-not-observed'
+fi
 
 receipt='accepted'
 if [ "$tag_commit" = "$main_sha" ]; then

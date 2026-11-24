@@ -102,7 +102,7 @@ set -euo pipefail
 [ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
 [ "$1 $2" = 'actions runs' ] || { echo "unexpected forge read: $*" >&2; exit 2; }
 verb="$3"; shift 3
-repo=codewire; target=''; job=''; output=text; workflow=''; event=''
+repo=codewire; target=''; job=''; output=text; workflow=''; event=''; status=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -R) [ "$2" = origin ] || exit 2; shift 2 ;;
@@ -110,7 +110,8 @@ while [ "$#" -gt 0 ]; do
     -H) [ "$2" = git.example.invalid ] || exit 2; shift 2 ;;
     --workflow) workflow="$2"; shift 2 ;;
     --event) event="$2"; shift 2 ;;
-    --head|--status|-L) shift 2 ;;
+    --status) status="$2"; shift 2 ;;
+    --head|-L) shift 2 ;;
     --job) job="$2"; shift 2 ;;
     --output) output="$2"; shift 2 ;;
     [0-9]*) target="$1"; shift ;;
@@ -126,6 +127,14 @@ dev_status=success
 [ "$FIXTURE_MODE" != failed_dev ] || dev_status=failure
 dev_source="$FIXTURE_TAG_COMMIT"
 [ "$FIXTURE_MODE" != wrong_dev_source ] || dev_source="$(printf '%040d' 7)"
+# The accepted run 801 was created after the tagged commit unless the mode
+# says otherwise.
+case "$FIXTURE_MODE" in
+  dev_before_source) dev_created=2000-01-01T00:00:00Z ;;
+  dev_created_unparsable) dev_created='not a time' ;;
+  dev_created_invalid) dev_created=2099-13-45T00:00:00Z ;;
+  *) dev_created=2099-01-01T00:00:00Z ;;
+esac
 # A superseded run, or one that reused a tested tree, dispatches no group.
 group_status=success
 case "$FIXTURE_MODE" in superseded|dispatched_nothing|tested_tree) group_status=skipped ;; esac
@@ -307,18 +316,109 @@ case "$repo:$verb:$target" in
     fi
     ;;
   deploy:list:)
-    run_status=success
-    [ "$FIXTURE_MODE" != failed_dev ] || run_status=failure
-    printf '{"schema_version":1,"total_count":1,"runs":[{"id":801,"head_sha":"%040d","workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main"}]}' \
-      9 "$run_status"
+    # promote-dev runs: 801, the exact source's green run; 799, an earlier
+    # failed run (of the exact source unless replaced_other_source) that
+    # logged a replaced Pod; 798, a failed run whose acceptance never
+    # started, which no log is read from; and 797 and 796, failed runs whose
+    # logs cannot be read, created before and after the tagged commit. The
+    # page_full modes fill a page of 50 with runs 600 and up, created when
+    # the mode says; the oldest_first modes list them oldest first.
+    older() { # STATUS CREATED COUNT [ODD_ID ODD_CREATED]: COUNT runs, newest first, down to 600
+      local id sep='' created
+      for ((id = 599 + $3; id >= 600; id--)); do
+        created="$2"
+        [ "$id" != "${4:-}" ] || created="$5"
+        printf '%s{"id":%s,"head_sha":"%040d","workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main","created":"%s"}' \
+          "$sep" "$id" 8 "$1" "$created"
+        sep=,
+      done
+    }
+    oldest_first() { # RUNS: the same runs, listed in the reverse order
+      jq -c 'reverse | .[]' <<<"[$1]" | paste -sd,
+    }
+    case "$status" in
+      success)
+        run_status=success
+        [ "$FIXTURE_MODE" != failed_dev ] || run_status=failure
+        runs="$(printf '{"id":801,"head_sha":"%040d","workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main","created":"%s"}' \
+          9 "$run_status" "$dev_created")"
+        ;;
+      failure)
+        [ "$FIXTURE_MODE" != dev_other_runs_unavailable ] || exit 1
+        failed() { # ID CREATED
+          printf '{"id":%s,"head_sha":"%040d","workflow":"promote-dev.yaml","status":"failure","event":"","ref":"main","created":"%s"}' \
+            "$1" 8 "$2"
+        }
+        runs="$(failed 798 2099-01-01T00:00:00Z)"
+        case "$FIXTURE_MODE" in
+          replaced_then_green_same_source|replaced_other_source)
+            runs="$(failed 799 2099-01-01T00:00:00+01:00),$runs" ;;
+          replaced_invalid_created) runs="$(failed 799 2099-13-45T00:00:00Z),$runs" ;;
+          old_unreadable_log) runs="$runs,$(failed 797 2000-01-01T00:00:00Z)" ;;
+          new_unreadable_log) runs="$runs,$(failed 796 2099-01-01T00:00:00.1234567Z)" ;;
+          page_full_new) runs="$runs,$(older failure 2099-01-01T00:00:00Z 49)" ;;
+          page_full_old) runs="$runs,$(older failure 2000-01-01T00:00:00Z 49)" ;;
+          page_full_unparsable) runs="$runs,$(older failure 'not a time' 49)" ;;
+          # The newest run, 798, listed last behind 49 that predate the commit.
+          page_full_oldest_first)
+            runs="$(oldest_first "$runs,$(older failure 2000-01-01T00:00:00Z 49)")" ;;
+          page_full_new_oldest_first)
+            runs="$(oldest_first "$runs,$(older failure 2099-01-01T00:00:00Z 49)")" ;;
+          # The last run predates the commit, but one in the middle names no date.
+          page_full_unparsable_middle)
+            runs="$runs,$(older failure 2000-01-01T00:00:00Z 49 624 2099-13-45T00:00:00Z)" ;;
+        esac
+        ;;
+      cancelled)
+        runs=''
+        [ "$FIXTURE_MODE" != page_full_new_cancelled ] \
+          || runs="$(older cancelled 2099-01-01T00:00:00Z 50)"
+        ;;
+      *) exit 2 ;;
+    esac
+    printf '{"schema_version":1,"total_count":1,"runs":[%s]}' "$runs"
     ;;
   deploy:view:801)
-    printf '{"schema_version":1,"run":{"id":801,"workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main"},"jobs":[{"id":811,"name":"Commit one complete dev release","status":"success","attempt":1},{"id":812,"name":"Verify the exact promoted dev commit","status":"success","attempt":1},{"id":813,"name":"Run exact-source Dev acceptance smokes","status":"%s","attempt":1}]}' \
-      "$dev_status" "$dev_status"
+    printf '{"schema_version":1,"run":{"id":801,"workflow":"promote-dev.yaml","status":"%s","event":"","ref":"main","created":"%s"},"jobs":[{"id":810,"name":"Read the continuity Sandbox before delivery","status":"success","attempt":1},{"id":811,"name":"Commit one complete dev release","status":"success","attempt":1},{"id":812,"name":"Verify the exact promoted dev commit","status":"success","attempt":1},{"id":813,"name":"Run exact-source Dev acceptance smokes","status":"%s","attempt":1}]}' \
+      "$dev_status" "$dev_created" "$dev_status"
+    ;;
+  deploy:view:79[6-9])
+    # Jobs 79x are run 799's, 78x run 798's, 77x run 797's and 76x run 796's.
+    smoke_status=failure jobs="$(( ${target#79} + 70 ))"
+    [ "$target" != 798 ] || smoke_status=skipped
+    printf '{"schema_version":1,"run":{"id":%s,"workflow":"promote-dev.yaml","status":"failure","event":"","ref":"main"},"jobs":[{"id":%s1,"name":"Commit one complete dev release","status":"success","attempt":1},{"id":%s3,"name":"Run exact-source Dev acceptance smokes","status":"%s","attempt":1}]}' \
+      "$target" "$jobs" "$jobs" "$smoke_status"
+    ;;
+  deploy:logs:799)
+    replaced_source="$FIXTURE_TAG_COMMIT"
+    [ "$FIXTURE_MODE" != replaced_other_source ] || replaced_source="$(printf '%040d' 7)"
+    case "$job" in
+      791) ;;
+      793) printf '2026-09-27T15:10:00.0000000Z [dev-acceptance] pod-continuity replaced cause=generation\r\n' ;;
+      *) exit 2 ;;
+    esac
+    printf '== job %s ==\r\n2026-09-27T15:11:00.0000000Z Checked out exact Codewire source %s\r\n' "$job" "$replaced_source"
     ;;
   deploy:logs:801)
     case "$job" in 811|813) ;; *) exit 2 ;; esac
-    printf '== job %s ==\r\n2026-09-27T16:51:42.6844462Z Checked out exact Codewire source %s\r\n' "$job" "$dev_source"
+    printf '== job %s ==\r\n' "$job"
+    # The continuity check runs before the acceptance job checks out its
+    # source, and prints one line (#6095).
+    if [ "$job" = 813 ]; then
+      case "$FIXTURE_MODE" in
+        continuity_missing) ;;
+        continuity_not_observed) continuity='not-observed reason=no-before' ;;
+        continuity_planned) continuity='not-observed reason=planned-node-reboot' ;;
+        continuity_twice) continuity='held' ;;
+        pod_replaced) continuity='replaced cause=pod' ;;
+        *) continuity='held' ;;
+      esac
+      [ -z "${continuity:-}" ] \
+        || printf '2026-09-27T16:51:40.0000000Z [dev-acceptance] pod-continuity %s\r\n' "$continuity"
+      [ "$FIXTURE_MODE" != continuity_twice ] \
+        || printf '2026-09-27T16:51:41.0000000Z [dev-acceptance] pod-continuity not-observed reason=unavailable\r\n'
+    fi
+    printf '2026-09-27T16:51:42.6844462Z Checked out exact Codewire source %s\r\n' "$dev_source"
     # Real job logs are far larger than a pipe buffer after the matched
     # line; an early-exiting matcher must not turn that into a failure.
     awk 'BEGIN { for (i = 0; i < 100000; i++) print "2026-09-27T16:51:43.0000000Z filler line that keeps the job log larger than a pipe buffer\r" }'
@@ -355,7 +455,7 @@ grep -Fqx "header = \"Authorization: token ${FIXTURE_TOKEN:?}\"" || exit 99
 repo="${BASH_REMATCH[1]}" path="${BASH_REMATCH[2]}"
 target=(-R origin)
 [ "$repo" = codewire ] || target=(-r codewire/deploy -H git.example.invalid)
-raw_run='{id, commit_sha: .head_sha, workflow_id: .workflow, status, event, prettyref: .ref}'
+raw_run='{id, commit_sha: .head_sha, workflow_id: .workflow, status, event, prettyref: .ref, created}'
 answer() { # forge reads, then the jq filter that makes Forgejo's response
   local filter="$1" document
   shift
@@ -409,6 +509,10 @@ case "$path" in
       71[0-9]) run=711 ;;
       72[0-9]) run=721 ;;
       73[0-9]) run=731 ;;
+      76[0-9]) run=796 ;;
+      77[0-9]) run=797 ;;
+      78[0-9]) run=798 ;;
+      79[0-9]) run=799 ;;
       81[0-9]) run=801 ;;
       *) exit 96 ;;
     esac
@@ -490,6 +594,46 @@ run_case failed_ci failed_ci v1.2.3 fallback exact-main-ci-not-successful
 run_case failed_required failed_required v1.2.3 fallback required-verification-not-successful
 run_case failed_dev failed_dev v1.2.3 fallback exact-source-dev-acceptance-not-successful
 run_case wrong_dev_source wrong_dev_source v1.2.3 fallback exact-source-dev-acceptance-not-successful
+# Pod continuity (#6095): the accepted run must log that the continuity
+# Sandbox held its Pod, and no run of the same source may have logged a
+# replaced one, even when a later green run of that source held. A missing
+# line, not-observed (a planned node window included) or a second result is
+# no evidence. A replaced Pod in another source's run does not count.
+run_case held success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+grep -Fxq release_tag_dev_acceptance_run=801 <<<"$case_output" || fail 'the held receipt does not report run 801'
+run_case pod_replaced pod_replaced v1.2.3 fallback dev-pod-replaced
+run_case continuity_missing continuity_missing v1.2.3 fallback dev-pod-continuity-not-observed
+run_case continuity_not_observed continuity_not_observed v1.2.3 fallback dev-pod-continuity-not-observed
+run_case continuity_planned continuity_planned v1.2.3 fallback dev-pod-continuity-not-observed
+run_case continuity_twice continuity_twice v1.2.3 fallback dev-pod-continuity-not-observed
+run_case replaced_then_green_same_source replaced_then_green_same_source v1.2.3 fallback dev-pod-replaced
+run_case replaced_other_source replaced_other_source v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+run_case dev_other_runs_unavailable dev_other_runs_unavailable v1.2.3 fallback dev-acceptance-runs-unavailable
+run_case ancestor_replaced_then_green replaced_then_green_same_source v1.2.2 fallback dev-pod-replaced
+# A run created before the tagged commit cannot have delivered it: its
+# unreadable log is never read. A newer run's unreadable log still refuses.
+run_case old_unreadable_log old_unreadable_log v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+run_case new_unreadable_log new_unreadable_log v1.2.3 fallback dev-acceptance-runs-unavailable
+# A creation time shaped like a date that names none does not parse: that run
+# is read, and its replaced Pod refuses.
+run_case replaced_invalid_created replaced_invalid_created v1.2.3 fallback dev-pod-replaced
+# One page of 50 failed and of 50 cancelled runs is read. A full page on
+# which any run's creation time does not parse, or whose earliest is at or
+# after the tagged commit, may hide a run of this source: it refuses. A full
+# page that reaches back before the tagged commit holds every run that could
+# have delivered it, in whatever order it is listed.
+run_case page_full_new page_full_new v1.2.3 fallback dev-acceptance-runs-truncated
+run_case page_full_new_cancelled page_full_new_cancelled v1.2.3 fallback dev-acceptance-runs-truncated
+run_case page_full_unparsable page_full_unparsable v1.2.3 fallback dev-acceptance-runs-truncated
+run_case page_full_old page_full_old v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+run_case page_full_oldest_first page_full_oldest_first v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+run_case page_full_new_oldest_first page_full_new_oldest_first v1.2.3 fallback dev-acceptance-runs-truncated
+run_case page_full_unparsable_middle page_full_unparsable_middle v1.2.3 fallback dev-acceptance-runs-truncated
+# The accepted run cannot predate the tagged commit, whose time anchors that
+# search; a creation time that does not parse, or names no real date, refuses.
+run_case dev_before_source dev_before_source v1.2.3 fallback dev-acceptance-before-source
+run_case dev_created_unparsable dev_created_unparsable v1.2.3 fallback dev-acceptance-before-source
+run_case dev_created_invalid dev_created_invalid v1.2.3 fallback dev-acceptance-before-source
 # Main moved on: the tag names an ancestor of canonical main with its own
 # exact, verified CI and Dev acceptance.
 run_case ancestor_full success v1.2.2 accepted signed-tag-on-main-at-exact-green-deployed-commit
