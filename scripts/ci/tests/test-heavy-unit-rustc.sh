@@ -67,10 +67,10 @@ run_n 3 2 codewire_proto
 expect_at_once 2 'with two slots, three codewire_proto compiles did not run two at a time'
 [ -e "$work/lock.0" ] && [ -e "$work/lock.1" ] && [ ! -e "$work/lock.2" ] ||
   fail "two slots did not use exactly lock.0 and lock.1: $(cd "$work" && echo lock.*)"
-# The default is three slots.
+# The default is six slots.
 rm -f "$work"/lock.*
-run_n 4 '' codewire_proto
-expect_at_once 3 'the default did not allow three codewire_proto compiles at once'
+run_n 7 '' codewire_proto
+expect_at_once 6 'the default did not allow six codewire_proto compiles at once'
 
 : > "$work/log"
 LOG="$work/log" BUILD_ONCE_HEAVY_SLOTS=1 BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name=codewire_proto &
@@ -124,4 +124,4 @@ sed -n '/^checks() {/,/^}/p' "$once" | grep -A1 '^  unset RUSTC_WRAPPER$' | grep
 grep -q 'peak-rss.py" "$logs/$name.rss"' "$once" || fail 'a leg runs without its peak measured'
 grep -q 'peak-rss.py" "$logs/checks.rss"' "$once" || fail 'the checks run without their peak measured'
 
-echo 'test-heavy-unit-rustc: codewire_proto in its slots (one, two, the default three), others at once, no slot kept by a leftover process, the next wrapper kept, peaks measured'
+echo 'test-heavy-unit-rustc: codewire_proto in its slots (one, two, the default six), others at once, no slot kept by a leftover process, the next wrapper kept, peaks measured'
