@@ -307,19 +307,69 @@
         "third_party/sqlx-sqlite-unused/**"
       ]
     },
+    "egress_node_binary": {
+      "kind": "rust-package",
+      "manifest": "Cargo.toml",
+      "package": "codewire-egress-node",
+      "lockfile": "Cargo.lock",
+      "profiles": [
+        "release",
+        "runtime"
+      ],
+      "release_targets": [
+        "host"
+      ],
+      "package_inputs": {
+        "codewire-cli": [
+          "apps/cli/GPG_PUBLIC_KEY.asc"
+        ],
+        "codewire-egress-policy": [
+          "crates/codewire-egress-policy/policies/**"
+        ],
+        "codewire-local-credentials": [
+          "crates/codewire-local-credentials/proto/**"
+        ],
+        "codewire-local-vmm": [
+          "crates/codewire-local-vmm/proto/**"
+        ],
+        "codewire-proto": [
+          "proto/**"
+        ],
+        "codewire-admin-proto": [
+          "proto/**"
+        ],
+        "codewire-daemon-proto": [
+          "libs/daemon-proto/proto/**"
+        ],
+        "codewire-mesh": [
+          "crates/codewire-mesh/migrations/**"
+        ],
+        "codewire-server-core": [
+          "crates/codewire-server-core/migrations/**"
+        ]
+      },
+      "explicit_inputs": [
+        "rust-toolchain.toml",
+        "third_party/sqlx-sqlite-unused/**"
+      ]
+    },
     "egress_image": {
-      "kind": "file-set",
+      "kind": "composite",
+      "dependencies": [
+        "egress_node_binary"
+      ],
       "inputs": [
-        "Cargo.toml",
-        "Cargo.lock",
-        "crates/**",
         "deployments/docker/egress.Dockerfile",
         "deployments/docker/egress.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/daemon-proto/**",
-        "proto/**",
-        "third_party/sqlx-sqlite-unused/**"
+        "scripts/ci/images/build-push-image.sh",
+        "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/compute-image-tags.sh",
+        "scripts/ci/images/pipeline-identity.sh",
+        "scripts/ci/setup/trusted-buildkit.sh",
+        "scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh",
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
       ]
     },
     "pod_runtime_image": {
@@ -361,6 +411,7 @@
       "package": "codewire-kvm-device-plugin",
       "lockfile": "Cargo.lock",
       "profiles": [
+        "release",
         "runtime"
       ],
       "release_targets": [
@@ -372,7 +423,8 @@
         ]
       },
       "explicit_inputs": [
-        "rust-toolchain.toml"
+        "rust-toolchain.toml",
+        "third_party/sqlx-sqlite-unused/**"
       ]
     },
     "kvm_device_plugin_image": {
