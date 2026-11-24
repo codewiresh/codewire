@@ -11,25 +11,27 @@ discovery. The work is #4661; the configuration is in
 
 ## Where it stands
 
-Updated 2026-11-23. Dev serves the issuer at `https://identity.codewire-dev.sh`,
-from its own signing key in OpenBao (#4662). Production serves nothing yet
-(#4667). The contract for groups, audiences and minting is
-[dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md); nothing mints a token
-yet.
+Updated 2026-11-24. Dev serves the issuer at `https://identity.codewire-dev.sh`,
+from its own signing key in OpenBao (#4662), and runs groups, audiences and
+minting (#4663, #4664). Minting on Dev waits for its key version 2, made by an
+emergency rotation rehearsal on 2026-11-23, to reach 24 hours. Production
+serves nothing yet (#4667), and no release has these. The contract is
+[dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md).
 
 | ID | Slice | Dev | Production |
 | --- | --- | --- | --- |
-| `identity-groups` | #4664 | not yet built | not yet built |
-| `identity-per-org-issuer` | #4664 | not yet built | not yet built |
-| `identity-audiences` | #4663 | not yet built | not yet built |
-| `identity-groups-stay-put` | #4663 | not yet built | not yet built |
-| `identity-changes-apply` | #4663, #4664 | not yet built | not yet built |
-| `identity-limits` | #4664 | not yet built | not yet built |
+| `identity-groups` | #4664 | not yet observed | not yet observed |
+| `identity-per-org-issuer` | #4664 | not yet observed | not yet observed |
+| `identity-audiences` | #4663 | partly observed (2026-11-24) | not yet observed |
+| `identity-groups-stay-put` | #4663 | not yet observed | not yet observed |
+| `identity-changes-apply` | #4663, #4664 | partly observed (2026-11-24) | not yet observed |
+| `identity-limits` | #4664 | partly observed (2026-11-24) | not yet observed |
 | `identity-discovery` | #4662 | observed (2026-11-23) | not yet observed |
 | `identity-custody` | #4662 | observed; a drifted key by test (2026-11-23) | not yet observed |
-| `identity-own-openbao` | #4666 | not yet built | not yet built |
+| `identity-own-openbao` | #4666 | the route's refusals observed (2026-11-24); the login not yet | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
-| `identity-audit` | #4663, #4664 | not yet built | not yet built |
+| `identity-audit` | #4663, #4664 | partly observed (2026-11-24) | not yet observed |
+| `identity-files` | #4664 | not yet built | not yet built |
 
 ## Before the walk
 
@@ -93,7 +95,11 @@ yet.
   3. `cw identity token --resource HTTPS://K8S.WALK.EXAMPLE:443` succeeds, and
      its `aud` is `https://k8s.walk.example`.
 - **Proof:** each refusal's text, and the decoded `aud`.
-- **Observed:** not yet observed.
+- **Observed:** partly, on Dev on 2026-11-24 (#4664). Driving 1 exits 1 with
+  `invalid_target`. Driving 2 refuses all six, naming the rule: "can't be
+  codewire-dev.sh or a host under it" for both deployment hosts, "the
+  in-cluster Kubernetes API", "an IP address", "uses https" and "has no
+  query". Driving 3 waits for the key to sign.
 
 ## 4. `identity-groups-stay-put`: groups don't spread
 
@@ -101,8 +107,10 @@ yet.
   1. `MEMBER` forks `A`; the fork has no groups, and step 1's command is
      Forbidden from it. The admin's fork of `A` keeps `data-readers`.
   2. Granting `operator` on `A` as `MEMBER` is refused; as the admin it works.
-  3. Moving `A` to another organization clears its groups.
-  4. Saving a preset with groups is refused.
+  3. Moving `A` to another organization clears its groups. Hosted Sandboxes
+     can't move between organizations yet, so this waits until that's built.
+  4. Presets have no groups field in the protocol, the API or `cw`, so there
+     is nothing to refuse until presets can carry groups.
 - **Proof:** `cw identity groups` on each Sandbox, and each refusal.
 - **Observed:** not yet observed.
 
@@ -119,7 +127,11 @@ yet.
   4. On Dev, set `CODEWIRE_IDENTITY_MINTING=off`: every Sandbox's request fails
      with `identity_unavailable`. Set it back.
 - **Proof:** each refusal, with its time against the last token's `exp`.
-- **Observed:** not yet observed.
+- **Observed:** partly, on Dev on 2026-11-24 (#4664). After
+  `cw identity stop A`, a token request in `A` exits 1 with
+  `identity_stopped`, before any key check, and `cw identity resume A`
+  restores it. The cached-token part, and driving 1, 3 and 4, wait for the
+  key to sign.
 
 ## 6. `identity-limits`: a flood stays in its own Sandbox
 
@@ -130,7 +142,10 @@ yet.
   3. With several Sandboxes in one organization, the organization's total stays
      under its limit.
 - **Proof:** the counts of granted and refused calls, and `B`'s health.
-- **Observed:** not yet observed.
+- **Observed:** partly, on Dev on 2026-11-24 (#4664). 30 concurrent requests
+  in `A`: 13 passed the limit and 17 got `resource_exhausted`. During a
+  40-request flood in `A` (28 refused), all 8 of `B`'s requests passed the
+  limit. Driving 3 isn't practical to drive from one walker.
 
 ## 7. `identity-discovery`: each organization's issuer, and nothing else
 
@@ -314,7 +329,41 @@ yet.
     before and after;
   - one `identity_mints` row per signature, not per cache hit, with `jti` and
     `kid`, and no column holding a token.
-- **Observed:** not yet observed.
+- **Observed:** partly, on Dev on 2026-11-24 (#4664). `audit_logs` held exactly
+  one row per action, each with its actor: `identity.audience.registered`,
+  `identity.groups.changed` (before `[]`, after `["data-readers"]`),
+  `identity.stopped` and `identity.resumed`. The six refused registrations
+  wrote none. `identity_mints` has no column holding a token, and no row yet,
+  because nothing has been signed.
+
+## 12. `identity-files`: a projected token stays current, in memory, and nowhere else
+
+- **Entry points:** `cw identity audience add URI --file k8s`, the file
+  `/codewire/run/identity/k8s.jwt` in a Sandbox made after the change, and the
+  scratch cluster from step 1.
+- **Driving it:**
+  0. Before any file is written: on Dev, `kubectl apply --dry-run=server` of
+     a warm-pool template whose `codewire-run` volume is `{}` is refused by
+     the warm-pool template policy, whose Flux Kustomization reads Ready.
+  1. Register `https://k8s.walk.example` with `--file k8s`. In a new Sandbox:
+     `stat -c '%a' /codewire/run/identity /codewire/run/identity/k8s.jwt`
+     prints `700` and `600`, and `stat -f -c %T /codewire/run/identity`
+     prints `tmpfs`.
+  2. `kubectl --server "$KIND" --token "$(cat /codewire/run/identity/k8s.jwt)"
+     get pods -n data` lists the Pods, as step 1's command does.
+  3. The file's modification time moves at about half the token's lifetime.
+  4. `cw identity stop A`: the file is gone at the next renewal, at half life;
+     `cw identity resume A` brings it back within a minute.
+  5. Remove the audience: the file is gone within one access refresh.
+  6. `cw cp A:/codewire/run/identity/k8s.jwt .`, an sftp read and the
+     dashboard's files view are refused, and so is a `/workspace` link into
+     `/codewire/run`.
+  7. A ninth file audience in the organization is refused with
+     `identity_file_limit`.
+- **Proof:** the `stat` lines, the refusals, the file's times against the
+  token's `iat` and `exp`, and the daemon log naming the audience and file,
+  never the token.
+- **Observed:** not yet built.
 
 ## The other steps
 

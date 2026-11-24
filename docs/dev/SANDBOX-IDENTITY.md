@@ -10,8 +10,10 @@ before the code. The issuer that publishes each organization's keys is in
 [`docs/journeys/sandbox-identity.md`](../journeys/sandbox-identity.md).
 Hosted Sandboxes only; local VMs and hosts come later, by a separate design.
 
-**Status: target, not shipped.** Nothing below is built yet; each part's
-journey step reads "not yet observed" until it has run on Dev.
+**Status:** groups, audiences, kill switches, minting, the socket and
+`cw identity token` are on main and run on Dev; no release has them yet. The
+token files (below) are not built yet. Each part's journey step reads "not yet
+observed" until it has run on Dev.
 
 ## The token
 
@@ -85,6 +87,9 @@ a token for a registered audience.
   - a lifetime, 1 to 10 minutes, 10 by default;
   - the opt-in claims `created_by` and `environment_name`;
   - optionally a file name, for "project to file" (below).
+- **Files:** at most 8 of an organization's audiences carry a file name. A
+  ninth is refused at registration with `identity_file_limit`, so the files'
+  renewals stay well inside a Sandbox's minting limit.
 - **Uniqueness:** an audience is registered at most once per organization.
   Two organizations may register the same one, because each token's `iss`
   names its own organization.
@@ -101,7 +106,8 @@ a token for a registered audience.
   --org`, and resumes it with `cw identity resume`. Orchestration checks it
   before its cache, so a stopped Sandbox gets no new or cached token from the
   RPC. Inside the Sandbox, the daemon's socket cache and its `--file` files
-  keep serving a token issued before the stop until half its lifetime.
+  keep serving a token issued before the stop until half its lifetime; at that
+  renewal the stop is refused, and the file is deleted.
 - **Global circuit breaker:** `CODEWIRE_IDENTITY_MINTING=off` in
   orchestration's environment stops every mint with `unavailable`. It also
   trips by itself for 60 seconds after 20 consecutive signing failures.
@@ -171,11 +177,48 @@ enforced here, never in the daemon.
 - **`cw identity token --resource URI`** prints the token on stdout with no
   newline. A refusal goes to stderr with its name and exits non-zero. Outside a
   cloud Sandbox, it says so and exits 2.
-- **Files:** for an audience registered with `--file NAME`, the daemon keeps
-  `/codewire/run/identity/NAME.jwt` current, renewed at half its lifetime. The
-  directory is a tmpfs mounted at boot, mode 0700, with files at 0600. It is
-  excluded from snapshots, VM checkpoints, environment projections, the files
-  API, `cw cp` and sync, and previews, and a test holds each exclusion.
+- **Files:** for each audience registered with `--file NAME`, the daemon keeps
+  `/codewire/run/identity/NAME.jwt` current: the token with no newline, 0600,
+  in a directory at 0700.
+  - **Which audiences:** every access grant the binding gives the daemon (at
+    bind, and at each refresh, about every 5 minutes) lists the Sandbox's own
+    organization's file audiences, as canonical audience and file name. A
+    grant without the list keeps the files the daemon has; an empty list
+    deletes them all. A removed or renamed audience's file is deleted at the
+    next grant. The daemon serves at most 8, and checks each name again
+    against `[a-z0-9-]{1,63}`.
+  - **Renewal:** the daemon mints through the same `IssueIdentityToken` call
+    and cache as the socket, at the first grant and then at half the token's
+    lifetime, at most 16 mints a minute for all its files. It writes a
+    temporary file in the directory and renames it into place, so a reader
+    sees the old token or the new one, never part of one. At start it removes
+    any file left from an earlier daemon in the same Pod, then mints.
+  - **Refusals:** on `identity_unavailable`, a deadline or
+    `resource_exhausted`, the file is kept while its token is valid, deleted
+    10 seconds before `exp`, and retried with backoff. Every other refusal,
+    including any added later, deletes the file at once; minting is retried
+    within a minute, so a resumed Sandbox gets its file back. Deleting a file
+    stops new reads of it. A token a process has already read stays usable
+    until its `exp`.
+  - **Memory only:** `/codewire/run` is an `emptyDir` with `medium: Memory`
+    and a `sizeLimit` of a few MiB on every runtime profile, and admission
+    pins it: the repository's workspace policy check, the warm-pool template
+    policy, and the deployment's hosted template rule each refuse it as `{}`,
+    without a `sizeLimit`, as a host path or a volume claim, or missing. The
+    daemon opens `/codewire/run/identity` through a directory handle and
+    writes nothing unless the file system is tmpfs. A Sandbox rendered before
+    this keeps its disk-backed `/codewire/run` and gets no files until it is
+    made again.
+  - **Order:** the warm-pool template policy's pin is live on an environment
+    (its Flux Kustomization Ready, and a server dry run of a template with
+    `codewire-run` as `{}` refused) before any daemon there writes a token
+    file.
+  - **Excluded** from snapshots, VM checkpoints, environment projections, the
+    files API, `cw cp`, scp and sftp, and previews, and a test holds each
+    exclusion. The files API refuses the platform directory by resolved path,
+    so a link from `/workspace` into `/codewire/run` is refused too. A copy
+    the workload makes itself, such as rsync over `cw shell --stdio`, is the
+    workload reading its own files, as the next point says.
 - **The shared uid isn't a boundary.** The workload runs as the daemon's user,
   so every process can read the files and call the socket. The limits and the
   groups rules above are what hold.
