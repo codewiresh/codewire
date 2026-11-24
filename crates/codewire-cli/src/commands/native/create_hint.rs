@@ -44,7 +44,10 @@ pub(super) fn explain(
     match hint(code, image) {
         Some(hint) => {
             let failure = format!("{error:#}");
-            anyhow::anyhow!("{}; {hint}", failure.trim_end_matches('.'))
+            anyhow::anyhow!(
+                "the local VM runtime reported: {}; {hint}",
+                failure.trim_end_matches('.')
+            )
         }
         None => error,
     }
@@ -71,9 +74,7 @@ fn hint(code: Option<&str>, image: &CreateImage) -> Option<String> {
         "create_registry_not_found" => format!(
             "{registry} has no {reference}, the default image; `cw upgrade` brings a cw that names a current one"
         ),
-        "create_failed" => {
-            "the local VM runtime gave no cause; run `cw doctor`, then create again".to_owned()
-        }
+        "create_failed" => "it gave no cause; run `cw doctor`, then create again".to_owned(),
         _ => return None,
     })
 }
@@ -129,7 +130,7 @@ mod tests {
         assert!(
             hint(Some("create_failed"), &named)
                 .unwrap()
-                .starts_with("the local VM runtime gave no cause")
+                .starts_with("it gave no cause")
         );
         assert_eq!(hint(Some("create_name_taken"), &named), None);
         assert_eq!(hint(None, &named), None);
@@ -140,7 +141,7 @@ mod tests {
         let failure = anyhow::anyhow!("local lifecycle operation op-1 failed: create_failed.");
         assert_eq!(
             explain(failure, Some("create_failed"), &CreateImage::of("")).to_string(),
-            "local lifecycle operation op-1 failed: create_failed; the local VM runtime gave no cause; run `cw doctor`, then create again"
+            "the local VM runtime reported: local lifecycle operation op-1 failed: create_failed; it gave no cause; run `cw doctor`, then create again"
         );
         let untouched = explain(
             anyhow::anyhow!("name taken"),

@@ -301,7 +301,7 @@ fn output(command: &mut Command) -> anyhow::Result<String> {
         .with_context(|| format!("running {program}"))?;
     anyhow::ensure!(
         result.status.success(),
-        "{program} failed: {}",
+        "the command {program} failed: {}",
         String::from_utf8_lossy(&result.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&result.stdout).into_owned())

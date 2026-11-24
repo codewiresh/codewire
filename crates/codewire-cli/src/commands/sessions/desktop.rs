@@ -130,7 +130,7 @@ impl DesktopTarget {
         match resolve_environment_session_target(globals, environment).await? {
             #[cfg(unix)]
             EnvironmentSessionTarget::Host { target, .. } => anyhow::bail!(
-                "{} is a folder on this computer, which has no desktop of its own; `cw desktop` shows a local VM's or a cloud environment's",
+                "the folder {} is on this computer, which has no desktop of its own; `cw desktop` shows a local VM's or a cloud environment's",
                 terminal_text(&target.name)
             ),
             #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -213,7 +213,7 @@ fn login_reach_error(
         };
         return unreachable(host, &cause);
     }
-    login_tls_hint(error, pinned).context(format!("{host} didn't answer as a Codewire server"))
+    login_tls_hint(error, pinned).context(format!("no Codewire server answered at {host}"))
 }
 
 fn login_tls_hint(error: codewire_client::AuthClientError, pinned: bool) -> anyhow::Error {
@@ -283,6 +283,6 @@ mod reach_tests {
         });
         let answered = get(port).await;
         hang_up.await.unwrap();
-        assert_eq!(answered, "127.0.0.1 didn't answer as a Codewire server");
+        assert_eq!(answered, "no Codewire server answered at 127.0.0.1");
     }
 }

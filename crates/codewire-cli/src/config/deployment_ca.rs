@@ -51,7 +51,7 @@ pub enum DeploymentCaFileError {
         source: DeploymentCaError,
     },
     #[error(
-        "{path} is not the CA pinned at login: its fingerprints differ. Run `cw login --ca-file` again"
+        "the CA file {path} is not the CA pinned at login: its fingerprints differ. Run `cw login --ca-file` again"
     )]
     Changed { path: PathBuf },
     #[error("save the CA to {path}: {source}")]

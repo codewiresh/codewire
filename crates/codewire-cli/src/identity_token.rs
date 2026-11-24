@@ -80,10 +80,12 @@ async fn token_at(socket: &Path, resource: &str) -> anyhow::Result<zeroize::Zero
             };
             // The name comes last: the error report capitalises the first
             // letter, and the name must stay exactly as the contract spells it.
-            anyhow::anyhow!("{why} ({})", refusal.name())
+            anyhow::anyhow!("the token was refused: {why} ({})", refusal.name())
         }
         FetchError::InvalidAnswer => {
-            anyhow::anyhow!("the workspace daemon's answer was not a token (identity_unavailable)")
+            anyhow::anyhow!(
+                "the token was refused: the workspace daemon's answer was not a token (identity_unavailable)"
+            )
         }
     })
 }
@@ -165,7 +167,7 @@ mod tests {
         let error = token(&socket).await.unwrap_err();
         assert_eq!(
             crate::error_report::render(&error, Style::new(false, Charset::Unicode)),
-            "✗ The resource is not an https URI your organization registered (invalid_target)\n"
+            "✗ The token was refused: the resource is not an https URI your organization registered (invalid_target)\n"
         );
     }
 

@@ -241,7 +241,7 @@ fn loader(
     let text = |path: &Path| {
         path.to_str().map(lua_string).ok_or_else(|| {
             anyhow::anyhow!(
-                "{} is not UTF-8, so Rex's config cannot name it",
+                "the path {} is not UTF-8, so Rex's config cannot name it",
                 path.display()
             )
         })
@@ -401,7 +401,7 @@ fn read_optional(path: &Path) -> anyhow::Result<Option<String>> {
     match fs::read(path) {
         Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
             anyhow::anyhow!(
-                "{} is not UTF-8 text, so cw cannot edit it without changing it; it was not changed",
+                "the file {} is not UTF-8 text, so cw cannot edit it without changing it; it was not changed",
                 path.display()
             )
         }),

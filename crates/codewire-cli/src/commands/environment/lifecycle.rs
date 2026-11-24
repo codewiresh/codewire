@@ -191,7 +191,7 @@ async fn await_stopped(
                 (format!("state: {}", environment.state), interval)
             }
             Err(error) if is_not_found(&error) => {
-                anyhow::bail!("{name} was removed before it stopped")
+                anyhow::bail!("environment {name} was removed before it stopped")
             }
             Err(error) => (
                 format!("last read failed: {}", terminal_text(&format!("{error:#}"))),
@@ -225,13 +225,13 @@ fn stop_finished(environment: &Environment, name: &str) -> anyhow::Result<bool> 
                 .filter(|reason| !reason.is_empty())
                 .map(|reason| format!(": {reason}"))
                 .unwrap_or_default();
-            anyhow::bail!("{name} became {state} before it stopped{reason}");
+            anyhow::bail!("environment {name} became {state} before it stopped{reason}");
         }
         _ => {}
     }
     if environment.desired_state != "stopped" {
         anyhow::bail!(
-            "{name} did not stop: a newer request wants it {} (state: {state})",
+            "environment {name} did not stop: a newer request wants it {} (state: {state})",
             environment.desired_state
         );
     }
@@ -1036,25 +1036,25 @@ mod tests {
                     EnvironmentState::Error,
                     DesiredState::Stopped,
                     Some("set replicas 0: refused"),
-                    "app became error before it stopped: set replicas 0: refused",
+                    "environment app became error before it stopped: set replicas 0: refused",
                 ),
                 (
                     EnvironmentState::Destroying,
                     DesiredState::Destroyed,
                     None,
-                    "app became destroying before it stopped",
+                    "environment app became destroying before it stopped",
                 ),
                 (
                     EnvironmentState::Starting,
                     DesiredState::Started,
                     None,
-                    "app did not stop: a newer request wants it started (state: starting)",
+                    "environment app did not stop: a newer request wants it started (state: starting)",
                 ),
                 (
                     EnvironmentState::Stopping,
                     DesiredState::Started,
                     None,
-                    "app did not stop: a newer request wants it started (state: stopping)",
+                    "environment app did not stop: a newer request wants it started (state: stopping)",
                 ),
             ] {
                 let server = MockServer::start().await;
@@ -1078,7 +1078,7 @@ mod tests {
                 .await;
             assert_eq!(
                 stop(&server, QUICK).await.unwrap_err().to_string(),
-                "app was removed before it stopped"
+                "environment app was removed before it stopped"
             );
         }
 

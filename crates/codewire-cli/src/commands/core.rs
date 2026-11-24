@@ -178,7 +178,7 @@ pub(crate) async fn handle_init_command(
             .with_context(|| format!("stat {}", args.file.display()))?
     {
         anyhow::bail!(
-            "{} already exists (use --force to overwrite)",
+            "the file {} already exists (use --force to overwrite)",
             args.file.display()
         );
     }

@@ -251,7 +251,7 @@ pub(crate) async fn handle_logs(globals: &Globals, args: LogsArgs) -> anyhow::Re
         && matches!(local_environment_named(&environment).await, Ok(true))
     {
         anyhow::bail!(
-            "{environment} is a local VM, whose setup shows as `cw start` or `cw create` runs; setup logs are kept for cloud environments (`cw --cloud logs {environment} --setup`)"
+            "local VM {environment} keeps no setup logs: its setup shows as `cw start` or `cw create` runs, and setup logs are kept for cloud environments (`cw --cloud logs {environment} --setup`)"
         );
     }
     operation(

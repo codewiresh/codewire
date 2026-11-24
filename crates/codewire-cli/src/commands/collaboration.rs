@@ -47,7 +47,7 @@ pub(crate) fn resolve_platform(
 pub(crate) fn trimmed_required<'a>(value: &'a str, label: &str) -> anyhow::Result<&'a str> {
     let value = value.trim();
     if value.is_empty() {
-        anyhow::bail!("{label} must be non-empty");
+        anyhow::bail!("the {label} must be non-empty");
     }
     Ok(value)
 }

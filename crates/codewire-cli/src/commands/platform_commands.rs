@@ -2137,7 +2137,7 @@ impl SshConfigFile {
         };
         String::from_utf8(bytes).map(Some).map_err(|_| {
             anyhow::anyhow!(
-                "{} is not UTF-8 text, so cw cannot edit it without changing your entries; it was not changed",
+                "the file {} is not UTF-8 text, so cw cannot edit it without changing your entries; it was not changed",
                 self.path.display()
             )
         })
@@ -2171,7 +2171,7 @@ impl SshConfigFile {
 
     fn incomplete_markers(&self, rerun: &str) -> anyhow::Error {
         anyhow::anyhow!(
-            "{} has an incomplete Codewire section: a `{SSH_CONFIG_MARKER_START}` line without its `{SSH_CONFIG_MARKER_END}` line, or the reverse; it was not changed. Delete the leftover marker line, then run `{rerun}{}` again",
+            "the file {} has an incomplete Codewire section: a `{SSH_CONFIG_MARKER_START}` line without its `{SSH_CONFIG_MARKER_END}` line, or the reverse; it was not changed. Delete the leftover marker line, then run `{rerun}{}` again",
             self.path.display(),
             self.flag()
         )
@@ -2189,7 +2189,7 @@ impl SshConfigFile {
             Ok(metadata) => {
                 anyhow::ensure!(
                     metadata.is_file(),
-                    "{} is not a regular file; it was not changed",
+                    "the path {} is not a regular file; it was not changed",
                     target.display()
                 );
                 #[cfg(unix)]
@@ -2197,7 +2197,7 @@ impl SshConfigFile {
                     use std::os::unix::fs::MetadataExt as _;
                     anyhow::ensure!(
                         metadata.nlink() <= 1,
-                        "{} has {} hard links, and replacing it would leave the other names with the old text; it was not changed. Make the other names symlinks to it, then run `{rerun}` again",
+                        "the file {} has {} hard links, and replacing it would leave the other names with the old text; it was not changed. Make the other names symlinks to it, then run `{rerun}` again",
                         target.display(),
                         metadata.nlink()
                     );
@@ -2206,7 +2206,7 @@ impl SshConfigFile {
                 // writable, so ask the file itself.
                 if let Err(err) = fs::OpenOptions::new().write(true).open(target) {
                     anyhow::bail!(
-                        "{} is not writable ({err}); it was not changed. Make it writable, for example `chmod u+w {}`, then run `{rerun}` again",
+                        "the file {} is not writable ({err}); it was not changed. Make it writable, for example `chmod u+w {}`, then run `{rerun}` again",
                         target.display(),
                         shell_word(&target.to_string_lossy())
                     );
@@ -2511,7 +2511,7 @@ pub(crate) fn ssh_config_write_target(path: &Path) -> anyhow::Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!("{} is a chain of more than 40 symlinks", path.display())
+    anyhow::bail!("the path {} is a chain of over 40 symlinks", path.display())
 }
 
 fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
@@ -2541,7 +2541,7 @@ pub(crate) fn write_ssh_config_atomically(
         .unwrap_or(Path::new("."));
     let name = target
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("{} names no file", target.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("the path {} names no file", target.display()))?;
     let temp = dir.join(format!(
         ".{}.cw-{:016x}",
         name.to_string_lossy(),
@@ -3013,7 +3013,7 @@ mod tests {
     fn read_error(kind: std::io::ErrorKind) -> Option<Box<config::ConfigError>> {
         Some(Box::new(config::ConfigError::ReadConfig {
             path: std::path::PathBuf::from("/synthetic/config.json"),
-            source: std::io::Error::from(kind),
+            reason: std::io::Error::from(kind),
         }))
     }
 

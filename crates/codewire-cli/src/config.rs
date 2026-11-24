@@ -306,7 +306,7 @@ impl Eq for ResolvedPlatformConfig {}
 fn config_note(cause: Option<&ConfigError>) -> String {
     match cause {
         None => String::new(),
-        Some(ConfigError::ReadConfig { source, .. })
+        Some(ConfigError::ReadConfig { reason: source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
             String::new()
@@ -462,14 +462,14 @@ fn no_platform_token(cause: Option<&ConfigError>, sandbox: Option<&str>) -> Stri
 
 pub fn load_platform_config(config_dir: &Path) -> Result<PlatformConfig, ConfigError> {
     let path = config_dir.join("config.json");
-    let data = fs::read(&path).map_err(|source| ConfigError::ReadConfig {
+    let data = fs::read(&path).map_err(|reason| ConfigError::ReadConfig {
         path: path.clone(),
-        source,
+        reason,
     })?;
     let config: PlatformConfig =
-        serde_json::from_slice(&data).map_err(|source| ConfigError::ParsePlatform {
+        serde_json::from_slice(&data).map_err(|reason| ConfigError::ParsePlatform {
             path: path.clone(),
-            source,
+            reason,
         })?;
     if config.server_url.trim().is_empty() {
         return Err(ConfigError::IncompletePlatformConfig { path });
@@ -483,16 +483,16 @@ pub fn save_platform_config(config_dir: &Path, config: &PlatformConfig) -> Resul
         return Err(ConfigError::IncompletePlatformConfig { path });
     }
 
-    fs::create_dir_all(config_dir).map_err(|source| ConfigError::CreateConfigDir {
+    fs::create_dir_all(config_dir).map_err(|reason| ConfigError::CreateConfigDir {
         path: config_dir.to_path_buf(),
-        source,
+        reason,
     })?;
     harden_dir(config_dir)?;
 
     let mut data =
-        serde_json::to_vec_pretty(config).map_err(|source| ConfigError::SerializePlatform {
+        serde_json::to_vec_pretty(config).map_err(|reason| ConfigError::SerializePlatform {
             path: path.clone(),
-            source,
+            reason,
         })?;
     data.push(b'\n');
 
@@ -501,13 +501,13 @@ pub fn save_platform_config(config_dir: &Path, config: &PlatformConfig) -> Resul
         .truncate(true)
         .write(true)
         .open(&path)
-        .map_err(|source| ConfigError::WriteConfig {
+        .map_err(|reason| ConfigError::WriteConfig {
             path: path.clone(),
-            source,
+            reason,
         })?;
     harden_file(&path)?;
     file.write_all(&data)
-        .map_err(|source| ConfigError::WriteConfig { path, source })
+        .map_err(|reason| ConfigError::WriteConfig { path, reason })
 }
 
 /// The account a `cw login` verified, kept beside the platform config: its
@@ -527,15 +527,15 @@ pub(crate) const ACCOUNT_FILE: &str = "account.json";
 /// old record or the new one, never part of either.
 pub fn save_account(config_dir: &Path, account: &SavedAccount) -> Result<(), ConfigError> {
     let path = config_dir.join(ACCOUNT_FILE);
-    fs::create_dir_all(config_dir).map_err(|source| ConfigError::CreateConfigDir {
+    fs::create_dir_all(config_dir).map_err(|reason| ConfigError::CreateConfigDir {
         path: config_dir.to_path_buf(),
-        source,
+        reason,
     })?;
     harden_dir(config_dir)?;
     let mut data =
-        serde_json::to_vec_pretty(account).map_err(|source| ConfigError::SerializePlatform {
+        serde_json::to_vec_pretty(account).map_err(|reason| ConfigError::SerializePlatform {
             path: path.clone(),
-            source,
+            reason,
         })?;
     data.push(b'\n');
     let temporary = config_dir.join(format!(
@@ -560,17 +560,17 @@ pub fn save_account(config_dir: &Path, account: &SavedAccount) -> Result<(), Con
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    written.map_err(|source| ConfigError::WriteConfig { path, source })
+    written.map_err(|reason| ConfigError::WriteConfig { path, reason })
 }
 
 pub fn delete_account(config_dir: &Path) -> Result<(), ConfigError> {
     let path = config_dir.join(ACCOUNT_FILE);
     match fs::remove_file(&path) {
         Ok(()) => {
-            sync_directory(config_dir).map_err(|source| ConfigError::WriteConfig { path, source })
+            sync_directory(config_dir).map_err(|reason| ConfigError::WriteConfig { path, reason })
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ConfigError::WriteConfig { path, source }),
+        Err(reason) => Err(ConfigError::WriteConfig { path, reason }),
     }
 }
 
@@ -652,7 +652,7 @@ pub fn delete_platform_config(config_dir: &Path) -> Result<(), ConfigError> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ConfigError::WriteConfig { path, source }),
+        Err(reason) => Err(ConfigError::WriteConfig { path, reason }),
     }
 }
 
@@ -994,19 +994,19 @@ pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
         };
         String::from_utf8(bytes).map_err(|error| ConfigError::ReadConfig {
             path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            reason: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
         })?
     };
-    let value: toml::Value = toml::from_str(&data).map_err(|source| ConfigError::ParseMesh {
+    let value: toml::Value = toml::from_str(&data).map_err(|reason| ConfigError::ParseMesh {
         path: path.clone(),
-        source,
+        reason,
     })?;
     if !matches!(value, toml::Value::Table(_)) {
         return Err(ConfigError::InvalidMeshConfigRoot { path });
     }
     value
         .try_into()
-        .map_err(|source| ConfigError::ParseMesh { path, source })
+        .map_err(|reason| ConfigError::ParseMesh { path, reason })
 }
 
 /// Creates the one standalone-local organization and its approved machine
@@ -1113,13 +1113,13 @@ pub fn current_target(data_dir: &Path) -> Result<CurrentTargetConfig, ConfigErro
 pub fn load_project_document(
     path: &Path,
 ) -> Result<codewire_project::ProjectDocument, ConfigError> {
-    let data = fs::read_to_string(path).map_err(|source| ConfigError::ReadConfig {
+    let data = fs::read_to_string(path).map_err(|reason| ConfigError::ReadConfig {
         path: path.to_path_buf(),
-        source,
+        reason,
     })?;
-    codewire_project::parse_project_yaml(&data).map_err(|source| ConfigError::ParseCodewireConfig {
+    codewire_project::parse_project_yaml(&data).map_err(|reason| ConfigError::ParseCodewireConfig {
         path: path.to_path_buf(),
-        source,
+        reason,
     })
 }
 
@@ -1156,20 +1156,20 @@ fn update_mesh_config(
 
 fn write_mesh_config(data_dir: &Path, config: &MeshConfig) -> Result<(), ConfigError> {
     let path = data_dir.join("config.toml");
-    let data = toml::to_string_pretty(config).map_err(|source| ConfigError::SerializeMesh {
+    let data = toml::to_string_pretty(config).map_err(|reason| ConfigError::SerializeMesh {
         path: path.clone(),
-        source,
+        reason,
     })?;
     {
         let write_error = |error: anyhow::Error| ConfigError::WriteConfig {
             path: path.clone(),
-            source: std::io::Error::other(error),
+            reason: std::io::Error::other(error),
         };
         let directory = crate::commands::MeshStateDir::open(data_dir, true)
             .map_err(write_error)?
             .ok_or_else(|| ConfigError::WriteConfig {
                 path: path.clone(),
-                source: std::io::Error::other("local Mesh directory is absent"),
+                reason: std::io::Error::other("local Mesh directory is absent"),
             })?;
         directory
             .write("config.toml", data.as_bytes())
@@ -1183,7 +1183,7 @@ fn harden_dir(path: &Path) -> Result<(), ConfigError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
         ConfigError::WriteConfig {
             path: path.to_path_buf(),
-            source,
+            reason: source,
         }
     })
 }
@@ -1199,7 +1199,7 @@ fn harden_file(path: &Path) -> Result<(), ConfigError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
         ConfigError::WriteConfig {
             path: path.to_path_buf(),
-            source,
+            reason: source,
         }
     })
 }
@@ -1407,53 +1407,45 @@ pub enum ConfigError {
         "CW_MESH_DATA_DIR must be a bounded absolute non-root Unicode path without control or dot components"
     )]
     InvalidMeshDataDirectory,
-    #[error("read config {path}: {source}")]
+    #[error("read config {path}: {reason}")]
     ReadConfig {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        reason: std::io::Error,
     },
-    #[error("create config dir {path}: {source}")]
+    #[error("create config dir {path}: {reason}")]
     CreateConfigDir {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        reason: std::io::Error,
     },
-    #[error("write config {path}: {source}")]
+    #[error("write config {path}: {reason}")]
     WriteConfig {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        reason: std::io::Error,
     },
-    #[error("parse platform config {path}: {source}")]
+    #[error("parse platform config {path}: {reason}")]
     ParsePlatform {
         path: PathBuf,
-        #[source]
-        source: serde_json::Error,
+        reason: serde_json::Error,
     },
-    #[error("serialize platform config {path}: {source}")]
+    #[error("serialize platform config {path}: {reason}")]
     SerializePlatform {
         path: PathBuf,
-        #[source]
-        source: serde_json::Error,
+        reason: serde_json::Error,
     },
-    #[error("parse mesh config {path}: {source}")]
+    #[error("parse mesh config {path}: {reason}")]
     ParseMesh {
         path: PathBuf,
-        #[source]
-        source: toml::de::Error,
+        reason: toml::de::Error,
     },
-    #[error("parse codewire config {path}: {source}")]
+    #[error("parse codewire config {path}: {reason}")]
     ParseCodewireConfig {
         path: PathBuf,
-        #[source]
-        source: codewire_project::ProjectError,
+        reason: codewire_project::ProjectError,
     },
-    #[error("serialize mesh config {path}: {source}")]
+    #[error("serialize mesh config {path}: {reason}")]
     SerializeMesh {
         path: PathBuf,
-        #[source]
-        source: toml::ser::Error,
+        reason: toml::ser::Error,
     },
     #[error("invalid mesh config {path}: top-level TOML value must be a table")]
     InvalidMeshConfigRoot { path: PathBuf },
@@ -1502,6 +1494,19 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_config_read_error_says_its_reason_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("config.json")).unwrap();
+        let error = anyhow::Error::new(load_platform_config(dir.path()).unwrap_err());
+        let shown = crate::error_report::sentence(&error);
+        let reason = std::fs::read(dir.path().join("config.json"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(shown.matches(&reason).count(), 1, "{shown}");
+        assert!(shown.starts_with("read config "), "{shown}");
+    }
 
     fn paths(home: &Path, env: &impl Env) -> ResolvePaths {
         ResolvePaths::from_home_and_env(home.to_path_buf(), env).unwrap()

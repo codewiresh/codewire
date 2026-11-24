@@ -280,12 +280,12 @@ pub(super) async fn lifecycle_failure(
     if error.is::<LostContact>() {
         return error;
     }
-    let head = match stage {
-        Some(stage) => format!("{verb} {name} failed at {stage:?}"),
-        None => format!("{verb} {name} failed"),
+    let action = match stage {
+        Some(stage) => format!("{verb} {name} at {stage:?}"),
+        None => format!("{verb} {name}"),
     };
     if !inspect {
-        return error.context(head);
+        return error.context(format!("couldn't {action}"));
     }
     let after = match native_client().await {
         Ok(mut client) => match client.get(name).await {
@@ -301,13 +301,16 @@ pub(super) async fn lifecycle_failure(
         },
         Err(_) => format!("the state of {name} is unknown; check `cw --local ls`"),
     };
-    with_state(&head, &error, &after)
+    with_state(&action, &error, &after)
 }
 
-/// `error` under `head`, followed by the environment's state line, keeping
-/// the next step `error` carries as the error's own.
-fn with_state(head: &str, error: &anyhow::Error, after: &str) -> anyhow::Error {
-    let message = anyhow::anyhow!("{head}: {}\n{after}", crate::error_report::sentence(error));
+/// `error` under `couldn't ACTION`, followed by the environment's state line,
+/// keeping the next step `error` carries as the error's own.
+fn with_state(action: &str, error: &anyhow::Error, after: &str) -> anyhow::Error {
+    let message = anyhow::anyhow!(
+        "couldn't {action}: {}\n{after}",
+        crate::error_report::sentence(error)
+    );
     match crate::error_report::next_step(error) {
         Some(step) => crate::error_report::with_next_step(message, step),
         None => message,
@@ -1108,7 +1111,7 @@ mod tests {
             "rm /state/egress-intercept",
         );
         let error = with_state(
-            "Start p3 failed at \"Starting the VM\"",
+            "start p3 at \"Starting the VM\"",
             &error,
             "p3 reports state error",
         );
@@ -1118,7 +1121,7 @@ mod tests {
         );
         assert_eq!(
             crate::error_report::sentence(&error),
-            "Start p3 failed at \"Starting the VM\": start_intercept_unavailable (the switch is on)\np3 reports state error"
+            "couldn't start p3 at \"Starting the VM\": start_intercept_unavailable (the switch is on)\np3 reports state error"
         );
     }
     use crate::output::{Charset, Style};

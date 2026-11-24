@@ -22,6 +22,7 @@ from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.database_pools import check_database_pools
 from repo_policy.deployment_http_clients import check_deployment_http_clients
 from repo_policy.forgejo_list_paging import check_forgejo_list_paging
+from repo_policy.error_first_word import check_error_first_word
 from repo_policy.trace_context_callers import check_trace_context_callers
 from repo_policy.mcp_settings import check_mcp_settings
 from repo_policy.merge_queue_boundary import check_merge_queue_boundary
@@ -86,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     forgejo_list_paging_parser = subparsers.add_parser("forgejo-list-paging")
     forgejo_list_paging_parser.add_argument("--self-test", action="store_true")
     forgejo_list_paging_parser.set_defaults(func=check_forgejo_list_paging)
+    error_first_word_parser = subparsers.add_parser("error-first-word")
+    error_first_word_parser.add_argument("--self-test", action="store_true")
+    error_first_word_parser.set_defaults(func=check_error_first_word)
     trace_context_callers_parser = subparsers.add_parser("trace-context-callers")
     trace_context_callers_parser.add_argument("--self-test", action="store_true")
     trace_context_callers_parser.set_defaults(func=check_trace_context_callers)

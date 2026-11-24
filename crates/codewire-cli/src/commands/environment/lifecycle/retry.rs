@@ -280,16 +280,14 @@ fn retry_result(name: &str, end: FollowEnd) -> RetryResult {
 pub(crate) fn setup_failed_error(name: &str, step: Option<&str>, error: &str) -> anyhow::Error {
     let error = terminal_text(error);
     let failed = match step {
-        Some(step) if !error.is_empty() && error != step => {
-            format!("setup failed at {step}: {error}")
-        }
-        Some(step) => format!("setup failed at {step}"),
-        None if !error.is_empty() => format!("setup failed: {error}"),
-        None => "setup failed".to_owned(),
+        Some(step) if !error.is_empty() && error != step => format!(" at {step}: {error}"),
+        Some(step) => format!(" at {step}"),
+        None if !error.is_empty() => format!(": {error}"),
+        None => String::new(),
     };
     with_next_step(
         anyhow::anyhow!(
-            "{failed}; {name} is still running, so fix it there and run `cw retry {name}` (`cw logs {name} --setup` has the whole log)"
+            "setup failed{failed}; {name} is still running, so fix it there and run `cw retry {name}` (`cw logs {name} --setup` has the whole log)"
         ),
         format!("cw shell {name}"),
     )

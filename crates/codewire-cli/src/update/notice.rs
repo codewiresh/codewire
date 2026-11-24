@@ -216,7 +216,7 @@ fn read_state(path: &Path) -> NoticeState {
 fn write_state(path: &Path, state: &NoticeState) -> anyhow::Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} has no directory", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("the path {} has no directory", path.display()))?;
     std::fs::create_dir_all(parent)?;
     let staged = parent.join(format!(".upgrade-check.{}.json", std::process::id()));
     std::fs::write(&staged, serde_json::to_vec(state)?)

@@ -74,7 +74,7 @@ pub(crate) fn local_credential_root(env: &impl config::Env) -> anyhow::Result<Pa
     if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
         let root = PathBuf::from(value);
         if !root.is_absolute() {
-            anyhow::bail!("{LOCAL_CREDENTIAL_ROOT_ENV} must be an absolute path");
+            anyhow::bail!("the path in {LOCAL_CREDENTIAL_ROOT_ENV} must be absolute");
         }
         return Ok(root);
     }
@@ -837,7 +837,7 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
     if snapshot.direct_mounts {
         if !args.share_mounts {
             anyhow::bail!(
-                "{source_kind} {} was taken from a VM that mounts host folders directly; an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
+                "the {source_kind} {} was taken from a VM that mounts host folders directly; an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
                 terminal_text(&snapshot.name)
             );
         }
@@ -1098,7 +1098,7 @@ fn snapshot_restore_names(
         let candidate = format!("{prefix}-{index}");
         anyhow::ensure!(
             codewire_local_vmm::valid_environment_name(&candidate),
-            "{candidate:?} is not a valid environment name; choose another --name-prefix"
+            "the environment name {candidate:?} is not valid; choose another --name-prefix"
         );
         if !existing.iter().any(|existing| existing == &candidate) {
             names.push(candidate);
@@ -2763,7 +2763,7 @@ pub(crate) async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::
     if !restart_offer_applies(&error) {
         return error;
     }
-    let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw upgrade --vms`");
+    let hint = || crate::error_report::with_next_step(error, "cw upgrade --vms");
     let config = match native_runtime_config() {
         Ok(config) => config,
         Err(_) => return hint(),
@@ -3089,7 +3089,7 @@ fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
     };
     let path = PathBuf::from(value);
     if !path.is_absolute() {
-        anyhow::bail!("{name} must be an absolute path");
+        anyhow::bail!("the path in {name} must be absolute");
     }
     Ok(Some(path))
 }
@@ -4074,7 +4074,7 @@ fn empty_native_workspace(
             .with_context(|| format!("read {}", directory.display()))?
             .next()
             .is_none(),
-        "{} must stay empty; remove its contents",
+        "the directory {} must stay empty; remove its contents",
         directory.display()
     );
     Ok(NativeWorkspace {

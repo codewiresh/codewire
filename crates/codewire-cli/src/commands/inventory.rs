@@ -639,7 +639,7 @@ pub(crate) fn find_direct<'a>(
                 .find(|(location, _)| *location != entry.location)
             {
                 anyhow::bail!(
-                    "{} could not be listed ({reason}), so {requested:?} may also name one there; {}",
+                    "couldn't list {} ({reason}), so {requested:?} may also name one there; {}",
                     location.listing(),
                     select_one(entry, requested, false)
                 );
@@ -664,7 +664,7 @@ pub(crate) fn find_direct<'a>(
                 .map(|entry| select_one(entry, requested, hosted))
                 .collect();
             anyhow::bail!(
-                "{requested:?} names a {}; {}",
+                "there's a {} named {requested:?}; {}",
                 several
                     .iter()
                     .map(|entry| entry.location.kind())
@@ -685,7 +685,7 @@ pub(crate) fn find_direct<'a>(
         several => {
             let ids: Vec<&str> = several.iter().map(|entry| entry.id()).collect();
             anyhow::bail!(
-                "{requested:?} begins several cloud environment IDs; use a longer prefix ({})",
+                "several cloud environment IDs begin with {requested:?}; use a longer prefix ({})",
                 ids.join(", ")
             );
         }
@@ -701,7 +701,7 @@ pub(crate) fn find_direct<'a>(
     // Nowhere could be searched: the failure is the answer.
     if !searched && !failures.is_empty() {
         anyhow::bail!(
-            "{}; the current environment is unchanged",
+            "couldn't search for {requested:?}: {}; the current environment is unchanged",
             failures.join("; ")
         );
     }
@@ -1764,7 +1764,7 @@ mod tests {
         );
         assert_eq!(
             find_direct(&both, "app", None).unwrap_err().to_string(),
-            "\"app\" names a local VM and a cloud VM; `cw --local use app` selects the local VM, or `cw --cloud use app` selects the cloud VM"
+            "there's a local VM and a cloud VM named \"app\"; `cw --local use app` selects the local VM, or `cw --cloud use app` selects the cloud VM"
         );
         let clouds = inventory(
             vec![
@@ -1795,7 +1795,7 @@ mod tests {
                 find_direct(&host, "box", placement)
                     .unwrap_err()
                     .to_string(),
-                "\"box\" names a local VM and a trusted host; `cw use box-local-id` selects the local VM, or `cw use box-host-id` selects the trusted host"
+                "there's a local VM and a trusted host named \"box\"; `cw use box-local-id` selects the local VM, or `cw use box-host-id` selects the trusted host"
             );
         }
     }
@@ -1814,7 +1814,7 @@ mod tests {
         );
         assert_eq!(
             find_direct(&partial, "app", None).unwrap_err().to_string(),
-            "cloud environments could not be listed (connection refused), so \"app\" may also name one there; `cw --local use app` selects the local VM"
+            "couldn't list cloud environments (connection refused), so \"app\" may also name one there; `cw --local use app` selects the local VM"
         );
         assert!(
             find_direct(&partial, "gone", None)
@@ -1834,7 +1834,7 @@ mod tests {
             find_direct(&nothing, "app", Some(EnvironmentPlacement::Platform))
                 .unwrap_err()
                 .to_string(),
-            "cloud environments could not be listed: not logged in (`cw login`); the current environment is unchanged"
+            "couldn't search for \"app\": cloud environments could not be listed: not logged in (`cw login`); the current environment is unchanged"
         );
         // Not logged in: there is nothing there to collide with.
         let local_only = inventory(

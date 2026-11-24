@@ -184,7 +184,7 @@ async fn nothing_pending_or_no_match_is_said_and_accepts_nothing() {
         .to_string();
     assert_eq!(
         several,
-        "\"BETA\" names 2 pending invitations; name one by slug: beta, beta-two"
+        "the name \"BETA\" matches 2 pending invitations; name one by slug: beta, beta-two"
     );
 }
 

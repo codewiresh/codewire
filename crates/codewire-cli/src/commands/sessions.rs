@@ -982,7 +982,7 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
     if managed_session(&session) {
         let name = short_id::session_display(&session);
         anyhow::bail!(
-            "{name} is a managed agent conversation and takes no raw input; send it a task with `cw msg ENV --session {name} TEXT`"
+            "session {name} is a managed agent conversation and takes no raw input; send it a task with `cw msg ENV --session {name} TEXT`"
         );
     }
     if args.key.is_some() && !session.pty {
@@ -2916,7 +2916,7 @@ async fn select_or_create_environment_session(
         SessionSelection::Create => {
             let environment = &target.current_target().name;
             anyhow::bail!(
-                "{environment} has no sessions; start one with `cw shell {environment}` or `cw run --in {environment} -- COMMAND`"
+                "there are no sessions in {environment}; start one with `cw shell {environment}` or `cw run --in {environment} -- COMMAND`"
             )
         }
     }
@@ -3285,7 +3285,7 @@ async fn select_logs_session(
     let sessions = target.list().await?;
     match sessions.as_slice() {
         [] => anyhow::bail!(
-            "{environment} has no sessions; its setup logs: `cw logs {environment} --setup`"
+            "there are no sessions in {environment}; its setup logs: `cw logs {environment} --setup`"
         ),
         [session] => {
             eprintln!(

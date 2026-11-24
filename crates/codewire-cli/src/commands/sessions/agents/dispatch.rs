@@ -127,7 +127,7 @@ fn terminal_session_refusal(
     doing: &str,
 ) -> anyhow::Error {
     anyhow::anyhow!(
-        "{} is a terminal session, not a managed agent conversation; {doing} applies only to managed conversations. Type into it with `cw msg {} --session {} TEXT`, or send raw input with `cw send`",
+        "session {} is a terminal session, not a managed agent conversation; {doing} applies only to managed conversations. Type into it with `cw msg {} --session {} TEXT`, or send raw input with `cw send`",
         conversation_label(target, view),
         environment_name(target),
         session_name(view)
@@ -268,7 +268,7 @@ async fn message_session(
     if running.iter().any(|view| view.name == first) {
         return Err(with_next_step(
             anyhow::anyhow!(
-                "{first:?} is a session in {environment}; name it with --session so it isn't sent as text"
+                "the session {first:?} is in {environment}; name it with --session so it isn't sent as text"
             ),
             format!("cw {command} {environment} --session {first} {rest}"),
         ));
@@ -355,7 +355,7 @@ async fn write_terminal_message(
     let message = terminal_message_bytes(text, view.pty)?;
     anyhow::ensure!(
         session_running(view),
-        "{label} is {}; it cannot receive input. Start it with `cw restart {} --session {}`",
+        "session {label} is {}; it cannot receive input. Start it with `cw restart {} --session {}`",
         view.state.to_ascii_lowercase(),
         environment_name(target),
         session_name(view)

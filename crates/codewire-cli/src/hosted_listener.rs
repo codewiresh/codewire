@@ -29,7 +29,7 @@ pub fn take_from_environment() -> anyhow::Result<()> {
     unsafe { std::env::remove_var(HOSTED_DAEMON_LISTENER_FD_ENV) };
     ensure!(
         value == HOSTED_DAEMON_LISTENER_FD.to_string().as_str(),
-        "{HOSTED_DAEMON_LISTENER_FD_ENV} names another descriptor"
+        "the variable {HOSTED_DAEMON_LISTENER_FD_ENV} names another descriptor"
     );
     // SAFETY: F_GETFD only reads the descriptor's flags.
     ensure!(

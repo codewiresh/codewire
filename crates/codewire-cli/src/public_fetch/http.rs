@@ -86,12 +86,15 @@ impl FixedHttp {
         let host = url.host_str().unwrap_or(HOST);
         anyhow::ensure!(
             response.url() == &url && !response.status().is_redirection(),
-            "{host} redirected {key}; a release object is read only from its own address"
+            "the server {host} redirected {key}; a release object is read only from its own address"
         );
         match response.status() {
             StatusCode::OK => {}
-            StatusCode::NOT_FOUND => anyhow::bail!("{host} has no {key} (HTTP 404)"),
-            status => anyhow::bail!("{host} answered HTTP {} for {key}", status.as_u16()),
+            StatusCode::NOT_FOUND => anyhow::bail!("the server {host} has no {key} (HTTP 404)"),
+            status => anyhow::bail!(
+                "the server {host} answered HTTP {} for {key}",
+                status.as_u16()
+            ),
         }
         anyhow::ensure!(
             response

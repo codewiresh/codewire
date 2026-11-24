@@ -87,8 +87,10 @@ the docs, and nothing on screen is internal.
 
 - An error says what failed in the user's terms, then a `→` line with the one
   command or flag that helps. The top-level printer owns the shape: `✗` (red
-  at a terminal), the outermost message in sentence case, the next step the
-  error carries, and the cause chain only with `-v`. Commands return messages
+  at a terminal), the outermost message in sentence case (an error never
+  begins with a value, so the letter it raises is always a word's;
+  `error-first-word` checks it), the next step the error carries, and the
+  cause chain only with `-v`. Commands return messages
   as lowercase fragments that compose into the chain, and never print `✗`
   themselves. Until #4609 lands, `main` prints `{err:#}`, the chain joined
   with ": ", and this shape is the target.

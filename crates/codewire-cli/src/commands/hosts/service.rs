@@ -45,7 +45,7 @@ pub(crate) fn service_value(value: &str, what: &str) -> anyhow::Result<()> {
     });
     match refused {
         Some(c) => anyhow::bail!(
-            "{what} `{}` has a character a service file cannot carry ({c:?}); use a path without it",
+            "a service file cannot carry {c:?} in {what} `{}`; use a path without it",
             value.escape_debug()
         ),
         None => Ok(()),
@@ -240,7 +240,7 @@ fn install() -> anyhow::Result<()> {
     let path = service_file()?;
     anyhow::ensure!(
         !path.exists() || ours(&path)?,
-        "{} exists and was not written by cw; it is left alone",
+        "the service file {} exists and was not written by cw; it is left alone",
         path.display()
     );
     let executable = executable()?;

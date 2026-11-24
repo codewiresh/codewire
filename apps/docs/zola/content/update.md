@@ -1,7 +1,7 @@
 ---
 title: Update and roll back
 description: Keep cw current with cw upgrade, roll back to a version you had, and move local VMs onto a new cw.
-updated: 2026-11-18
+updated: 2026-11-21
 weight: 7
 ---
 
@@ -51,7 +51,7 @@ old VM still runs such a command says:
 
 ```text
 your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw --local stop NAME`)
-cw: restart them with `cw upgrade --vms`
+→ cw upgrade --vms
 ```
 
 Once none of your VMs runs, the next such command switches over by itself and

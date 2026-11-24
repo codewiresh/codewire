@@ -171,7 +171,7 @@ async fn handle_local_checkpoint_command(
 ) -> anyhow::Result<()> {
     let status = |action: &'static str| {
         move |status: tonic::Status| {
-            let error = anyhow::anyhow!("{action}: {}", status.message());
+            let error = anyhow::anyhow!("couldn't {action}: {}", status.message());
             interception::with_switch_step(error, &status)
         }
     };
@@ -184,13 +184,19 @@ async fn handle_local_checkpoint_command(
     };
     match command {
         CheckpointCommand::Create(args) => {
-            create(&mut client, globals, args, status("checkpoint create")).await
+            create(
+                &mut client,
+                globals,
+                args,
+                status("create the VM checkpoint"),
+            )
+            .await
         }
         CheckpointCommand::Ls(args) => {
             let checkpoints = client
                 .list_checkpoints(args.env.as_deref().unwrap_or_default())
                 .await
-                .map_err(status("checkpoint ls"))?;
+                .map_err(status("list VM checkpoints"))?;
             match args.output {
                 OutputFormat::Json => print_json(
                     &checkpoints
@@ -208,7 +214,7 @@ async fn handle_local_checkpoint_command(
             let checkpoint = client
                 .get_checkpoint(&args.checkpoint)
                 .await
-                .map_err(status("checkpoint inspect"))?;
+                .map_err(status("read the VM checkpoint"))?;
             match args.output {
                 OutputFormat::Json => print_json(&CheckpointView::from(&checkpoint)),
                 OutputFormat::Text => {
@@ -222,7 +228,7 @@ async fn handle_local_checkpoint_command(
             let checkpoint = client
                 .get_checkpoint(&args.checkpoint)
                 .await
-                .map_err(status("checkpoint restore"))?;
+                .map_err(status("restore the VM checkpoint"))?;
             // Refused before the source is stopped.
             refuse_unrestorable(&checkpoint, "restored")?;
             let source = checkpoint.source_name.clone();
@@ -230,7 +236,7 @@ async fn handle_local_checkpoint_command(
             let environment = client
                 .get(&source)
                 .await
-                .map_err(status("checkpoint restore"))?;
+                .map_err(status("restore the VM checkpoint"))?;
             let mut stopped = None;
             if environment.state != v1::EnvironmentState::Stopped as i32 {
                 if !confirm_restore(&source, &checkpoint.name, args.yes)? {
@@ -248,7 +254,7 @@ async fn handle_local_checkpoint_command(
                         &mut |_| {},
                     )
                     .await
-                    .map_err(status("checkpoint restore: stop"))?;
+                    .map_err(status("stop the VM for the restore"))?;
                 stopped = Some(stopping.elapsed());
             }
             let restoring = std::time::Instant::now();
@@ -258,7 +264,7 @@ async fn handle_local_checkpoint_command(
                 .await
                 .map_err(|error| {
                     locked_restore_failure(&source, &error)
-                        .unwrap_or_else(|| status("checkpoint restore")(error))
+                        .unwrap_or_else(|| status("restore the VM checkpoint")(error))
                 })?;
             let restored = restoring.elapsed();
             match args.output {
@@ -289,7 +295,7 @@ async fn handle_local_checkpoint_command(
             let checkpoint = client
                 .delete_checkpoint(&args.checkpoint)
                 .await
-                .map_err(status("checkpoint rm"))?;
+                .map_err(status("remove the VM checkpoint"))?;
             match args.output {
                 OutputFormat::Json => print_json(&CheckpointView::from(&checkpoint)),
                 OutputFormat::Text => {
@@ -317,7 +323,7 @@ fn confirm_restore(source: &str, checkpoint: &str, yes: bool) -> anyhow::Result<
     }
     anyhow::ensure!(
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
-        "{source} is running; restoring discards its running state and every disk change since {checkpoint}: pass --yes to do it noninteractively"
+        "environment {source} is running; restoring discards its running state and every disk change since {checkpoint}: pass --yes to do it noninteractively"
     );
     let mut stderr = std::io::stderr().lock();
     write!(

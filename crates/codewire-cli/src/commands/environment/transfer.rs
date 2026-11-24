@@ -308,7 +308,7 @@ async fn resolve_destination(destination: &Path) -> anyhow::Result<PathBuf> {
         .is_ok_and(|metadata| metadata.is_dir())
     {
         bail!(
-            "{} is a directory; name the file to write",
+            "the destination {} is a directory; name the file to write",
             destination.display()
         );
     }
@@ -361,7 +361,7 @@ impl Partial {
     async fn create(destination: &Path) -> anyhow::Result<Self> {
         let name = destination
             .file_name()
-            .with_context(|| format!("{} names no file", destination.display()))?;
+            .with_context(|| format!("the path {} names no file", destination.display()))?;
         let mut partial_name = std::ffi::OsString::from(".");
         partial_name.push(name);
         partial_name.push(format!(".cw-partial-{:016x}", rand::random::<u64>()));

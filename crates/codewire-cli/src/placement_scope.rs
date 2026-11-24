@@ -20,7 +20,7 @@ pub(crate) fn validate_placement_scope(
     };
     anyhow::ensure!(
         !member,
-        "{flag} cannot be combined with --member, which names its pinned host target"
+        "can't combine {flag} with --member, which names its pinned host target"
     );
     if let Command::Setup(SetupArgs {
         command: Some(setup),
@@ -31,7 +31,7 @@ pub(crate) fn validate_placement_scope(
             SetupCommand::Ssh(_) => "ssh",
             SetupCommand::Rex(_) => "rex",
         };
-        anyhow::bail!("{flag} does not apply to `cw setup {name}`");
+        anyhow::bail!("the {flag} flag does not apply to `cw setup {name}`");
     }
     let reads = matches!(
         command,
@@ -93,6 +93,6 @@ pub(crate) fn validate_placement_scope(
             command,
             Command::Interrupt(_) | Command::Steer(_) | Command::Msg(_) | Command::Inbox(_)
         );
-    anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
+    anyhow::ensure!(reads, "the {flag} flag does not apply to `cw {name}`");
     Ok(())
 }

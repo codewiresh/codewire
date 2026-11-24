@@ -82,7 +82,7 @@ pub(super) fn ambiguous_id_prefix(
             .collect();
         crate::error_report::with_next_step(
             anyhow::anyhow!(
-                "{requested:?} starts the IDs of {} sessions in {environment} ({}); give more of the ID",
+                "the ID {requested:?} starts {} sessions' IDs in {environment} ({}); give more of the ID",
                 matches.len(),
                 names.join(", ")
             ),
@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(
             crate::error_report::sentence(&refusal),
             format!(
-                "\"cff391de\" starts the IDs of 2 sessions in app ({SHELL}, {TWIN}); give more of the ID"
+                "the ID \"cff391de\" starts 2 sessions' IDs in app ({SHELL}, {TWIN}); give more of the ID"
             )
         );
         assert_eq!(

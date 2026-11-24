@@ -615,10 +615,10 @@ fn info_names_each_failed_conversation_with_its_repair_and_inbox() {
     assert!(managed_attention_rows(&none).is_empty());
     assert_eq!(managed_attention_json(&none), None);
     let unavailable =
-        ManagedAttentionReport::Unavailable("listing its sessions took longer than 3 s".into());
+        ManagedAttentionReport::Unavailable("gave up listing its sessions after 3 s".into());
     assert_eq!(
         managed_attention_rows(&unavailable),
-        ["agents: unavailable (listing its sessions took longer than 3 s)"]
+        ["agents: unavailable (gave up listing its sessions after 3 s)"]
     );
     assert_eq!(managed_attention_json(&unavailable), None);
 }

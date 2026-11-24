@@ -67,7 +67,7 @@ pub(crate) fn no_cloud_environment(target_ref: &str) -> anyhow::Error {
 pub(crate) fn no_agent_profile(location: VmLocation, name: &str) -> anyhow::Error {
     crate::error_report::with_next_step(
         anyhow::anyhow!(
-            "{name} has no credential profile for this agent; select one with `{} --profile PROFILE`",
+            "environment {name} has no credential profile for this agent; select one with `{} --profile PROFILE`",
             environment_command(location, "update", name)
         ),
         environment_command(location, "agent info", name),

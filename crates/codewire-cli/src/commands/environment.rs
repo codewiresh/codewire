@@ -965,7 +965,7 @@ fn parse_resize_binary_quantity(value: &str, units: &[&str], label: &str) -> any
         .parse()
         .with_context(|| format!("invalid {label} quantity {value:?}"))?;
     if amount <= 0 {
-        anyhow::bail!("{label} must be greater than zero");
+        anyhow::bail!("the {label} must be greater than zero");
     }
     Ok(amount)
 }
@@ -1890,7 +1890,7 @@ pub(crate) async fn resolve_unified_environment_target(
         .await?
         .is_some()
     {
-        anyhow::bail!("{command} is not supported by trusted host environments");
+        anyhow::bail!("trusted host environments don't support `cw {command}`");
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let native = match placement {
@@ -2848,7 +2848,7 @@ pub(crate) async fn handle_env_port_command(
             let name = environment_display_name(&environment).to_owned();
             anyhow::ensure!(
                 environment.state == "running",
-                "{name} is {}; start it with `cw start {name}`, then publish the port",
+                "environment {name} is {}; start it with `cw start {name}`, then publish the port",
                 display_str(&environment.state)
             );
             let result = environment_client

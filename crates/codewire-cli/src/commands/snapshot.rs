@@ -162,7 +162,7 @@ async fn handle_local_snapshot_command(
     command: SnapshotCommand,
 ) -> anyhow::Result<()> {
     let status = |action: &'static str| {
-        move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
+        move |status: tonic::Status| anyhow::anyhow!("couldn't {action}: {}", status.message())
     };
     let client = native_client().await?;
     match command {
@@ -179,7 +179,7 @@ async fn handle_local_snapshot_command(
             let snapshot = client
                 .create_snapshot(environment, &name, account)
                 .await
-                .map_err(status("snapshot create"))?;
+                .map_err(status("create the snapshot"))?;
             match args.output {
                 OutputFormat::Json => print_json(&SnapshotView::from(&snapshot)),
                 OutputFormat::Text => {
@@ -193,7 +193,7 @@ async fn handle_local_snapshot_command(
             let snapshots = client
                 .list_snapshots()
                 .await
-                .map_err(status("snapshot ls"))?;
+                .map_err(status("list snapshots"))?;
             match args.output {
                 OutputFormat::Json => {
                     print_json(&snapshots.iter().map(SnapshotView::from).collect::<Vec<_>>())
@@ -208,7 +208,7 @@ async fn handle_local_snapshot_command(
             let snapshot = client
                 .get_snapshot(&args.snapshot)
                 .await
-                .map_err(status("snapshot inspect"))?;
+                .map_err(status("read the snapshot"))?;
             match args.output {
                 OutputFormat::Json => print_json(&SnapshotView::from(&snapshot)),
                 OutputFormat::Text => {
@@ -222,7 +222,7 @@ async fn handle_local_snapshot_command(
             let snapshot = client
                 .delete_snapshot(&args.snapshot)
                 .await
-                .map_err(status("snapshot rm"))?;
+                .map_err(status("remove the snapshot"))?;
             match args.output {
                 OutputFormat::Json => print_json(&SnapshotView::from(&snapshot)),
                 OutputFormat::Text => {

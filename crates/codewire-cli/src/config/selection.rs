@@ -181,7 +181,7 @@ pub fn save(data_dir: &Path, selection: &EnvironmentSelection) -> Result<(), Con
         version: SELECTION_VERSION,
         environment: Some(selection.clone()),
     })
-    .map_err(|source| ConfigError::SerializeMesh { path, source })?;
+    .map_err(|reason| ConfigError::SerializeMesh { path, reason })?;
     write_file(data_dir, data.as_bytes())?;
     let legacy = selection.legacy_target();
     update_mesh_config(data_dir, |config| config.current_target = Some(legacy))
@@ -211,9 +211,15 @@ fn state_error(path: &Path, write: bool, error: anyhow::Error) -> ConfigError {
     let path = path.to_path_buf();
     let source = std::io::Error::other(error);
     if write {
-        ConfigError::WriteConfig { path, source }
+        ConfigError::WriteConfig {
+            path,
+            reason: source,
+        }
     } else {
-        ConfigError::ReadConfig { path, source }
+        ConfigError::ReadConfig {
+            path,
+            reason: source,
+        }
     }
 }
 
@@ -237,7 +243,7 @@ fn write_file(data_dir: &Path, data: &[u8]) -> Result<(), ConfigError> {
         .map_err(|error| state_error(&path, true, error))?
         .ok_or_else(|| ConfigError::WriteConfig {
             path: path.clone(),
-            source: std::io::Error::other("local Mesh directory is absent"),
+            reason: std::io::Error::other("local Mesh directory is absent"),
         })?;
     directory
         .write(SELECTION_FILE, data)

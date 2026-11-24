@@ -1509,7 +1509,7 @@ fn setup_ssh_replaces_config_ssh_and_takes_no_placement() {
             .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "--cloud does not apply to `cw setup ssh`"
+        "the --cloud flag does not apply to `cw setup ssh`"
     );
     // `%n` in ProxyCommand needs an OpenSSH with the CVE-2023-51385 fix.
     let help = Cli::try_parse_from(["cw", "setup", "ssh", "--help"])
@@ -1526,7 +1526,7 @@ fn setup_ssh_replaces_config_ssh_and_takes_no_placement() {
         false,
     )
     .unwrap_err();
-    assert_eq!(error.to_string(), "--local does not apply to `cw setup ssh`");
+    assert_eq!(error.to_string(), "the --local flag does not apply to `cw setup ssh`");
 }
 
 #[test]
@@ -1554,7 +1554,7 @@ fn setup_rex_installs_or_removes_and_takes_no_placement() {
     let error =
         crate::validate_placement_scope(&cli.command, "setup", cli.placement().unwrap(), false)
             .unwrap_err();
-    assert_eq!(error.to_string(), "--cloud does not apply to `cw setup rex`");
+    assert_eq!(error.to_string(), "the --cloud flag does not apply to `cw setup rex`");
 }
 
 #[test]
@@ -2441,7 +2441,7 @@ fn every_way_of_asking_names_the_version() {
         })
         .unwrap()
         .unwrap_err();
-    assert_eq!(error.to_string(), "--cloud does not apply to `cw version`");
+    assert_eq!(error.to_string(), "the --cloud flag does not apply to `cw version`");
     // Bare `cw` prints this help, so it heads with the version too.
     for all in [false, true] {
         let help = crate::cli_command_with(all).render_help().to_string();

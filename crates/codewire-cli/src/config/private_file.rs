@@ -18,13 +18,13 @@ pub(super) fn read_error(path: &Path, error: anyhow::Error) -> ConfigError {
         None => {
             return ConfigError::ReadConfig {
                 path: path.to_owned(),
-                source: std::io::Error::other(error),
+                reason: std::io::Error::other(error),
             };
         }
     };
     ConfigError::ReadConfig {
         path: path.to_owned(),
-        source: std::io::Error::other(reason),
+        reason: std::io::Error::other(reason),
     }
 }
 

@@ -599,7 +599,7 @@ pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
     validate_token("model", &config.model)?;
     if agent_effort(config.agent, config.effort.as_deref())? != config.effort {
         anyhow::bail!(
-            "{} effort must be the explicit effort the launch resolved",
+            "the {} effort must be the explicit effort the launch resolved",
             config.agent.name()
         );
     }
@@ -783,7 +783,7 @@ fn queue(
         MessageAction::Interrupt if text.is_empty() => {}
         MessageAction::Interrupt => anyhow::bail!("an interrupt carries no message text"),
         MessageAction::Prompt | MessageAction::Notification => anyhow::bail!(
-            "{} records are created by launch and workers; queue a message, steer or interrupt",
+            "the {} records are created by launch and workers; queue a message, steer or interrupt",
             action.name()
         ),
     }
@@ -813,7 +813,7 @@ fn queue(
         if action == MessageAction::Steer {
             if !state.capabilities.steer {
                 anyhow::bail!(
-                    "{agent} conversations do not support steering: {}",
+                    "steering is not supported in {agent} conversations: {}",
                     state.capabilities.note
                 );
             }
@@ -828,7 +828,7 @@ fn queue(
         } else {
             if !state.capabilities.interrupt {
                 anyhow::bail!(
-                    "{agent} conversations do not support interrupt: {}",
+                    "interrupt is not supported in {agent} conversations: {}",
                     state.capabilities.note
                 );
             }
@@ -872,7 +872,7 @@ fn mark_delivery(
         MessageAction::Message | MessageAction::Steer | MessageAction::Interrupt
     ) {
         anyhow::bail!(
-            "{} records are not delivered through session input",
+            "the {} records are not delivered through session input",
             saved.action.name()
         );
     }
@@ -1797,8 +1797,8 @@ mod tests {
         };
         assert!(refusal(&steer, "steer", "focus").contains("has not reported its capabilities"));
         write_state(&dir, &config, false, Some("turn-1"), Some(task.as_str()));
-        assert!(refusal(&steer, "steer", "focus").contains("do not support steering"));
-        assert!(refusal(&interrupt, "interrupt", "").contains("do not support interrupt"));
+        assert!(refusal(&steer, "steer", "focus").contains("steering is not supported"));
+        assert!(refusal(&interrupt, "interrupt", "").contains("interrupt is not supported"));
         write_state(&dir, &config, true, None, None);
         assert!(refusal(&steer, "steer", "focus").contains("no active turn to steer"));
         assert!(refusal(&interrupt, "interrupt", "").contains("no active turn to interrupt"));

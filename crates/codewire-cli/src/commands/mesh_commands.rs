@@ -1322,7 +1322,7 @@ pub(crate) async fn network_connect_at(
 
     let request = codewire_daemon_proto::mesh_connect_request(node, port).ok_or_else(|| {
         anyhow::anyhow!(
-            "{} is not a Mesh node name, or {port} is not a port",
+            "either {} is not a Mesh node name or {port} is not a port",
             terminal_text(node)
         )
     })?;

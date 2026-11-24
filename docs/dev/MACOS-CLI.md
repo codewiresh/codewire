@@ -29,7 +29,7 @@ command says so instead:
 
 ```text
 your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw --local stop NAME`)
-cw: restart them with `cw upgrade --vms`
+→ cw upgrade --vms
 ```
 
 At a terminal that command also offers to restart them now. To move them

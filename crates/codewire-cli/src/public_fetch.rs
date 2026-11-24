@@ -110,7 +110,7 @@ pub(crate) async fn stable_release(deadline: Duration) -> anyhow::Result<String>
     };
     tokio::time::timeout(deadline, read)
         .await
-        .map_err(|_| anyhow::anyhow!("{} didn't answer in time", http::HOST))?
+        .map_err(|_| anyhow::anyhow!("the server {} didn't answer in time", http::HOST))?
 }
 
 async fn controlled<T>(

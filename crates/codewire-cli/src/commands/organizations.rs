@@ -528,7 +528,7 @@ fn select_invitation<'a>(
             format_pending_invitations_text(invitations).trim_end()
         ),
         several => anyhow::bail!(
-            "{org:?} names {} pending invitations; name one by slug: {}",
+            "the name {org:?} matches {} pending invitations; name one by slug: {}",
             several.len(),
             several
                 .iter()

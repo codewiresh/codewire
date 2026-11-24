@@ -590,7 +590,7 @@ command says so instead:
 
 ```text
 your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw --local stop NAME`)
-cw: restart them with `cw upgrade --vms`
+→ cw upgrade --vms
 ```
 
 A restore is refused the same way before it stops the VM it would restore
@@ -649,7 +649,7 @@ a VM that this cw starts its credentials.
 
   ```text
   your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)
-  cw: restart them with `cw upgrade --vms`
+  → cw upgrade --vms
   ```
 
   With one VM it reads `your local VM dev keeps …` and `once it stops`.

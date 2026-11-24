@@ -152,7 +152,7 @@ pub(crate) fn state_error(
             (format!("{environment} {name} failed"), info)
         }
         Some(EnvironmentState::Destroying | EnvironmentState::Destroyed) => {
-            return Some(anyhow::anyhow!("{environment} {name} is being removed"));
+            return Some(anyhow::anyhow!("the {environment} {name} is being removed"));
         }
         _ => (format!("{environment} {name} isn't running"), info),
     };
@@ -450,7 +450,7 @@ mod tests {
         );
         assert_eq!(
             state(Some(EnvironmentState::Destroying)),
-            Some(says("cloud environment walk is being removed", None))
+            Some(says("the cloud environment walk is being removed", None))
         );
         assert_eq!(
             state(None),

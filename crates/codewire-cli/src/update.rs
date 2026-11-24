@@ -1327,15 +1327,12 @@ fn nix_installed(executable: &Path) -> anyhow::Error {
 }
 
 fn unmanaged(executable: Option<&Path>, root: &Path) -> anyhow::Error {
-    let running = executable.map_or_else(
-        || "this cw".to_owned(),
-        |path| format!("this cw ({})", path.display()),
-    );
+    let running = executable.map_or_else(String::new, |path| format!(" ({})", path.display()));
     anyhow::anyhow!(
-        "{running} is not a managed installation and no managed store exists at {}; reinstall \
-         with `curl -fsSL https://codewire.sh/install.sh | sh`, which installs a managed cw, or \
-         use `make cli-install` from an authorized source checkout. An existing regular-file cw \
-         is never replaced automatically.",
+        "this cw{running} is not a managed installation and no managed store exists at {}; \
+         reinstall with `curl -fsSL https://codewire.sh/install.sh | sh`, which installs a \
+         managed cw, or use `make cli-install` from an authorized source checkout. An existing \
+         regular-file cw is never replaced automatically.",
         root.display()
     )
 }
@@ -1357,7 +1354,7 @@ fn with_hint(error: StoreError) -> anyhow::Error {
         _ => None,
     };
     match hint {
-        Some(hint) => anyhow::anyhow!("{error}. {hint}"),
+        Some(hint) => anyhow::anyhow!("couldn't change the installed cw: {error}. {hint}"),
         None => error.into(),
     }
 }

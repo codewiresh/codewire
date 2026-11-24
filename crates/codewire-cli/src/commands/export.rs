@@ -329,7 +329,7 @@ fn references_note(spec: &codewire_project::ProjectSpec, profile_name: &str) -> 
 
 fn existing_file(path: &Path) -> anyhow::Error {
     anyhow::anyhow!(
-        "{} already exists (use --force to overwrite)",
+        "the file {} already exists (use --force to overwrite)",
         terminal_text(&path.display().to_string())
     )
 }
@@ -366,7 +366,7 @@ fn write_file(path: &Path, data: &[u8], force: bool) -> anyhow::Result<()> {
     }
     let name = path
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("{} is not a file path", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("the path {} names no file", path.display()))?;
     let mut staged = name.to_os_string();
     staged.push(format!(".cw-export-{}", std::process::id()));
     let staged = path.with_file_name(staged);

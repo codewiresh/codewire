@@ -634,7 +634,7 @@ pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedPro
 
 fn explicit_selector_name<'a>(name: &'a str, kind: &str) -> anyhow::Result<&'a str> {
     if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
-        anyhow::bail!("{kind} selector name must be non-empty and have no surrounding whitespace");
+        anyhow::bail!("a {kind} selector name must be non-empty with no surrounding whitespace");
     }
     Ok(name)
 }

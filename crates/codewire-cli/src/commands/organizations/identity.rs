@@ -213,7 +213,7 @@ pub(crate) async fn handle_identity_command(
 /// A failed call, in the user's terms: the server's own refusal names the
 /// rule a request broke.
 fn failed(action: &str, error: ClientError) -> anyhow::Error {
-    anyhow::anyhow!("{action}: {}", error.message())
+    anyhow::anyhow!("couldn't {action}: {}", error.message())
 }
 
 fn print_json(value: &serde_json::Value) -> anyhow::Result<()> {

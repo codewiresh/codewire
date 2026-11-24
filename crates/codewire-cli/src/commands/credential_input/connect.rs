@@ -428,7 +428,7 @@ fn confirm_reconnect_with(
     }
     anyhow::ensure!(
         is_terminal,
-        "{label} {:?} is already connected {place}; pass --yes to reconnect it without a terminal",
+        "the {label} credential {:?} is already connected {place}; pass --yes to reconnect it without a terminal",
         existing.name
     );
     prompt(&format!(

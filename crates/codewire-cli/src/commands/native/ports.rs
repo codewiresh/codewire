@@ -36,7 +36,7 @@ pub(crate) async fn handle_native_environment_port(
             let environment = client.get(name).await.map_err(native_status)?;
             anyhow::ensure!(
                 environment.state == v1::EnvironmentState::Running as i32,
-                "{name} is not running; start it with `cw start {name}`, then publish the port"
+                "environment {name} is not running; start it with `cw start {name}`, then publish the port"
             );
             let host_port = host_port.unwrap_or(guest_port);
             if let Some(bound) = environment
@@ -132,11 +132,11 @@ fn unpublished_host_port(
     match (bindings.as_slice(), host_port) {
         ([one], _) => Ok(*one),
         ([], Some(host_port)) => anyhow::bail!(
-            "{name} does not publish guest port {guest_port} on 127.0.0.1:{host_port}"
+            "environment {name} does not publish guest port {guest_port} on 127.0.0.1:{host_port}"
         ),
-        ([], None) => anyhow::bail!("{name} does not publish guest port {guest_port}"),
+        ([], None) => anyhow::bail!("environment {name} does not publish guest port {guest_port}"),
         (several, _) => anyhow::bail!(
-            "{name} publishes guest port {guest_port} on several host ports ({}); choose one with --host-port",
+            "environment {name} publishes guest port {guest_port} on several host ports ({}); choose one with --host-port",
             several
                 .iter()
                 .map(u16::to_string)
@@ -255,19 +255,19 @@ mod tests {
         let ambiguous = unpublished_host_port(&environment, 80, None).unwrap_err();
         assert_eq!(
             ambiguous.to_string(),
-            "web publishes guest port 80 on several host ports (8080, 8081); choose one with --host-port"
+            "environment web publishes guest port 80 on several host ports (8080, 8081); choose one with --host-port"
         );
         assert_eq!(
             unpublished_host_port(&environment, 80, Some(9000))
                 .unwrap_err()
                 .to_string(),
-            "web does not publish guest port 80 on 127.0.0.1:9000"
+            "environment web does not publish guest port 80 on 127.0.0.1:9000"
         );
         assert_eq!(
             unpublished_host_port(&environment, 22, None)
                 .unwrap_err()
                 .to_string(),
-            "web does not publish guest port 22"
+            "environment web does not publish guest port 22"
         );
     }
 

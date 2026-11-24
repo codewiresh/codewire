@@ -704,10 +704,10 @@ fn driver_line(message: impl std::fmt::Display) -> String {
 
 fn canonical_uuid(value: &str) -> anyhow::Result<String> {
     let parsed =
-        uuid::Uuid::parse_str(value).with_context(|| format!("{value:?} is not a valid ID"))?;
+        uuid::Uuid::parse_str(value).with_context(|| format!("the ID {value:?} is not valid"))?;
     let canonical = parsed.hyphenated().to_string();
     if canonical != value {
-        anyhow::bail!("{value:?} is not a canonical lowercase UUID");
+        anyhow::bail!("the ID {value:?} is not a canonical lowercase UUID");
     }
     Ok(canonical)
 }
@@ -733,7 +733,7 @@ fn validate_token(kind: &str, value: &str) -> anyhow::Result<()> {
             .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
     {
         anyhow::bail!(
-            "{kind} must be 1-{MAX_TOKEN_BYTES} letters, numbers, '.', '_', ':', '/' or '-'"
+            "the {kind} must be 1-{MAX_TOKEN_BYTES} letters, numbers, '.', '_', ':', '/' or '-'"
         );
     }
     Ok(())
@@ -1358,7 +1358,7 @@ pub(super) async fn handle_agent_run_command(
         (Some(model), _) => model.clone(),
         (None, Some(model)) => model.into(),
         (None, None) => anyhow::bail!(
-            "{} needs --model PROVIDER/ID; it has no Codewire default",
+            "the {} agent needs --model PROVIDER/ID; it has no Codewire default",
             agent.name()
         ),
     };
@@ -1620,7 +1620,7 @@ fn host_message_record(
             .context("the managed driver has not reported its capabilities yet")?;
         if !state.capabilities.steer {
             anyhow::bail!(
-                "{} conversations do not support steering: {}",
+                "steering is not supported in {} conversations: {}",
                 managed.config.agent.name(),
                 state.capabilities.note
             );
@@ -1671,7 +1671,7 @@ pub(crate) async fn handle_agent_interrupt_command(
         .context("the managed driver has not reported its capabilities yet")?;
     if !state.capabilities.interrupt {
         anyhow::bail!(
-            "{} conversations do not support interrupt: {}",
+            "interrupt is not supported in {} conversations: {}",
             managed.config.agent.name(),
             state.capabilities.note
         );
@@ -1776,7 +1776,7 @@ async fn bounded_read<T>(
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "{what} took longer than {} s",
+                "gave up {what} after {} s",
                 ATTENTION_READ_TIMEOUT.as_secs()
             )
         })?

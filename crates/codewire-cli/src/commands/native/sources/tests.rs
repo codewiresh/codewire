@@ -182,7 +182,7 @@ fn only_a_missing_platform_configuration_proves_an_ineligible_backend() {
     let missing = config::ConfigError::NoPlatformServer {
         cause: Some(Box::new(config::ConfigError::ReadConfig {
             path: PathBuf::from("/synthetic/missing/config.json"),
-            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            reason: std::io::Error::from(std::io::ErrorKind::NotFound),
         })),
     };
     assert!(platform_is_proven_unconfigured(&missing));
@@ -195,7 +195,7 @@ fn only_a_missing_platform_configuration_proves_an_ineligible_backend() {
         config::ConfigError::NoPlatformServer {
             cause: Some(Box::new(config::ConfigError::ReadConfig {
                 path: PathBuf::from("/synthetic/unreadable/config.json"),
-                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                reason: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             })),
         },
     ] {

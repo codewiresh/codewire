@@ -462,7 +462,7 @@ fn both_placements_ask_the_same_reconnect_question() {
     };
     assert_eq!(
         refusal("cloud"),
-        "GitHub \"work\" is already connected in your Codewire account; pass --yes to reconnect it without a terminal"
+        "the GitHub credential \"work\" is already connected in your Codewire account; pass --yes to reconnect it without a terminal"
     );
     assert_eq!(
         refusal("local"),

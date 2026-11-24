@@ -697,7 +697,7 @@ fn placement_is_refused_by_commands_that_do_not_read_it() {
         )
         .unwrap_err();
         let flag = if argv.contains(&"--local") { "--local" } else { "--cloud" };
-        assert_eq!(error.to_string(), format!("{flag} does not apply to `cw {name}`"));
+        assert_eq!(error.to_string(), format!("the {flag} flag does not apply to `cw {name}`"));
     }
     for argv in [
         vec!["cw", "run", "--cloud", "claude", "--in", "app"],

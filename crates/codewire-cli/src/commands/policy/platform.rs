@@ -289,10 +289,10 @@ fn rules_proto(rules: Vec<AllowRule>) -> Vec<NetworkPolicyRule> {
 /// cannot be edited, and a `local:` policy lives on a host.
 fn stored_selector(value: &str) -> anyhow::Result<NetworkPolicySelector> {
     let selector = match PolicyReference::parse(value)
-        .map_err(|error| anyhow::anyhow!("{value}: {error}"))?
+        .map_err(|error| anyhow::anyhow!("the policy {value}: {error}"))?
     {
         PolicyReference::Builtin(builtin) => anyhow::bail!(
-            "{builtin} is a built-in policy and cannot be changed; create your own with `cw --cloud policy create NAME --allow TARGET`, which starts from `locked`"
+            "the built-in policy {builtin} cannot be changed; create your own with `cw --cloud policy create NAME --allow TARGET`, which starts from `locked`"
         ),
         PolicyReference::Name { store, name } => {
             require_platform(store)?;

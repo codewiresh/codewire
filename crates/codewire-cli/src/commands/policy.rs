@@ -252,7 +252,7 @@ async fn handle_local_policy_command(
     }
     let mut client = native_client().await?;
     let status = |action: &'static str| {
-        move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
+        move |status: tonic::Status| anyhow::anyhow!("couldn't {action}: {}", status.message())
     };
     match command {
         PolicyCommand::Create(mut args) => {
@@ -425,10 +425,10 @@ fn stored_selector(
 ) -> anyhow::Result<codewire_local_vmm::control::v1::NetworkPolicySelector> {
     use codewire_local_vmm::control::v1::network_policy_selector::Selector;
     let selector = match PolicyReference::parse(value)
-        .map_err(|error| anyhow::anyhow!("{value}: {error}"))?
+        .map_err(|error| anyhow::anyhow!("the policy {value}: {error}"))?
     {
         PolicyReference::Builtin(builtin) => anyhow::bail!(
-            "{builtin} is a built-in policy and cannot be changed; create your own with `cw policy create NAME --allow TARGET`, which starts from `locked`"
+            "the built-in policy {builtin} cannot be changed; create your own with `cw policy create NAME --allow TARGET`, which starts from `locked`"
         ),
         PolicyReference::Name { store, name } => {
             require_local(store)?;
@@ -472,15 +472,15 @@ fn require_local(store: Option<PolicyStore>) -> anyhow::Result<()> {
 fn split_port(value: &str) -> anyhow::Result<(&str, Option<u16>)> {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix('[') {
-        let (target, tail) = rest
-            .split_once(']')
-            .ok_or_else(|| anyhow::anyhow!("{value}: a `[` needs its closing `]`"))?;
+        let (target, tail) = rest.split_once(']').ok_or_else(|| {
+            anyhow::anyhow!("the destination {value}: a `[` needs its closing `]`")
+        })?;
         return match tail {
             "" => Ok((target, None)),
             _ => {
-                let port = tail
-                    .strip_prefix(':')
-                    .ok_or_else(|| anyhow::anyhow!("{value}: write `[RANGE]:PORT`"))?;
+                let port = tail.strip_prefix(':').ok_or_else(|| {
+                    anyhow::anyhow!("the destination {value}: write `[RANGE]:PORT`")
+                })?;
                 Ok((target, Some(parse_port(value, port)?)))
             }
         };
@@ -497,7 +497,7 @@ fn split_port(value: &str) -> anyhow::Result<(&str, Option<u16>)> {
 fn parse_port(value: &str, port: &str) -> anyhow::Result<u16> {
     match port.parse::<u16>() {
         Ok(port) if port != 0 => Ok(port),
-        _ => anyhow::bail!("{value}: {port} is not a TCP port from 1 to 65535"),
+        _ => anyhow::bail!("the destination {value}: {port} is not a TCP port from 1 to 65535"),
     }
 }
 
@@ -529,7 +529,7 @@ fn removal_target(value: &str) -> anyhow::Result<String> {
     let (target, port) = split_port(value)?;
     anyhow::ensure!(
         port.is_none(),
-        "{value}: `rm` removes a destination's whole rule; name it without a port"
+        "the destination {value}: `rm` removes a destination's whole rule; name it without a port"
     );
     Ok(AllowTarget::parse(target)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -619,11 +619,11 @@ fn typed_from(policy: &impl ShownPolicy, source: &str) -> anyhow::Result<TypedPo
             Ok(AllowRule::new(AllowTarget::parse(target)?, ports)?)
         })
         .collect::<anyhow::Result<Vec<_>>>()
-        .with_context(|| format!("{source} returned an invalid network policy"))?;
+        .with_context(|| format!("the network policy from {source} is invalid"))?;
     let typed = TypedPolicy::new(rules)?;
     anyhow::ensure!(
         typed.compile().digest().to_hex() == policy.digest(),
-        "{source} returned a network policy whose rules do not match its digest"
+        "the network policy from {source} has rules that do not match its digest"
     );
     Ok(typed)
 }
@@ -761,8 +761,9 @@ fn print_check(
 ) -> anyhow::Result<()> {
     let (destination, port) = split_port(&args.destination)?;
     let port = port.unwrap_or(DEFAULT_CHECK_PORT);
-    let parsed = CheckDestination::parse(destination)
-        .map_err(|_| anyhow::anyhow!("{destination} is not a DNS name or IP address"))?;
+    let parsed = CheckDestination::parse(destination).map_err(|_| {
+        anyhow::anyhow!("the destination {destination} is not a DNS name or IP address")
+    })?;
     let check: PolicyCheck = policy.check(&parsed, port)?;
     let named = matches!(parsed, CheckDestination::Name(_));
     let shown = match &parsed {

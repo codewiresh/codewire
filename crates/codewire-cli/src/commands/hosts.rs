@@ -879,7 +879,7 @@ fn confirm(question: &str) -> anyhow::Result<()> {
     use std::io::{IsTerminal as _, Write as _};
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
-        "{question} Pass --yes to confirm outside a terminal."
+        "no terminal to ask: {question} Pass --yes to confirm outside a terminal."
     );
     eprint!("{question} [y/N] ");
     std::io::stderr().flush()?;
