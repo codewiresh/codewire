@@ -17,14 +17,17 @@ API_VERSION = "deploy.codewire.sh/v1alpha1"
 KIND = "ImageBundle"
 SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "daemon", "services", "mesh")
-# Published by digest but never part of the runtime bundle: cw-egress is
-# built and signed by Dev delivery and pinned by its own component (#4000),
-# and the systemd workspace is an opt-in image a deployment names (#5638).
+# Published by digest but never part of the runtime bundle: cw-egress, the
+# standard pod-runtime image (#5602) and the /dev/kvm device plugin (#6202)
+# are built and signed by Dev delivery and each pinned on its own, and the
+# systemd workspace is an opt-in image a deployment names (#5638).
 PUBLICATION_FAMILIES = FAMILIES + (
     "base",
     "workspace",
     "confidential-probe",
     "egress",
+    "kvm-device-plugin",
+    "pod-runtime",
     "workspace-systemd",
 )
 ENVIRONMENTS = ("dev", "prod")

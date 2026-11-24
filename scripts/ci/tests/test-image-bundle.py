@@ -225,6 +225,25 @@ class ImageBundleTests(unittest.TestCase):
                 ),
             )
 
+    def test_buildx_metadata_emits_the_other_side_image_candidates(self) -> None:
+        # The pod-runtime image (#5602) and the /dev/kvm device plugin (#6202)
+        # are built, signed and pinned outside the runtime bundle, as cw-egress is.
+        for family in ("pod-runtime", "kvm-device-plugin"):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
+                metadata = Path(directory) / "metadata.json"
+                digest = "sha256:" + "e" * 64
+                metadata.write_text(json.dumps({"containerimage.digest": digest}), encoding="utf-8")
+                self.assertEqual(
+                    image_bundle._candidate_from_metadata(
+                        family, SOURCE_SHA, "registry.example.invalid/codewire", metadata
+                    ),
+                    (family, SOURCE_SHA, f"registry.example.invalid/codewire/{family}@" + digest),
+                )
+                values = candidates()
+                values[-1] = [family, SOURCE_SHA, f"registry.example.invalid/codewire/{family}@" + digest]
+                with self.assertRaises(image_bundle.BundleError):
+                    image_bundle._create_bundle(SOURCE_SHA, values)
+
     def test_egress_does_not_expand_runtime_bundle(self) -> None:
         values = candidates()
         values[-1] = [
