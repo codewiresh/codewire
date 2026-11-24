@@ -529,6 +529,56 @@ for name in sorted(built):
 PY
 }
 
+# Prints the workspace crates under crates/ that compile a changed file in
+# with include_str! or include_bytes!, when the file sits outside the crate.
+# Cargo's graph doesn't show such an input: #6244 changed the credential
+# service's mutation/wire.rs, which a test in the codewire crate reads, and no
+# codewire test ran on main (infra#1534). Only literal paths count, either
+# relative to the including file or after env!("CARGO_MANIFEST_DIR"); grep
+# finds the few files that use either macro, so the scan stays cheap.
+include_dependents() {
+  local changed="$1"
+  [ -d "$repo_root/crates" ] || return 0
+  python3 - "$repo_root" "$changed" <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+repo_root, changed_path = sys.argv[1:]
+root = os.path.realpath(repo_root)
+with open(changed_path, encoding="utf-8") as handle:
+    changed = {line.strip() for line in handle if line.strip()}
+found = subprocess.run(
+    ["grep", "-rlE", "--include=*.rs", "include_(str|bytes)!", "crates"],
+    cwd=root, capture_output=True, text=True, check=False)
+if found.returncode not in (0, 1):
+    sys.exit(f"  include scan failed: {found.stderr.strip()[:200]}")
+macro = re.compile(
+    r'include_(?:str|bytes)!\(\s*(?:concat!\(\s*env!\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?"([^"]+)"',
+    re.S)
+embedders = set()
+for source in found.stdout.split():
+    parts = source.split("/")
+    if len(parts) < 3 or "target" in parts:
+        continue
+    crate = parts[1]
+    with open(os.path.join(root, source), encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    for match in macro.finditer(text):
+        literal = match.group(1)
+        if match.group(0).find("CARGO_MANIFEST_DIR") >= 0:
+            target = os.path.join("crates", crate, literal.lstrip("/"))
+        else:
+            target = os.path.join(os.path.dirname(source), literal)
+        target = os.path.normpath(target)
+        if target in changed and not target.startswith(f"crates/{crate}/"):
+            embedders.add(crate)
+for crate in sorted(embedders):
+    print(crate)
+PY
+}
+
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
@@ -2787,6 +2837,24 @@ if [ "$event_selected" = false ]; then
   # guest's tests without its reproducibility proof unless an input selects it.
   if [ "$classification" = unclassified ] && [ "$static_guest_input_seen" = false ]; then
     unset 'selected[static_guest_proof]'
+  fi
+
+  # A crate that compiles a changed file in from outside itself changed too,
+  # with its dependents; see include_dependents. The whole workspace already
+  # covers every such crate.
+  if token_selected rust_workspace; then
+    :
+  elif embedders="$(include_dependents "$tmp")"; then
+    while IFS= read -r crate; do
+      [ -n "$crate" ] || continue
+      select_crate_tests "$crate"
+      if [ "$crate" != codewire-workspace-hack ]; then
+        changed_crates["$crate"]=1
+      fi
+    done <<<"$embedders"
+  else
+    echo "warning: the include scan failed; selecting the whole Rust workspace" >&2
+    select_rust_workspace
   fi
 
   # A changed crate's reverse dependents run their tests too; see

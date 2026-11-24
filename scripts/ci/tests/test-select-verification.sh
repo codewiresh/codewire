@@ -937,10 +937,8 @@ run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   .gitea/workflows/cli-release.yaml \
   .gitea/workflows/mirror-github.yaml \
-  apps/cli/GPG_PUBLIC_KEY.asc \
   keys/production-release.asc \
   apps/cli/README.md \
-  apps/cli/install.sh \
   images/base/Dockerfile \
   images/base/entrypoint.sh \
   scripts/ci/release/mirror-canonical-release-tag.sh \
@@ -980,6 +978,13 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/require-current-release.sh \
   scripts/ci/release/confirm-release-checkout.sh \
   install.sh
+# The release key and the install script are compiled into codewire-cli,
+# codewire-cw-release and the dashboard with include_str!, so they also select
+# those crates (and, with a real crate graph, their dependents; infra#1534).
+run_paths_case release_embedded_inputs pull_request refs/pull/3/head false \
+  'confidential_script_tests go_consumer_interop go_support policy policy_shell release rust rust_pkg_codewire_cli rust_pkg_codewire_cw_release rust_pkg_codewire_dashboard_web' \
+  apps/cli/GPG_PUBLIC_KEY.asc \
+  apps/cli/install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
 run_present_paths_case bounded_external_downloads \
@@ -1248,7 +1253,7 @@ run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-vmm-guest-probe/src/lib.rs
 run_paths_case local_vmm_network_fixture pull_request refs/pull/50121/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe rust rust_pkg_codewire_network_session' \
   testdata/local-vm-network/protocol-v2.json
 run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -1364,6 +1369,13 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+# A file another crate compiles in with include_str! selects that crate (and,
+# with a real crate graph, its dependents): the codewire crate's test reads the
+# service's wire.rs, and #6244 changed wire.rs with no codewire test selected
+# (infra#1534).
+run_paths_case embedded_credential_service_wire pull_request refs/pull/6244/head false \
+  'database policy rust rust_pkg_codewire rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/mutation/wire.rs
 run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind.rs
@@ -1486,7 +1498,7 @@ run_paths_case temporal_service pull_request refs/pull/84/head false \
 # The dashboard's setup_progress tests include_str! the setup worker (#3772),
 # so a change to it alone also runs the dashboard tests.
 run_paths_case setup_worker_dashboard_contract pull_request refs/pull/4748/head false \
-  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal web' \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal web rust_pkg_codewire_dashboard_web' \
   crates/codewire-orchestration/src/worker/setup.rs
 run_paths_case temporal_fencing_kind_driver pull_request refs/pull/842/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
@@ -1580,7 +1592,7 @@ run_paths_case go_tailnet pull_request refs/pull/10/head false \
   'go_support go_tailnet policy' \
   libs/tailnet/peer.go
 run_paths_case tailscale_golden pull_request refs/pull/10/head false \
-  'go_support go_tailnet policy' \
+  'go_support go_tailnet policy transport transport_pkg_codewire_tailnet' \
   tests/contract/tailscalegolden/golden_test.go tests/fixtures/tailnet/tailscale_golden.json
 run_paths_case derp_contract pull_request refs/pull/101/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
@@ -1660,7 +1672,7 @@ run_present_paths_case design_token_guard_module pull_request refs/pull/22032/he
   'contracts contracts_proto deploy go_consumer_interop go_support policy release confidential_script_tests security security_idp_kek security_js' \
   scripts/checks/repo_policy/design_tokens.py
 run_present_paths_case design_system_stylesheets pull_request refs/pull/22034/head false \
-  'policy security security_js web' packages/codewire-design/styles.css packages/codewire-design/routes/settings.css
+  'policy security security_js web rust rust_pkg_codewire_dashboard_web' packages/codewire-design/styles.css packages/codewire-design/routes/settings.css
 run_paths_case retired_openapi_deletions pull_request refs/pull/1175/head false \
   'policy security security_js' openapi.json crates/codewire-api-contract/src/lib.rs \
   crates/codewire-api-types/src/lib.rs crates/codewire-core/src/lib.rs \
@@ -2099,7 +2111,7 @@ run_paths_case workspace_image_pin_with_source pull_request refs/pull/2255/head 
 # workspace-agents-lock class: the workspace agents check installs the
 # lockfile and starts each agent. Any other path makes the change general.
 run_paths_case workspace_agents_lock pull_request refs/pull/3274/head false \
-  'policy workspace_agents' \
+  'policy workspace_agents transport transport_pkg_codewire_daemon' \
   images/workspace/agents/package.json images/workspace/agents/package-lock.json
 run_paths_case workspace_agents_lockfile_only pull_request refs/pull/3274/head false \
   'policy workspace_agents' \
@@ -2110,7 +2122,7 @@ run_paths_case workspace_agents_lockfile_only pull_request refs/pull/3274/head f
 # its recorded version is not the lockfile-only class, and is the change the
 # check exists for.
 run_paths_case workspace_agents_with_license pull_request refs/pull/3274/head false \
-  'confidential_script_tests go_consumer_interop go_support policy release workspace_agents' \
+  'confidential_script_tests go_consumer_interop go_support policy release workspace_agents transport transport_pkg_codewire_daemon' \
   images/workspace/agents/package.json images/workspace/agents/LICENSE
 run_paths_case workspace_agents_lockfile_with_docs pull_request refs/pull/3274/head false \
   'confidential_script_tests go_consumer_interop go_support policy release workspace_agents' \
@@ -2234,7 +2246,7 @@ run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head f
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy security security_js' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'docs go_consumer_interop go_support policy release confidential_script_tests dev_smoke_script_tests rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web' \
+  'docs go_consumer_interop go_support policy release confidential_script_tests dev_smoke_script_tests rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web rust_pkg_codewire_dashboard_web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \
