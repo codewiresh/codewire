@@ -1324,7 +1324,7 @@ type CreateEnvironmentRequest struct {
 	Organization *string `protobuf:"bytes,32,opt,name=organization,proto3,oneof" json:"organization,omitempty"`
 	// The network policy to select (#4000), as
 	// UpdateEnvironmentNetworkPolicyRequest.network_policy. Empty selects none,
-	// and the environment is on `hosted-default`. Refused with UNAVAILABLE
+	// and the environment is on `open` by default. Refused with UNAVAILABLE
 	// while the deployment's platform network policies are off.
 	NetworkPolicy string `protobuf:"bytes,33,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
 	// Where the environment runs. Absent: the deployment's own runtime. A

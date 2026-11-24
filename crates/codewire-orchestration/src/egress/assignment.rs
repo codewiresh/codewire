@@ -1,14 +1,13 @@
 //! The policy an environment's sandbox enforces through cw-egress (#4000):
 //! its selection's current revision, as the canonical document cw-egress
 //! compiles and checks against the digest. An environment that selects
-//! nothing is on `hosted-default` (#3997 D2), and stores no row.
+//! nothing is on the built-in `open`, the default (#3997), and stores no row.
+//! While the platform network policy store is switched off, every
+//! environment is on `open`, whatever it selected (#6120).
 
 use codewire_access::{FrontDoorHost, INTERCEPT_PORT, ManagedCredentialClients, front_door_hosts};
 use codewire_egress_policy::intercept::{InterceptBinding, MAX_INTERCEPT_BINDINGS};
-use codewire_egress_policy::{
-    BuiltinPolicy, CompiledPolicy, HOSTED_DEFAULT_NAME, HOSTED_DEFAULT_YAML, PolicyDocument,
-    PolicyError,
-};
+use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy, PolicyError};
 use sqlx::PgPool;
 use thiserror::Error;
 
@@ -110,10 +109,14 @@ fn intercepts(hosts: &[FrontDoorHost]) -> anyhow::Result<Vec<Intercept>> {
     Ok(intercepts)
 }
 
-/// The current revision of what `environment_id` selects.
+/// The current revision of what `environment_id` selects, or `open` while
+/// the store is switched off (`store_enabled`, the deployment's
+/// `CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED`). The stored selections are
+/// kept, so switching the store back on restores them unchanged (#6120).
 pub async fn environment_policy(
     pool: &PgPool,
     environment_id: &str,
+    store_enabled: bool,
 ) -> Result<AssignedPolicy, AssignmentError> {
     let row: Option<SelectionRow> = sqlx::query_as(
         "SELECT np.policy_id, np.builtin, npp.name AS policy_name,
@@ -129,15 +132,15 @@ pub async fn environment_policy(
     .bind(environment_id)
     .fetch_optional(pool)
     .await?;
-    selection(row.ok_or(AssignmentError::NoEnvironment)?)
+    selection(row.ok_or(AssignmentError::NoEnvironment)?, store_enabled)
 }
 
-fn selection(row: SelectionRow) -> Result<AssignedPolicy, AssignmentError> {
+fn selection(row: SelectionRow, store_enabled: bool) -> Result<AssignedPolicy, AssignmentError> {
+    if !store_enabled {
+        return compiled(BuiltinPolicy::Open.name(), &BuiltinPolicy::Open.compile());
+    }
     match (row.policy_id, row.builtin.as_deref()) {
-        (None, None) => compiled(
-            HOSTED_DEFAULT_NAME,
-            &PolicyDocument::parse_yaml(HOSTED_DEFAULT_YAML)?,
-        ),
+        (None, None) => compiled(BuiltinPolicy::Open.name(), &BuiltinPolicy::Open.compile()),
         (None, Some(name)) => {
             let builtin =
                 BuiltinPolicy::from_name(name).ok_or(AssignmentError::CorruptSelection)?;
@@ -176,8 +179,6 @@ mod database_tests;
 
 #[cfg(test)]
 mod tests {
-    use codewire_egress_policy::HOSTED_DEFAULT_DIGEST;
-
     use super::*;
 
     fn row() -> SelectionRow {
@@ -196,19 +197,59 @@ mod tests {
     }
 
     #[test]
-    fn no_selection_is_hosted_default_with_its_pinned_digest() {
-        let policy = selection(row()).unwrap();
-        assert_eq!(policy.name, "hosted-default");
+    fn no_selection_is_open_with_its_pinned_digest() {
+        let policy = selection(row(), true).unwrap();
+        assert_eq!(policy.name, "open");
         assert_eq!(policy.revision, 0);
-        assert_eq!(hex(&policy.digest), HOSTED_DEFAULT_DIGEST);
+        assert_eq!(
+            hex(&policy.digest),
+            "384ad64a6b4de41783c369f74ae4a4265617de1c7da2c97c14f5fb9b4e40090f"
+        );
+        assert_eq!(
+            policy.document,
+            BuiltinPolicy::Open.compile().canonical_json().unwrap()
+        );
+    }
+
+    /// A selection stores a built-in by name, so one of `open` made before
+    /// #3997 sends today's `open`, every TCP port, and `web` sends the three
+    /// ports `open` had.
+    #[test]
+    fn a_stored_open_selection_sends_todays_open_and_web_the_old_document() {
+        let open = selection(
+            SelectionRow {
+                builtin: Some("open".to_owned()),
+                ..row()
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!((open.name.as_str(), open.revision), ("open", 0));
+        assert_eq!(hex(&open.digest), BuiltinPolicy::Open.digest_hex());
+        let web = selection(
+            SelectionRow {
+                builtin: Some("web".to_owned()),
+                ..row()
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(web.name, "web");
+        assert_eq!(
+            hex(&web.digest),
+            "fab8151c7bffd0d0fe6ca1a9397ae6b60fa1e0ae650a967f9c9445ac3dd4189f"
+        );
     }
 
     #[test]
     fn a_builtin_selection_sends_the_builtin_document() {
-        let policy = selection(SelectionRow {
-            builtin: Some("locked".to_owned()),
-            ..row()
-        })
+        let policy = selection(
+            SelectionRow {
+                builtin: Some("locked".to_owned()),
+                ..row()
+            },
+            true,
+        )
         .unwrap();
         assert_eq!(policy.name, "locked");
         assert_eq!(hex(&policy.digest), BuiltinPolicy::Locked.digest_hex());
@@ -220,16 +261,19 @@ mod tests {
 
     #[test]
     fn a_stored_selection_sends_its_current_revision() {
-        let policy = selection(SelectionRow {
-            policy_id: Some("id".to_owned()),
-            policy_name: Some("web".to_owned()),
-            revision: Some(3),
-            document: Some(b"{}".to_vec()),
-            digest: Some(vec![7; 32]),
-            ..row()
-        })
+        let policy = selection(
+            SelectionRow {
+                policy_id: Some("id".to_owned()),
+                policy_name: Some("team-web".to_owned()),
+                revision: Some(3),
+                document: Some(b"{}".to_vec()),
+                digest: Some(vec![7; 32]),
+                ..row()
+            },
+            true,
+        )
         .unwrap();
-        assert_eq!(policy.name, "platform:web");
+        assert_eq!(policy.name, "platform:team-web");
         assert_eq!(policy.revision, 3);
         assert_eq!(policy.digest, [7; 32]);
     }
@@ -247,7 +291,7 @@ mod tests {
         };
         let short_digest = SelectionRow {
             policy_id: Some("id".to_owned()),
-            policy_name: Some("web".to_owned()),
+            policy_name: Some("team-web".to_owned()),
             revision: Some(1),
             document: Some(b"{}".to_vec()),
             digest: Some(vec![7; 31]),
@@ -255,9 +299,49 @@ mod tests {
         };
         for broken in [both, unknown_builtin, short_digest] {
             assert!(matches!(
-                selection(broken),
+                selection(broken, true),
                 Err(AssignmentError::CorruptSelection)
             ));
+        }
+    }
+
+    /// With the store switched off every environment is on `open`, whatever
+    /// it selected, a wider or a narrower policy alike; switched on, the
+    /// stored selection is assigned again (#6120).
+    #[test]
+    fn with_the_store_off_every_selection_is_assigned_open() {
+        let builtin = |name: &str| SelectionRow {
+            builtin: Some(name.to_owned()),
+            ..row()
+        };
+        let selections = || {
+            [
+                (
+                    SelectionRow {
+                        policy_id: Some("id".to_owned()),
+                        policy_name: Some("team-web".to_owned()),
+                        revision: Some(3),
+                        document: Some(b"{}".to_vec()),
+                        digest: Some(vec![7; 32]),
+                        ..row()
+                    },
+                    "platform:team-web",
+                ),
+                (builtin("locked"), "locked"),
+                (builtin("web"), "web"),
+                (row(), "open"),
+            ]
+        };
+        for (stored, selected) in selections() {
+            let off = selection(stored, false).unwrap();
+            assert_eq!(
+                (off.name.as_str(), off.revision, hex(&off.digest)),
+                ("open", 0, BuiltinPolicy::Open.digest_hex().to_owned()),
+                "{selected} with the store off"
+            );
+        }
+        for (stored, selected) in selections() {
+            assert_eq!(selection(stored, true).unwrap().name, selected);
         }
     }
 

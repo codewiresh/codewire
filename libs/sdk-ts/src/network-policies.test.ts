@@ -24,13 +24,16 @@ export async function runNetworkPolicyTests(): Promise<void> {
         return response({ code: "unavailable", message: "platform network policies are not enabled on this deployment" }, 503);
       }
       if (method === "UpdateEnvironmentNetworkPolicy" && body.environmentId === "future") {
-        return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: 99 } });
+        return response({ networkPolicy: { reference: "", name: "open", digest: "cd".repeat(32), enforcement: 99 } });
+      }
+      if (method === "UpdateEnvironmentNetworkPolicy" && body.environmentId === "unconfirmed") {
+        return response({ networkPolicy: { reference: "web", name: "web", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED" } });
       }
       if (method === "UpdateEnvironmentNetworkPolicy" && body.environmentId === "blocked") {
-        return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED", failureCode: "lockdown_not_applied" } });
+        return response({ networkPolicy: { reference: "", name: "open", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED", failureCode: "lockdown_not_applied" } });
       }
       if (method === "UpdateEnvironmentNetworkPolicy") {
-        return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED" } });
+        return response({ networkPolicy: { reference: "", name: "open", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED" } });
       }
       return response({ policy });
     },
@@ -66,6 +69,9 @@ export async function runNetworkPolicyTests(): Promise<void> {
   // A Sandbox failed closed says why (#5068).
   const blocked = await cw.networkPolicies.select("blocked", "hosted-default");
   assert.deepEqual([blocked.enforcement, blocked.failure_code], ["failed_closed", "lockdown_not_applied"]);
+
+  // Hosted egress on, with no fresh report (#3997).
+  assert.equal((await cw.networkPolicies.select("unconfirmed", "web")).enforcement, "unconfirmed");
 
   // A state this SDK does not know yet never fails the read.
   assert.equal((await cw.networkPolicies.select("future", "hosted-default")).enforcement, "unknown");

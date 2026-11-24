@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use buffa_types::Timestamp;
 use chrono::{DateTime, Utc};
-use codewire_egress_policy::HOSTED_DEFAULT_NAME;
 use codewire_proto::codewire::v1::__buffa::oneof::{network_policy_selector, network_policy_usage};
 use codewire_proto::codewire::v1::{
     CreateNetworkPolicyRequest, CreateNetworkPolicyResponse, DeleteNetworkPolicyRequest,
@@ -27,6 +26,9 @@ use crate::api::network_policies::{
     select_for_environment, update_policy,
 };
 
+/// `flags.hosted_egress` is the deployment's hosted egress switch, which
+/// `ListNetworkPolicies` and `GetNetworkPolicy` report as whether hosted
+/// policies are enforced.
 pub fn router(pool: PgPool, flags: NetworkPolicyFlags) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(NetworkPolicyConnectService { pool, flags }))
 }
@@ -84,11 +86,7 @@ impl NetworkPolicyService for NetworkPolicyConnectService {
         .await
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         let (policies, usage) = result;
-        connectrpc::Response::ok(ListNetworkPoliciesResponse {
-            policies: policies.into_iter().map(proto_policy).collect(),
-            usage: usage.into_iter().map(proto_usage).collect(),
-            ..Default::default()
-        })
+        connectrpc::Response::ok(list_response(policies, usage, self.flags.hosted_egress))
     }
 
     async fn get_network_policy(
@@ -107,10 +105,7 @@ impl NetworkPolicyService for NetworkPolicyConnectService {
         }
         .await
         .map_err(|error| rpc_app_error(&error, &ctx))?;
-        connectrpc::Response::ok(GetNetworkPolicyResponse {
-            policy: Some(proto_policy(result)).into(),
-            ..Default::default()
-        })
+        connectrpc::Response::ok(get_response(result, self.flags.hosted_egress))
     }
 
     async fn update_network_policy(
@@ -188,7 +183,7 @@ impl NetworkPolicyService for NetworkPolicyConnectService {
         .await
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(UpdateEnvironmentNetworkPolicyResponse {
-            network_policy: Some(proto_environment_policy(result)).into(),
+            network_policy: Some(proto_environment_policy(result, self.flags.hosted_egress)).into(),
             ..Default::default()
         })
     }
@@ -253,15 +248,36 @@ fn proto_policy(view: PolicyView) -> NetworkPolicy {
     }
 }
 
+/// Hosted policies are enforced exactly where hosted egress is on (#3997).
+fn list_response(
+    policies: Vec<PolicyView>,
+    usage: Vec<PolicyUsage>,
+    hosted_egress: bool,
+) -> ListNetworkPoliciesResponse {
+    ListNetworkPoliciesResponse {
+        policies: policies.into_iter().map(proto_policy).collect(),
+        usage: usage.into_iter().map(proto_usage).collect(),
+        hosted_policies_enforced: hosted_egress,
+        ..Default::default()
+    }
+}
+
+/// As [`list_response`], hosted policies are enforced exactly where hosted
+/// egress is on.
+fn get_response(policy: PolicyView, hosted_egress: bool) -> GetNetworkPolicyResponse {
+    GetNetworkPolicyResponse {
+        policy: Some(proto_policy(policy)).into(),
+        hosted_policies_enforced: hosted_egress,
+        ..Default::default()
+    }
+}
+
 fn proto_usage(usage: PolicyUsage) -> NetworkPolicyUsage {
     NetworkPolicyUsage {
         selection: Some(match usage.selection {
             UsageSelection::Policy(id) => network_policy_usage::Selection::PolicyId(id),
             UsageSelection::Builtin(builtin) => {
                 network_policy_usage::Selection::Builtin(builtin.name().to_owned())
-            }
-            UsageSelection::HostedDefault => {
-                network_policy_usage::Selection::Builtin(HOSTED_DEFAULT_NAME.to_owned())
             }
         }),
         environments: usage.environments,
@@ -271,9 +287,14 @@ fn proto_usage(usage: PolicyUsage) -> NetworkPolicyUsage {
 }
 
 /// The environment read's form: the selection, and what cw-egress reports
-/// the environment's current Pod enforces (#4000).
-pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> EnvironmentNetworkPolicy {
+/// the environment's current Pod enforces (#4000), or `NOT_ENFORCED` where
+/// hosted egress is off (#3997).
+pub(crate) fn proto_environment_policy(
+    view: EnvironmentPolicyView,
+    hosted_egress: bool,
+) -> EnvironmentNetworkPolicy {
     use crate::api::network_policies::EnforcementView;
+    let view = view.on_deployment(hosted_egress);
     let failure_code = match view.enforcement {
         EnforcementView::FailedClosed(reason) => reason.code(),
         _ => "",
@@ -281,6 +302,10 @@ pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> Environme
     let (enforcement, enforced) = match view.enforcement {
         EnforcementView::NotEnforced => (
             NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
+            None,
+        ),
+        EnforcementView::Unconfirmed => (
+            NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED,
             None,
         ),
         EnforcementView::Enforced(at) => (
@@ -327,6 +352,10 @@ mod tests {
     use codewire_server_core::connect::connect_router;
     use tower::ServiceExt as _;
 
+    use crate::api::network_policies::{EnforcedRevision, EnforcementView};
+    use codewire_egress_policy::typed::TypedPolicy;
+    use codewire_proto::codewire::v1::NetworkPolicyEnforcement as Enforcement;
+
     /// With the deployment switch off, every method answers UNAVAILABLE before
     /// it reads the request's organization or touches the database: the pool
     /// here is lazy and points at a documentation address that answers nothing.
@@ -335,7 +364,11 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://fixture:fixture@192.0.2.1:1/fixture")
             .unwrap();
-        let app = connect_router(router(pool, NetworkPolicyFlags::default()));
+        let flags = NetworkPolicyFlags {
+            hosted_egress: true,
+            ..NetworkPolicyFlags::default()
+        };
+        let app = connect_router(router(pool, flags));
         for method in [
             "CreateNetworkPolicy",
             "ListNetworkPolicies",
@@ -375,23 +408,103 @@ mod tests {
     }
 
     #[test]
-    fn every_selection_reports_not_enforced_until_cw_egress_exists() {
-        let wire = proto_environment_policy(EnvironmentPolicyView {
+    fn the_list_says_hosted_policies_are_enforced_only_where_hosted_egress_is_on() {
+        for hosted_egress in [false, true] {
+            let usage = vec![PolicyUsage {
+                selection: UsageSelection::Builtin(codewire_egress_policy::BuiltinPolicy::Open),
+                environments: 1,
+                names: vec!["plain".into()],
+            }];
+            let response = list_response(Vec::new(), usage, hosted_egress);
+            assert_eq!(response.hosted_policies_enforced, hosted_egress);
+            assert_eq!(
+                response.usage[0].selection,
+                Some(network_policy_usage::Selection::Builtin("open".into()))
+            );
+        }
+    }
+
+    fn stored_policy() -> PolicyView {
+        let policy = TypedPolicy::new(Vec::new()).unwrap();
+        PolicyView {
+            id: "6b1f7c55-2a4f-4b8e-9d4b-1f2e3d4c5b6a".into(),
+            org_id: "org-one".into(),
+            name: "team".into(),
+            revision: 1,
+            current_revision: 1,
+            digest: policy.compile().digest().to_hex(),
+            policy,
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            created_by: None,
+        }
+    }
+
+    #[test]
+    fn get_says_hosted_policies_are_enforced_only_where_hosted_egress_is_on() {
+        for hosted_egress in [false, true] {
+            let response = get_response(stored_policy(), hosted_egress);
+            assert_eq!(response.hosted_policies_enforced, hosted_egress);
+            assert_eq!(response.policy.as_option().unwrap().name, "team");
+        }
+    }
+
+    fn view(enforcement: EnforcementView) -> EnvironmentPolicyView {
+        EnvironmentPolicyView {
             reference: "platform:id:6b1f7c55-2a4f-4b8e-9d4b-1f2e3d4c5b6a".into(),
-            name: "web".into(),
+            name: "team".into(),
             revision: 2,
             digest: "aa".into(),
-            enforcement: crate::api::network_policies::EnforcementView::NotEnforced,
+            enforcement,
+        }
+    }
+
+    /// With hosted egress off nothing enforces, whatever a report said; with
+    /// it on, no fresh report is unconfirmed, never not enforced (#3997).
+    #[test]
+    fn not_enforced_means_hosted_egress_is_off_and_unconfirmed_means_no_fresh_report() {
+        let enforced = EnforcementView::Enforced(EnforcedRevision {
+            revision: 2,
+            digest: "aa".into(),
+            at: chrono::DateTime::UNIX_EPOCH,
         });
+        for (enforcement, hosted_egress, expected) in [
+            (
+                EnforcementView::Unconfirmed,
+                false,
+                Enforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
+            ),
+            (
+                enforced.clone(),
+                false,
+                Enforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
+            ),
+            (
+                EnforcementView::Unconfirmed,
+                true,
+                Enforcement::NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED,
+            ),
+            (
+                enforced,
+                true,
+                Enforcement::NETWORK_POLICY_ENFORCEMENT_ENFORCED,
+            ),
+        ] {
+            let wire = proto_environment_policy(view(enforcement.clone()), hosted_egress);
+            assert_eq!(
+                wire.enforcement.as_known(),
+                Some(expected),
+                "{enforcement:?} with hosted egress {hosted_egress}"
+            );
+            assert_eq!((wire.revision, wire.digest.as_str()), (2, "aa"));
+        }
+        let unconfirmed = proto_environment_policy(view(EnforcementView::Unconfirmed), true);
         assert_eq!(
-            wire.enforcement.as_known(),
-            Some(NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED)
-        );
-        assert_eq!(
-            (wire.enforced_revision, wire.enforced_digest.as_str()),
+            (
+                unconfirmed.enforced_revision,
+                unconfirmed.enforced_digest.as_str()
+            ),
             (0, "")
         );
-        assert!(wire.enforced_at.as_option().is_none());
-        assert_eq!((wire.revision, wire.digest.as_str()), (2, "aa"));
+        assert!(unconfirmed.enforced_at.as_option().is_none());
     }
 }

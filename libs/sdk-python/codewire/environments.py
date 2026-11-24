@@ -132,7 +132,7 @@ class Environments:
                 raise ValueError("codewire: network must be a nonempty Mesh network name")
             request.network = network
         if network_policy is not None:
-            # An organization network policy; none is `hosted-default`.
+            # An organization network policy; none is `open`, the default.
             if not isinstance(network_policy, str) or not network_policy:
                 raise ValueError("codewire: network_policy must be a nonempty policy reference")
             request.network_policy = network_policy

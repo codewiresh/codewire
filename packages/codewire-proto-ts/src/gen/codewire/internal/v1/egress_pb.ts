@@ -260,8 +260,8 @@ export const InterceptionBindingSchema: GenMessage<InterceptionBinding> = /*@__P
 export type EgressPolicyRevision = Message<"codewire.internal.v1.EgressPolicyRevision"> & {
   /**
    * The reference as the environment selected it, for example
-   * "platform:web", "locked" or "hosted-default", as the public
-   * EnvironmentNetworkPolicy names it.
+   * "platform:team", "web" or "locked", or "open" for an environment that
+   * selects nothing.
    *
    * @generated from field: string reference = 1;
    */

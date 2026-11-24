@@ -7,13 +7,13 @@
 //! digest wherever it is stored. Members read policies and select them for
 //! environments they created; owners and admins create, change and delete
 //! them. A selection follows the policy's current revision. An environment
-//! that selects nothing is on `hosted-default` and has no row.
+//! that selects nothing is on the built-in `open`, the default, and has no
+//! row (#3997).
 //!
-//! Nothing enforces a hosted policy yet, so an environment's selection is
-//! always reported as not enforced; cw-egress will record what it enforces in
-//! the selection's enforced_* columns, and reading them comes with that
-//! writer. Everything here is behind
-//! the deployment switch [`SWITCH`], off by default.
+//! An environment's status says what cw-egress reports its current Pod
+//! enforces, and reads as not enforced wherever hosted egress is off
+//! (#3997). Everything here is behind the deployment switch [`SWITCH`], off
+//! by default.
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
@@ -21,9 +21,7 @@ use codewire_egress_policy::reference::{
     PolicyName, PolicyPlacement, PolicyReference, PolicyReferenceError,
 };
 use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy};
-use codewire_egress_policy::{
-    BuiltinPolicy, HOSTED_DEFAULT_DIGEST, HOSTED_DEFAULT_NAME, PolicyDigest, PolicyDocument,
-};
+use codewire_egress_policy::{BuiltinPolicy, PolicyDigest, PolicyDocument};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::{AppError, AppResult};
@@ -39,15 +37,23 @@ mod database_tests;
 /// The deployment switch. It stays off in Production until something
 /// enforces hosted policies (docs/CONFIGURATION.md).
 pub const SWITCH: &str = "CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED";
+/// The reference that removes an environment's selection, so it is on
+/// `open` by default. Clients from before #3997 send it; it is no policy's
+/// name, and the database refuses it as one.
+const CLEAR_SELECTION: &str = "hosted-default";
 /// Policies one organization may hold, as a local store.
 pub const MAX_POLICIES_PER_ORG: i64 = 256;
 /// Revisions one policy may hold, as a local store.
 pub const MAX_REVISIONS: u32 = 10_000;
 
-/// The deployment's platform network policy switch.
+/// The deployment's platform network policy switch, and whether it enforces
+/// the policies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NetworkPolicyFlags {
     pub enabled: bool,
+    /// Whether hosted egress is on, which is whether hosted policies are
+    /// enforced (#3997). Startup sets it from the hosted egress settings.
+    pub hosted_egress: bool,
 }
 
 impl NetworkPolicyFlags {
@@ -55,11 +61,21 @@ impl NetworkPolicyFlags {
         Self::from_setting(crate::confidential_storage::env_setting(SWITCH)?.as_deref())
     }
 
+    /// The flags where hosted egress is `on` or off: hosted policies are
+    /// enforced exactly where it is on (#3997).
+    pub fn with_hosted_egress(self, on: bool) -> Self {
+        Self {
+            hosted_egress: on,
+            ..self
+        }
+    }
+
     /// Off unless a deployment turns it on; any value but `true` or `false`
     /// fails startup.
     fn from_setting(value: Option<&str>) -> anyhow::Result<Self> {
         Ok(Self {
             enabled: crate::confidential_storage::parse_bool(SWITCH, value, false)?,
+            hosted_egress: false,
         })
     }
 
@@ -107,7 +123,8 @@ pub struct RuleInput<'a> {
 /// An environment's selection, resolved, and what its current Pod enforces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentPolicyView {
-    /// `open`, `locked`, `hosted-default` or `platform:id:UUID`.
+    /// `open`, `web`, `locked` or `platform:id:UUID`; empty when the
+    /// environment selects nothing and is on `open` by default.
     pub reference: String,
     pub name: String,
     /// The stored policy's current revision; zero for a built-in.
@@ -124,8 +141,12 @@ pub const ENFORCEMENT_REPORT_STALE_MINUTES: i64 = 15;
 /// What cw-egress reports the environment's current Pod enforces (#4000).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnforcementView {
-    /// No report, or the Pod's stream is down.
+    /// The deployment doesn't enforce hosted policies: hosted egress is off
+    /// (#3997). Only [`EnvironmentPolicyView::on_deployment`] sets it.
     NotEnforced,
+    /// Hosted egress is on, but no fresh report confirms the policy: there
+    /// is none, the Pod's stream is down, or the latest is stale (#3997).
+    Unconfirmed,
     /// The selected revision is in force.
     Enforced(EnforcedRevision),
     /// An older revision is in force while the selected one is applied.
@@ -187,10 +208,10 @@ impl EnforcementView {
         let state: Option<String> = row.try_get("egress_state")?;
         let fresh: Option<bool> = row.try_get("egress_report_fresh")?;
         if fresh != Some(true) {
-            return Ok(Self::NotEnforced);
+            return Ok(Self::Unconfirmed);
         }
         Ok(match state.as_deref() {
-            None | Some("disconnected") => Self::NotEnforced,
+            None | Some("disconnected") => Self::Unconfirmed,
             Some("failed_closed") => {
                 let detail: String = row.try_get("egress_detail")?;
                 let code = FailureCode::parse(&detail).ok_or_else(corrupt_selection)?;
@@ -218,17 +239,31 @@ impl EnforcementView {
 }
 
 impl EnvironmentPolicyView {
-    fn hosted_default() -> Self {
-        Self::builtin(HOSTED_DEFAULT_NAME, HOSTED_DEFAULT_DIGEST)
+    /// The status as this deployment reports it: with hosted egress off
+    /// nothing enforces a hosted policy, whatever a report once said, so it
+    /// is never shown as enforced or unconfirmed (#3997).
+    pub fn on_deployment(mut self, hosted_egress: bool) -> Self {
+        if !hosted_egress {
+            self.enforcement = EnforcementView::NotEnforced;
+        }
+        self
     }
 
-    fn builtin(name: &str, digest: &str) -> Self {
+    /// No selection: `open`, by default.
+    fn unselected() -> Self {
         Self {
-            reference: name.to_owned(),
-            name: name.to_owned(),
+            reference: String::new(),
+            ..Self::builtin(BuiltinPolicy::Open)
+        }
+    }
+
+    fn builtin(builtin: BuiltinPolicy) -> Self {
+        Self {
+            reference: builtin.name().to_owned(),
+            name: builtin.name().to_owned(),
             revision: 0,
-            digest: digest.to_owned(),
-            enforcement: EnforcementView::NotEnforced,
+            digest: builtin.digest_hex().to_owned(),
+            enforcement: EnforcementView::Unconfirmed,
         }
     }
 }
@@ -269,7 +304,7 @@ pub(crate) fn environment_policy_from_row(
     let policy_id: Option<String> = row.try_get("network_policy_id")?;
     let builtin: Option<String> = row.try_get("network_policy_builtin")?;
     let mut view = match (policy_id, builtin.as_deref()) {
-        (None, None) => EnvironmentPolicyView::hosted_default(),
+        (None, None) => EnvironmentPolicyView::unselected(),
         (Some(id), None) => {
             let revision: i32 = row.try_get("network_policy_revision")?;
             let digest: Vec<u8> = row.try_get("network_policy_digest")?;
@@ -278,13 +313,12 @@ pub(crate) fn environment_policy_from_row(
                 name: row.try_get("network_policy_name")?,
                 revision: stored_revision(revision)?,
                 digest: hex_digest(&digest)?,
-                enforcement: EnforcementView::NotEnforced,
+                enforcement: EnforcementView::Unconfirmed,
             }
         }
-        (None, Some(name)) => {
-            let builtin = BuiltinPolicy::from_name(name).ok_or_else(corrupt_selection)?;
-            EnvironmentPolicyView::builtin(builtin.name(), builtin.digest_hex())
-        }
+        (None, Some(name)) => EnvironmentPolicyView::builtin(
+            BuiltinPolicy::from_name(name).ok_or_else(corrupt_selection)?,
+        ),
         (Some(_), Some(_)) => return Err(corrupt_selection()),
     };
     view.enforcement = EnforcementView::from_row(row, &view.digest)?;
@@ -490,11 +524,11 @@ pub async fn create_policy(
 ) -> AppResult<PolicyView> {
     require_manager(pool, user, org_id).await?;
     let name = PolicyName::parse(name).map_err(reference_error)?;
-    // A hosted environment that selects nothing is on `hosted-default`, so no
-    // organization policy may take the name. A local store may (#4000).
-    if name.as_str() == HOSTED_DEFAULT_NAME {
+    // Older clients clear a selection with this name, so no organization
+    // policy may take it. A local store may (#4000).
+    if name.as_str() == CLEAR_SELECTION {
         return Err(AppError::BadRequest(
-            "the network policy name hosted-default is reserved for the hosted default".into(),
+            "the network policy name hosted-default is reserved".into(),
         ));
     }
     let allow = parse_rules(allow)?;
@@ -693,9 +727,8 @@ pub async fn delete_policy(
 pub enum UsageSelection {
     /// A stored policy, by id.
     Policy(String),
+    /// A built-in; `open` counts the environments that select nothing too.
     Builtin(BuiltinPolicy),
-    /// No selection.
-    HostedDefault,
 }
 
 /// How many environments select one thing, and the first names.
@@ -713,7 +746,7 @@ pub const NAMED_ENVIRONMENTS: u8 = 10;
 /// What the organization's hosted environments select, in one grouped read.
 /// It counts the same selection rows [`delete_policy`] refuses for, so a
 /// count never says nobody selects a policy whose delete is refused; an
-/// environment with no row and not destroyed is on `hosted-default`.
+/// environment with no row and not destroyed is on `open`, and counts there.
 pub async fn policy_usage(
     pool: &PgPool,
     user: &AuthUser,
@@ -742,7 +775,7 @@ pub async fn policy_usage(
            FROM ranked GROUP BY policy_id, builtin ORDER BY policy_id, builtin",
     )
     .bind(org_id)
-    .bind(HOSTED_DEFAULT_NAME)
+    .bind(BuiltinPolicy::Open.name())
     .bind(i64::from(NAMED_ENVIRONMENTS))
     .fetch_all(pool)
     .await?;
@@ -752,7 +785,6 @@ pub async fn policy_usage(
             let builtin: Option<String> = row.try_get("builtin")?;
             let selection = match (policy_id, builtin) {
                 (Some(id), None) => UsageSelection::Policy(id),
-                (None, Some(name)) if name == HOSTED_DEFAULT_NAME => UsageSelection::HostedDefault,
                 (None, Some(name)) => UsageSelection::Builtin(
                     BuiltinPolicy::from_name(&name).ok_or_else(corrupt_selection)?,
                 ),
@@ -775,7 +807,7 @@ pub async fn policy_usage(
 
 /// What a reference selects, resolved in an organization.
 enum Selection {
-    HostedDefault,
+    Unselected,
     Builtin(BuiltinPolicy),
     Stored(String),
 }
@@ -787,8 +819,8 @@ async fn resolve(
     org_id: &str,
     reference: &str,
 ) -> AppResult<Selection> {
-    if reference == HOSTED_DEFAULT_NAME {
-        return Ok(Selection::HostedDefault);
+    if reference == CLEAR_SELECTION {
+        return Ok(Selection::Unselected);
     }
     let parsed = PolicyReference::parse(reference).map_err(reference_error)?;
     parsed
@@ -812,7 +844,7 @@ pub(crate) async fn select_in(
     reference: &str,
 ) -> AppResult<()> {
     let (policy_id, builtin) = match resolve(connection, org_id, reference).await? {
-        Selection::HostedDefault => {
+        Selection::Unselected => {
             sqlx::query(
                 "DELETE FROM platform_environment_network_policies WHERE environment_id = $1",
             )
@@ -918,14 +950,21 @@ mod tests {
             );
         }
         assert!(matches!(
-            NetworkPolicyFlags { enabled: false }.require(),
+            NetworkPolicyFlags::default().require(),
             Err(AppError::Coded {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: "NETWORK_POLICIES_DISABLED",
                 ..
             })
         ));
-        assert!(NetworkPolicyFlags { enabled: true }.require().is_ok());
+        assert!(
+            NetworkPolicyFlags {
+                enabled: true,
+                ..NetworkPolicyFlags::default()
+            }
+            .require()
+            .is_ok()
+        );
     }
 
     #[test]

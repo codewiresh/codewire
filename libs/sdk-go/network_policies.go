@@ -30,8 +30,10 @@ type NetworkPolicy struct {
 }
 
 // EnvironmentNetworkPolicy is what an environment selects and what its runtime
-// enforces. Enforcement is "not_enforced", "enforced", "enforcing",
-// "failed_closed", or "unknown" for a state this SDK does not know yet.
+// enforces. Enforcement is "not_enforced" (the deployment's hosted egress is
+// off), "unconfirmed" (it is on, but no fresh report confirms the policy),
+// "enforced", "enforcing", "failed_closed", or "unknown" for a state this SDK
+// does not know yet.
 type EnvironmentNetworkPolicy struct {
 	Reference        string `json:"reference"`
 	Name             string `json:"name"`
@@ -101,6 +103,7 @@ func fromProtoEnvironmentNetworkPolicy(policy *codewirev1.EnvironmentNetworkPoli
 		codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_ENFORCED:      "enforced",
 		codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_ENFORCING:     "enforcing",
 		codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED: "failed_closed",
+		codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED:   "unconfirmed",
 	}[policy.GetEnforcement()]
 	if !ok {
 		enforcement = "unknown"

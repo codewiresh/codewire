@@ -511,12 +511,21 @@ fn a_selected_policy_says_what_its_enforcement_means() {
         enforcement: enforcement.into(),
         ..Default::default()
     };
+    // Not enforced only where hosted egress is off; with it on and no fresh
+    // report, unconfirmed (#3997). An unknown status claims neither.
     assert_eq!(
         policy_selection_notice("web", "app", Some(&policy("not_enforced"))).as_deref(),
         Some(
-            "Network policy web is not enforced yet: this environment's outbound connections are not restricted."
+            "Network policy web isn't enforced on this deployment: outbound connections are not restricted."
         )
     );
+    for enforcement in ["unconfirmed", "unknown"] {
+        assert_eq!(
+            policy_selection_notice("web", "app", Some(&policy(enforcement))).as_deref(),
+            Some("We can't confirm network policy web is applied to this environment right now."),
+            "{enforcement}"
+        );
+    }
     assert_eq!(
         policy_selection_notice("platform:web", "app", Some(&policy("enforcing"))).as_deref(),
         Some(
@@ -546,8 +555,8 @@ fn a_policy_the_server_did_not_record_is_said_plainly() {
     assert_eq!(policy_selection_notice("web", "app", None), not_recorded);
     // Or one other than the policy asked for.
     let other = crate::presentation::EnvironmentNetworkPolicy {
-        reference: "hosted-default".into(),
-        name: "hosted-default".into(),
+        reference: String::new(),
+        name: "open".into(),
         enforcement: "not_enforced".into(),
         ..Default::default()
     };
@@ -2919,6 +2928,7 @@ fn format_env_info_text_says_why_hosted_egress_is_blocked_and_json_keeps_the_cod
     assert!(!format_env_info_text(&environment).contains("Egress:"));
     for (enforcement, failure, line) in [
         ("not_enforced", None, "Egress:        not enforced\n"),
+        ("unconfirmed", None, "Egress:        unconfirmed\n"),
         ("enforced", None, "Egress:        enforced\n"),
         (
             "failed_closed",
@@ -2940,6 +2950,84 @@ fn format_env_info_text_says_why_hosted_egress_is_blocked_and_json_keeps_the_cod
     let json = serde_json::to_value(&environment).unwrap();
     assert_eq!(json["egress_enforcement"], "failed_closed");
     assert_eq!(json["egress_failure"], "self_check_failed");
+}
+
+/// `cw info` says in a sentence that a policy isn't enforced, or that
+/// nothing confirms it, and nothing once it is enforced (#3997).
+#[test]
+fn format_env_info_text_says_whether_the_policy_is_enforced_in_a_sentence() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    let policy = |enforcement: &str| crate::presentation::EnvironmentNetworkPolicy {
+        reference: String::new(),
+        name: "open".into(),
+        enforcement: enforcement.into(),
+        ..Default::default()
+    };
+    for (enforcement, notice) in [
+        (
+            "not_enforced",
+            Some(
+                "Notice:        Network policy open isn't enforced on this deployment: outbound connections are not restricted.\n",
+            ),
+        ),
+        (
+            "unconfirmed",
+            Some(
+                "Notice:        We can't confirm network policy open is applied to this environment right now.\n",
+            ),
+        ),
+        ("enforced", None),
+    ] {
+        environment.network_policy = Some(policy(enforcement));
+        let text = format_env_info_text(&environment);
+        assert!(
+            text.contains("NetworkPolicy: open (default) · "),
+            "{enforcement}: {text}"
+        );
+        match notice {
+            Some(notice) => assert!(text.contains(notice), "{enforcement}: {text}"),
+            None => assert!(!text.contains("Notice:"), "{enforcement}: {text}"),
+        }
+    }
+}
+
+/// #3997: a Sandbox that selected `open` is told, beside its policy line,
+/// that `open` now allows every TCP port and how to keep the three; one on
+/// `open` by default, or on another policy, is not, and JSON never is.
+#[test]
+fn format_env_info_text_says_an_explicit_open_widened() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    let policy = |reference: &str, name: &str| crate::presentation::EnvironmentNetworkPolicy {
+        reference: reference.into(),
+        name: name.into(),
+        enforcement: "enforced".into(),
+        ..Default::default()
+    };
+    let widened = "Notice:        open now allows every public TCP port; select web to keep 22, 80 and 443.\n";
+    environment.network_policy = Some(policy("open", "open"));
+    let text = format_env_info_text(&environment);
+    assert!(
+        text.contains(&format!("NetworkPolicy: open · enforced\n{widened}")),
+        "{text}"
+    );
+    let json = serde_json::to_string(&environment).unwrap();
+    assert!(!json.contains("allows every public TCP port"), "{json}");
+    for (reference, name) in [("", "open"), ("web", "web"), ("locked", "locked")] {
+        environment.network_policy = Some(policy(reference, name));
+        let text = format_env_info_text(&environment);
+        assert!(
+            !text.contains("allows every public TCP port"),
+            "{name}: {text}"
+        );
+    }
 }
 
 #[test]
@@ -2999,7 +3087,10 @@ fn format_env_info_text_says_when_and_why_a_sandbox_restarted_on_its_own() {
         "{text}"
     );
     // #3772's notice stays, as `reboot-restart-notice` reads it.
-    assert!(text.contains("Notice:        Restarted at 12:00 UTC"), "{text}");
+    assert!(
+        text.contains("Notice:        Restarted at 12:00 UTC"),
+        "{text}"
+    );
     // The time is local: here two hours east of UTC.
     let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
     assert!(

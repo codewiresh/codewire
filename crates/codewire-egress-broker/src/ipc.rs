@@ -1678,7 +1678,7 @@ rules:
 
     #[test]
     fn frames_are_authenticated_bound_and_strictly_sequenced() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let payload = encode_dns_request("allowed.example.com", DnsRecordFamily::Ipv4).unwrap();
         let frame = encode_frame(FRAME_KIND_REQUEST, 4, binding, &key(), &payload).unwrap();
@@ -1721,7 +1721,7 @@ rules:
             BrokerIpcKey::from_bytes([0_u8; BROKER_IPC_KEY_LEN]).unwrap_err(),
             BrokerIpcError::InvalidKey
         );
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         assert_eq!(
             BrokerIpcBinding::new(Uuid::nil(), 1, policy.digest()),
             Err(BrokerIpcError::InvalidBinding)
@@ -2546,7 +2546,7 @@ rules:
     /// connection, and carries the next request in step.
     #[tokio::test]
     async fn a_late_connect_closes_its_connection_and_its_session_carries_on() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2829,7 +2829,7 @@ rules:
     #[tokio::test]
     async fn server_rejects_a_policy_digest_mismatch_before_reading() {
         let policy = named_policy();
-        let wrong_binding = binding(&CompiledPolicy::developer_baseline());
+        let wrong_binding = binding(&CompiledPolicy::open());
         let broker = Arc::new(PolicyEgressBroker::new(
             policy,
             RouteClass::General,
@@ -2846,7 +2846,7 @@ rules:
 
     #[tokio::test]
     async fn connected_tcp_descriptor_is_transferred_and_exact_peer_validated() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let destination = listener.local_addr().unwrap();
@@ -2936,7 +2936,7 @@ rules:
 
     #[tokio::test]
     async fn cancelling_connect_after_response_before_descriptor_fails_client_session_closed() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let response_sent = Arc::new(Notify::new());
@@ -3003,7 +3003,7 @@ rules:
 
     #[tokio::test]
     async fn mismatched_connected_peer_poison_closes_the_client_session() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -3047,7 +3047,7 @@ rules:
 
     #[tokio::test]
     async fn non_tcp_stream_descriptor_is_rejected() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let (foreign, _foreign_peer) = StdUnixStream::pair().unwrap();
@@ -3179,7 +3179,16 @@ rules:
         BrokerIpcBinding,
         Arc<PolicyEgressBroker<FakeResolver, NoConnector, FakeClock>>,
     ) {
-        let policy = CompiledPolicy::developer_baseline();
+        policy_broker(CompiledPolicy::open(), connector)
+    }
+
+    fn policy_broker(
+        policy: CompiledPolicy,
+        connector: Arc<NoConnector>,
+    ) -> (
+        BrokerIpcBinding,
+        Arc<PolicyEgressBroker<FakeResolver, NoConnector, FakeClock>>,
+    ) {
         let binding = binding(&policy);
         let broker = Arc::new(PolicyEgressBroker::new(
             policy,
@@ -3279,7 +3288,11 @@ rules:
     /// folded as a UDP refusal, and the session carries on (#3997).
     #[tokio::test]
     async fn a_dropped_datagram_is_recorded_over_the_admission_session() {
-        let (binding, broker) = developer_broker(Arc::default());
+        // `web` refuses TCP 25, so the session's next decision is a denial.
+        let (binding, broker) = policy_broker(
+            codewire_egress_policy::BuiltinPolicy::Web.compile(),
+            Arc::default(),
+        );
         let fold = Arc::new(crate::refusals::RefusalFold::new());
         let broker = Arc::into_inner(broker)
             .unwrap()
@@ -3448,7 +3461,7 @@ rules:
     /// timeout.
     #[tokio::test]
     async fn stalled_connects_leave_dns_and_admission_working() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let connector = Arc::new(StalledConnector::default());
         let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
@@ -3548,7 +3561,7 @@ rules:
     /// carries on, and the broker keeps serving.
     #[tokio::test]
     async fn a_connection_reset_after_the_handshake_fails_only_its_request() {
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let binding = binding(&policy);
         let broker = Arc::new(PolicyEgressBroker::new(
             policy,

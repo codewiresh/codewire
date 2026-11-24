@@ -236,7 +236,7 @@ fn template_from(
     }))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EgressSettings {
     pub enabled: bool,
     /// Whether a broker-mode sandbox's bind response turns interception on.

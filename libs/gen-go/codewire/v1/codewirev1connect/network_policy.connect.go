@@ -72,7 +72,8 @@ type NetworkPolicyServiceClient interface {
 	// with FAILED_PRECONDITION while any environment selects it.
 	DeleteNetworkPolicy(context.Context, *connect.Request[v1.DeleteNetworkPolicyRequest]) (*connect.Response[v1.DeleteNetworkPolicyResponse], error)
 	// UpdateEnvironmentNetworkPolicy selects the network policy of a hosted
-	// environment the caller created. `hosted-default` removes the selection.
+	// environment the caller created. `hosted-default` removes the selection,
+	// which leaves the environment on `open` by default.
 	// A running environment keeps running.
 	UpdateEnvironmentNetworkPolicy(context.Context, *connect.Request[v1.UpdateEnvironmentNetworkPolicyRequest]) (*connect.Response[v1.UpdateEnvironmentNetworkPolicyResponse], error)
 }
@@ -189,7 +190,8 @@ type NetworkPolicyServiceHandler interface {
 	// with FAILED_PRECONDITION while any environment selects it.
 	DeleteNetworkPolicy(context.Context, *connect.Request[v1.DeleteNetworkPolicyRequest]) (*connect.Response[v1.DeleteNetworkPolicyResponse], error)
 	// UpdateEnvironmentNetworkPolicy selects the network policy of a hosted
-	// environment the caller created. `hosted-default` removes the selection.
+	// environment the caller created. `hosted-default` removes the selection,
+	// which leaves the environment on `open` by default.
 	// A running environment keeps running.
 	UpdateEnvironmentNetworkPolicy(context.Context, *connect.Request[v1.UpdateEnvironmentNetworkPolicyRequest]) (*connect.Response[v1.UpdateEnvironmentNetworkPolicyResponse], error)
 }

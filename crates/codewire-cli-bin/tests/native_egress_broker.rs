@@ -177,7 +177,7 @@ fn spawn_broker_with_sessions(
 /// A client over every session of a ready broker. Call it in a runtime.
 fn ipc_client(parent: StdUnixStream, sessions: Vec<StdUnixStream>) -> BrokerIpcClient {
     let (environment_id, generation) = identity();
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = CompiledPolicy::open();
     let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
     parent.set_read_timeout(None).unwrap();
     parent.set_write_timeout(None).unwrap();
@@ -518,6 +518,6 @@ fn developer_broker_bootstrap(
         environment_id,
         generation,
         key,
-        &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+        &codewire_egress_policy::CompiledPolicy::open(),
     )
 }

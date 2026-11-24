@@ -4,8 +4,8 @@
 //! is one document in the typed rule subset of [`codewire_egress_policy`]:
 //! default deny plus allow rules, stored in its canonical form with the digest
 //! the brokers enforce. Every edit appends a revision; a revision is never
-//! changed. `open` and `locked` are built-ins compiled from the crate, never
-//! stored and never editable.
+//! changed. `open`, `web` and `locked` are built-ins compiled from the crate,
+//! never stored and never editable.
 //!
 //! The store is its own SQLite file in the supervisor's private root, owned by
 //! the supervisor process, the one writer. It holds no secret: a policy is
@@ -18,7 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_egress_policy::reference::{PolicyId, PolicyName};
 use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy, TypedPolicyError};
-use codewire_egress_policy::{CompiledPolicy, PolicyDigest, PolicyDocument, PolicyError};
+use codewire_egress_policy::{
+    BuiltinPolicy, CompiledPolicy, PolicyDigest, PolicyDocument, PolicyError,
+};
 use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
@@ -30,9 +32,10 @@ use crate::host::path::{PathError, PrivateRoot};
 pub(crate) const DATABASE_FILE: &str = "network-policies.db";
 const APPLICATION_ID: i64 = 0x4357_4e50; // "CWNP"
 /// 1: policies and revisions. 2: which policy each environment selects.
-const SCHEMA_VERSION: i64 = 2;
+/// 3: a selection may be the built-in `web` (#3997).
+const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// The TCP ports a rule gets when its target names none: those `open` allows,
+/// The TCP ports a rule gets when its target names none: those `web` allows,
 /// so an allowed Git host also works over SSH.
 pub const DEFAULT_ALLOW_PORTS: [u16; 3] = [22, 80, 443];
 /// The most policies one host keeps.
@@ -74,7 +77,7 @@ BEGIN SELECT RAISE(ABORT, 'a policy revision is immutable'); END",
         "CREATE TABLE environment_policies (
   environment_id TEXT PRIMARY KEY NOT NULL CHECK (length(environment_id) = 36),
   policy_id TEXT NULL REFERENCES policies(id) ON DELETE RESTRICT,
-  builtin TEXT NULL CHECK (builtin IN ('open', 'locked')),
+  builtin TEXT NULL CHECK (builtin IN ('open', 'web', 'locked')),
   enforced_revision INTEGER NULL CHECK (enforced_revision IS NULL OR enforced_revision > 0),
   enforced_digest BLOB NULL CHECK (enforced_digest IS NULL OR length(enforced_digest) = 32),
   CHECK ((policy_id IS NULL) != (builtin IS NULL))
@@ -83,6 +86,15 @@ BEGIN SELECT RAISE(ABORT, 'a policy revision is immutable'); END",
 ];
 /// The schema version 1 had: every statement but the last.
 const SCHEMA_V1_STATEMENTS: usize = 3;
+/// Version 2's selection table, which admitted only `open` and `locked`.
+const SCHEMA_V2_SELECTIONS: &str = "CREATE TABLE environment_policies (
+  environment_id TEXT PRIMARY KEY NOT NULL CHECK (length(environment_id) = 36),
+  policy_id TEXT NULL REFERENCES policies(id) ON DELETE RESTRICT,
+  builtin TEXT NULL CHECK (builtin IN ('open', 'locked')),
+  enforced_revision INTEGER NULL CHECK (enforced_revision IS NULL OR enforced_revision > 0),
+  enforced_digest BLOB NULL CHECK (enforced_digest IS NULL OR length(enforced_digest) = 32),
+  CHECK ((policy_id IS NULL) != (builtin IS NULL))
+) STRICT";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkPolicyStoreError {
@@ -167,10 +179,11 @@ impl StoredPolicy {
     }
 }
 
-/// What an environment asks for: the built-in `locked` or a stored policy.
-/// `open` is the absence of a selection.
+/// What an environment asks for: the built-in `web` or `locked`, or a stored
+/// policy. `open` is the absence of a selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicySelection {
+    Web,
     Locked,
     Stored(PolicySelector),
 }
@@ -180,43 +193,56 @@ pub enum PolicySelection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectedPolicy {
     Open,
+    Web,
     Locked,
     Stored(StoredPolicy),
 }
 
 impl SelectedPolicy {
+    /// The built-in this is, or the stored policy.
+    fn builtin(&self) -> Result<BuiltinPolicy, &StoredPolicy> {
+        match self {
+            Self::Open => Ok(BuiltinPolicy::Open),
+            Self::Web => Ok(BuiltinPolicy::Web),
+            Self::Locked => Ok(BuiltinPolicy::Locked),
+            Self::Stored(stored) => Err(stored),
+        }
+    }
+
     /// The engine form the egress broker enforces.
     pub fn compile(&self) -> CompiledPolicy {
-        match self {
-            Self::Open => CompiledPolicy::developer_baseline(),
-            Self::Locked => TypedPolicy::default().compile(),
-            Self::Stored(stored) => stored.compile(),
+        match self.builtin() {
+            Ok(builtin) => builtin.compile(),
+            Err(stored) => stored.compile(),
         }
     }
 
-    /// `open`, `locked`, or the stored policy's exact `local:id:` reference.
+    /// A built-in's name, or the stored policy's exact `local:id:` reference.
     pub fn reference(&self) -> String {
-        match self {
-            Self::Open => "open".to_owned(),
-            Self::Locked => "locked".to_owned(),
-            Self::Stored(stored) => format!("local:id:{}", stored.id),
+        match self.builtin() {
+            Ok(builtin) => builtin.name().to_owned(),
+            Err(stored) => format!("local:id:{}", stored.id),
         }
     }
 
-    /// `open`, `locked` or the stored policy's name.
+    /// A built-in's name, or the stored policy's name.
     pub fn display_name(&self) -> String {
-        match self {
-            Self::Open => "open".to_owned(),
-            Self::Locked => "locked".to_owned(),
-            Self::Stored(stored) => stored.name.to_string(),
+        match self.builtin() {
+            Ok(builtin) => builtin.name().to_owned(),
+            Err(stored) => stored.name.to_string(),
         }
     }
 
     /// The stored policy's current revision; built-ins have none.
     pub fn revision(&self) -> Option<u32> {
-        match self {
-            Self::Stored(stored) => Some(stored.revision),
-            Self::Open | Self::Locked => None,
+        self.builtin().err().map(|stored| stored.revision)
+    }
+
+    /// The selection table's `(policy_id, builtin)`.
+    fn row(&self) -> (Option<String>, Option<&'static str>) {
+        match self.builtin() {
+            Ok(builtin) => (None, Some(builtin.name())),
+            Err(stored) => (Some(stored.id.to_string()), None),
         }
     }
 }
@@ -323,6 +349,8 @@ impl NetworkPolicyStore {
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         } else if user_version == 1 {
             upgrade_from_version_one(&transaction)?;
+        } else if user_version == 2 {
+            upgrade_from_version_two(&transaction)?;
         }
         transaction.commit()?;
         validate_schema(&connection)?;
@@ -484,16 +512,13 @@ impl NetworkPolicyStore {
         let id = environment_id.to_string();
         let selected = match selection {
             None => SelectedPolicy::Open,
+            Some(PolicySelection::Web) => SelectedPolicy::Web,
             Some(PolicySelection::Locked) => SelectedPolicy::Locked,
             Some(PolicySelection::Stored(selector)) => {
                 SelectedPolicy::Stored(load_current(&transaction, selector)?)
             }
         };
-        let (policy_id, builtin) = match &selected {
-            SelectedPolicy::Open => (None, Some("open")),
-            SelectedPolicy::Locked => (None, Some("locked")),
-            SelectedPolicy::Stored(stored) => (Some(stored.id.to_string()), None),
-        };
+        let (policy_id, builtin) = selected.row();
         transaction.execute(
             "INSERT INTO environment_policies(environment_id, policy_id, builtin)
              VALUES (?1, ?2, ?3)
@@ -539,6 +564,9 @@ impl NetworkPolicyStore {
                 ),
             )?),
             (None, Some("locked")) => SelectedPolicy::Locked,
+            (None, Some("web")) => SelectedPolicy::Web,
+            // Stored by name, so a selection of `open` made before #3997
+            // enforces today's `open`.
             (None, Some("open")) => SelectedPolicy::Open,
             _ => return Err(NetworkPolicyStoreError::InvalidDatabase),
         };
@@ -559,11 +587,7 @@ impl NetworkPolicyStore {
         selected: &SelectedPolicy,
     ) -> Result<(), NetworkPolicyStoreError> {
         let connection = self.connection.lock().expect("policy store lock");
-        let (policy_id, builtin) = match selected {
-            SelectedPolicy::Open => (None, Some("open")),
-            SelectedPolicy::Locked => (None, Some("locked")),
-            SelectedPolicy::Stored(stored) => (Some(stored.id.to_string()), None),
-        };
+        let (policy_id, builtin) = selected.row();
         // An environment that never selected anything still records what its
         // boot enforces, so a later selection can show it is not yet applied.
         connection.execute(
@@ -634,6 +658,25 @@ fn upgrade_from_version_one(connection: &Connection) -> Result<(), NetworkPolicy
     for (_, statement) in &SCHEMA[SCHEMA_V1_STATEMENTS..] {
         connection.execute_batch(&format!("{statement};"))?;
     }
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Let a version 2 store's selections name `web`, inside the transaction that
+/// decided it holds version 2, after its exact schema is checked. SQLite
+/// cannot change a CHECK in place, so the table is copied into the new one;
+/// every selection and what its boot enforces is kept.
+fn upgrade_from_version_two(connection: &Connection) -> Result<(), NetworkPolicyStoreError> {
+    let mut version_two = SCHEMA;
+    version_two[SCHEMA_V1_STATEMENTS].1 = SCHEMA_V2_SELECTIONS;
+    validate_schema_statements(connection, 2, &version_two)?;
+    connection.execute_batch(&format!(
+        "ALTER TABLE environment_policies RENAME TO environment_policies_v2;
+         {};
+         INSERT INTO environment_policies SELECT * FROM environment_policies_v2;
+         DROP TABLE environment_policies_v2;",
+        SCHEMA[SCHEMA_V1_STATEMENTS].1
+    ))?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -729,7 +772,7 @@ fn find_policy(
     row.map(|(id, name, current)| {
         Ok((
             PolicyId::parse(&id).map_err(|_| NetworkPolicyStoreError::InvalidDatabase)?,
-            PolicyName::parse(&name).map_err(|_| NetworkPolicyStoreError::InvalidDatabase)?,
+            PolicyName::from_stored(&name).map_err(|_| NetworkPolicyStoreError::InvalidDatabase)?,
             current,
         ))
     })
@@ -1284,6 +1327,203 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// A version 2 store, with a policy named `web` from before the name was
+    /// a built-in's, a VM that selected it and one that selected `open`.
+    fn version_two_store() -> (Connection, PolicyId, Uuid, Uuid) {
+        let connection = Connection::open_in_memory().unwrap();
+        let (id, stored, open) = write_version_two(&connection);
+        (connection, id, stored, open)
+    }
+
+    /// The rules the version 2 store's policy named `web` holds.
+    fn user_web_rules() -> TypedPolicy {
+        TypedPolicy::default()
+            .with_rules(vec![rule("github.com", &[443])])
+            .unwrap()
+    }
+
+    /// [`version_two_store`] written into `connection`.
+    fn write_version_two(connection: &Connection) -> (PolicyId, Uuid, Uuid) {
+        let mut version_two = SCHEMA;
+        version_two[SCHEMA_V1_STATEMENTS].1 = SCHEMA_V2_SELECTIONS;
+        for (_, statement) in &version_two {
+            connection.execute_batch(&format!("{statement};")).unwrap();
+        }
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 2_i64)
+            .unwrap();
+        let id = PolicyId::parse(&Uuid::new_v4().to_string()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO policies(id, name, current_revision, created_unix_ms) VALUES (?1, 'web', 1, 0)",
+                [id.as_str()],
+            )
+            .unwrap();
+        insert_revision(connection, &id, 1, &user_web_rules(), 0).unwrap();
+        let (stored, open) = (Uuid::new_v4(), Uuid::new_v4());
+        connection
+            .execute(
+                "INSERT INTO environment_policies(environment_id, policy_id) VALUES (?1, ?2)",
+                params![stored.to_string(), id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO environment_policies(environment_id, builtin, enforced_digest)
+                 VALUES (?1, 'open', ?2)",
+                params![
+                    open.to_string(),
+                    BuiltinPolicy::Web.compile().digest().as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        (id, stored, open)
+    }
+
+    /// #3997, cw-security's (3): a VM that selected the user's own policy
+    /// named `web` before the name became a built-in's keeps enforcing that
+    /// policy, never the built-in. The selection is stored by the policy's
+    /// id. The supervisor opens its store file as it starts, which upgrades
+    /// it; the VM boots and records what it enforces; the supervisor starts
+    /// again and reads the same selection, document and digest.
+    #[test]
+    fn a_vm_that_selected_a_users_web_keeps_it_after_the_upgrade_and_a_restart() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join(DATABASE_FILE);
+        let file = Connection::open(&path).unwrap();
+        let (id, vm, _) = write_version_two(&file);
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Before the supervisor upgrades it, `cw --local policy ls` cannot
+        // read it alone and asks the supervisor, which upgrades it.
+        assert!(
+            crate::supervisor::network_policies::read_network_policies(directory.path()).is_err()
+        );
+        let root = PrivateRoot::open(directory.path()).unwrap();
+        let expected = user_web_rules().compile();
+        assert_ne!(
+            expected.digest().to_hex(),
+            BuiltinPolicy::Web.digest_hex(),
+            "the user's rules are not the built-in's"
+        );
+
+        for (start, running) in [("upgrade", false), ("restart", true)] {
+            let store = NetworkPolicyStore::open(&root).unwrap();
+            let selection = store.environment_policy(vm).unwrap();
+            let SelectedPolicy::Stored(policy) = &selection.selected else {
+                panic!("{start}: {:?} is not the stored policy", selection.selected);
+            };
+            assert_eq!(
+                (policy.id.as_str(), policy.name.as_str()),
+                (id.as_str(), "web"),
+                "{start}"
+            );
+            // What the VM's boot sends its broker (boot_egress.rs).
+            assert_eq!(
+                selection.selected.compile().canonical_json().unwrap(),
+                expected.canonical_json().unwrap(),
+                "{start}"
+            );
+            let status =
+                crate::supervisor::network_policies::status_proto(&store, vm, running).unwrap();
+            assert_eq!(
+                (status.reference, status.name, status.digest),
+                (
+                    format!("local:id:{id}"),
+                    "web".to_owned(),
+                    expected.digest().to_hex()
+                ),
+                "{start}"
+            );
+            if running {
+                assert_eq!(status.enforced_digest, expected.digest().to_hex());
+                assert!(!status.restart_required);
+            } else {
+                store.record_enforced(vm, &selection.selected).unwrap();
+            }
+        }
+        // What `cw --local policy ls` lists, by the exact id its new-name
+        // hint gives (cw's policies_text marks the name).
+        let listed = crate::supervisor::network_policies::read_network_policies(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|policy| (policy.id.as_str(), policy.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(id.as_str(), "web")]
+        );
+    }
+
+    /// #3997: a version 2 store upgrades in place. A VM that selected `open`
+    /// enforces today's `open`, every TCP port, and its running boot is
+    /// seen enforcing the old document; a local policy named `web` keeps its
+    /// selection; and a VM may now select the built-in `web`.
+    #[test]
+    fn a_version_two_store_upgrades_and_an_old_open_selection_widens() {
+        let (connection, id, stored, open) = version_two_store();
+        let store = NetworkPolicyStore::from_connection(connection).unwrap();
+        let version: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let old_open = store.environment_policy(open).unwrap();
+        assert_eq!(old_open.selected, SelectedPolicy::Open);
+        assert_eq!(
+            old_open.selected.compile().digest().to_hex(),
+            BuiltinPolicy::Open.digest_hex()
+        );
+        assert!(
+            old_open.enforcement_is_stale(),
+            "its boot still enforces the three ports"
+        );
+
+        let kept = store.environment_policy(stored).unwrap().selected;
+        assert_eq!(kept.display_name(), "web");
+        assert_eq!(kept.reference(), format!("local:id:{id}"));
+        let listed = store.list().unwrap();
+        assert_eq!(
+            (listed.len(), listed[0].name.as_str()),
+            (1, "web"),
+            "a policy named web is left as it is"
+        );
+
+        let selected = store.select(open, Some(&PolicySelection::Web)).unwrap();
+        assert_eq!(
+            (selected.reference(), selected.revision()),
+            ("web".to_owned(), None)
+        );
+        let web = store.environment_policy(open).unwrap();
+        assert_eq!(web.selected, SelectedPolicy::Web);
+        assert_eq!(
+            web.selected.compile().digest().to_hex(),
+            BuiltinPolicy::Web.digest_hex()
+        );
+        assert!(!web.enforcement_is_stale());
+    }
+
+    #[test]
+    fn a_version_two_store_that_is_not_exactly_version_two_is_refused() {
+        let (connection, ..) = version_two_store();
+        connection
+            .execute_batch("CREATE TABLE extra (id INTEGER) STRICT;")
+            .unwrap();
+        assert!(matches!(
+            NetworkPolicyStore::from_connection(connection),
+            Err(NetworkPolicyStoreError::InvalidDatabase)
+        ));
     }
 
     #[test]

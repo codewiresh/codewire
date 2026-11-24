@@ -286,7 +286,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         vm_id,
         generation,
         &broker_key,
-        &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+        &codewire_egress_policy::CompiledPolicy::open(),
     )
     .unwrap();
     broker_parent.write_all(broker_bootstrap.as_ref()).unwrap();
@@ -316,7 +316,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         &broker_key,
         &mesh_ingress_key,
         &[mesh_ingress_port],
-        codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
+        codewire_egress_policy::CompiledPolicy::open().digest(),
     )
     .unwrap();
     let worker_source = worker_child_socket.as_raw_fd();

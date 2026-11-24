@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::*;
 use crate::commands::progress::terminal_text;
 use info_text::format_native_environment;
+use policy_view::{network_policy_text, print_network_policy_update};
 
 mod create_hint;
 pub(crate) mod dev_store;
@@ -35,6 +36,7 @@ mod host_support;
 mod info_text;
 mod lifecycle;
 mod local_https;
+mod policy_view;
 mod ports;
 mod profile;
 mod sources;
@@ -1426,7 +1428,7 @@ async fn edit_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyh
             "Explicit local:NAME or platform:NAME reference",
         ),
         Choice::new("Application secrets", "Explicit project reference"),
-        Choice::new("Network policy", "open, locked, or local:NAME"),
+        Choice::new("Network policy", "open, web, locked, or local:NAME"),
         Choice::new("Docker", ""),
         Choice::new("Back to review", ""),
     ];
@@ -2358,12 +2360,9 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) network: Option<String>,
     /// The `Network policy:` line (#2537); unrelated to the Mesh network.
     pub(crate) network_policy: Option<String>,
-    /// Whether that policy is one that doesn't allow the model providers by
-    /// rule, so a selected model credential is the one thing still reaching
-    /// out (#5215). Whether the profile holds one isn't known here, so the
-    /// note shows for every policy but `open`.
+    /// What `cw info` says under that line (#5215, #3997).
     #[serde(skip)]
-    pub(crate) policy_leaves_providers_to_credentials: bool,
+    pub(crate) policy_note: policy_view::PolicyNote,
     #[serde(flatten)]
     pub(crate) error: error_view::ErrorView,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -2424,78 +2423,9 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
             generation: environment.generation,
             source_selection: sources::source_view(environment)?,
             network_policy: environment.network_policy.as_ref().map(network_policy_text),
-            policy_leaves_providers_to_credentials: leaves_providers_to_credentials(
-                environment.network_policy.as_ref(),
-            ),
+            policy_note: policy_view::PolicyNote::of(environment.network_policy.as_ref()),
         })
     }
-}
-
-/// Whether `policy` doesn't allow the model providers by rule: every policy
-/// but the built-in `open`, which allows every public destination on 443.
-fn leaves_providers_to_credentials(policy: Option<&v1::EnvironmentNetworkPolicy>) -> bool {
-    policy.is_some_and(|policy| policy.name != "open")
-}
-
-/// `work · rev 3`, then what a running VM enforces when it could not take
-/// the selection (#2537): `work · rev 4 · enforces rev 3 until restarted`.
-pub(crate) fn network_policy_text(policy: &v1::EnvironmentNetworkPolicy) -> String {
-    let selected = if policy.revision > 0 {
-        format!("{} · rev {}", policy.name, policy.revision)
-    } else {
-        policy.name.clone()
-    };
-    if !policy.restart_required {
-        return selected;
-    }
-    let enforced = if policy.enforced_revision > 0 {
-        format!("rev {}", policy.enforced_revision)
-    } else {
-        "an earlier selection".to_owned()
-    };
-    format!("{selected} · enforces {enforced} until restarted")
-}
-
-/// What `cw update ENV --policy` changed.
-pub(crate) fn print_network_policy_update(
-    environment: &v1::Environment,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    let policy = environment
-        .network_policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("the supervisor did not report the network policy"))?;
-    match output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "environment": environment.name,
-                "network_policy": {
-                    "reference": policy.reference,
-                    "name": policy.name,
-                    "revision": policy.revision,
-                    "digest": policy.digest,
-                    "enforced_revision": policy.enforced_revision,
-                    "enforced_digest": policy.enforced_digest,
-                    "restart_required": policy.restart_required,
-                },
-            }))?
-        ),
-        OutputFormat::Text => {
-            println!(
-                "Network policy for {}: {}",
-                environment.name,
-                network_policy_text(policy)
-            );
-            if policy.restart_required {
-                println!(
-                    "Its running VM could not take it, so it applies at the next start: `cw restart {}`",
-                    environment.name
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn native_state_label(state: i32) -> &'static str {
@@ -6557,18 +6487,45 @@ working_directory: /workspace/github
         assert!(json.get("docker_disk").is_none());
     }
 
-    /// Under every policy but `open`, `cw info` says what still reaches out:
-    /// the selected model credentials' providers (#5215).
+    /// Under every policy but `open` and `web`, `cw info` says what still
+    /// reaches out: the selected model credentials' providers (#5215). Under
+    /// `open` it says `open` widened and how to keep the three ports (#3997).
+    /// Neither is in JSON.
     #[test]
-    fn every_policy_but_open_says_model_credentials_still_reach_their_providers() {
-        let policy = |name: &str| v1::EnvironmentNetworkPolicy {
+    fn the_line_under_a_local_network_policy_says_what_reaches_out() {
+        use policy_view::PolicyNote;
+        let policy = |reference: &str, name: &str| v1::EnvironmentNetworkPolicy {
+            reference: reference.to_owned(),
             name: name.to_owned(),
             ..Default::default()
         };
-        assert!(leaves_providers_to_credentials(Some(&policy("locked"))));
-        assert!(leaves_providers_to_credentials(Some(&policy("work"))));
-        assert!(!leaves_providers_to_credentials(Some(&policy("open"))));
-        assert!(!leaves_providers_to_credentials(None));
+        let note = |reference, name| PolicyNote::of(Some(&policy(reference, name)));
+        assert_eq!(note("locked", "locked"), PolicyNote::ProvidersStillReached);
+        assert_eq!(
+            note("local:id:0b8f6a52-0f6c-4a59-9f43-1b1f0c3a9e01", "work"),
+            PolicyNote::ProvidersStillReached
+        );
+        assert_eq!(note("web", "web"), PolicyNote::None);
+        // A stored policy named `web` from before #3997 is not the built-in.
+        assert_eq!(
+            note("local:id:5d1c3a3e-7f0e-4c43-9a55-3f3d2a1b8c70", "web"),
+            PolicyNote::ProvidersStillReached
+        );
+        assert_eq!(PolicyNote::of(None), PolicyNote::None);
+
+        let environment = v1::Environment {
+            network_policy: Some(policy("open", "open")),
+            ..Default::default()
+        };
+        let view = NativeEnvironmentView::try_from(&environment).unwrap();
+        let text = format_native_environment(&view, None, &[], PLAIN_STYLE);
+        assert!(text.contains(
+            "Network policy: open\n                open now allows every public TCP port; select web to keep 22, 80 and 443.\n"
+        ));
+        assert!(!text.contains("model credentials"));
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("allows every public TCP port"), "{json}");
+        assert!(json.contains(r#""network_policy":"open""#), "{json}");
     }
 
     #[test]
@@ -6595,7 +6552,7 @@ working_directory: /workspace/github
             }],
             network: Some("mesh-dev".to_owned()),
             network_policy: Some("work · rev 3".to_owned()),
-            policy_leaves_providers_to_credentials: true,
+            policy_note: policy_view::PolicyNote::ProvidersStillReached,
             error: Default::default(),
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),

@@ -1,6 +1,6 @@
 ---
 title: Egress policies
-description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
+description: Decide what an environment may reach on the Internet; the built-in open, web and locked policies, your own policies, and what egress does not protect.
 updated: 2026-11-23
 weight: 3
 ---
@@ -9,15 +9,17 @@ What an environment may reach on the Internet is its egress.
 
 **A local VM** has no network device. Its TCP and DNS go to a confined
 network worker on your machine, and an egress broker dials out on the VM's
-behalf under the VM's network policy. Two policies are built in:
+behalf under the VM's network policy. Three policies are built in:
 
 ```sh
 cw --local policy list
 ```
 
 ```text
-open    built-in · every public destination on TCP 22, 80 and 443
+open    built-in, the default · every public destination on any TCP port
+web     built-in · every public destination on TCP 22, 80 and 443
 locked  built-in · nothing, except the model providers of credentials you selected
+UDP other than DNS is blocked under every policy.
 ```
 
 `open` is the default. Whatever the policy, loopback, private, link-local and
@@ -25,12 +27,12 @@ metadata addresses, your machine's own addresses and the public address it is
 seen from are always refused. `cw policy check` explains a decision:
 
 ```sh
-cw --local policy check open example.com:8080
+cw --local policy check web example.com:8080
 cw --local policy check open 192.168.1.10:443
 ```
 
 ```text
-Refused: example.com:8080 by open (port not allowed)
+Refused: example.com:8080 by web (port not allowed)
 Refused: 192.168.1.10:443 by open (protected address)
 ```
 
@@ -109,12 +111,17 @@ cw --cloud create --policy web-only
 cw --cloud policy ls
 ```
 
+A deployment enforces them only where its hosted egress is on. Where it is
+off, a hosted sandbox can still reach anything public whatever it selects,
+and each command says so. Where it is on, `cw --cloud policy ls` says UDP
+other than DNS is blocked.
+
 Run `cw info NAME` to see the selected policy and its enforcement status
 for that sandbox. An enforced policy applies its destination rules. If the
-status is `Not enforced`, selecting the policy alone does not block traffic
-to unlisted public destinations. The platform still excludes private,
-loopback, link-local and carrier-grade NAT ranges. A sandbox that selects
-no policy has `hosted-default`.
+status says it can't be confirmed right now, there is no fresh report from
+the sandbox yet. The platform still excludes private, loopback, link-local
+and carrier-grade NAT ranges, whatever the policy. A sandbox that selects
+no policy shows `open (default)`.
 
 `cw --local policy` and `cw --cloud policy` are two stores:
 the same name in both is two policies, and `cw policy` with neither uses this

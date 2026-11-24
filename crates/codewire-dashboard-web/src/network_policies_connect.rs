@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use axum::http::HeaderValue;
 use codewire_egress_policy::check::CheckDestination;
 use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy};
-use codewire_egress_policy::{BuiltinPolicy, DEFAULT_ALLOW_PORTS, HOSTED_DEFAULT_NAME};
+use codewire_egress_policy::{BuiltinPolicy, DEFAULT_ALLOW_PORTS};
 use codewire_proto::codewire::v1::__buffa::oneof::{network_policy_selector, network_policy_usage};
 use codewire_proto::codewire::v1::{
     CreateNetworkPolicyRequest, DeleteNetworkPolicyRequest, GetNetworkPolicyRequest,
@@ -80,7 +80,8 @@ pub(crate) struct PolicyList {
     pub(crate) policies: Vec<PolicyRow>,
     pub(crate) open: Usage,
     pub(crate) locked: Usage,
-    /// Sandboxes that select nothing, on `hosted-default`.
+    /// Sandboxes that select nothing. The service counts them under `open`
+    /// since #3997, so this stays empty until the page is rewired.
     pub(crate) unselected: Usage,
 }
 
@@ -188,14 +189,13 @@ pub(crate) async fn list(
             Some(network_policy_usage::Selection::PolicyId(id)) => {
                 stored.insert(id.clone(), usage_of(usage));
             }
-            Some(network_policy_usage::Selection::Builtin(name)) if name == HOSTED_DEFAULT_NAME => {
-                list.unselected = usage_of(usage);
-            }
             Some(network_policy_usage::Selection::Builtin(name)) => {
                 match BuiltinPolicy::from_name(name) {
                     Some(BuiltinPolicy::Open) => list.open = usage_of(usage),
                     Some(BuiltinPolicy::Locked) => list.locked = usage_of(usage),
-                    None => {}
+                    // A hosted Sandbox may select `web` (0053), but the page
+                    // has no row for it until its text lands (#6226).
+                    Some(BuiltinPolicy::Web) | None => {}
                 }
             }
             None => {}

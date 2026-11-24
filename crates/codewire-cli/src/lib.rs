@@ -552,7 +552,7 @@ enum Command {
     Identity(IdentityArgs),
     #[command(
         about = "Manage network policies: which destinations an environment may reach",
-        long_about = "Manage network policies: which destinations an environment may reach.\n\nA network policy is named and reusable, and every edit makes a new revision. `open` (every public destination on TCP 22, 80 and 443) and `locked` (nothing) are built in. This is not `cw network`, which manages Mesh networks."
+        long_about = "Manage network policies: which destinations an environment may reach.\n\nA network policy is named and reusable, and every edit makes a new revision. `open` (every public destination on any TCP port, the default), `web` (every public destination on TCP 22, 80 and 443) and `locked` (nothing) are built in. This is not `cw network`, which manages Mesh networks."
     )]
     Policy(PolicyArgs),
     #[command(

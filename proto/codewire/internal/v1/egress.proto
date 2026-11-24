@@ -157,8 +157,8 @@ message InterceptionBinding {
 
 message EgressPolicyRevision {
   // The reference as the environment selected it, for example
-  // "platform:web", "locked" or "hosted-default", as the public
-  // EnvironmentNetworkPolicy names it.
+  // "platform:team", "web" or "locked", or "open" for an environment that
+  // selects nothing.
   string reference = 1;
   // 0 for a built-in policy.
   uint32 revision = 2;

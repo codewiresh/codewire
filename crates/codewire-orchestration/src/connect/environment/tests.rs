@@ -609,11 +609,11 @@ fn an_unplanned_restart_carries_when_and_why() {
 fn the_network_policy_shows_only_while_platform_policies_are_on() {
     let mut environment = test_environment("running", true);
     environment.network_policy = Some(crate::api::network_policies::EnvironmentPolicyView {
-        reference: "hosted-default".into(),
-        name: "hosted-default".into(),
+        reference: String::new(),
+        name: "open".into(),
         revision: 0,
-        digest: codewire_egress_policy::HOSTED_DEFAULT_DIGEST.into(),
-        enforcement: crate::api::network_policies::EnforcementView::NotEnforced,
+        digest: codewire_egress_policy::OPEN_POLICY_DIGEST.into(),
+        enforcement: crate::api::network_policies::EnforcementView::Unconfirmed,
     });
     let off = proto_environment(
         environment.clone(),
@@ -622,18 +622,34 @@ fn the_network_policy_shows_only_while_platform_policies_are_on() {
     )
     .unwrap();
     assert!(off.network_policy.as_option().is_none());
-    let on = proto_environment(
-        environment,
-        NetworkPolicyFlags { enabled: true },
-        Default::default(),
-    )
-    .unwrap();
-    let policy = on.network_policy.as_option().unwrap();
-    assert_eq!(policy.reference, "hosted-default");
-    assert_eq!(
-        policy.enforcement.as_known(),
-        Some(proto::NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED)
-    );
+    // With hosted egress off it is not enforced; with it on and no fresh
+    // report, unconfirmed (#3997).
+    for (hosted_egress, expected) in [
+        (
+            false,
+            proto::NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
+        ),
+        (
+            true,
+            proto::NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED,
+        ),
+    ] {
+        let on = proto_environment(
+            environment.clone(),
+            NetworkPolicyFlags {
+                enabled: true,
+                hosted_egress,
+            },
+            Default::default(),
+        )
+        .unwrap();
+        let policy = on.network_policy.as_option().unwrap();
+        assert_eq!(
+            (policy.reference.as_str(), policy.name.as_str()),
+            ("", "open")
+        );
+        assert_eq!(policy.enforcement.as_known(), Some(expected));
+    }
 }
 
 fn test_environment(state: &str, setup_complete: bool) -> Environment {

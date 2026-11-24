@@ -327,21 +327,19 @@ async fn db_status_reads_what_the_current_pod_enforces() -> anyhow::Result<()> {
     let result = async {
         environment(&db).await?;
         anyhow::ensure!(
-            status(&db).await? == EnforcementView::NotEnforced,
+            status(&db).await? == EnforcementView::Unconfirmed,
             "no Pod yet"
         );
         bind(&db, POD).await?;
         anyhow::ensure!(
-            status(&db).await? == EnforcementView::NotEnforced,
+            status(&db).await? == EnforcementView::Unconfirmed,
             "bound, no report"
         );
 
-        // hosted-default is selected: enforcing its digest is ENFORCED.
-        let selected = *codewire_egress_policy::PolicyDocument::parse_yaml(
-            codewire_egress_policy::HOSTED_DEFAULT_YAML,
-        )?
-        .digest()
-        .as_bytes();
+        // Nothing is selected, so open is: enforcing its digest is ENFORCED.
+        let selected = *codewire_egress_policy::CompiledPolicy::open()
+            .digest()
+            .as_bytes();
         record_enforcement(
             &db.pool,
             POD,
@@ -408,12 +406,12 @@ async fn db_status_reads_what_the_current_pod_enforces() -> anyhow::Result<()> {
         )?)
         .execute(&db.pool)
         .await?;
-        anyhow::ensure!(status(&db).await? == EnforcementView::NotEnforced, "stale");
+        anyhow::ensure!(status(&db).await? == EnforcementView::Unconfirmed, "stale");
 
         // A report for a Pod the environment has moved away from is not its status.
         bind(&db, OTHER_POD).await?;
         anyhow::ensure!(
-            status(&db).await? == EnforcementView::NotEnforced,
+            status(&db).await? == EnforcementView::Unconfirmed,
             "the new Pod"
         );
         anyhow::Ok(())
@@ -479,11 +477,9 @@ async fn db_a_lockdown_refusal_is_the_status_until_the_lockdown_passes_or_the_po
         );
 
         // Nothing cw-egress reports, and no age, replaces it.
-        let selected = *codewire_egress_policy::PolicyDocument::parse_yaml(
-            codewire_egress_policy::HOSTED_DEFAULT_YAML,
-        )?
-        .digest()
-        .as_bytes();
+        let selected = *codewire_egress_policy::CompiledPolicy::open()
+            .digest()
+            .as_bytes();
         for report in [
             Enforcement::Enforced {
                 revision: 0,
@@ -512,7 +508,7 @@ async fn db_a_lockdown_refusal_is_the_status_until_the_lockdown_passes_or_the_po
         clear_lockdown_refusal(&db.pool, POD).await?;
         anyhow::ensure!(stored_refusal(&db, POD).await?.is_none(), "cleared");
         anyhow::ensure!(
-            status(&db).await? == EnforcementView::NotEnforced,
+            status(&db).await? == EnforcementView::Unconfirmed,
             "stale report"
         );
 

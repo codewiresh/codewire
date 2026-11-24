@@ -1,10 +1,10 @@
 //! `cw policy`: network policies, the destinations an environment may reach
 //! (#2537). Not Mesh networks, which `cw network` manages.
 //!
-//! A policy is named and every edit makes a new revision. `open` and `locked`
-//! are built-ins. Policies live in this host's store (`--local`) or in the
-//! organization's platform store (`--cloud`, #4000), which nothing enforces
-//! until cw-egress does.
+//! A policy is named and every edit makes a new revision. `open`, `web` and
+//! `locked` are built-ins. Policies live in this host's store (`--local`) or in the
+//! organization's platform store (`--cloud`, #4000), which a deployment
+//! enforces where its hosted egress is on.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -14,7 +14,7 @@ use codewire_egress_policy::check::{CheckDestination, PolicyCheck};
 use codewire_egress_policy::lease::RefusalReason;
 use codewire_egress_policy::reference::{PolicyReference, PolicyStore};
 use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy};
-use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
+use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy, is_reserved_policy_name};
 
 use super::*;
 
@@ -41,7 +41,7 @@ pub(crate) fn policies_disabled(error: &codewire_client::ClientError) -> Option<
 const NO_HOSTED_REFUSAL_LOG: &str =
     "hosted Sandboxes have no refusal log yet; `cw --local policy log ENV` shows a local VM's";
 
-/// The ports a target gets when it names none: those `open` allows, so an
+/// The ports a target gets when it names none: those `web` allows, so an
 /// allowed Git host also works over SSH.
 const DEFAULT_PORTS: [u16; 3] = [22, 80, 443];
 const DEFAULT_CHECK_PORT: u16 = 443;
@@ -57,7 +57,7 @@ impl std::str::FromStr for PolicyName {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         if name.is_empty() {
-            return Err("name a network policy: open, locked, or a policy from `cw policy`");
+            return Err("name a network policy: open, web, locked, or a policy from `cw policy`");
         }
         Ok(Self(name.to_owned()))
     }
@@ -405,7 +405,8 @@ async fn list_local_policies(output: OutputFormat) -> anyhow::Result<()> {
                 .await
                 .map_err(|status| anyhow::anyhow!("list network policies: {}", status.message()))?,
         };
-    print_policies(&policies, output)
+    // A local VM's broker always enforces its policy.
+    print_policies(&policies, output, true)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -443,16 +444,17 @@ fn stored_selector(
     })
 }
 
-/// `--from`: `locked` (no selector) or a stored policy. `open` allows every
-/// public destination and is outside the rule subset, so nothing starts from it.
+/// `--from`: `locked` (no selector) or a stored policy. `open` and `web`
+/// allow every public destination and are outside the rule subset, so nothing
+/// starts from them.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn base_selector(
     value: &str,
 ) -> anyhow::Result<Option<codewire_local_vmm::control::v1::NetworkPolicySelector>> {
     match BuiltinPolicy::from_name(value) {
         Some(BuiltinPolicy::Locked) => Ok(None),
-        Some(BuiltinPolicy::Open) => anyhow::bail!(
-            "a policy cannot start from `open`, which allows every public destination; start from `locked` and allow what you need"
+        Some(builtin @ (BuiltinPolicy::Open | BuiltinPolicy::Web)) => anyhow::bail!(
+            "a policy cannot start from `{builtin}`, which allows every public destination; start from `locked` and allow what you need"
         ),
         None => stored_selector(value).map(Some),
     }
@@ -546,6 +548,8 @@ fn rule_proto(rule: AllowRule) -> codewire_local_vmm::control::v1::NetworkPolicy
 /// platform.
 trait ShownPolicy {
     fn name(&self) -> &str;
+    /// Its exact reference, `local:id:UUID` or `platform:id:UUID`.
+    fn reference(&self) -> String;
     fn revision(&self) -> u32;
     fn digest(&self) -> &str;
     fn rules(&self) -> Vec<(&str, &[u32])>;
@@ -560,6 +564,10 @@ trait ShownPolicy {
 impl ShownPolicy for codewire_local_vmm::control::v1::NetworkPolicy {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn reference(&self) -> String {
+        format!("local:id:{}", self.id)
     }
 
     fn revision(&self) -> u32 {
@@ -581,7 +589,7 @@ impl ShownPolicy for codewire_local_vmm::control::v1::NetworkPolicy {
         serde_json::json!({
             "id": self.id,
             "name": self.name,
-            "reference": format!("local:id:{}", self.id),
+            "reference": self.reference(),
             "revision": self.revision,
             "current_revision": self.current_revision,
             "digest": self.digest,
@@ -686,10 +694,14 @@ fn applied_text(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> Vec<
 
 /// The built-ins, then each stored policy. `locked` names what it leaves
 /// open: a selected model credential still reaches its own provider (SPEC,
-/// the interception paragraph; #5215).
-fn policies_text(policies: &[impl ShownPolicy]) -> String {
+/// the interception paragraph; #5215). A stored policy named before its name
+/// became a built-in's is marked and asked for a new name. `udp_blocked`:
+/// a broker enforces the policies, which never allow UDP other than DNS
+/// (#3997).
+fn policies_text(policies: &[impl ShownPolicy], udp_blocked: bool) -> String {
     let mut text = String::from(
-        "open    built-in · every public destination on TCP 22, 80 and 443\n\
+        "open    built-in, the default · every public destination on any TCP port\n\
+         web     built-in · every public destination on TCP 22, 80 and 443\n\
          locked  built-in · nothing, except the model providers of credentials you selected\n",
     );
     for policy in policies {
@@ -699,6 +711,15 @@ fn policies_text(policies: &[impl ShownPolicy]) -> String {
             policy.revision(),
             rules_text(policy)
         ));
+        if is_reserved_policy_name(policy.name()) {
+            text.push_str(&format!(
+                "  Its name is now a built-in's, so give it a new one: `cw --local policy create NAME --from {}`.\n",
+                policy.reference()
+            ));
+        }
+    }
+    if udp_blocked {
+        text.push_str("UDP other than DNS is blocked under every policy.\n");
     }
     text
 }
@@ -711,7 +732,11 @@ fn print_deleted(policy: &impl ShownPolicy, output: OutputFormat) -> anyhow::Res
     Ok(())
 }
 
-fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow::Result<()> {
+fn print_policies(
+    policies: &[impl ShownPolicy],
+    output: OutputFormat,
+    udp_blocked: bool,
+) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!(
             "{}",
@@ -719,7 +744,7 @@ fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow
                 &policies.iter().map(ShownPolicy::json).collect::<Vec<_>>()
             )?
         ),
-        OutputFormat::Text => print!("{}", policies_text(policies)),
+        OutputFormat::Text => print!("{}", policies_text(policies, udp_blocked)),
     }
     Ok(())
 }
@@ -812,13 +837,39 @@ mod tests {
     /// credential's provider (#5215).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn the_list_says_what_locked_leaves_open() {
+    fn the_list_says_what_each_built_in_allows() {
         let none: &[codewire_local_vmm::control::v1::NetworkPolicy] = &[];
         assert_eq!(
-            policies_text(none),
-            "open    built-in · every public destination on TCP 22, 80 and 443\n\
+            policies_text(none, false),
+            "open    built-in, the default · every public destination on any TCP port\n\
+             web     built-in · every public destination on TCP 22, 80 and 443\n\
              locked  built-in · nothing, except the model providers of credentials you selected\n"
         );
+    }
+
+    /// Where a broker enforces, the list says UDP other than DNS is blocked;
+    /// a policy named `web` before it was a built-in is marked and asked for
+    /// a new name, by its exact reference (#3997).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_list_says_udp_is_blocked_and_marks_a_policy_with_a_built_ins_name() {
+        let policy = |name: &str| codewire_local_vmm::control::v1::NetworkPolicy {
+            id: "0b8f6a52-0f6c-4a59-9f43-1b1f0c3a9e01".into(),
+            name: name.into(),
+            revision: 2,
+            ..Default::default()
+        };
+        let text = policies_text(&[policy("web"), policy("team")], true);
+        assert!(
+            text.ends_with(
+                "web  rev 2 · nothing (like `locked`)\n\
+                 \x20 Its name is now a built-in's, so give it a new one: `cw --local policy create NAME --from local:id:0b8f6a52-0f6c-4a59-9f43-1b1f0c3a9e01`.\n\
+                 team  rev 2 · nothing (like `locked`)\n\
+                 UDP other than DNS is blocked under every policy.\n"
+            ),
+            "{text}"
+        );
+        assert!(!policies_text(&[policy("team")], false).contains("UDP"));
     }
 
     #[test]
@@ -932,13 +983,15 @@ mod tests {
     #[test]
     fn built_ins_are_never_edited_and_nothing_starts_from_open() {
         assert!(base_selector("locked").unwrap().is_none());
-        assert!(
-            base_selector("open")
-                .unwrap_err()
-                .to_string()
-                .contains("start from `locked`")
-        );
-        for name in ["open", "locked"] {
+        for name in ["open", "web"] {
+            assert!(
+                base_selector(name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("start from `locked`")
+            );
+        }
+        for name in ["open", "web", "locked"] {
             let error = stored_selector(name).unwrap_err().to_string();
             assert!(error.contains("built-in"), "{error}");
             // The hint must be one `create` accepts: never `--from open`.

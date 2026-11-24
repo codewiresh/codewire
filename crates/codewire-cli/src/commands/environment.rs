@@ -10,6 +10,7 @@ mod idle_stop;
 pub(crate) mod info;
 pub(crate) mod lifecycle;
 mod platform_create;
+mod policy_notice;
 pub(crate) mod progress;
 mod runtime;
 mod server_errors;
@@ -24,6 +25,9 @@ pub(crate) use idle_stop::format_env_idle_stop_text;
 pub(crate) use idle_stop::print_env_idle_stop_status;
 pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
 use platform_create::handle_platform_env_create;
+#[cfg(test)]
+pub(crate) use policy_notice::policy_selection_notice;
+pub(crate) use policy_notice::{open_widening_notice, report_policy_selection};
 pub(crate) use server_errors::map_env_delete_error;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
@@ -2015,62 +2019,8 @@ pub(crate) fn ambiguous_environment_placement_error(
     )
 }
 
-/// After `--policy` on a hosted create or update (#4000): what the selection
-/// means for the environment's outbound connections, or, when the reply
-/// doesn't carry the selection asked for, that the server didn't record it
-/// (a server older than #4211 ignores `--policy`). Without `--policy` there
-/// is nothing to say: the default selection is not news.
-pub(crate) fn report_policy_selection(
-    asked: &str,
-    environment: &str,
-    selected: Option<&crate::presentation::EnvironmentNetworkPolicy>,
-) {
-    if let Some(notice) = policy_selection_notice(asked, environment, selected) {
-        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
-            .stderr_style();
-        eprintln!(
-            "{} {notice}",
-            style.status(crate::output::Status::Attention)
-        );
-    }
-}
-
-/// The words `report_policy_selection` prints, without the status glyph.
-pub(crate) fn policy_selection_notice(
-    asked: &str,
-    environment: &str,
-    selected: Option<&crate::presentation::EnvironmentNetworkPolicy>,
-) -> Option<String> {
-    match selected {
-        Some(policy) if policy.selects(asked) => enforcement_notice(policy),
-        _ => Some(format!(
-            "The server didn't record network policy {asked} for {environment}: it may not support network policies, so the environment has its default."
-        )),
-    }
-}
-
-/// What a selection's enforcement means for the environment, in the user's
-/// terms; nothing once it is enforced.
-pub(crate) fn enforcement_notice(
-    policy: &crate::presentation::EnvironmentNetworkPolicy,
-) -> Option<String> {
-    let name = &policy.name;
-    match policy.enforcement.as_str() {
-        "enforced" => None,
-        "enforcing" => Some(format!(
-            "Network policy {name} is being applied: until it is, the environment's previous policy applies."
-        )),
-        "failed_closed" => Some(format!(
-            "Network policy {name} couldn't be confirmed as enforced: this environment's outbound connections are refused until it is."
-        )),
-        _ => Some(format!(
-            "Network policy {name} is not enforced yet: this environment's outbound connections are not restricted."
-        )),
-    }
-}
-
 /// `cw update ENV --policy POLICY` on hosted: the selection changes in
-/// place; nothing restarts (#4000). `hosted-default` clears a selection.
+/// place; nothing restarts (#4000).
 async fn update_platform_network_policy(
     globals: &Globals,
     environment_client: &EnvironmentClient,

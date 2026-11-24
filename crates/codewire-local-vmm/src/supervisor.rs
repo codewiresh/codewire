@@ -2931,11 +2931,10 @@ impl Supervisor {
             return Ok(());
         };
         if operation.kind == OperationKind::Create {
-            let (request, workspace_plan) = match create_request_from_operation(&operation) {
+            let (request, workspace_plan) = match self.replayed_create(&operation, recovering) {
                 Ok(prepared) => prepared,
-                Err(_) => {
-                    self.core()
-                        .interrupt_operation(&operation, "invalid_replay_payload")?;
+                Err(error_code) => {
+                    self.core().interrupt_operation(&operation, error_code)?;
                     return Ok(());
                 }
             };

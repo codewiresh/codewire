@@ -35,8 +35,12 @@ class NetworkPolicy(TypedDict):
     created_by: str
 
 
-# "unknown" is a state this SDK does not know yet; it never fails a read.
-EnforcementState = Literal["not_enforced", "enforced", "enforcing", "failed_closed", "unknown"]
+# "not_enforced": the deployment's hosted egress is off. "unconfirmed": it is
+# on, but no fresh report confirms the policy. "unknown" is a state this SDK
+# does not know yet; it never fails a read.
+EnforcementState = Literal[
+    "not_enforced", "unconfirmed", "enforced", "enforcing", "failed_closed", "unknown"
+]
 
 
 class EnvironmentNetworkPolicy(TypedDict):
@@ -61,6 +65,7 @@ _ENFORCEMENT: dict[int, EnforcementState] = {
     pb.NETWORK_POLICY_ENFORCEMENT_ENFORCED: "enforced",
     pb.NETWORK_POLICY_ENFORCEMENT_ENFORCING: "enforcing",
     pb.NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED: "failed_closed",
+    pb.NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED: "unconfirmed",
 }
 
 

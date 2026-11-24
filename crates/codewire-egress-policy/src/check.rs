@@ -419,8 +419,12 @@ mod tests {
         assert_eq!(check(&open, "example.com", 443), None);
         assert_eq!(check(&open, "example.com", 22), None);
         assert_eq!(check(&open, "8.8.8.8", 443), None);
+        assert_eq!(check(&open, "example.com", 25), None);
+        let web = BuiltinPolicy::Web.compile();
+        assert_eq!(check(&web, "example.com", 443), None);
+        assert_eq!(check(&web, "example.com", 22), None);
         assert_eq!(
-            check(&open, "example.com", 25),
+            check(&web, "example.com", 25),
             Some(RefusalReason::PortNotAllowed)
         );
         let locked = BuiltinPolicy::Locked.compile();

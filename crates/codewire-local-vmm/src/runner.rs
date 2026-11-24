@@ -5098,7 +5098,7 @@ mod tests {
             cw_runtime_moved_from_generation: None,
             checkpoint: None,
             image_disk: None,
-            network_policy: CompiledPolicy::developer_baseline(),
+            network_policy: CompiledPolicy::open(),
             intercepts: InterceptSet::default(),
             credential_placeholders: Default::default(),
             vm_id: Uuid::new_v4(),
@@ -6146,13 +6146,8 @@ mod tests {
         let key = fresh_egress_broker_key();
         assert!(key.iter().any(|byte| *byte != 0));
         assert!(
-            encode_egress_broker_bootstrap(
-                Uuid::new_v4(),
-                1,
-                &key,
-                &CompiledPolicy::developer_baseline()
-            )
-            .is_ok()
+            encode_egress_broker_bootstrap(Uuid::new_v4(), 1, &key, &CompiledPolicy::open())
+                .is_ok()
         );
     }
 

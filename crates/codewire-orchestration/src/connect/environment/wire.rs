@@ -12,7 +12,12 @@ pub(super) fn proto_environment(
     let network_policy = environment
         .network_policy
         .filter(|_| network_policies.enabled)
-        .map(super::super::network_policies::proto_environment_policy);
+        .map(|policy| {
+            super::super::network_policies::proto_environment_policy(
+                policy,
+                network_policies.hosted_egress,
+            )
+        });
     Ok(proto::Environment {
         id: environment.id,
         org_id: environment.org_id,

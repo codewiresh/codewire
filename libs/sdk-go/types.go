@@ -226,8 +226,8 @@ type CreateEnvironmentBody struct {
 	// SourceSnapshotId starts from this hosted disk snapshot, which the caller
 	// created in the organization. Not with a repository or the confidential tier.
 	SourceSnapshotId *string `json:"source_snapshot_id,omitempty"`
-	// NetworkPolicy selects an organization network policy; nil is
-	// hosted-default.
+	// NetworkPolicy selects an organization network policy; nil is open,
+	// the default.
 	NetworkPolicy *string `json:"network_policy,omitempty"`
 }
 

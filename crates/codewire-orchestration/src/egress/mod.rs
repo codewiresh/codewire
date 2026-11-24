@@ -29,13 +29,17 @@ pub mod service;
 pub mod settings;
 pub mod startup;
 
-/// What hosted interception takes from the rest of orchestration (#4001).
+/// What the egress service takes from the rest of orchestration: hosted
+/// interception's inputs (#4001) and the organization policy store's switch.
 #[derive(Default)]
-pub struct InterceptionInputs {
+pub struct ServiceInputs {
     /// The credential relay's admitted epochs, which front-door sessions join.
     pub front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
     /// The credential service's private origin, which makes each Pod's CA.
     pub credential_broker: Option<String>,
+    /// The platform network policy store's switch. While it is off every
+    /// environment is assigned `open` (#6120).
+    pub network_policies: bool,
 }
 
 /// The service's state with `settings` whenever the broker settings are read,
@@ -51,12 +55,13 @@ pub fn service_state(
     pool: PgPool,
     server_namespace: &str,
     sandbox_namespace: &str,
-    interception: InterceptionInputs,
+    inputs: ServiceInputs,
 ) -> anyhow::Result<Option<service::EgressServiceState>> {
-    let InterceptionInputs {
+    let ServiceInputs {
         front_doors,
         credential_broker,
-    } = interception;
+        network_policies,
+    } = inputs;
     let Some(settings) = settings else {
         return Ok(None);
     };
@@ -92,6 +97,7 @@ pub fn service_state(
         attestation,
         bindings: Arc::new(PgBindingStore::connect_lazy(database_url)?),
         pool,
+        network_policies,
         server_namespace: server_namespace.to_owned(),
         sandbox_namespace: sandbox_namespace.to_owned(),
         // No deployment sets a platform allow (see `settings::PLATFORM_ALLOWS`).
@@ -132,8 +138,9 @@ pub fn mount(
         api.pool.clone(),
         &api.sandbox_cfg.pod_namespace,
         &api.sandbox_cfg.sandbox_namespace,
-        InterceptionInputs {
+        ServiceInputs {
             front_doors,
+            network_policies: api.network_policy_flags.enabled,
             credential_broker: api
                 .sandbox_cfg
                 .credential_runtime
@@ -195,7 +202,7 @@ mod tests {
             pool(),
             "",
             "",
-            InterceptionInputs::default(),
+            ServiceInputs::default(),
         )
         .unwrap();
         assert!(state.is_none());
@@ -225,7 +232,7 @@ mod tests {
             pool(),
             "dev",
             "sb",
-            InterceptionInputs::default(),
+            ServiceInputs::default(),
         )
         .unwrap()
         .expect("mounted with the switch off");
@@ -246,7 +253,7 @@ mod tests {
                 pool(),
                 "dev",
                 "sb",
-                InterceptionInputs::default()
+                ServiceInputs::default()
             )
             .is_err()
         );
@@ -272,7 +279,7 @@ mod tests {
                 pool(),
                 " ",
                 "sb",
-                InterceptionInputs::default(),
+                ServiceInputs::default(),
             )
             .is_err()
         );
@@ -284,7 +291,7 @@ mod tests {
                 pool(),
                 "dev",
                 "sb",
-                InterceptionInputs::default(),
+                ServiceInputs::default(),
             )
             .unwrap()
             .is_some_and(|state| !state.interception && state.interception_cas.is_none())
@@ -303,7 +310,7 @@ mod tests {
                 pool(),
                 "dev",
                 "sb",
-                InterceptionInputs::default(),
+                ServiceInputs::default(),
             )
             .is_err()
         );
@@ -314,15 +321,18 @@ mod tests {
             pool(),
             "dev",
             "sb",
-            InterceptionInputs {
+            ServiceInputs {
                 front_doors: None,
                 credential_broker: Some("https://credentials.codewire.test".into()),
+                network_policies: true,
             },
         )
         .unwrap()
         .unwrap();
         assert!(state.interception);
         assert!(state.interception_cas.is_some());
+        // The store's switch reaches the assignment (#6120).
+        assert!(state.network_policies);
         // Off, a Pod whose trust record carries a CA still gets it (#6200).
         let off = service_state(
             Some(on()),
@@ -331,9 +341,10 @@ mod tests {
             pool(),
             "dev",
             "sb",
-            InterceptionInputs {
+            ServiceInputs {
                 front_doors: None,
                 credential_broker: Some("https://credentials.codewire.test".into()),
+                network_policies: false,
             },
         )
         .unwrap()

@@ -55,8 +55,8 @@ service LocalSupervisorService {
   // on keeps this RPC unchanged.
   rpc RetireSupervisor(RetireSupervisorRequest) returns (RetireSupervisorResponse);
   // This host's network policies (#2537, protocol 16): named, each edit an
-  // immutable revision with its own digest. `open` and `locked` are built-ins
-  // and never stored. A policy holds no secret.
+  // immutable revision with its own digest. `open`, `web` and `locked` are
+  // built-ins and never stored. A policy holds no secret.
   rpc CreateNetworkPolicy(CreateNetworkPolicyRequest) returns (NetworkPolicy);
   rpc ListNetworkPolicies(ListNetworkPoliciesRequest) returns (ListNetworkPoliciesResponse);
   rpc GetNetworkPolicy(GetNetworkPolicyRequest) returns (NetworkPolicy);
@@ -130,9 +130,9 @@ message EgressRefusalSummary {
 }
 
 message EnvironmentNetworkPolicy {
-  // `open`, `locked` or `local:id:UUID`.
+  // `open`, `web`, `locked` or `local:id:UUID`.
   string reference = 1;
-  // `open`, `locked` or the stored policy's name.
+  // `open`, `web`, `locked` or the stored policy's name.
   string name = 2;
   // The stored policy's current revision; zero for a built-in.
   uint32 revision = 3;
@@ -793,7 +793,7 @@ message CreateEnvironmentRequest {
   // the project declares repositories or mounts.
   repeated string implicit_vm_only = 18;
   // The network policy the environment selects (#2537, protocol 16): `open`
-  // or empty, `locked`, or a policy in this host's store by NAME, local:NAME
+  // or empty, `web`, `locked`, or a policy in this host's store by NAME, local:NAME
   // or local:id:UUID. A platform policy is not available yet.
   string network_policy = 19;
   // Start from a local disk snapshot (protocol 19, Linux) instead of

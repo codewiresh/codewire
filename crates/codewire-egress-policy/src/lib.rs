@@ -28,21 +28,17 @@ pub mod reference;
 pub mod typed;
 
 pub use builtin::{
-    BuiltinPolicy, HOSTED_DEFAULT_DIGEST, HOSTED_DEFAULT_ID, HOSTED_DEFAULT_NAME,
-    HOSTED_DEFAULT_YAML, LOCKED_ID, LOCKED_POLICY_DIGEST, LOCKED_POLICY_YAML,
+    BuiltinPolicy, LOCKED_ID, LOCKED_POLICY_DIGEST, LOCKED_POLICY_YAML, OPEN_ID,
+    OPEN_POLICY_DIGEST, OPEN_POLICY_YAML, WEB_ID, WEB_POLICY_DIGEST, WEB_POLICY_YAML,
     is_reserved_policy_name,
 };
 use cidr::IpNetwork;
 use hostname::{NamePattern, canonical_hostname, protected_name};
 
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
-/// The ports an allowed destination gets when it names none: those `open`
+/// The ports an allowed destination gets when it names none: those `web`
 /// allows, so an allowed Git host also works over SSH.
 pub const DEFAULT_ALLOW_PORTS: [u16; 3] = [22, 80, 443];
-pub const DEVELOPER_BASELINE_ID: &str = "codewire-developer-v1";
-pub const DEVELOPER_BASELINE_DIGEST: &str =
-    "fab8151c7bffd0d0fe6ca1a9397ae6b60fa1e0ae650a967f9c9445ac3dd4189f";
-pub const DEVELOPER_BASELINE_YAML: &[u8] = include_bytes!("../policies/developer-v1.yaml");
 pub const MAX_POLICY_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_POLICY_RULES: usize = 256;
 pub const MAX_RULE_SELECTORS: usize = 128;
@@ -605,21 +601,15 @@ impl CompiledPolicy {
         })
     }
 
-    /// The built-in `open` policy, `codewire-developer-v1`.
-    pub fn developer_baseline() -> Self {
+    /// The built-in `open` policy, the default: DNS, and TCP on any port to
+    /// public addresses.
+    pub fn open() -> Self {
         BuiltinPolicy::Open.compile()
     }
 
     /// The built-in `locked` policy: no rules, so no workload egress.
     pub fn locked() -> Self {
         BuiltinPolicy::Locked.compile()
-    }
-
-    /// `hosted-default`, `codewire-hosted-default-v1`: what a hosted Sandbox
-    /// with no selection enforces.
-    pub fn hosted_default() -> Self {
-        PolicyDocument::parse_yaml(HOSTED_DEFAULT_YAML)
-            .expect("the hosted default egress policy must remain valid")
     }
 
     pub fn digest(&self) -> PolicyDigest {

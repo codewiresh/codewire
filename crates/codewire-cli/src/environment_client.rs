@@ -16,6 +16,7 @@ mod environment_wire;
 mod network_status;
 use create_request::{create_environment_request_from_proto, proto_create_environment_request};
 use environment_wire::environment_from_proto;
+pub(crate) use network_status::environment_network_policy_from_proto;
 use network_status::{egress_enforcement, network_failure, network_state};
 
 /// Typed EnvironmentService facade preserving the CLI's established
@@ -1422,25 +1423,6 @@ pub(crate) fn legacy_environment_daemon_status(
     }
 }
 
-pub(crate) fn environment_network_policy_from_proto(
-    value: &rpc::EnvironmentNetworkPolicy,
-) -> crate::presentation::EnvironmentNetworkPolicy {
-    let enforcement = match value.enforcement.as_known() {
-        Some(rpc::NetworkPolicyEnforcement::NotEnforced) => "not_enforced",
-        Some(rpc::NetworkPolicyEnforcement::Enforced) => "enforced",
-        Some(rpc::NetworkPolicyEnforcement::Enforcing) => "enforcing",
-        Some(rpc::NetworkPolicyEnforcement::FailedClosed) => "failed_closed",
-        Some(rpc::NetworkPolicyEnforcement::Unspecified) | None => "unknown",
-    };
-    crate::presentation::EnvironmentNetworkPolicy {
-        reference: value.reference.clone(),
-        name: value.name.clone(),
-        revision: value.revision,
-        enforcement: enforcement.to_owned(),
-        enforced_revision: (value.enforced_revision != 0).then_some(value.enforced_revision),
-    }
-}
-
 fn legacy_environment_resize_response(
     operation: Option<rpc::EnvironmentResizeOperation>,
     environment: Option<rpc::Environment>,
@@ -1758,6 +1740,16 @@ mod tests {
         let view = environment_network_policy_from_proto(&selected);
         assert_eq!(view.enforcement, "not_enforced");
         assert_eq!(view.enforced_revision, None);
+        selected.enforcement = rpc::NetworkPolicyEnforcement::Unconfirmed.into();
+        assert_eq!(
+            environment_network_policy_from_proto(&selected).enforcement,
+            "unconfirmed"
+        );
+        selected.enforcement = rpc::NetworkPolicyEnforcement::Unspecified.into();
+        assert_eq!(
+            environment_network_policy_from_proto(&selected).enforcement,
+            "unknown"
+        );
         selected.enforcement = rpc::NetworkPolicyEnforcement::Enforced.into();
         selected.enforced_revision = 2;
         let view = environment_network_policy_from_proto(&selected);

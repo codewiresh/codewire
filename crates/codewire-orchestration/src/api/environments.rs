@@ -265,7 +265,7 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         network_failure: row.try_get("mesh_network_failure")?,
         ports: Vec::new(),
         // A selection that does not decode never fails the environment read:
-        // it is logged and left out, not reported as hosted-default (#4000).
+        // it is logged and left out, not reported as the default (#4000).
         network_policy: match super::network_policies::environment_policy_from_row(row) {
             Ok(policy) => Some(policy),
             Err(error) => {

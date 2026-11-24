@@ -260,7 +260,7 @@ pub(super) fn start_network_policy(
     document: &[u8],
 ) -> Result<codewire_egress_policy::CompiledPolicy, Status> {
     if document.is_empty() {
-        return Ok(codewire_egress_policy::CompiledPolicy::developer_baseline());
+        return Ok(codewire_egress_policy::CompiledPolicy::open());
     }
     if document.len() > codewire_egress_policy::MAX_POLICY_DOCUMENT_BYTES {
         return Err(Status::invalid_argument(

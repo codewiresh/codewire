@@ -107,7 +107,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &db.pool,
             &owner,
             "np-org",
-            "web",
+            "team",
             None,
             &[rule("github.com", &[443])],
         )
@@ -134,14 +134,14 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &db.pool,
             &alice,
             "np-org",
-            Selector::Name("web"),
+            Selector::Name("team"),
             &[],
             &["github.com"],
             None,
         )
         .await;
         anyhow::ensure!(code(refused.unwrap_err()) == "not_network_policy_manager");
-        let refused = delete_policy(&db.pool, &alice, "np-org", Selector::Name("web")).await;
+        let refused = delete_policy(&db.pool, &alice, "np-org", Selector::Name("team")).await;
         anyhow::ensure!(code(refused.unwrap_err()) == "not_network_policy_manager");
         let outsider = session("np-other-alice");
         let refused = list_policies(&db.pool, &outsider, "np-org").await;
@@ -151,7 +151,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             via_api_key: true,
             ..session("np-org-owner")
         };
-        let refused = get_policy(&db.pool, &api_key, "np-org", Selector::Name("web"), None).await;
+        let refused = get_policy(&db.pool, &api_key, "np-org", Selector::Name("team"), None).await;
         anyhow::ensure!(code(refused.unwrap_err()) == "org_not_found");
         let refused = get_policy(
             &db.pool,
@@ -185,7 +185,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
                 ]
         );
         anyhow::ensure!(second.digest != web.digest);
-        let first = get_policy(&db.pool, &alice, "np-org", Selector::Name("web"), Some(1))
+        let first = get_policy(&db.pool, &alice, "np-org", Selector::Name("team"), Some(1))
             .await
             .unwrap();
         anyhow::ensure!(
@@ -202,7 +202,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &db.pool,
             &admin,
             "np-org",
-            Selector::Name("web"),
+            Selector::Name("team"),
             &[rule("crates.io", &[443])],
             &[],
             Some(1),
@@ -213,7 +213,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &db.pool,
             &admin,
             "np-org",
-            Selector::Name("web"),
+            Selector::Name("team"),
             &[rule("pypi.org", &[443])],
             &[],
             None,
@@ -224,7 +224,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &db.pool,
             &admin,
             "np-org",
-            Selector::Name("web"),
+            Selector::Name("team"),
             &[],
             &["crates.io"],
             None,
@@ -233,26 +233,18 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
         anyhow::ensure!(code(refused.unwrap_err()).contains("has no rule for crates.io"));
 
         // Names: taken once per organization, never a built-in's.
-        let taken = create_policy(&db.pool, &owner, "np-org", "web", None, &[]).await;
+        let taken = create_policy(&db.pool, &owner, "np-org", "team", None, &[]).await;
         anyhow::ensure!(code(taken.unwrap_err()) == "network_policy_name_taken");
         create_policy(
             &db.pool,
             &session("np-other-owner"),
             "np-other",
-            "web",
+            "team",
             None,
             &[],
         )
         .await
         .unwrap();
-        for (reserved, expected) in [
-            ("open", "reserved for the built-in policies"),
-            ("locked", "reserved for the built-in policies"),
-            ("hosted-default", "reserved for the hosted default"),
-        ] {
-            let refused = create_policy(&db.pool, &owner, "np-org", reserved, None, &[]).await;
-            anyhow::ensure!(code(refused.unwrap_err()).contains(expected), "{reserved}");
-        }
 
         // A copy starts from the other policy's current revision.
         let copy = create_policy(
@@ -260,7 +252,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             &owner,
             "np-org",
             "web-and-npm",
-            Some(Selector::Name("web")),
+            Some(Selector::Name("team")),
             &[rule("registry.npmjs.org", &[443])],
         )
         .await
@@ -278,7 +270,7 @@ async fn db_owners_and_admins_change_policies_and_members_read_them() -> anyhow:
             .into_iter()
             .map(|view| view.name)
             .collect();
-        anyhow::ensure!(names == ["web"]);
+        anyhow::ensure!(names == ["team"]);
         Ok(())
     }
     .await;
@@ -340,7 +332,7 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
         let alice = session("np-env-alice");
         environment(&db, "np-env-app", "np-env", "np-env-alice").await?;
         environment(&db, "np-env-owners", "np-env", "np-env-owner").await?;
-        let web = create_policy(&db.pool, &owner, "np-env", "web", None, &[rule("github.com", &[443])])
+        let web = create_policy(&db.pool, &owner, "np-env", "team", None, &[rule("github.com", &[443])])
             .await
             .unwrap();
         create_policy(
@@ -354,33 +346,33 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
         .await
         .unwrap();
 
-        // No selection is hosted-default.
+        // No selection is open, by default: no reference.
         let mut connection = db.pool.acquire().await?;
         let unselected = environment_policy_in(&mut connection, "np-env-app").await.unwrap();
         drop(connection);
         anyhow::ensure!(
             unselected == EnvironmentPolicyView {
-                reference: "hosted-default".into(),
-                name: "hosted-default".into(),
+                reference: String::new(),
+                name: "open".into(),
                 revision: 0,
-                digest: HOSTED_DEFAULT_DIGEST.into(),
-                enforcement: EnforcementView::NotEnforced,
+                digest: BuiltinPolicy::Open.digest_hex().into(),
+                enforcement: EnforcementView::Unconfirmed,
             }
         );
 
         // A member selects by name, platform:NAME or platform:id:UUID.
         let exact = format!("platform:id:{}", web.id);
-        for reference in ["web", "platform:web", exact.as_str()] {
+        for reference in ["team", "platform:team", exact.as_str()] {
             let view = select_for_environment(&db.pool, &alice, "np-env", "np-env-app", reference)
                 .await
                 .unwrap();
             anyhow::ensure!(
                 view == EnvironmentPolicyView {
                     reference: format!("platform:id:{}", web.id),
-                    name: "web".into(),
+                    name: "team".into(),
                     revision: 1,
                     digest: web.digest.clone(),
-                    enforcement: EnforcementView::NotEnforced,
+                    enforcement: EnforcementView::Unconfirmed,
                 },
                 "{reference}"
             );
@@ -391,7 +383,7 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
             &db.pool,
             &owner,
             "np-env",
-            Selector::Name("web"),
+            Selector::Name("team"),
             &[rule("pypi.org", &[443])],
             &[],
             None,
@@ -404,8 +396,8 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
         anyhow::ensure!(followed.revision == 2 && followed.digest == second.digest);
 
         // A selected policy cannot be deleted; the refusal names who selects it.
-        let refused = delete_policy(&db.pool, &owner, "np-env", Selector::Name("web")).await;
-        anyhow::ensure!(code(refused.unwrap_err()).contains("web is selected by np-env-app"));
+        let refused = delete_policy(&db.pool, &owner, "np-env", Selector::Name("team")).await;
+        anyhow::ensure!(code(refused.unwrap_err()).contains("team is selected by np-env-app"));
 
         // Built-ins, then back to no selection.
         let locked = select_for_environment(&db.pool, &alice, "np-env", "np-env-app", "locked")
@@ -419,19 +411,19 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
             select_for_environment(&db.pool, &alice, "np-env", "np-env-app", "hosted-default")
                 .await
                 .unwrap();
-        anyhow::ensure!(unselected.reference == "hosted-default");
+        anyhow::ensure!(unselected.reference.is_empty() && unselected.name == "open");
         let rows: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM platform_environment_network_policies WHERE environment_id = 'np-env-app'",
         )
         .fetch_one(&db.pool)
         .await?;
-        anyhow::ensure!(rows == 0, "hosted-default stores no row");
+        anyhow::ensure!(rows == 0, "no selection stores no row");
 
         // Refused: a local policy, a qualified built-in, another organization's
         // policy, a policy that does not exist, another member's environment,
         // and an environment of an organization the caller is not in.
         for (reference, expected) in [
-            ("local:web", "local-only"),
+            ("local:team", "local-only"),
             ("platform:open", "built-in network policy"),
             ("elsewhere", "network_policy_not_found"),
             ("missing", "network_policy_not_found"),
@@ -441,21 +433,21 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
             anyhow::ensure!(code(refused.unwrap_err()).contains(expected), "{reference}");
         }
         let refused =
-            select_for_environment(&db.pool, &alice, "np-env", "np-env-owners", "web").await;
+            select_for_environment(&db.pool, &alice, "np-env", "np-env-owners", "team").await;
         anyhow::ensure!(code(refused.unwrap_err()) == "environment_not_found");
         let refused = select_for_environment(
             &db.pool,
             &session("np-env-other-alice"),
             "np-env",
             "np-env-app",
-            "web",
+            "team",
         )
         .await;
         anyhow::ensure!(code(refused.unwrap_err()) == "org_not_found");
 
         // Destroying the environment releases its selection, so the policy
         // can go.
-        select_for_environment(&db.pool, &alice, "np-env", "np-env-app", "web")
+        select_for_environment(&db.pool, &alice, "np-env", "np-env-app", "team")
             .await
             .unwrap();
         sqlx::query(
@@ -468,9 +460,60 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
         crate::lifecycle::Service::for_pool(db.pool.clone())
             .complete_destroy("np-env-app", proof)
             .await?;
-        delete_policy(&db.pool, &owner, "np-env", Selector::Name("web"))
+        delete_policy(&db.pool, &owner, "np-env", Selector::Name("team"))
             .await
             .unwrap();
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// #3997: the built-ins `open`, `web` and `locked` are selected by name, an
+/// explicit selection is stored as one, and no organization policy may take
+/// a built-in's name or `hosted-default`.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_builtins_are_selected_by_name_and_no_policy_takes_their_names() -> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        organization(&db, "np-bi").await?;
+        let owner = session("np-bi-owner");
+        let alice = session("np-bi-alice");
+        environment(&db, "np-bi-app", "np-bi", "np-bi-alice").await?;
+        for (reserved, expected) in [
+            ("open", "reserved for the built-in policies"),
+            ("web", "reserved for the built-in policies"),
+            ("locked", "reserved for the built-in policies"),
+            ("hosted-default", "name hosted-default is reserved"),
+        ] {
+            let refused = create_policy(&db.pool, &owner, "np-bi", reserved, None, &[]).await;
+            anyhow::ensure!(code(refused.unwrap_err()).contains(expected), "{reserved}");
+        }
+        // `web` is selectable since 0053; an explicit `open` has a reference.
+        for builtin in [BuiltinPolicy::Open, BuiltinPolicy::Web] {
+            let selected =
+                select_for_environment(&db.pool, &alice, "np-bi", "np-bi-app", builtin.name())
+                    .await
+                    .unwrap();
+            anyhow::ensure!(
+                (
+                    selected.reference.as_str(),
+                    selected.name.as_str(),
+                    selected.revision
+                ) == (builtin.name(), builtin.name(), 0)
+                    && selected.digest == builtin.digest_hex(),
+                "{builtin:?}"
+            );
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM platform_environment_network_policies \
+                 WHERE environment_id = 'np-bi-app' AND builtin = $1",
+            )
+            .bind(builtin.name())
+            .fetch_one(&db.pool)
+            .await?;
+            anyhow::ensure!(rows == 1, "{builtin:?} is stored as a selection");
+        }
         Ok(())
     }
     .await;
@@ -490,7 +533,7 @@ async fn db_strangers_change_nothing_and_the_limits_hold() -> anyhow::Result<()>
             &db.pool,
             &owner,
             "np-lim",
-            "web",
+            "team",
             None,
             &[rule("github.com", &[443])],
         )
@@ -511,24 +554,24 @@ async fn db_strangers_change_nothing_and_the_limits_hold() -> anyhow::Result<()>
                 create_policy(&db.pool, caller, "np-lim", "theirs", None, &[])
                     .await
                     .map(|_| ()),
-                get_policy(&db.pool, caller, "np-lim", Selector::Name("web"), None)
+                get_policy(&db.pool, caller, "np-lim", Selector::Name("team"), None)
                     .await
                     .map(|_| ()),
                 update_policy(
                     &db.pool,
                     caller,
                     "np-lim",
-                    Selector::Name("web"),
+                    Selector::Name("team"),
                     &[rule("pypi.org", &[443])],
                     &[],
                     None,
                 )
                 .await
                 .map(|_| ()),
-                delete_policy(&db.pool, caller, "np-lim", Selector::Name("web"))
+                delete_policy(&db.pool, caller, "np-lim", Selector::Name("team"))
                     .await
                     .map(|_| ()),
-                select_for_environment(&db.pool, caller, "np-lim", "np-lim-app", "web")
+                select_for_environment(&db.pool, caller, "np-lim", "np-lim-app", "team")
                     .await
                     .map(|_| ()),
                 list_policies(&db.pool, caller, "np-lim").await.map(|_| ()),
@@ -605,7 +648,7 @@ async fn db_a_selection_that_does_not_decode_never_fails_the_environment_read() 
             &db.pool,
             &session("np-bad-owner"),
             "np-bad",
-            "web",
+            "team",
             None,
             &[rule("github.com", &[443])],
         )
@@ -616,7 +659,7 @@ async fn db_a_selection_that_does_not_decode_never_fails_the_environment_read() 
             &session("np-bad-owner"),
             "np-bad",
             "np-bad-app",
-            "web",
+            "team",
         )
         .await
         .unwrap();
@@ -659,7 +702,7 @@ async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result
         organization(&db, "np-use-other").await?;
         let owner = session("np-use-owner");
         let alice = session("np-use-alice");
-        let web = create_policy(&db.pool, &owner, "np-use", "web", None, &[])
+        let web = create_policy(&db.pool, &owner, "np-use", "team", None, &[])
             .await
             .unwrap();
         create_policy(&db.pool, &owner, "np-use", "unused", None, &[])
@@ -683,7 +726,7 @@ async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result
         )
         .await?;
         for id in ["np-use-b", "np-use-a", "np-use-going"] {
-            select_for_environment(&db.pool, &alice, "np-use", id, "web")
+            select_for_environment(&db.pool, &alice, "np-use", id, "team")
                 .await
                 .unwrap();
         }
@@ -717,9 +760,9 @@ async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result
                 == Some((1, vec!["np-use-locked".to_owned()]))
         );
         anyhow::ensure!(
-            find(UsageSelection::HostedDefault).map(|u| (u.environments, u.names))
+            find(UsageSelection::Builtin(BuiltinPolicy::Open)).map(|u| (u.environments, u.names))
                 == Some((1, vec!["np-use-plain".to_owned()])),
-            "a destroyed environment is not on hosted-default: {usage:?}"
+            "no selection counts as open, and a destroyed environment is on nothing: {usage:?}"
         );
         anyhow::ensure!(
             usage.len() == 3,
@@ -727,7 +770,7 @@ async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result
         );
 
         // The destroying environment a count names is the one delete names.
-        let refused = delete_policy(&db.pool, &owner, "np-use", Selector::Name("web")).await;
+        let refused = delete_policy(&db.pool, &owner, "np-use", Selector::Name("team")).await;
         anyhow::ensure!(code(refused.unwrap_err()).contains("np-use-a, np-use-b, np-use-going"));
 
         // Ten names at most, and the count is still all of them.
@@ -744,7 +787,8 @@ async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result
             .into_iter()
             .find(|u| u.selection == UsageSelection::Builtin(BuiltinPolicy::Open))
             .unwrap();
-        anyhow::ensure!(open.environments == 11 && open.names.len() == 10);
+        // Eleven select open, and np-use-plain is on it by default.
+        anyhow::ensure!(open.environments == 12 && open.names.len() == 10);
         anyhow::ensure!(open.names.first().map(String::as_str) == Some("np-use-many-00"));
 
         // Not a member: the organization does not exist.

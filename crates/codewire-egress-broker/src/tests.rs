@@ -390,7 +390,7 @@ async fn direct_ip_policy_dials_without_dns_or_hostname_attribution() {
     let resolver = Arc::new(FakeResolver::new([]));
     let connector = Arc::new(FakeConnector::new([Ok(11)]));
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::clone(&resolver),
         Arc::clone(&connector),
@@ -416,7 +416,7 @@ async fn a_dial_the_table_would_intercept_is_refused_and_never_dialled() {
     let connector = Arc::new(FakeConnector::new([Ok(3)]));
     let clock = Arc::new(FakeClock::default());
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::clone(&resolver),
         Arc::clone(&connector),
@@ -495,7 +495,7 @@ async fn a_failed_hand_off_is_a_counted_refusal_and_is_never_dialled() {
     let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
     let connector = Arc::new(FakeConnector::new([Ok(3)]));
     let broker = PolicyEgressBroker::new(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::clone(&resolver),
         Arc::clone(&connector),
@@ -545,7 +545,7 @@ async fn with_a_handoff_an_intercepted_dial_goes_to_the_front_door_and_is_never_
         front_door: StdMutex::new(Vec::new()),
     });
     let broker = PolicyEgressBroker::new(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::clone(&resolver),
         Arc::clone(&connector),
@@ -645,7 +645,7 @@ rules:
 async fn a_replacement_ends_the_passed_flows_it_refuses_and_keeps_the_rest() {
     let connector = Arc::new(FakeConnector::new([Ok(1), Ok(2), Ok(3)]));
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::new(FakeResolver::new([])),
         connector,
@@ -696,7 +696,7 @@ async fn a_replacement_ends_the_passed_flows_it_refuses_and_keeps_the_rest() {
 #[tokio::test]
 async fn a_flow_admitted_before_a_replacement_is_not_recorded_after_it() {
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::new(FakeResolver::new([])),
         Arc::new(FakeConnector::new([Ok(1)])),
@@ -724,7 +724,7 @@ async fn a_flow_admitted_before_a_replacement_is_not_recorded_after_it() {
 async fn the_record_holds_a_bounded_number_of_live_flows() {
     let connector = Arc::new(FakeConnector::new((0..=MAX_PASSED_FLOWS as u64).map(Ok)));
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::new(FakeResolver::new([])),
         connector,
@@ -783,7 +783,7 @@ async fn addresses_local_to_the_host_are_refused_before_any_dial() {
     const LEARNED: IpAddr = IpAddr::V4(Ipv4Addr::new(87, 0, 0, 180));
     let connector = Arc::new(FakeConnector::new([Ok(21), Ok(22)]));
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::new(FakeResolver::new([])),
         Arc::clone(&connector),
@@ -911,7 +911,7 @@ async fn adapter_failures_are_bounded_and_do_not_change_policy() {
     )]));
     let connector = Arc::new(FakeConnector::new([Err(BrokerAdapterFailure::Unavailable)]));
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         resolver,
         Arc::clone(&connector),
@@ -931,7 +931,7 @@ async fn adapter_failures_are_bounded_and_do_not_change_policy() {
     assert_eq!(connector.destinations(), [destination]);
     assert_eq!(
         broker.policy_digest().await,
-        CompiledPolicy::developer_baseline().digest()
+        CompiledPolicy::open().digest()
     );
 }
 
@@ -940,7 +940,7 @@ async fn adapter_failures_are_bounded_and_do_not_change_policy() {
 #[tokio::test]
 async fn a_flow_admitted_before_an_intercept_replacement_is_not_recorded() {
     let broker = broker(
-        CompiledPolicy::developer_baseline(),
+        CompiledPolicy::open(),
         RouteClass::General,
         Arc::new(FakeResolver::new([])),
         Arc::new(FakeConnector::new([Ok(1)])),

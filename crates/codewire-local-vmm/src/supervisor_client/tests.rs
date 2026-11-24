@@ -1116,6 +1116,21 @@ fn direct_share_change_failures_name_the_moved_source() {
     assert_eq!(operation_error_hint("start_failed"), "");
 }
 
+/// A replayed create refused for a stored policy with a built-in's name
+/// names that policy and the fix in one sentence (#3997).
+#[test]
+fn a_replayed_create_refused_for_a_stored_name_says_how_to_select_it() {
+    for name in ["open", "web", "locked"] {
+        let hint = operation_error_hint(&format!("create_stored_policy_named_{name}"));
+        assert_eq!(
+            hint,
+            format!(
+                " (a policy you stored is named {name}; select it by its id, local:id: and the id `cw --local policy ls` shows, then create again)"
+            ),
+        );
+    }
+}
+
 /// A registry that can't be reached says why a cached image was not used:
 /// a tag is always checked with its registry (#4968).
 #[test]

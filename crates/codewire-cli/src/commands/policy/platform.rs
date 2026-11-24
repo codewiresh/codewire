@@ -1,7 +1,7 @@
 //! `cw --cloud policy`: the organization's network policies (#4000). The
 //! same subcommands, rules and output as the local store; the platform keeps
-//! the revisions and digests. Nothing enforces a stored policy until
-//! cw-egress does, and the commands that select one say so.
+//! the revisions and digests. A deployment enforces them where its hosted
+//! egress is on, and the server says which (#3997).
 
 use codewire_client::{
     ClientError, CodewireClient, CreateNetworkPolicyRequest, DeleteNetworkPolicyRequest,
@@ -15,14 +15,6 @@ use codewire_proto::codewire::v1::NetworkPolicySelector;
 
 use super::*;
 
-/// Whether hosted Sandboxes enforce an organization's network policies
-/// (#4000). They don't yet: enforcement is per environment, and no
-/// deployment-level state exists to read. Every platform policy command's
-/// text and `check`'s JSON read this one constant, so nothing else claims
-/// either way; when cw-egress enforces, the server's state replaces it
-/// (#4000's done-when).
-const HOSTED_ENFORCEMENT: bool = false;
-
 /// Whether a platform policy command wrote the policy or only read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Touched {
@@ -32,35 +24,71 @@ enum Touched {
     Read,
 }
 
-/// The one line every platform policy command's text ends with while hosted
-/// Sandboxes don't enforce, on stderr and never in JSON.
-fn say_hosted_enforcement(output: OutputFormat, touched: Touched) {
-    if let Some(line) = hosted_enforcement_line(output, touched) {
+/// The one line every platform policy command's text ends with where the
+/// deployment doesn't enforce hosted policies, on stderr and never in JSON.
+/// `enforced` is the server's `hosted_policies_enforced`; `None` when it
+/// could not be read, which claims nothing.
+fn say_hosted_enforcement(output: OutputFormat, touched: Touched, enforced: Option<bool>) {
+    if let Some(line) = hosted_enforcement_line(output, touched, enforced) {
         let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
             .stderr_style();
         eprintln!("{} {line}", style.status(crate::output::Status::Attention));
     }
 }
 
-/// The line, without the status glyph, or nothing: for JSON, or once hosted
-/// Sandboxes enforce.
-fn hosted_enforcement_line(output: OutputFormat, touched: Touched) -> Option<&'static str> {
-    if HOSTED_ENFORCEMENT || !matches!(output, OutputFormat::Text) {
+/// The line, without the status glyph, or nothing: for JSON, or where the
+/// deployment enforces or it isn't known.
+fn hosted_enforcement_line(
+    output: OutputFormat,
+    touched: Touched,
+    enforced: Option<bool>,
+) -> Option<&'static str> {
+    if enforced != Some(false) || !matches!(output, OutputFormat::Text) {
         return None;
     }
     Some(match touched {
         Touched::Stored => {
-            "Stored. Hosted sandboxes don't enforce network policies yet, so this changes nothing a sandbox can reach."
+            "Stored. Network policies aren't enforced on this deployment, so this changes nothing a Sandbox can reach."
         }
         Touched::Read => {
-            "Hosted sandboxes don't enforce network policies yet: whatever their policy, they can reach any public destination."
+            "Network policies aren't enforced on this deployment: whatever their policy, Sandboxes can reach any public destination."
         }
     })
+}
+
+/// After a write, whether the deployment enforces hosted policies, read
+/// with the policy just written; only text says it, so JSON asks nothing.
+async fn enforced_after_write(
+    client: &CodewireClient,
+    org_id: &str,
+    policy: &NetworkPolicy,
+    output: OutputFormat,
+) -> Option<bool> {
+    if !matches!(output, OutputFormat::Text) {
+        return None;
+    }
+    client
+        .get_network_policy(GetNetworkPolicyRequest {
+            org_id: org_id.to_owned(),
+            policy: Some(NetworkPolicySelector {
+                selector: Some(Selector::Id(policy.id.clone())),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .map(|response| response.hosted_policies_enforced)
 }
 
 impl ShownPolicy for NetworkPolicy {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn reference(&self) -> String {
+        format!("platform:id:{}", self.id)
     }
 
     fn revision(&self) -> u32 {
@@ -82,7 +110,7 @@ impl ShownPolicy for NetworkPolicy {
         serde_json::json!({
             "id": self.id,
             "name": self.name,
-            "reference": format!("platform:id:{}", self.id),
+            "reference": self.reference(),
             "revision": self.revision,
             "current_revision": self.current_revision,
             "digest": self.digest,
@@ -106,7 +134,7 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
                 .flatten();
             let created = client
                 .create_network_policy(CreateNetworkPolicyRequest {
-                    org_id,
+                    org_id: org_id.clone(),
                     name: args.name.context("policy name is required")?,
                     from: from.into(),
                     allow: rules_proto(rules_from(&args.allow)?),
@@ -114,12 +142,10 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
                 })
                 .await
                 .map_err(|error| failed("create the network policy", error))?;
-            print_policy(
-                "Created",
-                &returned(created.policy.into_option())?,
-                args.output,
-            )?;
-            say_hosted_enforcement(args.output, Touched::Stored);
+            let created = returned(created.policy.into_option())?;
+            print_policy("Created", &created, args.output)?;
+            let enforced = enforced_after_write(&client, &org_id, &created, args.output).await;
+            say_hosted_enforcement(args.output, Touched::Stored, enforced);
             Ok(())
         }
         PolicyCommand::List(args) => {
@@ -130,15 +156,16 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
                 })
                 .await
                 .map_err(|error| failed("list network policies", error))?;
-            print_policies(&listed.policies, args.output)?;
-            say_hosted_enforcement(args.output, Touched::Read);
+            let enforced = listed.hosted_policies_enforced;
+            print_policies(&listed.policies, args.output, enforced)?;
+            say_hosted_enforcement(args.output, Touched::Read, Some(enforced));
             Ok(())
         }
         PolicyCommand::Allow(args) => {
             let changed = update(
                 &client,
                 UpdateNetworkPolicyRequest {
-                    org_id,
+                    org_id: org_id.clone(),
                     policy: Some(stored_selector(&args.name)?).into(),
                     allow: rules_proto(rules_from(&args.targets)?),
                     ..Default::default()
@@ -146,7 +173,8 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
             )
             .await?;
             print_policy("Changed", &changed, args.output)?;
-            say_hosted_enforcement(args.output, Touched::Stored);
+            let enforced = enforced_after_write(&client, &org_id, &changed, args.output).await;
+            say_hosted_enforcement(args.output, Touched::Stored, enforced);
             Ok(())
         }
         PolicyCommand::Rm(args) => {
@@ -158,7 +186,7 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
             let changed = update(
                 &client,
                 UpdateNetworkPolicyRequest {
-                    org_id,
+                    org_id: org_id.clone(),
                     policy: Some(stored_selector(&args.name)?).into(),
                     remove,
                     ..Default::default()
@@ -166,31 +194,30 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
             )
             .await?;
             print_policy("Changed", &changed, args.output)?;
-            say_hosted_enforcement(args.output, Touched::Stored);
+            let enforced = enforced_after_write(&client, &org_id, &changed, args.output).await;
+            say_hosted_enforcement(args.output, Touched::Stored, enforced);
             Ok(())
         }
         PolicyCommand::Check(args) => {
-            let stored = returned(
-                client
-                    .get_network_policy(GetNetworkPolicyRequest {
-                        org_id,
-                        policy: Some(stored_selector(&args.name)?).into(),
-                        ..Default::default()
-                    })
-                    .await
-                    .map_err(|error| failed("read the network policy", error))?
-                    .policy
-                    .into_option(),
-            )?;
+            let response = client
+                .get_network_policy(GetNetworkPolicyRequest {
+                    org_id,
+                    policy: Some(stored_selector(&args.name)?).into(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|error| failed("read the network policy", error))?;
+            let enforced = response.hosted_policies_enforced;
+            let stored = returned(response.policy.into_option())?;
             let compiled = typed_from(&stored, "the platform")?.compile();
             print_check(
                 &args,
                 &stored.name,
                 Some(stored.revision),
                 &compiled,
-                Some(HOSTED_ENFORCEMENT),
+                Some(enforced),
             )?;
-            say_hosted_enforcement(args.output, Touched::Read);
+            say_hosted_enforcement(args.output, Touched::Read, Some(enforced));
             Ok(())
         }
         PolicyCommand::Delete(args) => {
@@ -286,8 +313,8 @@ fn stored_selector(value: &str) -> anyhow::Result<NetworkPolicySelector> {
 fn base_selector(value: &str) -> anyhow::Result<Option<NetworkPolicySelector>> {
     match BuiltinPolicy::from_name(value) {
         Some(BuiltinPolicy::Locked) => Ok(None),
-        Some(BuiltinPolicy::Open) => anyhow::bail!(
-            "a policy cannot start from `open`, which allows every public destination; start from `locked` and allow what you need"
+        Some(builtin @ (BuiltinPolicy::Open | BuiltinPolicy::Web)) => anyhow::bail!(
+            "a policy cannot start from `{builtin}`, which allows every public destination; start from `locked` and allow what you need"
         ),
         None => stored_selector(value).map(Some),
     }
@@ -324,21 +351,21 @@ mod tests {
     #[test]
     fn a_platform_command_names_only_platform_policies() {
         assert!(matches!(
-            stored_selector("web").unwrap().selector,
-            Some(Selector::Name(name)) if name == "web"
+            stored_selector("team-web").unwrap().selector,
+            Some(Selector::Name(name)) if name == "team-web"
         ));
         assert!(matches!(
-            stored_selector("platform:web").unwrap().selector,
-            Some(Selector::Name(name)) if name == "web"
+            stored_selector("platform:team-web").unwrap().selector,
+            Some(Selector::Name(name)) if name == "team-web"
         ));
         let id = "0b8f6a52-0f6c-4a59-9f43-1b1f0c3a9e01";
         assert!(matches!(
             stored_selector(&format!("platform:id:{id}")).unwrap().selector,
             Some(Selector::Id(found)) if found == id
         ));
-        let local = stored_selector("local:web").unwrap_err().to_string();
+        let local = stored_selector("local:team-web").unwrap_err().to_string();
         assert!(local.contains("cw --local policy"), "{local}");
-        for builtin in ["open", "locked"] {
+        for builtin in ["open", "web", "locked"] {
             let error = stored_selector(builtin).unwrap_err().to_string();
             assert!(error.contains("built-in"), "{error}");
         }
@@ -372,7 +399,8 @@ mod tests {
     fn a_platform_policy_starts_from_locked_or_one_of_the_organizations() {
         assert!(base_selector("locked").unwrap().is_none());
         assert!(base_selector("open").is_err());
-        assert!(base_selector("web").unwrap().is_some());
+        assert!(base_selector("web").is_err());
+        assert!(base_selector("team-web").unwrap().is_some());
     }
 
     #[test]
@@ -395,28 +423,34 @@ mod tests {
         );
     }
 
+    /// Said in text only, and only where the server says the deployment
+    /// doesn't enforce: never where it does, or where it isn't known (#3997).
     #[test]
-    fn the_not_enforced_line_is_said_in_text_and_never_in_json() {
+    fn the_not_enforced_line_is_said_only_where_the_deployment_does_not_enforce() {
         assert_eq!(
-            hosted_enforcement_line(OutputFormat::Text, Touched::Stored),
+            hosted_enforcement_line(OutputFormat::Text, Touched::Stored, Some(false)),
             Some(
-                "Stored. Hosted sandboxes don't enforce network policies yet, so this changes nothing a sandbox can reach."
+                "Stored. Network policies aren't enforced on this deployment, so this changes nothing a Sandbox can reach."
             )
         );
         assert_eq!(
-            hosted_enforcement_line(OutputFormat::Text, Touched::Read),
+            hosted_enforcement_line(OutputFormat::Text, Touched::Read, Some(false)),
             Some(
-                "Hosted sandboxes don't enforce network policies yet: whatever their policy, they can reach any public destination."
+                "Network policies aren't enforced on this deployment: whatever their policy, Sandboxes can reach any public destination."
             )
         );
-        assert_eq!(
-            hosted_enforcement_line(OutputFormat::Json, Touched::Stored),
-            None
-        );
-        assert_eq!(
-            hosted_enforcement_line(OutputFormat::Json, Touched::Read),
-            None
-        );
+        for touched in [Touched::Stored, Touched::Read] {
+            for enforced in [Some(true), None] {
+                assert_eq!(
+                    hosted_enforcement_line(OutputFormat::Text, touched, enforced),
+                    None
+                );
+            }
+            assert_eq!(
+                hosted_enforcement_line(OutputFormat::Json, touched, Some(false)),
+                None
+            );
+        }
     }
 
     #[test]

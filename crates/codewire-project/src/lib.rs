@@ -234,7 +234,7 @@ impl ProjectSpec {
             });
         }
         // Hosted Sandboxes cannot select a policy from the project file yet
-        // (#4000); refusing it is never a silent fallback to `hosted-default`.
+        // (#4000); refusing it is never a silent fallback to the default.
         if self.network.is_some() {
             return Err(ProjectError::PlatformUnsupported {
                 field: "network.policy",

@@ -53,10 +53,8 @@ pub(super) fn format_native_environment(
     }
     if let Some(network_policy) = &view.network_policy {
         output.push_str(&format!("Network policy: {network_policy}\n"));
-        if view.policy_leaves_providers_to_credentials {
-            output.push_str(
-                "                selected model credentials still reach their providers\n",
-            );
+        if let Some(note) = view.policy_note.line() {
+            output.push_str(&note);
         }
     }
     output.push_str(&view.error.line());

@@ -92,12 +92,15 @@ pub struct Environment {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EnvironmentNetworkPolicy {
-    /// `hosted-default`, `locked`, `open` or `platform:id:UUID`.
+    /// `open`, `web`, `locked` or `platform:id:UUID`; empty when the
+    /// environment selects nothing and is on `open` by default.
     pub reference: String,
     pub name: String,
     /// The selected policy's current revision; zero for a built-in.
     pub revision: u32,
-    /// `not_enforced`, `enforced`, `enforcing`, `failed_closed` or `unknown`.
+    /// `not_enforced` (the deployment's hosted egress is off), `unconfirmed`
+    /// (it is on, but no fresh report confirms the policy), `enforced`,
+    /// `enforcing`, `failed_closed` or `unknown`.
     pub enforcement: String,
     /// The revision cw-egress enforces, once it does.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,7 +116,7 @@ impl EnvironmentNetworkPolicy {
             || asked.strip_prefix("platform:") == Some(self.name.as_str())
     }
 
-    /// `web · rev 2 · not enforced yet`: the policy and its state, in words.
+    /// `web · rev 2 · not enforced`: the policy and its state, in words.
     pub fn summary(&self) -> String {
         let revision = match self.revision {
             0 => String::new(),
@@ -126,10 +129,17 @@ impl EnvironmentNetworkPolicy {
             },
             "enforcing" => "applying the new revision".to_owned(),
             "failed_closed" => "no egress: enforcement failed".to_owned(),
-            "not_enforced" => "not enforced yet".to_owned(),
+            "not_enforced" => "not enforced".to_owned(),
+            "unconfirmed" => "unconfirmed".to_owned(),
             _ => "enforcement unknown".to_owned(),
         };
-        format!("{}{revision} · {state}", self.name)
+        // An environment that selects nothing is on its default (#3997).
+        let default = if self.reference.is_empty() && !self.name.is_empty() {
+            " (default)"
+        } else {
+            ""
+        };
+        format!("{}{default}{revision} · {state}", self.name)
     }
 }
 
@@ -408,8 +418,8 @@ pub struct CreateEnvironmentRequest {
     /// The hosted Mesh network to join, by name, in the organization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
-    /// The network policy to select: a reference such as `platform:web`,
-    /// `locked` or `hosted-default` (#4000).
+    /// The network policy to select: a reference such as `platform:team`,
+    /// `locked` or `open` (#4000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_policy: Option<String>,
     /// The hosted disk snapshot to start from.
@@ -487,7 +497,7 @@ mod tests {
     #[test]
     fn a_network_policy_summary_says_whether_it_is_enforced() {
         let policy = |name: &str, revision, enforcement: &str, enforced| EnvironmentNetworkPolicy {
-            reference: String::new(),
+            reference: name.into(),
             name: name.into(),
             revision,
             enforcement: enforcement.into(),
@@ -495,11 +505,20 @@ mod tests {
         };
         assert_eq!(
             policy("web", 2, "not_enforced", None).summary(),
-            "web · rev 2 · not enforced yet"
+            "web · rev 2 · not enforced"
         );
         assert_eq!(
-            policy("hosted-default", 0, "not_enforced", None).summary(),
-            "hosted-default · not enforced yet"
+            policy("open", 0, "not_enforced", None).summary(),
+            "open · not enforced"
+        );
+        let unselected = EnvironmentNetworkPolicy {
+            reference: String::new(),
+            ..policy("open", 0, "not_enforced", None)
+        };
+        assert_eq!(unselected.summary(), "open (default) · not enforced");
+        assert_eq!(
+            policy("web", 0, "unconfirmed", None).summary(),
+            "web · unconfirmed"
         );
         assert_eq!(
             policy("web", 3, "enforced", Some(3)).summary(),

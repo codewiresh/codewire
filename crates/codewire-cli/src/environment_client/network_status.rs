@@ -13,6 +13,7 @@ pub(super) fn egress_enforcement(
         match value.as_known() {
             Some(Enforcement::Unspecified) => return None,
             Some(Enforcement::NotEnforced) => "not_enforced",
+            Some(Enforcement::Unconfirmed) => "unconfirmed",
             Some(Enforcement::Enforced) => "enforced",
             Some(Enforcement::Enforcing) => "enforcing",
             Some(Enforcement::FailedClosed) => "failed_closed",
@@ -53,4 +54,18 @@ pub(super) fn network_failure(
         }
         .to_owned(),
     )
+}
+
+/// The selection as the CLI shows it; an unset or unknown status is
+/// `unknown`.
+pub(crate) fn environment_network_policy_from_proto(
+    value: &rpc::EnvironmentNetworkPolicy,
+) -> crate::presentation::EnvironmentNetworkPolicy {
+    crate::presentation::EnvironmentNetworkPolicy {
+        reference: value.reference.clone(),
+        name: value.name.clone(),
+        revision: value.revision,
+        enforcement: egress_enforcement(value.enforcement).unwrap_or_else(|| "unknown".to_owned()),
+        enforced_revision: (value.enforced_revision != 0).then_some(value.enforced_revision),
+    }
 }

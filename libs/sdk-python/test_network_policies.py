@@ -54,13 +54,17 @@ class NetworkPolicyFixture:
         self.record("UpdateEnvironmentNetworkPolicy", request)
         if request.environment_id == "blocked":
             return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
-                reference="hosted-default", name="hosted-default", digest="cd" * 32,
+                reference="", name="open", digest="cd" * 32,
                 enforcement=pb.NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED, failure_code="lockdown_not_applied"))
+        if request.environment_id == "unconfirmed":
+            return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
+                reference="web", name="web", digest="cd" * 32,
+                enforcement=pb.NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED))
         if request.environment_id == "future":
             return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
-                reference="hosted-default", name="hosted-default", digest="cd" * 32, enforcement=99))
+                reference="", name="open", digest="cd" * 32, enforcement=99))
         return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
-            reference="hosted-default", name="hosted-default", digest="cd" * 32,
+            reference="", name="open", digest="cd" * 32,
             enforcement=pb.NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED))
 
 
@@ -105,6 +109,10 @@ class NetworkPoliciesTestCase(unittest.TestCase):
     def test_a_sandbox_failed_closed_says_why(self):
         blocked = self.cw.network_policies.select("blocked", "hosted-default")
         self.assertEqual((blocked["enforcement"], blocked["failure_code"]), ("failed_closed", "lockdown_not_applied"))
+
+    def test_hosted_egress_on_with_no_fresh_report_is_unconfirmed(self):
+        selected = self.cw.network_policies.select("unconfirmed", "web")
+        self.assertEqual((selected["name"], selected["enforcement"]), ("web", "unconfirmed"))
 
     def test_an_unknown_enforcement_state_never_fails_a_read(self):
         selected = self.cw.network_policies.select("future", "hosted-default")

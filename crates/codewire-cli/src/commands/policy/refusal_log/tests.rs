@@ -144,12 +144,14 @@ fn a_built_in_policy_gets_a_new_policy_and_a_protected_reason_no_step() {
         next_step(&under("locked", "name_not_allowed"), &current()).as_deref(),
         Some("cw --local policy create NAME --from locked --allow example.com:8080")
     );
-    // `create` refuses `--from open`, and a policy from `locked` would drop
-    // what `open` allows, so `open` gets no step.
-    assert_eq!(
-        next_step(&under("open", "port_not_allowed"), &current()),
-        None
-    );
+    // `create` refuses `--from open` and `--from web`, and a policy from
+    // `locked` would drop what they allow, so neither gets a step.
+    for builtin in ["open", "web"] {
+        assert_eq!(
+            next_step(&under(builtin, "port_not_allowed"), &current()),
+            None
+        );
+    }
     for reason in [
         "protected_address",
         "protected_answers_only",

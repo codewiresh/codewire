@@ -1076,7 +1076,7 @@ mod linux {
             cw_runtime_catalog_generation: None,
             cw_runtime_moved_from_generation: None,
             image_disk: None,
-            network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
+            network_policy: codewire_egress_policy::CompiledPolicy::open(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             credential_placeholders: Default::default(),
             checkpoint: None,

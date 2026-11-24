@@ -57,6 +57,9 @@ pub struct EgressServiceState {
     pub attestation: Arc<dyn RuntimeAttestation>,
     pub bindings: Arc<dyn BindingStore>,
     pub pool: PgPool,
+    /// The platform network policy store's switch. While it is off every
+    /// environment is assigned `open`, whatever it selects (#6120).
+    pub network_policies: bool,
     pub server_namespace: String,
     pub sandbox_namespace: String,
     pub platform: Vec<PlatformDestination>,
@@ -529,7 +532,7 @@ impl EgressServiceState {
         let Some(binding) = binding else {
             return Ok(Assignment::Unbound);
         };
-        let policy = environment_policy(&self.pool, &binding.environment_id)
+        let policy = environment_policy(&self.pool, &binding.environment_id, self.network_policies)
             .await
             .map_err(|error| unavailable("read the environment's policy", error))?;
         let intercepts = binding_intercepts(

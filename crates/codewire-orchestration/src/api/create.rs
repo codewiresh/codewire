@@ -83,7 +83,7 @@ pub struct CreateEnvironmentBody {
     /// The client's ID for this create; a retry with it returns the first
     /// create's environment (#3609, design §6).
     pub request_id: Option<String>,
-    /// The network policy to select (#4000); none is `hosted-default`.
+    /// The network policy to select (#4000); none is `open`, the default.
     pub network_policy: Option<String>,
 }
 
@@ -2973,11 +2973,20 @@ credentials: {profile: user/work}
             })
         ));
         assert!(require_network_policies(off, &CreateEnvironmentBody::default()).is_ok());
-        assert!(require_network_policies(NetworkPolicyFlags { enabled: true }, &named).is_ok());
+        assert!(
+            require_network_policies(
+                NetworkPolicyFlags {
+                    enabled: true,
+                    ..NetworkPolicyFlags::default()
+                },
+                &named
+            )
+            .is_ok()
+        );
     }
 
     /// #4000: a create records the network policy it names in its own
-    /// transaction. Naming none is `hosted-default`; naming one that does not
+    /// transaction. Naming none is `open` by default; naming one that does not
     /// resolve leaves no environment behind.
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
@@ -2993,7 +3002,7 @@ credentials: {profile: user/work}
                 .as_ref()
                 .map(|policy| policy.reference.clone())
         };
-        assert_eq!(reference(&unselected).as_deref(), Some("hosted-default"));
+        assert_eq!(reference(&unselected).as_deref(), Some(""));
         let locked = fixture
             .create(&CreateEnvironmentBody {
                 network_policy: Some("locked".into()),

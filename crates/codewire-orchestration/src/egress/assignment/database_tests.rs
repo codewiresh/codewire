@@ -1,7 +1,7 @@
 //! The assignment query against the organization policy store (#4211): what
 //! a hosted environment's sandbox is told to enforce.
 
-use codewire_egress_policy::{BuiltinPolicy, HOSTED_DEFAULT_DIGEST, PolicyDigest};
+use codewire_egress_policy::{BuiltinPolicy, PolicyDigest};
 use codewire_server_core::auth::AuthUser;
 
 use super::*;
@@ -70,16 +70,16 @@ async fn db_a_sandbox_is_assigned_its_selections_current_revision() -> anyhow::R
     let result = async {
         fixture(&db).await?;
 
-        // Nothing selected: hosted-default, and no row.
-        let none = environment_policy(&db.pool, ENVIRONMENT).await?;
-        assert_eq!((none.name.as_str(), none.revision), ("hosted-default", 0));
-        assert_eq!(hex(&none), HOSTED_DEFAULT_DIGEST);
+        // Nothing selected: the built-in open, and no row.
+        let none = environment_policy(&db.pool, ENVIRONMENT, true).await?;
+        assert_eq!((none.name.as_str(), none.revision), ("open", 0));
+        assert_eq!(hex(&none), BuiltinPolicy::Open.digest_hex());
 
         // A built-in.
         select_for_environment(&db.pool, &owner(), ORG, ENVIRONMENT, "locked")
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        let locked = environment_policy(&db.pool, ENVIRONMENT).await?;
+        let locked = environment_policy(&db.pool, ENVIRONMENT, true).await?;
         assert_eq!(locked.name, "locked");
         assert_eq!(hex(&locked), BuiltinPolicy::Locked.digest_hex());
 
@@ -88,14 +88,17 @@ async fn db_a_sandbox_is_assigned_its_selections_current_revision() -> anyhow::R
             target: "github.com",
             ports: &[443],
         }];
-        let created = create_policy(&db.pool, &owner(), ORG, "web", None, &rule)
+        let created = create_policy(&db.pool, &owner(), ORG, "team-web", None, &rule)
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        select_for_environment(&db.pool, &owner(), ORG, ENVIRONMENT, "platform:web")
+        select_for_environment(&db.pool, &owner(), ORG, ENVIRONMENT, "platform:team-web")
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        let first = environment_policy(&db.pool, ENVIRONMENT).await?;
-        assert_eq!((first.name.as_str(), first.revision), ("platform:web", 1));
+        let first = environment_policy(&db.pool, ENVIRONMENT, true).await?;
+        assert_eq!(
+            (first.name.as_str(), first.revision),
+            ("platform:team-web", 1)
+        );
         assert_eq!(hex(&first), created.digest);
         assert_eq!(
             CompiledPolicy::compile(serde_json::from_slice(&first.document)?)?
@@ -113,19 +116,70 @@ async fn db_a_sandbox_is_assigned_its_selections_current_revision() -> anyhow::R
             &db.pool,
             &owner(),
             ORG,
-            Selector::Name("web"),
+            Selector::Name("team-web"),
             &extra,
             &[],
             None,
         )
         .await
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        let second = environment_policy(&db.pool, ENVIRONMENT).await?;
+        let second = environment_policy(&db.pool, ENVIRONMENT, true).await?;
         assert_eq!(second.revision, 2);
         assert_eq!(hex(&second), changed.digest);
 
         assert!(matches!(
-            environment_policy(&db.pool, "no-such-environment").await,
+            environment_policy(&db.pool, "no-such-environment", true).await,
+            Err(AssignmentError::NoEnvironment)
+        ));
+        anyhow::Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// With the store switched off a sandbox is assigned `open`, whatever its
+/// environment selects; switched back on, the stored selection is assigned
+/// unchanged, since nothing was deleted (#6120).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_with_the_store_off_a_sandbox_is_assigned_open_and_on_again_its_selection()
+-> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        fixture(&db).await?;
+        let rule = [RuleInput {
+            target: "github.com",
+            ports: &[443],
+        }];
+        let created = create_policy(&db.pool, &owner(), ORG, "team-web", None, &rule)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        for (reference, assigned, digest) in [
+            (
+                "locked",
+                "locked",
+                BuiltinPolicy::Locked.digest_hex().to_owned(),
+            ),
+            ("web", "web", BuiltinPolicy::Web.digest_hex().to_owned()),
+            ("team-web", "platform:team-web", created.digest.clone()),
+        ] {
+            select_for_environment(&db.pool, &owner(), ORG, ENVIRONMENT, reference)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+            let off = environment_policy(&db.pool, ENVIRONMENT, false).await?;
+            anyhow::ensure!(
+                (off.name.as_str(), off.revision, hex(&off).as_str())
+                    == ("open", 0, BuiltinPolicy::Open.digest_hex()),
+                "{reference} with the store off: {off:?}"
+            );
+            let on = environment_policy(&db.pool, ENVIRONMENT, true).await?;
+            anyhow::ensure!(
+                (on.name.as_str(), hex(&on)) == (assigned, digest),
+                "{reference} with the store on again: {on:?}"
+            );
+        }
+        anyhow::ensure!(matches!(
+            environment_policy(&db.pool, "no-such-environment", false).await,
             Err(AssignmentError::NoEnvironment)
         ));
         anyhow::Ok(())

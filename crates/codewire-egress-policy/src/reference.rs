@@ -3,8 +3,8 @@
 //!
 //! `local:NAME` and `platform:NAME` name the store; a bare name must be unique
 //! across the stores a placement may use; `local:id:UUID` and
-//! `platform:id:UUID` are the exact form an environment binds. A bare `open`
-//! or `locked` is the built-in. Syntax lives here; resolution takes the
+//! `platform:id:UUID` are the exact form an environment binds. A bare `open`,
+//! `web` or `locked` is the built-in. Syntax lives here; resolution takes the
 //! candidates an authenticated store adapter listed, so a bare name never
 //! silently chooses a store.
 
@@ -55,12 +55,25 @@ impl PolicyPlacement {
 }
 
 /// A stored policy's name: lowercase ASCII letters and digits, with `-`, `_`
-/// or `.` inside, at most [`MAX_POLICY_NAME_BYTES`], never a built-in's name.
+/// or `.` inside, at most [`MAX_POLICY_NAME_BYTES`]. A new name is never a
+/// built-in's.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PolicyName(String);
 
 impl PolicyName {
+    /// A name a policy may be created with: never a built-in's.
     pub fn parse(value: &str) -> Result<Self, PolicyReferenceError> {
+        let name = Self::from_stored(value)?;
+        if is_reserved_policy_name(value) {
+            return Err(PolicyReferenceError::ReservedName);
+        }
+        Ok(name)
+    }
+
+    /// A name a store already holds. A policy named before its name became
+    /// a built-in's (`web`, #3997) keeps it, and is reached by its id, since
+    /// a bare reference to the name means the built-in.
+    pub fn from_stored(value: &str) -> Result<Self, PolicyReferenceError> {
         let edge = |byte: Option<u8>| {
             byte.is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         };
@@ -74,9 +87,6 @@ impl PolicyName {
             })
         {
             return Err(PolicyReferenceError::InvalidName);
-        }
-        if is_reserved_policy_name(value) {
-            return Err(PolicyReferenceError::ReservedName);
         }
         Ok(Self(value.to_owned()))
     }
@@ -127,7 +137,7 @@ impl fmt::Display for PolicyId {
 /// One parsed selection, before resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PolicyReference {
-    /// A bare `open` or `locked`.
+    /// A bare `open`, `web` or `locked`.
     Builtin(BuiltinPolicy),
     /// `NAME`, `local:NAME` or `platform:NAME`.
     Name {
@@ -292,7 +302,7 @@ pub enum PolicyReferenceError {
         "invalid network policy name: use lowercase letters, digits, '-', '_' or '.', starting and ending with a letter or digit, at most 64 bytes"
     )]
     InvalidName,
-    #[error("network policy names open and locked are reserved for the built-in policies")]
+    #[error("network policy names open, web and locked are reserved for the built-in policies")]
     ReservedName,
     #[error("{0} is a built-in network policy; select it without local: or platform:")]
     QualifiedBuiltin(BuiltinPolicy),
@@ -367,6 +377,7 @@ mod tests {
                 },
             ),
             ("open", PolicyReference::Builtin(BuiltinPolicy::Open)),
+            ("web", PolicyReference::Builtin(BuiltinPolicy::Web)),
             ("locked", PolicyReference::Builtin(BuiltinPolicy::Locked)),
         ] {
             let parsed = parse(value);
@@ -416,6 +427,8 @@ mod tests {
         for (value, builtin) in [
             ("local:open", BuiltinPolicy::Open),
             ("platform:open", BuiltinPolicy::Open),
+            ("local:web", BuiltinPolicy::Web),
+            ("platform:web", BuiltinPolicy::Web),
             ("local:locked", BuiltinPolicy::Locked),
             ("platform:locked", BuiltinPolicy::Locked),
         ] {
@@ -429,12 +442,22 @@ mod tests {
                 )
             );
         }
-        for reserved in ["open", "locked"] {
+        for reserved in ["open", "web", "locked"] {
             assert_eq!(
                 PolicyName::parse(reserved),
                 Err(PolicyReferenceError::ReservedName)
             );
         }
+        assert_eq!(
+            PolicyReferenceError::ReservedName.to_string(),
+            "network policy names open, web and locked are reserved for the built-in policies"
+        );
+        // A store that already holds a policy named `web` still reads it.
+        assert_eq!(PolicyName::from_stored("web").unwrap().as_str(), "web");
+        assert_eq!(
+            PolicyName::from_stored("Web"),
+            Err(PolicyReferenceError::InvalidName)
+        );
         // hosted-default is no built-in here: locally it is an ordinary name,
         // which only the platform store reserves (#4000).
         assert_eq!(name("hosted-default").as_str(), "hosted-default");
@@ -466,7 +489,7 @@ mod tests {
             );
             assert_eq!(reference.check_placement(PolicyPlacement::Local), Ok(()));
         }
-        for value in ["work", "platform:work", "open", "locked"] {
+        for value in ["work", "platform:work", "open", "web", "locked"] {
             assert_eq!(
                 parse(value).check_placement(PolicyPlacement::Hosted),
                 Ok(())

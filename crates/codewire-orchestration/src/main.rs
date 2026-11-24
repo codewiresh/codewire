@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
+use codewire_orchestration::api::network_policies::NetworkPolicyFlags;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
 use codewire_orchestration::connect::live::MountLive as _;
 use codewire_orchestration::drain::{DRAIN_WINDOW, Drain};
@@ -638,8 +639,7 @@ async fn main() -> anyhow::Result<()> {
     let (pool, lease_owner) = database(&cfg.database_url).await?;
     codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
     let confidential_storage_flags = FeatureFlags::from_env()?;
-    let network_policy_flags =
-        codewire_orchestration::api::network_policies::NetworkPolicyFlags::from_env()?;
+    let network_policy_flags = NetworkPolicyFlags::from_env()?;
 
     let loops = env_list("WORKER_LOOPS");
 
@@ -684,6 +684,7 @@ async fn main() -> anyhow::Result<()> {
     // Hosted egress and the standard runtime, read once and only here
     // (`egress::startup`, #4000, #6070).
     let egress_settings = egress::startup::configure(&mut sandbox_cfg, kube.as_ref()).await?;
+    let network_policy_flags = network_policy_flags.with_hosted_egress(egress_settings.enabled);
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {

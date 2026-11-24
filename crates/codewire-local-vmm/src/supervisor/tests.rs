@@ -3831,6 +3831,118 @@ fn stored_creation_intent_remains_valid_after_runtime_resource_resize() {
     assert_eq!(environment.project_spec_sha256, Some(creation_digest));
 }
 
+/// #3997, cw-security's (3): a cw from before #3997 journaled a bare `web`
+/// for the user's own policy of that name. A create replayed from the
+/// journal before it selects its policy, while the store holds a policy
+/// named `web`, is interrupted with the code whose hint names the fix, and
+/// nothing is recorded, selected or booted. A create this supervisor
+/// admitted, one past its selection, and one whose bare name the store
+/// doesn't hold keep the built-in's meaning.
+#[tokio::test]
+async fn a_replayed_create_whose_bare_name_a_stored_policy_has_is_refused() {
+    use crate::network_policy_store::PolicyBase;
+    let (project_spec_json, project_spec_sha256) = project_intent(2, 16 * 1024, 20);
+    let request = v1::CreateEnvironmentRequest {
+        network_policy: "web".to_owned(),
+        name: "replayed".to_owned(),
+        source_path: "/workspace/source".to_owned(),
+        vcpus: 2,
+        memory_mib: 16 * 1024,
+        disk_bytes: 20 * 1024 * 1024 * 1024,
+        docker_disk_bytes: crate::state::MINIMUM_DOCKER_DISK_BYTES,
+        request_id: Uuid::new_v4().to_string(),
+        project_spec_json,
+        project_spec_sha256,
+        implicit_path_mode: "clone".to_owned(),
+        ..Default::default()
+    };
+    let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+        vm_only: Vec::new(),
+        source_path: PathBuf::from("/workspace/source"),
+        commit: "a".repeat(40),
+        mode: WorkspaceSourceMode::Clone,
+    })
+    .unwrap();
+    let (_parent, core) = test_supervisor_core(project_environment());
+    let users_web = core
+        .network_policies
+        .create(
+            &codewire_egress_policy::reference::PolicyName::from_stored("web").unwrap(),
+            &PolicyBase::Locked,
+            Vec::new(),
+        )
+        .unwrap();
+    let environment_id = Uuid::new_v4();
+    let operation = core
+        .store
+        .begin_operation(
+            Uuid::parse_str(&request.request_id).unwrap(),
+            Some(environment_id),
+            OperationKind::Create,
+            &create_operation_payload(&request, &workspace_plan).unwrap(),
+        )
+        .unwrap();
+    let supervisor = test_supervisor(core);
+
+    assert_eq!(
+        supervisor.replayed_create(&operation, true).unwrap_err(),
+        "create_stored_policy_named_web"
+    );
+    assert!(supervisor.replayed_create(&operation, false).is_ok());
+    let selected = OperationRecord {
+        checkpoint: 1,
+        ..operation.clone()
+    };
+    assert!(supervisor.replayed_create(&selected, true).is_ok());
+    let locked = OperationRecord {
+        payload: create_operation_payload(
+            &v1::CreateEnvironmentRequest {
+                network_policy: "locked".to_owned(),
+                ..request.clone()
+            },
+            &workspace_plan,
+        )
+        .unwrap(),
+        ..operation.clone()
+    };
+    assert!(supervisor.replayed_create(&locked, true).is_ok());
+
+    supervisor
+        .run_operation(operation.clone(), true)
+        .await
+        .unwrap();
+    let interrupted = supervisor
+        .core()
+        .store
+        .operation_by_request(operation.request_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (interrupted.phase, interrupted.error_code.as_deref()),
+        (
+            OperationPhase::Interrupted,
+            Some("create_stored_policy_named_web")
+        )
+    );
+    let core = supervisor.core();
+    assert!(!core.state.environments.contains_key("replayed"));
+    assert!(core.children.is_empty() && core.live_runners.is_empty());
+    assert!(
+        core.network_policies
+            .environments_selecting(&users_web.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        core.network_policies
+            .environment_policy(environment_id)
+            .unwrap()
+            .enforced,
+        None,
+        "nothing booted"
+    );
+}
+
 #[test]
 fn create_journal_reconstructs_exact_canonical_project_intent() {
     let (project_spec_json, _) = project_intent(2, 16 * 1024, 20);

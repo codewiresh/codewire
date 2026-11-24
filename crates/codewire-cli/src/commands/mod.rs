@@ -1164,7 +1164,7 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "POLICY",
-        help = "Network policy for outbound connections: open (the local default), locked, or a policy from `cw policy`; a cloud environment without one is on hosted-default, and its policy is not enforced yet. Unrelated to --network, which joins a Mesh network"
+        help = "Network policy for outbound connections: open (the default, any TCP port), web (TCP 22, 80 and 443), locked, or a policy from `cw policy`; a cloud deployment enforces it only where its hosted egress is on. Unrelated to --network, which joins a Mesh network"
     )]
     policy: Option<policy::PolicyName>,
     #[arg(short, long, default_value_t = true, help = "Watch startup progress")]

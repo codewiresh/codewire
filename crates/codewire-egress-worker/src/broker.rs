@@ -865,7 +865,7 @@ mod tests {
     fn bootstrap_is_exact_and_generation_policy_bound() {
         let (environment_id, generation) = identity();
         let key = [0x5a; BROKER_IPC_KEY_LEN];
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let bytes =
             encode_egress_broker_bootstrap(environment_id, generation, &key, &policy).unwrap();
         let bytes = bytes[..EGRESS_BROKER_BOOTSTRAP_LEN].to_vec();
@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(decoded.binding.policy_digest(), selected.digest());
 
         // A different document than the header names is refused.
-        let open = CompiledPolicy::developer_baseline();
+        let open = CompiledPolicy::open();
         assert!(matches!(
             decode_bootstrap(header, environment_id, generation, &open),
             Err(EgressBrokerProcessError::PolicyMismatch)
@@ -940,17 +940,12 @@ mod tests {
                 Uuid::nil(),
                 generation,
                 &[1; 32],
-                &CompiledPolicy::developer_baseline()
+                &CompiledPolicy::open()
             ),
             Err(EgressBrokerProcessError::InvalidIdentity)
         ));
         assert!(matches!(
-            encode_egress_broker_bootstrap(
-                environment_id,
-                0,
-                &[1; 32],
-                &CompiledPolicy::developer_baseline()
-            ),
+            encode_egress_broker_bootstrap(environment_id, 0, &[1; 32], &CompiledPolicy::open()),
             Err(EgressBrokerProcessError::InvalidIdentity)
         ));
         assert!(matches!(
@@ -958,11 +953,11 @@ mod tests {
                 environment_id,
                 generation,
                 &[0; 32],
-                &CompiledPolicy::developer_baseline()
+                &CompiledPolicy::open()
             ),
             Err(EgressBrokerProcessError::InvalidBootstrap)
         ));
-        let policy = CompiledPolicy::developer_baseline();
+        let policy = CompiledPolicy::open();
         let mut bytes =
             encode_egress_broker_bootstrap(environment_id, generation, &[1; 32], &policy).unwrap();
         bytes[0] ^= 1;

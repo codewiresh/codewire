@@ -41,7 +41,7 @@ pub(crate) struct EnvUpdateArgs {
     #[arg(
         long,
         value_name = "POLICY",
-        help = "Select the network policy for outbound connections: open, locked, or a policy from `cw policy`; on a cloud environment, hosted-default clears the selection. Unrelated to Mesh networks"
+        help = "Select the network policy for outbound connections: open, web, locked, or a policy from `cw policy`. Unrelated to Mesh networks"
     )]
     pub(crate) policy: Option<policy::PolicyName>,
     #[arg(

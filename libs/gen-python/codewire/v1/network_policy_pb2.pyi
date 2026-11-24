@@ -17,11 +17,13 @@ class NetworkPolicyEnforcement(int, metaclass=_enum_type_wrapper.EnumTypeWrapper
     NETWORK_POLICY_ENFORCEMENT_ENFORCED: _ClassVar[NetworkPolicyEnforcement]
     NETWORK_POLICY_ENFORCEMENT_ENFORCING: _ClassVar[NetworkPolicyEnforcement]
     NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED: _ClassVar[NetworkPolicyEnforcement]
+    NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED: _ClassVar[NetworkPolicyEnforcement]
 NETWORK_POLICY_ENFORCEMENT_UNSPECIFIED: NetworkPolicyEnforcement
 NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED: NetworkPolicyEnforcement
 NETWORK_POLICY_ENFORCEMENT_ENFORCED: NetworkPolicyEnforcement
 NETWORK_POLICY_ENFORCEMENT_ENFORCING: NetworkPolicyEnforcement
 NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED: NetworkPolicyEnforcement
+NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED: NetworkPolicyEnforcement
 
 class NetworkPolicySelector(_message.Message):
     __slots__ = ("name", "id")
@@ -85,12 +87,14 @@ class ListNetworkPoliciesRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ...) -> None: ...
 
 class ListNetworkPoliciesResponse(_message.Message):
-    __slots__ = ("policies", "usage")
+    __slots__ = ("policies", "usage", "hosted_policies_enforced")
     POLICIES_FIELD_NUMBER: _ClassVar[int]
     USAGE_FIELD_NUMBER: _ClassVar[int]
+    HOSTED_POLICIES_ENFORCED_FIELD_NUMBER: _ClassVar[int]
     policies: _containers.RepeatedCompositeFieldContainer[NetworkPolicy]
     usage: _containers.RepeatedCompositeFieldContainer[NetworkPolicyUsage]
-    def __init__(self, policies: _Optional[_Iterable[_Union[NetworkPolicy, _Mapping]]] = ..., usage: _Optional[_Iterable[_Union[NetworkPolicyUsage, _Mapping]]] = ...) -> None: ...
+    hosted_policies_enforced: bool
+    def __init__(self, policies: _Optional[_Iterable[_Union[NetworkPolicy, _Mapping]]] = ..., usage: _Optional[_Iterable[_Union[NetworkPolicyUsage, _Mapping]]] = ..., hosted_policies_enforced: _Optional[bool] = ...) -> None: ...
 
 class NetworkPolicyUsage(_message.Message):
     __slots__ = ("policy_id", "builtin", "environments", "names")
@@ -115,10 +119,12 @@ class GetNetworkPolicyRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ..., policy: _Optional[_Union[NetworkPolicySelector, _Mapping]] = ..., revision: _Optional[int] = ...) -> None: ...
 
 class GetNetworkPolicyResponse(_message.Message):
-    __slots__ = ("policy",)
+    __slots__ = ("policy", "hosted_policies_enforced")
     POLICY_FIELD_NUMBER: _ClassVar[int]
+    HOSTED_POLICIES_ENFORCED_FIELD_NUMBER: _ClassVar[int]
     policy: NetworkPolicy
-    def __init__(self, policy: _Optional[_Union[NetworkPolicy, _Mapping]] = ...) -> None: ...
+    hosted_policies_enforced: bool
+    def __init__(self, policy: _Optional[_Union[NetworkPolicy, _Mapping]] = ..., hosted_policies_enforced: _Optional[bool] = ...) -> None: ...
 
 class UpdateNetworkPolicyRequest(_message.Message):
     __slots__ = ("org_id", "policy", "allow", "remove", "expected_revision")

@@ -1349,6 +1349,15 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_interrupted" => {
             " (the local supervisor stopped during the create; create it again)"
         }
+        "create_stored_policy_named_web" => {
+            " (a policy you stored is named web; select it by its id, local:id: and the id `cw --local policy ls` shows, then create again)"
+        }
+        "create_stored_policy_named_open" => {
+            " (a policy you stored is named open; select it by its id, local:id: and the id `cw --local policy ls` shows, then create again)"
+        }
+        "create_stored_policy_named_locked" => {
+            " (a policy you stored is named locked; select it by its id, local:id: and the id `cw --local policy ls` shows, then create again)"
+        }
         #[cfg(target_os = "macos")]
         "create_vz_helper_missing" => {
             " (the Virtualization.framework helper named by the local VM artifact lock is missing; install the signed codewire-vz-runner at that path)"

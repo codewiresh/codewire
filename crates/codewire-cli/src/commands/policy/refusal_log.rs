@@ -308,8 +308,8 @@ fn table(rows: &[Row], now_unix_ms: i64, columns: usize) -> String {
 
 /// The one step that would allow the most recent refusal a rule can: an
 /// edit of the user's own policy, or a new policy from `locked`. Under
-/// `open` there is none: `create` refuses `--from open`, and a policy from
-/// `locked` would drop the ports `open` allows. A row refused under an older
+/// `open` or `web` there is none: `create` refuses `--from` either, and a
+/// policy from `locked` would drop what they allow. A row refused under an older
 /// revision of the user's policy gets none either, since an edit since may
 /// already allow it; `current` names each policy's current revision.
 fn next_step(rows: &[Row], current: &HashMap<String, u32>) -> Option<String> {
@@ -318,7 +318,7 @@ fn next_step(rows: &[Row], current: &HashMap<String, u32>) -> Option<String> {
         .find(|row| row.allow_target().is_some() && row.policy.is_some())?;
     let (target, (policy, _)) = (row.allow_target()?, row.policy.as_ref()?);
     match BuiltinPolicy::from_name(policy) {
-        Some(BuiltinPolicy::Open) => None,
+        Some(BuiltinPolicy::Open | BuiltinPolicy::Web) => None,
         Some(BuiltinPolicy::Locked) => Some(format!(
             "cw --local policy create NAME --from locked --allow {target}"
         )),

@@ -72,17 +72,22 @@ func (f *networkPolicyFixture) UpdateEnvironmentNetworkPolicy(_ context.Context,
 	f.record(request.Msg)
 	if request.Msg.GetEnvironmentId() == "blocked" {
 		return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
-			Reference: "hosted-default", Name: "hosted-default", Digest: strings.Repeat("cd", 32),
+			Reference: "", Name: "open", Digest: strings.Repeat("cd", 32),
 			Enforcement: codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED,
 			FailureCode: "lockdown_not_applied"}}), nil
 	}
+	if request.Msg.GetEnvironmentId() == "unconfirmed" {
+		return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
+			Reference: "web", Name: "web", Digest: strings.Repeat("cd", 32),
+			Enforcement: codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED}}), nil
+	}
 	if request.Msg.GetEnvironmentId() == "future" {
 		return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
-			Reference: "hosted-default", Name: "hosted-default", Digest: strings.Repeat("cd", 32),
+			Reference: "", Name: "open", Digest: strings.Repeat("cd", 32),
 			Enforcement: codewirev1.NetworkPolicyEnforcement(99)}}), nil
 	}
 	return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
-		Reference: "hosted-default", Name: "hosted-default", Digest: strings.Repeat("cd", 32),
+		Reference: "", Name: "open", Digest: strings.Repeat("cd", 32),
 		Enforcement: codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED}}), nil
 }
 
@@ -132,6 +137,11 @@ func TestNetworkPoliciesNameTheOrganizationAndPolicy(t *testing.T) {
 	blocked, err := client.NetworkPolicies.Select(ctx, "blocked", "hosted-default")
 	if err != nil || blocked.Enforcement != "failed_closed" || blocked.FailureCode != "lockdown_not_applied" {
 		t.Fatalf("failed closed: %v %v", blocked, err)
+	}
+	// Hosted egress on, with no fresh report (#3997).
+	unconfirmed, err := client.NetworkPolicies.Select(ctx, "unconfirmed", "web")
+	if err != nil || unconfirmed.Enforcement != "unconfirmed" {
+		t.Fatalf("unconfirmed: %v %v", unconfirmed, err)
 	}
 	// A state this SDK does not know yet never fails the read.
 	future, err := client.NetworkPolicies.Select(ctx, "future", "hosted-default")

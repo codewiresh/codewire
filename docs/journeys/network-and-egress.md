@@ -29,7 +29,8 @@ separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- | --- |
-| `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 | not yet observed | n/a | n/a |
+| `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 (under the old `open`; the port rule under its new name, `web`, not yet observed) | not yet observed | n/a | n/a |
+| `policy-builtins` | #3997 | not yet observed | not yet observed | not yet observed | not yet observed |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (steps 1 to 5 and 8, and the enforcement half; step 6 not walked) | not yet observed |
 | `policy-dashboard` | #5114, #5116, #5117 | n/a | n/a | not yet observed | not yet observed |
@@ -97,7 +98,8 @@ Issue: #2537. Code: `crates/codewire-egress-policy`,
   delete`; `cw create --local --policy REF`; `cw update ENV --policy REF`;
   `cw info ENV`.
 - **States to exercise:**
-  - the built-ins `open` (the default) and `locked`;
+  - the built-ins `open` (the default), `web` and `locked`
+    (`policy-builtins` walks what each allows);
   - a policy made from `locked` that allows two names, one a wildcard;
   - a VM created with `--policy`, and a running VM moved with `cw update`;
   - an edit to a policy two running VMs select: an allow, then a removal;
@@ -135,8 +137,10 @@ Issue: #2537. Code: `crates/codewire-egress-policy`,
 - **Gotchas:**
   - A policy allows names. The broker dials only an address it resolved for
     an allowed name, so a raw IP address is refused unless a rule covers it.
-  - `open` allows TCP 22, 80 and 443 only. A refusal on another port is the
-    port rule, not the name.
+  - `web` allows TCP 22, 80 and 443 only. Under `web` a refusal on another
+    port is the port rule, not the name. `open` allows every TCP port. Not
+    yet observed under the new name: the walk below saw this rule under the
+    old `open`.
   - In the VM a refused name fails as a lookup (`curl: (6) Could not resolve
     host`), and a refused address or port as a connection (`curl: (7) Failed
     to connect`), each within milliseconds. Neither is a DNS or network
@@ -174,6 +178,102 @@ Issue: #2537. Code: `crates/codewire-egress-policy`,
     stopping at "Preparing sources" with nothing created; `policy delete` is
     refused while a VM selects the policy, naming that VM, and succeeds once
     none does.
+  - This walk predates #3997. Its `open` is the old one, which allowed TCP
+    22, 80 and 443 only, so `example.com:8443` was refused under it. That
+    rule is `web` now, and the rename is not yet observed
+    (`policy-builtins`).
+
+## `policy-builtins`: the built-ins `open`, `web` and `locked`, and the default
+
+Issue: #3997. `SPEC.md` "Networking and egress" defines the three built-ins
+and the default, and "Hosted enforcement status" the two states a policy that
+isn't enforced can read.
+
+- **Entry points:** `cw --local policy list` and `cw --cloud policy list`;
+  `cw policy check`; `cw info ENV`; a create with no `--policy`; the
+  dashboard's Network policies page and a Sandbox's Network access.
+- **States to exercise:**
+  - a local VM and a hosted Sandbox created with no `--policy`;
+  - the same on `web`;
+  - a local VM and a hosted Sandbox that selected `open` before the rename,
+    read again after it;
+  - a local VM that selected the user's own policy named `web` before the
+    rename, read again after it;
+  - a UDP send other than DNS, from a local VM and from a hosted Sandbox
+    with hosted egress on;
+  - a hosted Sandbox on a deployment with hosted egress off;
+  - a hosted Sandbox with hosted egress on and no fresh report, such as one
+    whose node's `cw-egress` has been gone for over 15 minutes.
+- **Driving it:** on a local VM, with `cw` and its runtime from the source
+  under test:
+
+  ```sh
+  cw --local policy list
+  cw --local policy check open example.com:8443
+  cw --local policy check web example.com:8443
+  cw --local policy check web example.com:443
+  cw create --local --name egress-walk -y
+  cw --local info egress-walk
+  cw --local exec --in egress-walk -- curl -sS -m 5 http://example.com:8443/
+  cw --local exec --in egress-walk -- python3 -c 'import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"walk", ("1.1.1.1", 123))'
+  cw --local update egress-walk --policy web
+  cw --local exec --in egress-walk -- curl -sS -m 5 http://example.com:8443/
+  cw --local policy log egress-walk
+  ```
+
+  For the old selection, create a VM with `--policy open` from a release
+  before the rename, then upgrade as "Before the walk" says, and read
+  `cw --local info` and `cw --local policy log` after the same `curl`. For a
+  hosted Sandbox, the same with `cw --cloud policy list`,
+  `cw --cloud create --name builtins-walk`, `cw info builtins-walk` and
+  `cw update builtins-walk --policy web`, on a deployment with hosted egress
+  off and on one with it on.
+- **Proof:**
+  - `policy list` shows `open`, `web` and `locked` as built in, each with
+    what it allows, and says that UDP other than DNS is blocked. So does the
+    dashboard's Network policies page;
+  - `check` allows `example.com:8443` under `open` and refuses it under
+    `web` with `(port not allowed)`; both allow `example.com:443`;
+  - a Sandbox created with no `--policy` shows `open (default)` in
+    `cw info` and on its page. A local VM shows `open`: its store can't
+    tell the default from a selection. Neither shows `hosted-default`;
+  - under `open` the `curl` to port 8443 leaves no row in the refusal log;
+    a timeout there is the server's, not a refusal. Under `web` it fails at
+    once with `curl: (7)` and leaves a `port not allowed` row;
+  - on a local VM the UDP send leaves a `udp` row in the refusal log under
+    every policy. A hosted Sandbox's refusal log has no command yet
+    (#4000);
+  - an old `open` selection reads `open` in `cw info`, with no
+    `(default)`, and the `curl` to port 8443 leaves no row: it now allows
+    every TCP port;
+  - `cw info` for any selection of `open`, and for every local VM on `open`,
+    says "open now allows every public TCP port; select web to keep 22, 80
+    and 443." beside the policy line, as do `cw update ENV --policy open`
+    and a hosted create with `--policy open`. `cw info` for a Sandbox on
+    `open (default)` doesn't, and `--output json` never does;
+  - a VM that selected the user's own `web` still shows `web · rev N` in
+    `cw info`, with no line about `open`, and its own rules apply, not the
+    built-in's; `cw --local policy list` marks the policy and asks for a new
+    name;
+  - a protected address is refused under `open` and `web` alike, as in
+    `policy-protected`;
+  - with hosted egress off, `cw info` says "Network policy NAME isn't
+    enforced on this deployment: outbound connections are not restricted.",
+    the status reads `NOT_ENFORCED`, and `cw --cloud policy` and the
+    dashboard say policies are not enforced on this deployment;
+  - with hosted egress on, no command or page says policies are not
+    enforced. A Sandbox with no fresh report reads `UNCONFIRMED`, and
+    `cw info` says "We can't confirm network policy NAME is applied to this
+    environment right now.";
+  - `--output json` carries `not_enforced` and `unconfirmed` for the two
+    states.
+- **Gotchas:**
+  - Widening an old `open` selection to every TCP port is the owner's call
+    (#3997). Read it as the expected result, not a regression.
+  - Under `open` no TCP connection is refused for its port.
+  - A UDP send gets no answer either way, so only the refusal log shows it
+    was refused.
+- **Observed:** not yet observed.
 
 ## `policy-project-file`: `codewire.yaml` names a policy
 
@@ -218,25 +318,29 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
   - deleting a policy a Sandbox selects;
   - a deployment with the store switched off;
   - a Sandbox on `locked`, reached by its owner;
-  - the default when nothing is selected, `hosted-default` (any TCP port
-    through the broker, plus DNS; other UDP off unless the environment opts
-    in).
+  - the default when nothing is selected, `open` (DNS and any TCP port
+    through the broker; other UDP blocked), shown as `open (default)`
+    (#3997, `policy-builtins`).
 - **Driving it,** as a member of an organization whose deployment has the
   store switched on (Kind's overlay does; Dev once
   `CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED` is set):
   1. `cw --cloud policy create walk-docs --allow docs.rs:443` makes revision
      1 from `locked`, the default base. `cw --cloud policy ls` lists it with
      its revision and rules; with `--output json` each policy also has its
-     digest and its reference, `platform:id:…`. Until `hosted-enforcement`
-     reports, each of these commands' text ends with one stderr line saying
-     hosted sandboxes don't enforce network policies yet (create, allow and
-     rm start it with "Stored."), and `check`'s JSON says `"enforced":
-     false`.
+     digest and its reference, `platform:id:…`. On a deployment with
+     hosted egress off, each of these commands' text ends with one stderr
+     line saying network policies aren't enforced on this deployment
+     (create, allow and rm start it with "Stored."), and `check`'s JSON says
+     `"enforced": false`. With hosted egress on there is no such line (#3997;
+     not yet observed under this rule).
   2. `cw --cloud create --policy walk-docs --name policy-walk` selects it at
-     create. `cw info policy-walk` shows `NetworkPolicy: walk-docs · rev 1 ·
-     not enforced yet`, and the create prints one notice on stderr, never in
-     `--output json`. A create without `--policy` prints none. If the server
-     doesn't record the selection, the create says so instead.
+     create. With hosted egress off, `cw info policy-walk` shows `walk-docs ·
+     rev 1` and that it isn't enforced on this deployment, and the create
+     prints one notice on stderr, never in `--output json`: "Network policy
+     walk-docs isn't enforced on this deployment: outbound connections are
+     not restricted." A create without `--policy` prints none (#3997; not
+     yet observed in these words). If the server doesn't record the
+     selection, the create says so instead.
   3. `cw --cloud policy allow walk-docs crates.io:443` makes revision 2.
      `cw --cloud policy check walk-docs crates.io` says it is allowed, and
      by which rule. `cw info policy-walk` shows revision 2 desired.
@@ -268,8 +372,10 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
 - **Gotchas:** a hosted policy is stored on the platform, a local one on the
   host. The same name in both is two policies.
 - **Observed:**
-  - on a local Kind cluster, 2026-11-16 (#4000): steps 1 to 8 as written,
-    with the "not enforced" line on every command that's meant to show it;
+  - on a local Kind cluster, 2026-11-16 (#4000): steps 1 to 8 as they
+    read then, with the "not enforced" line on every command that's meant
+    to show it. That line did not yet depend on whether the deployment enforces
+    policies; the rule of #3997 is not yet observed;
   - on Dev, 2026-11-23, Dev source 42306388f8, as the Dev smoke identity,
     with hosted egress and the store on (#4000 comment 135597, with every
     command and its output). The Sandbox `policy-walk` and the
@@ -302,7 +408,7 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
       identity;
     - step 7 needs the store off;
     - an edit ending an open connection the new revision refuses;
-    - refusals in `cw policy log`, which wait for #6144.
+    - refusals in `cw policy log`, which wait for the audit log (#6189).
 
 ## `policy-dashboard`: an organization's policies in the dashboard
 
@@ -316,8 +422,9 @@ policies.
   Network access on a Sandbox's page; the network policy field on the
   Sandbox create form.
 - **States to exercise:**
-  - an organization with no policies of its own: the built-ins `open` and
-    `locked`, "No policies yet" and Create policy;
+  - an organization with no policies of its own: the built-ins `open`,
+    `web` and `locked`, "No policies yet" and Create policy;
+  - a deployment with hosted egress off, and one with it on;
   - a policy created from `locked` with two destinations, one a wildcard,
     then a destination added and one removed;
   - a protected range typed as a destination;
@@ -334,9 +441,11 @@ policies.
 - **Driving it:** on the retained Kind cluster (its overlay switches the store
   on), signed in as an organization owner, then as a member, in two browser
   windows:
-  1. Open Network policies. It shows `open` and `locked` as built in,
-     "No policies yet", and the notice that hosted Sandboxes don't enforce
-     network policies yet.
+  1. Open Network policies. It shows `open`, `web` and `locked` as built
+     in, and "No policies yet". With hosted egress off it says outbound
+     connections are not restricted on this deployment. With hosted egress
+     on it says that UDP other than DNS is blocked, and nothing about
+     policies not being enforced (#3997).
   2. Create policy `walk-dash` from `locked`, allowing `docs.rs` on 443 and
      `*.crates.io` on the default ports. Add `crates.io` on 443, then remove
      `docs.rs`. Type `10.0.0.0/8` as a destination.
@@ -365,14 +474,17 @@ policies.
     which lists all 12;
   - step 6 is refused, naming the Sandboxes, and succeeds after the move;
   - a member reads every policy and sees no Create, edit or Delete;
+  - a Sandbox that selects nothing shows `open (default)` under Network
+    access, never `hosted-default`;
   - with the store off the page says network policies aren't available on
     this deployment, and no RPC error;
   - no page makes a request without a live event or a user action.
 - **Gotchas:**
   - The page shows only the organization's store. A policy made with
     `cw --local policy` never appears, even under the same name.
-  - Until `hosted-enforcement` reports, every Sandbox reads "Not enforced
-    yet". That is the expected state, not a failure of the page.
+  - With hosted egress off, every Sandbox reads as not enforced on this
+    deployment. With it on, a Sandbox with no fresh report reads as
+    unconfirmed. Neither is a failure of the page.
 - **Observed:**
   - on a local Kind profile (`cw-netui`), 2026-11-17, the dashboard built
     from #5114's pull request (NP1), as the seeded owner and member:
@@ -393,7 +505,10 @@ policies.
     - step 6: delete refused, naming the Sandboxes;
     - step 7: the member saw no Create, Allow, Remove or Delete;
   - not yet observed: step 8 (the Kind overlay switches the store on), Network
-    access on a Sandbox (#5116) and refusals (#5117); Dev and Production.
+    access on a Sandbox (#5116) and refusals (#5117); Dev and Production;
+  - not yet observed under #3997: step 1 with `web` listed, either notice
+    as it depends on hosted egress, and `open (default)`. The 2026-11-17
+    walk saw `open` and `locked` and the old notice.
 
 ## `policy-protected`: addresses no policy can allow
 
@@ -582,7 +697,7 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     the log keeps;
   - a name the workload builds to carry a terminal escape sequence;
   - the one-step allow from the log's next step, under a policy of yours and
-    under the built-in `locked`, and none under `open`;
+    under the built-in `locked`, and none under `web` or `open`;
   - a stopped VM, a restarted VM, and a supervisor older than the command.
 - **Driving it:** on the host, with a released `cw` or one built from the
   source under test, and a throwaway `HOME`:
@@ -632,8 +747,8 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     allow: `→ cw --local policy allow walk-log example.com:8080`, or under
     `locked` `→ cw --local policy create NAME --from locked --allow
     example.com:8080`. A protected or credential reason gets no `→` line,
-    and neither does `open`: `create` can't start from it, and a policy
-    from `locked` would drop the ports `open` allows;
+    and neither does `web` or `open`: `create` can't start from either,
+    and a policy from `locked` would drop the ports they allow;
   - after the allow, the same request is no longer refused, its row's count
     doesn't grow, and the log offers no `→` step for a row refused under an
     older revision of the policy;
@@ -2028,7 +2143,8 @@ Issue: #4000.
 - **Entry points:** the environment's network policy status, in `cw info`
   and the API; no user action starts the checks.
 - **States to exercise:**
-  - a stopped Sandbox, and one whose placement has no egress broker;
+  - a Sandbox on a deployment with hosted egress off;
+  - with hosted egress on, a stopped Sandbox;
   - a running Sandbox on its selected revision;
   - a running Sandbox just moved to a new revision;
   - a Sandbox whose lockdown is not applied when it starts;
@@ -2066,9 +2182,14 @@ Issue: #4000.
     with the switch off.
 - **Driving it:** no command yet (#4000).
 - **Proof:**
-  - the status reads `NOT_ENFORCED` for the first state, `ENFORCED` with the
-    enforced revision for the second, `ENFORCING` until the new revision
-    takes over for the third;
+  - the status reads `NOT_ENFORCED` for the first state, and `cw info`
+    says "Network policy NAME isn't enforced on this deployment: outbound
+    connections are not restricted."; `UNCONFIRMED` for the second, and
+    `cw info` says "We can't confirm network policy NAME is applied to this
+    environment right now." (#3997, which splits today's `NOT_ENFORCED` in
+    two); `ENFORCED` with the enforced revision for a running Sandbox on its
+    selected revision; `ENFORCING` until the new revision takes over for
+    one just moved;
   - at every start the Sandbox tries one direct connection and one lookup
     at the cluster's DNS, around its egress path. Both must fail. If either
     succeeds the Sandbox does not become ready, its status reads
@@ -2206,19 +2327,21 @@ Issue: #4000.
     first self-check serves nothing, so its log is where it reads. Once
     `cw-egress` accepts the daemon's version, the next try connects and the
     health line clears (not yet observed);
-  - through every move the status reads `ENFORCED`, never `NOT_ENFORCED` or
-    `FAILED_CLOSED`, the refusal log keeps its counts, and `cw-egress`'s
-    log names the Sandboxes that moved idle and those cut at the deadline,
-    with a count of each.
+  - through every move the status reads `ENFORCED`, never `UNCONFIRMED`,
+    `NOT_ENFORCED` or `FAILED_CLOSED`, the refusal log keeps its counts,
+    and `cw-egress`'s log names the Sandboxes that moved idle and those cut
+    at the deadline, with a count of each.
 - **Gotchas:**
-  - `NOT_ENFORCED` on a running Sandbox is a finding, not a default.
+  - With hosted egress on, `UNCONFIRMED` on a running Sandbox is a finding,
+    not a default. `NOT_ENFORCED` means the deployment has hosted egress
+    off.
   - A workload can use every path the daemon has. On `locked` it still
     reaches what the platform's public gateway serves (the API, sign-in,
     the dashboard, previews) and the relay. `locked` means the platform's
     own services and nothing else; a walk that records "nothing can leave"
     is wrong.
   - A status whose latest report is older than 15 minutes (three of
-    cw-egress's 5-minute refreshes) reads `NOT_ENFORCED`; do not trust a
+    cw-egress's 5-minute refreshes) reads `UNCONFIRMED`; do not trust a
     cached `ENFORCED`.
   - Connections to the platform's in-cluster address (the daemon's, and a
     workload's that uses the same address) do not pass through `cw-egress`:

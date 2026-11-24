@@ -280,7 +280,7 @@ message CreateEnvironmentRequest {
   optional string organization = 32;
   // The network policy to select (#4000), as
   // UpdateEnvironmentNetworkPolicyRequest.network_policy. Empty selects none,
-  // and the environment is on `hosted-default`. Refused with UNAVAILABLE
+  // and the environment is on `open` by default. Refused with UNAVAILABLE
   // while the deployment's platform network policies are off.
   string network_policy = 33;
   // Where the environment runs. Absent: the deployment's own runtime. A

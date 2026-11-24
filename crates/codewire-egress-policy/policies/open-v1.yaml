@@ -1,0 +1,18 @@
+# `open`, the default policy (codewire#3997): any TCP port, plus DNS; other UDP
+# stays off. Protected names and addresses are refused before any rule, so this
+# reaches public addresses only. Its rules, and so its digest, are those the
+# hosted default had before it was named `open`.
+version: 1
+default: deny
+rules:
+  - id: hosted-default-dns
+    action: allow
+    protocols: [dns]
+    ports: [53]
+    destinations: ["*"]
+    route_classes: [general]
+  - id: hosted-default-tcp
+    action: allow
+    protocols: [tcp]
+    cidrs: [0.0.0.0/0, "::/0"]
+    route_classes: [general]

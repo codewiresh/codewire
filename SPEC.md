@@ -731,11 +731,43 @@ the refusal log below (#3997). ICMP, IPv6, and malformed or fragmented
 packets are dropped with no record. The egress broker
 (`cw __native-egress-broker`, on `crates/codewire-egress-broker`) dials on the
 guest's behalf under the VM's selected network policy, from
-`crates/codewire-egress-policy`. The default is the built-in `open` (deny
-first; DNS on 53 and TCP to ports 22, 80 and 443 of public addresses). The
-other built-in, `locked`, allows nothing, except that a selected model
-credential still reaches its provider, as the interception paragraph below
-says (#5215).
+`crates/codewire-egress-policy`. Three policies are built in, the same for
+local VMs and hosted Sandboxes (#3997). None can be changed or deleted.
+
+- `open` is the default. It allows DNS on 53, and TCP on any port to public
+  addresses.
+- `web` allows DNS on 53, and TCP on ports 22, 80 and 443 to public
+  addresses: the rules `open` had before #3997.
+- `locked` allows nothing, except that a selected model credential still
+  reaches its provider, as the interception paragraph below says (#5215).
+
+No built-in allows UDP other than DNS. Where a broker enforces the policy (a
+local VM, or a hosted Sandbox with hosted egress on), every other UDP send is
+blocked, and `cw` says so. A Sandbox that selects nothing shows
+`open (default)`; a local VM's store keeps no difference between selecting
+`open` and selecting nothing, so it shows `open`. A selection of `open` made
+before #3997 reads `open`, and its egress widened from ports 22, 80 and 443 to
+every TCP port. To keep the three ports, select `web`. `cw info`, and
+`cw update ENV --policy open` and a hosted create with `--policy open`, say
+so in one sentence beside the policy line, never under `--output json`, for
+every selection whose reference is `open`: no selection records when it was
+made.
+The three names are reserved: no stored policy can be created with one. A
+local policy already named `web` keeps its selections, and
+`cw --local policy ls` marks it and gives the step that copies it under a new
+name (`cw --local policy create NAME --from local:id:UUID`). A local VM's
+selection of a stored policy is kept by the policy's id, so a VM that selected
+the user's `web` keeps enforcing that policy's rules and digest, and never
+becomes the built-in; a bare `web` given after #3997 means the built-in, and
+the user's policy is reached as `local:id:UUID`. A create the supervisor
+replays from its journal before it selected its policy, whose bare built-in
+name a stored policy has, may have been written by a cw from before #3997,
+so it is refused with a sentence naming the fix, and nothing is selected or
+booted.
+
+Target, not shipped (#6226): the dashboard's Network policies page shows the
+three built-ins as above, and says that UDP other than DNS is blocked.
+
 `cw create --local --policy REF` and `cw update ENV --policy REF` select
 another, built-in or named, and an edit to a selected policy applies to the
 running VMs that select it (#3378, #3386). Loopback, private, link-local and
@@ -896,8 +928,14 @@ delete policies there, and members read them, under the store's own rules
 and refusals. A Sandbox's page shows its policy, revision and enforcement
 state under Network access, and lets the Sandbox's creator choose another
 policy without a restart; later it lists what was refused, with a one-step
-Allow, on the Sandbox's audit log page (#6189). While hosted Sandboxes do not enforce network policies, each of these
-pages says so. The dashboard never shows a local policy: those live on the
+Allow, on the Sandbox's audit log page (#6189). With #6226 the page lists
+the built-ins `open`, `web` and `locked`, and a Sandbox that selects nothing
+shows `open (default)`. Where the deployment doesn't enforce hosted network
+policies, as `ListNetworkPolicies` says, each of these pages says that
+outbound connections are not restricted. Where it does, they say that UDP
+other than DNS is blocked. No page says policies are not enforced on a
+deployment that enforces them. The dashboard never shows a local policy:
+those live on the
 user's computer. A page learns of a new revision, an enforcement change or a
 refusal from the live event stream, never by polling; those events are part
 of #5114, #5116 and #5117, and none exists yet.
@@ -950,8 +988,8 @@ owner-authenticated delegation to the platform broker, which performs the
 provider operations, and no platform provider material is copied to the host
 or the VM. A local profile holds the owner's Codex sign-in and Claude
 sign-in as a platform profile does; a Claude subscription token is still a
-platform credential only. The `open`
-egress policy still lets the guest open TCP 443 to a provider directly, so the
+platform credential only. A policy that allows TCP 443 to a provider, as
+the default `open` does, still lets the guest open it directly, so the
 broker keeps the credential out of the workload but does not enforce provider
 mediation.
 
@@ -1377,7 +1415,7 @@ unaffected.
   relays. UDP to STUN and to the endpoints its peers advertise, some of them
   private addresses. All of it is ordinary egress under the environment's
   policy:
-  - Under the hosted default (TCP and DNS only), only the TCP to public
+  - Under the default, `open` (TCP and DNS only), only the TCP to public
     addresses passes. Every UDP send other than DNS to the environment's
     resolver is refused as `udp_not_carried`, and every send to a protected
     address is refused, so traffic inside the tunnel rides DERP over 443.
@@ -1425,6 +1463,21 @@ There is no user-facing per-environment egress rule on the hosted platform. A lo
 `open` by default, as above.
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.
+
+While a deployment's organization network policies are switched off
+(`CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED`), hosted egress assigns every
+environment `open` whatever selection it has stored, and switching them back
+on assigns the stored selections again, unchanged (#6120;
+`crates/codewire-orchestration/src/egress/assignment.rs`).
+
+A hosted Sandbox's built-ins are `open`, `web` and `locked`, as for a local
+VM above (#3997). `hosted-default` is no longer a name a user sees; its
+rules, DNS and TCP on any port to public addresses, are `open`'s, and a
+client that sends it clears the selection. A Sandbox that selects nothing
+reports `open` with no reference and shows `open (default)`. A Sandbox that
+selected `open` before #3997 keeps the selection and reads `open`, so its
+egress widened from ports 22, 80 and 443 to every TCP port. Protected
+addresses stay refused under every policy.
 
 Target, not shipped (#4000 P6): the egress self-check. At every start a
 hosted guest probes that a direct dial and a direct DNS query, both sent
@@ -1557,10 +1610,11 @@ new create, which the switch decides. The emergency stop for broker egress is
 removing the broker settings, not turning the switch off. Each broker Sandbox
 is then refused with a named reason, nothing is written, and it is never
 given direct rules. Startup logs and counts those Sandboxes. The stop fails
-closed. With the switch off, the template admission policy refuses any update
-of a broker environment's own template, so a start that needs that template
-changed is refused and fails closed, and nothing is relaxed (#6121 would
-allow it). A deployment on the `standard` runtime profile still can't turn
+closed. With the switch off, the template admission policy admits an update
+of a broker environment's own template only when it keeps the whole broker
+shape and the settings still name a fence revision (#6121), so a start can
+change that template without relaxing it; any other broker-mode template
+write is refused and fails closed. A deployment on the `standard` runtime profile still can't turn
 the switch off.
 
 Target, not shipped (#4000): with hosted egress on, a confidential guest
@@ -1669,18 +1723,30 @@ Pod's report. The status reads:
   second bind grace for a claimed warm member. A failed write is logged and
   changes nothing else: the Sandbox fails closed either way. The refusal
   stays the Pod's status over any report and at any age, so the end of the
-  refused stream does not turn it into `NOT_ENFORCED`, and cw-egress can
-  neither set nor clear it. It clears when the Pod's lockdown check next
-  passes, when the Pod is bound to another environment, and when the Pod is
-  released. A Pod that died bound keeps it until its environment is placed
+  refused stream does not turn it into `UNCONFIRMED`, and cw-egress can
+  neither set nor clear it. It
+  clears when the Pod's lockdown check next passes, when the Pod is bound
+  to another environment, and when the Pod is released. A Pod that died bound keeps it until its environment is placed
   on a new Pod, unbound or deleted, as every bound Pod's row does;
-- `NOT_ENFORCED` when there is no report, the Pod's stream is down, or the
-  latest report is older than 15 minutes. cw-egress refreshes every live
-  Pod's report every 5 minutes, so a stale report means its cw-egress is gone,
-  and a cached `ENFORCED` is never shown.
+- `UNCONFIRMED` when hosted egress is on but there is no fresh report for
+  the Sandbox: there is none, the Pod's stream is down, or the latest report
+  is older than 15 minutes. cw-egress refreshes every live Pod's report every
+  5 minutes, so a stale report means its cw-egress is gone, and a cached
+  `ENFORCED` is never shown. `cw` says "We can't confirm network policy NAME
+  is applied to this environment right now." (#3997);
+- `NOT_ENFORCED` when the deployment doesn't enforce hosted network
+  policies: hosted egress is off. A deployment that enforces them never says
+  it doesn't. `cw` says "Network policy NAME isn't enforced on this
+  deployment: outbound connections are not restricted." (#3997)
 
 `cw info` shows a hosted environment's status, and with `FAILED_CLOSED` its
 reason in words, with the code under `--output json`.
+
+`ListNetworkPolicies` and `GetNetworkPolicy` also say whether the deployment
+enforces hosted network policies, which is whether hosted egress is on.
+`cw --cloud policy` reads it, and says policies are not enforced only where
+it is false. Where it is true, it says that UDP other than DNS is blocked.
+Target, not shipped (#6226): the dashboard reads it and says the same.
 
 The records cw-egress reports of what a Pod reached are folded per
 environment and kept to the most recent 1,000. The target reader of these

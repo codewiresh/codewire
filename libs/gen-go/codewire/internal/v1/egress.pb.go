@@ -639,8 +639,8 @@ func (x *InterceptionBinding) GetSuffix() bool {
 type EgressPolicyRevision struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The reference as the environment selected it, for example
-	// "platform:web", "locked" or "hosted-default", as the public
-	// EnvironmentNetworkPolicy names it.
+	// "platform:team", "web" or "locked", or "open" for an environment that
+	// selects nothing.
 	Reference string `protobuf:"bytes,1,opt,name=reference,proto3" json:"reference,omitempty"`
 	// 0 for a built-in policy.
 	Revision uint32 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`

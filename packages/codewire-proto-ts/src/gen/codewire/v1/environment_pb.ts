@@ -455,7 +455,7 @@ export type CreateEnvironmentRequest = Message<"codewire.v1.CreateEnvironmentReq
   /**
    * The network policy to select (#4000), as
    * UpdateEnvironmentNetworkPolicyRequest.network_policy. Empty selects none,
-   * and the environment is on `hosted-default`. Refused with UNAVAILABLE
+   * and the environment is on `open` by default. Refused with UNAVAILABLE
    * while the deployment's platform network policies are off.
    *
    * @generated from field: string network_policy = 33;

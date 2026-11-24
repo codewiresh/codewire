@@ -55,9 +55,22 @@ where
     }
     if let Some(policy) = &environment.network_policy {
         output.push_str(&format!("{:<14} {}\n", "NetworkPolicy:", policy.summary()));
+        // An explicit `open` allows every TCP port since #3997.
+        if let Some(widened) = super::policy_notice::open_widening_notice(&policy.reference) {
+            output.push_str(&format!("{:<14} {widened}\n", "Notice:"));
+        }
     }
     if let Some(egress) = egress_label(environment) {
         output.push_str(&format!("{:<14} {egress}\n", "Egress:"));
+    }
+    // Not enforced, or nothing confirms it: say so in a sentence (#3997).
+    if let Some(notice) = environment
+        .network_policy
+        .as_ref()
+        .filter(|policy| matches!(policy.enforcement.as_str(), "not_enforced" | "unconfirmed"))
+        .and_then(super::policy_notice::enforcement_notice)
+    {
+        output.push_str(&format!("{:<14} {notice}\n", "Notice:"));
     }
     output.push_str(&format!("CPU:           {}m\n", environment.cpu_millicores));
     output.push_str(&format!(
@@ -171,6 +184,7 @@ pub(crate) fn env_state_label(environment: &Environment) -> &str {
 pub(crate) fn egress_label(environment: &Environment) -> Option<String> {
     let label = match environment.egress_enforcement.as_deref()? {
         "not_enforced" => "not enforced".to_owned(),
+        "unconfirmed" => "unconfirmed".to_owned(),
         "enforced" => "enforced".to_owned(),
         "enforcing" => "applying the selected policy".to_owned(),
         "failed_closed" => match environment.egress_failure.as_deref() {

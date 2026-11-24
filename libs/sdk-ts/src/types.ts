@@ -240,7 +240,7 @@ export interface CreateEnvironmentRequest {
   network?: string | null;
   /** Start from this hosted disk snapshot, which the caller created in the organization. */
   source_snapshot_id?: string | null;
-  /** The organization network policy to select; none is `hosted-default`. */
+  /** The organization network policy to select; none is `open`, the default. */
   network_policy?: string | null;
 }
 

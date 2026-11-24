@@ -1594,7 +1594,7 @@ rules:
 
     #[test]
     fn direct_ip_allow_does_not_claim_a_hostname_lease() {
-        let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
+        let mut table = EgressLeaseTable::new(CompiledPolicy::open());
         let tcp = allowed(
             table
                 .admit_or_refuse(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
@@ -2462,8 +2462,8 @@ rules:
     }
 
     #[test]
-    fn open_refuses_an_uncurated_port_as_port_not_allowed() {
-        let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
+    fn web_refuses_an_uncurated_port_as_port_not_allowed() {
+        let mut table = EgressLeaseTable::new(crate::BuiltinPolicy::Web.compile());
         let refusal = refused(verdict(&mut table, PUBLIC_V4, 25, at(0)));
         assert_eq!(refusal.reason(), RefusalReason::PortNotAllowed);
     }
@@ -2498,7 +2498,7 @@ rules:
 
     #[test]
     fn replace_policy_drops_refused_leases_and_reports_refused_flows() {
-        let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
+        let mut table = EgressLeaseTable::new(CompiledPolicy::open());
         let previous = table.policy_digest();
         resolve(&mut table, "github.com", PUBLIC_V4, 60, at(0));
         resolve(&mut table, "registry.npmjs.org", CDN_V4, 60, at(0));
@@ -2582,14 +2582,10 @@ rules:
 
     #[test]
     fn replace_policy_refuses_flows_to_addresses_now_local_to_the_host() {
-        let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
+        let mut table = EgressLeaseTable::new(CompiledPolicy::open());
         let flow = admitted(verdict(&mut table, PUBLIC_V4, 443, at(0)));
         table.set_host_addresses(HostAddressSet::new([], [PUBLIC_V4]).unwrap());
-        let replacement = table.replace_policy(
-            CompiledPolicy::developer_baseline(),
-            [("flow", &flow)],
-            at(1),
-        );
+        let replacement = table.replace_policy(CompiledPolicy::open(), [("flow", &flow)], at(1));
         assert_eq!(replacement.refused_flows(), ["flow"]);
     }
 

@@ -26,12 +26,20 @@ export interface NetworkPolicy {
   created_by: string;
 }
 
-/** `unknown` is a state this SDK does not know yet; it never fails a read. */
-export type NetworkPolicyEnforcementState = "not_enforced" | "enforced" | "enforcing" | "failed_closed" | "unknown";
+/** `not_enforced`: the deployment's hosted egress is off. `unconfirmed`: it is
+ * on, but no fresh report confirms the policy. `unknown` is a state this SDK
+ * does not know yet; it never fails a read. */
+export type NetworkPolicyEnforcementState =
+  | "not_enforced"
+  | "unconfirmed"
+  | "enforced"
+  | "enforcing"
+  | "failed_closed"
+  | "unknown";
 
 /** What an environment selects, and what its runtime enforces. */
 export interface EnvironmentNetworkPolicy {
-  /** `open`, `locked`, `hosted-default` or `platform:id:UUID`. */
+  /** `open`, `web`, `locked` or `platform:id:UUID`; empty when nothing is selected and `open` applies by default. */
   reference: string;
   name: string;
   /** The stored policy's current revision; 0 for a built-in. */
@@ -82,6 +90,7 @@ const ENFORCEMENT: Record<number, NetworkPolicyEnforcementState> = {
   [NetworkPolicyEnforcement.ENFORCED]: "enforced",
   [NetworkPolicyEnforcement.ENFORCING]: "enforcing",
   [NetworkPolicyEnforcement.FAILED_CLOSED]: "failed_closed",
+  [NetworkPolicyEnforcement.UNCONFIRMED]: "unconfirmed",
 };
 
 export function fromEnvironmentNetworkPolicy(policy: ProtoEnvironmentNetworkPolicy): EnvironmentNetworkPolicy {

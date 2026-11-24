@@ -27,6 +27,7 @@ pub(crate) fn selection_from_reference(reference: &str) -> Result<Option<PolicyS
     })?;
     match parsed {
         PolicyReference::Builtin(BuiltinPolicy::Open) => Ok(None),
+        PolicyReference::Builtin(BuiltinPolicy::Web) => Ok(Some(PolicySelection::Web)),
         PolicyReference::Builtin(BuiltinPolicy::Locked) => Ok(Some(PolicySelection::Locked)),
         PolicyReference::Name {
             store: Some(PolicyStore::Platform),
@@ -51,6 +52,55 @@ pub(crate) fn check_selectable(store: &NetworkPolicyStore, reference: &str) -> R
         store.get(&selector, None).map_err(status)?;
     }
     Ok(())
+}
+
+/// The error code that refuses a create replayed from the operation journal
+/// whose reference is a bare built-in name while this host stores a policy of
+/// that name (#3997). A cw from before #3997 journaled a bare `web` for the
+/// user's own policy, so the name can't say which one is meant.
+pub(crate) fn replayed_reference_refusal(
+    store: &NetworkPolicyStore,
+    reference: &str,
+) -> Option<&'static str> {
+    let builtin = BuiltinPolicy::from_name(reference)?;
+    let name = PolicyName::from_stored(builtin.name()).ok()?;
+    match store.get(&PolicySelector::Name(name), None) {
+        Err(NetworkPolicyStoreError::NotFound(_)) => None,
+        Ok(_) => Some(match builtin {
+            BuiltinPolicy::Open => "create_stored_policy_named_open",
+            BuiltinPolicy::Web => "create_stored_policy_named_web",
+            BuiltinPolicy::Locked => "create_stored_policy_named_locked",
+        }),
+        Err(_) => Some("supervisor_network_policy_store"),
+    }
+}
+
+impl super::Supervisor {
+    /// A journaled create's request and plan as `run_operation` replays it,
+    /// or the error code that interrupts it. One replayed before it selects
+    /// its policy is refused by [`replayed_reference_refusal`], so nothing is
+    /// selected or booted; a create this supervisor admitted, or one past its
+    /// selection, keeps a bare name's built-in meaning.
+    pub(super) fn replayed_create(
+        &self,
+        operation: &super::OperationRecord,
+        recovering: bool,
+    ) -> Result<(v1::CreateEnvironmentRequest, super::WorkspacePlan), &'static str> {
+        let prepared = super::create_request_from_operation(operation)
+            .map_err(|_| "invalid_replay_payload")?;
+        let selects_next = matches!(
+            super::supervisor_effect(operation.kind, operation.checkpoint),
+            Ok(Some(super::LifecycleEffect::RecordEnvironment))
+        );
+        if recovering && selects_next {
+            let store = std::sync::Arc::clone(&self.core().network_policies);
+            if let Some(error_code) = replayed_reference_refusal(&store, &prepared.0.network_policy)
+            {
+                return Err(error_code);
+            }
+        }
+        Ok(prepared)
+    }
 }
 
 /// A stored selection's `Network policy` status for an environment.
@@ -306,6 +356,12 @@ mod tests {
 
         for (request, code, contains) in [
             ("open", tonic::Code::InvalidArgument, "built-in"),
+            (
+                "web",
+                tonic::Code::InvalidArgument,
+                "web is a built-in policy",
+            ),
+            ("locked", tonic::Code::InvalidArgument, "built-in"),
             ("Work", tonic::Code::InvalidArgument, "lowercase"),
             ("work", tonic::Code::AlreadyExists, "already exists"),
         ] {
@@ -379,6 +435,10 @@ mod tests {
         use crate::network_policy_store::PolicySelection;
         assert_eq!(selection_from_reference("").unwrap(), None);
         assert_eq!(selection_from_reference("open").unwrap(), None);
+        assert_eq!(
+            selection_from_reference("web").unwrap(),
+            Some(PolicySelection::Web)
+        );
         assert_eq!(
             selection_from_reference("locked").unwrap(),
             Some(PolicySelection::Locked)

@@ -193,7 +193,7 @@ mod tests {
 
         let dials = Arc::new(Dials::default());
         let broker = PolicyEgressBroker::new(
-            CompiledPolicy::developer_baseline(),
+            CompiledPolicy::open(),
             RouteClass::General,
             Arc::new(OneAddress),
             Arc::clone(&dials),

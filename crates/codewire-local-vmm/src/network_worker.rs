@@ -526,7 +526,7 @@ mod tests {
             &broker_key,
             &mesh_ingress_key,
             &mesh_ingress_ports,
-            CompiledPolicy::developer_baseline().digest(),
+            CompiledPolicy::open().digest(),
         )
         .unwrap();
         let decoded = decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation).unwrap();
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(decoded.broker_binding.generation(), generation);
         assert_eq!(
             decoded.broker_binding.policy_digest(),
-            CompiledPolicy::developer_baseline().digest()
+            CompiledPolicy::open().digest()
         );
         network_key.with_bytes(|expected| {
             decoded
@@ -552,7 +552,7 @@ mod tests {
             decode_product_worker_bootstrap(other_policy.as_ref(), vm_id, generation).unwrap();
         assert_ne!(
             other.broker_binding.policy_digest(),
-            CompiledPolicy::developer_baseline().digest()
+            CompiledPolicy::open().digest()
         );
         let mut zero_policy = bytes.clone();
         zero_policy[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET].fill(0);
@@ -570,7 +570,7 @@ mod tests {
                 &[0_u8; BROKER_IPC_KEY_LEN],
                 &mesh_ingress_key,
                 &mesh_ingress_ports,
-                CompiledPolicy::developer_baseline().digest(),
+                CompiledPolicy::open().digest(),
             )
             .is_err()
         );

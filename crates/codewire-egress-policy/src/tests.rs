@@ -37,9 +37,9 @@ fn document(rules: Vec<PolicyRule>) -> PolicyDocument {
 }
 
 #[test]
-fn developer_baseline_allows_public_general_dns_and_tcp_only() {
-    let policy = CompiledPolicy::developer_baseline();
-    assert_eq!(policy.digest().to_hex(), DEVELOPER_BASELINE_DIGEST);
+fn web_allows_public_general_dns_and_tcp_on_22_80_and_443_only() {
+    let policy = BuiltinPolicy::Web.compile();
+    assert_eq!(policy.digest().to_hex(), WEB_POLICY_DIGEST);
     for address in [PUBLIC_V4, PUBLIC_V6] {
         let decision = policy.evaluate(&request(address, 443, None, RouteClass::General));
         assert!(decision.is_allowed(), "public address {address} was denied");
@@ -64,7 +64,7 @@ fn developer_baseline_allows_public_general_dns_and_tcp_only() {
 
 #[test]
 fn protected_addresses_override_an_explicit_public_allow() {
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = CompiledPolicy::open();
     let cases = [
         ("0.0.0.1", AddressClass::Unspecified),
         ("10.0.0.1", AddressClass::Private),
@@ -108,12 +108,12 @@ fn protected_addresses_override_an_explicit_public_allow() {
 }
 
 #[test]
-fn hosted_default_allows_public_dns_and_every_tcp_port_and_nothing_protected() {
-    // D2 (codewire#3997): the document allows TCP to 0.0.0.0/0 and ::/0 on
-    // every port, which reads wider than it is. Protected names and
-    // addresses are refused before any rule, so only public ones are reached.
-    let policy = CompiledPolicy::hosted_default();
-    assert_eq!(policy.digest().to_hex(), HOSTED_DEFAULT_DIGEST);
+fn open_allows_public_dns_and_every_tcp_port_and_nothing_protected() {
+    // #3997: the document allows TCP to 0.0.0.0/0 and ::/0 on every port,
+    // which reads wider than it is. Protected names and addresses are refused
+    // before any rule, so only public ones are reached.
+    let policy = CompiledPolicy::open();
+    assert_eq!(policy.digest().to_hex(), OPEN_POLICY_DIGEST);
     for address in [PUBLIC_V4, PUBLIC_V6] {
         for port in [22, 443, 5432, 8080, 65535] {
             let decision = policy.evaluate(&request(address, port, None, RouteClass::General));
@@ -151,7 +151,7 @@ fn hosted_default_allows_public_dns_and_every_tcp_port_and_nothing_protected() {
 
 #[test]
 fn protected_names_override_dns_and_tcp_allows() {
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = CompiledPolicy::open();
     let cases = [
         ("localhost", NameClass::Localhost),
         ("api.localhost", NameClass::Localhost),
@@ -178,7 +178,7 @@ fn protected_names_override_dns_and_tcp_allows() {
 
 #[test]
 fn dns_answers_are_rechecked_against_the_address_boundary() {
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = CompiledPolicy::open();
     let query = EgressRequest::dns_query("registry.npmjs.org", RouteClass::General).unwrap();
     assert!(policy.evaluate(&query).is_allowed());
 
@@ -428,7 +428,7 @@ fn invalid_runtime_requests_are_rejected_before_evaluation() {
 
 #[test]
 fn decisions_expose_only_bounded_reason_rule_and_digest() {
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = CompiledPolicy::open();
     let decision = policy.evaluate(&request(
         "10.0.0.1".parse().unwrap(),
         443,
@@ -447,14 +447,21 @@ fn decisions_expose_only_bounded_reason_rule_and_digest() {
 
 #[test]
 fn builtin_policies_have_stable_names_ids_bytes_and_digests() {
-    // `open` is `codewire-developer-v1`: its bytes and digest never change.
+    // `web` is the document `open` was before #3997, byte for byte, so its
+    // digest is that document's.
     assert_eq!(
-        DEVELOPER_BASELINE_YAML,
+        WEB_POLICY_YAML,
         b"version: 1\ndefault: deny\nrules:\n  - id: developer-public-dns\n    action: allow\n    protocols: [dns]\n    ports: [53]\n    destinations: [\"*\"]\n    route_classes: [general]\n  - id: developer-public-tcp\n    action: allow\n    protocols: [tcp]\n    ports: [22, 80, 443]\n    cidrs: [0.0.0.0/0, \"::/0\"]\n    route_classes: [general]\n"
     );
     assert_eq!(
-        DEVELOPER_BASELINE_DIGEST,
+        WEB_POLICY_DIGEST,
         "fab8151c7bffd0d0fe6ca1a9397ae6b60fa1e0ae650a967f9c9445ac3dd4189f"
+    );
+    // `open` has the rules, and so the digest, of the hosted default it
+    // replaces.
+    assert_eq!(
+        OPEN_POLICY_DIGEST,
+        "384ad64a6b4de41783c369f74ae4a4265617de1c7da2c97c14f5fb9b4e40090f"
     );
     assert_eq!(
         LOCKED_POLICY_YAML,
@@ -467,14 +474,24 @@ fn builtin_policies_have_stable_names_ids_bytes_and_digests() {
 
     assert_eq!(
         BuiltinPolicy::ALL,
-        [BuiltinPolicy::Open, BuiltinPolicy::Locked]
+        [
+            BuiltinPolicy::Open,
+            BuiltinPolicy::Web,
+            BuiltinPolicy::Locked
+        ]
     );
     for (builtin, name, id, digest) in [
         (
             BuiltinPolicy::Open,
             "open",
-            "codewire-developer-v1",
-            DEVELOPER_BASELINE_DIGEST,
+            "codewire-open-v1",
+            OPEN_POLICY_DIGEST,
+        ),
+        (
+            BuiltinPolicy::Web,
+            "web",
+            "codewire-web-v1",
+            WEB_POLICY_DIGEST,
         ),
         (
             BuiltinPolicy::Locked,
@@ -490,35 +507,25 @@ fn builtin_policies_have_stable_names_ids_bytes_and_digests() {
         assert_eq!(builtin.compile().digest().to_hex(), digest);
         assert_eq!(BuiltinPolicy::from_name(name), Some(builtin));
     }
-    assert_eq!(
-        CompiledPolicy::developer_baseline().digest().to_hex(),
-        DEVELOPER_BASELINE_DIGEST
-    );
+    assert_eq!(CompiledPolicy::open().digest().to_hex(), OPEN_POLICY_DIGEST);
     assert_eq!(
         CompiledPolicy::locked().digest().to_hex(),
         LOCKED_POLICY_DIGEST
     );
     assert_eq!(BuiltinPolicy::from_name("Open"), None);
     assert_eq!(BuiltinPolicy::from_name("work"), None);
-
-    // `hosted-default` has its own bytes and digest, and is never selectable.
-    assert_eq!(HOSTED_DEFAULT_NAME, "hosted-default");
-    assert_eq!(HOSTED_DEFAULT_ID, "codewire-hosted-default-v1");
-    assert_eq!(
-        CompiledPolicy::hosted_default().digest().to_hex(),
-        HOSTED_DEFAULT_DIGEST
-    );
-    assert_eq!(BuiltinPolicy::from_name(HOSTED_DEFAULT_NAME), None);
-    // Only the platform store reserves it; a local store may hold the name.
-    assert!(!is_reserved_policy_name(HOSTED_DEFAULT_NAME));
+    // `hosted-default` is no built-in, and no longer a name anything selects.
+    assert_eq!(BuiltinPolicy::from_name("hosted-default"), None);
 }
 
 #[test]
 fn builtin_names_are_reserved_in_any_letter_case() {
-    for name in ["open", "OPEN", "Open", "locked", "LOCKED", "lOcKeD"] {
+    for name in [
+        "open", "OPEN", "Open", "web", "WEB", "Web", "locked", "LOCKED", "lOcKeD",
+    ] {
         assert!(is_reserved_policy_name(name), "{name} is not reserved");
     }
-    for name in ["work", "opened", "unlocked", "open-1", ""] {
+    for name in ["work", "opened", "unlocked", "open-1", "web-1", "webs", ""] {
         assert!(!is_reserved_policy_name(name), "{name} is reserved");
     }
 }
@@ -541,21 +548,26 @@ fn locked_admits_no_workload_egress() {
 }
 
 #[test]
-fn locked_is_the_empty_typed_policy_and_open_is_outside_the_subset() {
+fn locked_is_the_empty_typed_policy_and_open_and_web_are_outside_the_subset() {
     let empty = typed::TypedPolicy::new([]).unwrap();
     assert_eq!(empty.compile().digest().to_hex(), LOCKED_POLICY_DIGEST);
     assert_eq!(
         typed::TypedPolicy::from_document(CompiledPolicy::locked().canonical_document()).unwrap(),
         empty
     );
-    let open = typed::TypedPolicy::from_document(
-        CompiledPolicy::developer_baseline().canonical_document(),
-    )
-    .unwrap_err();
-    assert_eq!(
-        open.to_string(),
-        "egress policy rule developer-public-dns is outside the supported subset: its id is not a .dns or .tcp allow rule id"
-    );
+    for (builtin, rule) in [
+        (BuiltinPolicy::Open, "hosted-default-dns"),
+        (BuiltinPolicy::Web, "developer-public-dns"),
+    ] {
+        let error =
+            typed::TypedPolicy::from_document(builtin.compile().canonical_document()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "egress policy rule {rule} is outside the supported subset: its id is not a .dns or .tcp allow rule id"
+            )
+        );
+    }
 }
 
 #[test]
@@ -588,7 +600,7 @@ fn protected_overlap_finds_any_shared_address() {
 /// stored policy that used it fails closed and is never read without the rule.
 #[test]
 fn a_document_naming_the_removed_credential_route_class_is_refused_by_name() {
-    const BASE: &str = include_str!("../policies/developer-v1.yaml");
+    const BASE: &str = include_str!("../policies/web-v1.yaml");
     assert!(BASE.contains("route_classes: [general]"));
     let named = BASE.replacen("route_classes: [general]", "route_classes: [credential]", 1);
     let Err(error) = PolicyDocument::parse_yaml(named.as_bytes()) else {
@@ -604,7 +616,7 @@ fn a_document_naming_the_removed_credential_route_class_is_refused_by_name() {
 /// serde_yaml so a reader change cannot quietly change what a policy allows.
 #[test]
 fn policy_yaml_keeps_yaml_1_2_meanings_and_refuses_yaml_1_1_forms() {
-    const BASE: &str = include_str!("../policies/developer-v1.yaml");
+    const BASE: &str = include_str!("../policies/web-v1.yaml");
     let edited = |from: &str, to: &str| {
         assert!(BASE.contains(from), "{from}");
         BASE.replacen(from, to, 1)

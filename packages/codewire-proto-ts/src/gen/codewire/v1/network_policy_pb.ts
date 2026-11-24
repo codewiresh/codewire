@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/network_policy.proto.
  */
 export const file_codewire_v1_network_policy: GenFile = /*@__PURE__*/
-  fileDesc("CiBjb2Rld2lyZS92MS9uZXR3b3JrX3BvbGljeS5wcm90bxILY29kZXdpcmUudjEiQQoVTmV0d29ya1BvbGljeVNlbGVjdG9yEg4KBG5hbWUYASABKAlIABIMCgJpZBgCIAEoCUgAQgoKCHNlbGVjdG9yIjIKEU5ldHdvcmtQb2xpY3lSdWxlEg4KBnRhcmdldBgBIAEoCRINCgVwb3J0cxgCIAMoDSLoAQoNTmV0d29ya1BvbGljeRIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghyZXZpc2lvbhgEIAEoDRIYChBjdXJyZW50X3JldmlzaW9uGAUgASgNEi0KBXJ1bGVzGAYgAygLMh4uY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVJ1bGUSDgoGZGlnZXN0GAcgASgJEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmNyZWF0ZWRfYnkYCSABKAkimwEKGkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEjAKBGZyb20YAyABKAsyIi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5U2VsZWN0b3ISLQoFYWxsb3cYBCADKAsyHi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5UnVsZSJJChtDcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSIsChpMaXN0TmV0d29ya1BvbGljaWVzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkiewobTGlzdE5ldHdvcmtQb2xpY2llc1Jlc3BvbnNlEiwKCHBvbGljaWVzGAEgAygLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeRIuCgV1c2FnZRgCIAMoCzIfLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lVc2FnZSJuChJOZXR3b3JrUG9saWN5VXNhZ2USEwoJcG9saWN5X2lkGAEgASgJSAASEQoHYnVpbHRpbhgCIAEoCUgAEhQKDGVudmlyb25tZW50cxgDIAEoDRINCgVuYW1lcxgEIAMoCUILCglzZWxlY3Rpb24ibwoXR2V0TmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEjIKBnBvbGljeRgCIAEoCzIiLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lTZWxlY3RvchIQCghyZXZpc2lvbhgDIAEoDSJGChhHZXROZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSK6AQoaVXBkYXRlTmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEjIKBnBvbGljeRgCIAEoCzIiLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lTZWxlY3RvchItCgVhbGxvdxgDIAMoCzIeLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lSdWxlEg4KBnJlbW92ZRgEIAMoCRIZChFleHBlY3RlZF9yZXZpc2lvbhgFIAEoDSJJChtVcGRhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSJgChpEZWxldGVOZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yIkkKG0RlbGV0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5ImcKJVVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhYKDm5ldHdvcmtfcG9saWN5GAMgASgJImcKJlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlc3BvbnNlEj0KDm5ldHdvcmtfcG9saWN5GAEgASgLMiUuY29kZXdpcmUudjEuRW52aXJvbm1lbnROZXR3b3JrUG9saWN5IpQCChhFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3kSEQoJcmVmZXJlbmNlGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIcmV2aXNpb24YAyABKA0SDgoGZGlnZXN0GAQgASgJEjoKC2VuZm9yY2VtZW50GAUgASgOMiUuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeUVuZm9yY2VtZW50EhkKEWVuZm9yY2VkX3JldmlzaW9uGAYgASgNEhcKD2VuZm9yY2VkX2RpZ2VzdBgHIAEoCRIvCgtlbmZvcmNlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFAoMZmFpbHVyZV9jb2RlGAkgASgJKvQBChhOZXR3b3JrUG9saWN5RW5mb3JjZW1lbnQSKgomTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfVU5TUEVDSUZJRUQQABIrCidORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9OT1RfRU5GT1JDRUQQARInCiNORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9FTkZPUkNFRBACEigKJE5FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX0VORk9SQ0lORxADEiwKKE5FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX0ZBSUxFRF9DTE9TRUQQBDK1BQoUTmV0d29ya1BvbGljeVNlcnZpY2USaAoTQ3JlYXRlTmV0d29ya1BvbGljeRInLmNvZGV3aXJlLnYxLkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0GiguY29kZXdpcmUudjEuQ3JlYXRlTmV0d29ya1BvbGljeVJlc3BvbnNlEm0KE0xpc3ROZXR3b3JrUG9saWNpZXMSJy5jb2Rld2lyZS52MS5MaXN0TmV0d29ya1BvbGljaWVzUmVxdWVzdBooLmNvZGV3aXJlLnYxLkxpc3ROZXR3b3JrUG9saWNpZXNSZXNwb25zZSIDkAIBEmQKEEdldE5ldHdvcmtQb2xpY3kSJC5jb2Rld2lyZS52MS5HZXROZXR3b3JrUG9saWN5UmVxdWVzdBolLmNvZGV3aXJlLnYxLkdldE5ldHdvcmtQb2xpY3lSZXNwb25zZSIDkAIBEmgKE1VwZGF0ZU5ldHdvcmtQb2xpY3kSJy5jb2Rld2lyZS52MS5VcGRhdGVOZXR3b3JrUG9saWN5UmVxdWVzdBooLmNvZGV3aXJlLnYxLlVwZGF0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRJoChNEZWxldGVOZXR3b3JrUG9saWN5EicuY29kZXdpcmUudjEuRGVsZXRlTmV0d29ya1BvbGljeVJlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxldGVOZXR3b3JrUG9saWN5UmVzcG9uc2USiQEKHlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeRIyLmNvZGV3aXJlLnYxLlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlcXVlc3QaMy5jb2Rld2lyZS52MS5VcGRhdGVFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3lSZXNwb25zZUK1AQoPY29tLmNvZGV3aXJlLnYxQhJOZXR3b3JrUG9saWN5UHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("CiBjb2Rld2lyZS92MS9uZXR3b3JrX3BvbGljeS5wcm90bxILY29kZXdpcmUudjEiQQoVTmV0d29ya1BvbGljeVNlbGVjdG9yEg4KBG5hbWUYASABKAlIABIMCgJpZBgCIAEoCUgAQgoKCHNlbGVjdG9yIjIKEU5ldHdvcmtQb2xpY3lSdWxlEg4KBnRhcmdldBgBIAEoCRINCgVwb3J0cxgCIAMoDSLoAQoNTmV0d29ya1BvbGljeRIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghyZXZpc2lvbhgEIAEoDRIYChBjdXJyZW50X3JldmlzaW9uGAUgASgNEi0KBXJ1bGVzGAYgAygLMh4uY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVJ1bGUSDgoGZGlnZXN0GAcgASgJEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmNyZWF0ZWRfYnkYCSABKAkimwEKGkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEjAKBGZyb20YAyABKAsyIi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5U2VsZWN0b3ISLQoFYWxsb3cYBCADKAsyHi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5UnVsZSJJChtDcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSIsChpMaXN0TmV0d29ya1BvbGljaWVzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkinQEKG0xpc3ROZXR3b3JrUG9saWNpZXNSZXNwb25zZRIsCghwb2xpY2llcxgBIAMoCzIaLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3kSLgoFdXNhZ2UYAiADKAsyHy5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5VXNhZ2USIAoYaG9zdGVkX3BvbGljaWVzX2VuZm9yY2VkGAMgASgIIm4KEk5ldHdvcmtQb2xpY3lVc2FnZRITCglwb2xpY3lfaWQYASABKAlIABIRCgdidWlsdGluGAIgASgJSAASFAoMZW52aXJvbm1lbnRzGAMgASgNEg0KBW5hbWVzGAQgAygJQgsKCXNlbGVjdGlvbiJvChdHZXROZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yEhAKCHJldmlzaW9uGAMgASgNImgKGEdldE5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5EiAKGGhvc3RlZF9wb2xpY2llc19lbmZvcmNlZBgCIAEoCCK6AQoaVXBkYXRlTmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEjIKBnBvbGljeRgCIAEoCzIiLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lTZWxlY3RvchItCgVhbGxvdxgDIAMoCzIeLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lSdWxlEg4KBnJlbW92ZRgEIAMoCRIZChFleHBlY3RlZF9yZXZpc2lvbhgFIAEoDSJJChtVcGRhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSJgChpEZWxldGVOZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yIkkKG0RlbGV0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5ImcKJVVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhYKDm5ldHdvcmtfcG9saWN5GAMgASgJImcKJlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlc3BvbnNlEj0KDm5ldHdvcmtfcG9saWN5GAEgASgLMiUuY29kZXdpcmUudjEuRW52aXJvbm1lbnROZXR3b3JrUG9saWN5IpQCChhFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3kSEQoJcmVmZXJlbmNlGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIcmV2aXNpb24YAyABKA0SDgoGZGlnZXN0GAQgASgJEjoKC2VuZm9yY2VtZW50GAUgASgOMiUuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeUVuZm9yY2VtZW50EhkKEWVuZm9yY2VkX3JldmlzaW9uGAYgASgNEhcKD2VuZm9yY2VkX2RpZ2VzdBgHIAEoCRIvCgtlbmZvcmNlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFAoMZmFpbHVyZV9jb2RlGAkgASgJKqACChhOZXR3b3JrUG9saWN5RW5mb3JjZW1lbnQSKgomTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfVU5TUEVDSUZJRUQQABIrCidORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9OT1RfRU5GT1JDRUQQARInCiNORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9FTkZPUkNFRBACEigKJE5FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX0VORk9SQ0lORxADEiwKKE5FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX0ZBSUxFRF9DTE9TRUQQBBIqCiZORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9VTkNPTkZJUk1FRBAFMrUFChROZXR3b3JrUG9saWN5U2VydmljZRJoChNDcmVhdGVOZXR3b3JrUG9saWN5EicuY29kZXdpcmUudjEuQ3JlYXRlTmV0d29ya1BvbGljeVJlcXVlc3QaKC5jb2Rld2lyZS52MS5DcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USbQoTTGlzdE5ldHdvcmtQb2xpY2llcxInLmNvZGV3aXJlLnYxLkxpc3ROZXR3b3JrUG9saWNpZXNSZXF1ZXN0GiguY29kZXdpcmUudjEuTGlzdE5ldHdvcmtQb2xpY2llc1Jlc3BvbnNlIgOQAgESZAoQR2V0TmV0d29ya1BvbGljeRIkLmNvZGV3aXJlLnYxLkdldE5ldHdvcmtQb2xpY3lSZXF1ZXN0GiUuY29kZXdpcmUudjEuR2V0TmV0d29ya1BvbGljeVJlc3BvbnNlIgOQAgESaAoTVXBkYXRlTmV0d29ya1BvbGljeRInLmNvZGV3aXJlLnYxLlVwZGF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0GiguY29kZXdpcmUudjEuVXBkYXRlTmV0d29ya1BvbGljeVJlc3BvbnNlEmgKE0RlbGV0ZU5ldHdvcmtQb2xpY3kSJy5jb2Rld2lyZS52MS5EZWxldGVOZXR3b3JrUG9saWN5UmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGV0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRKJAQoeVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5EjIuY29kZXdpcmUudjEuVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5UmVxdWVzdBozLmNvZGV3aXJlLnYxLlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlc3BvbnNlQrUBCg9jb20uY29kZXdpcmUudjFCEk5ldHdvcmtQb2xpY3lQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.v1.NetworkPolicySelector
@@ -216,13 +216,23 @@ export type ListNetworkPoliciesResponse = Message<"codewire.v1.ListNetworkPolici
 
   /**
    * Which of the organization's hosted environments select what: one entry
-   * for each stored policy, built-in and `hosted-default` that any selects.
-   * It counts exactly the selections DeleteNetworkPolicy refuses for, so a
-   * destroying environment is counted until its destroy ends.
+   * for each stored policy and built-in that any selects. An environment that
+   * selects nothing counts under `open`. It counts exactly the selections
+   * DeleteNetworkPolicy refuses for, so a destroying environment is counted
+   * until its destroy ends.
    *
    * @generated from field: repeated codewire.v1.NetworkPolicyUsage usage = 2;
    */
   usage: NetworkPolicyUsage[];
+
+  /**
+   * Whether this deployment enforces hosted network policies, which is
+   * whether hosted egress is on. False: a hosted environment's outbound
+   * connections are not restricted by its policy.
+   *
+   * @generated from field: bool hosted_policies_enforced = 3;
+   */
+  hostedPoliciesEnforced: boolean;
 };
 
 /**
@@ -249,8 +259,8 @@ export type NetworkPolicyUsage = Message<"codewire.v1.NetworkPolicyUsage"> & {
     case: "policyId";
   } | {
     /**
-     * `open`, `locked`, or `hosted-default` for an environment that selects
-     * nothing.
+     * `open`, `web` or `locked`. `open` counts the environments that select
+     * nothing too.
      *
      * @generated from field: string builtin = 2;
      */
@@ -316,6 +326,13 @@ export type GetNetworkPolicyResponse = Message<"codewire.v1.GetNetworkPolicyResp
    * @generated from field: codewire.v1.NetworkPolicy policy = 1;
    */
   policy?: NetworkPolicy | undefined;
+
+  /**
+   * As ListNetworkPoliciesResponse.hosted_policies_enforced.
+   *
+   * @generated from field: bool hosted_policies_enforced = 2;
+   */
+  hostedPoliciesEnforced: boolean;
 };
 
 /**
@@ -440,8 +457,9 @@ export type UpdateEnvironmentNetworkPolicyRequest = Message<"codewire.v1.UpdateE
   environmentId: string;
 
   /**
-   * `open`, `locked`, `hosted-default`, or a policy of the organization by
-   * `NAME`, `platform:NAME` or `platform:id:UUID`. `local:` is refused.
+   * `open`, `web`, `locked`, or a policy of the organization by `NAME`,
+   * `platform:NAME` or `platform:id:UUID`; `hosted-default` removes the
+   * selection. `local:` is refused.
    *
    * @generated from field: string network_policy = 3;
    */
@@ -480,14 +498,15 @@ export const UpdateEnvironmentNetworkPolicyResponseSchema: GenMessage<UpdateEnvi
  */
 export type EnvironmentNetworkPolicy = Message<"codewire.v1.EnvironmentNetworkPolicy"> & {
   /**
-   * `open`, `locked`, `hosted-default` or `platform:id:UUID`.
+   * `open`, `web`, `locked` or `platform:id:UUID`; empty when the
+   * environment selects nothing and is on `open` by default.
    *
    * @generated from field: string reference = 1;
    */
   reference: string;
 
   /**
-   * `open`, `locked`, `hosted-default` or the stored policy's name.
+   * `open`, `web`, `locked` or the stored policy's name.
    *
    * @generated from field: string name = 2;
    */
@@ -558,8 +577,9 @@ export enum NetworkPolicyEnforcement {
   UNSPECIFIED = 0,
 
   /**
-   * Nothing enforces the selection: the environment is not running, or its
-   * placement has no egress broker yet.
+   * The deployment doesn't enforce hosted network policies: its hosted
+   * egress is off, so the environment's outbound connections are not
+   * restricted.
    *
    * @generated from enum value: NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED = 1;
    */
@@ -587,6 +607,15 @@ export enum NetworkPolicyEnforcement {
    * @generated from enum value: NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED = 4;
    */
   FAILED_CLOSED = 4,
+
+  /**
+   * The deployment enforces hosted network policies, but nothing confirms
+   * this environment's right now: its broker has sent no report, its stream
+   * is down, or its latest report is older than 15 minutes.
+   *
+   * @generated from enum value: NETWORK_POLICY_ENFORCEMENT_UNCONFIRMED = 5;
+   */
+  UNCONFIRMED = 5,
 }
 
 /**
@@ -603,10 +632,11 @@ export const NetworkPolicyEnforcementSchema: GenEnum<NetworkPolicyEnforcement> =
  * so one set of rules means one digest wherever it runs. A policy holds no
  * secret.
  *
- * `open` and `locked` are built-ins and are never stored. `hosted-default`
- * is what a hosted environment that selects no policy enforces: any TCP
- * port and DNS, to public addresses only. No stored policy may take any of
- * those names.
+ * `open`, `web` and `locked` are built-ins and are never stored. `open`, the
+ * default, allows DNS and any TCP port to public addresses; `web` allows DNS
+ * and TCP 22, 80 and 443; `locked` allows nothing. A hosted environment that
+ * selects no policy is on `open`. No stored policy may take any of those
+ * names.
  *
  * Every method needs a signed-in caller who is a member of `org_id`; a
  * non-member is told the organization does not exist, and a policy of
@@ -618,8 +648,8 @@ export const NetworkPolicyEnforcementSchema: GenEnum<NetworkPolicyEnforcement> =
  * The deployment switch CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED is off by
  * default. While it is off, every method answers UNAVAILABLE.
  *
- * Nothing enforces a hosted policy yet. Until cw-egress does, an
- * environment's EnvironmentNetworkPolicy reports
+ * A deployment enforces hosted policies exactly where its hosted egress is
+ * on. Where it is off, every environment's EnvironmentNetworkPolicy reports
  * NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED.
  *
  * @generated from service codewire.v1.NetworkPolicyService
@@ -682,7 +712,8 @@ export const NetworkPolicyService: GenService<{
   },
   /**
    * UpdateEnvironmentNetworkPolicy selects the network policy of a hosted
-   * environment the caller created. `hosted-default` removes the selection.
+   * environment the caller created. `hosted-default` removes the selection,
+   * which leaves the environment on `open` by default.
    * A running environment keeps running.
    *
    * @generated from rpc codewire.v1.NetworkPolicyService.UpdateEnvironmentNetworkPolicy
