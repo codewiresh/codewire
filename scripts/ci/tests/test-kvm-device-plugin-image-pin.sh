@@ -28,9 +28,9 @@ git -C "$repo" config commit.gpgsign false
 mkdir -p "$repo/scripts/ci/images" "$repo/scripts/ci/trust" "$repo/deployments/k8s/kvm-device-plugin"
 install -m 755 "$ROOT/scripts/ci/images/kvm-device-plugin-image-pin.py" "$ROOT/scripts/ci/images/egress-image-pin.py" \
   "$repo/scripts/ci/images/"
-install -m 644 "$ROOT/deployments/k8s/kvm-device-plugin/image.digest" "$repo/deployments/k8s/kvm-device-plugin/"
-[[ "$(cat "$repo/deployments/k8s/kvm-device-plugin/image.digest")" == unpinned ]] ||
-  fail 'main already pins a device plugin image; start the fixture from unpinned'
+# The fixture starts unpinned, whatever main pins now: the pin file is
+# rewritten, never copied.
+printf 'unpinned\n' >"$repo/deployments/k8s/kvm-device-plugin/image.digest"
 printf 'synthetic public key\n' >"$repo/scripts/ci/trust/codewire-runtime-signing.pub"
 cat >"$repo/scripts/ci/images/verify-runtime-image-signatures.sh" <<'MOCK'
 #!/usr/bin/env bash
