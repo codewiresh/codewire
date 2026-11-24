@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run one command signed in to Dev as the synthetic personal-walk identity
-# (provision-dev-personal-walk-user.sh, #6074), through a fresh `cw login` in
+# (provision-dev-personal-walk-user.sh, #6074), or with --identity invitee as
+# the synthetic invitee (provision-dev-invitee-user.sh), through a fresh `cw login` in
 # a private cw config folder on tmpfs. The device code is approved here with a
 # password session, as invitations-journey.sh approves the invitee's. The
 # command then acts with that cw sign-in, an account credential, so it can add
@@ -14,8 +15,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly DEV_ORIGIN="https://codewire-dev.sh"
 readonly SERVER="${CODEWIRE_SERVER_URL:-$DEV_ORIGIN}"
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
-readonly OPENBAO_PATH="apps/codewire/dev/ci-personal-walk"
-readonly WALK_EMAIL="success+codewire-dev-personal-walk@simulator.amazonses.com"
+# The identity, from --identity: its OpenBao document, its email and the
+# script that creates and rotates it.
+IDENTITY=personal-walk
+OPENBAO_PATH="apps/codewire/dev/ci-personal-walk"
+WALK_EMAIL="success+codewire-dev-personal-walk@simulator.amazonses.com"
+PROVISIONER=provision-dev-personal-walk-user.sh
 # cw's OAuth client (crates/codewire-client/src/auth.rs), a public client: the
 # token itself is the exact id the server revokes and introspects by.
 readonly CLI_CLIENT_ID="codewire-cli"
@@ -36,14 +41,19 @@ BROWSER_STATES=()
 usage() {
   cat <<'USAGE'
 Usage:
-  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--document-stdin] [--browser-sessions N] [--] COMMAND [ARGS...]
+  CW_BIN=/path/to/cw scripts/runtime/dev/with-dev-personal-walk.sh [--identity invitee] [--document-stdin] [--browser-sessions N] [--] COMMAND [ARGS...]
 
-The flags may come in either order, each at most once.
+The flags may come in any order, each at most once.
 
 Dev only. Runs COMMAND signed in to https://codewire-dev.sh as the synthetic
 personal-walk identity (success+codewire-dev-personal-walk@simulator.amazonses.com),
 whose password is in the OpenBao document apps/codewire/dev/ci-personal-walk
-(provision-dev-personal-walk-user.sh creates and rotates it).
+(provision-dev-personal-walk-user.sh creates and rotates it). With
+--identity invitee it is the synthetic invitee instead
+(success+codewire-dev-invitee@simulator.amazonses.com, apps/codewire/dev/ci-invitee,
+provision-dev-invitee-user.sh), for a walk that needs a second person.
+Everything below is the same for it except --document-stdin, which only the
+personal-walk identity's CI reader uses (#6302) and is refused with it.
 
   - The document is read once with a short-lived token from the workstation
     access client, which is revoked before anything else runs. With
@@ -152,7 +162,7 @@ end_sign_in() {
   # provisioner's rotation revoke every CLI token of the account by id.
   if [[ -s "$PRIVATE/login.access" && -s "$PRIVATE/final.access" ]] &&
       ! cmp -s "$PRIVATE/login.access" "$PRIVATE/final.access"; then
-    log 'the CLI sign-in refreshed during the walk; rotate the identity with provision-dev-personal-walk-user.sh to revoke every CLI token'
+    log "the CLI sign-in refreshed during the walk; rotate the identity with $PROVISIONER to revoke every CLI token"
     status=1
   fi
   for file in "$PRIVATE"/login.access "$PRIVATE"/login.refresh \
@@ -219,7 +229,7 @@ browser_session() {
   # Second-factor setup is skipped only for this synthetic identity.
   id="$(jq -er --arg email "$WALK_EMAIL" \
     'select(.user.email == $email) | .session.id | select(type == "string" and length > 0)' \
-    <<<"$session" 2>/dev/null)" || die "browser session $1 is not the personal-walk identity's"
+    <<<"$session" 2>/dev/null)" || die "browser session $1 is not the $IDENTITY identity's"
   log "browser session $1: id $id"
   status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" \
     -H 'Content-Type: application/json' -H "Origin: $SERVER" --data '{}' \
@@ -305,8 +315,18 @@ finish() {
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 DOCUMENT_STDIN=false
+IDENTITY_GIVEN=false
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
+    --identity)
+      [[ "$IDENTITY_GIVEN" == false ]] || die '--identity is given twice'
+      [[ "${2:-}" == invitee ]] || die '--identity takes invitee'
+      IDENTITY=invitee
+      OPENBAO_PATH="apps/codewire/dev/ci-invitee"
+      WALK_EMAIL="success+codewire-dev-invitee@simulator.amazonses.com"
+      PROVISIONER=provision-dev-invitee-user.sh
+      IDENTITY_GIVEN=true
+      shift 2 ;;
     --document-stdin)
       [[ "$DOCUMENT_STDIN" == false ]] || die '--document-stdin is given twice'
       DOCUMENT_STDIN=true
@@ -319,6 +339,9 @@ while [[ "$#" -gt 0 ]]; do
     *) break ;;
   esac
 done
+readonly IDENTITY OPENBAO_PATH WALK_EMAIL PROVISIONER
+[[ "$DOCUMENT_STDIN" == false || "$IDENTITY" == personal-walk ]] ||
+  die '--document-stdin is for the personal-walk identity only'
 [[ "${1:-}" != '--' ]] || shift
 [[ "$#" -gt 0 ]] || die 'name the command to run; see --help'
 [[ "$SERVER" == "$DEV_ORIGIN" ]] ||
@@ -370,7 +393,7 @@ else
     if grep -Eqi 'permission denied|status code: 403|code 403' "$PRIVATE/bao.err"; then
       die "the access client token lacks the exact Dev path $OPENBAO_PATH"
     elif grep -q '^No value found at ' "$PRIVATE/bao.err"; then
-      die "$OPENBAO_PATH does not exist; run provision-dev-personal-walk-user.sh --create-document"
+      die "$OPENBAO_PATH does not exist; run $PROVISIONER --create-document"
     fi
     die "failed to read $OPENBAO_PATH; output suppressed"
   fi
@@ -459,7 +482,7 @@ secure_remove "$PRIVATE/cookies"
 
 whoami="$("$CW_BIN" --server "$SERVER" whoami --output json 2>/dev/null |
   jq -r '.email // empty' 2>/dev/null)" || true
-[[ "$whoami" == "$WALK_EMAIL" ]] || die 'cw is not signed in as the personal-walk identity'
+[[ "$whoami" == "$WALK_EMAIL" ]] || die "cw is not signed in as the $IDENTITY identity"
 log "signed in as $WALK_EMAIL in a private cw config folder"
 
 if [[ "$BROWSER_SESSIONS" -gt 0 ]]; then

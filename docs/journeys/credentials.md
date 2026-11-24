@@ -103,6 +103,12 @@ observed**.
     never change token. A `kill -9` of the helper skips the sign-out: up to N
     sessions then live for 8 hours after their last use. Revoke them by the
     ids the run logged.
+  - `with-dev-personal-walk.sh --identity invitee …` does all of the above
+    as the synthetic invitee (`provision-dev-invitee-user.sh`, OpenBao
+    `apps/codewire/dev/ci-invitee`), for a walk that needs a second person,
+    such as removing a member from an organization (#3586). Its document is
+    checked against the invitee's email. `--document-stdin` is refused with
+    it, because only the personal-walk identity has a CI reader (#6302).
   - `scripts/runtime/dev/personal-credentials-walk.sh`, run under it, adds a
     synthetic Anthropic API key, selects it in a profile, creates a Sandbox
     with that profile, checks that the server refuses it a billing write

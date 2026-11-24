@@ -30,12 +30,12 @@ make_fake_tools() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'bao %s\n' "$*" >>"$MOCK_STATE/argv"
-[[ "$*" == 'kv get -format=json apps/codewire/dev/ci-personal-walk' ]] || exit 90
+[[ "$*" == "kv get -format=json $MOCK_BAO_PATH" ]] || exit 90
 [[ "${BAO_ADDR:-}" == https://openbao.example.invalid && "${BAO_TOKEN:-}" == synthetic-bao-token-6074 ]] || exit 91
 printf 'bao-read\n' >>"$MOCK_STATE/events"
 password="$(cat "$MOCK_STATE/password")"
 case "$MOCK_MODE" in
-  missing) printf 'No value found at apps/data/codewire/dev/ci-personal-walk\n' >&2; exit 2 ;;
+  missing) printf 'No value found at %s\n' "${MOCK_BAO_PATH/codewire\//data/codewire/}" >&2; exit 2 ;;
   permission) printf 'permission denied (status code: 403)\n' >&2; exit 2 ;;
   extra_field) jq -n --arg password "$password" --arg email "$EMAIL" \
     '{data: {metadata: {version: 2}, data: {password: $password, userEmail: $email, apiKey: "cw_x"}}}' ;;
@@ -296,7 +296,8 @@ run_case() {
   [[ -n "${NO_COMMAND:-}" ]] || set -- "$@" -- "$CASE/child"
   env -i PATH="$CASE/bin:$PATH" HOME="$CASE/home" TMPDIR="$CASE/tmp" \
     XDG_RUNTIME_DIR="${CASE_RUNTIME:-$RUNTIME}" MOCK_STATE="$CASE/state" MOCK_MODE="$mode" \
-    MOCK_EMAIL="$EMAIL" EMAIL="$EMAIL" MOCK_CHILD_STATUS="${CHILD_STATUS:-0}" \
+    MOCK_EMAIL="${IDENTITY_EMAIL:-$EMAIL}" EMAIL="${IDENTITY_EMAIL:-$EMAIL}" \
+    MOCK_BAO_PATH="${IDENTITY_PATH:-apps/codewire/dev/ci-personal-walk}" MOCK_CHILD_STATUS="${CHILD_STATUS:-0}" \
     MOCK_BROWSER_SESSIONS="${BROWSER:-0}" \
     CW_BIN="$CASE/bin/cw" CODEWIRE_ACCESS_CLIENT="$CASE/access" \
     ${SERVER_URL:+CODEWIRE_SERVER_URL="$SERVER_URL"} \
@@ -402,6 +403,7 @@ expect_no_session() {
 # Browser sessions are made before the password file is removed, each
 # checked as this identity's before its setup is skipped, and every one is
 # signed out afterwards.
+readonly SIGN_IN_ONE_BROWSER=$'bao-read\nbao-revoke\ncw-login\nsign-in\nsign-in\nskip-setup session-2\nskip-setup\ndevice-page\napprove\nbrowser-sign-out\ncw-whoami'
 readonly BROWSER_SIGN_IN=$'bao-read\nbao-revoke\ncw-login\nsign-in\nsign-in\nskip-setup session-2\nsign-in\nskip-setup session-3\nskip-setup\ndevice-page\napprove\nbrowser-sign-out\ncw-whoami'
 BROWSER=2 run_case browser_sessions success 0 --browser-sessions 2
 expect_events "$BROWSER_SIGN_IN"$'\nchild\n'"$CHECKED"$'\nsign-out session-2\nsign-out session-3'
@@ -516,6 +518,46 @@ run_case browser_twice success 1 --browser-sessions 1 --browser-sessions 2
 expect_events ''
 expect_err '--browser-sessions is given twice'
 rm -f -- "$TEST_TMP/stdin-document.json" "$TEST_TMP/stdin-wrong.json"
+
+# --identity invitee: the synthetic invitee's document, sign-in and browser
+# sessions, in either order with --browser-sessions, everything ended as for
+# the personal-walk identity.
+readonly INVITEE_EMAIL="success+codewire-dev-invitee@simulator.amazonses.com"
+readonly INVITEE_PATH="apps/codewire/dev/ci-invitee"
+for order in identity_first browser_first; do
+  if [[ "$order" == identity_first ]]; then flags=(--identity invitee --browser-sessions 1)
+  else flags=(--browser-sessions 1 --identity invitee); fi
+  IDENTITY_EMAIL="$INVITEE_EMAIL" IDENTITY_PATH="$INVITEE_PATH" BROWSER=1 \
+    run_case "invitee_$order" success 0 "${flags[@]}"
+  expect_events "$SIGN_IN_ONE_BROWSER"$'\nchild\n'"$CHECKED"$'\nsign-out session-2'
+  expect_password_in_one_file
+  expect_no_grant
+  expect_no_session
+  grep -qxF "bao kv get -format=json $INVITEE_PATH" "$CASE/state/argv" ||
+    fail "invitee_$order: the invitee's document was not read"
+  expect_err "identity: $INVITEE_EMAIL"
+  expect_err 'PASS browser_sessions_ended=1 secret_values_printed=false'
+done
+# The personal-walk identity's document at the invitee's path: refused by its
+# email before anything signs in.
+IDENTITY_PATH="$INVITEE_PATH" run_case invitee_wrong_document success 1 --identity invitee
+expect_events $'bao-read\nbao-revoke'
+expect_err 'has an unexpected shape'
+# The invitee has no CI reader, so --document-stdin is refused with it, and
+# --identity takes only invitee, once; all before anything is read.
+document "$INVITEE_EMAIL" >"$TEST_TMP/stdin-invitee.json"
+STDIN_FILE="$TEST_TMP/stdin-invitee.json" run_case invitee_stdin success 1 --identity invitee --document-stdin
+expect_events ''
+expect_err '--document-stdin is for the personal-walk identity only'
+rm -f -- "$TEST_TMP/stdin-invitee.json"
+run_case identity_twice success 1 --identity invitee --identity invitee
+expect_events ''
+expect_err '--identity is given twice'
+for value in personal-walk smoke ''; do
+  run_case "identity_${value:-empty}" success 1 --identity "$value"
+  expect_events ''
+  expect_err '--identity takes invitee'
+done
 
 # The runtime directory must be the caller's own 0700 tmpfs directory.
 mkdir -m 0700 "$TEST_TMP/disk-runtime"
