@@ -184,6 +184,11 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
                  'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
              AND NOT pg_catalog.has_any_column_privilege(current_user, \
                  'public.platform_placeholder_keys','UPDATE,REFERENCES'))) \
+         AND (pg_catalog.to_regclass('public.platform_local_placeholder_roots') IS NULL OR ( \
+             NOT pg_catalog.has_table_privilege(current_user,'public.platform_local_placeholder_roots', \
+                 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
+             AND NOT pg_catalog.has_any_column_privilege(current_user, \
+                 'public.platform_local_placeholder_roots','UPDATE,REFERENCES'))) \
          AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secrets','SELECT') \
          AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secret_deks','SELECT') \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
@@ -329,6 +334,11 @@ mod tests {
                     "UPDATE (nonce) ON public.platform_placeholder_keys",
                     "DELETE ON public.platform_placeholder_keys",
                     "TRUNCATE ON public.platform_placeholder_keys",
+                    // Nor an owner-local placeholder root (#6191).
+                    "UPDATE ON public.platform_local_placeholder_roots",
+                    "UPDATE (nonce) ON public.platform_local_placeholder_roots",
+                    "DELETE ON public.platform_local_placeholder_roots",
+                    "TRUNCATE ON public.platform_local_placeholder_roots",
                     // The broker uses no sequence, so the guard denies every
                     // privilege on every public sequence.
                     "USAGE ON SEQUENCE public.billing_events_id_seq",

@@ -25,7 +25,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
 use subtle::ConstantTimeEq as _;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{AccessError, CapabilitySlot, CredentialId, EnvironmentId};
 
@@ -62,6 +62,34 @@ impl PlaceholderKey {
         }
         key.copy_from_slice(bytes);
         Ok(Self(key))
+    }
+}
+
+/// HKDF info prefix for an owner-local environment's key (#6191). The
+/// environment ID follows it.
+const OWNER_LOCAL_KEY_INFO: &[u8] = b"codewire local placeholder key v1\0";
+
+impl PlaceholderKey {
+    /// The key of one local VM that runs on a platform profile (#4909,
+    /// #6191), derived from its owner's local placeholder root: HKDF-SHA256
+    /// Expand of one block with the root as the pseudorandom key (it is 32
+    /// uniformly random bytes, so no Extract step is needed) and the info
+    /// `codewire local placeholder key v1`, a zero byte and the environment
+    /// ID, which can contain no zero byte. That is HMAC-SHA256 keyed by the
+    /// root over the info and the block counter `0x01`. Each environment of
+    /// one owner gets its own key; another owner's root never gives the
+    /// same one.
+    pub fn owner_local(root: &PlaceholderKey, environment_id: &EnvironmentId) -> Self {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&*root.0).expect("HMAC accepts any key length");
+        mac.update(OWNER_LOCAL_KEY_INFO);
+        mac.update(environment_id.as_str().as_bytes());
+        mac.update(&[1]);
+        let mut derived = mac.finalize().into_bytes();
+        let mut key = Zeroizing::new([0_u8; PLACEHOLDER_KEY_BYTES]);
+        key.copy_from_slice(&derived);
+        derived.as_mut_slice().zeroize();
+        Self(key)
     }
 }
 

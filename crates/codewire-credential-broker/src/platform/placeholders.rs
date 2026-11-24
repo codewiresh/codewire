@@ -66,7 +66,9 @@ impl EpochPlaceholders {
 impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     /// The placeholder for `grant`'s credential in its environment generation:
     /// the one this epoch already derived, or one derived now under the
-    /// environment's key, which is read for this lease alone and dropped here.
+    /// environment's key (a hosted environment's own, or a local VM's from its
+    /// owner's local root, #6191), which is read for this lease alone and
+    /// dropped here.
     ///
     /// A key that cannot be read or created gives none, and the lease is
     /// marked failed: a placeholder never decides whether a lease is admitted,
@@ -83,8 +85,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             Err(reason) => {
                 tracing::warn!(
                     environment_id = grant.environment_id.as_str(),
+                    owner_local =
+                        matches!(self.session.identity, RuntimeIdentity::OwnerLocal { .. }),
                     reason = reason.label(),
-                    "hosted lease carries no placeholder: its environment's key could not be read"
+                    "lease carries no placeholder: its environment's key could not be read"
                 );
                 None
             }
@@ -105,11 +109,27 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             timing::placeholder(PlaceholderUse::Reused);
             return Ok(placeholder);
         }
-        match self
-            .credentials
-            .environment_placeholder_key(&grant.environment_id)
-            .await
-        {
+        let key = match &self.session.identity {
+            RuntimeIdentity::Hosted { .. } => {
+                self.credentials
+                    .environment_placeholder_key(&grant.environment_id)
+                    .await
+            }
+            // A local VM on a platform profile has no environments row: its
+            // key comes from its owner's local root, by the admitted
+            // session's user and environment, never a frame (#6191).
+            RuntimeIdentity::OwnerLocal { .. } => {
+                let context = &self.session.context;
+                if grant.environment_id != context.environment_id {
+                    timing::placeholder(PlaceholderUse::NotFound);
+                    return Err(PlaceholderUse::NotFound);
+                }
+                self.credentials
+                    .owner_local_placeholder_key(&context.user_id, &context.environment_id)
+                    .await
+            }
+        };
+        match key {
             Ok(key) => {
                 let placeholder = hosted_placeholder(&key, grant);
                 placeholders.insert(inputs, placeholder.clone());

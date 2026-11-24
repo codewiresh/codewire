@@ -37,6 +37,9 @@ GRANT SELECT,INSERT,DELETE ON public.platform_credential_material TO codewire_cr
 -- Hosted placeholder keys (#4001): created once, then only read. A key never
 -- changes and is deleted only with its environment, so no UPDATE or DELETE.
 GRANT SELECT,INSERT ON public.platform_placeholder_keys TO codewire_credential_broker;
+-- Owner-local placeholder roots (#6191): likewise created once, then only
+-- read, and deleted only with their user.
+GRANT SELECT,INSERT ON public.platform_local_placeholder_roots TO codewire_credential_broker;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_attempts TO codewire_credential_broker;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_material TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO codewire_credential_broker;

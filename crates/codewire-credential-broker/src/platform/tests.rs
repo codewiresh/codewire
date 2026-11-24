@@ -376,7 +376,34 @@ impl Fixture {
         record: &CredentialRecord,
         permission: GrantPermission,
     ) -> Result<Result<Adapter, BrokerLeaseError>> {
+        let environment_id = self.context.environment_id.clone();
+        self.owner_local_in(
+            environment_id,
+            credential_owner,
+            allow_personal_credentials,
+            profile,
+            slot,
+            record,
+            permission,
+        )
+        .await
+    }
+
+    /// [`Self::owner_local`] for a local VM of another environment ID, as a
+    /// real local VM is: one with no row in `environments` (#6191).
+    #[allow(clippy::too_many_arguments)] // The delegation's whole shape.
+    pub(super) async fn owner_local_in(
+        &self,
+        environment_id: EnvironmentId,
+        credential_owner: Owner,
+        allow_personal_credentials: bool,
+        profile: Option<EnvironmentAccessBinding>,
+        slot: CapabilitySlot,
+        record: &CredentialRecord,
+        permission: GrantPermission,
+    ) -> Result<Result<Adapter, BrokerLeaseError>> {
         let mut context = self.context.clone();
+        context.environment_id = environment_id;
         context.placement = GrantPlacement::PlatformToLocal;
         context.allow_personal_credentials = allow_personal_credentials;
         // A delegation without a profile authorizes no credential; the session

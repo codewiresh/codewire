@@ -712,20 +712,28 @@ async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh()
 }
 
 /// A local VM's delegation whose Open declared a front door seals the Codex
-/// login with its environment's placeholder, derived under that environment's
-/// key exactly as a hosted lease's is; without a declared front door its
-/// lease carries none, as before (#4909, Dev 2026-11-22, where every login was
-/// refused `no_placeholder_beside_front_door`).
+/// login with its environment's placeholder, derived exactly as a hosted
+/// lease's is but under its owner's local key, since a local VM has no
+/// environments row (#6191); without a declared front door its lease carries
+/// none, as before (#4909, Dev 2026-11-22 and 2026-11-23, where every login
+/// was refused `no_placeholder_beside_front_door`).
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn a_delegated_epoch_with_a_front_door_leases_its_environments_placeholder() -> Result<()> {
     let f = Fixture::create_for_bridge().await?;
     let result = async {
+        // A local VM: an environment ID with no row.
+        let local = codewire_access::EnvironmentId::parse(Uuid::new_v4().to_string())?;
         let delegation = || async {
-            f.owner_local(
+            let binding = EnvironmentAccessBinding {
+                environment_id: local.clone(),
+                ..f.current_binding().await?
+            };
+            f.owner_local_in(
+                local.clone(),
                 f.owner.clone(),
                 true,
-                Some(f.current_binding().await?),
+                Some(binding),
                 CapabilitySlot::codex(),
                 &f.record,
                 codex_login_permission(),
@@ -743,9 +751,10 @@ async fn a_delegated_epoch_with_a_front_door_leases_its_environments_placeholder
         };
         let lease = login(&declared).await?;
         let grant = lease.grant().clone();
+        ensure!(grant.environment_id == local);
         let key = f
             .store
-            .environment_placeholder_key(&grant.environment_id)
+            .owner_local_placeholder_key(&f.context.user_id, &grant.environment_id)
             .await?;
         let expected = codewire_access::CredentialPlaceholder::derive(
             &key,

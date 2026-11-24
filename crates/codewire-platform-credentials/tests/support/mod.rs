@@ -228,6 +228,7 @@ impl TestDatabase {
             "UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at,account_hint,display_name) ON public.platform_credentials",
             "SELECT,INSERT,DELETE ON public.platform_credential_material",
             "SELECT,INSERT ON public.platform_placeholder_keys",
+            "SELECT,INSERT ON public.platform_local_placeholder_roots",
             "SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_attempts",
             "SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_material",
             "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",

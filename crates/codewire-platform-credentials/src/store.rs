@@ -14,6 +14,7 @@ use codewire_protected_store::secret_envelope::{
 };
 use sqlx::{Executor, PgPool, Postgres, Transaction};
 
+mod local_placeholder_root;
 mod placeholder_key;
 
 use crate::model::{auth_kind, parse_auth_kind, parse_ssh_public_key, parse_status};

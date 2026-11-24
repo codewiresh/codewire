@@ -1980,7 +1980,45 @@ or one whose credentials come from the platform, carries none.
     `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED` is `true` (it accepts only `true`
     or `false`), hosted leases carry none, and no key is created or read. With
     it on, the service refuses to start unless its login holds `SELECT` and
-    `INSERT` on the table. An owner-local epoch's leases never carry one.
+    `INSERT` on the table. An owner-local epoch's leases carry one only when
+    its delegation declared a front door, under the owner-local key below,
+    whatever this switch says.
+
+- **A local VM on a platform profile (#4909, #6191).** It has no row in
+  `environments`, so it has no hosted key. Its leases derive under a key
+  taken from its owner's local placeholder root:
+  - **One root per user**, in `platform_local_placeholder_roots`: 32 random
+    bytes, sealed like credential material. Its DEK is wrapped by the
+    credential-material KEK and scoped to the user, and the envelope's
+    associated data names both the user and the purpose
+    (`platform_local_placeholder_root/v1`), so a root copied into another
+    user's row does not open. The credential service creates it on that
+    user's first delegation lease that needs a placeholder, with
+    `ON CONFLICT (user_id) DO NOTHING`, and each first use then opens the
+    stored row. It is kept until the user is deleted: the foreign key to
+    `users(id)` cascades.
+  - **A local VM's key** is RFC 5869 HKDF-SHA256 Expand of one 32-byte
+    block. The root is the pseudorandom key (it is 32 uniformly random bytes,
+    so there is no Extract step). The info is the bytes
+    `codewire local placeholder key v1`, one zero byte, and the environment
+    ID's UTF-8 bytes, as the admitted session names it, never re-formatted;
+    an ID can contain no zero byte. The user and the
+    environment are the delegation's admitted session's, never a frame's.
+    The key is derived for one lease and dropped like a hosted key, and
+    nothing is stored per local VM, so a removed VM leaves nothing behind.
+  - **Owners never share a key.** Another user who names the same
+    environment ID derives under their own root, and a hosted environment's
+    key is read only for a hosted epoch, so neither kind can reach the
+    other's placeholders.
+  - **A root never changes, and there is no rotation path.** Replacing one
+    would change every placeholder of that user's local VMs, and would be a
+    reviewed admin command. None exists.
+  - `codewire_credential_broker` has `SELECT` and `INSERT` on the table and
+    nothing else, and the migration revokes everything from `PUBLIC`. The
+    Kind grants check refuses the broker `UPDATE`, `DELETE`, `TRUNCATE` and
+    references on it. The service does not refuse to start without the
+    grant: without it, only a delegation's lease is marked failed, and is
+    logged as for a hosted key.
 
 ### Refusals an agent or a person can read (#5057)
 
@@ -2404,9 +2442,10 @@ above). These rules hold:
 - **Its logins carry placeholders.** A delegation epoch whose Open declared
   a front door is paired, so its broker seals Claude and Codex logins with
   placeholders, never the sign-in's tokens. Each one is the lease's
-  placeholder, derived by the platform's broker under the credential
-  service's per-environment key, exactly as a hosted epoch's leases derive
-  theirs, whatever the hosted placeholders switch says. The local front door
+  placeholder, derived by the platform's broker under the owner-local key
+  ("Per-environment placeholders"), exactly as a hosted epoch's leases derive
+  theirs under their environment's key, whatever the hosted placeholders
+  switch says. The local front door
   never swaps: it forwards over the front-door session to that same epoch,
   whose leases carry the placeholder the login delivered. A delegation that
   declared no front door delivers logins as before (#4909).

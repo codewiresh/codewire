@@ -376,3 +376,41 @@ fn the_token_answer_fixture_states_the_shape_minted_here() {
         format!("{CREDENTIAL_PLACEHOLDER_TAG}<{PLACEHOLDER_ENCODED_BYTES} base64url characters>")
     );
 }
+
+/// An owner-local environment's key (#6191) is RFC 5869 HKDF-SHA256 Expand,
+/// one block, of the owner's root with the info
+/// `codewire local placeholder key v1`, a zero byte and the environment ID:
+/// this vector was computed independently of the code. Each environment of
+/// one root gets its own key, and another root never gives the same one.
+#[test]
+fn an_owner_local_key_is_the_roots_hkdf_expand_for_its_environment() {
+    let expected = [
+        0x12, 0x2a, 0x9d, 0xf6, 0xd8, 0xb9, 0x5d, 0x0f, 0xc8, 0x56, 0x6e, 0xc8, 0x62, 0x19, 0x07,
+        0xac, 0x31, 0x5a, 0x2e, 0x65, 0xb8, 0x55, 0xb8, 0xed, 0x34, 0x59, 0x21, 0x3e, 0xd8, 0x20,
+        0x24, 0x0c,
+    ];
+    let derived_under = |key: &PlaceholderKey, environment_id: &str| {
+        CredentialPlaceholder::derive(
+            key,
+            &environment(environment_id),
+            7,
+            &slot("anthropic"),
+            &credential("claude-sign-in"),
+        )
+    };
+    let a = PlaceholderKey::owner_local(&key(7), &environment("environment-a"));
+    let vector = PlaceholderKey::from_slice(&expected).unwrap();
+    assert!(derived_under(&a, "environment-a").ct_eq(&derived_under(&vector, "environment-a")));
+    // Deterministic for one root and environment.
+    let again = PlaceholderKey::owner_local(&key(7), &environment("environment-a"));
+    assert!(derived_under(&a, "environment-a").ct_eq(&derived_under(&again, "environment-a")));
+    // Another environment of the same root, or the same environment of another root.
+    let b = PlaceholderKey::owner_local(&key(7), &environment("environment-b"));
+    let other_owner = PlaceholderKey::owner_local(&key(8), &environment("environment-a"));
+    for other in [&b, &other_owner] {
+        assert!(!derived_under(&a, "environment-a").ct_eq(&derived_under(other, "environment-a")));
+    }
+    // Never the root itself.
+    assert!(!derived_under(&a, "environment-a").ct_eq(&derived_under(&key(7), "environment-a")));
+    assert_eq!(format!("{a:?}"), "PlaceholderKey([REDACTED])");
+}
