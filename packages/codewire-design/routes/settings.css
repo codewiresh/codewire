@@ -41,6 +41,8 @@
 [data-dashboard-app] .cw-profile-row h3 { margin-bottom: var(--space-1); }
 [data-dashboard-app] .cw-account-session code,
 [data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: var(--text-code); }
+/* A key's fingerprint is one 50-character word; it wraps as the key does. */
+[data-dashboard-app] .cw-public-key > small { overflow-wrap: anywhere; }
 [data-dashboard-app] :is(.cw-credential-row, .cw-profile-row) > .cw-button { justify-self: start; }
 /* Session, organization and security rows: what it is on the left, its actions on the right. */
 [data-dashboard-app] :is(.cw-account-session, .cw-account-organization) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }

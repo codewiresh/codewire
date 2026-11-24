@@ -241,6 +241,19 @@ test("rows keep status and expiry visible and open focused editors straight from
   await fits(page, page.locator("#credential-fixture-openai-rename"));
 });
 
+// At a 390-pixel window, as the Dev walk sets it, nothing on the page scrolls
+// sideways, an SSH key's 50-character fingerprint included (#6330). A phone
+// emulation would zoom out to fit a wide page instead, so the window is set
+// here and the page is measured against it.
+test("at 390 pixels the credentials page, an SSH key's fingerprint included, never scrolls sideways", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const fingerprint = page.locator(".cw-public-key > small");
+  await expect(fingerprint).toHaveText(/^SHA256:\S{43}$/);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  const box = (await fingerprint.boundingBox())!;
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+});
+
 test("a Claude subscription token reads its expiry and is replaced by paste from its menu", { tag: "@mobile" }, async ({ page }) => {
   const posts: { path: string; fields: Record<string, string> }[] = [];
   await page.route("**/settings/credentials/_actions/**", async (route) => {
