@@ -647,14 +647,19 @@ In a cluster, orchestration reaches the Kubernetes API through the `kubernetes` 
 
 ## Database pools
 
-Each service's Postgres pool opens at most 25 connections per process, and a
-request waits 5 s for one before it fails (`codewire-server-core`
-`db::pool_options`). A pool opens connections as concurrent work needs them
-and keeps them: it hands out its longest-idle connection first, so steady
-traffic uses every connection before the 10-minute idle timeout, and a pool's
-size stays at the highest concurrency it has met (#6262). Orchestration, the
-identity service, billing and the coordinator publish their pool on
-`/metrics`, sampled every second:
+Each service's Postgres pool opens at most `DATABASE_MAX_CONNECTIONS`
+connections per process, 25 when unset, and a request waits 5 s for one before
+it fails (`codewire-server-core` `db::pool_options`). The credential service
+reads `CREDENTIAL_DATABASE_MAX_CONNECTIONS` instead, 16 when unset. A value
+that is not a whole number above zero stops the service at startup.
+
+A pool opens connections as concurrent work needs them. It hands out its
+longest-idle connection first, so steady traffic uses every connection before
+the 10-minute idle timeout ends any of them. Instead each connection is retired
+two minutes after it opened, so a pool settles at the concurrency it has needed
+lately rather than the highest it has met (#6262). Orchestration, the identity
+service, billing and the coordinator publish their pool on `/metrics`, sampled
+every second:
 
 - `codewire_db_pool_connections{pool, state}`: the pool's open connections,
   `state` `idle` or `in_use`;
@@ -662,7 +667,10 @@ identity service, billing and the coordinator publish their pool on
 
 `pool` is `main`, each service's own pool. Every Pod of every service that
 shares a database, during a rollout too, must fit that database's
-`max_connections`, less the slots it keeps for superusers.
+`max_connections`, less the slots it keeps for superusers. Size each cap from
+the pool's `in_use` peak, not its open connections. Count the connections a
+service holds outside its pool too: orchestration keeps about ten for its
+listeners, its leader lock and its lease heartbeat.
 
 ## Unplanned restarts
 

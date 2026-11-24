@@ -120,15 +120,48 @@ fn checked_pool_options_bounding(idle_transaction_timeout: Duration) -> PgPoolOp
         .after_release(|connection, _| Box::pin(outside_transaction(connection)))
 }
 
+/// A service pool's cap when [`MAX_CONNECTIONS_ENV`] is unset.
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 25;
+
+/// Caps a service's own pool ([`connect_published`]), sized per service so
+/// every Pod of every service fits the database during a rollout (#6262).
+pub const MAX_CONNECTIONS_ENV: &str = "DATABASE_MAX_CONNECTIONS";
+
+/// How long a pooled connection is reused. A pool hands out its
+/// longest-idle connection first, so under steady traffic no connection
+/// reaches the idle timeout and a pool keeps every connection a burst
+/// opened. Retiring each one after two minutes lets the pool settle at the
+/// concurrency it has needed lately, at the cost of one reconnect per
+/// connection every two minutes (#6262).
+pub const MAX_LIFETIME: Duration = Duration::from_secs(2 * 60);
+
+/// A pool cap from its environment value: `default` when unset, otherwise a
+/// whole number above zero.
+pub fn max_connections(value: Option<&str>, default: u32) -> Result<u32, InvalidMaxConnections> {
+    match value {
+        None => Ok(default),
+        Some(value) => value
+            .parse::<u32>()
+            .ok()
+            .filter(|cap| *cap > 0)
+            .ok_or(InvalidMaxConnections),
+    }
+}
+
+/// A pool cap that is not a whole number above zero.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a database pool cap must be a whole number above zero")]
+pub struct InvalidMaxConnections;
+
 /// The pool options every service shares, with `health` deciding when an
 /// idle connection is pinged.
 pub fn pool_options(health: PoolHealth) -> PgPoolOptions {
     let reprove_after_idle = health.reprove_after_idle;
     checked_pool_options()
-        .max_connections(25)
+        .max_connections(DEFAULT_MAX_CONNECTIONS)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Some(Duration::from_secs(10 * 60)))
-        .max_lifetime(Some(Duration::from_secs(30 * 60)))
+        .max_lifetime(Some(MAX_LIFETIME))
         .test_before_acquire(false)
         .before_acquire(move |connection, metadata| {
             Box::pin(async move {
@@ -146,10 +179,20 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
     Ok(pool)
 }
 
-/// [`connect`], with the pool published under `name` ([`publish_pool`]): a
-/// service's own pool.
+/// [`connect`], capped by [`MAX_CONNECTIONS_ENV`] and published under
+/// `name` ([`publish_pool`]): a service's own pool.
 pub async fn connect_published(url: &str, name: &'static str) -> anyhow::Result<PgPool> {
-    let pool = connect(url).await?;
+    let invalid = |error| anyhow::anyhow!("{MAX_CONNECTIONS_ENV}: {error}");
+    let cap = match std::env::var(MAX_CONNECTIONS_ENV) {
+        Ok(cap) => Some(cap),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(invalid(InvalidMaxConnections)),
+    };
+    let cap = max_connections(cap.as_deref(), DEFAULT_MAX_CONNECTIONS).map_err(invalid)?;
+    let pool = pool_options(PoolHealth::default())
+        .max_connections(cap)
+        .connect(url)
+        .await?;
     publish_pool(name, &pool);
     Ok(pool)
 }
@@ -254,6 +297,19 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_cap_is_its_default_when_unset_and_otherwise_above_zero() {
+        assert_eq!(max_connections(None, 25), Ok(25));
+        assert_eq!(max_connections(Some("12"), 25), Ok(12));
+        for invalid in ["", "0", "-1", "twelve", " 12", "4294967296"] {
+            assert_eq!(
+                max_connections(Some(invalid), 25),
+                Err(InvalidMaxConnections),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn service_pools_do_not_ping_on_every_acquire() {
         let options = pool_options(PoolHealth::default());
         assert!(!options.get_test_before_acquire());
@@ -263,10 +319,7 @@ mod tests {
             options.get_idle_timeout(),
             Some(Duration::from_secs(10 * 60))
         );
-        assert_eq!(
-            options.get_max_lifetime(),
-            Some(Duration::from_secs(30 * 60))
-        );
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(120)));
         assert_eq!(
             PoolHealth::default().reprove_after_idle,
             Duration::from_secs(30)

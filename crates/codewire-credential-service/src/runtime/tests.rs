@@ -828,10 +828,12 @@ async fn shutdown_drains_issued_enrollment_commit_and_real_refresh_past_transpor
 
 #[test]
 fn credential_database_pool_does_not_ping_on_every_acquire() {
-    let options = database_pool_options();
+    let options = database_pool_options(config::DEFAULT_DATABASE_MAX_CONNECTIONS);
     assert!(!options.get_test_before_acquire());
     assert_eq!(options.get_max_connections(), 16);
     assert_eq!(options.get_acquire_timeout(), Duration::from_secs(5));
+    assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(120)));
+    assert_eq!(database_pool_options(6).get_max_connections(), 6);
 }
 
 /// A connection left inside a transaction by a cancelled begin is closed on

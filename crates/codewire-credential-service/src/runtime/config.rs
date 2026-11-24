@@ -69,6 +69,8 @@ pub struct CredentialServiceConfig {
     /// The namespace hosted Sandbox Pods run in, which the interception CA
     /// check and sweep read Pods from (#5030). `None` leaves both off.
     pub(super) sandbox_namespace: Option<String>,
+    /// The database pool's cap ([`DATABASE_MAX_CONNECTIONS`]).
+    pub(super) database_max_connections: u32,
 }
 
 /// Where the credential-service's key-encryption keys come from.
@@ -202,6 +204,7 @@ impl CredentialServiceConfig {
             hosted_placeholders: hosted_placeholders_config(&lookup)?,
             relay_namespace,
             sandbox_namespace: sandbox_namespace(&lookup)?,
+            database_max_connections: database_max_connections(&lookup)?,
         };
         // Hosted placeholders serve intercepted Sandboxes, whose admission
         // needs the interception CAs; without them every intercepted
@@ -253,6 +256,24 @@ fn sandbox_namespace(
         .filter(|namespace| crate::objects::valid_name(namespace, true))
         .map(Some)
         .ok_or(RuntimeError::Configuration(SANDBOX_NAMESPACE))
+}
+
+const DATABASE_MAX_CONNECTIONS: &str = "CREDENTIAL_DATABASE_MAX_CONNECTIONS";
+
+/// The pool's cap when [`DATABASE_MAX_CONNECTIONS`] is unset.
+pub(super) const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 16;
+
+/// The database pool's cap, sized with every other service's so each Pod
+/// fits the database during a rollout (#6262).
+fn database_max_connections(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+) -> Result<u32, RuntimeError> {
+    let invalid = RuntimeError::Configuration(DATABASE_MAX_CONNECTIONS);
+    let value = lookup(DATABASE_MAX_CONNECTIONS)
+        .map(|value| value.into_string().map_err(|_| invalid))
+        .transpose()?;
+    codewire_server_core::db::max_connections(value.as_deref(), DEFAULT_DATABASE_MAX_CONNECTIONS)
+        .map_err(|_| invalid)
 }
 
 const KEEPALIVE_ENABLED: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED";
@@ -491,6 +512,28 @@ mod tests {
             assert!(
                 CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).is_err(),
                 "sandbox namespace {malformed:?} was accepted"
+            );
+        }
+    }
+
+    /// The pool keeps its cap of 16 when unset; a set cap is a whole number
+    /// above zero (#6262).
+    #[test]
+    fn the_database_pool_cap_is_optional_and_above_zero() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert_eq!(config.database_max_connections, 16);
+        let mut values = inputs();
+        values.insert(DATABASE_MAX_CONNECTIONS, "6".into());
+        let config =
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        assert_eq!(config.database_max_connections, 6);
+        for malformed in ["", "0", "six", "-6"] {
+            values.insert(DATABASE_MAX_CONNECTIONS, malformed.into());
+            assert_eq!(
+                CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).err(),
+                Some(RuntimeError::Configuration(DATABASE_MAX_CONNECTIONS)),
+                "pool cap {malformed:?} was accepted"
             );
         }
     }

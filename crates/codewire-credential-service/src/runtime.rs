@@ -139,7 +139,7 @@ pub async fn run(
         .disable_statement_logging();
     let pool = tokio::time::timeout(
         DATABASE_TIMEOUT,
-        database_pool_options().connect_with(options),
+        database_pool_options(config.database_max_connections).connect_with(options),
     )
     .await
     .map_err(|_| RuntimeError::Database)?
@@ -150,9 +150,11 @@ pub async fn run(
     result
 }
 
-/// The credential database pool of the service and of its Kind fixture.
-fn database_pool_options() -> PgPoolOptions {
+/// The credential database pool of the service and of its Kind fixture, at
+/// most `max_connections`.
+fn database_pool_options(max_connections: u32) -> PgPoolOptions {
     database_pool_options_reproving_after(DATABASE_REPROVE_AFTER_IDLE)
+        .max_connections(max_connections)
 }
 
 /// sqlx would ping every connection on every acquire, and one lease acquires
@@ -169,8 +171,11 @@ fn database_pool_options() -> PgPoolOptions {
 /// request opens a new one.
 fn database_pool_options_reproving_after(reprove_after_idle: Duration) -> PgPoolOptions {
     codewire_server_core::db::checked_pool_options()
-        .max_connections(16)
+        .max_connections(config::DEFAULT_DATABASE_MAX_CONNECTIONS)
         .acquire_timeout(Duration::from_secs(5))
+        // As every service pool: retired after two minutes, so the pool
+        // settles at the concurrency it has needed lately (#6262).
+        .max_lifetime(Some(codewire_server_core::db::MAX_LIFETIME))
         .test_before_acquire(false)
         .before_acquire(move |connection, metadata| {
             Box::pin(async move {
