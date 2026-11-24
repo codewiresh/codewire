@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-23. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-24. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -33,7 +33,7 @@ separately.
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (steps 1 to 5 and 8, and the enforcement half; step 6 not walked) | not yet observed |
 | `policy-dashboard` | #5114, #5116, #5117 | n/a | n/a | not yet observed | not yet observed |
-| `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
+| `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | observed 2026-11-24, Dev source 7862128013 (#4000 comment 137354) | not yet observed |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
 | `refusal-log` | #5058, #4000, #3997 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; an intercepted host's rows, slice 2, not yet built; the UDP rows not yet observed) | not yet observed | no command yet (#4000) | no command yet (#4000) |
@@ -411,7 +411,17 @@ Issues: #2537, #4000.
   cw --local exec --in egress-walk -- curl -sS -m 10 http://169.254.169.254/
   ```
 
-  Hosted: no command yet (#4000, with the static floor of its journey).
+  Hosted, from a scratch Sandbox on a deployment with hosted egress on:
+
+  ```sh
+  cw --cloud policy check open 169.254.169.254:80
+  cw --cloud policy create walk-names --allow '169.254.169.254,192.168.1.10'
+  cw --cloud exec --in egress-walk -- curl -sS -m 10 http://169.254.169.254/
+  ```
+
+  Also try another Sandbox's Pod address, and a name that answers only
+  loopback (`localtest.me`) under a policy that allows it. Loopback inside a
+  hosted VM is the guest's own, so `check` covers it.
 - **Proof:** `check` prints `Refused: … (protected address)`; the `curl`
   fails at once; a policy cannot name a protected address (`policy create
   --allow` refuses it: `the range includes protected addresses`), and
@@ -438,6 +448,22 @@ Issues: #2537, #4000.
     no policy named them;
   - a name that answers only loopback (`localtest.me`) failed in the VM as
     a lookup, under `open` and again from a VM whose policy allowed the name.
+  - Dev, 2026-11-24, Dev source 7862128013, as the Dev smoke identity, with
+    hosted egress and the store on (#4000 comment 137354, every command and
+    its output):
+    - `cw --cloud policy check open` refused `127.0.0.1:443`,
+      `192.168.1.10:443`, `10.44.0.1:443`, `169.254.169.254:80` and
+      `10.92.0.1:80`, each with `(protected address)`;
+    - `policy create --allow '169.254.169.254,192.168.1.10'` was refused:
+      `the range includes protected addresses`;
+    - from the Sandbox under the default, another Sandbox's Pod address
+      (ports 7777 and 22) and `169.254.169.254` were each refused within
+      2 ms, and `localtest.me` didn't resolve;
+    - under a policy allowing `localtest.me:80`, enforced at rev 1,
+      `localtest.me` still got no answer, and the other Sandbox's address
+      was still refused;
+    - the same refusals held with hosted egress switched off and the broker
+      settings kept (#6070's proof, #6070 comment 137297).
 
 ## `locked-refuses-managed-github`: a policy that does not allow GitHub refuses the managed credential
 
@@ -2037,7 +2063,12 @@ Issue: #4000.
     A restart while the switch is off comes back broker-mode, passes the
     self-check and reaches an allowed host through `cw-egress`. Turning the
     switch back on refuses nothing. A new create while the switch is off is
-    direct. With the broker settings removed instead, the broker
+    direct. Observed on Dev, 2026-11-24, in #6070's proof (#6070 comment
+    137297): two of the owner's broker Sandboxes and a scratch one kept
+    identical policies and their egress through the switch-off and back,
+    the scratch one restarted while off came back broker with egress, a
+    create while off was direct, and switching back on logged no
+    `policy_differs`. With the broker settings removed instead, the broker
     environment is refused with a named reason and is never given direct
     egress (not yet observed);
   - an environment in broker mode running across an orchestration release
