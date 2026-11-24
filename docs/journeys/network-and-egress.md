@@ -2094,8 +2094,7 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a `cw-egress` rollout, and a `cw-egress` restart, under a running
     Sandbox that has made intercepted calls;
   - a Sandbox claimed from the warm pool;
-  - an intercepted request made at once after `cw create`, before the front
-    door's first leaves are installed (#6267);
+  - an intercepted request made at once after `cw create` (#6267);
   - the Sandbox's trust before any agent runs: a new intercepted Sandbox,
     one not intercepted, an image that sets its own
     `NODE_EXTRA_CA_CERTS`, and an image with no system bundle (#6072);
@@ -2153,10 +2152,11 @@ arguments hold no real token, and the hosted sign-in exception is not used
     after a `cw-egress` restart, is served under the same CA the Sandbox
     installed at its start. The Sandbox installs nothing new, and a
     process that was already running keeps working;
-  - an intercepted request made at once after `cw create` is answered: its
-    handshake waits for the front door's first leaves rather than failing,
-    and the time from the bind to the first served handshake is recorded
-    (#6267, not yet observed);
+  - an intercepted request made at once after `cw create` is answered on
+    its first try, and the time from the bind to the first served handshake
+    is recorded (#6267; observed on Dev, 2026-11-24: 8.85 s). `cw create`
+    returns only after the front door's first leaves are in, so a request
+    from outside the Sandbox never meets the handshake's wait for them;
   - a Sandbox claimed from the warm pool gets its CA at the claim, since a
     member's daemon starts its egress only once bound. Its first egress
     session carries the CA its trust record names, and it serves

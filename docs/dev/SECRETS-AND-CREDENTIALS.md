@@ -3548,7 +3548,8 @@ credential, and never serves under a CA it made itself.
   sessions is the request's own short wait for the next. At most as many
   streams wait at once as the front door serves connections; one beyond
   that isn't held and fails closed as before. The asking ends with the pair
-  (#6267, not yet observed).
+  (#6267). The hold is proven by its tests and not yet seen on Dev, where
+  `cw create` returns only after the first leaves are in.
 - **Which hosts.** Only those in Codewire's interceptable-host table that
   the route of a credential this session is authorized for reaches; a caller
   cannot name one. A session with no such credential, and so an unbound Pod,
