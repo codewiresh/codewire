@@ -8,6 +8,8 @@ TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-personal-credentials-walk-tests.XXXXX
 chmod 0700 "$TEST_TMP"
 
 readonly EMAIL="success+codewire-dev-personal-walk@simulator.amazonses.com"
+readonly ACCESS_TOKEN="synthetic-walk-access-token-0123456789abcdef"
+readonly ORG_ID="0123456789abcdef0123456789abcdef"
 
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
@@ -103,6 +105,44 @@ FAKE
   chmod 0755 "$1"
 }
 
+# A curl that answers the two Connect calls the walk makes itself, as Dev
+# does: the organization listing, and UpdateAutoTopUp, which a member is
+# refused. It takes the Authorization header only from stdin.
+make_fake_curl() {
+  cat >"$1" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$MOCK_STATE/argv"
+url="${*: -1}" body="" header=""
+while (($# > 0)); do
+  case "$1" in
+    --data) body="$2"; shift 2 ;;
+    -H) [[ "$2" != @- ]] || header="$(cat)"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ "$header" == "Authorization: Bearer $ACCESS_TOKEN" ]] || { printf '{"code":"unauthenticated"}\n401'; exit 0; }
+case "$url" in
+  https://codewire-dev.sh/codewire.v1.OrganizationService/ListOrganizations)
+    printf 'list-organizations\n' >>"$MOCK_STATE/events"
+    role=ORG_ROLE_MEMBER
+    [[ "$MOCK_MODE" != walk_owner ]] || role=ORG_ROLE_OWNER
+    jq -nc --arg id "$ORG_ID" --arg role "$role" \
+      '{organizations: [{organization: {id: $id, slug: "codewire-dev-personal-walk"}, role: $role}]}'
+    printf '\n200' ;;
+  https://codewire-dev.sh/codewire.console.v1.BillingService/UpdateAutoTopUp)
+    printf 'billing-write %s\n' "$body" >>"$MOCK_STATE/events"
+    case "$MOCK_MODE" in
+      billing_admitted) printf '{"amountCents":500}\n200' ;;
+      billing_not_found) printf '{"code":"not_found","message":"organization not found"}\n404' ;;
+      *) printf '{"code":"permission_denied","message":"forbidden"}\n403' ;;
+    esac ;;
+  *) exit 95 ;;
+esac
+FAKE
+  chmod 0755 "$1"
+}
+
 # run_case NAME MODE EXPECT_STATUS [WALK ARGS...]. PROFILES, CREDENTIALS and
 # SANDBOXES seed the account; SERVER_URL and WALK_EMAIL override the helper's
 # environment.
@@ -123,7 +163,11 @@ run_case() {
   mkdir -p "$CASE/bin"
   printf '#!/bin/sh\nexit 0\n' >"$CASE/bin/sleep"
   chmod 0755 "$CASE/bin/sleep"
+  make_fake_curl "$CASE/bin/curl"
+  jq -n --arg token "$ACCESS_TOKEN" '{access_token: $token, refresh_token: "synthetic-refresh"}' \
+    >"$CASE/cw-config/credentials.json"
   env -i PATH="$CASE/bin:$PATH" HOME="$CASE" MOCK_STATE="$CASE/state" MOCK_MODE="$mode" EMAIL="$EMAIL" \
+    ACCESS_TOKEN="$ACCESS_TOKEN" ORG_ID="$ORG_ID" \
     CODEWIRE_SERVER_URL="${SERVER_URL-https://codewire-dev.sh}" CW_BIN="$CASE/cw" \
     CW_CONFIG_DIR="$CASE/cw-config" EXPECTED_PERSONAL_WALK_USER_EMAIL="${WALK_EMAIL-$EMAIL}" \
     bash "$WALK" "$@" >"$CASE/out" 2>"$CASE/err" || status=$?
@@ -136,6 +180,8 @@ run_case() {
     ! grep -qF -- "$key" "$CASE/out" "$CASE/err" "$CASE/state/argv" ||
       fail "$name: the synthetic key reached output or argv"
   done <"$CASE/state/keys"
+  ! grep -qF -- "$ACCESS_TOKEN" "$CASE/out" "$CASE/err" "$CASE/state/argv" ||
+    fail "$name: the sign-in's access token reached output or argv"
 }
 
 expect_err() {
@@ -164,7 +210,15 @@ expect_clean
 expect_deleted_in_order 'delete-sandbox,delete-profile,delete-credential,'
 expect_err 'making the empty default personal-walk-default'
 expect_err 'PASS run='
-expect_err 'all_three_deleted_by_id'
+expect_err 'walk_role=member billing_write_refused all_three_deleted_by_id'
+expect_err "member of codewire-dev-personal-walk id=$ORG_ID"
+expect_err 'billing write refused: UpdateAutoTopUp HTTP 403 code=permission_denied message=forbidden'
+# The probe asks to keep top-up off, for the organization it is a member of,
+# once the Sandbox exists and before anything is deleted.
+grep -qxF "billing-write {\"orgId\":\"$ORG_ID\",\"enabled\":false,\"amountCents\":500}" "$CASE/state/events" ||
+  fail 'fresh_account: the billing write was not the harmless UpdateAutoTopUp'
+[[ "$(sed -n '/^create-sandbox /,$p' "$CASE/state/events" | sed -n '2,3p' | cut -d' ' -f1 | tr '\n' ,)" == 'list-organizations,billing-write,' ]] ||
+  fail "fresh_account: the billing probe did not run between the create and the cleanup: $(tr '\n' , <"$CASE/state/events")"
 sandbox="$(sed -n 's/^create-sandbox //p' "$CASE/state/events")"
 [[ "$sandbox" =~ ^personal-walk-[0-9]{8}t[0-9]{6}z-[0-9a-f]{6}$ ]] || fail 'fresh_account: the Sandbox name lacks the walk and run id'
 grep -q -- "--server https://codewire-dev.sh credentials --cloud --profile $sandbox set anthropic id:" "$CASE/state/argv" ||
@@ -195,6 +249,23 @@ expect_deleted_in_order 'delete-credential,'
 PROFILES="$ANCHOR" run_case add_fails add_fails 1
 expect_clean
 expect_deleted_in_order ''
+! grep -q '^billing-write' "$CASE/state/events" || fail 'add_fails: the billing probe ran after a failed step'
+
+# A billing write the server admits fails the walk, which still deletes what
+# it made. So does any refusal but permission_denied, and an identity that is
+# not a plain member, which is never sent the write.
+PROFILES="$ANCHOR" run_case billing_admitted billing_admitted 1
+expect_clean
+expect_deleted_in_order 'delete-sandbox,delete-profile,delete-credential,'
+expect_err 'a billing write as a member was not refused: HTTP 200 code=none message=none'
+! grep -q 'PASS run=' "$CASE/err" || fail 'billing_admitted: the walk passed'
+PROFILES="$ANCHOR" run_case billing_not_found billing_not_found 1
+expect_clean
+expect_err 'was not refused: HTTP 404 code=not_found message=organization not found'
+PROFILES="$ANCHOR" run_case walk_owner walk_owner 1
+expect_clean
+expect_err 'must be a plain member of codewire-dev-personal-walk and nothing else'
+! grep -q '^billing-write' "$CASE/state/events" || fail 'walk_owner: an owner was sent the billing write'
 
 # Another walk's objects are never touched.
 OTHER_CREDENTIAL='{"id":"00000000-0000-4000-8000-0000000000bb","name":"personal-walk-20261101t000000z-abcdef","provider":"anthropic"}'
@@ -227,6 +298,6 @@ expect_out 'SWEEP sandbox id=s1 name=personal-walk-20261101t000000z-abcdef stale
 expect_err 'SWEEP stale=3 unknown_age=1 deleted=0'
 after="$(cat "$CASE/state/credentials.json" "$CASE/state/profiles.json" "$CASE/state/sandboxes.json" | jq -c .)"
 [[ "$before" == "$after" ]] || fail 'sweep: the account changed'
-[[ ! -s "$CASE/state/events" ]] || fail 'sweep: it changed something'
+[[ ! -s "$CASE/state/events" ]] || fail 'sweep: it changed something or called the API'
 
 printf 'personal-credentials-walk tests: PASS\n'

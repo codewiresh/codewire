@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The done-when walk of #6074 on Dev, as the synthetic personal-walk identity:
 # add a synthetic Anthropic API key, select it in a personal profile, create a
-# Sandbox with that profile, and delete all three by their exact ids at the
-# end, even when a step fails. Run it under with-dev-personal-walk.sh, which
-# signs cw in. With --sweep it only reports what the account holds that is
+# Sandbox with that profile, show that a billing write is refused to the
+# identity, a plain member of its organization, and delete all three by their
+# exact ids at the end, even when a step fails. Run it under
+# with-dev-personal-walk.sh, which signs cw in. With --sweep it only reports what the account holds that is
 # older than a day, or of unknown age, and deletes nothing.
 #
 # Dev only, synthetic only. A real provider key on this account is an
@@ -12,6 +13,7 @@ set -euo pipefail
 
 readonly DEV_ORIGIN="https://codewire-dev.sh"
 readonly WALK_EMAIL="success+codewire-dev-personal-walk@simulator.amazonses.com"
+readonly WALK_ORG_SLUG="codewire-dev-personal-walk"
 readonly WALK="personal-walk"
 # The account's default profile. A user's first profile becomes its default,
 # and a default can't be deleted (#3550), so the account keeps this one,
@@ -40,7 +42,10 @@ Dev only, synthetic only. As the synthetic personal-walk identity:
      turns up;
   2. selects it in a new personal profile;
   3. creates a Sandbox with that profile (30 minute TTL, no network);
-  4. deletes the Sandbox, the profile and the credential by their exact ids,
+  4. checks that it is a plain member of codewire-dev-personal-walk only, and
+     that the server refuses it a billing write (UpdateAutoTopUp, with top-up
+     left off) with permission_denied; anything else fails the walk;
+  5. deletes the Sandbox, the profile and the credential by their exact ids,
      even when an earlier step failed, and checks that none of them is left.
 
 Every name is personal-walk-RUN_ID, where RUN_ID is the UTC start time and a
@@ -74,7 +79,7 @@ readonly SERVER="${CODEWIRE_SERVER_URL:-}"
 [[ "${EXPECTED_PERSONAL_WALK_USER_EMAIL:-}" == "$WALK_EMAIL" && -n "${CW_CONFIG_DIR:-}" ]] ||
   die 'run under with-dev-personal-walk.sh, which signs cw in as the personal-walk identity'
 [[ -x "${CW_BIN:-}" ]] || die 'CW_BIN is not an executable cw'
-for command in date jq od sed sleep tr; do
+for command in curl date jq od sed sleep tr; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 
@@ -82,6 +87,16 @@ cw() { "$CW_BIN" --server "$SERVER" "$@"; }
 # A command's JSON output: from its first line that opens an array or object.
 json() { sed -n '/^[[{]/,$p'; }
 first() { jq -c 'if type == "array" then .[0] // empty else . end'; }
+
+# One Connect JSON call as cw's own sign-in, for what cw has no command for.
+# The access token goes to curl as a header on stdin, never on argv or in
+# output. Prints the body, then the HTTP status on a line of its own.
+connect_call() {
+  jq -er '.access_token | select(type == "string" and length > 0) | "Authorization: Bearer " + .' \
+    "$CW_CONFIG_DIR/credentials.json" 2>/dev/null |
+    curl -sS --max-time 30 -X POST -H @- -H 'Content-Type: application/json' \
+      --data "$2" -w '\n%{http_code}' "$SERVER/$1"
+}
 
 whoami="$(cw whoami --output json | json | jq -r '.email // empty')" || true
 [[ "$whoami" == "$WALK_EMAIL" ]] || die 'cw is not signed in as the personal-walk identity'
@@ -217,7 +232,7 @@ finish() {
   trap - EXIT HUP INT TERM
   cleanup || status=$((status ? status : 1))
   if [[ "$status" == 0 ]]; then
-    log "PASS run=$RUN_ID credential_added profile_selected sandbox_created all_three_deleted_by_id"
+    log "PASS run=$RUN_ID credential_added profile_selected sandbox_created walk_role=member billing_write_refused all_three_deleted_by_id"
   fi
   exit "$status"
 }
@@ -267,3 +282,33 @@ SANDBOX_ID="$(sandbox_id)" || true
 [[ -n "$SANDBOX_ID" ]] || die 'the Sandbox is not listed by its name'
 printf '\n$ cw --cloud info %s\n' "$SANDBOX_ID"
 cw --cloud info "$SANDBOX_ID"
+
+# The identity is a plain member of one organization, which an account nobody
+# can sign in as owns, so a billing write must be refused before it touches
+# anything (#6074). UpdateAutoTopUp checks the caller's role before it reads
+# its arguments, so the probe asks to keep top-up off: if the server ever
+# admitted it, nothing would change, and the walk fails. No card, Stripe
+# object or credit is involved.
+printf '\n$ POST codewire.v1.OrganizationService/ListOrganizations   # as cw'"'"'s sign-in\n'
+answer="$(connect_call codewire.v1.OrganizationService/ListOrganizations '{}')" ||
+  die 'cannot list the organizations'
+http="${answer##*$'\n'}" answer="${answer%$'\n'*}"
+[[ "$http" == 200 ]] || die "listing the organizations answered HTTP $http"
+membership="$(jq -c '[.organizations[]? | {slug: .organization.slug, role}]' <<<"$answer")" ||
+  die 'the organization listing is not JSON'
+jq -e --arg slug "$WALK_ORG_SLUG" '. == [{slug: $slug, role: "ORG_ROLE_MEMBER"}]' \
+  <<<"$membership" >/dev/null ||
+  die "the identity must be a plain member of $WALK_ORG_SLUG and nothing else (got: $membership)"
+org_id="$(jq -r --arg slug "$WALK_ORG_SLUG" \
+  '.organizations[] | select(.organization.slug == $slug) | .organization.id' <<<"$answer")"
+log "member of $WALK_ORG_SLUG id=$org_id"
+printf '\n$ POST codewire.console.v1.BillingService/UpdateAutoTopUp {enabled: false, amountCents: 500}   # as cw'"'"'s sign-in\n'
+answer="$(connect_call codewire.console.v1.BillingService/UpdateAutoTopUp \
+  "$(jq -nc --arg org "$org_id" '{orgId: $org, enabled: false, amountCents: 500}')")" ||
+  die 'the billing write could not reach Dev'
+http="${answer##*$'\n'}" answer="${answer%$'\n'*}"
+refusal="$(jq -r '"code=\(.code // "none") message=\(.message // "none")"' <<<"$answer" 2>/dev/null)" ||
+  refusal='code=none message=none'
+[[ "$http" == 403 && "$refusal" == 'code=permission_denied '* ]] ||
+  die "a billing write as a member was not refused: HTTP $http $refusal"
+log "billing write refused: UpdateAutoTopUp HTTP $http $refusal"

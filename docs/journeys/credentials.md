@@ -53,13 +53,22 @@ observed**.
   sign-in and an SSH key; a hosted walk uses those through a profile and adds
   only synthetic credentials.
 - **Hosted, with no person:** a walk that needs only synthetic credentials
-  runs as the synthetic Dev personal-walk identity, a password account that
-  owns one organization of its own on the regular rate card and has no API
-  key (#6074):
+  runs as the synthetic Dev personal-walk identity, a password account with
+  no API key that is a plain member of one organization on the regular rate
+  card (#6074). A second synthetic account with no password, linked sign-in,
+  session, CLI sign-in or API key owns that organization. Every billing write
+  needs an owner or admin, so the identity's sign-in can't turn automatic
+  top-up on or add credit, and the organization's EUR 5 of credit is a
+  ceiling the server holds. The identity also may not create an organization
+  of its own.
   - `scripts/runtime/dev/provision-dev-personal-walk-user.sh` creates and
     rotates it, with its password in the OpenBao document
-    `apps/codewire/dev/ci-personal-walk`. A rotation proves the new password,
-    then revokes the account's other sessions and CLI sign-ins by id.
+    `apps/codewire/dev/ci-personal-walk`. Each run makes or keeps the owner
+    account, removes any way in it has, and checks the roles, the quota of
+    two environments, the EUR 5 credit and that automatic top-up is off. An
+    organization of that slug made by any other account stops it. A rotation
+    proves the new password, then revokes the account's other sessions and
+    CLI sign-ins by id.
   - `CW_BIN=… scripts/runtime/dev/with-dev-personal-walk.sh -- COMMAND` signs
     `cw` in as it, through device sign-in in a fresh config folder on tmpfs,
     and runs the command. Afterwards it signs out and asks the server whether
@@ -95,8 +104,10 @@ observed**.
     ids the run logged.
   - `scripts/runtime/dev/personal-credentials-walk.sh`, run under it, adds a
     synthetic Anthropic API key, selects it in a profile, creates a Sandbox
-    with that profile and deletes all three by id. With `--sweep` it reports
-    what the account holds that is older than a day, and deletes nothing.
+    with that profile, checks that the server refuses it a billing write
+    with `permission_denied`, and deletes all three by id. With `--sweep` it
+    reports what the account holds that is older than a day, and deletes
+    nothing.
   - It holds only synthetic, canary-marked credentials. A real provider key
     on it is an incident: revoke it at the provider and delete it here by
     id.

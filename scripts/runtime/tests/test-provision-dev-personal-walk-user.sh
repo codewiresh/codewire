@@ -44,10 +44,26 @@ printf '%s\n' "$sql" >>"$MOCK_STATE/psql.sql"
 if [[ "$sql" == *'INSERT INTO users'* ]]; then
   printf 'db-account\n' >>"$MOCK_STATE/events"
   [[ "$MOCK_MODE" != db_failure ]] || exit 1
-  printf 'removed|1|2|1|1|0\n'
-  if [[ "$MOCK_MODE" == bad_state ]]; then printf 'state|1|1|1|1|1|2|1|0|1|1\n'
-  elif [[ "$MOCK_MODE" == over_credit ]]; then printf 'state|1|1|1|1|1|1|1|0|1|0\n'
-  else printf 'state|1|1|1|1|1|1|1|0|1|1\n'; fi
+  # Who made the organization before this run: none on a first run, the walk
+  # account on the first run after #6074's review, the owner afterwards.
+  case "$MOCK_MODE" in
+    absent|create_existing|bad_state|over_credit|owner_sign_in|walk_admin) printf 'previous|none\n' ;;
+    migrate) printf 'previous|walk_user\n' ;;
+    # psql stops at the upsert's empty \gset; stranger_unguarded is a psql
+    # that went on regardless, which the second guard must still stop.
+    stranger) printf 'previous|other\n'; exit 3 ;;
+    stranger_unguarded) printf 'previous|other\n' ;;
+    *) printf 'previous|owner\n' ;;
+  esac
+  printf 'removed|1|2|1|1|1|0|1|2|3\n'
+  good='1|1|1|1|1|0|1|0|0|1|1|2|1|0|0|1|1|1'
+  case "$MOCK_MODE" in
+    bad_state) printf 'state|%s\n' "${good/|2|/|3|}" ;;
+    over_credit) printf 'state|%s0\n' "${good%1}" ;;
+    owner_sign_in) printf 'state|1|1|1|1|1|0|1|1|0|1|1|2|1|0|0|1|1|1\n' ;;
+    walk_admin) printf 'state|1|1|1|1|0|0|1|0|0|1|1|2|1|0|0|1|1|1\n' ;;
+    *) printf 'state|%s\n' "$good" ;;
+  esac
 elif [[ "$sql" == *"'session ' ||"* ]]; then
   printf 'db-list\n' >>"$MOCK_STATE/events"
   if [[ "$MOCK_MODE" == bad_grant_id ]]; then printf 'session bad;id\n'; exit 0; fi
@@ -75,7 +91,7 @@ case "$1 $2" in
       exit 0
     fi
     case "$MOCK_MODE" in
-      rotate|probe_failure|cas_failure|create_existing|old_accepted|revoke_incomplete|bad_grant_id)
+      rotate|probe_failure|cas_failure|create_existing|old_accepted|revoke_incomplete|bad_grant_id|migrate|stranger|stranger_unguarded)
         jq -n --arg password "$OLD_PASSWORD" --arg email "$EMAIL" \
           '{data: {metadata: {version: 3}, data: {password: $password, userEmail: $email}}}' ;;
       malformed) printf '{"data":{"metadata":{"version":3},"data":{"apiKey":"cw_x"}}}\n' ;;
@@ -194,24 +210,64 @@ readonly PROVEN=$'bao-get\ndb-account\nbao-put -cas=3\nbao-get\ncurl sign-in\ncu
 run_case create absent pass --create-document
 expect_events $'bao-get\ndb-account\nbao-put -cas=0\nbao-get\ncurl sign-in\ncurl sign-out\ndb-list\ndb-revoke'
 expect_output 'PASS canonical_store=openbao path=apps/codewire/dev/ci-personal-walk sign_in_probe=true old_password_refused=not_applicable'
-expect_output 'removed sign_in_links=1 other_memberships=2 other_members=1 pending_invitations=1 api_keys=0'
+expect_output 'owner=provisioned-no-sign-in walk_role=member members=2 api_keys=0 walk_org_create=0'
+expect_output 'organization created; removed sign_in_links=1 other_memberships=2 other_members=1 walk_assignments=1 pending_invitations=1 api_keys=0 owner_sign_in_links=1 owner_sessions=2 owner_cli_sign_ins=3'
 expect_output 'revoked sessions=2 cli_refresh_tokens=1 cli_access_tokens=1'
 jq -e --arg email "$EMAIL" 'keys == ["password", "userEmail"] and .userEmail == $email and
   (.password | test("^[A-Za-z0-9_-]{43}$"))' "$CASE/state/published.json" >/dev/null ||
   fail 'create: the published document has the wrong shape'
 grep -qF "\\set hash '$HASH'" "$CASE/state/psql.sql" || fail 'create: the hash did not reach the database'
-for value in "email=$EMAIL" 'org_slug=codewire-dev-personal-walk'; do
+for value in "email=$EMAIL" 'org_slug=codewire-dev-personal-walk' \
+  'owner_email=success+codewire-dev-personal-walk-owner@simulator.amazonses.com' \
+  'owner_name=Codewire Dev personal walk owner'; do
   grep -qF -- "$value" "$CASE/state/psql.args" || fail "create: psql was not given $value"
 done
 for statement in "'regular', false" 'is_admin = false' 'two_factor_enabled = false' \
-  'WHERE organizations.created_by = EXCLUDED.created_by' 'DELETE FROM api_keys' \
   "DELETE FROM org_invitations WHERE org_id = :'walk_org_id' AND status = 'pending'" \
-  "DELETE FROM org_members WHERE org_id = :'walk_org_id' AND user_id <> :'walk_user_id'" \
+  "AND user_id NOT IN (:'walk_user_id', :'owner_user_id') RETURNING id" \
   "VALUES (:'walk_org_id', 2, 2, 4000, 16384)" "'grant', 5000000000 - balance" \
   'WHERE balance < 5000000000;' 'AND balance_nano_eur = 5000000000' \
   'auto_top_up_enabled = false' 'AND NOT auto_top_up_enabled'; do
   grep -qF -- "$statement" "$CASE/state/psql.sql" || fail "create: the SQL lacks: $statement"
 done
+# The owner account: made with the walk account, never given a password, and
+# stripped of every way in on every run.
+for statement in "(encode(public.gen_random_bytes(16), 'hex'), :'owner_email', true, :'owner_name', true, false," \
+  "SELECT id AS owner_user_id FROM users WHERE email = :'owner_email' \\gset" \
+  "DELETE FROM accounts WHERE user_id = :'owner_user_id'" \
+  "DELETE FROM sessions WHERE user_id = :'owner_user_id'" \
+  "DELETE FROM oidc_refresh_tokens WHERE user_id = :'owner_user_id'" \
+  "DELETE FROM oidc_access_tokens WHERE user_id = :'owner_user_id'" \
+  "DELETE FROM oidc_device_authorizations WHERE user_id = :'owner_user_id'" \
+  "DELETE FROM api_keys WHERE user_id IN (:'walk_user_id', :'owner_user_id')" \
+  "(SELECT count(*) FROM accounts WHERE user_id = :'owner_user_id')," \
+  "AND role = 'owner')," "AND created_by = :'owner_user_id'"; do
+  grep -qF -- "$statement" "$CASE/state/psql.sql" || fail "create: the SQL lacks: $statement"
+done
+# The only password row written is the walk account's.
+[[ "$(grep -c 'INSERT INTO accounts' "$CASE/state/psql.sql")" == 1 ]] ||
+  fail 'create: more than one password row is written'
+grep -qF "VALUES (encode(public.gen_random_bytes(16), 'hex'), :'walk_user_id', 'credential', :'email'," \
+  "$CASE/state/psql.sql" || fail 'create: the password row is not the walk account'"'"'s'
+# The walk account is a plain member with the viewer assignment only, and may
+# create no organization.
+for statement in ":'walk_user_id', 'member'," 'ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role' \
+  "AND org_member_assignments.assignment <> 'viewer'" "SELECT id, 'viewer' FROM org_members" \
+  "VALUES (:'walk_user_id', 'org_create', 0, 'provision-dev-personal-walk-user', NOW())" \
+  "AND name = 'org_create' AND max_requests = 0)"; do
+  grep -qF -- "$statement" "$CASE/state/psql.sql" || fail "create: the SQL lacks: $statement"
+done
+! grep -qF ":'walk_user_id', 'owner'" "$CASE/state/psql.sql" || fail 'create: the walk account is made an owner'
+# Ownership: the owner makes the organization, and only an organization the
+# owner or the walk account made may be taken over; any other stops psql.
+for statement in ":'owner_user_id', 'regular', false, false, NOW(), NOW())" \
+  'ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, created_by = EXCLUDED.created_by,' \
+  "WHERE organizations.created_by IN (EXCLUDED.created_by, :'walk_user_id')" \
+  'RETURNING id AS walk_org_id \gset'; do
+  grep -qF -- "$statement" "$CASE/state/psql.sql" || fail "create: the SQL lacks: $statement"
+done
+grep -qF -- '-v ON_ERROR_STOP=1' "$CASE/state/psql.args" || fail 'create: psql does not stop on an error'
+
 # Revocation is by the exact ids listed, never by account alone.
 for id_set in "\\set session_ids '{s-1,s-2}'" "\\set refresh_ids '{r-1}'" \
   "\\set access_ids '{$ACCESS_HASH}'"; do
@@ -241,9 +297,37 @@ run_case bad_grant_id bad_grant_id fail
 expect_events "$PROVEN"$'\ndb-list'
 expect_output 'unexpected shape'
 
+# The first run after #6074's review moves the walk account's organization
+# to the owner.
+run_case migrate migrate pass
+expect_events "$PROVEN"$'\ndb-list\ndb-revoke\ncurl sign-in-old'
+expect_output 'organization moved_from_walk_user_to_owner; removed'
+expect_output 'owner=provisioned-no-sign-in walk_role=member'
+
+run_case rotate_kept rotate pass
+expect_output 'organization kept; removed'
+
+# An organization with this slug that neither account made stops the run
+# before anything is published, at psql or, failing that, at the second guard.
+run_case stranger stranger fail
+expect_events $'bao-get\ndb-account'
+expect_output 'that neither account created also stops it'
+run_case stranger_unguarded stranger_unguarded fail
+expect_events $'bao-get\ndb-account'
+expect_output 'was made by another account (got: other)'
+
 run_case bad_state bad_state fail --create-document
 expect_events $'bao-get\ndb-account'
 expect_output 'expected account state'
+
+# The owner account holding a password, or the walk account being anything
+# but a member, stops the run before anything is published.
+run_case owner_sign_in owner_sign_in fail --create-document
+expect_events $'bao-get\ndb-account'
+expect_output 'expected account state (got: 1 1 1 1 1 0 1 1 0'
+run_case walk_admin walk_admin fail --create-document
+expect_events $'bao-get\ndb-account'
+expect_output 'expected account state (got: 1 1 1 1 0 0'
 
 # A balance the top-up couldn't bring to exactly EUR 5 (one above the bound)
 # stops the run before anything is published.

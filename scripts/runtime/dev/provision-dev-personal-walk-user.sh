@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Create or rotate the synthetic Dev personal-walk identity (#6074): a
 # verified account with a password and no second factor, admin flag or API
-# key, which owns exactly one personal organization on the regular rate card
-# and is its only member. Walks that need account-global operations (personal
-# credentials and profiles) sign in as it through with-dev-personal-walk.sh:
-# every API key is bound to one organization, and personal credentials refuse
-# API keys, so the walk signs in like a person, as the invitations journey's
-# invitee does.
+# key, which is a plain member of exactly one organization on the regular
+# rate card. Walks that need account-global operations (personal credentials
+# and profiles) sign in as it through with-dev-personal-walk.sh: every API key
+# is bound to one organization, and personal credentials refuse API keys, so
+# the walk signs in like a person, as the invitations journey's invitee does.
+#
+# The organization's owner is a second synthetic account with no password,
+# API key, linked sign-in or session, so nobody can sign in as it. Every
+# billing write (automatic top-up, credit, cards, Stripe sessions) needs an
+# owner or admin, so the walk's sign-in, if it leaked, can't change billing or
+# add credit, and its EUR 5 grant is a server-side ceiling. The walk account
+# also may not create an organization, which would make it an owner.
 #
 # Dev only, synthetic only. A real provider key on this account is an
 # incident: revoke it at the provider and delete it here by id.
@@ -23,6 +29,8 @@ readonly OPENBAO_PATH="apps/codewire/dev/ci-personal-walk"
 # counting as a bounce; codewire-dev.sh takes no mail.
 readonly WALK_EMAIL="success+codewire-dev-personal-walk@simulator.amazonses.com"
 readonly WALK_NAME="Codewire Dev personal walk"
+readonly OWNER_EMAIL="success+codewire-dev-personal-walk-owner@simulator.amazonses.com"
+readonly OWNER_NAME="Codewire Dev personal walk owner"
 readonly WALK_ORG_NAME="Codewire Dev personal walk"
 readonly WALK_ORG_SLUG="codewire-dev-personal-walk"
 readonly KUBE_NAMESPACE="dev"
@@ -44,10 +52,24 @@ Usage:
 
 Dev only. Creates or rotates the synthetic Dev personal-walk account
 success+codewire-dev-personal-walk@simulator.amazonses.com: verified, enabled,
-not an admin, no second factor and no API key, owning exactly one personal
-organization, codewire-dev-personal-walk, on the regular rate card, of which
-it is the only member. Every other membership, member and pending invitation
-of that organization, linked sign-in and API key is removed.
+not an admin, no second factor and no API key, and a plain member (role
+member, assignment viewer only) of exactly one organization,
+codewire-dev-personal-walk, on the regular rate card. It may not create an
+organization (its org_create limit is 0). Every other membership of it, and
+every pending invitation, linked sign-in and API key, is removed.
+
+The organization is owned by a second synthetic account,
+success+codewire-dev-personal-walk-owner@simulator.amazonses.com, verified,
+enabled and not an admin, with no password, API key, linked sign-in, session
+or CLI sign-in: each run removes any it has and checks there are none. The
+organization has exactly these two members. Billing writes need an owner or
+admin, so the walk account can't turn automatic top-up on or add credit.
+An organization with this slug made by any other account stops the run; one
+made by the walk account (before #6074's review) moves to the owner.
+
+The organization's quota is two environments of the smallest shape, its
+credit is topped up to exactly EUR 5 by one named grant, and automatic top-up
+is off.
 
 A new generated password is hashed locally (argon2id, read from stdin), the
 hash goes to the database, and {password, userEmail} is CAS-published to the
@@ -220,17 +242,21 @@ awk 'NR == 1 && /^\$argon2id\$v=19\$m=65536,t=3,p=2\$[A-Za-z0-9+\/]+\$[A-Za-z0-9
   { ok=0; exit } END { exit ok == 1 ? 0 : 1 }' "$HASH_FILE" ||
   die 'argon2 did not return one well-formed PHC hash'
 
-# One transaction. The account exists, is verified and enabled, is no admin,
-# has no second factor and signs in only with the new password. It owns one
-# organization on the regular rate card, of which it is the only member, with
-# no pending invitation. It holds no API key and no linked sign-in. The
-# organization's quota is two environments of the smallest shape, and its
-# compute credit is topped up to exactly EUR 5 by one named grant, with
-# automatic top-up off, so a leaked sign-in can never mean more Dev compute
-# than that, even with a card added (#6074). An
-# organization with this slug that the account did not create stops the run.
-# Sessions and CLI sign-ins stay until the new password is proven.
-log 'writing the account, its password hash and its personal organization'
+# One transaction. The walk account exists, is verified and enabled, is no
+# admin, has no second factor and signs in only with the new password. The
+# owner account exists the same way with no way in at all: no password or
+# linked sign-in, no session, CLI sign-in or API key. The owner owns, and
+# created, one organization on the regular rate card, whose only other member
+# is the walk account, as a plain member with the viewer assignment only, and
+# which has no pending invitation. The walk account belongs to nothing else
+# and may create no organization, which would make it an owner. Every billing
+# write needs an owner or admin, so the organization's credit, topped up to
+# exactly EUR 5 by one named grant with automatic top-up off, is a ceiling the
+# walk's sign-in can't raise (#6074). Its quota is two environments of the
+# smallest shape. An organization with this slug made by any other account
+# stops the run; one the walk account made moves to the owner. Sessions and
+# CLI sign-ins of the walk account stay until the new password is proven.
+log 'writing the accounts, the password hash and the organization'
 {
   printf '\\set hash %s\n' "'$(awk 'NR == 1' "$HASH_FILE")'"
   cat <<'SQL'
@@ -239,44 +265,78 @@ BEGIN;
 INSERT INTO users (id, email, email_verified, name, enabled, is_admin, two_factor_enabled,
   created_at, updated_at)
 VALUES (encode(public.gen_random_bytes(16), 'hex'), :'email', true, :'name', true, false, false,
-  NOW(), NOW())
+  NOW(), NOW()),
+  (encode(public.gen_random_bytes(16), 'hex'), :'owner_email', true, :'owner_name', true, false,
+  false, NOW(), NOW())
 ON CONFLICT (email) DO UPDATE SET email_verified = true, email_vouched_by = NULL,
   enabled = true, is_admin = false, two_factor_enabled = false,
   failed_login_attempts = 0, locked_until = NULL, name = EXCLUDED.name, updated_at = NOW();
 SELECT id AS walk_user_id FROM users WHERE email = :'email' \gset
+SELECT id AS owner_user_id FROM users WHERE email = :'owner_email' \gset
+SELECT 'previous', COALESCE((SELECT CASE created_by WHEN :'owner_user_id' THEN 'owner'
+  WHEN :'walk_user_id' THEN 'walk_user' ELSE 'other' END
+  FROM organizations WHERE slug = :'org_slug'), 'none');
 INSERT INTO organizations (id, name, slug, created_by, rate_card, billing_exempt,
   auto_top_up_enabled, created_at, updated_at)
 VALUES (encode(public.gen_random_bytes(16), 'hex'), :'org_name', :'org_slug',
-  :'walk_user_id', 'regular', false, false, NOW(), NOW())
-ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, rate_card = 'regular',
-  billing_exempt = false, auto_top_up_enabled = false, updated_at = NOW()
-WHERE organizations.created_by = EXCLUDED.created_by
+  :'owner_user_id', 'regular', false, false, NOW(), NOW())
+ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, created_by = EXCLUDED.created_by,
+  rate_card = 'regular', billing_exempt = false, auto_top_up_enabled = false, updated_at = NOW()
+WHERE organizations.created_by IN (EXCLUDED.created_by, :'walk_user_id')
 RETURNING id AS walk_org_id \gset
-WITH links AS (
+WITH walk_links AS (
   DELETE FROM accounts WHERE user_id = :'walk_user_id' RETURNING provider_id
+), owner_links AS (
+  DELETE FROM accounts WHERE user_id = :'owner_user_id' RETURNING id
 ), other_memberships AS (
-  DELETE FROM org_members WHERE user_id = :'walk_user_id' AND org_id <> :'walk_org_id' RETURNING id
+  DELETE FROM org_members WHERE user_id IN (:'walk_user_id', :'owner_user_id')
+    AND org_id <> :'walk_org_id' RETURNING id
 ), other_members AS (
-  DELETE FROM org_members WHERE org_id = :'walk_org_id' AND user_id <> :'walk_user_id' RETURNING id
+  DELETE FROM org_members WHERE org_id = :'walk_org_id'
+    AND user_id NOT IN (:'walk_user_id', :'owner_user_id') RETURNING id
+), assignments AS (
+  DELETE FROM org_member_assignments USING org_members
+  WHERE org_member_assignments.org_member_id = org_members.id
+    AND org_members.org_id = :'walk_org_id' AND org_members.user_id = :'walk_user_id'
+    AND org_member_assignments.assignment <> 'viewer'
+  RETURNING org_member_assignments.id
 ), invitations AS (
   DELETE FROM org_invitations WHERE org_id = :'walk_org_id' AND status = 'pending' RETURNING id
 ), keys AS (
-  DELETE FROM api_keys WHERE user_id = :'walk_user_id' RETURNING id
+  DELETE FROM api_keys WHERE user_id IN (:'walk_user_id', :'owner_user_id') RETURNING id
+), owner_sessions AS (
+  DELETE FROM sessions WHERE user_id = :'owner_user_id' RETURNING id
+), owner_refresh AS (
+  DELETE FROM oidc_refresh_tokens WHERE user_id = :'owner_user_id' RETURNING id
+), owner_access AS (
+  DELETE FROM oidc_access_tokens WHERE user_id = :'owner_user_id' RETURNING token_hash
+), owner_devices AS (
+  DELETE FROM oidc_device_authorizations WHERE user_id = :'owner_user_id'
+  RETURNING device_code_hash
 )
-SELECT 'removed', (SELECT count(*) FROM links WHERE provider_id <> 'credential'),
+SELECT 'removed', (SELECT count(*) FROM walk_links WHERE provider_id <> 'credential'),
   (SELECT count(*) FROM other_memberships), (SELECT count(*) FROM other_members),
-  (SELECT count(*) FROM invitations), (SELECT count(*) FROM keys);
+  (SELECT count(*) FROM assignments), (SELECT count(*) FROM invitations),
+  (SELECT count(*) FROM keys), (SELECT count(*) FROM owner_links),
+  (SELECT count(*) FROM owner_sessions),
+  (SELECT count(*) FROM owner_refresh) + (SELECT count(*) FROM owner_access)
+    + (SELECT count(*) FROM owner_devices);
 INSERT INTO accounts (id, user_id, provider_id, account_id, password, created_at, updated_at)
 VALUES (encode(public.gen_random_bytes(16), 'hex'), :'walk_user_id', 'credential', :'email',
   :'hash', NOW(), NOW());
-UPDATE org_members SET role = 'owner', updated_at = NOW()
-WHERE org_id = :'walk_org_id' AND user_id = :'walk_user_id';
 INSERT INTO org_members (id, org_id, user_id, role, created_at, updated_at)
-SELECT encode(public.gen_random_bytes(16), 'hex'), :'walk_org_id', :'walk_user_id', 'owner',
-  NOW(), NOW()
-WHERE NOT EXISTS (
-  SELECT 1 FROM org_members WHERE org_id = :'walk_org_id' AND user_id = :'walk_user_id'
-);
+VALUES (encode(public.gen_random_bytes(16), 'hex'), :'walk_org_id', :'owner_user_id', 'owner',
+  NOW(), NOW()),
+  (encode(public.gen_random_bytes(16), 'hex'), :'walk_org_id', :'walk_user_id', 'member',
+  NOW(), NOW())
+ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW();
+INSERT INTO org_member_assignments (org_member_id, assignment)
+SELECT id, 'viewer' FROM org_members WHERE org_id = :'walk_org_id' AND user_id = :'walk_user_id'
+ON CONFLICT (org_member_id, assignment) DO NOTHING;
+INSERT INTO rate_limit_overrides (user_id, name, max_requests, updated_by, updated_at)
+VALUES (:'walk_user_id', 'org_create', 0, 'provision-dev-personal-walk-user', NOW())
+ON CONFLICT (user_id, name) DO UPDATE SET max_requests = 0, updated_by = EXCLUDED.updated_by,
+  updated_at = NOW();
 INSERT INTO environment_quotas (org_id, max_concurrent_environments, max_concurrent_sandbox,
   max_cpu_millicores, max_memory_mb)
 VALUES (:'walk_org_id', 2, 2, 4000, 16384)
@@ -297,12 +357,27 @@ SELECT 'state',
   (SELECT count(*) FROM accounts WHERE user_id = :'walk_user_id'),
   (SELECT count(*) FROM org_members WHERE user_id = :'walk_user_id'),
   (SELECT count(*) FROM org_members WHERE org_id = :'walk_org_id' AND user_id = :'walk_user_id'
+    AND role = 'member'),
+  (SELECT count(*) FROM org_member_assignments a JOIN org_members m ON m.id = a.org_member_id
+    WHERE m.user_id = :'walk_user_id' AND a.assignment <> 'viewer'),
+  (SELECT count(*) FROM users WHERE id = :'owner_user_id' AND enabled AND email_verified
+    AND NOT COALESCE(is_admin, false) AND NOT COALESCE(two_factor_enabled, false)),
+  (SELECT count(*) FROM accounts WHERE user_id = :'owner_user_id'),
+  (SELECT count(*) FROM sessions WHERE user_id = :'owner_user_id')
+    + (SELECT count(*) FROM oidc_refresh_tokens WHERE user_id = :'owner_user_id')
+    + (SELECT count(*) FROM oidc_access_tokens WHERE user_id = :'owner_user_id')
+    + (SELECT count(*) FROM oidc_device_authorizations WHERE user_id = :'owner_user_id'),
+  (SELECT count(*) FROM org_members WHERE user_id = :'owner_user_id'),
+  (SELECT count(*) FROM org_members WHERE org_id = :'walk_org_id' AND user_id = :'owner_user_id'
     AND role = 'owner'),
   (SELECT count(*) FROM org_members WHERE org_id = :'walk_org_id'),
-  (SELECT count(*) FROM organizations WHERE id = :'walk_org_id' AND rate_card = 'regular'
-    AND NOT billing_exempt AND NOT auto_top_up_enabled AND deletion_state = 'active'
-    AND suspended_at IS NULL),
-  (SELECT count(*) FROM api_keys WHERE user_id = :'walk_user_id'),
+  (SELECT count(*) FROM organizations WHERE id = :'walk_org_id' AND created_by = :'owner_user_id'
+    AND rate_card = 'regular' AND NOT billing_exempt AND NOT auto_top_up_enabled
+    AND deletion_state = 'active' AND suspended_at IS NULL),
+  (SELECT count(*) FROM api_keys WHERE user_id IN (:'walk_user_id', :'owner_user_id')),
+  (SELECT count(*) FROM org_invitations WHERE org_id = :'walk_org_id' AND status = 'pending'),
+  (SELECT count(*) FROM rate_limit_overrides WHERE user_id = :'walk_user_id'
+    AND name = 'org_create' AND max_requests = 0),
   (SELECT count(*) FROM environment_quotas WHERE org_id = :'walk_org_id'
     AND max_concurrent_environments = 2 AND max_concurrent_sandbox = 2
     AND max_cpu_millicores = 4000 AND max_memory_mb = 16384),
@@ -311,16 +386,31 @@ SELECT 'state',
 COMMIT;
 SQL
 } | run_psql --set "email=$WALK_EMAIL" --set "name=$WALK_NAME" \
+  --set "owner_email=$OWNER_EMAIL" --set "owner_name=$OWNER_NAME" \
   --set "org_name=$WALK_ORG_NAME" --set "org_slug=$WALK_ORG_SLUG" >"$DB_RESULT" ||
-  die "the database write failed; nothing was published (an organization $WALK_ORG_SLUG this account did not create also stops it)"
-removed="$(awk -F'|' '$1 == "removed" { print $2, $3, $4, $5, $6 }' "$DB_RESULT")"
+  die "the database write failed; nothing was published (an organization $WALK_ORG_SLUG that neither account created also stops it)"
+previous="$(awk -F'|' '$1 == "previous" { print $2 }' "$DB_RESULT")"
+removed="$(awk -F'|' '$1 == "removed" { $1 = ""; print substr($0, 2) }' "$DB_RESULT")"
 state="$(awk -F'|' '$1 == "state" { $1 = ""; print substr($0, 2) }' "$DB_RESULT")"
-[[ "$removed" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] ||
-  die 'the database returned no removal counts'
-[[ "$state" == '1 1 1 1 1 1 1 0 1 1' ]] ||
-  die "the database did not reach the expected account state (got: ${state:-none})"
-read -r links memberships members invitations keys <<<"$removed"
-log "account ready; removed sign_in_links=$links other_memberships=$memberships other_members=$members pending_invitations=$invitations api_keys=$keys"
+# An organization someone else made never reaches here: the upsert returns no
+# row and psql stops. This is the second guard.
+[[ "$previous" =~ ^(none|owner|walk_user)$ ]] ||
+  die "the organization $WALK_ORG_SLUG was made by another account (got: ${previous:-none})"
+[[ "$removed" =~ ^[0-9]+(\ [0-9]+){8}$ ]] || die 'the database returned no removal counts'
+# walk: flags, password, sign-ins, memberships, member role, other assignments;
+# owner: flags, sign-ins, sessions and CLI sign-ins, memberships, owner role;
+# organization: members, its row, API keys, invitations, org_create, quota, credit.
+readonly EXPECTED_STATE='1 1 1 1 1 0 1 0 0 1 1 2 1 0 0 1 1 1'
+[[ "$state" == "$EXPECTED_STATE" ]] ||
+  die "the database did not reach the expected account state (got: ${state:-none}; want: $EXPECTED_STATE)"
+read -r links memberships members assignments invitations keys owner_links owner_sessions \
+  owner_cli_sign_ins <<<"$removed"
+case "$previous" in
+  none) organization=created ;;
+  owner) organization=kept ;;
+  walk_user) organization=moved_from_walk_user_to_owner ;;
+esac
+log "accounts ready; organization $organization; removed sign_in_links=$links other_memberships=$memberships other_members=$members walk_assignments=$assignments pending_invitations=$invitations api_keys=$keys owner_sign_in_links=$owner_links owner_sessions=$owner_sessions owner_cli_sign_ins=$owner_cli_sign_ins"
 
 jq -n --rawfile password "$PASSWORD_FILE" --arg userEmail "$WALK_EMAIL" \
   '{password: $password, userEmail: $userEmail}' >"$PAYLOAD"
@@ -431,4 +521,4 @@ if [[ -s "$OLD_SIGN_IN_BODY" ]]; then
   old_password_refused=true
 fi
 
-log "PASS canonical_store=openbao path=$OPENBAO_PATH sign_in_probe=true old_password_refused=$old_password_refused org=$WALK_ORG_SLUG rate_card=regular members=1 api_keys=0 quota=2x4000m16384MB credit_eur=5 secret_values_printed=false"
+log "PASS canonical_store=openbao path=$OPENBAO_PATH sign_in_probe=true old_password_refused=$old_password_refused org=$WALK_ORG_SLUG rate_card=regular owner=provisioned-no-sign-in walk_role=member members=2 api_keys=0 walk_org_create=0 quota=2x4000m16384MB credit_eur=5 auto_top_up=off secret_values_printed=false"
