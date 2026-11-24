@@ -828,6 +828,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py turnstile-access-projection --self-test
   python3 scripts/checks/repo_checks.py hosted-overlay-contract --self-test
   python3 scripts/checks/repo_checks.py kind-overlay-peers --self-test
+  python3 scripts/checks/repo_checks.py merge-queue-boundary --self-test
+  python3 scripts/checks/repo_checks.py merge-queue-boundary
 STEPS
   )
 }

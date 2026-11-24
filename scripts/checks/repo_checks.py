@@ -24,6 +24,7 @@ from repo_policy.deployment_http_clients import check_deployment_http_clients
 from repo_policy.forgejo_list_paging import check_forgejo_list_paging
 from repo_policy.trace_context_callers import check_trace_context_callers
 from repo_policy.mcp_settings import check_mcp_settings
+from repo_policy.merge_queue_boundary import check_merge_queue_boundary
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_authz
 from repo_policy.os_splits import check_os_splits
@@ -175,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     chart_guard_parser = subparsers.add_parser("chart-deletion-guard")
     chart_guard_parser.add_argument("--self-test", action="store_true")
     chart_guard_parser.set_defaults(func=check_chart_deletion_guard)
+    boundary_parser = subparsers.add_parser("merge-queue-boundary")
+    boundary_parser.add_argument("--self-test", action="store_true")
+    boundary_parser.set_defaults(func=check_merge_queue_boundary)
 
     args = parser.parse_args(argv)
     return args.func(args)
