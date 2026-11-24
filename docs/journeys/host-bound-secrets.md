@@ -27,13 +27,15 @@ Updated 2026-11-24. Written first; every step is not yet observed.
 
 ## Before the walk
 
-- **The fixture.** A checked-in HTTPS endpoint, at a public name with a
-  publicly trusted certificate, that records the auth headers, query and
-  body of each request it receives, answers with a request ID, and on
-  `/echo` returns the request's headers in its reply. It is the first step
-  of #4003's code and does not exist yet: no command yet. Below, `FIXTURE`
-  is its host name and `OTHER` a second host the walk controls that the
-  binding doesn't name.
+- **The fixture.** An HTTPS endpoint on Dev, at a public name with a
+  publicly trusted certificate, checked into the infrastructure repository
+  (`codewire-walk-echo`, Dev only). Every reply carries a request ID and
+  SHA-256 digests of the headers, query and body it received, never a value,
+  so a walk compares them with its canary's digests; `/echo` also returns
+  the headers as received, and `/requests` lists the last requests'
+  digests. Cookies are never echoed or recorded. Below,
+  `FIXTURE` is its host name and `OTHER` a second host the walk controls
+  that the binding doesn't name.
 - **A canary value.** A synthetic, canary-marked value, never a real key,
   made in the walk's scratch directory and passed on stdin. The walk greps
   for it; it is never printed.
@@ -133,7 +135,10 @@ Updated 2026-11-24. Written first; every step is not yet observed.
   2. As A, `--remove-host` of one of two hosts, and `--prefix sk_`, with no
      value.
   3. As M, any binding change.
-- **Proof:** each change in step 1 is refused with `secret_value_required`,
+  4. As A, rename the bound `FANCY_TOKEN`.
+- **Proof:** the rename in step 4 is refused with `secret_bound_rename`,
+  naming the set-then-delete step, and the key is unchanged; each change in
+  step 1 is refused with `secret_value_required`,
   naming the change, and `list` shows the binding unchanged; step 2
   succeeds without a value; step 3 is refused as setting the secret is
   today.

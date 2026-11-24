@@ -2303,7 +2303,16 @@ and from `codewire_access::FRONT_DOOR_HOSTS`, in the module that validates
 bindings for both this and the `bound` credential kind. The credential
 service checks it when a binding is set and again at bind, so a name the
 deployment adds later refuses an existing binding at the next bind
-(`bound_host_reserved`, naming the host), never serving it.
+(`bound_host_reserved`, naming the host), never serving it. Orchestration
+builds the list from its own front-end and preview names and the setting
+`CODEWIRE_BOUND_HOST_RESERVED_NAMES` (exact names and `*.suffix` entries),
+which each deployment's configuration fills. A `*.suffix` entry reserves the
+suffix itself and every name under it. The front-end and preview names miss
+the identity issuer, the registries, OpenBao and the forge, so a hosted
+orchestration that serves bound secrets refuses to start while the setting
+is unset, naming it; Dev's and Production's configuration fill it in the
+delivery that turns bound secrets on. A local store has no deployment, so
+it reserves the provider hosts only.
 
 The value of a bound secret is printable ASCII, at most 8 KiB. The key
 name is the variable name, as for every secret. Out of scope: values used
@@ -2329,8 +2338,19 @@ value to a host of their own or read it in an environment:
   allows it, since that changes its slot.
 
 Removing a host while others remain, and changing the prefix, need no
-value. A request that needs the value and has none is refused with
-`secret_value_required`, naming the change, and nothing is changed.
+value. A bound secret can't be renamed: a rename changes its slot and
+carries no value, so it is refused (`secret_bound_rename`) with the step to
+take instead, setting the new key with the value and deleting the old one.
+The dashboard offers no Rename on a bound key.
+
+**Refusals when setting a secret.** Each is a 400 that changes nothing, with
+a stable code and a sentence that names what the person gave:
+`secret_value_required` (a change above that needs the value),
+`bound_host_provider` (a host a built-in credential names),
+`bound_host_reserved` (one of the deployment's own names),
+`secret_binding_invalid` (any other host, header, scheme, prefix, preset or
+value rule), and `secret_bound_rename`. An empty value for a plain secret
+is refused as it always has been.
 
 **The record.** A bound secret's record gains a `binding_id`, made when it
 is first bound and kept until the secret is deleted, and a
@@ -2346,9 +2366,13 @@ the same keys: the environment's key hosted, and the owner's local root for
 a local VM. The inputs:
 
 - the environment;
-- the slot, `secret/<scope>/<scope id>/<key>`, where the scope is `user`,
-  `organization` or `project`. The slot grammar refuses a string that
-  parses as a provider slot or a `bound/<id>` slot, and a test holds that;
+- the slot, `secret/<scope>/<collection id>/<key>`, where the scope is
+  `user`, `organization` or `project`, and the collection ID is the opaque
+  UUID of the set that stores the key, never a name. A rename of a project,
+  or sets added under a project later (#6314), changes no existing slot; a
+  key such a set overrides is another record with its own slot. The slot
+  grammar refuses a string that parses as a provider slot or a `bound/<id>`
+  slot, and a test holds that;
 - the credential, the secret's `binding_id` and `binding_generation`;
 - no profile revision: a secret is selected through a source, not a
   profile.
@@ -2406,9 +2430,9 @@ and the front door binds the secret's hosts only from then.
 - **Interception is never quietly off.** A boot or Pod that would bind a
   secret's host and can't intercept refuses to start, by name
   (`bound_secret_not_interceptable`, naming the key). It never falls back to
-  projecting the value. Today that covers a local VM whose credentials come
-  from the platform on macOS ("Agent host interception" above), until that
-  placement intercepts.
+  projecting the value. Today that covers a local VM boot with no local
+  credential broker, or one whose running credential authority predates
+  boot secrets ("Agent host interception" above).
 - **What that does to the host.** A bound host goes through the front door
   for the whole environment. In a local VM a request to it that carries no
   Codewire value follows the network policy, as for every intercepted host.
