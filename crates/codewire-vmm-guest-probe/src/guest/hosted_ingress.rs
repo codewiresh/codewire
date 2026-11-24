@@ -15,6 +15,8 @@ use anyhow::{Context as _, Result};
 use tokio::sync::Semaphore;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
 
+mod workload_log;
+
 use crate::hosted_control::{
     HOSTED_DAEMON_GUEST_PORT, HOSTED_DAEMON_INGRESS_VSOCK_PORT, HOSTED_INGRESS_CONNECT,
     HOSTED_INGRESS_IDLE, HOSTED_INGRESS_MAX_JOINS, HOSTED_SSH_INGRESS_VSOCK_PORT, guest_carried,
@@ -149,11 +151,13 @@ fn connect_from_workspace_namespace(port: u16) -> std::io::Result<std::net::TcpS
 /// lands anywhere else. A container restart gets this same descriptor.
 static DAEMON_LISTENER: std::sync::OnceLock<std::net::TcpListener> = std::sync::OnceLock::new();
 
-/// Binds and holds the daemon's listener in a guest-carried boot, once.
+/// Binds and holds the daemon's listener in a guest-carried boot, once, and
+/// the pipe its output leaves the guest by.
 pub(super) fn hold_daemon_listener(command_line: &str, uid: u32, gid: u32) -> Result<()> {
     if !guest_carried(command_line) || DAEMON_LISTENER.get().is_some() {
         return Ok(());
     }
+    workload_log::hold(command_line)?;
     let (sent, received) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("codewire-hosted-listener".to_owned())
@@ -186,34 +190,73 @@ pub(super) fn daemon_listener_fd() -> Option<std::os::fd::RawFd> {
     DAEMON_LISTENER.get().map(AsRawFd::as_raw_fd)
 }
 
-/// runc's `--preserve-fds`: the readiness channel, and the held listener in
-/// a guest-carried boot, as descriptors 3 and 4.
+/// runc's `--preserve-fds`: the readiness channel, and in a guest-carried
+/// boot the held listener and the log pipe, as descriptors 3, 4 and 5.
 pub(super) fn preserved_fds() -> &'static str {
-    if daemon_listener_fd().is_some() {
-        "2"
-    } else {
-        "1"
+    match container_fds() {
+        [Some(_), Some(_)] => "3",
+        [Some(_), None] => "2",
+        _ => "1",
     }
 }
 
-/// Inside the container: the listener runc passed as descriptor 4, moved to a
-/// close-on-exec descriptor that no process the container init starts
-/// inherits, save the hosted workload (`spawn_workspace_process_with_projection`).
+/// The descriptors runc passes after the readiness channel, in order: the
+/// held listener and the log pipe's write end.
+pub(super) fn container_fds() -> [Option<std::os::fd::RawFd>; 2] {
+    [daemon_listener_fd(), workload_log::writer_fd()]
+}
+
+/// Between fork and exec of runc: places `fds` as descriptors 4 and on,
+/// inherited. Only dup2 and fcntl, so it is safe there. False on failure.
+pub(super) fn place_container_fds(fds: [Option<std::os::fd::RawFd>; 2]) -> bool {
+    (4..).zip(fds).all(|(target, fd)| {
+        fd.is_none_or(|fd| {
+            // SAFETY: dup2 and fcntl on open descriptors, async-signal-safe.
+            unsafe { libc::dup2(fd, target) != -1 && libc::fcntl(target, libc::F_SETFD, 0) != -1 }
+        })
+    })
+}
+
+/// Inside the container: the listener runc passed as descriptor 4, and the
+/// log pipe as descriptor 5, each moved to a close-on-exec descriptor that no
+/// process the container init starts inherits, save the hosted workload
+/// (`spawn_workspace_process_with_projection`).
 static CONTAINER_LISTENER: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::OnceLock::new();
+static CONTAINER_LOG: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::OnceLock::new();
 
 pub(super) fn claim_container_listener() -> Result<bool> {
-    // SAFETY: F_GETFD on a descriptor number only reads its flags.
-    if unsafe { libc::fcntl(4, libc::F_GETFD) } == -1 {
+    let Some(listener) = claim_inherited(4).context("move the hosted daemon listener")? else {
         return Ok(false);
-    }
-    // SAFETY: descriptor 4 is open, and runc passed it to this PID 1 alone.
-    let inherited = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(4) };
-    let moved = rustix::io::fcntl_dupfd_cloexec(&inherited, 10)
-        .context("move the hosted daemon listener")?;
-    drop(inherited);
+    };
     // Claimed once per container start; a second set changes nothing.
-    let _ = CONTAINER_LISTENER.set(moved);
+    let _ = CONTAINER_LISTENER.set(listener);
+    if let Some(log) = claim_inherited(5).context("move the hosted daemon's log pipe")? {
+        // As above.
+        let _ = CONTAINER_LOG.set(log);
+    }
     Ok(true)
+}
+
+/// Descriptor `fd`, if runc passed it, moved to a close-on-exec descriptor.
+fn claim_inherited(fd: std::os::fd::RawFd) -> Result<Option<std::os::fd::OwnedFd>> {
+    // SAFETY: F_GETFD on a descriptor number only reads its flags.
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+        return Ok(None);
+    }
+    // SAFETY: `fd` is open, and runc passed it to this PID 1 alone.
+    let inherited = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    let moved = rustix::io::fcntl_dupfd_cloexec(&inherited, 10)?;
+    drop(inherited);
+    Ok(Some(moved))
+}
+
+/// The hosted workload's stdout or stderr: the log pipe when `listener` is
+/// set, which only the workload's spawn passes, and nothing otherwise.
+pub(super) fn workload_output(listener: Option<std::os::fd::RawFd>) -> std::process::Stdio {
+    listener
+        .and(CONTAINER_LOG.get())
+        .and_then(|log| log.try_clone().ok())
+        .map_or_else(std::process::Stdio::null, std::process::Stdio::from)
 }
 
 pub(super) fn container_listener_fd() -> Option<std::os::fd::RawFd> {

@@ -45,6 +45,13 @@ pub const HOSTED_DAEMON_LISTENER_FD: i32 = 9;
 pub const HOSTED_INGRESS_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
 /// How long a join waits to connect to its target.
 pub const HOSTED_INGRESS_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The hosted workload's output out (#5602): in a guest-carried boot the
+/// guest connects to this host port and only writes; the Pod's runtime only
+/// reads, and writes what it accepts to its own log as untrusted text.
+pub const HOSTED_LOG_VSOCK_PORT: u32 = 7_783;
+/// The longest line, in bytes, either side keeps; the rest of a longer line
+/// is dropped and the line marked truncated.
+pub const HOSTED_LOG_MAX_LINE: usize = 4_096;
 
 /// Joins two streams byte for byte until both directions have ended, or
 /// until neither has carried a byte for `idle`. The ingress on both sides of

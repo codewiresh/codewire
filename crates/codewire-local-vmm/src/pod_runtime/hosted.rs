@@ -219,11 +219,22 @@ pub(super) async fn refresh_tokens(
     Ok(current)
 }
 
+/// The guest's channels on the host: the Pod's two published ports in, and
+/// the hosted workload's output out to this container's log
+/// ([`super::guest_log`]).
+pub(super) async fn open_guest_channels(
+    vsock_socket: &Path,
+) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
+    let mut tasks = publish_ports(vsock_socket).await?;
+    tasks.push(super::guest_log::forward(vsock_socket)?);
+    Ok(tasks)
+}
+
 /// Listens on the Pod's two published ports and joins each connection, byte
 /// for byte, to the guest's ingress port for it over the VM's hybrid vsock
 /// socket: at most [`HOSTED_INGRESS_MAX_JOINS`] at once per port, refused
 /// over that, each closed after [`HOSTED_INGRESS_IDLE`] without a byte.
-pub(super) async fn publish_ports(
+async fn publish_ports(
     vsock_socket: &Path,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
     let mut tasks = Vec::new();

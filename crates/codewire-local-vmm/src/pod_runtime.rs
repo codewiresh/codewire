@@ -32,6 +32,7 @@ use crate::setup_pack::{PublishedSetupRequest, ensure_published_setup_pack};
 use crate::workspace::ensure_empty_state_disk;
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError};
 
+mod guest_log;
 mod hosted;
 use codewire_vmm_guest_probe::image_disk::BuildId;
 pub use hosted::HostedPaths;
@@ -432,7 +433,7 @@ fn boot_request(
         memory_mib: settings.memory_mib,
         setup,
         // The Pod's ports reach the guest through its own ingress, not the
-        // runner's host ports (see `hosted::publish_ports`).
+        // runner's host ports (see `hosted::open_guest_channels`).
         host_ports: Vec::new(),
         mesh: None,
         direct_shares: Vec::new(),
@@ -477,7 +478,7 @@ async fn boot_and_wait(
     running
         .start_network_worker(&executable, BOOT_TIMEOUT)
         .await?;
-    let _published = hosted::publish_ports(&running.paths().vsock_socket).await?;
+    let _channels = hosted::open_guest_channels(&running.paths().vsock_socket).await?;
     let stage = running
         .authenticated_guest_terminal_stage(BOOT_TIMEOUT)
         .await?;

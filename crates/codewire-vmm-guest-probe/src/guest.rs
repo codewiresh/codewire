@@ -1897,8 +1897,8 @@ fn spawn_workspace_process_with_projection(
     )
 }
 
-/// As [`spawn_workspace_process_with_projection`], and `listener`, when
-/// given, as descriptor 9: only the hosted workload's spawn passes one.
+/// As [`spawn_workspace_process_with_projection`], and `listener`, when given,
+/// as descriptor 9 with output to the log pipe: only the hosted workload's.
 fn spawn_workspace_process(
     plan: &WorkspacePlan,
     arguments: &[String],
@@ -1948,8 +1948,8 @@ fn spawn_workspace_process(
         .env_clear()
         .process_group(0)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(hosted_ingress::workload_output(listener))
+        .stderr(hosted_ingress::workload_output(listener));
     for entry in &runtime_path_environment(&plan.environment, Path::new(CW_RUNTIME_ROOT).is_dir()) {
         let (key, value) = entry
             .split_once('=')
@@ -4727,7 +4727,7 @@ fn spawn_workspace_container(
         .set_nonblocking(true)
         .context("make workspace readiness channel nonblocking")?;
     let readiness_fd = readiness_writer.as_raw_fd();
-    let listener = hosted_ingress::daemon_listener_fd();
+    let carried = hosted_ingress::container_fds();
     let mut command = Command::new(RUNC_PATH);
     command
         .args([
@@ -4758,9 +4758,7 @@ fn spawn_workspace_container(
                 return Err(io::Error::last_os_error());
             }
             if libc::fcntl(WORKSPACE_READY_FD, libc::F_SETFD, 0) == -1
-                || listener.is_some_and(|fd| {
-                    libc::dup2(fd, 4) == -1 || libc::fcntl(4, libc::F_SETFD, 0) == -1
-                })
+                || !hosted_ingress::place_container_fds(carried)
             {
                 return Err(io::Error::last_os_error());
             }

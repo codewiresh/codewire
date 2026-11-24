@@ -571,6 +571,13 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   children and cannot be traced by them. SSH needs no such listener: a
   process that took its port would fail the platform's pinned host key, not
   learn anything.
+  The daemon's stdout and stderr reach the Pod log, as a Kata Pod's daemon's
+  do: the guest writes them out over one more fixed guest-channel port, and
+  the runtime, which only reads it, writes each line prefixed
+  `guest-daemon: `, escaped so no guest byte can end it or start another,
+  cut at 4 KiB, and capped at 200 lines and 64 KiB a second per Sandbox,
+  counting what it drops. That text is untrusted guest output: nothing uses
+  it for health, readiness or billing.
   Production's `standard` profile stays off until an orchestration-side
   check that does not depend on the guest exists; for a broker-mode
   `standard` Pod that is #5800's lockdown check at the `cw-egress` handshake.
