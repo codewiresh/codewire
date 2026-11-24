@@ -150,7 +150,10 @@ fn a_standard_workspace_mounts_only_its_claim_its_image_disk_its_tokens_and_root
         volumes["image-disk"]["image"],
         json!({ "reference": IMAGE_DISK, "pullPolicy": "IfNotPresent" })
     );
-    assert_eq!(volumes["codewire-run"]["emptyDir"]["medium"], "Memory");
+    assert_eq!(
+        volumes["codewire-run"]["emptyDir"],
+        json!({ "medium": "Memory", "sizeLimit": "16Mi" })
+    );
     let mounts: BTreeMap<&str, &Value> = workspace(&template)["volumeMounts"]
         .as_array()
         .unwrap()

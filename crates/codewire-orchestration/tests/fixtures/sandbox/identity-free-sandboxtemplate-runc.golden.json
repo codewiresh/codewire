@@ -168,7 +168,6 @@
       },
       "spec": {
         "automountServiceAccountToken": false,
-        "enableServiceLinks": false,
         "containers": [
           {
             "command": [
@@ -295,6 +294,7 @@
           }
         ],
         "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": false,
         "initContainers": [
           {
             "command": [
@@ -314,6 +314,10 @@
                 "memory": "32Mi"
               }
             },
+            "securityContext": {
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
             "volumeMounts": [
               {
                 "mountPath": "/codewire/bin",
@@ -323,11 +327,7 @@
                 "mountPath": "/codewire/run",
                 "name": "codewire-run"
               }
-            ],
-            "securityContext": {
-              "runAsUser": 0,
-              "runAsGroup": 0
-            }
+            ]
           }
         ],
         "restartPolicy": "Never",
@@ -345,7 +345,10 @@
             "name": "codewire-bin"
           },
           {
-            "emptyDir": {},
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "16Mi"
+            },
             "name": "codewire-run"
           },
           {

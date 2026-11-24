@@ -63,6 +63,10 @@ EGRESS = "with hosted egress on, a template's egress names only the broker peers
 PRIVILEGE = "with hosted egress on, the Pod runs as 1000:1000"
 TUN = "hosted-egress-tun runs only as an init container"
 DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memory"
+RUN = "the daemon's run directory codewire-run is exactly one emptyDir with medium Memory and sizeLimit 16Mi"
+RUN_MOUNT = "every mount at or under /codewire/run, every mount of codewire-run and every mount path that is not plain"
+MEMBER_RUN = "a Sandbox's run directory codewire-run is exactly one emptyDir with medium Memory and sizeLimit 16Mi"
+MEMBER_RUN_MOUNT = "on a Sandbox, every mount at or under /codewire/run"
 RUNTIME = "warm-pool members run under the commodity runtime"
 EGRESS_MODE = "CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container"
 STANDARD_POOL = "a standard pool template is one workspace container"
@@ -335,12 +339,14 @@ def sandbox(labels: dict[str, str], runtime_class: str | None = None, mode: str 
 
 def sandbox_change(cluster: "Cluster", before: dict, change: Callable[[dict], object],
                    param: dict[str, str] | None = None, identity: str = AS,
-                   creator: str | None = AS) -> str | None:
-    """With the switch at `param`, create `before` as `creator` (CREATE holds
-    none of the update rules; None is the cluster's administrator), apply
-    `change` to the stored Sandbox and update it as `identity`, then delete
-    it. A missing param denies the create too, so that case creates with the
-    switch on and then removes it."""
+                   creator: str | None = None) -> str | None:
+    """With the switch at `param`, create `before` as `creator` (None, the
+    default, is the cluster's administrator, whom the member policy does not
+    match, so any stored shape can be the starting point, as with Sandboxes
+    the controller made before a rule; orchestration never creates one),
+    apply `change` to the stored Sandbox and update it as `identity`, then
+    delete it. A missing param denies the create too, so that case creates
+    with the switch on and then removes it."""
     cluster.param(ON if param is None else param)
     create_as = [f"--as={creator}"] if creator else []
     stored = cluster.kubectl("create", *create_as, "-f", "-", stdin=json.dumps(before))
@@ -623,76 +629,76 @@ def move_cases(cluster: "Cluster", env_today: dict, env_broker: dict, pool_today
     results = []
     for name, before, change, param, identity, creator, expected in [
         ("on, Sandbox: a stopped one moved to the whole broker shape",
-         moved_sandbox(env_today), whole, ON, AS, AS, None),
+         moved_sandbox(env_today), whole, ON, AS, None, None),
         ("on, Sandbox: only the broker label added to a stopped bound one",
-         moved_sandbox(env_today), lambda s: labels(s).__setitem__("codewire.sh/egress", "broker"), ON, AS, AS,
+         moved_sandbox(env_today), lambda s: labels(s).__setitem__("codewire.sh/egress", "broker"), ON, AS, None,
          LABEL_ONLY),
         # Without its TUN init or its fence revision the label goes on alone.
         ("on, Sandbox: a move without the TUN init", moved_sandbox(env_today), move_to(env_broker, without_tun),
-         ON, AS, AS, LABEL_ONLY),
+         ON, AS, None, LABEL_ONLY),
         ("on, Sandbox: a move without the resolver", moved_sandbox(env_today),
          move_to(env_broker, setting(pod, "dnsPolicy", "ClusterFirst"), lambda s: pod(s).pop("dnsConfig")),
-         ON, AS, AS, RESOLVER),
+         ON, AS, None, RESOLVER),
         ("on, Sandbox: the whole shape and a host path", moved_sandbox(env_today), move_to(env_broker, lambda s: pod(
-            s)["volumes"].append({"name": "host", "hostPath": {"path": "/"}})), ON, AS, AS, HOST),
+            s)["volumes"].append({"name": "host", "hostPath": {"path": "/"}})), ON, AS, None, HOST),
         ("on, Sandbox: the whole shape and the host network", moved_sandbox(env_today),
-         move_to(env_broker, setting(pod, "hostNetwork", True)), ON, AS, AS, HOST),
+         move_to(env_broker, setting(pod, "hostNetwork", True)), ON, AS, None, HOST),
         ("on, Sandbox: the whole shape and a privileged container", moved_sandbox(env_today), move_to(
             env_broker, lambda s: container(s, "workspace").__setitem__("securityContext", {"privileged": True})),
-         ON, AS, AS, PRIVILEGE),
+         ON, AS, None, PRIVILEGE),
         ("on, Sandbox: the whole shape and an added capability", moved_sandbox(env_today), move_to(
             env_broker, lambda s: container(s, "workspace").__setitem__(
-                "securityContext", {"capabilities": {"add": ["NET_ADMIN"]}})), ON, AS, AS, PRIVILEGE),
+                "securityContext", {"capabilities": {"add": ["NET_ADMIN"]}})), ON, AS, None, PRIVILEGE),
         ("on, Sandbox: the whole shape and an extra nameserver", moved_sandbox(env_today), move_to(
-            env_broker, lambda s: pod(s)["dnsConfig"]["nameservers"].append("10.44.0.10")), ON, AS, AS, RESOLVER),
+            env_broker, lambda s: pod(s)["dnsConfig"]["nameservers"].append("10.44.0.10")), ON, AS, None, RESOLVER),
         ("on, Sandbox: the whole shape under another fence revision", moved_sandbox(env_today), move_to(
             env_broker, lambda s: annotations(s).__setitem__("codewire.sh/egress-fence-revision", "1")),
-         ON, AS, AS, FENCE),
+         ON, AS, None, FENCE),
         ("on, Sandbox: the whole shape with no fence revision", moved_sandbox(env_today), move_to(
-            env_broker, lambda s: annotations(s).pop("codewire.sh/egress-fence-revision")), ON, AS, AS, LABEL_ONLY),
+            env_broker, lambda s: annotations(s).pop("codewire.sh/egress-fence-revision")), ON, AS, None, LABEL_ONLY),
         ("off, Sandbox: a stopped one moved to the whole broker shape",
-         moved_sandbox(env_today), whole, OFF, AS, AS, MOVE),
-        ("on, Sandbox: a running one moved", moved_sandbox(env_today, mode="Running"), whole, ON, AS, AS, MOVE),
+         moved_sandbox(env_today), whole, OFF, AS, None, MOVE),
+        ("on, Sandbox: a running one moved", moved_sandbox(env_today, mode="Running"), whole, ON, AS, None, MOVE),
         ("on, Sandbox: a stopped one moved and started in one update",
-         moved_sandbox(env_today), move_to(env_broker, mode("Running")), ON, AS, AS, MOVE),
+         moved_sandbox(env_today), move_to(env_broker, mode("Running")), ON, AS, None, MOVE),
         ("on, Sandbox: a stopped one bound to no environment moved",
-         moved_sandbox(env_today, bound=False), whole, ON, AS, AS, MOVE),
+         moved_sandbox(env_today, bound=False), whole, ON, AS, None, MOVE),
         ("on, Sandbox: a move that changes the environment", moved_sandbox(env_today), move_to(
-            env_broker, lambda s: labels(s).__setitem__("codewire.sh/environment-id", "another")), ON, AS, AS, MOVE),
-        ("on, Sandbox: the move by another identity", moved_sandbox(env_today), whole, ON, OTHER, AS, WRITER),
-        ("off, Sandbox: broker mode added by another identity", moved_sandbox(env_today), whole, OFF, OTHER, AS,
+            env_broker, lambda s: labels(s).__setitem__("codewire.sh/environment-id", "another")), ON, AS, None, MOVE),
+        ("on, Sandbox: the move by another identity", moved_sandbox(env_today), whole, ON, OTHER, None, WRITER),
+        ("off, Sandbox: broker mode added by another identity", moved_sandbox(env_today), whole, OFF, OTHER, None,
          WRITER),
         ("on, Sandbox: an unclaimed pool member moved", moved_sandbox(env_today, pool_member=True), whole,
          ON, AS, None, POOL_MEMBER),
         ("on, Sandbox: another identity changes a broker one", moved_sandbox(env_broker),
-         lambda s: labels(s).__setitem__("x", "y"), ON, OTHER, AS, None),
+         lambda s: labels(s).__setitem__("x", "y"), ON, OTHER, None, None),
         # A pool-born Sandbox (every one on Dev) moves onto its environment's
         # own template: the whole shape and the new template reference in
         # one update, under its cw-pool- name.
         ("on, Sandbox: a pool-born one moved onto its own template", pool_born_sandbox(pool_today),
-         move_to(env_broker, onto_own_template), ON, AS, AS, None),
+         move_to(env_broker, onto_own_template), ON, AS, None, None),
         ("on, Sandbox: a pool-born one given only the label and its own template reference",
          pool_born_sandbox(pool_today), lambda s: (labels(s).__setitem__("codewire.sh/egress", "broker"),
-                                                   onto_own_template(s)), ON, AS, AS, LABEL_ONLY),
+                                                   onto_own_template(s)), ON, AS, None, LABEL_ONLY),
         # The controller, holding the Sandbox to its Claim's new template
         # before orchestration's patch, may not add the label on its own.
         ("on, Sandbox: the controller giving a pool-born one its new template's labels",
          pool_born_sandbox(pool_today), lambda s: (labels(s).__setitem__("codewire.sh/egress", "broker"),
-                                                   onto_own_template(s)), ON, OTHER, AS, WRITER),
+                                                   onto_own_template(s)), ON, OTHER, None, WRITER),
         ("on, Sandbox: a pool-born one moved while running", pool_born_sandbox(pool_today) | {"spec": dict(
             pool_born_sandbox(pool_today)["spec"], operatingMode="Running")},
-         move_to(env_broker, onto_own_template), ON, AS, AS, MOVE),
+         move_to(env_broker, onto_own_template), ON, AS, None, MOVE),
         # codewire#6033: a move is held to the CODEWIRE_VM_EGRESS_MODE rule:
         # only a standard environment's workspace container sets it.
         ("on, Sandbox: a move that sets CODEWIRE_VM_EGRESS_MODE on the DinD container", moved_sandbox(env_today),
          move_to(env_broker, lambda s: container(s, "dind").setdefault("env", []).append(
-             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, AS, EGRESS_MODE),
+             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, None, EGRESS_MODE),
         ("on, Sandbox: a commodity move that sets CODEWIRE_VM_EGRESS_MODE on its workspace", moved_sandbox(env_today),
          move_to(env_broker, lambda s: container(s, "workspace").setdefault("env", []).append(
-             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, AS, EGRESS_MODE),
+             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), ON, AS, None, EGRESS_MODE),
         # A move keeps the runtime class: never commodity to standard.
         ("on, Sandbox: a commodity one moved to the whole shape under standard", moved_sandbox(env_today),
-         move_to(env_broker, setting(pod, "runtimeClassName", "standard")), ON, AS, AS, CLASS),
+         move_to(env_broker, setting(pod, "runtimeClassName", "standard")), ON, AS, None, CLASS),
         # A Sandbox with the broker label alone (no fence revision, no TUN
         # init), as only another writer could leave it: made before the
         # switch, so not started as it is, and moved under every broker check.
@@ -707,6 +713,45 @@ def move_cases(cluster: "Cluster", env_today: dict, env_broker: dict, pool_today
          ON, OTHER, None, WRITER),
     ]:
         results.append(check(name, sandbox_change(cluster, before, change, param, identity, creator), expected))
+    return results
+
+
+def member_run_cases(cluster: "Cluster", env_today: dict, env_broker: dict) -> list[bool]:
+    """The member policy holds a Sandbox's run directory as the template
+    policy holds a template's. Orchestration never creates a Sandbox, so the
+    creates are dry runs as it; a Sandbox made before this, disk-backed,
+    stays startable and resizable, and a start's move to broker mode, which
+    writes the whole current render, passes."""
+    disk = {"name": "codewire-run", "emptyDir": {}}
+    host = {"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run", "type": "DirectoryOrCreate"}}
+    current = moved_sandbox(env_today)
+    legacy = mutate(current, set_run(disk))
+
+    def resize(s: dict) -> None:
+        container(s, "workspace")["resources"]["limits"]["memory"] = "8192Mi"
+
+    results = []
+    cluster.param(OFF)
+    for name, sandbox_object, expected in [
+        ("off, Sandbox create: as rendered", current, None),
+        ("off, Sandbox create: codewire-run on disk", legacy, MEMBER_RUN),
+        ("off, Sandbox create: codewire-run a host path", mutate(current, set_run(host)), MEMBER_RUN),
+        ("off, Sandbox create: no codewire-run", mutate(current, rename_run(None)), MEMBER_RUN),
+        ("off, Sandbox create: a disk emptyDir at /codewire/run/identity",
+         mutate(current, add_mounted(IDENTITY_DISK, "/codewire/run/identity")), MEMBER_RUN_MOUNT),
+    ]:
+        results.append(check(name, cluster.admit("create", sandbox_object), expected))
+    for name, before, change, param, expected in [
+        ("off, Sandbox: a disk-backed one started", legacy, mode("Running"), OFF, None),
+        ("off, Sandbox: a disk-backed one resized", legacy, resize, OFF, None),
+        ("off, Sandbox: a disk-backed one updated to a host path", legacy, set_run(host), OFF, MEMBER_RUN),
+        ("off, Sandbox: a memory one updated to disk", current, set_run(disk), OFF, MEMBER_RUN),
+        ("off, Sandbox: a disk emptyDir added at /codewire/run/identity", current,
+         add_mounted(IDENTITY_DISK, "/codewire/run/identity"), OFF, MEMBER_RUN_MOUNT),
+        ("on, Sandbox: a disk-backed stopped one moved to the whole broker shape", legacy,
+         move_to(env_broker), ON, None),
+    ]:
+        results.append(check(name, sandbox_change(cluster, before, change, param), expected))
     return results
 
 
@@ -773,6 +818,97 @@ def keep_cases(cluster: "Cluster", env_today: dict, env_broker: dict, standard: 
         results.append(check(name, template_change(cluster, before, change, param), expected))
     cluster.param(OFF_KEEPING)
     results.append(check("off, keeping: the broker golden created", cluster.admit("create", env_broker), GATE))
+    return results
+
+
+def run_mount(t: dict, container_name: str = "workspace") -> dict:
+    return next(m for m in container(t, container_name)["volumeMounts"] if m["name"] == "codewire-run")
+
+
+def add_mounted(volume: dict, path: str, container_name: str = "workspace") -> Callable[[dict], object]:
+    """`volume` added and mounted at `path`, by the workspace container or by
+    a new sidecar of the workspace's image."""
+    def change(t: dict) -> None:
+        pod(t)["volumes"].append(copy.deepcopy(volume))
+        mount = {"name": volume["name"], "mountPath": path}
+        if container_name == "workspace":
+            container(t, "workspace")["volumeMounts"].append(mount)
+        else:
+            pod(t)["containers"].append({"name": container_name, "image": container(t, "workspace")["image"],
+                                         "volumeMounts": [mount]})
+    return change
+
+
+def drop_run_mount(t: dict) -> None:
+    container(t, "workspace")["volumeMounts"].remove(run_mount(t))
+
+
+IDENTITY_DISK = {"name": "identity-disk", "emptyDir": {}}
+
+
+def run_mount_cases(today: dict, broker: dict, env_today: dict, conf_today: dict,
+                    standard: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """The run directory's mounts: nothing else is mounted over or under
+    /codewire/run, or at a path a runtime would clean onto it, and the
+    workspace container mounts codewire-run at exactly /codewire/run."""
+    host = {"name": "run-host", "hostPath": {"path": "/var/lib/codewire-run", "type": "DirectoryOrCreate"}}
+    on_standard = with_disk(disk_reference(standard))
+    return [
+        ("off, environment: a disk emptyDir at /codewire/run/identity", OFF, "create",
+         mutate(env_today, add_mounted(IDENTITY_DISK, "/codewire/run/identity")), RUN_MOUNT),
+        ("off, environment: a host path at /codewire/run", OFF, "create",
+         mutate(env_today, drop_run_mount, add_mounted(host, "/codewire/run")), RUN_MOUNT),
+        ("off, pool: another volume at /codewire/run", OFF, "create",
+         mutate(today, lambda t: run_mount(t).__setitem__("name", "codewire-bin")), RUN_MOUNT),
+        ("off, pool: the workspace without its /codewire/run mount", OFF, "create",
+         mutate(today, drop_run_mount), RUN_MOUNT),
+        ("off, environment: a sidecar mounting another volume under /codewire/run", OFF, "create",
+         mutate(env_today, add_mounted(IDENTITY_DISK, "/codewire/run/identity", "sidecar")), RUN_MOUNT),
+        ("off, environment: a disk emptyDir at an unclean path", OFF, "create",
+         mutate(env_today, add_mounted(IDENTITY_DISK, "/codewire//run/identity")), RUN_MOUNT),
+        ("off, environment: codewire-run by subPath", OFF, "create",
+         mutate(env_today, lambda t: run_mount(t).__setitem__("subPath", "identity")), RUN_MOUNT),
+        ("off, confidential: the daemon init's codewire-run at another path", OFF, "create",
+         mutate(conf_today, lambda t: next(m for m in container(t, "codewire-daemon-init", "initContainers")[
+             "volumeMounts"] if m["name"] == "codewire-run").__setitem__("mountPath", "/codewire/state")), RUN_MOUNT),
+        ("on, pool: the broker golden with a disk emptyDir at /codewire/run/identity", ON, "create",
+         mutate(broker, add_mounted(IDENTITY_DISK, "/codewire/run/identity")), RUN_MOUNT),
+        ("on, standard: a disk emptyDir at /codewire/run/identity", on_standard, "create",
+         mutate(standard, add_mounted(IDENTITY_DISK, "/codewire/run/identity")), RUN_MOUNT),
+    ]
+
+
+def run_update_cases(cluster: "Cluster", env_today: dict, env_broker: dict) -> list[bool]:
+    """A Sandbox rendered before the run directory moved to memory keeps its
+    disk-backed codewire-run (docs/dev/SANDBOX-IDENTITY.md, "Memory only"):
+    an update that keeps the stored template's codewire-run unchanged is
+    admitted, and any other change to it is held to the rendered shape."""
+    def repin(t: dict) -> None:
+        container(t, "workspace")["image"] = "registry.example.invalid/codewire/workspace@sha256:" + "6" * 64
+
+    disk = {"name": "codewire-run", "emptyDir": {}}
+    host = {"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run", "type": "DirectoryOrCreate"}}
+    old_env, old_broker = mutate(env_today, set_run(disk)), mutate(env_broker, set_run(disk))
+    old_mounts = mutate(env_today, add_mounted(IDENTITY_DISK, "/codewire/run/identity"))
+    results = []
+    for name, before, change, param, expected in [
+        ("off, environment: an update keeping a disk-backed codewire-run", old_env, repin, OFF, None),
+        ("on, environment: an update of a broker template keeping a disk-backed codewire-run",
+         old_broker, repin, ON, None),
+        ("off, environment: an update from a disk-backed codewire-run to a host path", old_env,
+         set_run(host), OFF, RUN),
+        ("off, environment: an update from a memory codewire-run to disk", env_today, set_run(disk), OFF, RUN),
+        ("off, environment: an update removing codewire-run", env_today, rename_run(None), OFF, RUN),
+        # The mounts: a stored template keeps its own, unchanged; a change is
+        # held to the rendered shape.
+        ("off, environment: an update keeping a stored mount under /codewire/run", old_mounts, repin, OFF, None),
+        ("off, environment: an update moving a stored mount under /codewire/run", old_mounts,
+         lambda t: next(m for m in container(t, "workspace")["volumeMounts"]
+                        if m["name"] == "identity-disk").__setitem__("mountPath", "/codewire/run/other"), OFF, RUN_MOUNT),
+        ("off, environment: an update adding a disk emptyDir at /codewire/run/identity", env_today,
+         add_mounted(IDENTITY_DISK, "/codewire/run/identity"), OFF, RUN_MOUNT),
+    ]:
+        results.append(check(name, template_change(cluster, before, change, param), expected))
     return results
 
 
@@ -962,6 +1098,63 @@ def devnet(t: dict) -> dict:
     return next(v for v in pod(t)["volumes"] if v["name"] == "egress-devnet")
 
 
+def set_run(volume: dict) -> Callable[[dict], object]:
+    """Replace the daemon's run directory with `volume`, in its place."""
+    return lambda t: [pod(t)["volumes"].__setitem__(i, copy.deepcopy(volume))
+                      for i, v in enumerate(pod(t)["volumes"]) if v["name"] == "codewire-run"]
+
+
+def rename_run(name: str | None) -> Callable[[dict], object]:
+    """The run directory renamed with its mounts, or with None removed with
+    them, so the template is otherwise whole."""
+    def renamed(items: list[dict]) -> list[dict]:
+        return [item | {"name": name} if item["name"] == "codewire-run" else item
+                for item in items if item["name"] != "codewire-run" or name is not None]
+
+    def change(t: dict) -> None:
+        for c in pod(t)["containers"] + pod(t).get("initContainers", []):
+            if "volumeMounts" in c:
+                c["volumeMounts"] = renamed(c["volumeMounts"])
+        pod(t)["volumes"] = renamed(pod(t)["volumes"])
+    return change
+
+
+def run_cases(today: dict, broker: dict, env_today: dict, conf_today: dict,
+              standard: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """The daemon's run directory (docs/dev/SANDBOX-IDENTITY.md, "Memory
+    only"): exactly one emptyDir with medium Memory and sizeLimit 16Mi on
+    every template, pooled or not, on every runtime. The clearing template,
+    which has none, is admitted in clearing_cases."""
+    disk = {"name": "codewire-run", "emptyDir": {}}
+    unbounded = {"name": "codewire-run", "emptyDir": {"medium": "Memory"}}
+    host = {"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run", "type": "DirectoryOrCreate"}}
+    claim = {"name": "codewire-run", "persistentVolumeClaim": {"claimName": "codewire-run"}}
+    on_standard = with_disk(disk_reference(standard))
+    return [
+        ("off, pool: codewire-run on disk", OFF, "create", mutate(today, set_run(disk)), RUN),
+        ("off, pool: codewire-run in memory without a size limit", OFF, "create", mutate(today, set_run(unbounded)), RUN),
+        ("off, pool: codewire-run larger", OFF, "create", mutate(today, set_run(
+            {"name": "codewire-run", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}})), RUN),
+        ("off, pool: codewire-run sized on disk", OFF, "create", mutate(today, set_run(
+            {"name": "codewire-run", "emptyDir": {"sizeLimit": "16Mi"}})), RUN),
+        ("off, pool: codewire-run a host path", OFF, "create", mutate(today, set_run(host)), RUN),
+        ("off, pool: codewire-run a volume claim", OFF, "create", mutate(today, set_run(claim)), RUN),
+        ("off, pool: no codewire-run", OFF, "create", mutate(today, rename_run(None)), RUN),
+        ("off, pool: codewire-run renamed", OFF, "create", mutate(today, rename_run("codewire-state")), RUN),
+        ("off, environment: codewire-run on disk", OFF, "create", mutate(env_today, set_run(disk)), RUN),
+        ("off, environment: codewire-run a host path", OFF, "create", mutate(env_today, set_run(host)), RUN),
+        ("off, environment: codewire-run a volume claim", OFF, "create", mutate(env_today, set_run(claim)), RUN),
+        ("off, environment: no codewire-run", OFF, "create", mutate(env_today, rename_run(None)), RUN),
+        ("off, confidential: codewire-run in memory without a size limit", OFF, "create",
+         mutate(conf_today, set_run(unbounded)), RUN),
+        ("on, pool: the broker golden with codewire-run on disk", ON, "create", mutate(broker, set_run(disk)), RUN),
+        ("on, standard: codewire-run in memory without a size limit", on_standard, "create",
+         mutate(standard, set_run(unbounded)), RUN),
+        ("on, standard: codewire-run renamed", on_standard, "create",
+         mutate(standard, rename_run("codewire-state")), RUN),
+    ]
+
+
 def devnet_mount(c: dict) -> dict:
     return next(m for m in c["volumeMounts"] if m["name"] == "egress-devnet")
 
@@ -1025,7 +1218,11 @@ def main() -> int:
         load("confidential-sandboxtemplate.golden.json"), load("confidential-broker-sandboxtemplate.golden.json"),
         broker) + standard_cases(
         load("standard-sandboxtemplate.golden.json"), pinned(load("environment-broker-sandboxtemplate.golden.json")),
-        broker) + standard_pool_cases(load("warm-pool-standard-sandboxtemplate.golden.json"), broker)
+        broker) + standard_pool_cases(load("warm-pool-standard-sandboxtemplate.golden.json"), broker) + run_cases(
+        today, broker, pinned(load("identity-free-sandboxtemplate.golden.json")),
+        load("confidential-sandboxtemplate.golden.json"), load("standard-sandboxtemplate.golden.json")) + run_mount_cases(
+        today, broker, pinned(load("identity-free-sandboxtemplate.golden.json")),
+        load("confidential-sandboxtemplate.golden.json"), load("standard-sandboxtemplate.golden.json"))
     wait_for(cluster, mutate(today, lambda t: t["spec"]["podTemplate"]["metadata"].setdefault("labels", {})
                              .__setitem__("codewire.sh/egress", "broker")), GATE)
     results = []
@@ -1038,6 +1235,10 @@ def main() -> int:
     results.extend(keep_cases(cluster, pinned(load("identity-free-sandboxtemplate.golden.json")),
                               pinned(load("environment-broker-sandboxtemplate.golden.json")),
                               load("standard-sandboxtemplate.golden.json"), broker))
+    results.extend(run_update_cases(cluster, pinned(load("identity-free-sandboxtemplate.golden.json")),
+                                    pinned(load("environment-broker-sandboxtemplate.golden.json"))))
+    results.extend(member_run_cases(cluster, pinned(load("identity-free-sandboxtemplate.golden.json")),
+                                    pinned(load("environment-broker-sandboxtemplate.golden.json"))))
 
     # An UPDATE to a refused shape: create the broker golden for real, then
     # update it to world egress.

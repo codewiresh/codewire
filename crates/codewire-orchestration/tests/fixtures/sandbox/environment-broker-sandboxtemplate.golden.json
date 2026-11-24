@@ -550,7 +550,10 @@
             "name": "codewire-bin"
           },
           {
-            "emptyDir": {},
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "16Mi"
+            },
             "name": "codewire-run"
           },
           {

@@ -555,7 +555,8 @@ def member_broker_shape_violations(template: str, member: str) -> list[str]:
     return output
 # A snapshot's clearing template, exactly as rendered, is excepted from the
 # broker arm's shape (codewire#4000): the arm itself, the workspace addresses,
-# the resolver, the privilege rule and the TUN init's and its volume's presence.
+# the resolver, the privilege rule and the TUN init's and its volume's presence;
+# and, since it runs no daemon, from the run directory's volume and mount rules.
 SNAPSHOT_CLEARING = (
     "- expression: request.name.matches('^cw-snap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-clear$') && "
     "has(object.metadata.labels) && 'codewire.sh/type' in object.metadata.labels && "
@@ -568,7 +569,51 @@ SNAPSHOT_CLEARING = (
     "has(object.spec.networkPolicy.ingress) && size(object.spec.networkPolicy.ingress) == 0 && "
     "has(object.spec.networkPolicy.egress) && size(object.spec.networkPolicy.egress) == 0 name: clearing"
 )
-SNAPSHOT_CLEARING_USES = 6
+SNAPSHOT_CLEARING_USES = 8
+# The daemon's run directory is bounded memory on every template but the
+# clearing one (docs/dev/SANDBOX-IDENTITY.md, "Memory only"); an update that
+# keeps the stored template's run directory unchanged is admitted, so a
+# Sandbox rendered before this keeps its own.
+RUN_VOLUME_RULE = (
+    "variables.clearing || "
+    "request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) && "
+    "oldObject.spec.podTemplate.spec.volumes.filter(v, v.name == 'codewire-run') == "
+    "variables.volumes.filter(v, v.name == 'codewire-run') || "
+    "size(variables.volumes.filter(v, v.name == 'codewire-run')) == 1 && "
+    "variables.volumes.all(v, v.name != 'codewire-run' || "
+    "dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
+    "dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) && "
+    "has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' && "
+    "has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '16Mi')"
+)
+# What touches the run directory: a mount of codewire-run, a mount at or under
+# /codewire/run, or a mount path a runtime would clean onto another path.
+RUN_MOUNT_TOUCHES = (
+    "m.name == 'codewire-run' || !m.mountPath.startsWith('/') || "
+    "m.mountPath.matches('//|(^|/)[.][.]?(/|$)') || "
+    "m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')"
+)
+# Nothing else is mounted over or under the run directory, and the workspace
+# container mounts it at exactly /codewire/run; an update that keeps those
+# mounts as stored is admitted.
+RUN_MOUNT_RULE = (
+    "variables.clearing || "
+    "request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.containers) && "
+    "(oldObject.spec.podTemplate.spec.containers + (has(oldObject.spec.podTemplate.spec.initContainers) ? "
+    "oldObject.spec.podTemplate.spec.initContainers : [])).map(c, has(c.volumeMounts) ? "
+    f"c.volumeMounts.filter(m, {RUN_MOUNT_TOUCHES}) : []) == "
+    f"variables.containers.map(c, has(c.volumeMounts) ? c.volumeMounts.filter(m, {RUN_MOUNT_TOUCHES}) : []) || "
+    "variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, "
+    f"!({RUN_MOUNT_TOUCHES}) || "
+    "dyn(m).all(k, k in ['name', 'mountPath']) && m.name == 'codewire-run' && m.mountPath == '/codewire/run')) && "
+    "variables.pod.containers.exists(c, c.name == 'workspace' && has(c.volumeMounts) && "
+    "c.volumeMounts.exists(m, m.name == 'codewire-run' && m.mountPath == '/codewire/run'))"
+)
+# The member policy holds a Sandbox's run directory to the same two rules. A
+# Sandbox is never a clearing template (its clearing variable is false), so
+# neither carries that exception; an unchanged update keeps a stored one.
+MEMBER_RUN_VOLUME_RULE = RUN_VOLUME_RULE.removeprefix("variables.clearing || ")
+MEMBER_RUN_MOUNT_RULE = RUN_MOUNT_RULE.removeprefix("variables.clearing || ")
 HOSTED_EGRESS_FRAGMENTS = [
     # codewire#4000: a broker-mode Pod shares no host namespace, mounts no host
     # path and carries the switch's fence revision; a Sandbox's move to broker
@@ -808,6 +853,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             *HOSTED_EGRESS_FRAGMENTS,
             *ENVIRONMENT_KBS_FRAGMENTS,
             SNAPSHOT_CLEARING,
+            RUN_VOLUME_RULE,
+            RUN_MOUNT_RULE,
         ],
         WARM_POOL_MEMBER_POLICY: [
             "apiGroups: - agents.x-k8s.io apiVersions: - v1beta1 operations: - CREATE - UPDATE resources: - sandboxes",
@@ -817,6 +864,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "!(has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
             SANDBOX_KEEPS_BROKER_MODE,
             *SANDBOX_PRE_SWITCH,
+            MEMBER_RUN_VOLUME_RULE,
+            MEMBER_RUN_MOUNT_RULE,
         ],
         SANDBOX_BROKER_WRITER_POLICY: SANDBOX_BROKER_WRITER,
     }
@@ -863,11 +912,12 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                                       f"{found.group(1) if found else None}")
                 if not prune_protected(policy):
                     output.append(f"{label}: {policy_name} must never be pruned")
-                # The clearing exception reaches only the broker arm's shape.
+                # The clearing exception reaches only the broker arm's shape
+                # and the run directory's volume and mount rules.
                 uses = normalized.count("variables.clearing")
                 if uses != SNAPSHOT_CLEARING_USES:
                     output.append(f"{label}: {policy_name} excepts the clearing template in exactly "
-                                  f"{SNAPSHOT_CLEARING_USES} broker-arm rules, not {uses}")
+                                  f"{SNAPSHOT_CLEARING_USES} rules (the broker arm's and the run directory's two), not {uses}")
                 # Only the Kind e2e overlay adds its test knob's variable (#3852).
                 environment = [*WARM_POOL_ENVIRONMENT, *WARM_POOL_EXTRA_ENVIRONMENT.get(target["path"], [])]
                 found = re.search(r"- expression: '?(\[[^\]]*\])'? name: environment ", normalized)

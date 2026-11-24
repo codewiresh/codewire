@@ -29,6 +29,16 @@ use super::{
 pub(crate) const DAEMON_INIT_CONTAINER: &str = "codewire-daemon-init";
 /// The volume that holds `/codewire/bin/cw` in the workspace container.
 pub(crate) const DAEMON_VOLUME: &str = "codewire-bin";
+/// `/codewire/run`: the daemon's credential, SSH host key, sockets and token
+/// files. Guest memory on every profile, so none of it reaches node disk
+/// (`docs/dev/SANDBOX-IDENTITY.md`, "Memory only"); admission pins this
+/// exact shape. 16Mi: `processes/` holds each runc launch's spec, up to the
+/// daemon's 1 MiB process-spec cap, for every launch in flight at once,
+/// beside about 200 KiB measured on Dev for the egress trust bundles and
+/// the daemon's own state.
+pub(crate) fn run_volume() -> Value {
+    json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory", "sizeLimit": "16Mi" } })
+}
 /// The directory of the support image that holds `cw`.
 const SUPPORT_IMAGE_DAEMON_SUBPATH: &str = "usr/local/bin";
 
@@ -474,14 +484,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     } else {
         json!({ "name": DAEMON_VOLUME, "emptyDir": {} })
     };
-    // A confidential daemon keeps its credential and SSH host key here: guest
-    // memory, whatever emptyDir backing the runtime would choose (B2c).
-    let run_volume = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-        json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory" } })
-    } else {
-        json!({ "name": "codewire-run", "emptyDir": {} })
-    };
-    let mut volumes = with_systemd_volumes(opts, ws, block, vec![daemon_volume, run_volume]);
+    let mut volumes = with_systemd_volumes(opts, ws, block, vec![daemon_volume, run_volume()]);
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }

@@ -401,7 +401,8 @@
           },
           {
             "emptyDir": {
-              "medium": "Memory"
+              "medium": "Memory",
+              "sizeLimit": "16Mi"
             },
             "name": "codewire-run"
           },

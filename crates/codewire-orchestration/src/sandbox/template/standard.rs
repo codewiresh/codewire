@@ -23,7 +23,7 @@ use crate::sandbox::runtime_images::{RuntimeImages, SystemdWorkspaceImage};
 use super::runtime_policy::{
     RUNTIME_CLASS_STANDARD, STANDARD_VMM_CPU_MILLICORES, STANDARD_VMM_MEMORY_MIB,
 };
-use super::workspace::{apply_daemon_ready_probes, build_workspace_env};
+use super::workspace::{apply_daemon_ready_probes, build_workspace_env, run_volume};
 use super::{
     HostedEgressTemplate, SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_DAEMON_PORT,
     WORKSPACE_EPHEMERAL_STORAGE_GI, hosted_egress, identity,
@@ -343,10 +343,7 @@ pub(super) fn pod_spec(
             { "name": "codewire-run", "mountPath": "/codewire/run" },
         ],
     });
-    let mut volumes = vec![
-        runtime.image_disk_volume(),
-        json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory" } }),
-    ];
+    let mut volumes = vec![runtime.image_disk_volume(), run_volume()];
     identity::mount_identity(opts, &mut ws, &mut volumes, hosted_egress::mount_identity);
     ws["env"]
         .as_array_mut()

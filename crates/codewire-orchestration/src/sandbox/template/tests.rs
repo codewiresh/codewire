@@ -495,6 +495,43 @@ mod tests {
 
 
 
+    /// `/codewire/run` holds the daemon's credential, SSH host key and token
+    /// files, so it is guest memory with a size limit on every profile, and
+    /// never the workspace volume (`docs/dev/SANDBOX-IDENTITY.md`, "Memory
+    /// only"). Admission pins the same shape.
+    #[test]
+    fn the_daemon_run_directory_is_bounded_memory_on_every_profile() {
+        for profile in [
+            RUNTIME_PROFILE_COMMODITY,
+            RUNTIME_PROFILE_RUNC,
+            RUNTIME_PROFILE_CONFIDENTIAL,
+        ] {
+            for disk_gib in [0, 40] {
+                let mut opts = commodity_opts();
+                opts.runtime_profile = profile.into();
+                opts.disk_gib = disk_gib;
+                if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                    opts = measured(opts);
+                }
+                let template = render_sandbox_template("dev-sandboxes", &opts);
+                let runs: Vec<&Value> = template["spec"]["podTemplate"]["spec"]["volumes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|volume| volume["name"] == "codewire-run")
+                    .collect();
+                assert_eq!(
+                    runs,
+                    [&json!({
+                        "name": "codewire-run",
+                        "emptyDir": { "medium": "Memory", "sizeLimit": "16Mi" },
+                    })],
+                    "{profile} with {disk_gib} GiB"
+                );
+            }
+        }
+    }
+
     #[test]
     fn credential_mounts_and_identities_are_separate_for_workspace_and_init() {
         use codewire_access::{CODEX_PLATFORM_HOME, CODEX_PLATFORM_TOKEN_FILE};
@@ -3501,7 +3538,7 @@ mod tests {
         assert!(!template.to_string().contains("codewire-orchestration-internal-roots"));
         assert_eq!(
             workspace_volume(&template, "codewire-run").unwrap()["emptyDir"],
-            json!({ "medium": "Memory" })
+            json!({ "medium": "Memory", "sizeLimit": "16Mi" })
         );
         assert!(
             workspace_volume(

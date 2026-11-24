@@ -34,6 +34,14 @@ policy pins those anchors and the binding URL, and its daemon state
 (`codewire-run`) is guest memory. It stays cold, and only its storage claim
 carries the environment label.
 
+On every profile, pooled or not, `codewire-run` (`/codewire/run`, the
+daemon's credential, SSH host key and token files) is exactly one emptyDir
+with medium Memory and sizeLimit 16Mi, so none of it reaches node disk
+(`docs/dev/SANDBOX-IDENTITY.md`, "Memory only"). It is mounted at exactly
+`/codewire/run` by the workspace container, and nothing else is mounted at or
+under that path or at a path a runtime would clean onto it. Every
+SandboxTemplate golden is held to both.
+
 The orchestration renderer's golden fixtures are the reviewed rendering; the
 Rust test pins renderer == fixture, and this guard pins the fixture against
 the invariant, so neither can drift alone.
@@ -63,6 +71,9 @@ MEASURED_ENVIRONMENT_ENV = "CODEWIRE_MEASURED_ENVIRONMENT_ID"
 BINDING_URL_ENV = "CODEWIRE_WORKSPACE_BINDING_URL"
 POOL_TEMPLATE_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json"
 POOL_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxwarmpool.golden.json"
+TEMPLATE_GOLDENS = "crates/codewire-orchestration/tests/fixtures/sandbox"
+ENVIRONMENT_BROKER_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/environment-broker-sandboxtemplate.golden.json"
+RUN_VOLUME = {"name": "codewire-run", "emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}}
 
 FORBIDDEN_ENVIRONMENT = {
     "CODEWIRE_DAEMON_AUTH_TOKEN",
@@ -163,6 +174,268 @@ def deployment_manifests() -> dict[str, str]:
     return manifests
 
 
+def run_volumes(template: dict[str, Any]) -> list[Any]:
+    spec = ((template.get("spec") or {}).get("podTemplate") or {}).get("spec") or {}
+    return [volume for volume in spec.get("volumes") or [] if volume.get("name") == "codewire-run"]
+
+
+def run_violations(template: dict[str, Any], label: str, stored: dict[str, Any] | None = None) -> list[str]:
+    """`/codewire/run` is bounded guest memory on every profile. As the
+    template admission policy does, an update (`stored` is the object it
+    replaces) that keeps the stored codewire-run unchanged is admitted, so a
+    Sandbox rendered before this keeps its own."""
+    if stored is not None and run_volumes(stored) == run_volumes(template):
+        return []
+    if run_volumes(template) != [RUN_VOLUME]:
+        return [f"{label}: codewire-run is not exactly one emptyDir with medium Memory and sizeLimit 16Mi"]
+    return []
+
+
+PLAIN_PATH = re.compile(r"//|(^|/)[.][.]?(/|$)")
+RUN_MOUNT = {"name": "codewire-run", "mountPath": "/codewire/run"}
+
+
+def touches_run(mount: dict[str, Any]) -> bool:
+    """A mount of codewire-run, at or under /codewire/run, or at a path a
+    runtime would clean onto another path."""
+    path = str(mount.get("mountPath", ""))
+    return (mount.get("name") == "codewire-run" or not path.startswith("/") or bool(PLAIN_PATH.search(path))
+            or path == "/codewire/run" or path.startswith("/codewire/run/"))
+
+
+def run_mounts(template: dict[str, Any]) -> list[list[Any]]:
+    spec = ((template.get("spec") or {}).get("podTemplate") or {}).get("spec") or {}
+    return [[mount for mount in container.get("volumeMounts") or [] if touches_run(mount)]
+            for container in containers(spec)]
+
+
+def run_mount_violations(template: dict[str, Any], label: str, stored: dict[str, Any] | None = None) -> list[str]:
+    """Nothing else is mounted over or under the run directory, and the
+    workspace container mounts codewire-run at exactly /codewire/run. As the
+    template admission policy does, an update that keeps those mounts,
+    container by container, as stored is admitted."""
+    if stored is not None and run_mounts(stored) == run_mounts(template):
+        return []
+    spec = ((template.get("spec") or {}).get("podTemplate") or {}).get("spec") or {}
+    output = [f"{label}: container {container.get('name')} mounts {mount.get('name')} at {mount.get('mountPath')!r}, "
+              "not exactly codewire-run at /codewire/run"
+              for container in containers(spec) for mount in container.get("volumeMounts") or []
+              if touches_run(mount) and mount != RUN_MOUNT]
+    if not any(container.get("name") == "workspace" and RUN_MOUNT in [
+            {k: m.get(k) for k in ("name", "mountPath")} for m in container.get("volumeMounts") or []]
+               for container in spec.get("containers") or []):
+        output.append(f"{label}: the workspace container does not mount codewire-run at /codewire/run")
+    return output
+
+
+def run_mount_self_test(base: dict[str, Any], label: str, check: Any) -> None:
+    """Each way another volume could reach the run directory is refused, on
+    create and on an update that changes the stored mounts."""
+    def pod(fixture: dict[str, Any]) -> dict[str, Any]:
+        return fixture["spec"]["podTemplate"]["spec"]
+
+    def workspace(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(c for c in pod(fixture)["containers"] if c["name"] == "workspace")
+
+    def add_volume(fixture: dict[str, Any], volume: dict[str, Any], mount_path: str,
+                   container: str = "workspace") -> None:
+        pod(fixture)["volumes"].append(volume)
+        if container == "workspace":
+            workspace(fixture)["volumeMounts"].append({"name": volume["name"], "mountPath": mount_path})
+        else:
+            pod(fixture)["containers"].append({"name": container, "image": workspace(fixture)["image"],
+                                               "volumeMounts": [{"name": volume["name"], "mountPath": mount_path}]})
+
+    def run_mount(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(m for m in workspace(fixture)["volumeMounts"] if m["name"] == "codewire-run")
+
+    def drop_run_mount(fixture: dict[str, Any]) -> None:
+        workspace(fixture)["volumeMounts"].remove(run_mount(fixture))
+
+    disk = {"name": "identity-disk", "emptyDir": {}}
+    cases = {
+        "a disk emptyDir at /codewire/run/identity": lambda f: add_volume(f, disk, "/codewire/run/identity"),
+        "a host path at /codewire/run": lambda f: (drop_run_mount(f), add_volume(
+            f, {"name": "run-host", "hostPath": {"path": "/var/lib/codewire-run"}}, "/codewire/run")),
+        "another volume at /codewire/run": lambda f: run_mount(f).__setitem__("name", "codewire-bin"),
+        "no workspace mount": drop_run_mount,
+        "a sidecar mounting another volume under /codewire/run": lambda f: add_volume(
+            f, disk, "/codewire/run/identity", "sidecar"),
+        "codewire-run at another path": lambda f: run_mount(f).__setitem__("mountPath", "/codewire/state"),
+        "codewire-run by subPath": lambda f: run_mount(f).__setitem__("subPath", "identity"),
+        "codewire-run read-only": lambda f: run_mount(f).__setitem__("readOnly", True),
+        "a second codewire-run mount in a sidecar": lambda f: pod(f)["containers"].append(
+            {"name": "sidecar", "image": workspace(f)["image"], "volumeMounts": [{"name": "codewire-run", "mountPath": "/x"}]}),
+        "a disk emptyDir at an unclean path": lambda f: add_volume(f, disk, "/codewire//run/identity"),
+        "a disk emptyDir through ..": lambda f: add_volume(f, disk, "/codewire/bin/../run/identity"),
+        "a relative mount path": lambda f: add_volume(f, disk, "codewire/run/identity"),
+    }
+    for name, mutate in cases.items():
+        fixture = copy.deepcopy(base)
+        mutate(fixture)
+        if not check(fixture, f"negative {label} fixture run mount {name}"):
+            raise RuntimeError(f"negative {label} fixture run mount {name} was accepted")
+    # Updates: an unchanged stored shape is kept, a changed one is held to
+    # the rendered shape.
+    legacy = copy.deepcopy(base)
+    add_volume(legacy, disk, "/codewire/run/identity")
+    relabelled = copy.deepcopy(legacy)
+    relabelled["spec"]["podTemplate"].setdefault("metadata", {}).setdefault("labels", {})["x"] = "y"
+    moved = copy.deepcopy(legacy)
+    next(m for m in workspace(moved)["volumeMounts"] if m["name"] == "identity-disk")["mountPath"] = "/codewire/run/other"
+    dirty = copy.deepcopy(base)
+    add_volume(dirty, disk, "/codewire//run/identity")
+    for name, new, stored, admitted in [
+        ("an update keeping the stored mounts", relabelled, legacy, True),
+        ("an update keeping the rendered mounts", copy.deepcopy(base), base, True),
+        ("an update from the stored mounts to the rendered ones", base, legacy, True),
+        ("an update moving a mount under /codewire/run", moved, legacy, False),
+        ("an update adding a mount under /codewire/run", legacy, base, False),
+        ("an update adding a mount at an unclean path", dirty, base, False),
+    ]:
+        if (not run_mount_violations(new, name, stored)) != admitted:
+            raise RuntimeError(f"run mount update case {name} was {'refused' if admitted else 'admitted'}")
+
+
+def sandbox_of(template: dict[str, Any]) -> dict[str, Any]:
+    """The Sandbox the controller makes from a template: its pod template,
+    which the member admission policy reads at the same path."""
+    return {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {"name": "workspace", "namespace": (template.get("metadata") or {}).get("namespace")},
+            "spec": {"podTemplate": copy.deepcopy(template["spec"]["podTemplate"])}}
+
+
+def member_violations(sandbox: dict[str, Any], label: str, stored: dict[str, Any] | None = None) -> list[str]:
+    """The member policy's run directory rules on a Sandbox: the template
+    rules without the clearing exception, a Sandbox never being one."""
+    return run_violations(sandbox, label, stored) + run_mount_violations(sandbox, label, stored)
+
+
+def member_self_test(base: dict[str, Any], broker: dict[str, Any]) -> None:
+    """A Sandbox is held as a template is; one rendered before this keeps a
+    disk-backed run directory through every update that leaves it alone, and
+    a start's move to broker mode, which writes the whole current render,
+    passes as the new shape."""
+    def pod(sandbox: dict[str, Any]) -> dict[str, Any]:
+        return sandbox["spec"]["podTemplate"]["spec"]
+
+    def workspace(sandbox: dict[str, Any]) -> dict[str, Any]:
+        return next(c for c in pod(sandbox)["containers"] if c["name"] == "workspace")
+
+    def with_run(sandbox: dict[str, Any], volume: dict[str, Any] | None) -> dict[str, Any]:
+        changed = copy.deepcopy(sandbox)
+        volumes = pod(changed)["volumes"]
+        index = next(i for i, v in enumerate(volumes) if v["name"] == "codewire-run")
+        if volume is None:
+            volumes.pop(index)
+        else:
+            volumes[index] = copy.deepcopy(volume)
+        return changed
+
+    def with_mount(sandbox: dict[str, Any], path: str) -> dict[str, Any]:
+        changed = copy.deepcopy(sandbox)
+        pod(changed)["volumes"].append({"name": "identity-disk", "emptyDir": {}})
+        workspace(changed)["volumeMounts"].append({"name": "identity-disk", "mountPath": path})
+        return changed
+
+    def started(sandbox: dict[str, Any]) -> dict[str, Any]:
+        changed = copy.deepcopy(sandbox)
+        changed["spec"]["operatingMode"] = "Running"
+        return changed
+
+    def resized(sandbox: dict[str, Any]) -> dict[str, Any]:
+        changed = copy.deepcopy(sandbox)
+        workspace(changed).setdefault("resources", {}).setdefault("limits", {})["memory"] = "8192Mi"
+        return changed
+
+    current = sandbox_of(base)
+    legacy = with_run(current, {"name": "codewire-run", "emptyDir": {}})
+    host = with_run(current, {"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run"}})
+    foreign = with_mount(current, "/codewire/run/identity")
+    moved = sandbox_of(broker)
+    for name, new, stored, admitted in [
+        ("a Sandbox as rendered", current, None, True),
+        ("a Sandbox with a disk-backed codewire-run", legacy, None, False),
+        ("a Sandbox with a host path codewire-run", host, None, False),
+        ("a Sandbox without codewire-run", with_run(current, None), None, False),
+        ("a Sandbox with a foreign mount under /codewire/run", foreign, None, False),
+        ("a disk-backed Sandbox started", started(legacy), legacy, True),
+        ("a disk-backed Sandbox resized", resized(legacy), legacy, True),
+        ("a stored foreign mount kept on start", started(foreign), foreign, True),
+        ("a disk-backed Sandbox moved to broker mode", moved, legacy, True),
+        ("a Sandbox updated to a disk-backed codewire-run", legacy, current, False),
+        ("a disk-backed Sandbox updated to a host path", host, legacy, False),
+        ("a Sandbox updated without codewire-run", with_run(current, None), current, False),
+        ("a Sandbox updated with a foreign mount under /codewire/run", foreign, current, False),
+    ]:
+        if (not member_violations(new, name, stored)) != admitted:
+            raise RuntimeError(f"member run directory case {name} was {'refused' if admitted else 'admitted'}")
+
+
+def run_update_self_test(base: dict[str, Any]) -> None:
+    """An update keeps an unchanged codewire-run, and nothing else."""
+    def with_run(volume: dict[str, Any] | None) -> dict[str, Any]:
+        fixture = copy.deepcopy(base)
+        volumes = fixture["spec"]["podTemplate"]["spec"]["volumes"]
+        index = next(i for i, v in enumerate(volumes) if v["name"] == "codewire-run")
+        if volume is None:
+            volumes.pop(index)
+        else:
+            volumes[index] = copy.deepcopy(volume)
+        return fixture
+
+    disk = with_run({"name": "codewire-run", "emptyDir": {}})
+    host = with_run({"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run"}})
+    for name, new, stored, admitted in [
+        ("an update keeping a disk-backed codewire-run", disk, copy.deepcopy(disk), True),
+        ("an update keeping the rendered codewire-run", base, copy.deepcopy(base), True),
+        ("an update from disk-backed to the rendered shape", base, disk, True),
+        ("a create with a disk-backed codewire-run", disk, None, False),
+        ("an update from disk-backed to a host path", host, disk, False),
+        ("an update from memory to disk", disk, base, False),
+        ("an update removing codewire-run", with_run(None), base, False),
+        ("an update adding a disk-backed codewire-run", disk, with_run(None), False),
+    ]:
+        if (not run_violations(new, name, stored)) != admitted:
+            raise RuntimeError(f"codewire-run update case {name} was {'refused' if admitted else 'admitted'}")
+
+
+def run_self_test(base: dict[str, Any], label: str, check: Any) -> None:
+    """Each way `codewire-run` could leave bounded memory is refused."""
+    def volumes(fixture: dict[str, Any]) -> list[dict[str, Any]]:
+        return fixture["spec"]["podTemplate"]["spec"]["volumes"]
+
+    def run(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(v for v in volumes(fixture) if v["name"] == "codewire-run")
+
+    def replace(volume: dict[str, Any]) -> Any:
+        return lambda f: volumes(f).__setitem__(volumes(f).index(run(f)), volume)
+
+    cases = {
+        "disk-backed": replace({"name": "codewire-run", "emptyDir": {}}),
+        "memory without a size limit": replace({"name": "codewire-run", "emptyDir": {"medium": "Memory"}}),
+        "a larger size limit": lambda f: run(f)["emptyDir"].__setitem__("sizeLimit", "64Mi"),
+        "a size limit on disk": replace({"name": "codewire-run", "emptyDir": {"sizeLimit": "16Mi"}}),
+        "a host path": replace({"name": "codewire-run", "hostPath": {"path": "/var/lib/codewire-run"}}),
+        "a volume claim": replace({"name": "codewire-run", "persistentVolumeClaim": {"claimName": "run"}}),
+        "an extra source": lambda f: run(f).__setitem__("hostPath", {"path": "/var/lib/codewire-run"}),
+        "missing": lambda f: volumes(f).remove(run(f)),
+        "renamed": lambda f: run(f).__setitem__("name", "codewire-state"),
+        "twice": lambda f: volumes(f).append(copy.deepcopy(RUN_VOLUME)),
+    }
+    for name, mutate in cases.items():
+        fixture = copy.deepcopy(base)
+        mutate(fixture)
+        if not check(fixture, f"negative {label} fixture codewire-run {name}"):
+            raise RuntimeError(f"negative {label} fixture codewire-run {name} was accepted")
+
+
+def template_goldens() -> list[str]:
+    """Every SandboxTemplate golden, each a profile's or a pool's rendering."""
+    return sorted(path.relative_to(ROOT).as_posix()
+                  for path in (ROOT / TEMPLATE_GOLDENS).glob("*sandboxtemplate*.golden.json"))
+
+
 def containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
     return list(spec.get("containers") or []) + list(spec.get("initContainers") or [])
 
@@ -253,6 +526,8 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     # codewire#3626: the one ingress rule is orchestration's identity on the
     # daemon and SSH ports, nothing wider.
     output.extend(pool_ingress.ingress_violations(template, label))
+    output.extend(run_violations(template, label))
+    output.extend(run_mount_violations(template, label))
     return output
 
 
@@ -290,9 +565,8 @@ def confidential_violations(template: dict[str, Any], label: str) -> list[str]:
             output.append(f"{label}: mounts ConfigMap volume {volume.get('name')}, which the host would supply")
         if "secret" in volume:
             output.append(f"{label}: mounts Secret volume {volume.get('name')}")
-    run = [volume for volume in spec.get("volumes") or [] if volume.get("name") == "codewire-run"]
-    if run != [{"name": "codewire-run", "emptyDir": {"medium": "Memory"}}]:
-        output.append(f"{label}: the daemon's state is not guest memory")
+    output.extend(run_violations(template, label))
+    output.extend(run_mount_violations(template, label))
     binding = [volume for volume in spec.get("volumes") or [] if volume.get("name") == BINDING_VOLUME]
     if binding != [{
         "name": BINDING_VOLUME,
@@ -387,8 +661,8 @@ def confidential_self_test(base: dict[str, Any]) -> None:
     rejected("daemon token", lambda f: workspace(f)["env"].append({"name": "CODEWIRE_DAEMON_AUTH_TOKEN", "value": "x"}))
     rejected("roots ConfigMap", lambda f: spec(f)["volumes"].append(copy.deepcopy(EXPECTED_ROOTS_VOLUME)))
     rejected("coordinator extra roots", lambda f: spec(f)["volumes"].append(copy.deepcopy(EXPECTED_EXTRA_ROOTS_VOLUME)))
-    rejected("disk-backed daemon state", lambda f: next(v for v in spec(f)["volumes"] if v["name"] == "codewire-run").__setitem__(
-        "emptyDir", {}))
+    run_self_test(base, "confidential", confidential_violations)
+    run_mount_self_test(base, "confidential", confidential_violations)
     rejected("commodity runtime", lambda f: spec(f).__setitem__("runtimeClassName", "commodity"))
     rejected("template environment label", lambda f: f["metadata"].__setitem__("labels", {ENVIRONMENT_LABEL: measured}))
     rejected("missing measured roots", lambda f: workspace(f).__setitem__(
@@ -668,6 +942,10 @@ def self_test(base: dict[str, Any]) -> None:
     # 2222. Admission also admits no ingress, for the rollout only; both
     # shapes are positive fixtures, and every widening fails here.
     pool_ingress.self_test(base, "identity-free template ingress")
+    run_self_test(base, "identity-free", violations)
+    run_update_self_test(base)
+    run_mount_self_test(base, "identity-free", violations)
+    member_self_test(base, json.loads((ROOT / ENVIRONMENT_BROKER_FIXTURE).read_text(encoding="utf-8")))
     rejected("no template ingress", lambda f: f["spec"]["networkPolicy"].pop("ingress"))
     rejected("environment import", lambda f: workspace(f).__setitem__("envFrom", [{"configMapRef": {"name": "environment"}}]))
 
@@ -761,6 +1039,17 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
         failures.extend(confidential_violations(confidential, CONFIDENTIAL_FIXTURE))
     except (OSError, ValueError) as error:
         failures.append(f"{CONFIDENTIAL_FIXTURE}: unreadable ({error})")
+    goldens = template_goldens()
+    for rel in [*FIXTURES, CONFIDENTIAL_FIXTURE, POOL_TEMPLATE_FIXTURE]:
+        if rel not in goldens:
+            failures.append(f"{rel}: not found among the SandboxTemplate goldens")
+    for rel in goldens:
+        try:
+            golden = json.loads((ROOT / rel).read_text(encoding="utf-8"))
+            failures.extend(run_violations(golden, rel))
+            failures.extend(run_mount_violations(golden, rel))
+        except (OSError, ValueError) as error:
+            failures.append(f"{rel}: unreadable ({error})")
     try:
         failures.extend(extra_roots_setting_violations(deployment_manifests()))
     except OSError as error:
@@ -784,9 +1073,11 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
                 confidential_self_test(confidential)
         except RuntimeError as error:
             failures.append(str(error))
+    failures = list(dict.fromkeys(failures))
     for failure in failures:
         print(f"::error::identity-free workspace: {failure}")
     if failures:
         return 1
-    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s), 1 warm pool, 1 confidential{', self-test' if args.self_test else ''})")
+    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s), 1 warm pool, 1 confidential, "
+          f"{len(goldens)} template(s) with bounded memory codewire-run mounted only at /codewire/run{', self-test' if args.self_test else ''})")
     return 0

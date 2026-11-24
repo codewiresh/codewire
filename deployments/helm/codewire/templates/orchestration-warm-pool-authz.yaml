@@ -29,8 +29,16 @@
 #   in-cluster peers on their exact ports (codewire#3318). The Kind e2e
 #   overlay also admits its one side-loaded daemon image, which has no
 #   registry digest, and names its own ingress controller;
+# - every template orchestration writes but a snapshot's clearing template
+#   keeps the daemon's run directory in memory: exactly one codewire-run, an
+#   emptyDir with medium Memory and sizeLimit 16Mi, mounted at exactly
+#   /codewire/run by the workspace container and nothing else mounted at or
+#   under it, unless an update keeps the stored template's unchanged;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
 #   the agent-sandbox controller writes those;
+# - a Sandbox orchestration writes keeps the same run directory a template
+#   must, codewire-run in memory and nothing else at or under /codewire/run,
+#   unless an update keeps the stored Sandbox's unchanged;
 # - a Sandbox's broker mode never comes off. With hosted egress on,
 #   orchestration starts or changes a VM Sandbox made before it only by
 #   stopping it or, while it stays suspended and bound to an environment, by
@@ -556,6 +564,56 @@ spec:
         c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION' && has(e.value) &&
         e.value == object.metadata.annotations['codewire.sh/pool-revision'])))
       message: a warm-pool workspace binds through the workspace binding listener and carries its pool revision in its immutable Pod spec
+    # The daemon's run directory, /codewire/run (docs/dev/SANDBOX-IDENTITY.md,
+    # "Memory only"): its credential, SSH host key and token files stay in
+    # memory, since a disk-backed emptyDir is the node's filesystem (shared
+    # into the VM under Kata). Every template orchestration writes, pooled
+    # or not and on every runtime, has exactly one codewire-run, an emptyDir
+    # with medium Memory and sizeLimit 16Mi as rendered. A snapshot's clearing
+    # template runs no daemon and has none. An update that keeps the stored
+    # object's codewire-run as it was is unaffected: a Sandbox rendered
+    # before this keeps its disk-backed run directory, and gets no token
+    # files, until it is made again.
+    - expression: >-
+        variables.clearing ||
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) &&
+        oldObject.spec.podTemplate.spec.volumes.filter(v, v.name == 'codewire-run') ==
+        variables.volumes.filter(v, v.name == 'codewire-run') ||
+        size(variables.volumes.filter(v, v.name == 'codewire-run')) == 1 &&
+        variables.volumes.all(v, v.name != 'codewire-run' ||
+        dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
+        has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
+        has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '16Mi')
+      message: the daemon's run directory codewire-run is exactly one emptyDir with medium Memory and sizeLimit 16Mi on every template but a snapshot's clearing template, unless an update keeps the stored template's codewire-run unchanged
+    # The run directory's mounts: a memory codewire-run is no use if another
+    # volume, a disk emptyDir say, is mounted over it or beneath it at
+    # /codewire/run/identity. Every mount at or under /codewire/run, every
+    # mount of codewire-run and every mount path that isn't plain (relative,
+    # or with an empty, . or .. segment, which a runtime would clean onto
+    # another path) is exactly codewire-run at /codewire/run with no other
+    # field, as rendered in the workspace container and, where it runs, the
+    # daemon init; and the workspace container mounts it there. The same
+    # exceptions as the volume rule: a snapshot's clearing template, and an
+    # update that keeps those mounts, container by container, as stored.
+    - expression: >-
+        variables.clearing ||
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.containers) &&
+        (oldObject.spec.podTemplate.spec.containers + (has(oldObject.spec.podTemplate.spec.initContainers) ?
+        oldObject.spec.podTemplate.spec.initContainers : [])).map(c, has(c.volumeMounts) ? c.volumeMounts.filter(m, m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) : []) ==
+        variables.containers.map(c, has(c.volumeMounts) ? c.volumeMounts.filter(m, m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) : []) ||
+        variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
+        !(m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) ||
+        dyn(m).all(k, k in ['name', 'mountPath']) && m.name == 'codewire-run' && m.mountPath == '/codewire/run')) &&
+        variables.pod.containers.exists(c, c.name == 'workspace' && has(c.volumeMounts) &&
+        c.volumeMounts.exists(m, m.name == 'codewire-run' && m.mountPath == '/codewire/run'))
+      message: every mount at or under /codewire/run, every mount of codewire-run and every mount path that is not plain is exactly codewire-run at /codewire/run, and the workspace container mounts it there, on every template but a snapshot's clearing template, unless an update keeps the stored template's mounts at or under /codewire/run unchanged
     - expression: >-
         variables.environmentTemplate ||
         variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected']) &&
@@ -1084,6 +1142,45 @@ spec:
         !(has(oldObject.metadata.ownerReferences) &&
         oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool')))
       message: orchestration never strips an unclaimed warm-pool member's pool label or owner
+    # The daemon's run directory on a Sandbox, as the template policy holds it
+    # on a template (docs/dev/SANDBOX-IDENTITY.md, "Memory only"): exactly one
+    # codewire-run, an emptyDir with medium Memory and sizeLimit 16Mi, and
+    # nothing but it mounted at or under /codewire/run, which the workspace
+    # container mounts. Orchestration writes a Sandbox's pod template whole
+    # only from the current render (a start's move to broker mode, a measured
+    # or identity upgrade), which passes. Every other update it makes (start,
+    # stop, resize, the VM state) keeps the stored run directory, and is
+    # admitted as it was, so a Sandbox rendered before this, disk-backed
+    # included, keeps its own until it is made again. A snapshot's clearing
+    # Sandbox, made by the controller, has none and is only ever suspended.
+    - expression: >-
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) &&
+        oldObject.spec.podTemplate.spec.volumes.filter(v, v.name == 'codewire-run') ==
+        variables.volumes.filter(v, v.name == 'codewire-run') ||
+        size(variables.volumes.filter(v, v.name == 'codewire-run')) == 1 &&
+        variables.volumes.all(v, v.name != 'codewire-run' ||
+        dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
+        has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
+        has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '16Mi')
+      message: a Sandbox's run directory codewire-run is exactly one emptyDir with medium Memory and sizeLimit 16Mi, unless an update keeps the stored Sandbox's codewire-run unchanged
+    - expression: >-
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.containers) &&
+        (oldObject.spec.podTemplate.spec.containers + (has(oldObject.spec.podTemplate.spec.initContainers) ?
+        oldObject.spec.podTemplate.spec.initContainers : [])).map(c, has(c.volumeMounts) ? c.volumeMounts.filter(m, m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) : []) ==
+        variables.containers.map(c, has(c.volumeMounts) ? c.volumeMounts.filter(m, m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) : []) ||
+        variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
+        !(m.name == 'codewire-run' || !m.mountPath.startsWith('/') ||
+        m.mountPath.matches('//|(^|/)[.][.]?(/|$)') ||
+        m.mountPath == '/codewire/run' || m.mountPath.startsWith('/codewire/run/')) ||
+        dyn(m).all(k, k in ['name', 'mountPath']) && m.name == 'codewire-run' && m.mountPath == '/codewire/run')) &&
+        variables.pod.containers.exists(c, c.name == 'workspace' && has(c.volumeMounts) &&
+        c.volumeMounts.exists(m, m.name == 'codewire-run' && m.mountPath == '/codewire/run'))
+      message: on a Sandbox, every mount at or under /codewire/run, every mount of codewire-run and every mount path that is not plain is exactly codewire-run at /codewire/run, and the workspace container mounts it there, unless an update keeps the stored Sandbox's mounts at or under /codewire/run unchanged
     # codewire#5002: a Sandbox whose pod template is broker-mode stays so. A
     # Pod without the label escapes the fence, cw-egress and the self-check,
     # so no update by orchestration may take it off. A Sandbox made before

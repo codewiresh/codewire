@@ -3,13 +3,13 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "3760403ac102bdd15958312b4271ce850d99d20b6562b67e64911d8372df889b"
+      "codewire.sh/pool-revision": "34c6a4323b74ea9ef19d38e31e4f2bf1598128d875206f326091cfb2fa192a92"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-aef3717c",
+    "name": "cw-pool-1000m-4096mi-10gi-26a5a359",
     "namespace": "dev-sandboxes"
   },
   "spec": {
@@ -215,7 +215,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "3760403ac102bdd15958312b4271ce850d99d20b6562b67e64911d8372df889b"
+                "value": "34c6a4323b74ea9ef19d38e31e4f2bf1598128d875206f326091cfb2fa192a92"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -561,7 +561,10 @@
             "name": "codewire-bin"
           },
           {
-            "emptyDir": {},
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "16Mi"
+            },
             "name": "codewire-run"
           },
           {
