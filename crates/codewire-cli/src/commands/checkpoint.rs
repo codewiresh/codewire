@@ -278,14 +278,14 @@ async fn handle_local_checkpoint_command(
                 })),
                 OutputFormat::Text => {
                     println!(
-                        "Restored {} to VM checkpoint {}{} restore {:.2} s, total {:.2} s",
-                        terminal_text(&environment.name),
-                        terminal_text(&checkpoint.name),
-                        stopped
-                            .map(|elapsed| format!(": stop {:.2} s,", elapsed.as_secs_f64()))
-                            .unwrap_or_else(|| ":".to_owned()),
-                        restored.as_secs_f64(),
-                        started.elapsed().as_secs_f64()
+                        "{}",
+                        restored_line(
+                            &environment.name,
+                            &checkpoint.name,
+                            stopped,
+                            restored,
+                            started.elapsed()
+                        )
                     );
                     Ok(())
                 }
@@ -313,6 +313,27 @@ use codewire_local_vmm::control::v1;
 fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+/// A restore's line: the source's stop, when it was running, apart from the
+/// restore, so a slow one shows which part took the time (#6124).
+fn restored_line(
+    environment: &str,
+    checkpoint: &str,
+    stopped: Option<std::time::Duration>,
+    restored: std::time::Duration,
+    total: std::time::Duration,
+) -> String {
+    format!(
+        "Restored {} to VM checkpoint {}{} restore {:.2} s, total {:.2} s",
+        terminal_text(environment),
+        terminal_text(checkpoint),
+        stopped
+            .map(|elapsed| format!(": stop {:.2} s,", elapsed.as_secs_f64()))
+            .unwrap_or_else(|| ":".to_owned()),
+        restored.as_secs_f64(),
+        total.as_secs_f64()
+    )
 }
 
 /// Ask before discarding a running environment's state, unless `yes`.
@@ -662,6 +683,20 @@ mod tests {
     struct Probe {
         #[command(subcommand)]
         command: CheckpointCommand,
+    }
+
+    #[test]
+    fn a_restore_line_splits_the_stop_from_the_restore() {
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(
+            restored_line("app", "t1", Some(ms(420)), ms(9_030), ms(9_450)),
+            "Restored app to VM checkpoint t1: stop 0.42 s, restore 9.03 s, total 9.45 s"
+        );
+        // A stopped source has no stop to time.
+        assert_eq!(
+            restored_line("app", "t1", None, ms(8_870), ms(8_900)),
+            "Restored app to VM checkpoint t1: restore 8.87 s, total 8.90 s"
+        );
     }
 
     #[test]
