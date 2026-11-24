@@ -309,6 +309,19 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 .cw-status--pill[data-tone="danger"] { background: var(--destructive-muted); color: var(--destructive); }
 .cw-status--pill[data-tone="info"] { background: var(--info-muted); color: var(--info); }
 
+/* The same status as a dot and a word, for rows that draw no boxes. */
+.cw-status--quiet {
+  gap: var(--space-1-5);
+  color: var(--fg-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-none);
+}
+
+.cw-status--quiet::before {
+  width: var(--space-1-5);
+  height: var(--space-1-5);
+}
+
 /* Toast: a polite status that floats over the page, so a message never moves
    the content under it. The element stays rendered as an empty live region
    until a message arrives; empty, it draws nothing. */
@@ -828,6 +841,76 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 .cw-row-list > li:last-child {
   padding-bottom: 0;
 }
+
+/* Section: a titled part of a page set with space and type instead of a
+   box. The header holds the title, its description and at most one text
+   action; a row list under it is ruled by hairlines, top and bottom. */
+.cw-section {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  padding-top: var(--space-6);
+}
+
+.cw-section-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.cw-section-header > :first-child { min-width: 0; }
+
+.cw-section-title {
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.cw-section-description {
+  max-width: var(--measure);
+  margin: var(--space-1-5) 0 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-secondary);
+  line-height: var(--leading-body);
+}
+
+.cw-section > .cw-row-list {
+  border-block: var(--border-width) solid var(--border-subtle);
+}
+
+.cw-section > .cw-row-list > li:first-child { padding-top: var(--space-4); }
+.cw-section > .cw-row-list > li:last-child { padding-bottom: var(--space-4); }
+
+/* Text action: an action set in type, for a section or a row, where a
+   filled or outlined button would draw a box. */
+.cw-text-action {
+  display: inline-flex;
+  flex: none;
+  min-height: var(--control-height-sm);
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: var(--text-secondary);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-none);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cw-text-action:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.cw-text-action .cw-icon { width: var(--icon-size); height: var(--icon-size); }
 
 /* Field row: fields side by side with a trailing action, such as a remove
    button. Every label shares the first line and every control the second, so
