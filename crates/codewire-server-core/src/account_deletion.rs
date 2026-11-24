@@ -461,6 +461,9 @@ pub(crate) async fn request_in(
 
     // The trigger revokes sessions, OIDC tokens and grants, and disables
     // API keys, in this transaction.
+    // Order: this users update comes before the operation row's insert, so
+    // a suspend holding the users row first (orchestration `lock_account`)
+    // finishes, or waits and then sees the operation row (#5769).
     sqlx::query("UPDATE users SET enabled = false, updated_at = NOW() WHERE id = $1")
         .bind(user_id)
         .execute(&mut **tx)

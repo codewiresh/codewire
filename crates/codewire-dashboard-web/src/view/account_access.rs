@@ -1,4 +1,4 @@
-//! Admin → Manage account access: one account's row (#3297, #4541).
+//! Admin → Manage account access: one account's row (#3297, #4541, #5769).
 
 pub(crate) struct AccountAccessView {
     pub(crate) id: String,
@@ -28,11 +28,18 @@ pub(crate) enum AccountDeletionOffer {
     OwnAccount,
     /// Another admin, demoted before their account is deleted.
     Admin,
+    /// Its deletion is already running (#5769).
+    Deleting,
 }
 
 impl AccountDeletionOffer {
     pub(crate) fn is_offered(self) -> bool {
         self == Self::Offered
+    }
+
+    /// Its deletion is running, so the row offers no access change either.
+    pub(crate) fn is_deleting(self) -> bool {
+        self == Self::Deleting
     }
 
     /// Why the row offers no deletion, empty when it does.
@@ -41,6 +48,7 @@ impl AccountDeletionOffer {
             Self::Offered => "",
             Self::OwnAccount => "Your account. Delete it in Settings.",
             Self::Admin => "An admin. Demote them first.",
+            Self::Deleting => "Deleting",
         }
     }
 }

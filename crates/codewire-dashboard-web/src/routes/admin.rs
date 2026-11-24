@@ -86,6 +86,9 @@ struct AccountAccessResponse {
     /// An IdP that does not say is read as not suspended.
     #[serde(default)]
     suspended: bool,
+    /// Its deletion is running (#5769); an IdP that does not say, not.
+    #[serde(default)]
+    deleting: bool,
     /// `bounce` or `complaint` when SES suppressed the address (#4548);
     /// absent when it didn't, or the IdP didn't reach it.
     #[serde(default)]
@@ -1177,6 +1180,8 @@ fn account_access_view(account: &AccountAccessResponse, own_id: &str) -> Account
             .collect(),
         deletion: if account.id == own_id {
             AccountDeletionOffer::OwnAccount
+        } else if account.deleting {
+            AccountDeletionOffer::Deleting
         } else if account.is_admin {
             AccountDeletionOffer::Admin
         } else {

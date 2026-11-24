@@ -162,6 +162,21 @@ pub(crate) async fn suspend_account_core(
             "this account is already suspended".into(),
         ));
     }
+    // An account being deleted is already disabled and on its way out; the
+    // list offers no Suspend for it, and this refuses it too (#5769).
+    // Order: `lock_account` holds the users row before this read, and a
+    // deletion's start updates that row before inserting its operation, so
+    // whichever comes second waits and then sees the other's commit.
+    let deleting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM account_deletion_operations WHERE user_id = $1)",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(failure("read account deletion"))?;
+    if deleting {
+        return Err(AppError::Conflict("this account is being deleted".into()));
+    }
     sqlx::query(
         "UPDATE users SET enabled = false, suspended_at = NOW(), suspended_by = $2, \
          updated_at = NOW() WHERE id = $1",

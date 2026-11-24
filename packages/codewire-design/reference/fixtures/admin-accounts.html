@@ -11,7 +11,7 @@
 <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>accounts</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Manage account access</h1><p>Review verified access requests and control who can sign in to Codewire.</p></div></header>
         <section class="cw-card" aria-labelledby="account-access-heading">
-          <header class="cw-card-header"><div><h2 id="account-access-heading">Accounts</h2><p>6 accounts</p></div></header>
+          <header class="cw-card-header"><div><h2 id="account-access-heading">Accounts</h2><p>7 accounts</p></div></header>
           <div class="cw-table-wrap"><table class="cw-table cw-access-table"><thead><tr><th scope="col">Account</th><th scope="col">Request</th><th scope="col">Email</th><th scope="col">Sign-in providers</th><th scope="col">Created</th><th scope="col">Access</th><th scope="col">Delete</th></tr></thead><tbody>
             <tr>
               <td><strong>Grace Hopper</strong><span class="cw-access-email">grace@example.test</span></td>
@@ -57,6 +57,15 @@
               <td><time datetime="2026-11-20T11:05:00Z">2026-11-20T11:05:00Z</time></td>
               <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="44444444444444444444444444444444"><input type="hidden" name="enabled" value="true"><span class="cw-badge" data-tone="warning">Disabled</span><button class="cw-button cw-button--accent cw-button--pill" type="submit" disabled title="Email verification is required first">Enable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-5-suspend" aria-haspopup="dialog" aria-controls="account-5-suspend"><span>Suspend</span><span class="cw-sr-only"> barbara@example.test</span></button></td>
               <td><a class="cw-button cw-button--outline cw-button--pill cw-button--small" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> barbara@example.test</span></a></td>
+            </tr>
+            <tr>
+              <td><strong>Edsger Dijkstra</strong><span class="cw-access-email">edsger@example.test</span></td>
+              <td><span class="cw-muted">No access request supplied</span></td>
+              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-muted">None</span></td>
+              <td><time datetime="2026-11-08T10:20:00Z">2026-11-08T10:20:00Z</time></td>
+              <td><p class="cw-access-action"><span class="cw-badge" data-tone="warning">Disabled</span></p></td>
+              <td><span class="cw-muted">Deleting</span></td>
             </tr>
             <tr>
               <td><strong>Mallory Example</strong><span class="cw-access-email">mallory@example.test</span></td>

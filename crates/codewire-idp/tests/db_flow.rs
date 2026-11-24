@@ -6542,6 +6542,78 @@ async fn admin_resends_verification_only_for_an_unverified_account(pool: PgPool)
     cleanup(pool.clone()).await;
 }
 
+#[tokio::test]
+async fn admin_list_marks_an_account_being_deleted_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping admin list deleting e2e");
+        return;
+    };
+    in_own_database(
+        &url,
+        "cw_idp_admin_list_deleting",
+        admin_list_marks_an_account_being_deleted,
+    )
+    .await;
+}
+
+/// An account whose deletion is running is listed as deleting, and no
+/// other is (#5769).
+async fn admin_list_marks_an_account_being_deleted(pool: PgPool) {
+    // (id, email, is_admin)
+    let users = [
+        ("u_admin_deleting", "admin-deleting@example.com", true),
+        ("u_being_deleted", "being-deleted@example.com", false),
+        ("u_kept", "kept@example.com", false),
+    ];
+    for (id, email, admin) in users {
+        sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ($1,$2,$1,true,$3,true)")
+            .bind(id)
+            .bind(email)
+            .bind(admin)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ('s_admin_deleting','u_admin_deleting',$1,NOW() + interval '1 hour')")
+        .bind(hash_session_token("sess_admin_deleting_token"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO account_deletion_operations (id, user_id, workflow_id, email) \
+         VALUES ('account-deletion/list-test', 'u_being_deleted', \
+                 'account-deletion/list-test', 'being-deleted@example.com')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = codewire_idp::access_admin::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    let (status, body, _) = sess_req(
+        &app,
+        "GET",
+        "/api/admin/accounts",
+        Some("sess_admin_deleting_token"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let deleting = |id: &str| {
+        body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == id)
+            .map(|account| account["deleting"].clone())
+    };
+    assert_eq!(deleting("u_being_deleted"), Some(serde_json::json!(true)));
+    assert_eq!(deleting("u_kept"), Some(serde_json::json!(false)));
+}
+
 /// Expired authorization requests, device authorizations and tokens go as new
 /// ones are written: a bounded batch per request or device authorization, and
 /// a token's own user's expired tokens when one is issued.

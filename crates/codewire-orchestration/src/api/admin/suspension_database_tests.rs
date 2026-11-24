@@ -306,3 +306,34 @@ async fn db_suspension_stops_the_sole_owned_organization_and_unsuspension_restor
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_account_being_deleted_is_not_suspended() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let pool = &db.pool;
+        seed(pool).await?;
+        execute(
+            pool,
+            "INSERT INTO account_deletion_operations (id, user_id, workflow_id, email) \
+             VALUES ('account-deletion/suspend-test', $1, 'account-deletion/suspend-test', \
+                     $1 || '@example.test')",
+            &[TARGET],
+        )
+        .await?;
+        let refused = suspend_account_core(pool, ADMIN, TARGET, "spam").await;
+        ensure!(matches!(refused, Err(AppError::Conflict(_))), "{refused:?}");
+        let suspended: bool =
+            sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM users WHERE id = $1")
+                .bind(TARGET)
+                .fetch_one(pool)
+                .await?;
+        ensure!(!suspended, "an account being deleted was suspended");
+        ensure!(suspended_organizations(pool).await?.is_empty());
+        ensure!(audit_actions(pool).await?.is_empty());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

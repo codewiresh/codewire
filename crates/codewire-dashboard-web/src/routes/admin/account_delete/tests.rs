@@ -16,6 +16,8 @@ const ORIGIN: &str = "https://dashboard.synthetic.invalid";
 const ADMIN: &str = "synthetic-admin";
 const OTHER_ADMIN: &str = "synthetic-other-admin";
 const MEMBER: &str = "synthetic-member";
+/// An account whose deletion is already running (#5769).
+const DELETING: &str = "synthetic-deleting";
 const MEMBER_EMAIL: &str = "synthetic.member@example.test";
 const ACTION: &str = "/admin/accounts/_actions/delete";
 const CAP: &str = "at most 10 account deletions an hour; try again after 14:05:00 UTC";
@@ -136,10 +138,13 @@ async fn upstream(mode: &'static str) -> (TestServer, Calls) {
                     .into_response();
             }
             if path == "/api/admin/accounts" {
+                let mut deleting = account(DELETING, false);
+                deleting["deleting"] = json!(true);
                 return Json(json!({"accounts": [
                     account(ADMIN, true),
                     account(OTHER_ADMIN, true),
                     account(MEMBER, false),
+                    deleting,
                 ]}))
                 .into_response();
             }
@@ -262,6 +267,12 @@ async fn the_accounts_list_offers_delete_except_for_you_and_other_admins() {
     )));
     assert!(!page.body.contains(&delete_link(ADMIN)));
     assert!(!page.body.contains(&delete_link(OTHER_ADMIN)));
+    // An account already being deleted says so and offers no Delete (#5769).
+    assert!(!page.body.contains(&delete_link(DELETING)));
+    assert!(
+        page.body
+            .contains("<span class=\"cw-muted\">Deleting</span>")
+    );
     assert!(
         page.body
             .contains("<span class=\"cw-muted\">Your account. Delete it in Settings.</span>")

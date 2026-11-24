@@ -41,6 +41,8 @@ struct AccountAccessRow {
     is_admin: bool,
     /// Suspended by an administrator (#3297): only unsuspending enables it.
     suspended: bool,
+    /// Its deletion is running (#5769), so the list offers no Delete.
+    deleting: bool,
     access_reason: Option<String>,
     created_at: NaiveDateTime,
     /// Who vouched for the address on a server with no mail (#4121):
@@ -135,6 +137,8 @@ async fn list_accounts(
                   enabled,
                   COALESCE(is_admin, false) AS is_admin,
                   suspended_at IS NOT NULL AS suspended,
+                  EXISTS (SELECT 1 FROM account_deletion_operations d
+                           WHERE d.user_id = users.id) AS deleting,
                   access_reason,
                   COALESCE(created_at, NOW()::timestamp) AS created_at,
                   email_vouched_by AS vouched_by
