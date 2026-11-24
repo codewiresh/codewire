@@ -2678,8 +2678,10 @@ which its first bind will store, decides its CA.
   is delayed, never started without its placeholder. Every epoch of one binding gives the same placeholder,
   since no epoch is a derivation input; a rebind to another credential or
   profile revision gives a new one, and a process started before it
-  carries the old one, which the front door then refuses with 401 until
-  that process restarts. With no placeholder (none granted, or hosted
+  carries the old one. Once the rebind reaches the running epoch, within
+  60 seconds, the front door answers that old placeholder with 403 and
+  refusal `selected_credential_only` until the process restarts.
+  With no placeholder (none granted, or hosted
   placeholders off), it projects no Anthropic bearer at all, never the
   loopback routes. Before it serves, the daemon installs
   its first egress session's trust (#6072): the CA alone at

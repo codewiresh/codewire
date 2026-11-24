@@ -6,6 +6,7 @@
 mod authenticated;
 mod front_door;
 mod front_door_delegation;
+mod front_door_hosted;
 mod interception_rpcs;
 mod rotation;
 

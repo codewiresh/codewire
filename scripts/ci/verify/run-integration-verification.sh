@@ -995,6 +995,11 @@ database_lane_broker_admission() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform broker hosted front-door matrix" platform-broker-hosted-front-door \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::bridge::tests::front_door_hosted:: -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_broker_checked() {

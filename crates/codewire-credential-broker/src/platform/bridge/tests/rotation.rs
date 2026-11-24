@@ -13,7 +13,7 @@ use crate::platform::tests::{
     Fixture as DatabaseFixture, SyntheticAuthority, TIMEOUT, profiles, token,
 };
 
-struct DatabaseAuthenticator(Arc<SyntheticAuthority>);
+pub(super) struct DatabaseAuthenticator(pub(super) Arc<SyntheticAuthority>);
 
 #[async_trait]
 impl PlatformBridgeAuthenticator for DatabaseAuthenticator {

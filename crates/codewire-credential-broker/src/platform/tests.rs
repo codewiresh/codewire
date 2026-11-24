@@ -2,7 +2,7 @@
 //! No Kubernetes, provider network, ambient configuration or real credentials.
 
 mod checked;
-mod claude_sign_in;
+pub(super) mod claude_sign_in;
 mod codex_login;
 mod decision;
 mod keepalive;
@@ -462,6 +462,52 @@ impl Fixture {
             profile_id: current.id,
             profile_revision: current.revision,
         })
+    }
+
+    /// Select `record` in `slot` of the environment's profile, as a person
+    /// choosing a credential does: the profile's next revision, the binding
+    /// moved to it, and the record authorized for the runtime. Returns the
+    /// new binding.
+    pub(super) async fn select(
+        &self,
+        slot: CapabilitySlot,
+        record: &CredentialRecord,
+    ) -> Result<EnvironmentAccessBinding> {
+        let manager = profiles(self.db.pool.clone(), builtin_provider_catalog());
+        let previous = self.current_binding().await?;
+        let profile = manager.get(&self.owner, &previous.profile_id).await?;
+        let mut entries = profile.entries.clone();
+        entries.insert(slot, record.metadata.id.clone());
+        let changed = manager
+            .update(&self.owner, &profile.id, profile.revision, entries)
+            .await?;
+        self.authority.change(|session| {
+            session
+                .context
+                .authorized_credentials
+                .insert(record.metadata.id.clone());
+        });
+        let context = self
+            .authority
+            .session
+            .lock()
+            .expect("synthetic session")
+            .context
+            .clone();
+        let selected = EnvironmentAccessBinding {
+            environment_id: context.environment_id.clone(),
+            profile_id: changed.id,
+            profile_revision: changed.revision,
+        };
+        manager
+            .replace_binding(
+                &context,
+                &previous,
+                selected.clone(),
+                Some(&context.user_id),
+            )
+            .await?;
+        Ok(selected)
     }
 
     /// Another replica's provider outside any hosted bridge epoch: no

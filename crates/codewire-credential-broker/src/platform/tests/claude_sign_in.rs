@@ -92,7 +92,7 @@ fn json(status: StatusCode, body: serde_json::Value) -> BrokerUpstreamResponse {
 
 /// Sign-in material named `label` whose access token expires `remaining`
 /// seconds from now and whose own refresh time is `age` seconds ago.
-pub(super) fn sign_in_material(
+pub(in crate::platform) fn sign_in_material(
     label: &str,
     remaining: u64,
     age: u64,
@@ -131,7 +131,7 @@ fn sign_in_material_with_scopes(
     ProtectedValue::new(std::mem::take(&mut *bytes)).unwrap()
 }
 
-pub(super) fn sign_in_registration(name: &str) -> CredentialRegistration {
+pub(in crate::platform) fn sign_in_registration(name: &str) -> CredentialRegistration {
     CredentialRegistration {
         provider: codewire_access::ProviderId::parse("anthropic").unwrap(),
         authentication_kind: CredentialAuthKind::ClaudeSignIn,

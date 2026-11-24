@@ -1865,7 +1865,8 @@ arguments hold no real token, and the hosted sign-in exception is not used
     through the loopback routes; the daemon's logs hold no placeholder;
   - a renewed epoch keeps the agent's placeholder and its turns go on; after
     a rebind to another credential a new agent gets the new placeholder,
-    and one started before it is answered 401 until it restarts;
+    and one started before it is answered 403 `selected_credential_only`,
+    from at most 60 seconds after the rebind until it restarts;
   - a front door session for one Sandbox is refused another Sandbox's
     token, and no request of one Sandbox is ever served with the other's
     credential;

@@ -22,7 +22,9 @@ releases, so this runs the real agent and checks each:
 - it takes the placeholder from each environment variable it reads an
   Anthropic credential from, and sends its request with it: a release that
   began to refuse a token for its shape would fail here, not in an
-  environment.
+  environment;
+- `/usage` in print mode asks the API host for the sign-in's usage with the
+  placeholder, asks no other host, and shows what the answer says.
 
 The agent runs as it does in an environment: nothing here turns off any of
 its own traffic. It runs with no network but loopback, and this program
@@ -39,9 +41,9 @@ asked it for. Print mode has been seen to ask for the two provider hosts
 only, with no update check; a new host fails the run and is named, to be
 looked at and then recorded here.
 
-It is one offline run in print mode. It does not show the real provider
-accepting a swapped token, nor the requests an interactive session makes,
-`/usage` and `/status` among them.
+It is offline, in print mode. It does not show the real provider accepting
+a swapped token, nor the requests an interactive session makes, `/status`
+among them.
 """
 import argparse
 import dataclasses
@@ -71,8 +73,10 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # matches. A request in neither list is one nobody has looked at: the run
 # fails and names it. The feature-flag request names a client key in its path.
 EVALUATION = ("POST", "/api/eval/sdk-[A-Za-z0-9]+")
+USAGE_PATH = "/api/oauth/usage"
 PLACEHOLDER_REQUESTS = (
     ("POST", "/v1/messages"), ("GET", "/v1/mcp_servers"), ("GET", "/api/oauth/profile"),
+    ("GET", USAGE_PATH),
     ("GET", "/api/claude_cli/bootstrap"), ("GET", "/api/claude_code_penguin_mode"),
     EVALUATION, ("POST", "/api/event_logging/v2/batch"),
 )
@@ -122,6 +126,15 @@ MANAGED_REFRESH_PREFIX = "codewire-managed-no-refresh-token-"
 MANAGED_REFRESH = re.compile(re.escape(MANAGED_REFRESH_PREFIX) + "[0-9a-f]{32}")
 # What a managed refresh answers as the access token's life: ten years.
 MANAGED_LIFETIME_SECONDS = 315_360_000
+# The fake's usage answer, in the fields the pinned Claude Code reads, and
+# the lines `/usage` prints for it.
+USAGE_ANSWER = {
+    "five_hour": {"utilization": 37.0, "resets_at": "2030-01-01T05:00:00+00:00"},
+    "seven_day": {"utilization": 61.0, "resets_at": "2030-01-07T00:00:00+00:00"},
+    "seven_day_oauth_apps": None,
+    "seven_day_opus": None,
+}
+USAGE_SHOWN = ("Current session: 37% used", "Current week (all models): 61% used")
 AGENT_TIMEOUT_SECONDS = 90
 OPENSSL_TIMEOUT_SECONDS = 60
 MAX_BODY = 4 * 1024 * 1024
@@ -274,6 +287,8 @@ class Provider:
             return 200, "text/event-stream", reply_stream(model)
         if request.path == "/v1/mcp_servers":
             return 200, "application/json", b'{"data":[],"has_more":false}'
+        if request.method == "GET" and request.path == USAGE_PATH:
+            return 200, "application/json", json.dumps(USAGE_ANSWER).encode()
         return 404, "application/json", json.dumps({"type": "error", "error": {
             "type": "not_found_error", "message": "not found"}}).encode()
 
@@ -418,9 +433,9 @@ class Proxy(http.server.ThreadingHTTPServer):
             self.provider.stray(f"a request the fake provider failed on ({type(error).__name__})")
 
 
-def run_agent(agent, home, project, proxy_port, authority, variables):
-    """Run `claude -p` once, with `variables` added to its environment.
-    Returns its exit status and what it printed."""
+def run_agent(agent, home, project, proxy_port, authority, variables, prompt):
+    """Run `claude -p prompt` once, with `variables` added to its
+    environment. Returns its exit status and what it printed."""
     proxy = f"http://127.0.0.1:{proxy_port}"
     environment = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -432,7 +447,7 @@ def run_agent(agent, home, project, proxy_port, authority, variables):
         **variables,
     }
     process = subprocess.Popen(
-        [str(agent), "-p", "say ok"], cwd=project, env=environment, stdin=subprocess.DEVNULL,
+        [str(agent), "-p", prompt], cwd=project, env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         output, errors = process.communicate(timeout=AGENT_TIMEOUT_SECONDS)
@@ -633,9 +648,11 @@ CASES = (
 
 class Run:
     """One run of the agent in `work`'s home against a new fake provider,
-    holding the placeholder `access` with `scopes`, and given `variables`."""
+    holding the placeholder `access` with `scopes`, given `variables` and
+    asked `prompt`."""
 
-    def __init__(self, case, access, scopes, agent, tls, authority, work, variables=None):
+    def __init__(self, case, access, scopes, agent, tls, authority, work, variables=None,
+                 prompt="say ok"):
         self.provider = Provider(case, access, list(scopes))
         proxy = Proxy(tls, self.provider)
         threading.Thread(target=proxy.serve_forever, daemon=True).start()
@@ -643,7 +660,7 @@ class Run:
         try:
             self.status, self.printed = run_agent(
                 agent, work / "home", work / "project", proxy.server_address[1], authority,
-                variables or {})
+                variables or {}, prompt)
         finally:
             self.finished = int(time.time() * 1000)
             proxy.shutdown()
@@ -726,6 +743,32 @@ def run_variable(place, agent, placeholders, tls, authority, work):
     return run.report(provider.case.name, wrong)
 
 
+def run_usage(agent, recorded, placeholders, tls, authority, work):
+    """`/usage` with the login file: the agent asks the API host for the
+    usage with the placeholder, asks no other host, and prints the answer."""
+    before = starting_login(recorded, placeholders.make())
+    oauth = before["claudeAiOauth"]
+    login_file = work / "home" / ".claude" / ".credentials.json"
+    login_file.parent.mkdir(parents=True)
+    login_file.write_text(json.dumps(before))
+    login_file.chmod(0o600)
+    (work / "project").mkdir()
+    run = Run(Case("/usage with the login file", "issue", "answer"), oauth["accessToken"],
+              oauth["scopes"], agent, tls, authority, work, prompt="/usage")
+    provider = run.provider
+    wrong = requests_wrong(provider, oauth["refreshToken"])
+    if run.status != 0:
+        wrong.append(f"the agent ended with status {run.status}: {run.printed[:200]!r}")
+    if not any(r.host == API_HOST and r.method == "GET" and r.path == USAGE_PATH
+               and r.headers.get(LOGIN_FILE.header) == LOGIN_FILE.carries(provider.access)
+               for r in provider.requests):
+        wrong.append(f"no GET {USAGE_PATH} carries the placeholder")
+    for line in USAGE_SHOWN:
+        if line not in run.printed:
+            wrong.append(f"the agent did not print {line!r}")
+    return run.report(provider.case.name, wrong)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--agent", required=True, type=Path, help="the installed claude command")
@@ -752,6 +795,9 @@ def main():
             variable_work = arguments.work / place.name
             variable_work.mkdir()
             passed &= run_variable(place, arguments.agent, placeholders, tls, authority, variable_work)
+        usage_work = arguments.work / "usage"
+        usage_work.mkdir()
+        passed &= run_usage(arguments.agent, recorded, placeholders, tls, authority, usage_work)
     except Failure as failure:
         print(f"claude-login-compat: {failure}", file=sys.stderr)
         return 2
