@@ -28,9 +28,9 @@ git -C "$repo" config commit.gpgsign false
 mkdir -p "$repo/scripts/ci/images" "$repo/scripts/ci/trust" "$repo/deployments/k8s/orchestration"
 install -m 755 "$ROOT/scripts/ci/images/pod-runtime-image-pin.py" "$ROOT/scripts/ci/images/egress-image-pin.py" \
   "$repo/scripts/ci/images/"
-install -m 644 "$ROOT/deployments/k8s/orchestration/pod-runtime-image.digest" "$repo/deployments/k8s/orchestration/"
-[[ "$(cat "$repo/deployments/k8s/orchestration/pod-runtime-image.digest")" == unpinned ]] ||
-  fail 'main already pins a pod-runtime image; start the fixture from unpinned'
+# The fixture starts unpinned whatever main pins (#6272 pinned it); the
+# commits below cover both forms.
+printf 'unpinned\n' >"$repo/deployments/k8s/orchestration/pod-runtime-image.digest"
 printf 'synthetic public key\n' >"$repo/scripts/ci/trust/codewire-runtime-signing.pub"
 cat >"$repo/scripts/ci/images/verify-runtime-image-signatures.sh" <<'MOCK'
 #!/usr/bin/env bash
