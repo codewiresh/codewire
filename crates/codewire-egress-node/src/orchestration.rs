@@ -10,12 +10,13 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use codewire_egress_front_door_bridge::{INTERCEPT_PORT, RouteTable};
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest, PolicyDocument};
 use codewire_network_session::{EgressTrust, MAX_EGRESS_TRUST_BYTES};
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
-    AdmitRequest, EgressAssignment, EgressServiceClient, SignInterceptionLeavesRequest,
-    WatchAssignmentRequest, WatchAssignmentResponse,
+    AdmitRequest, EgressAssignment, EgressServiceClient, InterceptionBinding,
+    SignInterceptionLeavesRequest, WatchAssignmentRequest, WatchAssignmentResponse,
 };
 use codewire_tls::ConnectOriginTransport;
 use connectrpc::client::{CallOptions, ClientConfig};
@@ -231,6 +232,7 @@ impl Orchestration {
                 AdmitRequest {
                     guest_token: guest_token.to_owned(),
                     peer_ip: peer.to_string(),
+                    front_door_hosts: front_door_hosts(),
                     ..Default::default()
                 },
                 self.options()?,
@@ -324,6 +326,30 @@ impl crate::leaves::LeafSigner for Orchestration {
 
 pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};
 
+/// Every name this build's front door has a route for, on its port, as the
+/// admission reports it (#6290): its own built-in route table, each exact
+/// host and each suffix route, never a list it was sent.
+fn front_door_hosts() -> Vec<InterceptionBinding> {
+    let table = RouteTable::built_in();
+    let binding = |host: &str, suffix: bool| InterceptionBinding {
+        host: host.to_owned(),
+        port: u32::from(INTERCEPT_PORT),
+        suffix,
+        ..Default::default()
+    };
+    table
+        .hosts()
+        .into_iter()
+        .map(|host| binding(host, false))
+        .chain(
+            table
+                .suffixes()
+                .into_iter()
+                .map(|suffix| binding(suffix, true)),
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use codewire_egress_policy::BuiltinPolicy;
@@ -332,6 +358,36 @@ mod tests {
     };
 
     use super::*;
+
+    /// The admission reports exactly the routes this build's front door can
+    /// serve, each exact host and each suffix, on its port (#6290).
+    #[test]
+    fn the_admission_reports_every_name_the_front_door_routes() {
+        let reported = front_door_hosts();
+        let table = RouteTable::built_in();
+        let exact: Vec<&str> = reported
+            .iter()
+            .filter(|binding| !binding.suffix)
+            .map(|binding| binding.host.as_str())
+            .collect();
+        let suffixes: Vec<&str> = reported
+            .iter()
+            .filter(|binding| binding.suffix)
+            .map(|binding| binding.host.as_str())
+            .collect();
+        assert_eq!(exact, table.hosts());
+        assert_eq!(suffixes, table.suffixes());
+        assert!(reported.iter().all(|binding| binding.port == 443));
+        for host in [
+            "api.anthropic.com",
+            "api.openai.com",
+            "chatgpt.com",
+            "github.com",
+        ] {
+            assert!(exact.contains(&host), "{host}");
+        }
+        assert_eq!(suffixes, ["chatgpt.com"]);
+    }
 
     #[test]
     fn the_admitted_ca_is_the_trust_frame_and_one_it_cannot_carry_refuses_the_stream() {

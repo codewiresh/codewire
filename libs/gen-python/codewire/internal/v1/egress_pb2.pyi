@@ -30,12 +30,14 @@ EGRESS_TRANSPORT_TCP: EgressTransport
 EGRESS_TRANSPORT_UDP: EgressTransport
 
 class AdmitRequest(_message.Message):
-    __slots__ = ("guest_token", "peer_ip")
+    __slots__ = ("guest_token", "peer_ip", "front_door_hosts")
     GUEST_TOKEN_FIELD_NUMBER: _ClassVar[int]
     PEER_IP_FIELD_NUMBER: _ClassVar[int]
+    FRONT_DOOR_HOSTS_FIELD_NUMBER: _ClassVar[int]
     guest_token: str
     peer_ip: str
-    def __init__(self, guest_token: _Optional[str] = ..., peer_ip: _Optional[str] = ...) -> None: ...
+    front_door_hosts: _containers.RepeatedCompositeFieldContainer[InterceptionBinding]
+    def __init__(self, guest_token: _Optional[str] = ..., peer_ip: _Optional[str] = ..., front_door_hosts: _Optional[_Iterable[_Union[InterceptionBinding, _Mapping]]] = ...) -> None: ...
 
 class AdmitResponse(_message.Message):
     __slots__ = ("pod_uid", "assignment", "pod_name", "ca_certificate_der")

@@ -211,11 +211,18 @@ impl RouteTable {
     /// Every host any environment's route table may bind: the hosts a
     /// credential broker needs the network policy's answer for (#5555).
     pub fn bindable_hosts() -> Vec<String> {
-        Self::with_optional_hosts(true, true)
+        Self::built_in()
             .hosts()
             .into_iter()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Every route this build's front door can serve, which each
+    /// environment's table is cut from ([`Self::serving`]): what cw-egress
+    /// reports it serves at admission (#6290).
+    pub fn built_in() -> Self {
+        Self::with_optional_hosts(true, true)
     }
 
     /// The routes for an environment whose stock clients are `clients`: one
@@ -230,7 +237,7 @@ impl RouteTable {
     /// The built-in routes of each host `serves` names, with Codex's suffix
     /// routes when `chatgpt.com` is one, or `None` when it names none.
     pub(crate) fn serving(serves: impl Fn(&str) -> bool) -> Option<Self> {
-        let all = Self::with_optional_hosts(true, true);
+        let all = Self::built_in();
         let routes: Vec<HostRoute> = all
             .routes
             .into_iter()

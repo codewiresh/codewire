@@ -89,6 +89,13 @@ message AdmitRequest {
   // cannot verify it: a caller could misstate it only for Pods on its own
   // node, which it already serves.
   string peer_ip = 2;
+  // Every name the calling cw-egress's TLS front door has a route for, on
+  // its port: each exact host, and each suffix route with `suffix` set
+  // (#4001, #6290). It comes from that build's own route table, which every
+  // Pod's front door is cut from, never from an assignment it was sent.
+  // Orchestration binds an intercepted Pod only to names in its admission's
+  // set; a cw-egress older than this field sends none.
+  repeated InterceptionBinding front_door_hosts = 3;
 }
 
 message AdmitResponse {

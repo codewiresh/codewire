@@ -3299,6 +3299,13 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   Knowing an id grants nothing: the agent never speaks the bridge protocol,
   and no frame, cancel or route takes an id from it. The loopback ingress
   and local VMs answer without the header.
+- **What the front door serves** (#6290). At each admission, `cw-egress`
+  reports every name its own front door has a route for: each exact host on
+  443, and the `chatgpt.com` suffix route. The report comes from that
+  build's built-in route table, never from an assignment it was sent, so it
+  says what this `cw-egress` actually serves. Orchestration does not read
+  it yet. Next, an intercepted first bind will be refused by name when a
+  host its selection needs is missing from it.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 
