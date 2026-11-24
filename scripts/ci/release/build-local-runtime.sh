@@ -51,6 +51,11 @@ exits 4 as LOCAL_RUNTIME_NO_BUILD does. LOCAL_RUNTIME_KERNEL_SOURCE
 names an existing Linux clone to build the kernel from instead of cloning.
 --check only reports whether that side's slow parts are cached: it exits 0
 when all are, and 4 when one would be built.
+LOCAL_RUNTIME_LINUX_X86_64_ONLY=1 (linux side only) builds just the Linux
+x86_64 target's guest root and sealed cw runtime and packs DIR/linux-x86_64,
+leaving out the aarch64 parts the macOS target needs: for a consumer of the
+Linux target alone, such as the standard pod-runtime image. Its DIR is not a
+release's Linux side.
 In a CI job container, LOCAL_RUNTIME_JOB_CONTAINER names that container so the
 container builds can reach its files (build-runtime-kernel.sh --job-container);
 DIR must then be on its workspace. The build's scratch is a directory beside
@@ -116,6 +121,13 @@ case "${LOCAL_RUNTIME_BUILD_ONLY:-}" in
   kernel-arm64)
     [ -z "${LOCAL_RUNTIME_NO_BUILD:-}" ] || die "set LOCAL_RUNTIME_NO_BUILD or LOCAL_RUNTIME_BUILD_ONLY, not both" ;;
   *) die "LOCAL_RUNTIME_BUILD_ONLY may name only kernel-arm64" ;;
+esac
+case "${LOCAL_RUNTIME_LINUX_X86_64_ONLY:-}" in
+  '') ;;
+  1) [ "$mode" = linux ] || die "LOCAL_RUNTIME_LINUX_X86_64_ONLY is for the linux side"
+     [ -z "${LOCAL_RUNTIME_BUILD_ONLY:-}" ] ||
+       die "set LOCAL_RUNTIME_BUILD_ONLY or LOCAL_RUNTIME_LINUX_X86_64_ONLY, not both" ;;
+  *) die "LOCAL_RUNTIME_LINUX_X86_64_ONLY may be only 1" ;;
 esac
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
@@ -383,8 +395,12 @@ linux() {
     kernel_source
     side_by_side "${kernels_missing[@]/#/kernel-}"
   fi
-  # Each target's guest root and cw runtime, beside the other target's.
-  if [ "$linux_target" = true ]; then
+  # Each target's guest root and cw runtime, beside the other target's, or
+  # the Linux x86_64 target's alone.
+  if [ -n "${LOCAL_RUNTIME_LINUX_X86_64_ONLY:-}" ]; then
+    [ "$linux_target" = true ] || die "the Linux x86_64 target cannot be packed without its kernel"
+    side_by_side x86_64-parts
+  elif [ "$linux_target" = true ]; then
     side_by_side aarch64-parts x86_64-parts
   else
     side_by_side aarch64-parts

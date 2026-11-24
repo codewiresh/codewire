@@ -670,8 +670,8 @@ grep -Fq '    if: ${{ always() && ' <<<"$pod_build_job" ||
   fail 'the pod-runtime build does not run once publish has finished or been skipped'
 grep -Fq "needs.dev-delivery-turn.outputs.turn == 'go'" <<<"$pod_build_job" ||
   fail 'the pod-runtime build runs on a commit that does not hold the delivery turn'
-grep -Fq 'LOCAL_RUNTIME_CPUS=2 LOCAL_RUNTIME_JOBS=2 CARGO_BUILD_JOBS=2' <<<"$pod_build_job" ||
-  fail 'the pod-runtime build does not cap its builder containers and Rust build jobs'
+grep -Fq 'LOCAL_RUNTIME_LINUX_X86_64_ONLY=1 LOCAL_RUNTIME_CPUS=4 LOCAL_RUNTIME_JOBS=4 CARGO_BUILD_JOBS=4' <<<"$pod_build_job" ||
+  fail 'the pod-runtime build does not build only the Linux x86_64 target, capped in its builder containers and Rust build jobs'
 # One build at a time: its first step after the checkout skips the job while
 # another run's pod-runtime build is running, and every later step waits on it.
 first_steps="$(grep -E '^      - (uses|name):' <<<"$pod_build_job" | head -2)"

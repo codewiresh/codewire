@@ -628,11 +628,13 @@ jobs:
       # sealed cw runtime built here in their pinned Rust containers (never on
       # the runner's toolchain), the kernels only from the parts cache
       # (LOCAL_RUNTIME_NO_BUILD), whose miss exits 4 and skips the image.
-      # Each Rust builder container gets two cores (LOCAL_RUNTIME_CPUS, docker
-      # --cpus, which build scripts and linkers cannot exceed) and two Cargo
-      # jobs to match (LOCAL_RUNTIME_JOBS for the cw runtimes, CARGO_BUILD_JOBS
-      # for the guest roots). The two targets' chains run side by side, so the
-      # build takes about four cores beside the delivery's own builds.
+      # The image needs only the Linux x86_64 target, so the aarch64 parts the
+      # macOS target needs are left out (LOCAL_RUNTIME_LINUX_X86_64_ONLY).
+      # Each Rust builder container gets four cores (LOCAL_RUNTIME_CPUS, docker
+      # --cpus, which build scripts and linkers cannot exceed) and four Cargo
+      # jobs to match (LOCAL_RUNTIME_JOBS for the cw runtime, CARGO_BUILD_JOBS
+      # for the guest root). The one chain's builds run one after the other, so
+      # the build takes about four cores beside the delivery's own builds.
       - name: Build the local runtime's Linux side
         id: runtime
         if: ${{ steps.existing.outputs.state == 'absent' }}
@@ -642,7 +644,7 @@ jobs:
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
           TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" LOCAL_RUNTIME_NO_BUILD=1 \
-            LOCAL_RUNTIME_CPUS=2 LOCAL_RUNTIME_JOBS=2 CARGO_BUILD_JOBS=2 \
+            LOCAL_RUNTIME_LINUX_X86_64_ONLY=1 LOCAL_RUNTIME_CPUS=4 LOCAL_RUNTIME_JOBS=4 CARGO_BUILD_JOBS=4 \
             scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
             --version "v0.0.0-main.${GITHUB_SHA:0:12}" --output "$work/linux" || status=$?
           if [ "$status" -eq 4 ]; then

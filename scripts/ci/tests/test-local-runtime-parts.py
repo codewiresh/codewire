@@ -453,6 +453,35 @@ class BuildScriptTest(unittest.TestCase):
         self.assertIn('  [ "$linux_target" = true ] || return 0\n', linux)
         self.assertIn("    side_by_side aarch64-parts\n", linux)
 
+    def test_the_linux_side_may_build_only_the_x86_64_target(self):
+        # #5602: the standard pod-runtime image packs only linux-x86_64, so its
+        # job leaves out the aarch64 parts. A bad value, or the rule beside
+        # LOCAL_RUNTIME_BUILD_ONLY, is refused before anything is written.
+        base = fx.scratch("runtime-x86-only.")
+        self.addCleanup(shutil.rmtree, base)
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        args = ["bash", str(ROOT / "scripts/ci/release/build-local-runtime.sh"), "linux",
+                "--source-sha", head, "--version", "v1.2.3", "--output", str(base / "out")]
+        for extra, message in (
+            ({"LOCAL_RUNTIME_LINUX_X86_64_ONLY": "yes"}, "LOCAL_RUNTIME_LINUX_X86_64_ONLY may be only 1"),
+            ({"LOCAL_RUNTIME_LINUX_X86_64_ONLY": "1", "LOCAL_RUNTIME_BUILD_ONLY": "kernel-arm64"},
+             "set LOCAL_RUNTIME_BUILD_ONLY or LOCAL_RUNTIME_LINUX_X86_64_ONLY, not both"),
+        ):
+            result = subprocess.run(args, capture_output=True, text=True, check=False,
+                                    env={**os.environ, **extra}, timeout=60)
+            self.assertEqual(result.returncode, 1, extra)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(list(base.iterdir()), [])
+        # With the rule, the linux side builds the x86_64 chain alone, and
+        # refuses rather than packing nothing when its kernel is missing.
+        script = (ROOT / "scripts/ci/release/build-local-runtime.sh").read_text()
+        linux = script.split("\nlinux() {\n", 1)[1].split("\n}\n", 1)[0]
+        only = linux.split('if [ -n "${LOCAL_RUNTIME_LINUX_X86_64_ONLY:-}" ]; then\n', 1)[1].split("  elif", 1)[0]
+        self.assertIn('[ "$linux_target" = true ] || die', only)
+        self.assertIn("    side_by_side x86_64-parts\n", only)
+        self.assertNotIn("aarch64-parts", only)
+
     def test_a_noexec_output_parent_is_refused_before_anything_is_written(self):
         # #4324: the parts' builds run tools from the scratch beside DIR.
         noexec = next((Path(path) for path in ("/dev/shm", "/tmp")
