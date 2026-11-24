@@ -14,7 +14,7 @@ observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
 | --- | --- | --- | --- |
-| `cred-github` | not yet observed | not yet observed | not yet observed |
+| `cred-github` | partly observed, 2026-11-24: Use under interception (#4001 comment 139398) and a failed check's log on a build of #6323 at b216d9758, under the default and `locked` policies (#5737 comment 139451); enrol, remove and the rest not yet observed | not yet observed | partly observed on Dev, 2026-11-24: Use under interception (#4001 comment 139127) and a failed check's log at source 694706e71 (#5737 comment 139909); the `locked` line not shown, since hosted policies are not enforced yet; enrol, remove and the rest not yet observed |
 | `cred-codex-sign-in` | not yet observed | not yet observed | not yet observed |
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
@@ -277,7 +277,15 @@ only what differs.
     own 403 from `gh run list`, and every other GitHub command working.
 
   Walk it on a local VM and a hosted Sandbox with codewire-e2e's test
-  repository. Not yet observed.
+  repository. Observed 2026-11-24, with a workflow whose one step fails:
+  - Linux local VM, a build of #6323 at b216d9758: the log, the `locked`
+    line and the rerun's `placeholder_outside_route` (#5737 comment 139451).
+  - Hosted Sandbox on Dev, source 694706e71: the log and the rerun's
+    `placeholder_outside_route`, with no `github log redirect refused` in
+    the credential service's log (#5737 comment 139909). The `locked` line
+    is not shown there, since hosted policies are not enforced yet.
+  - Not yet observed: a Mac local VM, and the state before an installation's
+    owner accepts `actions`: read.
 - **Remove:**
   - In the cloud, deleting a connection made through the GitHub App asks
     GitHub to revoke its access token, and `cw` says whether GitHub confirmed
