@@ -99,6 +99,30 @@ pub(crate) fn child_stdio(root: &PrivateRoot, name: &str) -> (Stdio, Stdio) {
     }
 }
 
+/// The name a failed create's runner log is kept under (#5238): one per
+/// environment name, since the environment itself is removed.
+pub(crate) fn failed_create_log_name(name: &str) -> String {
+    format!("runner-failed-create-{name}.log")
+}
+
+/// Keeps the runner log of a create that failed under the environment's
+/// name, by a rename, so what the runner still writes as it is removed
+/// follows it. It replaces the log an earlier failed create of that name
+/// left; a create that left no log of its own removes that one, which would
+/// otherwise be read as its. Best effort: a log never decides whether the
+/// environment is removed.
+pub(crate) fn keep_failed_create_log(root: &PrivateRoot, environment_id: Uuid, name: &str) {
+    let Ok(logs) = root.open_private_directory(Path::new(LOG_DIRECTORY), 0o700) else {
+        return;
+    };
+    let log = runner_log_name(environment_id);
+    let kept = failed_create_log_name(name);
+    let moved = logs.rename_private_regular(Path::new(&log), Path::new(&kept), 0o600);
+    if !matches!(moved, Ok(true)) {
+        remove_log(root, &kept);
+    }
+}
+
 /// Removes a log and its rotated generation, as a deleted environment's
 /// runner log. Best effort.
 pub(crate) fn remove_log(root: &PrivateRoot, name: &str) {

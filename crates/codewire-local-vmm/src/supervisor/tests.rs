@@ -6931,6 +6931,56 @@ async fn a_new_mutation_cannot_terminalize_an_authority_deferred_recovery() {
     );
 }
 
+/// A create that failed after its runner wrote a log is rolled back with the
+/// environment removed and that log kept under the environment's name; a
+/// create of that name that then succeeds would remove it (#5238).
+#[tokio::test]
+async fn a_failed_creates_rollback_keeps_the_runners_log_under_its_name() {
+    let mut environment = project_environment();
+    environment.generation = 0;
+    environment.state = StoredEnvironmentState::Starting;
+    let environment_id = environment.id;
+    let (parent, mut core) = test_supervisor_core(environment);
+    core.config.executable = parent.path().join("must-not-spawn");
+    let core = test_supervisor(core);
+    let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+    VmPaths::create(&engine, environment_id).unwrap();
+    let create = begin_and_advance_test_operation(
+        &core.core().store,
+        environment_id,
+        OperationKind::Create,
+        &serde_json::json!({"name": "dev"}),
+        3,
+    );
+    let runner_log = diagnostic_log::runner_log_name(environment_id);
+    std::io::Write::write_all(
+        &mut diagnostic_log::open_child_log(&core.root, &runner_log).unwrap(),
+        b"event=vm_start_failed\n",
+    )
+    .unwrap();
+
+    core.roll_back_failed_create(&create, "dev", "create_guest_start_failed", false)
+        .await
+        .unwrap();
+
+    assert!(core.core().state.environments.is_empty());
+    let logs = core.root.path().join(diagnostic_log::LOG_DIRECTORY);
+    assert!(!logs.join(&runner_log).exists());
+    assert_eq!(
+        fs::read_to_string(logs.join("runner-failed-create-dev.log")).unwrap(),
+        "event=vm_start_failed\n"
+    );
+    let failed = SupervisorOperationReader::open(&core.root)
+        .unwrap()
+        .operation_by_id(create.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed.error_code.as_deref(),
+        Some("create_guest_start_failed")
+    );
+}
+
 #[tokio::test]
 async fn preboot_delete_replays_after_failed_workspace_admission() {
     for (staged, revoke_access) in [(false, false), (false, true), (true, false)] {

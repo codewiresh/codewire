@@ -14,6 +14,7 @@ use checkpoints::stop_payload_checkpoint;
 mod collection_roots;
 mod egress_intercept;
 mod egress_refusals;
+mod failed_create;
 mod halt;
 use halt::{HaltReason, fatal_drain_error};
 mod local_https;
@@ -2970,7 +2971,7 @@ impl Supervisor {
                 .get(name)
                 .map(environment_operation_result)
                 .ok_or(SupervisorError::InvalidState)?;
-            self.core().complete_operation(&operation, &result)?;
+            self.complete_create(&operation, &result, name)?;
             return Ok(());
         }
         if operation.kind == OperationKind::Start {
@@ -3367,30 +3368,6 @@ impl SupervisorCore {
             )?;
         }
         Ok(())
-    }
-}
-
-impl Supervisor {
-    /// A failed create leaves nothing behind (#2491). Once the environment
-    /// is recorded, the create fails in the same transaction that begins the
-    /// ordinary delete of that environment, which then runs at once. The
-    /// create keeps its own error code; the delete records its own outcome,
-    /// so a delete that cannot finish leaves a visible `error` environment
-    /// and a failed delete, never a silent record or a false "removed".
-    async fn roll_back_failed_create(
-        &self,
-        failed: &OperationRecord,
-        name: &str,
-        error_code: &str,
-        recovering: bool,
-    ) -> Result<(), SupervisorError> {
-        let rollback = self
-            .core()
-            .fail_create_and_begin_rollback(failed, name, error_code)?;
-        match rollback {
-            Some(rollback) => self.run_delete_operation(name, &rollback, recovering).await,
-            None => Ok(()),
-        }
     }
 }
 

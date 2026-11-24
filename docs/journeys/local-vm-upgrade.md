@@ -390,5 +390,12 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     helper_exit=code_37_network_worker_frame_io broker=never`, the
     supervisor's `observed=network_worker_exited`, and the broker log
     `broker_spawn_failed`. With the copy put back, the next start ran.
+  - Step 9's kept log, by another road, Linux, 2026-11-19, a `cw` built
+    from the change that adds it (recorded on #5238): a create whose VMM
+    was killed 1.5 s after it appeared failed, `cw ls --local` listed no
+    VM, and `logs/runner-failed-create-kl.log` held the runner's
+    `vm_start_failed` line. A create of that name that then succeeded
+    removed it. With a `cw` built from `main` before it, the same failed
+    create left only the supervisor's log.
   - Steps 7 to 10 as written, an upgrade between two releases, and their
     proofs: not yet observed (#5238 part 3).

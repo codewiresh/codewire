@@ -748,9 +748,8 @@ left running by v0.4.15 is never replaced, not even with every VM stopped,
 and from v0.4.22 only because that number happened to move.
 
 **Built of this:** the broker's own word, the helper that ended, whether
-the broker came, and the cause. **Not yet built:** a helper before the
-front door, the kept log, and the restart that is not refused. A failed
-create removes the runner's log with the VM.
+the broker came, the cause, and the kept log. **Not yet built:** a helper
+before the front door, and the restart that is not refused.
 `cw --local restart` of the only VM that keeps the other cw's service is
 refused and told to stop that same VM; `cw --local stop NAME` then
 `cw --local start NAME` works. The journey step is

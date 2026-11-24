@@ -157,6 +157,52 @@ fn spawned_child_output_reaches_its_log_instead_of_dev_null() {
     assert_eq!(mode(&path), 0o600);
 }
 
+/// A failed create's runner log is kept under the environment's name, whole,
+/// and what the runner still writes follows it there.
+#[test]
+fn a_failed_creates_runner_log_is_kept_under_its_name() {
+    let (_parent, root) = runtime_root();
+    let logs = root.path().join(LOG_DIRECTORY);
+    let kept = logs.join("runner-failed-create-app.log");
+    assert_eq!(
+        failed_create_log_name("app"),
+        "runner-failed-create-app.log"
+    );
+
+    let first = Uuid::new_v4();
+    let mut runner = open_child_log(&root, &runner_log_name(first)).unwrap();
+    runner.write_all(b"event=vm_start_failed first\n").unwrap();
+    keep_failed_create_log(&root, first, "app");
+    assert!(!logs.join(runner_log_name(first)).exists());
+    assert_eq!(mode(&kept), 0o600);
+    // The runner is still being stopped, and its last lines are kept too.
+    runner.write_all(b"event=vm_stopped first\n").unwrap();
+    assert_eq!(
+        fs::read_to_string(&kept).unwrap(),
+        "event=vm_start_failed first\nevent=vm_stopped first\n"
+    );
+    // The delete that follows finds nothing left under the runner's name.
+    remove_log(&root, &runner_log_name(first));
+    assert!(kept.exists());
+
+    // The next failed create of that name replaces it.
+    let second = Uuid::new_v4();
+    open_child_log(&root, &runner_log_name(second))
+        .unwrap()
+        .write_all(b"event=vm_start_failed second\n")
+        .unwrap();
+    keep_failed_create_log(&root, second, "app");
+    assert_eq!(
+        fs::read_to_string(&kept).unwrap(),
+        "event=vm_start_failed second\n"
+    );
+
+    // One that never started a runner leaves no earlier create's log to be
+    // read as its own.
+    keep_failed_create_log(&root, Uuid::new_v4(), "app");
+    assert!(!kept.exists());
+}
+
 #[test]
 fn unsafe_log_files_are_refused() {
     let (_parent, root) = runtime_root();

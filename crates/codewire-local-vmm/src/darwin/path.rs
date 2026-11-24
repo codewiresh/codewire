@@ -425,6 +425,29 @@ impl PrivateRoot {
         })
     }
 
+    /// Renames the regular file `source` to `destination` in this directory,
+    /// replacing a file already there. `false` when there is no `source`.
+    pub fn rename_private_regular(
+        &self,
+        source: &Path,
+        destination: &Path,
+        exact_permissions: u32,
+    ) -> Result<bool, PathError> {
+        single_name(source)?;
+        single_name(destination)?;
+        if self.named_stat(source)?.is_none() {
+            return Ok(false);
+        }
+        let file = self.open_regular(source, false, None, false, Some(exact_permissions))?;
+        self.require_named_file(source, file.file())?;
+        self.rename(source, self, destination, false)?;
+        self.after_effect(destination, || {
+            sync_full(&self.directory).map_err(|source| io_at(&self.path, source))?;
+            self.revalidate_named()?;
+            Ok(true)
+        })
+    }
+
     pub fn remove_private_regular(
         &self,
         relative: &Path,

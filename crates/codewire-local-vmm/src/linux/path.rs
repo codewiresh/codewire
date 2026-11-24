@@ -425,6 +425,41 @@ impl PrivateRoot {
         }
     }
 
+    /// Renames the regular file `source` to `destination` in this directory,
+    /// replacing a file already there. `false` when there is no `source`.
+    pub fn rename_private_regular(
+        &self,
+        source: &Path,
+        destination: &Path,
+        exact_permissions: u32,
+    ) -> Result<bool, PathError> {
+        validate_single_component(source)?;
+        validate_single_component(destination)?;
+        let path = self.path.join(source);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                self.open_regular(source, false, None, false, Some(exact_permissions))?;
+                renameat(
+                    self.directory.as_fd(),
+                    source,
+                    self.directory.as_fd(),
+                    destination,
+                )
+                .map_err(|source| PathError::Openat2 {
+                    path: destination.to_owned(),
+                    source,
+                })?;
+                self.directory.sync_all().map_err(|source| PathError::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(PathError::Io { path, source }),
+        }
+    }
+
     pub fn move_private_directory_to(
         &self,
         source: &Path,
@@ -794,6 +829,47 @@ mod tests {
             Err(PathError::UnsafeFile(_))
         ));
         assert!(root.path().join("wrong.raw").exists());
+    }
+
+    #[test]
+    fn rename_private_regular_moves_the_exact_file_over_one_already_there() {
+        let (_parent, root) = root();
+        assert!(
+            !root
+                .rename_private_regular(Path::new("a.log"), Path::new("kept.log"), 0o600)
+                .unwrap()
+        );
+        fs::write(root.path().join("kept.log"), "earlier").unwrap();
+        fs::set_permissions(
+            root.path().join("kept.log"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        root.create_regular(Path::new("a.log"), 0o600, true)
+            .unwrap();
+        fs::write(root.path().join("a.log"), "this one").unwrap();
+        assert!(
+            root.rename_private_regular(Path::new("a.log"), Path::new("kept.log"), 0o600)
+                .unwrap()
+        );
+        assert!(!root.path().join("a.log").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("kept.log")).unwrap(),
+            "this one"
+        );
+
+        // A file that is not the private one asked for stays where it is.
+        root.create_regular(Path::new("wrong.log"), 0o400, true)
+            .unwrap();
+        assert!(matches!(
+            root.rename_private_regular(Path::new("wrong.log"), Path::new("kept.log"), 0o600),
+            Err(PathError::UnsafeFile(_))
+        ));
+        assert!(root.path().join("wrong.log").exists());
+        assert!(matches!(
+            root.rename_private_regular(Path::new("kept.log"), Path::new("../out.log"), 0o600),
+            Err(PathError::InvalidRelativePath(_))
+        ));
     }
 
     #[test]
