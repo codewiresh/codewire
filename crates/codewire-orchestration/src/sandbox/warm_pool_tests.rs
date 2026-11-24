@@ -529,6 +529,43 @@ fn pool_labels_select_only_codewire_pools() {
     assert!(!has_pool_labels(None));
 }
 
+/// mount-workspace's state is exactly the two the renderer emits, and a
+/// standard pool member's VM state the one it emits, so a later edit cannot
+/// widen either silently.
+#[test]
+fn the_admission_policy_admits_only_the_rendered_states() {
+    let policy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .expect("warm-pool admission policy");
+    // The removed whole-volume layout's states are not admitted (#4026, #4960).
+    use crate::sandbox::template::WorkspaceVolume;
+    let states = format!(
+        "c.command[4] in ['{}', '{}'] && !has(c.args)",
+        WorkspaceVolume::New.argument(),
+        WorkspaceVolume::Existing.argument()
+    );
+    assert_eq!(
+        states,
+        "c.command[4] in ['new-subfolder', 'existing-subfolder'] && !has(c.args)"
+    );
+    assert!(policy.contains(&states), "policy lost {states}");
+    // A standard pool member's VM is new (#5602): that one clause is the
+    // only 'new' the policy may hold.
+    let vm_state = "e.name == 'CODEWIRE_VM_STATE' && has(e.value) && e.value == 'new'";
+    for (removed, allowed) in [
+        ("'new'", policy.matches(vm_state).count()),
+        ("'existing'", 0),
+    ] {
+        assert_eq!(
+            policy.matches(removed).count(),
+            allowed,
+            "the policy admits the removed state {removed}"
+        );
+    }
+}
+
 /// The admission policies pin what this renderer produces; drift in either
 /// fails here first.
 #[test]
@@ -557,26 +594,6 @@ fn the_admission_policy_pins_the_renderer() {
         ),
     ] {
         assert!(policy.contains(&fragment), "policy lost {fragment}");
-    }
-    // mount-workspace's state is exactly the two the renderer emits, and the
-    // removed whole-volume layout's are not admitted, so a later edit cannot
-    // widen it silently (#4026; cw-security's review on #4960).
-    use crate::sandbox::template::WorkspaceVolume;
-    let states = format!(
-        "c.command[4] in ['{}', '{}'] && !has(c.args)",
-        WorkspaceVolume::New.argument(),
-        WorkspaceVolume::Existing.argument()
-    );
-    assert_eq!(
-        states,
-        "c.command[4] in ['new-subfolder', 'existing-subfolder'] && !has(c.args)"
-    );
-    assert!(policy.contains(&states), "policy lost {states}");
-    for removed in ["'new'", "'existing'"] {
-        assert!(
-            !policy.contains(removed),
-            "the policy admits the removed state {removed}"
-        );
     }
     // The policy's name pattern accepts exactly the names the renderer emits.
     let pattern = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$";

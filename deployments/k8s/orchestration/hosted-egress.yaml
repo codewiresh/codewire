@@ -28,3 +28,6 @@ data:
   CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP: ""
   CODEWIRE_HOSTED_EGRESS_FENCE_REVISION: ""
   CODEWIRE_CLUSTER_DNS_IP: ""
+  # codewire#5602: the `standard` workspace disk the template policies admit,
+  # by exact reference; empty admits no standard template.
+  CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE: ""

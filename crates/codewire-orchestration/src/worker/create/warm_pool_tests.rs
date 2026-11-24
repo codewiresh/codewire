@@ -1297,6 +1297,95 @@ fn a_standard_pool_member_is_admitted_only_with_its_exact_disk() {
     );
 }
 
+/// The `standard` pool template (#5602): what the warm-pool template
+/// admission policy's standard arm admits. The scratch Kind proof of that
+/// policy applies this file.
+#[test]
+fn a_standard_warm_pool_matches_its_golden_file() {
+    let cfg = standard_cfg();
+    let opts = warm_pool_template_opts(&cfg, shapes()[0]).unwrap();
+    let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    // A standard pool serves only the canonical workspace image, so its
+    // rendering names the published pin, and its revision and name hash it.
+    // The file names a synthetic digest and a zero revision instead, so a pin
+    // bump changes no golden.
+    let (_, canonical) = canonical_workspace_runtime_image()
+        .rsplit_once('@')
+        .unwrap();
+    let (_, synthetic) = SYNTHETIC_WORKSPACE_IMAGE.rsplit_once('@').unwrap();
+    let revision = objects.template["metadata"]["annotations"]["codewire.sh/pool-revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = objects.template["metadata"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shape, _) = name.rsplit_once('-').unwrap();
+    let template: Value = serde_json::from_str(
+        &serde_json::to_string(&objects.template)
+            .unwrap()
+            .replace(canonical, synthetic)
+            .replace(&revision, &"0".repeat(64))
+            .replace(&name, &format!("{shape}-00000000")),
+    )
+    .unwrap();
+    crate::test_golden::assert_golden("warm-pool-standard-sandboxtemplate.golden.json", &template);
+}
+
+/// The template admission policy's standard pool arm (#5602) names exactly
+/// the VM settings the standard pool rendering adds to the broker pool's
+/// workspace. A renderer change on either side fails here before a cluster
+/// denies every standard pool.
+#[test]
+fn the_admission_policy_names_the_standard_pool_rendering() {
+    let policy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .unwrap();
+    let mut named = policy
+        .split_once("- name: standardPoolEnvironment\n")
+        .and_then(|(_, rest)| rest.lines().next())
+        .and_then(|line| line.trim().strip_prefix("expression: "))
+        .map(cel_names)
+        .expect("the template policy names standardPoolEnvironment");
+    let workspace_env = |template: &Value| -> Vec<String> {
+        template["spec"]["podTemplate"]["spec"]["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|container| container["name"] == "workspace")
+            .flat_map(|container| container["env"].as_array().cloned().unwrap_or_default())
+            .map(|variable| variable["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let cfg = standard_cfg();
+    let standard = render_warm_pool(
+        &cfg.sandbox_namespace,
+        &warm_pool_template_opts(&cfg, shapes()[0]).unwrap(),
+        2,
+        false,
+    )
+    .unwrap();
+    let mut broker_opts = shape_template_opts(
+        &dev_cfg(),
+        SYNTHETIC_WORKSPACE_IMAGE,
+        &standard_runtime_profile_spec(&dev_cfg()),
+        shapes()[0],
+    );
+    broker_opts.hosted_egress = Some(broker_egress());
+    let broker = render_warm_pool(&cfg.sandbox_namespace, &broker_opts, 2, false).unwrap();
+    let before = workspace_env(&broker.template);
+    let mut added: Vec<String> = workspace_env(&standard.template)
+        .into_iter()
+        .filter(|name| !before.contains(name))
+        .collect();
+    named.sort();
+    added.sort();
+    assert_eq!(named, added);
+}
+
 /// #5602: a `standard` deployment pools only while its disk boots the
 /// canonical image, since otherwise its canonical creates go to `commodity`
 /// and adopt no member.

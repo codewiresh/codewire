@@ -17,7 +17,8 @@
 #   internal roots; Kind adds its coordinator's extra roots), each mounted
 #   only as its ca.crt, and the two workspace-audience projected tokens the
 #   only volumes; the commodity
-#   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
+#   runtime (Kind overlays add their diagnostic runtimes), or the standard
+#   runtime in exactly its shape (codewire#5602); no host namespace,
 #   host alias or node pin; its revision in the workspace container's
 #   immutable environment; no environment identity label; ingress that is
 #   none (during the rollout, see the rule) or exactly orchestration's own identity (its namespace AND its Pod labels, in
@@ -432,12 +433,33 @@ spec:
         has(object.spec.networkPolicy.egress) && size(object.spec.networkPolicy.egress) == 0
     # codewire#5602: a `standard` workspace's VM is its runtime's, inside the
     # one container, and its netstack is the VM's own, so it has neither the
-    # TUN init nor its device. Only per-environment templates; a pool
-    # template never runs under `standard` (runtimeClasses).
+    # TUN init nor its device.
     - name: standardEnvironment
       expression: >-
         variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
         variables.pod.runtimeClassName == 'standard'
+    # codewire#5602: a `standard` pool template, admitted only in the
+    # standard shape (the standard pool rule after the runtime rule), so
+    # adding `standard` to the pool's runtimes widens nothing else.
+    - name: standardPool
+      expression: >-
+        !variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
+        variables.pod.runtimeClassName == 'standard'
+    - name: standardTemplate
+      expression: variables.standardEnvironment || variables.standardPool
+    # The VM settings a standard pool's workspace container sets, each as a
+    # literal (crates/codewire-orchestration/src/sandbox/template/standard.rs).
+    - name: standardPoolEnvironment
+      expression: "['CODEWIRE_VM_VCPUS', 'CODEWIRE_VM_MEMORY_MIB', 'CODEWIRE_VM_STATE_DISK_MIB', 'CODEWIRE_VM_DOCKER_DISK_MIB', 'CODEWIRE_VM_STATE', 'CODEWIRE_VM_EGRESS_MODE', 'CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_WORKSPACE_INIT', 'CODEWIRE_IMAGE_DISK_ID', 'CODEWIRE_IMAGE_DISK_BUILD_ID', 'CODEWIRE_POD_PLATFORM_PEERS']"
+    # codewire#5602: the one workspace disk a `standard` Pod may mount, by
+    # exact reference: the first field of the deployment's
+    # SANDBOX_STANDARD_IMAGE_DISK, from this policy's parameter. Empty,
+    # missing or not pinned by digest, it admits no standard template.
+    - name: standardDiskReference
+      expression: >-
+        has(params.data) && 'CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE' in params.data &&
+        params.data['CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE'].matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ?
+        string(params.data['CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE']) : ''
     # codewire#6121: a broker-mode Sandbox stays so with the switch off
     # (#6070), so a start may still have to update its environment's own
     # template. With the switch off, such an update is held to the broker
@@ -521,8 +543,10 @@ spec:
         e.valueFrom.fieldRef.fieldPath == 'metadata.uid' &&
         (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))) ||
         variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment &&
+        dyn(e).all(k, k in ['name', 'value']) && has(e.value) ||
+        variables.standardPool && c.name == 'workspace' && e.name in variables.standardPoolEnvironment &&
         dyn(e).all(k, k in ['name', 'value']) && has(e.value))))
-      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's broker addresses), takes no environment source and reads only its own Pod UID
+      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's broker addresses; on a standard pool, its VM settings as literals), takes no environment source and reads only its own Pod UID
     - expression: >-
         variables.environmentTemplate ||
         variables.pod.containers.exists_one(c, c.name == 'workspace') &&
@@ -554,9 +578,51 @@ spec:
         variables.pod.automountServiceAccountToken == false
       message: warm-pool members run as codewire-sandbox without a Kubernetes API token
     - expression: >-
-        variables.environmentTemplate ||
+        variables.environmentTemplate || variables.standardPool ||
         (has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses
-      message: warm-pool members run under the commodity runtime; only Kind overlays add a diagnostic runtime
+      message: warm-pool members run under the commodity runtime, or a standard pool under standard; only Kind overlays add a diagnostic runtime
+    # codewire#5602: a standard pool template is the standard shape and
+    # nothing else: one container, the workspace, and no init container; the
+    # workspace disk its one image volume, pinned by digest and mounted
+    # read-only at /image; the one kvm device; a member's VM state new, its
+    # egress mode guest-carried (the egress mode rule) and its first process
+    # a literal systemd or image. infra's Kyverno holds every standard Pod to
+    # its shape too.
+    - expression: >-
+        !variables.standardPool ||
+        size(variables.pod.containers) == 1 && variables.pod.containers[0].name == 'workspace' &&
+        !has(variables.pod.initContainers) &&
+        size(variables.volumes.filter(v, has(v.image))) == 1 &&
+        variables.volumes.exists(v, v.name == 'image-disk' && has(v.image) &&
+        dyn(v.image).all(k, k in ['reference', 'pullPolicy']) &&
+        has(v.image.reference) && v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$')) &&
+        variables.pod.containers.all(c, has(c.volumeMounts) &&
+        c.volumeMounts.exists(m, m.name == 'image-disk') &&
+        c.volumeMounts.all(m, m.name != 'image-disk' ||
+        m.mountPath == '/image' && has(m.readOnly) && m.readOnly) &&
+        has(c.resources) && has(c.resources.limits) &&
+        'codewire.sh/kvm' in c.resources.limits && string(c.resources.limits['codewire.sh/kvm']) == '1' &&
+        has(c.env) &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_VM_STATE') &&
+        c.env.exists(e, e.name == 'CODEWIRE_VM_STATE' && has(e.value) && e.value == 'new') &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_INIT') &&
+        c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_INIT' && has(e.value) && e.value in ['systemd', 'image']))
+      message: a standard pool template is one workspace container with the workspace disk its one image volume, digest-pinned and mounted read-only at /image, the codewire.sh/kvm device, its VM state new and its first process systemd or image
+    # codewire#5602: a `standard` Pod, per-environment or pooled, mounts
+    # exactly the deployment's workspace disk as image-disk, and no other
+    # image. Fails closed while the parameter names no disk. An update that
+    # keeps the object's image volumes as they were is unaffected: an
+    # existing Sandbox keeps its own disk after the deployment's moves on.
+    - expression: >-
+        !variables.standardTemplate ||
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) &&
+        oldObject.spec.podTemplate.spec.volumes.filter(v, has(v.image)) == variables.volumes.filter(v, has(v.image)) ||
+        size(variables.standardDiskReference) > 0 &&
+        variables.volumes.exists(v, v.name == 'image-disk' && has(v.image) && has(v.image.reference) &&
+        v.image.reference == variables.standardDiskReference) &&
+        variables.volumes.all(v, !has(v.image) || v.name == 'image-disk' &&
+        has(v.image.reference) && v.image.reference == variables.standardDiskReference)
+      message: a standard Pod mounts exactly the deployment's workspace disk (CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE) as image-disk and no other image, unless an update keeps its image volumes; while that names no disk by digest, no new standard template is admitted
     - expression: >-
         variables.environmentTemplate ||
         (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
@@ -793,7 +859,7 @@ spec:
         has(v.image.reference) && v.image.reference == c.image) ||
         variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
         variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
-        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) &&
+        (!variables.hostedEgress || variables.clearing || variables.standardTemplate || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
       message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template but a standard one has it
     # The TUN device's volume (#4000): a Kata container has no /dev/net/tun,
@@ -804,14 +870,14 @@ spec:
     # template has it. Container names are unique across both lists.
     - expression: >-
         variables.volumes.all(v, v.name != 'egress-devnet' ||
-        variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        variables.hostedEgress && !variables.standardTemplate && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
         dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
         has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
         has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') &&
         variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
         (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
-        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
+        (!variables.hostedEgress || variables.clearing || variables.standardTemplate || variables.volumes.exists(v, v.name == 'egress-devnet'))
       message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
     # The broker arm's host isolation (codewire#4000): a broker-mode Pod,
     # per-environment or pooled, or a Sandbox moved to broker mode at its
@@ -838,15 +904,17 @@ spec:
     # codewire#5602: CODEWIRE_VM_EGRESS_MODE is how a `standard` Pod's runtime
     # chooses broker mode inside the VM or the guest's own network session,
     # and the binding listener waives the guest's self-check only for
-    # `broker`. Only a standard environment template's workspace container
-    # sets it, once, to exactly guest-carried or broker, and every one does.
+    # `broker`. Only a standard template's workspace container sets it, once:
+    # an environment's to exactly guest-carried or broker, a pool's to
+    # guest-carried, so a pooled member never goes without the self-check.
     - expression: >-
         variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
-        variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
-        e.value in ['guest-carried', 'broker'])) &&
-        (!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
+        (variables.standardEnvironment && e.value in ['guest-carried', 'broker'] ||
+        variables.standardPool && e.value == 'guest-carried'))) &&
+        (!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
-      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container, once, to guest-carried or broker, and every standard environment template sets it
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker (a pool's to guest-carried), and every standard template sets it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -983,6 +1051,21 @@ spec:
       expression: >-
         variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
         variables.pod.runtimeClassName == 'standard'
+    - name: standardPool
+      expression: >-
+        !variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
+        variables.pod.runtimeClassName == 'standard'
+    - name: standardTemplate
+      expression: variables.standardEnvironment || variables.standardPool
+    # codewire#5602: the one workspace disk a `standard` Pod may mount, by
+    # exact reference: the first field of the deployment's
+    # SANDBOX_STANDARD_IMAGE_DISK, from this policy's parameter. Empty,
+    # missing or not pinned by digest, it admits no standard template.
+    - name: standardDiskReference
+      expression: >-
+        has(params.data) && 'CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE' in params.data &&
+        params.data['CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE'].matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ?
+        string(params.data['CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE']) : ''
     # A Sandbox is never a snapshot's clearing template.
     - name: clearing
       expression: "false"
@@ -1136,21 +1219,21 @@ spec:
         has(v.image.reference) && v.image.reference == c.image) ||
         variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
         variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
-        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) &&
+        (!variables.hostedEgress || variables.clearing || variables.standardTemplate || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
         )
       message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template but a standard one has it
     - expression: >-
         !variables.addsBroker || (
         variables.volumes.all(v, v.name != 'egress-devnet' ||
-        variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        variables.hostedEgress && !variables.standardTemplate && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
         dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
         has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
         has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') &&
         variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
         (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
-        (!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
+        (!variables.hostedEgress || variables.clearing || variables.standardTemplate || variables.volumes.exists(v, v.name == 'egress-devnet'))
         )
       message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
     - expression: >-
@@ -1178,12 +1261,28 @@ spec:
     - expression: >-
         !variables.addsBroker || (
         variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
-        variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
-        e.value in ['guest-carried', 'broker'])) &&
-        (!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
+        (variables.standardEnvironment && e.value in ['guest-carried', 'broker'] ||
+        variables.standardPool && e.value == 'guest-carried'))) &&
+        (!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
         )
-      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container, once, to guest-carried or broker, and every standard environment template sets it
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker (a pool's to guest-carried), and every standard template sets it
+    # codewire#5602: a `standard` Pod, per-environment or pooled, mounts
+    # exactly the deployment's workspace disk as image-disk, and no other
+    # image. Fails closed while the parameter names no disk. An update that
+    # keeps the object's image volumes as they were is unaffected: an
+    # existing Sandbox keeps its own disk after the deployment's moves on.
+    - expression: >-
+        !variables.standardTemplate ||
+        request.operation == 'UPDATE' && has(oldObject.spec.podTemplate.spec.volumes) &&
+        oldObject.spec.podTemplate.spec.volumes.filter(v, has(v.image)) == variables.volumes.filter(v, has(v.image)) ||
+        size(variables.standardDiskReference) > 0 &&
+        variables.volumes.exists(v, v.name == 'image-disk' && has(v.image) && has(v.image.reference) &&
+        v.image.reference == variables.standardDiskReference) &&
+        variables.volumes.all(v, !has(v.image) || v.name == 'image-disk' &&
+        has(v.image.reference) && v.image.reference == variables.standardDiskReference)
+      message: a standard Pod mounts exactly the deployment's workspace disk (CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE) as image-disk and no other image, unless an update keeps its image volumes; while that names no disk by digest, no new standard template is admitted
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

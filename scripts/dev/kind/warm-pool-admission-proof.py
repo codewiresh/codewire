@@ -64,7 +64,11 @@ PRIVILEGE = "with hosted egress on, the Pod runs as 1000:1000"
 TUN = "hosted-egress-tun runs only as an init container"
 DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memory"
 RUNTIME = "warm-pool members run under the commodity runtime"
-EGRESS_MODE = "CODEWIRE_VM_EGRESS_MODE is set only on a standard environment template's workspace container"
+EGRESS_MODE = "CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container"
+STANDARD_POOL = "a standard pool template is one workspace container"
+DISK = "a standard Pod mounts exactly the deployment's workspace disk"
+DISK_KEY = "CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE"
+OTHER_DISK = "registry.example.invalid/codewire/workspace-disk@sha256:" + "9" * 64
 KEEPS_BROKER = "orchestration never takes broker mode"
 MOVE = "orchestration adds broker mode to an existing Sandbox only with hosted egress on"
 PRE_SWITCH = "with hosted egress on, orchestration only stops a Sandbox made before it"
@@ -358,35 +362,109 @@ def without_tun(t: dict) -> None:
                                 if c["name"] not in ("hosted-egress-tun", "mount-workspace")]
 
 
+def disk_reference(t: dict) -> str:
+    return next(v["image"]["reference"] for v in pod(t)["volumes"] if v["name"] == "image-disk")
+
+
+def with_disk(reference: str) -> dict:
+    """Hosted egress on, with the deployment's standard disk named (#5602)."""
+    return ON | {DISK_KEY: reference}
+
+
+def set_disk(reference: str) -> Callable[[dict], object]:
+    return lambda t: [v["image"].__setitem__("reference", reference)
+                      for v in pod(t)["volumes"] if v["name"] == "image-disk"]
+
+
 def standard_cases(standard: dict, env_broker: dict,
                    broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
     """A `standard` template (#5602) runs its VM in its one container, with
     no TUN init and no TUN device, and only a per-environment template may."""
+    on = with_disk(disk_reference(standard))
     return [
-        ("off, standard: the golden", OFF, "create", standard, GATE),
-        ("on, standard: the golden", ON, "create", standard, None),
-        ("on, standard: a TUN init added", ON, "create", mutate(standard, lambda t: pod(t).__setitem__(
+        ("off, standard: the golden", OFF | {DISK_KEY: disk_reference(standard)}, "create", standard, GATE),
+        ("on, standard: the golden", on, "create", standard, None),
+        ("on, standard: a TUN init added", on, "create", mutate(standard, lambda t: pod(t).__setitem__(
             "initContainers", [copy.deepcopy(tun(env_broker))])), TUN),
-        ("on, standard: the TUN device's volume added", ON, "create", mutate(standard, lambda t: pod(t)[
+        ("on, standard: the TUN device's volume added", on, "create", mutate(standard, lambda t: pod(t)[
             "volumes"].append(copy.deepcopy(devnet(env_broker)))), DEVNET),
+        # The disk is the deployment's, by exact reference, and none is
+        # admitted while the parameter names none (#5602).
+        ("on, standard: no disk named", ON, "create", standard, DISK),
+        ("on, standard: an empty disk named", ON | {DISK_KEY: ""}, "create", standard, DISK),
+        ("on, standard: a disk named by tag", ON | {DISK_KEY: "registry.example.invalid/codewire/workspace-disk:1"},
+         "create", standard, DISK),
+        ("on, standard: another disk digest", on, "create", mutate(standard, set_disk(OTHER_DISK)), DISK),
+        ("on, standard: the disk by tag", on, "create",
+         mutate(standard, set_disk("registry.example.invalid/codewire/workspace-disk:1")), DISK),
+        ("on, standard: a second image", on, "create", mutate(standard, lambda t: pod(t)["volumes"].append(
+            {"name": "codewire-bin", "image": {"reference": OTHER_IMAGE, "pullPolicy": "IfNotPresent"}})), DISK),
+        ("on, environment: a broker template with no disk named", ON, "create", env_broker, None),
         ("on, environment: the broker golden without its TUN init", ON, "create",
          mutate(env_broker, without_tun), TUN),
         ("on, pool: the broker golden under standard without its TUN init", ON, "create",
-         mutate(broker, setting(pod, "runtimeClassName", "standard"), without_tun), RUNTIME),
+         mutate(broker, setting(pod, "runtimeClassName", "standard"), without_tun), STANDARD_POOL),
         # The egress mode: the binding listener waives the guest's self-check
         # only for `broker`, so only a standard template's workspace sets it,
         # once, to one of its two values.
-        ("on, standard: broker mode", ON, "create", mutate(standard, egress_mode("broker")), None),
-        ("on, standard: no egress mode", ON, "create", mutate(standard, egress_mode(None)), EGRESS_MODE),
-        ("on, standard: another egress mode", ON, "create", mutate(standard, egress_mode("open")), EGRESS_MODE),
+        ("on, standard: broker mode", on, "create", mutate(standard, egress_mode("broker")), None),
+        ("on, standard: no egress mode", on, "create", mutate(standard, egress_mode(None)), EGRESS_MODE),
+        ("on, standard: another egress mode", on, "create", mutate(standard, egress_mode("open")), EGRESS_MODE),
         # A second entry of the same name never reaches this policy: the
         # SandboxTemplate CRD's schema keys env by name, so the API server
         # refuses it as a duplicate value first. (A core Pod only warns; the
         # class's Kyverno rule refuses that one.)
-        ("on, standard: the egress mode from a source", ON, "create", mutate(standard, egress_mode(None), lambda t: env(t).append(
+        ("on, standard: the egress mode from a source", on, "create", mutate(standard, egress_mode(None), lambda t: env(t).append(
             {"name": "CODEWIRE_VM_EGRESS_MODE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}})), EGRESS_MODE),
         ("on, environment: a Kata broker template with an egress mode", ON, "create", mutate(env_broker, lambda t: env(t).append(
             {"name": "CODEWIRE_VM_EGRESS_MODE", "value": "broker"})), EGRESS_MODE),
+    ]
+
+
+def standard_pool_cases(spool: dict, broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """A `standard` pool template (#5602) is admitted only in the standard
+    shape: one workspace container, its workspace disk the one image volume,
+    mounted read-only, the kvm device, a new VM, a literal first process, its
+    VM settings as literals and its egress mode guest-carried."""
+    disk = next(v for v in pod(spool)["volumes"] if "image" in v)
+    support = {"name": "codewire-bin", "image": {"reference": OTHER_IMAGE, "pullPolicy": "IfNotPresent"}}
+
+    def disk_mount(t: dict) -> dict:
+        return next(m for m in container(t, "workspace")["volumeMounts"] if m["name"] == disk["name"])
+
+    def set_env(name: str, value: str) -> Callable[[dict], object]:
+        return lambda t: [e.__setitem__("value", value) for e in env(t) if e["name"] == name]
+
+    on = with_disk(disk_reference(spool))
+    return [
+        ("off, standard pool: the golden", OFF, "create", spool, ENVIRONMENT),
+        ("on, standard pool: the golden", on, "create", spool, None),
+        ("on, standard pool: no disk named", ON, "create", spool, DISK),
+        ("on, standard pool: another disk digest", on, "create", mutate(spool, set_disk(OTHER_DISK)), DISK),
+        ("on, standard pool: a second image volume", on, "create",
+         mutate(spool, lambda t: pod(t)["volumes"].append(copy.deepcopy(support))), STANDARD_POOL),
+        ("on, standard pool: the disk mounted read-write", on, "create",
+         mutate(spool, lambda t: disk_mount(t).__setitem__("readOnly", False)), STANDARD_POOL),
+        ("on, standard pool: no kvm device", on, "create",
+         mutate(spool, lambda t: container(t, "workspace")["resources"]["limits"].pop("codewire.sh/kvm")), STANDARD_POOL),
+        ("on, standard pool: an existing VM", on, "create",
+         mutate(spool, set_env("CODEWIRE_VM_STATE", "existing")), STANDARD_POOL),
+        ("on, standard pool: another first process", on, "create",
+         mutate(spool, set_env("CODEWIRE_WORKSPACE_INIT", "shell")), STANDARD_POOL),
+        ("on, standard pool: a second container", on, "create",
+         mutate(spool, lambda t: pod(t)["containers"].append({"name": "sidecar", "image": OTHER_IMAGE})), STANDARD_POOL),
+        ("on, standard pool: an init container", on, "create",
+         mutate(spool, lambda t: pod(t).__setitem__("initContainers", [{"name": "prepare", "image": OTHER_IMAGE}])),
+         STANDARD_POOL),
+        ("on, standard pool: broker egress mode", on, "create", mutate(spool, egress_mode("broker")), EGRESS_MODE),
+        ("on, standard pool: no egress mode", on, "create", mutate(spool, egress_mode(None)), EGRESS_MODE),
+        ("on, standard pool: an unknown VM setting", on, "create",
+         mutate(spool, lambda t: env(t).append({"name": "CODEWIRE_VM_DEBUG", "value": "1"})), ENVIRONMENT),
+        ("on, standard pool: a VM setting from a source", on, "create",
+         mutate(spool, lambda t: [e.pop("value") or e.__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}})
+                                  for e in env(t) if e["name"] == "CODEWIRE_VM_VCPUS"]), ENVIRONMENT),
+        ("on, commodity pool: a VM setting", ON, "create",
+         mutate(broker, lambda t: env(t).append({"name": "CODEWIRE_VM_STATE", "value": "new"})), ENVIRONMENT),
     ]
 
 
@@ -434,14 +512,17 @@ def pre_switch_cases(cluster: "Cluster") -> list[bool]:
     whole = sandbox(broker_label, "commodity", "Running")
     whole["spec"]["podTemplate"]["metadata"]["annotations"] = {"codewire.sh/egress-fence-revision": ON["CODEWIRE_HOSTED_EGRESS_FENCE_REVISION"]}
     whole["spec"]["podTemplate"]["spec"]["initContainers"] = [{"name": "hosted-egress-tun", "image": "busybox"}]
+    # A standard Sandbox mounts the deployment's disk (#5602).
+    standard = sandbox(plain, "standard", "Suspended")
+    standard["spec"]["podTemplate"]["spec"]["volumes"] = [{"name": "image-disk", "image": {"reference": OTHER_DISK}}]
     results = []
     for name, before, change, param, expected in [
         ("on, Sandbox: a pre-switch commodity one started", sandbox(plain, "commodity", "Suspended"),
          mode("Running"), ON, PRE_SWITCH),
         ("on, Sandbox: a pre-switch commodity one changed while running", sandbox(plain, "commodity", "Running"),
          lambda s: labels(s).__setitem__("x", "y"), ON, PRE_SWITCH),
-        ("on, Sandbox: a pre-switch standard one started", sandbox(plain, "standard", "Suspended"),
-         mode("Running"), ON, PRE_SWITCH),
+        ("on, Sandbox: a pre-switch standard one started", standard,
+         mode("Running"), with_disk(OTHER_DISK), PRE_SWITCH),
         ("on, Sandbox: a pre-switch confidential one started", sandbox(plain, "confidential", "Suspended"),
          mode("Running"), ON, PRE_SWITCH),
         ("on, Sandbox: a pre-switch commodity one moved to runc and started", sandbox(plain, "commodity", "Suspended"),
@@ -944,7 +1025,7 @@ def main() -> int:
         load("confidential-sandboxtemplate.golden.json"), load("confidential-broker-sandboxtemplate.golden.json"),
         broker) + standard_cases(
         load("standard-sandboxtemplate.golden.json"), pinned(load("environment-broker-sandboxtemplate.golden.json")),
-        broker)
+        broker) + standard_pool_cases(load("warm-pool-standard-sandboxtemplate.golden.json"), broker)
     wait_for(cluster, mutate(today, lambda t: t["spec"]["podTemplate"]["metadata"].setdefault("labels", {})
                              .__setitem__("codewire.sh/egress", "broker")), GATE)
     results = []
@@ -971,6 +1052,29 @@ def main() -> int:
         results.append(check("on: an UPDATE adding world egress", cluster.admit("replace", widened), EGRESS))
         cluster.kubectl("delete", "sandboxtemplate", broker["metadata"]["name"], "-n",
                         broker["metadata"]["namespace"])
+
+    # A standard template made under one disk updates as before once the
+    # deployment names another, as long as it keeps its own; it never moves
+    # to a disk the parameter doesn't name (#5602).
+    standard = load("standard-sandboxtemplate.golden.json")
+    cluster.param(with_disk(disk_reference(standard)))
+    stored = cluster.kubectl("create", f"--as={AS}", "-f", "-", stdin=json.dumps(standard))
+    if stored.returncode != 0:
+        results.append(check("on: create the standard golden for the UPDATE cases", stored.stderr.strip(), None))
+    else:
+        cluster.param(with_disk(OTHER_DISK))
+        live = json.loads(cluster.kubectl("get", "sandboxtemplate", standard["metadata"]["name"], "-n",
+                                          standard["metadata"]["namespace"], "-o", "json").stdout)
+        relabelled = mutate(live, lambda t: t["metadata"].setdefault("labels", {}).__setitem__("x", "y"))
+        results.append(check("on: an UPDATE of a standard template that keeps its disk after the disk moves on",
+                             cluster.admit("replace", relabelled), None))
+        live = json.loads(cluster.kubectl("get", "sandboxtemplate", standard["metadata"]["name"], "-n",
+                                          standard["metadata"]["namespace"], "-o", "json").stdout)
+        moved = mutate(live, set_disk("registry.example.invalid/codewire/workspace-disk@sha256:" + "8" * 64))
+        results.append(check("on: an UPDATE moving a standard template to a disk not named",
+                             cluster.admit("replace", moved), DISK))
+        cluster.kubectl("delete", "sandboxtemplate", standard["metadata"]["name"], "-n",
+                        standard["metadata"]["namespace"])
 
     # Broker mode never comes off a Sandbox (#5002); a Sandbox without it and
     # without a VM runtime class updates as before.

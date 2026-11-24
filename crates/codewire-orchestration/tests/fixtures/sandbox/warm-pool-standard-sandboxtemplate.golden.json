@@ -1,0 +1,464 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxTemplate",
+  "metadata": {
+    "annotations": {
+      "codewire.sh/pool-revision": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "codewire",
+      "codewire.sh/type": "workspace-pool"
+    },
+    "name": "cw-pool-1000m-4096mi-10gi-00000000",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "networkPolicy": {
+      "egress": [
+        {
+          "ports": [
+            {
+              "port": 8089,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "egress",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8087,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8443,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 10443,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "gateway-proxies"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "gateway.envoyproxy.io/owning-gateway-name": "public",
+                  "gateway.envoyproxy.io/owning-gateway-namespace": "gateway"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "ingress": [
+        {
+          "from": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ],
+          "ports": [
+            {
+              "port": 7777,
+              "protocol": "TCP"
+            },
+            {
+              "port": 2222,
+              "protocol": "TCP"
+            }
+          ]
+        }
+      ]
+    },
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "codewire.sh/disk-gib": "10",
+          "codewire.sh/egress-fence-revision": "2",
+          "codewire.sh/workspace": "true"
+        },
+        "labels": {
+          "codewire.sh/egress": "broker",
+          "codewire.sh/type": "workspace"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "0.0.0.0:7777"
+              },
+              {
+                "name": "HOME",
+                "value": "/home/codewire"
+              },
+              {
+                "name": "USER",
+                "value": "codewire"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_BINDING_URL",
+                "value": "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+              },
+              {
+                "name": "CODEWIRE_POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              },
+              {
+                "name": "CODEWIRE_EGRESS_STREAM_ADDR",
+                "value": "10.44.0.89:8089"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_BINDING_ADDR",
+                "value": "10.44.0.87:8087"
+              },
+              {
+                "name": "CODEWIRE_API_ADDR",
+                "value": "10.44.0.43:443"
+              },
+              {
+                "name": "CODEWIRE_MESH_ADDR",
+                "value": "10.44.0.43:443"
+              },
+              {
+                "name": "CODEWIRE_DERP_ADDR",
+                "value": "derp.codewire-dev.sh=10.44.0.84:8443"
+              },
+              {
+                "name": "CODEWIRE_CLUSTER_DNS_IP",
+                "value": "10.44.0.10"
+              },
+              {
+                "name": "CODEWIRE_VM_VCPUS",
+                "value": "1"
+              },
+              {
+                "name": "CODEWIRE_VM_MEMORY_MIB",
+                "value": "4096"
+              },
+              {
+                "name": "CODEWIRE_VM_STATE_DISK_MIB",
+                "value": "2586"
+              },
+              {
+                "name": "CODEWIRE_VM_DOCKER_DISK_MIB",
+                "value": "2585"
+              },
+              {
+                "name": "CODEWIRE_VM_STATE",
+                "value": "new"
+              },
+              {
+                "name": "CODEWIRE_VM_EGRESS_MODE",
+                "value": "guest-carried"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_IMAGE",
+                "value": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_INIT",
+                "value": "image"
+              },
+              {
+                "name": "CODEWIRE_IMAGE_DISK_ID",
+                "value": "6666666666666666666666666666666666666666666666666666666666666666"
+              },
+              {
+                "name": "CODEWIRE_IMAGE_DISK_BUILD_ID",
+                "value": "77777777777777777777777777777777"
+              },
+              {
+                "name": "CODEWIRE_POD_PLATFORM_PEERS",
+                "value": "10.44.0.89:8089,10.44.0.87:8087,10.44.0.43:443,10.44.0.84:8443"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
+                "value": "0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            ],
+            "image": "registry.example.invalid/codewire/pod-runtime@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "name": "workspace",
+            "ports": [
+              {
+                "containerPort": 7777,
+                "name": "daemon",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 2,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "resources": {
+              "limits": {
+                "codewire.sh/kvm": "1",
+                "cpu": "2000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "5120Mi"
+              },
+              "requests": {
+                "cpu": "1000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 600,
+              "periodSeconds": 1,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/state",
+                "name": "workspace"
+              },
+              {
+                "mountPath": "/image",
+                "name": "image-disk",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              },
+              {
+                "mountPath": "/run/codewire-credentials/workspace",
+                "name": "credential-workspace-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/secrets/codewire/egress",
+                "name": "workspace-egress-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/secrets/codewire/workspace-binding",
+                "name": "workspace-binding-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-orchestration-internal-roots",
+                "name": "orchestration-internal-roots",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "dnsConfig": {
+          "nameservers": [
+            "192.0.2.1"
+          ],
+          "searches": []
+        },
+        "dnsPolicy": "None",
+        "enableServiceLinks": false,
+        "restartPolicy": "Never",
+        "runtimeClassName": "standard",
+        "securityContext": {
+          "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "serviceAccountName": "codewire-sandbox",
+        "terminationGracePeriodSeconds": 60,
+        "volumes": [
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/workspace-disk@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+            },
+            "name": "image-disk"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "codewire-run"
+          },
+          {
+            "name": "credential-workspace-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.credential-workspace.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace-egress-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.egress.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace-binding-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.workspace-binding.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "configMap": {
+              "defaultMode": 292,
+              "items": [
+                {
+                  "key": "ca.crt",
+                  "path": "ca.crt"
+                }
+              ],
+              "name": "codewire-orchestration-internal-roots"
+            },
+            "name": "orchestration-internal-roots"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "workspace"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "10Gi"
+            }
+          },
+          "storageClassName": "linstor-local"
+        }
+      }
+    ]
+  }
+}

@@ -290,6 +290,8 @@ HOSTED_EGRESS_KEYS = (
     # to the pinned address, that address, the fence revision and cluster DNS.
     "CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE", "CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP",
     "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION", "CODEWIRE_CLUSTER_DNS_IP",
+    # codewire#5602: the one `standard` workspace disk the template policies admit.
+    "CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE",
 )
 HOSTED_EGRESS_BROKER_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "CODEWIRE_WORKSPACE_BINDING_ADDR",
     "CODEWIRE_API_ADDR", "CODEWIRE_MESH_ADDR", "CODEWIRE_DERP_ADDR", "CODEWIRE_CLUSTER_DNS_IP",
@@ -627,14 +629,14 @@ HOSTED_EGRESS_FRAGMENTS = [
     # the switch on and always then, mounted at exactly /dev/net by the TUN
     # init and the workspace container only.
     "variables.volumes.all(v, v.name != 'egress-devnet' || "
-    "variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
+    "variables.hostedEgress && !variables.standardTemplate && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
     "dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) && "
     "has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' && "
     "has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') && "
     "variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' || "
     "(c.name == 'workspace' || c.name == 'hosted-egress-tun') && "
     "dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) && "
-    "(!variables.hostedEgress || variables.clearing || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))",
+    "(!variables.hostedEgress || variables.clearing || variables.standardTemplate || variables.volumes.exists(v, v.name == 'egress-devnet'))",
     # The broker arm's privilege: root only for the TUN init, mount-workspace
     # ordered before it, and dind from the official DinD image; no added
     # capability or escalation anywhere.
@@ -643,20 +645,39 @@ HOSTED_EGRESS_FRAGMENTS = [
     "size(c.securityContext.capabilities.add) == 0",
     # Neither root init container is a sidecar, and a broker template has the TUN init.
     "c.name == 'hosted-egress-tun' && !has(c.restartPolicy) || c.name == 'mount-workspace' && !has(c.restartPolicy) &&",
-    "(!variables.hostedEgress || variables.clearing || variables.standardEnvironment || has(variables.pod.initContainers) && "
+    "(!variables.hostedEgress || variables.clearing || variables.standardTemplate || has(variables.pod.initContainers) && "
     "variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))",
-    # codewire#5602: only a per-environment `standard` template goes without
-    # the TUN init and its device; the TUN rule's VM classes still refuse a
-    # TUN init under `standard`.
+    # codewire#5602: only a `standard` template goes without the TUN init and
+    # its device; the TUN rule's VM classes still refuse a TUN init under
+    # `standard`.
     "expression: variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
     "variables.pod.runtimeClassName == 'standard' name: standardEnvironment",
-    # codewire#5602: the egress mode is a standard environment template's own,
-    # literal, one of two values, and always present on one.
+    "expression: '!variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
+    "variables.pod.runtimeClassName == 'standard'' name: standardPool",
+    "expression: variables.standardEnvironment || variables.standardPool name: standardTemplate",
+    # codewire#5602: the egress mode is a standard template's own, literal,
+    # one of two values on an environment and guest-carried on a pool, and
+    # always present on one.
     "variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' || "
-    "variables.standardEnvironment && c.name == 'workspace' && !has(e.valueFrom) && has(e.value) && "
-    "e.value in ['guest-carried', 'broker'])) && "
-    "(!variables.standardEnvironment || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) && "
+    "c.name == 'workspace' && !has(e.valueFrom) && has(e.value) && "
+    "(variables.standardEnvironment && e.value in ['guest-carried', 'broker'] || "
+    "variables.standardPool && e.value == 'guest-carried'))) && "
+    "(!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) && "
     "c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))",
+    # codewire#5602: a standard pool is admitted only in the standard shape.
+    "variables.environmentTemplate || variables.standardPool || "
+    "(has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses",
+    "!variables.standardPool || size(variables.pod.containers) == 1 && variables.pod.containers[0].name == 'workspace' && "
+    "!has(variables.pod.initContainers) && size(variables.volumes.filter(v, has(v.image))) == 1 &&",
+    "'codewire.sh/kvm' in c.resources.limits && string(c.resources.limits['codewire.sh/kvm']) == '1' &&",
+    "c.env.exists(e, e.name == 'CODEWIRE_VM_STATE' && has(e.value) && e.value == 'new') &&",
+    # codewire#5602: a standard Pod mounts exactly the deployment's disk, by
+    # the parameter's exact reference, and fails closed without one.
+    "size(variables.standardDiskReference) > 0 && "
+    "variables.volumes.exists(v, v.name == 'image-disk' && has(v.image) && has(v.image.reference) && "
+    "v.image.reference == variables.standardDiskReference) &&",
+    "variables.standardPool && c.name == 'workspace' && e.name in variables.standardPoolEnvironment && "
+    "dyn(e).all(k, k in ['name', 'value']) && has(e.value))))",
     # A broker-mode workspace always has its stream and binding addresses.
     "variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0))",
     # The netstack is the only resolver.

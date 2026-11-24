@@ -383,8 +383,15 @@ The `/dev/kvm` device resource is refused on a Pod of any other class.
 Orchestration's own template policy holds a `standard` template to its broker
 arm like any other, but without the TUN init and the TUN device: the VM's
 network is its own netstack, so a `standard` template has neither, and the
-TUN rule still refuses a TUN init under `standard`. Only a per-environment
-template may run under `standard`; a pool template may not.
+TUN rule still refuses a TUN init under `standard`. A pool template may run
+under `standard` only in exactly the standard shape (#5602): one container,
+the workspace, and no init container; the workspace disk its one image
+volume, pinned by digest and mounted read-only at `/image`; the one
+`codewire.sh/kvm` device; its VM state `new`, its egress mode
+`guest-carried` and its first process a literal `systemd` or `image`; and its
+VM settings as literals. Those settings are allowed on no other pool
+template. These rules must be live before a deployment sets a `standard`
+pool shape.
 
 The workspace container's `CODEWIRE_VM_EGRESS_MODE` says how the guest's
 workload reaches the network: `guest-carried`, its own network session with
