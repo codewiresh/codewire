@@ -1512,6 +1512,20 @@ database_lane_orchestration_hosts() {
       'worker::activity_authority::tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  # #6258: a post-start mutation that errors after its claim releases its
+  # own claimed lease, and only that one.
+  counted_suite "post-start error exit releases its own claim" post-start-claim-release \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::setup::post_start::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform cw runtime admission after a post-start error exit" platform-cw-runtime-post-start \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::cw_runtime::post_start_admission_tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "environment setup lease matrix" environment-setup-lease \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

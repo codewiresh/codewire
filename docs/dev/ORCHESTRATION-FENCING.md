@@ -232,6 +232,13 @@ Rules:
   failed step and clears the owner in one transaction. Terminal sessions are
   admitted only while no owner holds the lease, so a failed setup opens them
   and a setup that takes the lease again closes new ones (#4767).
+- A post-start mutation that returns an error after taking the lease
+  releases that lease only if it is still its own `claimed` lease, so the
+  Sandbox is not left refusing runtime reads and sessions. It clears its
+  exact tuple in one transaction under the lock order above and returns the
+  original error. A `running` lease is left as it is, and one another
+  activity has taken is left alone. A failed release is logged and does not
+  replace the error (#6258).
 - Retry setup (`EnvironmentService.RetryEnvironmentSetup`) runs the setup
   activity again through the environment workflow's `retry_setup` command,
   on a running Sandbox with a recorded failure and no owner. The run resumes

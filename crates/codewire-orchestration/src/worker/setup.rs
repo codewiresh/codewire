@@ -81,12 +81,14 @@ mod clone_failure;
 mod clone_progress;
 mod git_identity;
 mod github_checkout;
+mod post_start;
 mod ssh_checkout;
 
 use clone_failure::{
     CloneFailure, CloneFailureClassifier, CloneTransport, clone_failure_context,
     clone_failure_message,
 };
+pub use post_start::handle_post_start_configuration;
 
 /// Runs the clone chains depth by depth: every repository before the
 /// repositories inside it (#4024), each depth through
@@ -2613,86 +2615,6 @@ fn record_setup_complete(
         start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
         since_accepted,
     );
-}
-
-/// Reapply Git author metadata and run the current startup script after a
-/// stop→start Pod replacement under the same durable process lease used by setup.
-pub async fn handle_post_start_configuration(
-    ctx: &WorkerContext,
-    payload: &JobPayload,
-    authority: &ActivityAuthority,
-    setup_identity: SetupActivityIdentity,
-    activity_ctx: ActivityContext,
-) -> anyhow::Result<()> {
-    let env = load_environment(&ctx.pool, &payload.environment_id).await?;
-    let backend = load_backend_row(&ctx.pool, &payload.environment_id).await?;
-    let input = to_setup_inputs(&env, &backend);
-    let phase = input.setup_phase;
-    let phase_authority = SetupPhaseAuthority::new(authority.clone(), setup_identity)?;
-    let mut ops = WorkerSetupOps {
-        ctx,
-        env,
-        authority,
-        phase_authority: phase_authority.clone(),
-        activity_ctx,
-        active_phase: phase,
-        recovery_lock: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
-        launch_group_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        launch_group_reaping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        health_proven: false,
-        defaults_written: false,
-    };
-    match phase_authority.prepare_post_start_mutation(phase).await? {
-        PhasePreparation::Ready(PhaseAcquire::Acquired) => {}
-        PhasePreparation::Ready(PhaseAcquire::AlreadyComplete(_)) => {
-            return Err(super::activity_authority::AuthorityLost.into());
-        }
-        PhasePreparation::Recover(owner) => ops
-            .recover_setup_phase(&input, &owner)
-            .await
-            .map_err(classify_setup_recovery_error)?,
-    }
-
-    ops.configure_git_identity(&input.namespace).await?;
-    run_post_start_script(&mut ops, &input).await?;
-    ops.ensure_can_commit().await?;
-    phase_authority.complete_post_start_mutation(phase).await?;
-    Ok(())
-}
-
-/// Startup runs on every start, independently of completed install/clone phases.
-/// The caller owns the post-start lease and releases it only after this succeeds.
-async fn run_post_start_script(ops: &mut impl SetupOps, input: &Inputs) -> anyhow::Result<()> {
-    if input.startup_script.is_empty() {
-        return Ok(());
-    }
-    ops.emit_log(
-        &input.environment_id,
-        input.setup_phase,
-        "startup_script",
-        "started",
-        "",
-        None,
-    )
-    .await?;
-    let (status, message) = match ops
-        .run_startup_script(input, &input.working_directory)
-        .await
-    {
-        Ok(()) => ("completed", String::new()),
-        Err(error) if is_setup_control_flow(&error) => return Err(error),
-        Err(error) => ("warning", format!("{error:#}")),
-    };
-    ops.ensure_can_commit().await?;
-    ops.emit_log(
-        &input.environment_id,
-        input.setup_phase,
-        "startup_script",
-        status,
-        &message,
-        None,
-    )
-    .await
 }
 
 #[cfg(test)]

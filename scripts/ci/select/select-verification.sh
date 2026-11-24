@@ -1995,6 +1995,9 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/api/platform_agents/journal.rs|\
       crates/codewire-orchestration/src/connect/mesh_authorization.rs|\
       crates/codewire-orchestration/src/worker/lifecycle.rs|\
+      crates/codewire-orchestration/src/worker/setup/post_start.rs|\
+      crates/codewire-orchestration/src/worker/setup/post_start_tests.rs|\
+      crates/codewire-orchestration/src/api/cw_runtime/post_start_admission_tests.rs|\
       crates/codewire-orchestration/src/workspace_binding/store.rs|\
       crates/codewire-orchestration/src/worker/workspace_binding.rs|\
       crates/codewire-orchestration/src/sandbox/client.rs|\

@@ -596,6 +596,31 @@ impl SetupPhaseAuthority {
         }
     }
 
+    /// Release this activity's own post-start lease after an error, if it is
+    /// still `claimed` (#6258). One transaction under the setup lock order:
+    /// `lock_current` requires the activity's run, generation and the running,
+    /// started Sandbox, and the owner is read under those locks and cleared
+    /// by its exact tuple. A `running` owner, which may hide a process, and
+    /// any other activity's owner are left. Returns the owner it released.
+    pub async fn release_own_claimed_owner(
+        &self,
+        phase: i32,
+    ) -> anyhow::Result<Option<SetupLeaseRecord>> {
+        let mut tx = self.pool.begin().await?;
+        let row = self.lock_current(&mut tx).await?;
+        let Some(owner) = row.owner()?.filter(|owner| {
+            owner.identity == self.identity
+                && owner.phase == phase
+                && owner.status == SetupLeaseStatus::Claimed
+        }) else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        clear_owner(&mut tx, &self.environment_id, &owner).await?;
+        tx.commit().await?;
+        Ok(Some(owner))
+    }
+
     /// Finish a teardown-only recovery after the exact Pod is absent.
     ///
     /// When the same generation has moved out of started/running, clearing the
