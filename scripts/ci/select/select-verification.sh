@@ -1986,8 +1986,10 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/worker/host_lifecycle/*|\
       crates/codewire-orchestration/src/worker/confidential_slots.rs|\
       crates/codewire-orchestration/src/worker/setup_lease.rs|\
+      crates/codewire-orchestration/src/worker/setup_lease/*|\
       crates/codewire-orchestration/src/worker/snapshots.rs|\
       crates/codewire-orchestration/src/api/cw_runtime/owner.rs|\
+      crates/codewire-orchestration/src/api/cw_runtime/setup_owner_tests.rs|\
       crates/codewire-orchestration/src/api/environment_daemon/session_mutation/tests.rs|\
       crates/codewire-orchestration/src/api/environment_resize.rs|\
       crates/codewire-orchestration/src/api/platform_agents/journal.rs|\

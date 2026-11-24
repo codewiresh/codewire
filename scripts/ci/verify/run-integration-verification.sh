@@ -1190,6 +1190,12 @@ database_lane_orchestration_journals() {
       'api::cw_runtime::owner::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "platform cw runtime admission after a setup owner release" platform-cw-runtime-setup-owner \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::cw_runtime::setup_owner_tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "platform managed agent journal matrix" platform-managed-agent-journal \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1510,6 +1516,14 @@ database_lane_orchestration_hosts() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::setup_lease::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  # #6251: the running path releases a claimed setup owner another activity
+  # left, and only that one.
+  counted_suite "stale claimed setup owner release" stale-claimed-setup-owner \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::setup_lease::stale_claim::tests::db_' \
       -- --ignored --nocapture --test-threads=1
 }
 

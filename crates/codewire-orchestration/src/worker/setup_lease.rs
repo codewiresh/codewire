@@ -8,6 +8,9 @@ use super::activity_authority::{ActivityAuthority, AuthorityLost, lock_claim_run
 use super::env_log::emit_environment_log_in_transaction;
 use super::start_timing::{since_accepted, with_since_accepted};
 
+mod stale_claim;
+pub(crate) use stale_claim::release_stale_claimed_owner;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupActivityIdentity {
     pub generation: i64,

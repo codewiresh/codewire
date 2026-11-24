@@ -14,6 +14,8 @@ mod resolve;
 pub mod service;
 #[cfg(test)]
 mod service_test_support;
+#[cfg(test)]
+mod setup_owner_tests;
 pub mod staging;
 pub(crate) mod wire;
 

@@ -25,6 +25,7 @@ use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
+use super::setup_lease::release_stale_claimed_owner;
 use super::start_timing::{duration_ms, start_profile};
 use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
@@ -610,6 +611,25 @@ fn observe_resume_stage(stage: StartStage, profile: StartProfile, elapsed: Durat
     start_metrics::observe_stage(stage, StartPath::Resume, profile, elapsed);
 }
 
+/// A start that finds the environment past `stopped` and `error` has
+/// nothing to start. One that finds it running releases a claimed setup
+/// owner another activity left, as a retry of its own (#6251).
+async fn skip_start(
+    env: &super::env_data::EnvironmentRow,
+    authority: &ActivityAuthority,
+    setup_identity: super::setup_lease::SetupActivityIdentity,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        environment_id = env.id,
+        state = env.state,
+        "environment.start: not in stopped/error state, skipping"
+    );
+    if requires_running_runtime_identity(&env.state, &env.desired_state) {
+        release_stale_claimed_owner(authority, setup_identity).await?;
+    }
+    Ok(())
+}
+
 /// Mirrors `HandleEnvironmentStart`. A start resumes the environment's own
 /// suspended Sandbox and records its stages under the `resume` start path:
 /// `wait_for_ready`, `workspace_bind` (through the shared waits), the resumed
@@ -646,12 +666,7 @@ pub async fn handle_environment_start(
         ))
         .await?;
     if !proceed {
-        tracing::info!(
-            environment_id = env_id,
-            state = env.state,
-            "environment.start: not in stopped/error state, skipping"
-        );
-        return Ok(());
+        return skip_start(&env, authority, setup_identity).await;
     }
     // Record the transition `prepare_start` just committed, so the shared
     // waits below observe their stages as this start's (`resume`).
@@ -1294,20 +1309,7 @@ pub async fn handle_environment_reconcile(
             Ok(ReconcileOutcome::Destroyed)
         }
         Action::Noop => {
-            if requires_running_runtime_identity(&env.state, &env.desired_state)
-                && let Err(error) = reconcile_running_runtime_identity(ctx, &env, authority).await
-            {
-                if is_lifecycle_control_loss(&error) {
-                    return Err(error);
-                }
-                svc.mark_error_for_states(
-                    env_id,
-                    &format!("environment runtime reconciliation failed: {error:#}"),
-                    RUNNING_MUTATION_STATES,
-                )
-                .await?;
-            }
-            Ok(ReconcileOutcome::Continue)
+            reconcile_in_desired_state(ctx, &env, authority, &svc, setup_identity).await
         }
         Action::Create => {
             // D3 (Temporal-only): create chains setup inline rather than
@@ -1399,6 +1401,34 @@ pub async fn handle_environment_reconcile(
             Ok(ReconcileOutcome::Continue)
         }
     }
+}
+
+/// The reconcile of an environment already in its desired state. On a
+/// running Sandbox it releases a claimed setup owner another activity left
+/// (#6251) and checks the runtime identity; nothing else is done.
+async fn reconcile_in_desired_state(
+    ctx: &WorkerContext,
+    env: &super::env_data::EnvironmentRow,
+    authority: &ActivityAuthority,
+    svc: &Service<PgLifecycleStore>,
+    setup_identity: super::setup_lease::SetupActivityIdentity,
+) -> anyhow::Result<ReconcileOutcome> {
+    if !requires_running_runtime_identity(&env.state, &env.desired_state) {
+        return Ok(ReconcileOutcome::Continue);
+    }
+    release_stale_claimed_owner(authority, setup_identity).await?;
+    if let Err(error) = reconcile_running_runtime_identity(ctx, env, authority).await {
+        if is_lifecycle_control_loss(&error) {
+            return Err(error);
+        }
+        svc.mark_error_for_states(
+            &env.id,
+            &format!("environment runtime reconciliation failed: {error:#}"),
+            RUNNING_MUTATION_STATES,
+        )
+        .await?;
+    }
+    Ok(ReconcileOutcome::Continue)
 }
 
 fn resume_completed_workspace(state: &str, desired: &str) -> bool {

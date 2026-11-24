@@ -61,7 +61,7 @@ auth crates/codewire-orchestration/src/workspace_binding.rs absent
 auth crates/codewire-orchestration/src/worker/activity_authority* crates/codewire-orchestration/src/worker/activity_authority.rs
 auth crates/codewire-orchestration/src/worker/activity_authority*/** crates/codewire-orchestration/src/worker/activity_authority/tests.rs
 auth crates/codewire-orchestration/src/worker/setup_lease* crates/codewire-orchestration/src/worker/setup_lease.rs
-auth crates/codewire-orchestration/src/worker/setup_lease*/** absent
+auth crates/codewire-orchestration/src/worker/setup_lease*/** crates/codewire-orchestration/src/worker/setup_lease/stale_claim.rs
 auth crates/codewire-orchestration/src/temporal/activity_run* crates/codewire-orchestration/src/temporal/activity_run.rs
 auth crates/codewire-orchestration/src/temporal/activity_run*/** absent
 auth crates/codewire-dashboard-web/src/transport.rs crates/codewire-dashboard-web/src/transport.rs

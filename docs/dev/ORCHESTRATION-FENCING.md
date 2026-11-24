@@ -283,3 +283,45 @@ and completes this no-Pod check before it reports cancellation. Dropping an
 exec future is never treated as process exit. Parallel clones share one
 lease and one launch group: an early error observes every sibling complete
 or enters the reaping path.
+
+### A claimed owner left behind
+
+An activity can end with its `claimed` post-start lease still recorded,
+for example when an ordinary error returns between taking the lease and
+releasing it. A later attempt of the same activity that finds the Sandbox
+already running never asks for the lease, and a later activity of the same
+run does not outrank it. Nothing would release it, and while it is recorded
+runtime reads and terminal sessions are refused (#6251).
+
+So the running path releases it. When a reconcile finds the Sandbox
+`running` with intent `started`, or a start finds it already running, the
+activity releases the setup owner when all of these hold:
+
+- setup is complete (`setup_complete`);
+- the owner is `claimed`;
+- the owner's generation, activity id and attempt are not the activity's
+  own.
+
+It checks them in one transaction under the setup lock order above (the
+claim row `FOR SHARE`, then `environments`, then
+`sandbox_environment_backend`), with the same current-authority checks as
+every setup write. It clears only the exact owner tuple it read under those
+locks, so an owner that changed in between is left alone. Each release is
+logged with the environment, the released tuple and the releasing activity,
+and counted in `codewire_setup_claimed_owner_releases_total`.
+
+It is safe because a `claimed` owner has launched nothing. To launch, the
+owner first moves its own lease to `running` with a compare-and-set on its
+tuple. After a release that fails with `AuthorityLost`; if it commits
+first, the owner is `running` and the release leaves it. The owner is also
+done: a run handles one command at a time and awaits each activity before
+the next, and only the run the claim row names passes the authority check.
+A claimed owner that is not the activity's own is therefore an earlier
+activity of the run, an earlier attempt of the same activity, or an
+activity of a closed run.
+
+It leaves alone a `running` or `reaping` owner, which may hide a live exec
+and keeps the reap path above; any owner while setup is incomplete, which
+keeps the setup phase rules; and the activity's own claim. A Sandbox
+already left with such an owner is released by its next `running bootstrap
+check` reconcile.
