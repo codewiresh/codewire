@@ -73,6 +73,19 @@ export async function holds(name: string, expectations: Expectation[]): Promise<
   return true;
 }
 
+// As holds, for a check that fails its stage: the first expectation that did
+// not hold is named on the same line, then the stage fails with its class, so
+// a failed stage says which of its checks failed (#6330).
+export async function mustHold(name: string, expectations: Expectation[]): Promise<void> {
+  for (const [label, check] of expectations) {
+    try { await check(); } catch (error) {
+      const failure = failureClassOf(error);
+      console.error(`[dev-ux] ${name}:not-held expectation=${label} class=${failure}`);
+      throw new DevUxError(name, failure);
+    }
+  }
+}
+
 // The setup list's rows as a value-blind line for a check that did not hold:
 // our fixed step names and states, anything else as "other", so nothing the
 // page or a remote wrote is printed.

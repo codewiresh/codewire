@@ -1,7 +1,7 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
 import { expect, request, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
-import { DevUxError, failureClassOf, holds, setupRowsSeen, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
+import { DevUxError, failureClassOf, holds, mustHold, setupRowsSeen, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
 // Re-attaching a surviving terminal after navigation, reload, reconnect, or
@@ -129,38 +129,52 @@ const menuItems = (rows: Locator) => rows.evaluateAll((nodes) => nodes.map((row)
 // Credential rows show an icon, a name, a status in words and one actions menu
 // holding only that row's actions: no Manage step, generation or revision.
 // Profile rows show the account's GitHub connection, or that it is missing.
-async function credentialRows(page: Page): Promise<void> {
+// The keyboard opens the first row menu, which fits the page; Escape closes it
+// and returns focus. Nothing in the menu is chosen. Each check is named, so a
+// failure says which one (#6330).
+function credentialRows(page: Page): Expectation[] {
   const credentials = page.locator(".cw-credential-row");
   const profiles = page.locator(".cw-profile-row");
-  const count = await credentials.count();
-  if (!count) await expect(page.getByText("No credentials yet. Add a provider account, API key or SSH identity to get started.", { exact: true })).toBeVisible();
-  await expect(page.locator(".cw-credential-row > .cw-credential-identity > svg.cw-icon")).toHaveCount(count);
-  await expect(page.locator(".cw-credential-row > .cw-credential-identity strong").filter({ hasText: /\S/ })).toHaveCount(count);
-  await expect(page.locator(".cw-credential-row > .cw-credential-status").filter({ hasText: /\S/ })).toHaveCount(count);
-  await expect(page.locator('.cw-credential-row > details.cw-menu > summary[aria-label^="Actions for "]')).toHaveCount(count);
-  await expect(credentials.filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
-  const credentialMenus = await menuItems(credentials);
-  for (const menu of credentialMenus) expect(menu).toMatch(CREDENTIAL_MENU);
-  if (!await profiles.count()) await expect(page.getByText("No profiles yet. Create a profile from your credentials, then select it for a Sandbox.", { exact: true })).toBeVisible();
-  await expect(page.locator(".cw-profile-row > header").filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
-  for (const menu of await menuItems(profiles)) expect(menu).toBe("Rename,Edit identities,Delete");
-  const github = credentialMenus.some((menu) => menu.endsWith("Disconnect GitHub")) ? /GitHub: @\S/ : /GitHub: missing/;
-  for (const summary of await profiles.locator(":scope > header").allTextContents()) expect(summary).toMatch(github);
-  await expect(page.locator(":is(.cw-credential-row, .cw-profile-row)").getByRole("button", { name: /^Manage\b/ })).toHaveCount(0);
-  // The keyboard opens the first row menu; Escape closes it and returns focus.
-  // Nothing in the menu is chosen.
   const menu = page.locator(":is(.cw-credential-row, .cw-profile-row) > details.cw-menu").first();
-  if (await menu.count()) {
-    const trigger = menu.locator(":scope > summary");
-    await trigger.focus();
-    await page.keyboard.press("Enter");
-    await expect(menu).toHaveAttribute("open", "");
-    await expect(menu.locator(".cw-menu-item").first()).toBeVisible();
-    await fits(page);
-    await page.keyboard.press("Escape");
-    await expect(menu).not.toHaveAttribute("open", "");
-    await expect(trigger).toBeFocused();
-  }
+  const trigger = menu.locator(":scope > summary");
+  let credentialMenus: string[] = [];
+  return [
+    ["row-parts", async () => {
+      const count = await credentials.count();
+      if (!count) await expect(page.getByText("No credentials yet. Add a provider account, API key or SSH identity to get started.", { exact: true })).toBeVisible();
+      await expect(page.locator(".cw-credential-row > .cw-credential-identity > svg.cw-icon")).toHaveCount(count);
+      await expect(page.locator(".cw-credential-row > .cw-credential-identity strong").filter({ hasText: /\S/ })).toHaveCount(count);
+      await expect(page.locator(".cw-credential-row > .cw-credential-status").filter({ hasText: /\S/ })).toHaveCount(count);
+      await expect(page.locator('.cw-credential-row > details.cw-menu > summary[aria-label^="Actions for "]')).toHaveCount(count);
+      await expect(credentials.filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
+    }],
+    ["row-menus", async () => {
+      credentialMenus = await menuItems(credentials);
+      for (const items of credentialMenus) expect(items).toMatch(CREDENTIAL_MENU);
+    }],
+    ["profile-rows", async () => {
+      if (!await profiles.count()) await expect(page.getByText("No profiles yet. Create a profile from your credentials, then select it for a Sandbox.", { exact: true })).toBeVisible();
+      await expect(page.locator(".cw-profile-row > header").filter({ hasText: /Generation|Revision/ })).toHaveCount(0);
+      for (const items of await menuItems(profiles)) expect(items).toBe("Rename,Edit identities,Delete");
+      const github = credentialMenus.some((items) => items.endsWith("Disconnect GitHub")) ? /GitHub: @\S/ : /GitHub: missing/;
+      for (const summary of await profiles.locator(":scope > header").allTextContents()) expect(summary).toMatch(github);
+      await expect(page.locator(":is(.cw-credential-row, .cw-profile-row)").getByRole("button", { name: /^Manage\b/ })).toHaveCount(0);
+    }],
+    ["menu-opens", async () => {
+      if (!await menu.count()) return;
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      await expect(menu).toHaveAttribute("open", "");
+      await expect(menu.locator(".cw-menu-item").first()).toBeVisible();
+    }],
+    ["menu-fits", async () => { if (await menu.count()) await fits(page); }],
+    ["menu-closes", async () => {
+      if (!await menu.count()) return;
+      await page.keyboard.press("Escape");
+      await expect(menu).not.toHaveAttribute("open", "");
+      await expect(trigger).toBeFocused();
+    }],
+  ];
 }
 
 // Settings lists the account's own keys across its organizations, each linked
@@ -405,20 +419,26 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
   const chooser = dialog(page, "Add credential");
   await stage(`credentials-page-${width}`, async () => {
     await visit(page, `/settings/credentials/?org=${slug}`);
-    await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
-    await expect(page.locator(".cw-settings-content > .cw-page-header .cw-page-description"))
-      .toHaveText("Add and manage provider credentials for things like GitHub, SSH keys, Claude, and Codex.");
-    await settingsShell(page, "personal", "/settings/credentials/");
-    await credentialRows(page);
     // Git commit identity is attribution, apart from authentication and profiles.
     const identity = page.locator("#git-identity");
-    await expect(identity.getByRole("heading", { name: "Git commit identity", exact: true, level: 2 })).toBeVisible();
-    await expect(identity.locator(".cw-card-description"))
-      .toHaveText("Author name and email for Sandbox commits. This is commit attribution, not a GitHub login, provider credential or profile member.");
-    await expect(identity.getByText("Clear either field to use its independent account fallback. Connecting GitHub does not overwrite your Codewire email.")).toBeVisible();
-    for (const field of ["Commit author name", "Commit author email"]) await expect(identity.getByLabel(field, { exact: true })).toBeVisible();
-    await noUnsetValues(page);
+    await mustHold(`credentials-page-${width}`, [
+      ["headings", async () => {
+        await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
+        await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
+        await expect(page.locator(".cw-settings-content > .cw-page-header .cw-page-description"))
+          .toHaveText("Add and manage provider credentials for things like GitHub, SSH keys, Claude, and Codex.");
+      }],
+      ["settings-shell", () => settingsShell(page, "personal", "/settings/credentials/")],
+      ...credentialRows(page),
+      ["git-identity", async () => {
+        await expect(identity.getByRole("heading", { name: "Git commit identity", exact: true, level: 2 })).toBeVisible();
+        await expect(identity.locator(".cw-card-description"))
+          .toHaveText("Author name and email for Sandbox commits. This is commit attribution, not a GitHub login, provider credential or profile member.");
+        await expect(identity.getByText("Clear either field to use its independent account fallback. Connecting GitHub does not overwrite your Codewire email.")).toBeVisible();
+        for (const field of ["Commit author name", "Commit author email"]) await expect(identity.getByLabel(field, { exact: true })).toBeVisible();
+      }],
+      ["no-unset", () => noUnsetValues(page)],
+    ]);
   });
   await stage(`credentials-chooser-${width}`, async () => {
     await add.click();

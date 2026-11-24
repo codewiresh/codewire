@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, holds, setupRowsSeen, uxOrganizationSlug } from "./dev-ux-ownership";
+import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, holds, mustHold, setupRowsSeen, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const USER = "1".repeat(32);
 const ORG = "2".repeat(32);
@@ -322,6 +322,27 @@ test("a check that does not hold names its first failed expectation on one line 
     ])).toBe(false);
     expect(ran).toEqual(["list-visible", "first-row", "list-visible", "first-row"]);
     expect(lines.mock.calls).toEqual([["[dev-ux] create-start-list:not-held expectation=first-row class=timeout"]]);
+  } finally { lines.mockRestore(); }
+});
+
+test("a check that must hold names its first failed expectation, then fails its stage with that class", async () => {
+  const lines = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const ran: string[] = [];
+    const expectation = (label: string, error?: Error) => [label, async () => {
+      ran.push(label);
+      if (error) throw error;
+    }] as [string, () => Promise<void>];
+    await mustHold("credentials-page-390", [expectation("headings"), expectation("menu-fits")]);
+    expect(lines).not.toHaveBeenCalled();
+    const timeout = Object.assign(new Error("page text that must not be printed"), { name: "TimeoutError" });
+    const failed = await mustHold("credentials-page-390", [
+      expectation("headings"), expectation("menu-fits", timeout), expectation("no-unset"),
+    ]).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(DevUxError);
+    expect(failed).toMatchObject({ stage: "credentials-page-390", failureClass: "timeout" });
+    expect(ran).toEqual(["headings", "menu-fits", "headings", "menu-fits"]);
+    expect(lines.mock.calls).toEqual([["[dev-ux] credentials-page-390:not-held expectation=menu-fits class=timeout"]]);
   } finally { lines.mockRestore(); }
 });
 
