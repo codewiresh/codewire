@@ -24,7 +24,7 @@ Updated 2026-11-23.
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
-| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked; a home another tool wrote first, and a refusal's words, not yet observed (#6315) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-update-startup` | cw-cli | observed 2026-11-23 (#5949); other members, admins, the audit row and the creator leaving not yet observed | not yet observed |
@@ -531,7 +531,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - `cw network connect`, which works without one;
   - `cw login` offering the sandbox's server;
   - a saved server or `CODEWIRE_SERVER_URL` taking precedence over the
-    sandbox's.
+    sandbox's;
+  - a home where another tool made `~/.local` first, so it inherited the
+    home volume's setgid bit (#6315);
+  - a refusal: a version store directory writable by its group.
 - **Driving it:** in `walk`:
 
   ```sh
@@ -540,6 +543,8 @@ server it belongs to and says what it can do, instead of asking for a URL.
   cw --cloud exec --in walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
   cw --cloud exec --in walk -- sh -lc 'command -v cw; cw ls; echo "exit $?"'
   cw --cloud exec --in walk -- bash -c 'cw login </dev/null >/dev/null 2>&1 & p=$!; sleep 2; readlink /proc/$p/exe; kill $p'
+  cw --cloud exec --in walk -- bash -c 'mkdir -p ~/.local/share; stat -c "%n %a" ~/.local ~/.local/share; cw --version; echo "exit $?"'
+  cw --cloud exec --in walk -- bash -c 'chmod g+w ~/.local/share; cw --version; echo "exit $?"; chmod g-w ~/.local/share'
   ```
 
   Then run an agent in `walk` and ask it to run `cw whoami` and `cw ls`, with
@@ -564,6 +569,12 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - `cw ls` says it isn't signed in, as `cw whoami` does. It never mentions a
     local VM store or a development build, on Dev too.
   - The agent's bare `cw` gives the same answers.
+  - Not yet observed (#6315): `~/.local` and `~/.local/share` are 2755, and
+    `cw --version` still runs and exits 0.
+  - Not yet observed (#6315): with `~/.local/share` writable by its group,
+    `cw` exits 1, says "Your cw version store under ~/.local is not
+    private", and gives a `→` line with the `ls -ld` to check. It never
+    prints only "platform CW default selection refused".
 - **Gotchas:**
   - A workload started by a custom image's own entrypoint does not see the
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.

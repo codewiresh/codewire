@@ -82,6 +82,28 @@ The launcher in `crates/codewire-cli/src/platform_cw_runtime/launcher.rs`
 makes the choice before any configuration is read. Private roles and an
 explicit version path still run the executable they name.
 
+The launcher reads that selection from the version Store in the workspace
+home, `~/.local/share/codewire/cli` (#6315). The home is the Pod's volume
+root, which Kubernetes leaves root-owned and writable (local-path 0777) or
+setgid (`fsGroup` 2775), so a directory any tool makes below it, such as
+`~/.local`, inherits the setgid bit. The launcher admits the home as it is.
+Each directory below it must be owned by the workspace user or root and not
+writable by group or others, and it may carry setgid, which only names the
+group of new entries. Setuid and sticky bits are refused, and a directory the
+Store writes into is exactly 0700.
+
+When the launcher refuses, `cw` exits 1 with one line saying what it refused,
+in the user's terms, and a `→` line with the next step (#6315):
+
+| Refused | Next step |
+| --- | --- |
+| A version store directory or file that is not the user's, is a link, or is writable by anyone else | `ls -ld` of the store's directories |
+| `~/.local/bin/cw` that the Store did not select | move `~/.local/bin/cw` aside |
+| An update or rollback that did not finish | `cw --cloud runtime update ENV` again, from the user's computer |
+| A selected `cw` that fails its check | `cw --cloud runtime rollback ENV`, from the user's computer |
+| An image's `cw` that is not the root-owned copy it shipped | `cw --cloud stop ENV`, then `cw --cloud start ENV` |
+| The selection changing during the check, a 2-minute deadline, or a read error | run the command again |
+
 The launcher trusts `/codewire/bin/cw` by where it comes from, not by a build
 record. It is the hosted daemon's own executable, from the digest-pinned
 support image, delivered as a read-only image volume or by the root init

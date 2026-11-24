@@ -170,8 +170,8 @@ fn main() {
     // aliases. Private roles (including the later hosted-daemon dispatch) and
     // explicit immutable version paths never consult the writable Store.
     #[cfg(target_os = "linux")]
-    if codewire_cli::redirect_platform_cw_default_from(std::env::args_os()).is_err() {
-        eprintln!("platform CW default selection refused");
+    if let Err(error) = codewire_cli::redirect_platform_cw_default_from(std::env::args_os()) {
+        codewire_cli::report_error(&error);
         std::process::exit(1);
     }
     let network_worker = std::env::args_os()

@@ -34,8 +34,9 @@ enum Launch {
 /// success means the caller is not an eligible image alias, or runs itself.
 /// An ordinary invocation runs the Store's selection, else, invoked as the
 /// image's cw, the release's cw (#5202). It replaces only this new
-/// invocation, never an already-running daemon, helper or session.
-pub fn redirect_from<I, T>(args: I) -> std::io::Result<()>
+/// invocation, never an already-running daemon, helper or session. A
+/// refusal says what it refused and carries its next step (#6315).
+pub fn redirect_from<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
@@ -129,8 +130,49 @@ impl Release {
     }
 }
 
-fn refusal(_: Code) -> std::io::Error {
-    std::io::Error::other("platform CW default selection refused")
+/// The refusal's sentence and next step, as docs/dev/SANDBOX-DAEMON.md
+/// "Which `cw` a sandbox runs" lists them.
+pub(super) fn refusal(code: Code) -> anyhow::Error {
+    let (refused, step) = match code {
+        Code::UnsafeState => (
+            "your cw version store under ~/.local is not private: its directories must be yours, not links, and writable by no one else",
+            "ls -ld ~/.local ~/.local/bin ~/.local/share ~/.local/share/codewire",
+        ),
+        Code::UnmanagedEntry => (
+            "~/.local/bin/cw is not the cw this sandbox's version store selected",
+            "move ~/.local/bin/cw aside",
+        ),
+        Code::PendingSelection => (
+            "a cw update or rollback in this sandbox did not finish",
+            "cw --cloud runtime update ENV, again, from your computer",
+        ),
+        Code::CandidateRefused => (
+            "the cw selected for this sandbox failed its check",
+            "cw --cloud runtime rollback ENV, from your computer",
+        ),
+        Code::UnsupportedImage => (
+            "this sandbox's cw is not the root-owned copy its image shipped",
+            "cw --cloud stop ENV, then cw --cloud start ENV, from your computer",
+        ),
+        Code::StaleSelection => (
+            "the cw selected for this sandbox changed while it was checked",
+            "run the command again",
+        ),
+        Code::Deadline => (
+            "checking which cw this sandbox runs took over 2 minutes",
+            "run the command again",
+        ),
+        Code::Io
+        | Code::ReadOnly
+        | Code::InvalidFrame
+        | Code::StageExists
+        | Code::MissingStage
+        | Code::InputIncomplete => (
+            "could not read which cw version this sandbox runs",
+            "run the command again",
+        ),
+    };
+    crate::error_report::with_next_step(anyhow::anyhow!(refused), step)
 }
 
 pub(super) fn image_alias(path: &Path) -> bool {

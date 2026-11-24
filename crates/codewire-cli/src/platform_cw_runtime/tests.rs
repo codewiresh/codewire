@@ -600,6 +600,75 @@ fn shared_home_volume_root_is_an_anchor_but_runtime_directories_stay_private() {
 }
 
 #[test]
+fn directories_another_tool_made_below_a_setgid_home_keep_their_setgid() {
+    // Claude Code's or pip's installer makes ~/.local below the fsGroup home,
+    // so it and its children inherit setgid at 2755 (#6315).
+    let f = Fixture::new();
+    f.bootstrap();
+    let home = f.root.path().join("home");
+    chmod(&home, 0o2775);
+    let tool_made = [".local", ".local/bin", ".local/share"];
+    for name in tool_made {
+        chmod(&home.join(name), 0o2755);
+    }
+    assert!(Tree::open(&f.paths, false).is_ok());
+    assert!(matches!(
+        super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(10)),
+        Ok(Some(_))
+    ));
+    assert!(Tree::open(&f.paths, true).is_ok());
+    // Writable by its group, sticky or setuid still refuses.
+    for mode in [0o2775, 0o1755, 0o4755] {
+        chmod(&home.join(".local/share"), mode);
+        assert!(
+            matches!(Tree::open(&f.paths, false), Err(Code::UnsafeState)),
+            "{mode:o}"
+        );
+    }
+    for name in tool_made {
+        chmod(&home.join(name), 0o700);
+    }
+    chmod(&home, 0o700);
+}
+
+#[test]
+fn every_launcher_refusal_names_what_it_refused_and_a_next_step() {
+    use crate::output::{Charset, Style};
+    let plain = Style::new(false, Charset::Unicode);
+    let unsafe_state =
+        crate::error_report::render(&super::launcher::refusal(Code::UnsafeState), plain);
+    assert_eq!(
+        unsafe_state,
+        "✗ Your cw version store under ~/.local is not private: its directories must be yours, \
+         not links, and writable by no one else\n\
+         → ls -ld ~/.local ~/.local/bin ~/.local/share ~/.local/share/codewire\n"
+    );
+    for code in [
+        Code::InvalidFrame,
+        Code::UnsupportedImage,
+        Code::UnsafeState,
+        Code::ReadOnly,
+        Code::UnmanagedEntry,
+        Code::StaleSelection,
+        Code::PendingSelection,
+        Code::CandidateRefused,
+        Code::StageExists,
+        Code::MissingStage,
+        Code::InputIncomplete,
+        Code::Deadline,
+        Code::Io,
+    ] {
+        let error = super::launcher::refusal(code);
+        let text = crate::error_report::render(&error, plain);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{code:?}: {text}");
+        assert!(lines[0].starts_with("✗ "), "{code:?}: {text}");
+        assert!(lines[1].starts_with("→ "), "{code:?}: {text}");
+        assert!(!text.contains("platform CW default selection"), "{code:?}");
+    }
+}
+
+#[test]
 fn root_owned_shared_home_is_writable_through_effective_access() {
     // A root-owned world-writable /tmp stands in for a local-path volume root.
     let tmp = Path::new("/tmp");

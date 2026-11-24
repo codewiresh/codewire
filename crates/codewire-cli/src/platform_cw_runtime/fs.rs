@@ -136,11 +136,15 @@ struct Anchor {
 }
 
 impl Anchor {
+    /// Setgid is admitted: below a setgid volume root every directory another
+    /// tool makes inherits it (`~/.local` at 2755, #6315), and it only names
+    /// the group of new entries. Who may write is still the owner and the
+    /// group and other write bits.
     fn new(file: File, path: PathBuf, owner_only: bool) -> Result<Self> {
         let m = file.metadata().map_err(|_| Code::Io)?;
         if !m.is_dir()
             || (m.uid() != user().0 && (owner_only || m.uid() != 0))
-            || m.mode() & 0o7022 != 0
+            || m.mode() & 0o5022 != 0
             || m.mode() & 0o500 != 0o500
         {
             return Err(Code::UnsafeState);
