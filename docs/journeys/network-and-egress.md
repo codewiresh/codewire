@@ -1087,6 +1087,9 @@ session through a relay".
   profile. Nothing inside the VM turns interception on.
 - **States to exercise:**
   - a Claude sign-in and a Codex login, both from the platform profile;
+  - an Anthropic API key and GitHub from the platform profile, whose
+    placeholders the seed carries from the platform (#4001, not yet built),
+    and the profile changed while the VM runs, then the VM restarted;
   - a token forced to expire mid-session;
   - the platform credential revoked, then selected again;
   - a front door from another boot or VM asking for this VM's tokens;
@@ -1108,6 +1111,11 @@ session through a relay".
   - **no real token is found** in the VM's login files (they hold
     placeholders), on its disk, in the local relay's and front door's logs,
     or in the host's credential directories;
+  - with an API key or GitHub selected, the seed's placeholder is the one
+    the delegation's leases carry: a request with it is served, `git clone`
+    and `gh api user` work. A profile change leaves the running VM's
+    placeholder and its leases unchanged, and after a restart both use the
+    new revision;
   - **the first login is already a placeholder:** the agent's login file,
     read before the front door has joined (before any agent request), holds
     the placeholder, never the sign-in's token;

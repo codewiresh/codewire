@@ -1934,8 +1934,10 @@ assets moves onto the installed runtime at its next start, and its earlier VM
 checkpoints become unrestorable, as `CLI-ORCHESTRATION.md` describes for any
 guest ABI change. Guest
 init gives it to the workspace's own processes and to the guest daemon, which
-projects it to every session and managed agent. A boot without interception,
-or one whose credentials come from the platform, carries none.
+projects it to every session and managed agent. A boot without interception
+carries none. A boot whose credentials come from the platform gets them from
+the platform, derived under its owner's local root ("Its seed placeholders"
+below); until that is built, it carries none.
 
 - **The value.** `cwp1_` and 43 base64url characters, an HMAC over the
   environment, the selected binding's profile revision, the slot and the
@@ -2083,6 +2085,88 @@ or one whose credentials come from the platform, carries none.
     references on it. The service does not refuse to start without the
     grant: without it, only a delegation's lease is marked failed, and is
     logged as for a hosted key.
+  - **Its seed placeholders (#4001).** Not yet built. Such a boot needs the
+    placeholders of its variable forms (the `github` slot, and an Anthropic
+    API key or subscription token) in its seed before it starts, but its
+    delegation epoch opens only after boot, and the local authority holds
+    no grant for a platform binding. So the local authority's
+    `GetEnvironmentCredentialPlaceholders` forwards a platform binding to the
+    platform's `CredentialDelegationService.EnvironmentCredentialPlaceholders`.
+    That is one unary call, with an owner-OAuth client built for it from the
+    saved owner login and the binding, as the platform connector's GitHub
+    check already does; no delegation needs to exist. A local binding is
+    answered locally, as before. The platform's rules, in order:
+    1. **Who asks:** only the owner's OAuth token, like the rest of the
+       service; an organization API key is refused. The user is the token's,
+       never a request field.
+    2. **What it checks:** everything a delegation's admission checks for
+       the same boot: the current owner, organization membership, the
+       selected profile at the request's revision, the environment
+       generation and the selection digest (`selection_sha256`), all before
+       any key is read. A seed is never answered for a selection the boot's
+       delegation would refuse. A failed check refuses the call, the same
+       way for each reason.
+    3. **What it answers:** for each requested slot the profile grants, the
+       placeholder a delegation lease of that boot would carry: derived
+       under this owner's local key for the request's environment ID, from
+       the same inputs as the lease (environment, profile revision, slot,
+       credential). The environment ID must be a UUID already in canonical
+       form (lowercase, hyphenated, not nil), the form a delegation's Ready
+       must carry, or the call is refused. The key is derived from the
+       parsed UUID's canonical string, never the request's raw bytes, so a
+       seed value always equals the lease's; a test holds the two equal. The
+       local authority sends the same ID the boot's bridge Ready will carry.
+       A slot the profile doesn't grant is left out. A key that can't be read or created refuses the call
+       (`UNAVAILABLE`). The environment ID comes from the request, which is
+       safe because every value is an HMAC under the caller's own root:
+       naming any ID yields only that owner's own derivation, never another
+       owner's (cw-security, 2026-11-24, #4001).
+    4. **Bounds:** at most 16 slots, each one of the closed set a profile can
+       select, or the call is refused. At most 30 calls per user per minute
+       on each credential service replica; beyond that,
+       `RESOURCE_EXHAUSTED`. It bounds only reads of the caller's own root,
+       so a per-replica count is enough (cw-security, 2026-11-24, #4001).
+    5. **Nothing is printed:** no placeholder value appears in a log, an
+       error or a metric. Each call writes one log line with a fixed event
+       and its outcome, which is how calls are counted.
+
+    The local authority sends the binding's own `selection_sha256`, the
+    bytes its delegation's Open sends, so the recheck compares like with
+    like. The call has a 10-second deadline, its 5-second connect included,
+    inside the boot's start budget.
+
+    The supervisor reads the answer as it reads a local one. A missing
+    `github` placeholder (no GitHub grant) leaves GitHub's hosts unbound. An
+    answer without the placeholder for an Anthropic API key or subscription
+    token refuses the start as it does locally, with
+    `create_access_unavailable` (`access_unavailable` on a start).
+    Interception stays on: a platform boot never starts without it for want
+    of a seed placeholder (decision recorded on #6270).
+
+    When the call itself fails, the start is refused with the named error
+    `platform_placeholders_unavailable`, its status code, and the step to
+    take:
+    - an expired owner login: `cw login`;
+    - `RESOURCE_EXHAUSTED`: wait a minute and start again;
+    - `UNAVAILABLE`, the deadline or a transport error: start again once
+      the platform is reachable.
+
+    An authority older than this forwarding, which states it as an
+    `AuthorityFeature`, is not asked. Such a boot's start is refused with
+    the named error `platform_placeholders_unsupported` and the step that
+    `credential_service_outdated` gives: the local credential service that
+    is running is from an earlier cw; stop your local VMs so cw replaces
+    that service, then start this one. An older service keeps serving
+    until a boot finds no local VM running. A refusal is logged with its
+    reason and status, and counted. No VM is created or started.
+    The seed call and every delegation epoch of one boot name the same
+    binding revision, and a delegation is admitted only at the exact
+    revision it names, so the seed's placeholder is the one every lease of
+    that boot carries. A profile change never gives a running VM a
+    mismatched placeholder. It takes effect at the VM's next start, when
+    the seed call and the delegation both name the new revision. A revision
+    the platform no longer admits refuses the seed call, and so the start,
+    as above, and the delegation, as it does today.
 
 ### Refusals an agent or a person can read (#5057)
 
