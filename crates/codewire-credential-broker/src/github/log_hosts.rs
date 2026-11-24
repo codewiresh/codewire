@@ -5,8 +5,9 @@
 //!
 //! Source: `domains.actions_inbound.full_domains` of
 //! <https://api.github.com/meta>, fetched 2026-11-21, keeping the names that
-//! can serve a log: GitHub's results storage accounts and its `pipelines*`
-//! hosts. Never fetched at run time; it changes only by a reviewed change.
+//! can serve a log: GitHub's results storage accounts, its `pipelines*`
+//! hosts and its results receiver, which a run's log archive redirects to.
+//! Never fetched at run time; it changes only by a reviewed change.
 //! See docs/dev/SECRETS-AND-CREDENTIALS.md, "Actions reads and the one
 //! redirect the broker follows".
 
@@ -155,7 +156,8 @@ pub(crate) const BLOB_HOSTS: [&str; 140] = [
 ];
 
 /// GitHub's own log hosts.
-pub(crate) const PIPELINES_HOSTS: [&str; 30] = [
+pub(crate) const PIPELINES_HOSTS: [&str; 31] = [
+    "results-receiver.actions.githubusercontent.com",
     "pipelinesghubeus1.actions.githubusercontent.com",
     "pipelinesghubeus2.actions.githubusercontent.com",
     "pipelinesghubeus3.actions.githubusercontent.com",

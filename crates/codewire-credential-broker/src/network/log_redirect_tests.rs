@@ -187,7 +187,7 @@ fn a_start_pins_the_log_hosts_that_resolve_and_drops_the_rest_by_name() {
     assert!(!transport.slot_unserved("github"));
     assert_eq!(transport.resolved_address_count, 2);
     let listed = crate::github::log_hosts::log_hosts().collect::<BTreeSet<_>>();
-    assert_eq!(listed.len(), 170);
+    assert_eq!(listed.len(), 171);
     assert_eq!(
         listed
             .difference(&transport.log_hosts)

@@ -234,7 +234,10 @@ only what differs.
     the output, the environment or the broker's log;
   - the same under the `locked` network policy with GitHub allowed by rule,
     since the broker, not the guest, fetches the log;
-  - `gh run rerun RUN` refused with `request_not_forwarded`;
+  - `gh run rerun RUN` refused and never sent: `placeholder_outside_route`
+    through the interception front door, `request_not_forwarded` on the
+    loopback route. `gh` prints the refusal's message, so the code is read
+    with `gh api -X POST repos/OWNER/REPO/actions/runs/RUN/rerun`;
   - before an installation's owner accepts the App's `actions`: read, GitHub's
     own 403 from `gh run list`, and every other GitHub command working.
 

@@ -3931,8 +3931,11 @@ writes.
   names in `domains.actions_inbound.full_domains` of
   `https://api.github.com/meta`, as fetched on 2026-11-21, that can serve a
   log. That is the 140 Azure accounts `productionresultssa0` to `19`, `30`
-  to `49` and `100` to `199` under `blob.core.windows.net`, and GitHub's
-  `pipelines*` hosts under `actions.githubusercontent.com`, each written out.
+  to `49` and `100` to `199` under `blob.core.windows.net`, GitHub's
+  `pipelines*` hosts under `actions.githubusercontent.com`, and its results
+  receiver `results-receiver.actions.githubusercontent.com`, each written
+  out. A run's log archive (`gh run view --log-failed`) redirects to the
+  results receiver.
   It is never fetched at run time, and it changes only by a reviewed change.
   The match is exact on the parsed URL's host. The URL parser lowercases
   it, so an upper-case form is the same name and is admitted; a trailing dot
