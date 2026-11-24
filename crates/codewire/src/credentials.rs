@@ -1231,9 +1231,11 @@ mod tests {
         // What the person reads for each reason, before the device challenge
         // and after it. UNKNOWN is a decision, never a default: the service
         // can't tell (uncertain, cleanup), the person reconciles first
-        // (revision), or EnrollGithub never sends it (Claude).
+        // (revision), or EnrollGithub never sends it (Claude; in use, which
+        // only a delete sends).
         let expected = [
             ("CREDENTIAL_REVISION_CHANGED", UNKNOWN, UNKNOWN),
+            ("CREDENTIAL_IN_USE", UNKNOWN, UNKNOWN),
             (
                 "CREDENTIAL_ENROLLMENT_FAILED",
                 UNKNOWN,
