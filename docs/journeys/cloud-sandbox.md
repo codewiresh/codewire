@@ -12,7 +12,7 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-24.
+Updated 2026-11-25.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -24,7 +24,7 @@ Updated 2026-11-24.
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
-| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked; a home another tool wrote first, and a refusal's words, observed 2026-11-24 (#6315); the hand-off to the release's copy, not yet observed (#6331) | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked; a home another tool wrote first, and a refusal's words, observed 2026-11-24 (#6315); the hand-off to the release's copy, observed 2026-11-25 (#6331) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-update-startup` | cw-cli | observed 2026-11-23 (#5949); other members, admins, the audit row and the creator leaving not yet observed | not yet observed |
@@ -563,7 +563,7 @@ server it belongs to and says what it can do, instead of asking for a URL.
   cw --cloud exec --in walk -- bash -c 'cw login </dev/null >/dev/null 2>&1 & p=$!; sleep 2; readlink /proc/$p/exe; kill $p'
   cw --cloud exec --in walk -- bash -c 'mkdir -p ~/.local/share; stat -c "%n %a" ~/.local ~/.local/share; cw --version; echo "exit $?"'
   cw --cloud exec --in walk -- bash -c 'chmod g+w ~/.local/share; cw --version; echo "exit $?"; chmod g-w ~/.local/share'
-  cw --cloud exec --in walk -- bash -c 'strace -f -e trace=execve,execveat,openat -o /tmp/cw.trace cw --version; grep -nE "execve|/codewire/bin/cw|codewire/cli" /tmp/cw.trace'
+  cw --cloud exec --in walk -- bash -c 'strace -f -e trace=execve,execveat,open,openat,close -o /tmp/cw.trace cw --version; grep -nE "execve|/codewire/bin/cw|\.local|close\(4\)" /tmp/cw.trace'
   ```
 
   Then run an agent in `walk` and ask it to run `cw whoami` and `cw ls`, with
@@ -594,13 +594,14 @@ server it belongs to and says what it can do, instead of asking for a URL.
     `cw` exits 1, says "Your cw version store under ~/.local is not
     private", and gives a `→` line with the `ls -ld` to check. It never
     prints only "platform CW default selection refused" (#6315).
-  - Not yet observed (#6331): in the trace, the first `execve` is
-    `/usr/local/bin/cw`. The next one runs `/codewire/bin/cw` through the
-    descriptor an `openat` of `/codewire/bin/cw` returned: an
+  - In the trace, the first `execve` is `/usr/local/bin/cw`. The next one
+    runs `/codewire/bin/cw` through the descriptor an `open` or `openat` of
+    `/codewire/bin/cw` returned, with no `close` of it between: an
     `execveat(N, "", …, AT_EMPTY_PATH)`, or an `execve` of
-    `/proc/self/fd/N` where the kernel lacks it. No `openat` under
-    `~/.local/share/codewire/cli` comes before it, and there is exactly one
-    hand-off.
+    `/proc/self/fd/N` where the kernel lacks it. Nothing under `~/.local`
+    is opened before it, and there is exactly one hand-off (#6331). The
+    image's `cw` is a static build that calls `open`, so a trace of
+    `openat` alone misses its opens.
 - **Gotchas:**
   - A workload started by a custom image's own entrypoint does not see the
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
@@ -640,6 +641,16 @@ server it belongs to and says what it can do, instead of asking for a URL.
     "platform CW default selection refused". A sandbox made before its pool
     rotated to that image keeps the old `cw`. Evidence: #6315 comment
     140400.
+  - Dev, 2026-11-25 (cw-sandbox-images), source ba1266fb4b, as the Dev
+    smoke identity, in a fresh sandbox on the workspace image #6432 pinned
+    (`/usr/local/bin/cw` sha256 `00a3fc07bb16…`, `/codewire/bin/cw`
+    `5cbdf3fcc649…`). The bare `cw --version` traced two execs:
+    `execve("/usr/local/bin/cw", …)`, then `execveat(4, "", …,
+    AT_EMPTY_PATH)`, where 4 is the held `open("/codewire/bin/cw")`. Two
+    more opens of that name were checked against it and closed. Nothing
+    under `~/.local` was opened before the hand-off; the first such open is
+    the release's own. It exited 0, and a running bare `cw` was
+    `/codewire/bin/cw`. Evidence: #6331.
 
 ## `sandbox-attach-stays`: an attached session stays connected
 
