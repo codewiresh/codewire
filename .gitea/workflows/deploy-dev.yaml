@@ -909,7 +909,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf -- "${DISK_WORK:?}"
-          mkdir -m 0700 "$DISK_WORK" "$DISK_WORK/scratch" "$DISK_WORK/handback"
+          mkdir -m 0700 "$DISK_WORK" "$DISK_WORK/scratch" "$DISK_WORK/handback" "$DISK_WORK/upload-tmp"
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -948,6 +948,10 @@ jobs:
 
       - name: Hand the disk back
         uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        env:
+          # The upload gzips the disk into a file in os.tmpdir() first. The
+          # runner's /tmp is a 1Gi emptyDir, and filling it evicts the runner.
+          TMPDIR: ${{ env.DISK_WORK }}/upload-tmp
         with:
           name: workspace-disk-${{ github.run_id }}
           path: ${{ env.DISK_WORK }}/handback/disk.tar
