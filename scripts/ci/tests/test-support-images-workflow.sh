@@ -126,7 +126,8 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace .support-source/images
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
-probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
+probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  scan-support-images:/p' "$WORKFLOW")"
+scan_job="$(sed -n '/^  scan-support-images:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
 pin_job="$(sed -n '/^  propose-workspace-image-pin:/,/^  # The cw-egress pin/p' "$WORKFLOW")"
 egress_pin_job="$(sed -n '/^  propose-egress-image-pin:/,/^  alias-support-pair:/p' "$WORKFLOW")"
 alias_job="$(sed -n '/^  alias-support-pair:/,/^  # The systemd workspace/p' "$WORKFLOW")"
@@ -139,9 +140,12 @@ systemd_job="$(sed -n '/^  publish-workspace-systemd:/,$p' "$WORKFLOW")"
 # shellcheck disable=SC2016
 # Step outputs reach a publisher's script only through env:, never as text
 # interpolated into it. Prints each line that breaks that.
+# A step output may reach an if, a step's environment, or the job's own
+# outputs (which are no script); anywhere else it is interpolated into one.
 step_output_in_script() {
   grep -F '${{ steps.' <<<"$1" |
-    grep -Ev '^ +(- )?if: |^          [A-Z][A-Z0-9_]*: \$\{\{ steps\.[a-z_]+\.outputs\.[a-z_]+ \}\}$' || true
+    grep -Ev '^ +(- )?if: |^          [A-Z][A-Z0-9_]*: \$\{\{ steps\.[a-z_]+\.outputs\.[a-z_]+ \}\}$' |
+    grep -Ev "^      [a-z_]+: \\\$\\{\\{ steps\\.[a-z_]+\\.(outputs\\.[a-z_]+|outcome == 'success') \\}\\}\$" || true
 }
 systemd_job_violation() {
   local job="$1"
@@ -575,6 +579,27 @@ grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
 # global allowlist made every project install fail (#2876).
 [[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS' "$WORKSPACE_DOCKERFILE")" -eq 0 ]] ||
   fail 'workspace sets a global npm lifecycle-script policy for project installs'
+
+# The OS-package scan (#5402, report only) holds nothing: no OIDC, no
+# OpenBao role, no credential. It reads only the public GHCR copy, by the
+# digest Harbor published, every scan continues on error, and no job waits
+# for it.
+[[ -n "$scan_job" ]] || fail 'no job scans the published support images'
+if grep -Eq 'enable-openid-connect|OPENBAO_|fetch-openbao|DOCKER_CONFIG|secrets\.|github\.token' <<<"$scan_job"; then
+  fail 'the support image scan holds an identity or a credential'
+fi
+[[ "$(grep -Fc 'scripts/ci/images/scan-runtime-image-os.sh' <<<"$scan_job")" -eq 3 ]] ||
+  fail 'the support image scan does not scan base, workspace and the confidential probe'
+[[ "$(grep -Fxc '        continue-on-error: true' <<<"$scan_job")" -eq 3 ]] ||
+  fail 'a support image scan can fail the run'
+while read -r scan; do
+  [[ "$scan" =~ ^run:\ scripts/ci/images/scan-runtime-image-os\.sh\ ([a-z-]+)\ \"ghcr\.io/codewiresh/([a-z-]+)@\$\{HARBOR_REF##\*@\}\"$ \
+    && "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]] ||
+    fail "a support image scan reads something other than its GHCR copy by digest: $scan"
+done < <(grep -F 'scan-runtime-image-os.sh' <<<"$scan_job" | sed 's/^ *//')
+if grep -Eq '^    needs: .*scan-support-images' "$WORKFLOW"; then
+  fail 'a job waits for the report-only support image scan'
+fi
 
 # Harbor is the required publication; the GHCR mirror never gates delivery.
 for job_name in publish_job probe_job; do
