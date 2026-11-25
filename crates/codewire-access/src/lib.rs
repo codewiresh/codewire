@@ -6,6 +6,7 @@
 //! validates placement-local credential metadata, revisioned access profiles,
 //! and the derived grants consumed by a placement credential broker.
 
+mod binding;
 mod catalog;
 mod credential_name;
 mod credential_types;
@@ -18,7 +19,15 @@ mod placeholder;
 mod projected_placeholders;
 mod projection;
 mod refusal;
+mod secret_slot;
 
+pub use binding::{
+    BindingError, BoundHeader, BoundHost, DEFAULT_BASIC_USERNAME, DEFAULT_BOUND_HEADER,
+    DEFAULT_BOUND_SCHEME, HostBinding, MAX_BOUND_HEADERS, MAX_BOUND_HOSTS,
+    MAX_BOUND_HOSTS_PER_ENVIRONMENT, MAX_BOUND_VALUE_BYTES, MAX_PLACEHOLDER_PREFIX_LENGTH,
+    PlaceholderPrefix, Presentation, ReservedHosts, Scheme, change_moves_generation,
+    change_needs_value, is_provider_host,
+};
 pub use catalog::{
     CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
@@ -78,6 +87,7 @@ pub use projection::{
 pub use refusal::{
     REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider, Unforwarded, UpstreamFailure,
 };
+pub use secret_slot::{InvalidSecretSlot, SecretScope, SecretSlot};
 
 use thiserror::Error;
 
