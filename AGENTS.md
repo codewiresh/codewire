@@ -134,8 +134,12 @@ gate.
   merges on its required statuses green on its exact head, `CI / Required
   verification (pull_request)` and `Supply-chain scan / Supply-chain scan
   (pull_request_target)`, which branch protection enforces, plus its product
-  journey. Local evidence never replaces them. Each pull request merges alone,
-  never in a train. One that merges cleanly merges without a rebase (owner,
+  journey. Local evidence never replaces them. A review is needed only when
+  the pull request touches a path listed in `.forgejo/merge-queue-boundary`;
+  the queue then waits for an approval on the exact head. Other pull requests
+  by the queue's plain authors merge on green (owner, 2026-11-24, #6173).
+  Each pull request merges alone, never in a train. One that merges cleanly
+  merges without a rebase (owner,
   2026-10-21). On a conflict, bringing it up to date is judgment (owner,
   2026-10-27, #3013): merge `main` in when someone else works on or has
   reviewed the branch; rebase when it is yours alone; never force-push a branch
