@@ -54,9 +54,17 @@ fn tagged_policy(policy: &str) -> bool {
 }
 
 async fn serve(analytics: bool) -> (String, tokio::task::JoinHandle<()>) {
+    serve_docs(analytics, std::path::PathBuf::new()).await
+}
+
+async fn serve_docs(
+    analytics: bool,
+    docs_root: std::path::PathBuf,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let mut config = crate::test_support::unreachable_config();
+    config.docs_root = docs_root;
     if analytics {
         config.analytics = crate::analytics::parse(
             Some(ORIGIN.into()),
@@ -194,6 +202,119 @@ async fn public_pages_carry_the_tag_signed_out_and_the_homepage_for_everyone() {
         }
         assert!(!response.text().await.unwrap().contains(TRACKER), "{path}");
     }
+    server.abort();
+}
+
+/// A docs page as Zola builds it: the head states the page's own policy.
+const DOCS_PAGE: &str = "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'\">\n    <script src=\"/docs/docs.js\" defer></script>\n  </head>\n  <body><p>A policy may say connect-src 'self'.</p></body>\n</html>\n";
+const DOCS_REDIRECT: &str = "<!doctype html>\n<html>\n  <head>\n    <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\">\n    <meta http-equiv=\"refresh\" content=\"0; url=/docs\">\n  </head>\n  <body></body>\n</html>\n";
+
+/// A scratch docs root, removed by its exact name when dropped.
+struct DocsRoot(std::path::PathBuf);
+
+impl DocsRoot {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "codewire-docs-analytics-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("guide")).unwrap();
+        std::fs::create_dir(root.join("moved")).unwrap();
+        std::fs::write(root.join("index.html"), DOCS_PAGE).unwrap();
+        std::fs::write(root.join("guide/index.html"), DOCS_PAGE).unwrap();
+        std::fs::write(root.join("guide.md"), "connect-src 'self' </head>\n").unwrap();
+        std::fs::write(root.join("moved/index.html"), DOCS_REDIRECT).unwrap();
+        Self(root)
+    }
+}
+
+impl Drop for DocsRoot {
+    fn drop(&mut self) {
+        for file in [
+            "index.html",
+            "guide/index.html",
+            "guide.md",
+            "moved/index.html",
+        ] {
+            let _ = std::fs::remove_file(self.0.join(file));
+        }
+        for dir in ["guide", "moved", ""] {
+            let _ = std::fs::remove_dir(self.0.join(dir));
+        }
+    }
+}
+
+#[test]
+fn every_docs_page_head_holds_the_one_connection_the_tag_extends() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/docs/zola/templates/base.html");
+    let base = std::fs::read_to_string(base).unwrap();
+    let (head, _) = base.split_once("</head>").unwrap();
+    assert_eq!(head.matches("connect-src 'self'").count(), 1);
+    assert_eq!(base.matches("</head>").count(), 1);
+}
+
+#[tokio::test]
+async fn the_docs_carry_the_tag_for_every_visitor_and_their_own_policy_allows_it() {
+    let docs = DocsRoot::new();
+    let (origin, server) = serve_docs(true, docs.0.clone()).await;
+    let client = client();
+    let session = format!("{SESSION_COOKIE_NAME}=synthetic");
+    // A shared cache keeps one copy of each docs page, so a session changes
+    // nothing.
+    for path in ["/docs", "/docs/guide"] {
+        for cookie in [None, Some(session.as_str())] {
+            let mut request = client.get(format!("{origin}{path}"));
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(tagged_policy(&policy), "{path} {cookie:?}: {policy}");
+            assert!(policy.contains("script-src 'self';"), "{policy}");
+            let body = response.text().await.unwrap();
+            let (head, page) = body.split_once("</head>").unwrap();
+            assert!(head.contains(&format!("connect-src 'self' {ORIGIN}; object-src")));
+            assert!(head.find("/docs/docs.js").unwrap() < head.find(HOOK).unwrap());
+            assert!(head.find(HOOK).unwrap() < head.find(TRACKER).unwrap());
+            assert!(head.contains(&format!(r#"data-website-id="{WEBSITE}""#)));
+            assert!(page.contains("A policy may say connect-src 'self'.</p>"));
+        }
+    }
+    // A redirect page states no connection to extend, and a page's Markdown
+    // source isn't HTML: both are served as built.
+    for (path, built) in [
+        ("/docs/moved", DOCS_REDIRECT),
+        ("/docs/guide.md", "connect-src 'self' </head>\n"),
+    ] {
+        let response = client.get(format!("{origin}{path}")).send().await.unwrap();
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!tagged_policy(&policy), "{path}: {policy}");
+        assert_eq!(response.text().await.unwrap(), built, "{path}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn without_the_settings_the_docs_are_served_as_built() {
+    let docs = DocsRoot::new();
+    let (origin, server) = serve_docs(false, docs.0.clone()).await;
+    let response = client().get(format!("{origin}/docs")).send().await.unwrap();
+    let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(policy.contains("connect-src 'self';"), "{policy}");
+    assert_eq!(response.text().await.unwrap(), DOCS_PAGE);
     server.abort();
 }
 
