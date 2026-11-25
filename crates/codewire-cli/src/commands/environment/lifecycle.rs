@@ -4,9 +4,8 @@
 
 use super::*;
 use crate::commands::lifecycle_output::{
-    InterruptNotice, ResultBlock, bounded, credential_profile_name, credential_ref,
-    environment_command, exact_reference_id, next_shell_command, platform_location_label,
-    secret_refs, unless_interrupted,
+    Address, InterruptNotice, ResultBlock, bounded, credential_profile_name, credential_ref,
+    exact_reference_id, platform_location_label, secret_refs, unless_interrupted,
 };
 use crate::commands::progress::terminal_text;
 use crate::output::{
@@ -56,15 +55,17 @@ pub(crate) fn cloud_summary(
         environment.network_state.as_deref(),
         environment.network_failure.as_deref(),
     );
+    let host = environment.host.as_ref().map(|host| host.name.clone());
+    let address = Address::platform(host.as_deref());
     let next = match outcome {
-        Outcome::Creating => environment_command(VmLocation::Cloud, "info", &name),
-        _ => next_shell_command(VmLocation::Cloud, &name),
+        Outcome::Creating => address.command("info", &name),
+        _ => address.command("shell", &name),
     };
     LifecycleSummary {
         outcome,
         name,
         location: VmLocation::Cloud,
-        host: environment.host.as_ref().map(|host| host.name.clone()),
+        host,
         allocation: Allocation::cloud(
             environment.cpu_millicores,
             environment.memory_mb,
@@ -132,19 +133,22 @@ impl Default for StopWait {
 
 /// `cw stop` on a cloud environment: the request, then the wait until the
 /// platform reports `stopped`, so that a `cw start` straight after is accepted.
-/// An interrupt ends only the wait.
+/// An interrupt ends only the wait. `host` is the host it runs on, if any.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stop_cloud_environment<W: std::io::Write>(
     client: &EnvironmentClient,
     org_id: &str,
     environment_id: &str,
     name: &str,
+    host: Option<&str>,
     line: &mut StatusLine<W>,
     interruptible: bool,
     wait: StopWait,
 ) -> anyhow::Result<()> {
     let name = terminal_text(name);
     let name = name.as_str();
-    let interrupted = InterruptNotice::new(VmLocation::Cloud, "stop", name);
+    let address = Address::platform(host);
+    let interrupted = InterruptNotice::new(address, "stop", name);
     let Some(accepted) = Box::pin(tick_while(
         line,
         interruptible,
@@ -158,7 +162,7 @@ pub(crate) async fn stop_cloud_environment<W: std::io::Write>(
     let Some(stopped) = Box::pin(tick_while(
         line,
         interruptible,
-        await_stopped(client, org_id, environment_id, name, wait),
+        await_stopped(client, org_id, environment_id, name, address, wait),
     ))
     .await
     else {
@@ -177,6 +181,7 @@ async fn await_stopped(
     org_id: &str,
     environment_id: &str,
     name: &str,
+    address: Address,
     wait: StopWait,
 ) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + wait.timeout;
@@ -204,7 +209,7 @@ async fn await_stopped(
             anyhow::bail!(
                 "timed out after {} s waiting for {name} to stop ({last_seen}). The stop was requested and the platform carries on with it; check it with `{}`.",
                 wait.timeout.as_secs(),
-                environment_command(VmLocation::Cloud, "info", name)
+                address.command("info", name)
             );
         }
         tokio::time::sleep(interval.unwrap_or(wait.interval).min(deadline - now)).await;
@@ -243,7 +248,7 @@ fn stop_finished(environment: &Environment, name: &str) -> anyhow::Result<bool> 
 pub(crate) fn stop_result(name: &str, host: Option<&str>) -> ResultBlock {
     ResultBlock::new(Status::Done, format!("Environment {name} stopped"))
         .detail(platform_location_label(host))
-        .next(environment_command(VmLocation::Cloud, "start", name))
+        .next(Address::platform(host).command("start", name))
 }
 
 /// What a removal did, from one read after it.
@@ -287,6 +292,7 @@ impl CloudRemoval {
 
     pub(crate) fn result(&self, name: &str, host: Option<&str>) -> ResultBlock {
         let cloud = platform_location_label(host);
+        let address = Address::platform(host);
         match self {
             CloudRemoval::Removed => {
                 ResultBlock::new(Status::Done, format!("Environment {name} removed"))
@@ -308,20 +314,17 @@ impl CloudRemoval {
                 };
                 ResultBlock::new(Status::Done, format!("Deletion scheduled: {name}"))
                     .detail(detail)
-                    .next(format!(
-                        "Undo: {}",
-                        environment_command(VmLocation::Cloud, "cancel-delete", name)
-                    ))
+                    .next(format!("Undo: {}", address.command("cancel-delete", name)))
             }
             CloudRemoval::Removing { state } => {
                 ResultBlock::new(Status::Done, format!("Removal started: {name}"))
                     .detail(format!("{cloud} · state: {state}"))
-                    .next("cw --cloud ls")
+                    .next(format!("{} ls", address.cw()))
             }
             CloudRemoval::Unconfirmed => {
                 ResultBlock::new(Status::Done, format!("Removal requested: {name}"))
                     .detail(format!("{cloud} · state not confirmed"))
-                    .next("cw --cloud ls")
+                    .next(format!("{} ls", address.cw()))
             }
         }
     }
@@ -513,13 +516,27 @@ mod tests {
     fn a_host_environment_names_its_host_not_the_cloud() {
         assert_eq!(
             stop_result("app", Some("build-box")).render(PLAIN),
-            "✓ Environment app stopped\n  VM on host build-box\n\n→ cw --cloud start app\n"
+            "✓ Environment app stopped\n  VM on host build-box\n\n→ cw start app\n"
         );
         assert!(
             CloudRemoval::Removed
                 .result("app", Some("build-box"))
                 .render(PLAIN)
                 .contains("  VM on host build-box · environment disk removed\n")
+        );
+        assert_eq!(
+            CloudRemoval::Removing {
+                state: "destroying".into()
+            }
+            .result("app", Some("build-box"))
+            .render(PLAIN),
+            "✓ Removal started: app\n  VM on host build-box · state: destroying\n\n→ cw ls\n"
+        );
+        assert!(
+            CloudRemoval::Scheduled { until: None }
+                .result("app", Some("build-box"))
+                .render(PLAIN)
+                .ends_with("→ Undo: cw cancel-delete app\n")
         );
         let mut placed = environment();
         placed.host = Some(crate::presentation::EnvironmentHost {
@@ -530,6 +547,10 @@ mod tests {
             cloud_summary(&placed, Outcome::Started, &SourceNames::default()).render(PLAIN);
         assert!(header.contains(" · VM on host build-box\n"), "{header}");
         assert!(!header.contains("cloud VM"), "{header}");
+        assert!(header.ends_with("→ cw shell app\n"), "{header}");
+        let creating =
+            cloud_summary(&placed, Outcome::Creating, &SourceNames::default()).render(PLAIN);
+        assert!(!creating.contains("--cloud"), "{creating}");
     }
 
     #[test]
@@ -979,6 +1000,7 @@ mod tests {
                 "org_demo",
                 "env_demo",
                 "app",
+                None,
                 &mut line,
                 false,
                 wait,

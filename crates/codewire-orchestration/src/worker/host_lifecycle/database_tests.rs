@@ -217,6 +217,35 @@ async fn earlier_create(db: &TestDatabase, host_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// How many `complete` rows the environment's log has: what `cw create` and
+/// `cw start` wait for.
+async fn completions(db: &TestDatabase) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM environment_logs WHERE environment_id = $1 AND phase = 'complete'",
+    )
+    .bind(ENVIRONMENT)
+    .fetch_one(&db.pool)
+    .await?)
+}
+
+/// Whether the environment's read and session admission both say it has
+/// no setup left to wait for.
+async fn set_up(db: &TestDatabase) -> Result<bool> {
+    let row = sqlx::query(&format!(
+        "SELECT {} FROM environments e {} WHERE e.id = $1",
+        crate::api::environments::ENV_SELECT_COLS,
+        crate::api::environments::ENV_SELECT_JOINS
+    ))
+    .bind(ENVIRONMENT)
+    .fetch_one(&db.pool)
+    .await?;
+    let read = crate::api::environments::scan_environment(&row)?.setup_complete;
+    let admitted =
+        crate::api::environment_daemon::setup_admits_sessions(&db.pool, ENVIRONMENT).await?;
+    ensure!(read == admitted, "read {read}, admission {admitted}");
+    Ok(read)
+}
+
 async fn operations(db: &TestDatabase) -> Result<i64> {
     Ok(sqlx::query_scalar("SELECT count(*) FROM host_operations")
         .fetch_one(&db.pool)
@@ -278,6 +307,48 @@ async fn db_a_host_create_runs_once_the_host_reports_the_vm_running() -> Result<
             .ok_or_else(|| anyhow::anyhow!("the VM was not recorded"))?;
         ensure!(observed.local_environment_id.to_string() == VM);
         ensure!(observed.generation == 1 && observed.state == HostEnvironmentState::Running);
+        // `cw create` ends on the `complete` row, and a session opens at once.
+        ensure!(completions(&db).await? == 1);
+        ensure!(set_up(&db).await?, "a host environment waits for setup");
+        // Nothing on the host would apply a platform policy, so none is
+        // selected after create either.
+        sqlx::query(
+            "INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(ORGANIZATION)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        let user = codewire_server_core::auth::AuthUser {
+            user_id: CREATOR.into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let refused = crate::api::network_policies::select_for_environment(
+            &db.pool,
+            &user,
+            ORGANIZATION,
+            ENVIRONMENT,
+            "locked",
+        )
+        .await;
+        ensure!(
+            matches!(
+                &refused,
+                Err(codewire_server_core::AppError::Coded { code, .. })
+                    if *code == "host_network_policy_unsupported"
+            ),
+            "{refused:?}"
+        );
+        let selections: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM platform_environment_network_policies WHERE environment_id = $1",
+        )
+        .bind(ENVIRONMENT)
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(selections == 0, "{selections} selections");
         Ok(())
     }
     .await;
@@ -306,6 +377,14 @@ async fn db_a_retried_create_after_the_environment_ran_sends_nothing_new_and_sta
         create(&db.pool, &authority, &scope(10)).await?;
         let operations = operations(&db).await?;
         ensure!(operations == 1, "{operations} operations");
+        ensure!(completions(&db).await? == 1, "a retry wrote a second row");
+        // An attempt that ended running before its row: the retry writes it.
+        sqlx::query("DELETE FROM environment_logs WHERE environment_id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        create(&db.pool, &authority, &scope(10)).await?;
+        ensure!(completions(&db).await? == 1, "the retry wrote no row");
         ensure!(state(&db).await? == ("running".into(), None));
         Ok(())
     }
@@ -435,6 +514,9 @@ async fn db_stop_start_and_destroy_each_name_the_vm_the_host_last_reported_once(
             );
             let (now, reason) = state(&db).await?;
             ensure!(now == ends, "{change:?} left {now} ({reason:?})");
+            // Only a start ends on a `complete` row, after create's, and a
+            // retry of it writes no second one.
+            let wanted = if change == Change::Stop { 1 } else { 2 };
             // Temporal retries it after it finished: nothing new is sent.
             super::change(&db.pool, &authority, &scope, change).await?;
             let operations = operations(&db).await?;
@@ -443,6 +525,11 @@ async fn db_stop_start_and_destroy_each_name_the_vm_the_host_last_reported_once(
                 "{change:?} retried: {operations} operations"
             );
             ensure!(state(&db).await?.0 == ends, "{change:?} retried");
+            let completions = completions(&db).await?;
+            ensure!(
+                completions == wanted,
+                "{change:?}: {completions} complete rows"
+            );
         }
         let cleaned: bool = sqlx::query_scalar(
             "SELECT external_cleanup_completed_at IS NOT NULL FROM environments WHERE id = $1",

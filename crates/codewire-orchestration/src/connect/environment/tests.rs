@@ -650,6 +650,22 @@ fn the_network_policy_shows_only_while_platform_policies_are_on() {
         );
         assert_eq!(policy.enforcement.as_known(), Some(expected));
     }
+    // An environment on a host has no platform policy: its host's own
+    // network applies (#6397).
+    environment.host = Some(crate::api::environments::EnvironmentHost {
+        id: "00000000-0000-4000-8000-000000000002".into(),
+        name: "build-box".into(),
+    });
+    let on_host = proto_environment(
+        environment,
+        NetworkPolicyFlags {
+            enabled: true,
+            hosted_egress: true,
+        },
+        Default::default(),
+    )
+    .unwrap();
+    assert!(on_host.network_policy.as_option().is_none());
 }
 
 fn test_environment(state: &str, setup_complete: bool) -> Environment {

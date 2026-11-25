@@ -77,13 +77,7 @@ where
                 // before polling the mutating RPC. A running Pod may still be
                 // replaced by its setup owner. Stop remains available then.
                 if acknowledgement.requires_setup_ready() {
-                    let setup = sqlx::query_as::<_, SetupAdmission>(
-                        "SELECT COALESCE(setup_complete, false) AS complete, \
-                                setup_owner_status AS owner, setup_error AS error \
-                           FROM sandbox_environment_backend WHERE environment_id = $1",
-                    )
-                    .bind(&environment_id)
-                    .fetch_optional(&pool);
+                    let setup = read_setup_admission(&pool, &environment_id);
                     check_setup_readiness(setup, SETUP_READINESS_TIMEOUT).await?;
                 }
                 let record = dispatch.await.map_err(classify_dispatch_error)?;
@@ -97,6 +91,36 @@ where
     })
     .await
     .map_err(|_| uncertain_outcome())?
+}
+
+/// Reads the environment's setup for session admission: its Sandbox's, or
+/// none to wait for on a host, which has no Sandbox and nothing to set up
+/// (#6397). `None` when the environment has neither.
+async fn read_setup_admission(
+    pool: &PgPool,
+    environment_id: &str,
+) -> Result<Option<SetupAdmission>, sqlx::Error> {
+    sqlx::query_as::<_, SetupAdmission>(
+        "SELECT COALESCE(b.setup_complete, e.runtime_backend = 'host') AS complete, \
+                b.setup_owner_status AS owner, b.setup_error AS error \
+           FROM environments e \
+           LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id \
+          WHERE e.id = $1 AND (b.environment_id IS NOT NULL OR e.runtime_backend = 'host')",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Whether session admission opens a session in `environment_id` now.
+#[cfg(test)]
+pub(crate) async fn setup_admits_sessions(
+    pool: &PgPool,
+    environment_id: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(read_setup_admission(pool, environment_id)
+        .await?
+        .is_some_and(|setup| setup.admits_sessions()))
 }
 
 /// What session admission reads about the Sandbox's setup (#4767).

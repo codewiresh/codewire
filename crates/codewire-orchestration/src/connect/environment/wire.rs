@@ -8,10 +8,12 @@ pub(super) fn proto_environment(
     network_policies: NetworkPolicyFlags,
     idle_stop: crate::worker::idle_stop::IdleStop,
 ) -> AppResult<proto::Environment> {
-    // Unset while the deployment's platform network policies are off (#4000).
+    // Unset while the deployment's platform network policies are off (#4000),
+    // and on a host, whose own network applies (#6397).
+    let on_host = environment.host.is_some();
     let network_policy = environment
         .network_policy
-        .filter(|_| network_policies.enabled)
+        .filter(|_| network_policies.enabled && !on_host)
         .map(|policy| {
             super::super::network_policies::proto_environment_policy(
                 policy,

@@ -1,6 +1,7 @@
 //! `cw create` in the cloud.
 
 use super::*;
+use crate::commands::lifecycle_output::Address;
 
 /// `cw create` in the cloud.
 /// It lists organizations only if it needs one before it asks (#3747).
@@ -121,6 +122,8 @@ pub(super) async fn handle_platform_env_create(
         OutputFormat::Text if args.follow && !args.no_wait => {
             let caps = super::super::lifecycle_output::capabilities(args.output);
             let summary = lifecycle::cloud_summary(&environment, Outcome::Created, &names);
+            let address = Address::platform(summary.host.as_deref());
+            let interrupted = InterruptNotice::new(address, "creation", &summary.name);
             super::super::lifecycle_output::print_context(&summary, &caps);
             // The platform holds the environment from here on: an
             // interrupt ends only the wait for its setup.
@@ -137,9 +140,7 @@ pub(super) async fn handle_platform_env_create(
                 ),
             ))
             .await
-            .ok_or_else(|| {
-                InterruptNotice::new(VmLocation::Cloud, "creation", &summary.name).error(true)
-            })??;
+            .ok_or_else(|| interrupted.error(true))??;
             print_with_withheld(summary, &withheld, &caps);
         }
         OutputFormat::Text => {

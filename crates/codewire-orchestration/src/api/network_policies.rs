@@ -902,8 +902,8 @@ pub async fn select_for_environment(
 ) -> AppResult<EnvironmentPolicyView> {
     member_role(pool, user, org_id).await?;
     let mut tx = pool.begin().await?;
-    let environment: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM environments \
+    let backend: Option<String> = sqlx::query_scalar(
+        "SELECT runtime_backend FROM environments \
          WHERE id = $1 AND created_by = $2 AND org_id = $3 AND type = 'sandbox' \
            AND deletion_requested_at IS NULL AND desired_state <> 'destroyed' \
            AND state NOT IN ('destroyed', 'destroying') FOR UPDATE",
@@ -913,12 +913,17 @@ pub async fn select_for_environment(
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if environment.is_none() {
-        return Err(coded(
-            StatusCode::NOT_FOUND,
-            "environment_not_found",
-            "environment not found",
-        ));
+    match backend.as_deref() {
+        None => {
+            return Err(coded(
+                StatusCode::NOT_FOUND,
+                "environment_not_found",
+                "environment not found",
+            ));
+        }
+        // Nothing on a host would apply it (#6397).
+        Some("host") => return Err(super::host_placement::network_policy_unsupported()),
+        Some(_) => {}
     }
     select_in(&mut tx, org_id, environment_id, reference).await?;
     let view = environment_policy_in(&mut tx, environment_id).await?;

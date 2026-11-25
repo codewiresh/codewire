@@ -1,7 +1,7 @@
 //! `cw stop` and `cw start` on a cloud environment.
 
 use super::*;
-use crate::commands::lifecycle_output::{Already, already_line};
+use crate::commands::lifecycle_output::{Address, Already, already_line};
 
 /// `cw stop ENV` in the cloud: the stop, the wait until it is stopped, and
 /// the result.
@@ -29,6 +29,7 @@ pub(super) async fn stop(
         org_id,
         &environment_id,
         &name,
+        shown.host.as_deref(),
         &mut line,
         !caps.is_machine(),
         super::lifecycle::StopWait::default(),
@@ -110,7 +111,11 @@ pub(super) async fn start(
             &environment_id,
             began,
             &caps,
-            &InterruptNotice::new(VmLocation::Cloud, "start", &summary.name),
+            &InterruptNotice::new(
+                Address::platform(summary.host.as_deref()),
+                "start",
+                &summary.name,
+            ),
         ))
         .await?;
         crate::commands::lifecycle_output::print_summary(&summary, &caps);

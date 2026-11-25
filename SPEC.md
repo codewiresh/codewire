@@ -1118,8 +1118,10 @@ lifecycle on a host has not been observed working yet
   starts with an empty workspace on the host's own runtime image: another
   image, repositories, application secrets, a credential profile, a Mesh
   network, a network policy, a hosted snapshot and the confidential tier are
-  each refused by name. It counts toward the organization's environment
-  limits and takes no credit and no platform CPU or memory.
+  each refused by name. The host's own network applies: a host environment
+  carries no platform network policy, and selecting one later is refused as
+  at create. It counts toward the organization's environment limits and
+  takes no credit and no platform CPU or memory.
 - **Lifecycle on a host.** The environment's row names its backend
   (`environments.runtime_backend` is `host`), and the one lifecycle workflow
   runs each step on the host instead of the cluster. A step is one operation
@@ -1129,7 +1131,10 @@ lifecycle on a host has not been observed working yet
   its first result and never makes a second VM. A step waits at most 25
   minutes for the host's answer, then the environment is in error saying the
   host didn't answer. A host's own failure message is shown as one bounded
-  line. Resize is refused for now.
+  line. A create or start that leaves the VM running writes the
+  environment's `complete` log row, once per command, as the cluster's setup
+  and start do; with nothing to set up, a host environment's setup reads
+  complete and sessions open at once. Resize is refused for now.
 - **Running the agent.** `cw host service install` keeps it running as a user
   service: systemd `--user` on Linux, a LaunchAgent on macOS. On Linux it
   names `loginctl enable-linger` when linger is off, which keeps the agent

@@ -50,6 +50,16 @@ pub(crate) struct HostRequest<'a> {
     pub disk_gib: i32,
 }
 
+/// Why an environment on a host can't select a platform network policy, at
+/// create or after.
+pub(crate) fn network_policy_unsupported() -> codewire_server_core::AppError {
+    coded(
+        StatusCode::BAD_REQUEST,
+        "host_network_policy_unsupported",
+        "environments on a host can't select a network policy yet; the host's own network applies",
+    )
+}
+
 /// What a host create can't have yet, named. Checked before any read.
 pub(crate) fn refuse_unsupported(request: &HostRequest<'_>) -> AppResult<()> {
     let unsupported = |code: &'static str, detail: &'static str| {
@@ -88,10 +98,7 @@ pub(crate) fn refuse_unsupported(request: &HostRequest<'_>) -> AppResult<()> {
         );
     }
     if request.network_policy {
-        return unsupported(
-            "host_network_policy_unsupported",
-            "environments on a host can't select a network policy yet; the host's own network applies",
-        );
+        return Err(network_policy_unsupported());
     }
     if request.source_snapshot {
         return unsupported(

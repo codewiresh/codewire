@@ -41,6 +41,45 @@ pub(crate) fn placement_flag(location: VmLocation) -> &'static str {
     }
 }
 
+/// How a next step addresses an environment: with its placement's flag, or,
+/// for a platform environment on an enrolled host, with none, since
+/// `--cloud` would misname it (#6397). Without a flag `cw` looks the name up
+/// in both placements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Address {
+    Placement(VmLocation),
+    OnHost,
+}
+
+impl Address {
+    /// A platform environment's address: on its host, or in the cloud.
+    pub(crate) fn platform(host: Option<&str>) -> Self {
+        match host {
+            Some(_) => Self::OnHost,
+            None => Self::Placement(VmLocation::Cloud),
+        }
+    }
+
+    /// `cw`, with the placement's flag when it has one.
+    pub(crate) fn cw(self) -> String {
+        match self {
+            Self::Placement(location) => format!("cw {}", placement_flag(location)),
+            Self::OnHost => "cw".to_owned(),
+        }
+    }
+
+    /// A command that names the environment, such as `cw --local start app`.
+    pub(crate) fn command(self, command: &str, name: &str) -> String {
+        format!("{} {command} {name}", self.cw())
+    }
+}
+
+impl From<VmLocation> for Address {
+    fn from(location: VmLocation) -> Self {
+        Self::Placement(location)
+    }
+}
+
 /// The next step after an environment is ready: a shell in it, a real
 /// command to type as it stands.
 pub(crate) fn next_shell_command(location: VmLocation, name: &str) -> String {
@@ -49,7 +88,7 @@ pub(crate) fn next_shell_command(location: VmLocation, name: &str) -> String {
 
 /// A command that names the environment, such as `cw --local start app`.
 pub(crate) fn environment_command(location: VmLocation, command: &str, name: &str) -> String {
-    format!("cw {} {command} {name}", placement_flag(location))
+    Address::from(location).command(command, name)
 }
 
 /// That no cloud environment is named `target_ref`, and the command that
@@ -370,16 +409,14 @@ pub(crate) struct InterruptNotice {
 impl InterruptNotice {
     /// `operation` names it as a noun: `creation`, `start`, `restart`,
     /// `stop`, `removal` or `setup retry`.
-    pub(crate) fn new(location: VmLocation, operation: &'static str, name: &str) -> Self {
+    pub(crate) fn new(address: impl Into<Address>, operation: &'static str, name: &str) -> Self {
+        let address = address.into();
         let name = terminal_text(name);
         let check = match operation {
-            "removal" => format!("cw {} ls", placement_flag(location)),
+            "removal" => format!("{} ls", address.cw()),
             // `cw info` doesn't show setup; its log does.
-            "setup retry" => format!(
-                "{} --setup --follow",
-                environment_command(location, "logs", &name)
-            ),
-            _ => environment_command(location, "info", &name),
+            "setup retry" => format!("{} --setup --follow", address.command("logs", &name)),
+            _ => address.command("info", &name),
         };
         Self {
             operation,
@@ -539,6 +576,12 @@ mod tests {
             .context("create environment");
         assert_eq!(interrupted_exit_code(&wrapped), Some(130));
         assert_eq!(interrupted_exit_code(&anyhow::anyhow!("other")), None);
+        assert_eq!(
+            InterruptNotice::new(Address::OnHost, "creation", "app")
+                .error(true)
+                .to_string(),
+            "Interrupted. The creation of app continues in the background; check it with `cw info app`."
+        );
         let hostile = InterruptNotice::new(VmLocation::Local, "start", "app\x1b[2J").error(true);
         assert!(!hostile.to_string().contains('\x1b'));
     }

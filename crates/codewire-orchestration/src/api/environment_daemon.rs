@@ -56,6 +56,8 @@ pub(crate) use app_ports::push_environment_app_ports;
 use app_ports::send_app_ports;
 pub(crate) use desktop::environment_desktop_daemon_core;
 use session_client::session_client_for_target;
+#[cfg(test)]
+pub(crate) use session_mutation::setup_admits_sessions;
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);

@@ -203,12 +203,14 @@ async fn create_until(
     let svc = Service::<PgLifecycleStore>::for_activity(pool.clone(), authority.clone());
     authority.ensure().await?;
     let env = super::env_data::load_environment(pool, env_id).await?;
-    // A retry of a create that already ran has nothing left to do, as the
-    // cluster's create ends `Done` on a running environment.
-    if super::create::create_command_cancelled(&env.state, &env.desired_state)
-        || env.state == "running"
-    {
+    // A retry of a create that already ran has nothing left to do but the
+    // row its attempt may not have written, as the cluster's create ends
+    // `Done` on a running environment.
+    if super::create::create_command_cancelled(&env.state, &env.desired_state) {
         return Ok(());
+    }
+    if env.state == "running" {
+        return announce_running(authority).await;
     }
     let host_id: String = sqlx::query_scalar(
         "SELECT host_id FROM environments WHERE id = $1 AND runtime_backend = 'host' \
@@ -253,6 +255,7 @@ async fn create_until(
             if state == proto::HostEnvironmentState::HOST_ENVIRONMENT_STATE_RUNNING {
                 svc.transition(env_id, "creating", "running").await?;
                 svc.mark_started(env_id).await?;
+                announce_running(authority).await?;
             } else {
                 // A create satisfied by a VM made earlier may find it
                 // stopped; it is never reported as running (#4640).
@@ -270,6 +273,40 @@ async fn create_until(
         Finish::Refused(reason) => svc.mark_error(env_id, &reason).await?,
         Finish::Unanswered => unanswered(pool, &svc, env_id, &operation_id).await?,
     }
+    Ok(())
+}
+
+/// Writes the `complete` row that `cw create` and `cw start` wait for, as the
+/// cluster's setup and start do once the environment is usable (#6397). A
+/// host environment has nothing to set up: its host refuses a project that
+/// names repositories, credentials, secrets or skills. One row per command,
+/// so a retry whose attempt before ended without it writes it, and no other.
+async fn announce_running(authority: &ActivityAuthority) -> anyhow::Result<()> {
+    let generation = authority.operation_generation();
+    let mut tx = authority.pool().begin().await?;
+    authority
+        .lock_transaction_for_states(&mut tx, &["running"])
+        .await?;
+    let announced: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM environment_logs WHERE environment_id = $1 \
+         AND phase = 'complete' AND metadata->'operation_generation' = to_jsonb($2::bigint))",
+    )
+    .bind(authority.environment_id())
+    .bind(generation)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !announced {
+        super::env_log::emit_environment_log_in_transaction(
+            &mut tx,
+            authority.environment_id(),
+            "complete",
+            "completed",
+            "Running on its host",
+            Some(serde_json::json!({ "operation_generation": generation })),
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -352,6 +389,9 @@ async fn change_until(
         Change::Destroy => svc.prepare_destroy(&snapshot).await?,
     };
     if !proceed {
+        if change == Change::Start && env.state == "running" {
+            return announce_running(authority).await;
+        }
         return Ok(());
     }
     let proof = if change == Change::Destroy {
@@ -448,7 +488,8 @@ async fn change_until(
     match (change, state) {
         (Change::Start, Vm::HOST_ENVIRONMENT_STATE_RUNNING) => {
             svc.complete_start(env_id).await?;
-            svc.mark_started(env_id).await
+            svc.mark_started(env_id).await?;
+            announce_running(authority).await
         }
         (Change::Stop, Vm::HOST_ENVIRONMENT_STATE_STOPPED) => {
             svc.complete_stop(env_id).await?;

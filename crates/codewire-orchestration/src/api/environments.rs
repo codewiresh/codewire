@@ -171,7 +171,9 @@ pub(crate) fn compute_preview_url(
 }
 
 /// Mirrors `envSelectCols` (environment_db.go) — columns only, so the
-/// create handler's `WITH ins AS (...)` CTE can reuse them.
+/// create handler's `WITH ins AS (...)` CTE can reuse them. An environment on
+/// a host has no Sandbox row and nothing to set up, so its setup reads
+/// complete (#6397).
 pub(crate) const ENV_SELECT_COLS: &str = concat!(
     r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
     e.state, e.desired_state, e.error_reason, e.error_code, e.stop_reason,
@@ -181,7 +183,8 @@ pub(crate) const ENV_SELECT_COLS: &str = concat!(
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
                        'credentials',e.project_spec->'credentials') AS source_spec,
     ab.profile_id AS source_profile_id, ab.profile_revision AS source_profile_revision,
-    COALESCE(b.setup_phase, 0) AS setup_phase, COALESCE(b.setup_complete, false) AS setup_complete,
+    COALESCE(b.setup_phase, 0) AS setup_phase,
+    COALESCE(b.setup_complete, e.runtime_backend = 'host') AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
     e.ttl_seconds, e.shutdown_at, e.idle_stop_seconds,
     e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier,
