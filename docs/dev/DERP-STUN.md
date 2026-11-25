@@ -27,8 +27,9 @@ replica holding a connection, the replica keeps it until its drain deadline,
 restarting; connect again". The SSH connection lives in that replica and
 cannot move, so the session ends there, and `cw shell --stdio` prints
 `the connection ended: server restarting; connect again` before OpenSSH's own
-disconnect. A revoked credential closes with 1008, "access revoked", printed
-the same way (#6100, #3586).
+disconnect. A revoked credential closes with 1008, "access revoked", and a
+removal from the Sandbox's organization with 1008, "membership ended", printed
+the same way (#6100, #3586, #6407).
 
 An SSH connection over `cw shell --stdio` does not survive a network cut of
 about a minute, on any path. The workspace SSH server drops a client after

@@ -299,18 +299,21 @@
       tab.inputTimer = null;
       tab.stagedInput = null;
     }
-    // A refusal no retry can change (#3586): no Retry and no reconnect.
+    // Refusals no retry can change (#3586): no Retry and no reconnect. Signing
+    // in again can't restore a membership, so its line doesn't ask (#6407).
     const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
+    const membershipEnded = "You're no longer a member of this organization.";
     // However the page learns of it (Refresh sessions, a reconnect's check or a
     // return to the page), every open terminal says so and stops. As for a
     // revoked tab, nothing later replaces that line or offers Reconnect, which
     // could not succeed (#5944).
-    function organizationDeleted() {
+    function endAll(line) {
       for (const tab of tabs.values()) {
-        tab.organizationDeleting = true;
+        tab.ended = line;
         detach(tab);
       }
     }
+    const organizationDeleted = () => endAll(organizationDeleting);
     // Once the server revoked a tab's access, nothing later on the page, such
     // as the status feed failing with the same sign-in, replaces that line or
     // offers Reconnect: the page moves to sign-in instead (#5943).
@@ -333,11 +336,11 @@
       tab.queuedBytes = 0;
       discardInput(tab);
       if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) socket.close(1000, "browser detached");
-      tab.toggle.hidden = tab.revoked === true || tab.organizationDeleting === true;
+      tab.toggle.hidden = tab.revoked === true || tab.ended !== undefined;
       tab.root.dataset.terminalSettled = String(tab.pendingFrames === 0);
       tab.presentation.terminal.options.disableStdin = true;
       if (tab.revoked) connectionText(tab, accessRevoked, "warning");
-      else if (tab.organizationDeleting) connectionText(tab, organizationDeleting, "warning");
+      else if (tab.ended) connectionText(tab, tab.ended, "warning");
       else connectionText(tab, text, tone);
     }
     // Transport loss is not a decision to stop. Re-attach the same wanted
@@ -623,7 +626,8 @@
           // change, every open terminal says so and stops.
           organizationDeleted();
           announce(organizationDeleting);
-        } else lose(tab, "Disconnected.");
+        } else if (event.code === 1008 && event.reason === "membership ended") endAll(membershipEnded);
+        else lose(tab, "Disconnected.");
       });
     }
     // Every third automatic attempt re-reads the inventory for this tab only,
@@ -1206,7 +1210,7 @@
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
-        if (tab.revoked || tab.organizationDeleting) continue;
+        if (tab.revoked || tab.ended) continue;
         // Readiness loss pauses the transport without withdrawing intent. An
         // unknown status leaves an open terminal attached; a tab without a
         // socket says why it waits.

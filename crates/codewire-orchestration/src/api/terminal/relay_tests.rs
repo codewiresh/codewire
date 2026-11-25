@@ -780,34 +780,42 @@ async fn a_revocation_closes_the_browser_drops_input_and_waits_for_the_exit() {
 }
 
 /// #3586: the organization's deletion closes a one-off terminal with its own
-/// reason, so the page shows the organization line.
+/// reason, so the page shows the organization line, and a lost membership
+/// says so (#6407), so the page doesn't send its member to sign in.
 #[tokio::test]
-async fn the_deletion_closes_the_browser_saying_the_organization_is_being_deleted() {
-    let daemon = daemon();
-    let (_browser, mut input, mut output, probe) = browser();
-    let relay = tokio::spawn(async move {
-        relay_terminal_until(
-            &mut output,
-            &mut input,
-            async { Ok(daemon.session) },
-            limits(),
-            async { TerminalEnd::Revoked(Revocation::Organization) },
-        )
+async fn a_deletion_or_a_lost_membership_closes_the_browser_saying_which() {
+    for (revocation, reason) in [
+        (
+            Revocation::Organization,
+            codewire_server_core::org::ORGANIZATION_DELETING,
+        ),
+        (Revocation::Membership, "membership ended"),
+    ] {
+        let daemon = daemon();
+        let (_browser, mut input, mut output, probe) = browser();
+        let relay = tokio::spawn(async move {
+            relay_terminal_until(
+                &mut output,
+                &mut input,
+                async { Ok(daemon.session) },
+                limits(),
+                async move { TerminalEnd::Revoked(revocation) },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while probe.close_codes().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-    });
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while probe.close_codes().is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the browser was closed");
-    assert!(matches!(
-        &probe.state.lock().unwrap().sent[..],
-        [Message::Close(Some(frame))]
-            if frame.code == 1008 && frame.reason == codewire_server_core::org::ORGANIZATION_DELETING
-    ));
-    relay.abort();
+        .expect("the browser was closed");
+        assert!(matches!(
+            &probe.state.lock().unwrap().sent[..],
+            [Message::Close(Some(frame))] if frame.code == 1008 && frame.reason == reason
+        ));
+        relay.abort();
+    }
 }
 
 /// #4459: the drain deadline ends a one-off terminal the way a revocation

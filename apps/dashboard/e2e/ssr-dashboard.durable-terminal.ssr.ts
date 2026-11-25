@@ -2180,6 +2180,27 @@ test("a terminal whose access is revoked says so and offers no Reconnect", async
   expect(state.connections).toHaveLength(1);
 });
 
+// A member removed from the organization, or one who left it, can't sign in
+// back to it, so the line says what happened and doesn't ask (#6407).
+test("a terminal whose member left the organization says so, asks no sign-in and offers no Reconnect", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.connections[0].route.close({ code: 1008, reason: "membership ended" });
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("You're no longer a member of this organization.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  await page.evaluate((detail) => {
+    document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail }));
+  }, { environmentId: environment, available: true, running: true, setupComplete: true });
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("You're no longer a member of this organization.");
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+});
+
 // The same sign-out fails the page's status feed a moment later. The revoked
 // line stays, with no Reconnect, until the page moves to sign-in (#5943).
 test("a revoked terminal keeps its line when the Sandbox status then fails or returns", async ({ page }) => {

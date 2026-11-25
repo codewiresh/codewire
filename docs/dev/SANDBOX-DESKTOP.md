@@ -459,8 +459,8 @@ An open stream ends when:
 It closes with 1000 when the viewer left, 1012 on a drain and 1008
 otherwise, with a reason the page shows: the desktop ended or is not
 running, the viewer limit, a stall, a frame that is not desktop bytes, a
-Sandbox too old for the stream or one that could not be reached, or access
-revoked. It writes the `stream.revoked` audit event when the fence ended
+Sandbox too old for the stream or one that could not be reached, access
+revoked, or membership ended. It writes the `stream.revoked` audit event when the fence ended
 it. Removing its user from the organization, or the organization's deletion
 starting, ends it the same way ([AUTH-POLICY.md](AUTH-POLICY.md)).
 

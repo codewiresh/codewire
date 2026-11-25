@@ -88,6 +88,10 @@ fn each_end_closes_with_its_code_and_a_reason() {
         (1008, "access revoked".to_owned())
     );
     assert_eq!(
+        close(End::Revoked(Revocation::Membership)),
+        (1008, "membership ended".to_owned())
+    );
+    assert_eq!(
         close(End::Revoked(Revocation::Organization)),
         (1008, "organization is being deleted".to_owned())
     );

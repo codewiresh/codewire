@@ -30,7 +30,7 @@ use super::ApiState;
 use super::environment_daemon::environment_daemon_bridge_client_core;
 use super::prepare::plain_error;
 use super::proxy::resolve_running_sandbox_target;
-use super::socket_fence::{SocketAdmission, SocketRevoked, site};
+use super::socket_fence::{SocketAdmission, SocketRevoked, revoked_reason, site};
 use super::socket_keepalive::{ping, pings};
 use crate::runtime::{ClaimReadiness, Placement, RuntimeDriver};
 use codewire_server_core::revocation::Revocation;
@@ -785,10 +785,7 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
                     TerminalEnd::Natural => (1000, "session ended"),
                     TerminalEnd::InputLimit => (1009, "terminal input limit exceeded"),
                     TerminalEnd::ServerRestart => (1012, "server restarting"),
-                    TerminalEnd::Revoked(Revocation::Organization) => {
-                        (1008, codewire_server_core::org::ORGANIZATION_DELETING)
-                    }
-                    TerminalEnd::Revoked(_) => (1008, "access revoked"),
+                    TerminalEnd::Revoked(revocation) => (1008, revoked_reason(revocation)),
                     _ => (1011, "terminal unavailable"),
                 };
                 let _ = browser_output

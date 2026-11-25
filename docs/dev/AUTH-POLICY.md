@@ -628,7 +628,10 @@ The database records each loss in `credential_revocations`:
   `unavailable`.
 
 A revoked Connect stream ends with `permission_denied`, "access revoked". A
-WebSocket closes with code 1008, "access revoked". A stream the `organization`
+WebSocket closes with code 1008, "access revoked", or with 1008, "membership
+ended", when the `membership` kind ended it: signing in again can't restore a
+membership, so the dashboard's terminal says its user is no longer a member
+instead of asking them to sign in (#6407). A stream the `organization`
 kind ends says why as a new stream's refusal does: a Connect stream ends with
 the same error, "organization is being deleted", and a WebSocket closes with
 1008 and that reason, so the dashboard's terminal shows its organization line

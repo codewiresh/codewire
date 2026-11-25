@@ -1,9 +1,10 @@
 //! The dashboard's terminal and the SSH proxy's WebSocket on the revocation
 //! fence (#3586; `docs/dev/AUTH-POLICY.md`, "Account access revocation"): a
 //! socket is admitted by the credential its handshake carried, and closes
-//! with 1008, "access revoked", when that credential or its user's membership
-//! of the environment's organization is lost, or with 1008, "organization is
-//! being deleted", when that organization's deletion starts.
+//! with 1008, "access revoked", when that credential is lost, with 1008,
+//! "membership ended", when its user leaves the environment's organization or
+//! is removed from it, or with 1008, "organization is being deleted", when
+//! that organization's deletion starts.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,30 +18,24 @@ use codewire_server_core::revocation::{
 };
 use sqlx::PgPool;
 
-/// The close a revoked socket sends.
-pub(crate) fn access_revoked_close() -> Message {
-    Message::Close(Some(CloseFrame {
-        code: 1008,
-        reason: "access revoked".into(),
-    }))
-}
-
-/// The close a socket sends when its organization's deletion starts: the
-/// reason a new socket's refusal gives, so the page shows its organization
-/// line.
-pub(crate) fn organization_deleting_close() -> Message {
-    Message::Close(Some(CloseFrame {
-        code: 1008,
-        reason: codewire_server_core::org::ORGANIZATION_DELETING.into(),
-    }))
+/// Why a socket that ended on `revocation` closed, so the page can say what
+/// to do: signing in again restores a lost credential, but not a membership
+/// (#6407); a deletion gives the reason a new socket's refusal gives, so the
+/// page shows its organization line.
+pub(crate) fn revoked_reason(revocation: Revocation) -> &'static str {
+    match revocation {
+        Revocation::Membership => "membership ended",
+        Revocation::Organization => codewire_server_core::org::ORGANIZATION_DELETING,
+        _ => "access revoked",
+    }
 }
 
 /// The close for a socket that ended on `revocation`.
 pub(crate) fn revoked_close(revocation: Revocation) -> Message {
-    match revocation {
-        Revocation::Organization => organization_deleting_close(),
-        _ => access_revoked_close(),
-    }
+    Message::Close(Some(CloseFrame {
+        code: 1008,
+        reason: revoked_reason(revocation).into(),
+    }))
 }
 
 /// The user a socket's handshake admitted, the credential that admitted it,

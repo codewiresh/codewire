@@ -993,9 +993,10 @@ async fn gap_relay_orders_old_output_notice_new_output_and_terminal_status() {
 }
 
 /// #3586: a revoked credential closes the viewer with 1008 "access
-/// revoked", apart from the 1008 "terminal detached" of an abnormal end.
+/// revoked", a lost membership with 1008 "membership ended" (#6407), apart
+/// from the 1008 "terminal detached" of an abnormal end.
 #[test]
-fn a_revocation_closes_the_viewer_as_access_revoked() {
+fn a_revocation_closes_the_viewer_saying_what_was_lost() {
     let frame = |end| match close_for(end) {
         Message::Close(Some(frame)) => (frame.code, frame.reason.to_string()),
         other => panic!("expected a close, got {other:?}"),
@@ -1006,7 +1007,7 @@ fn a_revocation_closes_the_viewer_as_access_revoked() {
     );
     assert_eq!(
         frame(End::Revoked(Revocation::Membership)),
-        (1008, "access revoked".to_owned())
+        (1008, "membership ended".to_owned())
     );
     assert_eq!(
         frame(End::Revoked(Revocation::Organization)),

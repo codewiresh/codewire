@@ -425,9 +425,10 @@ Issue: #3586, the `membership` kind.
   streams as the member, remove them as the owner, and time when each stream
   ends.
 - **Proof:** every stream of the removed member into the organization ends
-  within 30 seconds: a WebSocket closes with 1008 "access revoked", the
-  dashboard's terminal shows its revoked line, and a Connect stream ends
-  `permission_denied`, "access revoked". A `stream.revoked` audit event
+  within 30 seconds: a WebSocket closes with 1008 "membership ended", the
+  dashboard's terminal shows "You're no longer a member of this
+  organization." with no Reconnect and no sign-in line (#6407), and a
+  Connect stream ends `permission_denied`, "access revoked". A `stream.revoked` audit event
   names the member, the kind `membership`, the surface and the environment.
   The other member's streams and the member's other organization keep
   running. After the member is invited back, new streams open, and

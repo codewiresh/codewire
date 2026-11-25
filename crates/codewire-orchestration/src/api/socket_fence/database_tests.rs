@@ -329,7 +329,13 @@ async fn a_socket_ends_when_its_user_leaves_the_organization() {
         .await
         .expect("the socket ends within the bound");
     assert_eq!(revocation, Revocation::Membership);
-    assert_eq!(revoked_close(revocation), access_revoked_close());
+    assert_eq!(
+        revoked_close(revocation),
+        Message::Close(Some(CloseFrame {
+            code: 1008,
+            reason: "membership ended".into(),
+        }))
+    );
     assert_eq!(revoked_kind(&account).await.as_deref(), Some("membership"));
     account.remove().await;
 }
