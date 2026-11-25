@@ -10,9 +10,8 @@
 <body class="cw-body" data-route="admin" data-dashboard-app>
 <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>organizations</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Organizations</h1><p>Inspect any organization's members, billing, environment quota, usage and API keys.</p></div></header>
-        <section class="cw-card" aria-labelledby="defaults-heading">
-          <header class="cw-card-header"><div><h2 id="defaults-heading">Defaults for organizations without their own quota</h2><p>Every organization without its own quota gets these limits. An organization on the Unlimited rate card has no limits.</p></div></header>
-          <div class="cw-card-body">
+        <section class="cw-section" aria-labelledby="defaults-heading">
+          <header class="cw-section-header"><div><h2 id="defaults-heading" class="cw-section-title">Defaults for organizations without their own quota</h2><p class="cw-section-description">Every organization without its own quota gets these limits. An organization on the Unlimited rate card has no limits.</p></div></header>
             <form class="cw-catalog-form" method="post" action="#" aria-labelledby="defaults-heading">
               <label class="cw-field"><span>Concurrent environments</span><input class="cw-input" type="number" name="environments" min="-1" step="1" value="-1" required></label>
               <label class="cw-field"><span>Concurrent sandboxes</span><input class="cw-input" type="number" name="sandboxes" min="-1" step="1" value="10" required></label>
@@ -21,25 +20,24 @@
               <p class="cw-muted">Now unlimited environments, 10 sandboxes, 16 vCPU and 32 GiB. Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Save defaults</button></div>
             </form>
-          </div>
         </section>
         <section class="cw-stat-grid cw-stat-grid--five" aria-label="Sandboxes across every organization">
-          <article class="cw-card cw-admin-stat"><span>Sandboxes created</span><strong>63</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes running</span><strong>9</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes stopped</span><strong>11</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes failed</span><strong>3</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes deleted</span><strong>40</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes created</span><strong>63</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes running</span><strong>9</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes stopped</span><strong>11</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes failed</span><strong>3</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes deleted</span><strong>40</strong></article>
         </section>
-        <section class="cw-card" aria-labelledby="organizations-heading">
-          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>4 organizations</p></div></header>
-          <div class="cw-table-wrap"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
+        <section class="cw-section" aria-labelledby="organizations-heading">
+          <header class="cw-section-header"><div><h2 id="organizations-heading" class="cw-section-title">All organizations</h2><p class="cw-section-description">4 organizations</p></div></header>
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
             <tbody>
               <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="#org_ada">Analytical Engines</a> <code>analytical-engines</code></th></tr>
               <tr>
                 <td>standard</td>
                 <td>active</td>
                 <td>42</td><td>6</td><td>9</td><td>2</td><td>25</td><td>Nov 23, 2026, 09:12 UTC</td>
-                <td><span class="cw-badge" data-tone="success">Opted in</span></td>
+                <td><span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></td>
                 <td>Mar 4, 2026, 10:00 UTC</td>
               </tr>
             </tbody>

@@ -26,13 +26,13 @@
           <label class="cw-field"><span>Severity</span><select class="cw-select" name="severity"><option value="">All severity</option><option value="info"{% if info_selected %} selected{% endif %}>Info</option><option value="warn"{% if warn_selected %} selected{% endif %}>Warn</option><option value="error"{% if error_selected %} selected{% endif %}>Error</option></select></label>
           <button class="cw-button cw-button--outline" type="submit">Filter</button>
         </form>
-        <section class="cw-card">
-          {% if logs.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No audit events match these filters.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table cw-audit-table"><thead><tr><th scope="col">Timestamp</th><th scope="col">Action</th><th scope="col">User</th><th scope="col">IP Address</th><th scope="col">Severity</th><th scope="col">Details</th></tr></thead><tbody>
+        <section class="cw-section">
+          {% if logs.is_empty() %}<p class="cw-muted">No audit events match these filters.</p>{% else %}
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table cw-audit-table"><thead><tr><th scope="col">Timestamp</th><th scope="col">Action</th><th scope="col">User</th><th scope="col">IP Address</th><th scope="col">Severity</th><th scope="col">Details</th></tr></thead><tbody>
             {% for row in logs %}<tr><td>{{ row.occurred }}</td><td><code>{{ row.action }}</code></td><td>{{ row.user }}</td><td><code>{{ row.ip_address }}</code></td><td><span class="cw-badge" data-tone="{{ row.severity_tone }}">{{ row.severity }}</span></td><td>{% if row.has_metadata %}<details class="cw-disclosure cw-audit-details"><summary>View</summary><pre>{{ row.metadata }}</pre></details>{% else %}—{% endif %}</td></tr>{% endfor %}
           </tbody></table></div>{% endif %}
         </section>
-        <nav class="cw-pagination" aria-label="Audit log pages">{% if has_previous %}<a class="cw-button cw-button--outline" href="{{ previous_url }}">Previous</a>{% endif %}{% if has_next %}<a class="cw-button cw-button--outline" href="{{ next_url }}">Next</a>{% endif %}</nav>
+        <nav class="cw-pagination" aria-label="Audit log pages">{% if has_previous %}<a class="cw-text-action" href="{{ previous_url }}">Previous</a>{% endif %}{% if has_next %}<a class="cw-text-action" href="{{ next_url }}">Next</a>{% endif %}</nav>
       </div></div></main>
     </div>
   </body>

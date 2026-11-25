@@ -23,10 +23,10 @@
         {% if !page.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>{% endif %}
         {% if !page.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>{% endif %}
         {% if let Some(review) = page.review %}
-        <section class="cw-card" aria-labelledby="price-review-title">
-          <header class="cw-card-header"><h2 id="price-review-title" class="cw-card-title">Review {{ review.display_name }}'s prices</h2></header>
-          <div class="cw-card-body cw-admin-section">
-            <div class="cw-table-shell"><table class="cw-table"><thead><tr><th scope="col">Rate</th><th scope="col">Now</th><th scope="col">New</th></tr></thead><tbody>{% for change in review.changes %}<tr><th scope="row">{{ change.label }}</th><td>{{ change.now }}</td><td>{{ change.new }}{% if change.large %}<span class="cw-badge" data-tone="warning">More than double</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+        <section class="cw-section" aria-labelledby="price-review-title">
+          <header class="cw-section-header"><div><h2 id="price-review-title" class="cw-section-title">Review {{ review.display_name }}'s prices</h2></div></header>
+          <div class="cw-admin-section">
+            <div class="cw-table-shell cw-table-shell--plain"><table class="cw-table"><thead><tr><th scope="col">Rate</th><th scope="col">Now</th><th scope="col">New</th></tr></thead><tbody>{% for change in review.changes %}<tr><th scope="row">{{ change.label }}</th><td>{{ change.now }}</td><td>{{ change.new }}{% if change.large %}<span class="cw-status cw-status--quiet" data-tone="warning">More than double</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
             <form class="cw-form" method="post" action="/admin/pricing/_actions/update">
               <input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="rate_card" value="{{ review.rate_card }}"><input type="hidden" name="expected_updated_at" value="{{ review.version_token() }}">{% for (name, value) in review.new_fields() %}<input type="hidden" name="{{ name }}_nano" value="{{ value }}">{% endfor %}
               {% if review.needs_confirmation() %}<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="confirm_increase" value="yes" required><span>I confirm these increases.</span></label>{% endif %}
@@ -35,20 +35,18 @@
           </div>
         </section>
         {% else if page.cards.is_empty() %}{% if !page.unavailable %}
-        <section class="cw-card cw-empty" aria-labelledby="rate-cards-empty-title"><h2 id="rate-cards-empty-title" class="cw-empty-title">No rate cards</h2></section>
+        <section class="cw-empty" aria-labelledby="rate-cards-empty-title"><h2 id="rate-cards-empty-title" class="cw-empty-title">No rate cards</h2></section>
         {% endif %}{% else %}{% for card in page.cards %}
-        <section class="cw-card" aria-labelledby="rate-card-{{ card.rate_card }}-title">
-          <header class="cw-card-header"><h2 id="rate-card-{{ card.rate_card }}-title" class="cw-card-title">{{ card.display_name }}</h2><p class="cw-card-description">Updated <time datetime="{{ card.updated_at() }}">{{ card.updated() }}</time></p></header>
-          <div class="cw-card-body">
+        <section class="cw-section" aria-labelledby="rate-card-{{ card.rate_card }}-title">
+          <header class="cw-section-header"><div><h2 id="rate-card-{{ card.rate_card }}-title" class="cw-section-title">{{ card.display_name }}</h2><p class="cw-section-description">Updated <time datetime="{{ card.updated_at() }}">{{ card.updated() }}</time></p></div></header>
             {% if card.charged() %}<form class="cw-form" method="post" action="/admin/pricing/_actions/review">
               <input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="rate_card" value="{{ card.rate_card }}"><input type="hidden" name="display_name" value="{{ card.display_name }}"><input type="hidden" name="expected_updated_at" value="{{ card.version_token() }}"><input type="hidden" name="now_cpu" value="{{ card.rates.cpu }}"><input type="hidden" name="now_memory" value="{{ card.rates.memory }}"><input type="hidden" name="now_disk" value="{{ card.rates.disk }}"><input type="hidden" name="now_storage" value="{{ card.rates.storage }}">
               <div class="cw-form-grid">{% for field in card.fields %}<div class="cw-field"><label class="cw-label" for="rate-{{ card.rate_card }}-{{ field.field }}">{{ field.label }}<span class="cw-sr-only">, in euros</span></label><span class="cw-input-group"><span aria-hidden="true">€</span><input id="rate-{{ card.rate_card }}-{{ field.field }}" name="{{ field.field }}" type="text" inputmode="decimal" value="{{ field.value }}" required maxlength="32" autocomplete="off" spellcheck="false"{% if field.invalid %} aria-invalid="true" aria-describedby="rate-{{ card.rate_card }}-{{ field.field }}-error"{% endif %}></span>{% if field.invalid %}<p class="cw-field-error" id="rate-{{ card.rate_card }}-{{ field.field }}-error">Enter an amount from €0 to €10, with at most 9 decimal places.</p>{% endif %}</div>{% endfor %}</div>
               <button class="cw-button" type="submit">Review</button>
             </form>{% else %}<div class="cw-admin-section">
-              <dl class="cw-stat-grid">{% for field in card.fields %}<div class="cw-stat"><dt>{{ field.label }}</dt><dd>€{{ field.value }}</dd></div>{% endfor %}</dl>
+              <dl class="cw-stat-grid cw-stat-grid--plain">{% for field in card.fields %}<div class="cw-stat"><dt>{{ field.label }}</dt><dd>€{{ field.value }}</dd></div>{% endfor %}</dl>
               <p class="cw-muted">Unlimited is never charged.</p>
             </div>{% endif %}
-          </div>
         </section>
         {% endfor %}{% endif %}
       </div></div></main>

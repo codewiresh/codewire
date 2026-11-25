@@ -22,24 +22,23 @@
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Delete account</h1><p>Deleting an account cannot be undone.</p></div></header>
         {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
         {% if page.deletion_running %}
-        <section class="cw-card" aria-labelledby="delete-account-running-title">
-          <header class="cw-card-header"><h2 id="delete-account-running-title" class="cw-card-title">{{ page.email }} is already being deleted</h2><p class="cw-card-description">It can no longer sign in. Its organizations and data are being deleted now.</p></header>
-          <div class="cw-card-content"><div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/admin/accounts/">Back to accounts</a></div></div>
+        <section class="cw-section" aria-labelledby="delete-account-running-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-running-title" class="cw-section-title">{{ page.email }} is already being deleted</h2><p class="cw-section-description">It can no longer sign in. Its organizations and data are being deleted now.</p></div></header>
+          <div class="cw-form-actions"><a class="cw-text-action" href="/admin/accounts/">Back to accounts</a></div>
         </section>
         {% else %}
         {% if page.is_admin %}
-        <section class="cw-card" aria-labelledby="delete-account-refused-title">
-          <header class="cw-card-header"><h2 id="delete-account-refused-title" class="cw-card-title">Demote this admin first</h2><p class="cw-card-description" id="delete-account-refused">This account is an admin. An admin is demoted before their account is deleted.</p></header>
+        <section class="cw-section" aria-labelledby="delete-account-refused-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-refused-title" class="cw-section-title">Demote this admin first</h2><p class="cw-section-description" id="delete-account-refused">This account is an admin. An admin is demoted before their account is deleted.</p></div></header>
         </section>
         {% else if !page.blocking.is_empty() %}
-        <section class="cw-card" aria-labelledby="delete-account-refused-title">
-          <header class="cw-card-header"><h2 id="delete-account-refused-title" class="cw-card-title">Transfer or delete these organizations first</h2><p class="cw-card-description" id="delete-account-refused">This account is the only owner of these organizations, and others are members. Make another member an owner, or delete the organization, then come back.</p></header>
-          <div class="cw-card-content"><ul class="cw-row-list">{% for organization in page.blocking %}<li><strong>{{ organization }}</strong></li>{% endfor %}</ul></div>
+        <section class="cw-section" aria-labelledby="delete-account-refused-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-refused-title" class="cw-section-title">Transfer or delete these organizations first</h2><p class="cw-section-description" id="delete-account-refused">This account is the only owner of these organizations, and others are members. Make another member an owner, or delete the organization, then come back.</p></div></header>
+          <ul class="cw-row-list">{% for organization in page.blocking %}<li><strong>{{ organization }}</strong></li>{% endfor %}</ul>
         </section>
         {% endif %}
-        <section class="cw-card cw-card--danger" aria-labelledby="delete-account-title">
-          <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete {{ page.email }}</h2><p class="cw-card-description">Sign-in stops at once: the account's sessions, API keys and CLI sign-ins stop working. Its organizations and data are then deleted.</p></header>
-          <div class="cw-card-content">
+        <section class="cw-section cw-section--danger" aria-labelledby="delete-account-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-title" class="cw-section-title">Delete {{ page.email }}</h2><p class="cw-section-description">Sign-in stops at once: the account's sessions, API keys and CLI sign-ins stop working. Its organizations and data are then deleted.</p></div></header>
             <h3 class="cw-section-label">Deleted with the account</h3>
             {% if page.personal.is_empty() %}<p class="cw-muted">No organizations. Only the account's own data is deleted.</p>{% else %}<ul class="cw-row-list">{% for organization in page.personal %}<li><strong>{{ organization.name }}</strong><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>{% endif %}
             {% if !page.shared.is_empty() %}<h3 class="cw-section-label">Memberships that end</h3>
@@ -51,7 +50,6 @@
               <div class="cw-field"><label class="cw-label" for="delete-account-proof">Authenticator or recovery code</label><input class="cw-input cw-input--mono" id="delete-account-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="delete-account-proof-help"{% if page.refused() %} disabled{% endif %}><p class="cw-field-help" id="delete-account-proof-help">The six-digit code your authenticator shows now, or one unused recovery code.</p></div>
               <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/admin/accounts/">Cancel</a><button class="cw-button cw-danger-button" type="submit"{% if page.refused() %} disabled aria-describedby="delete-account-refused"{% endif %}>Delete account</button></div>
             </form>
-          </div>
         </section>
         {% endif %}
       </div></div></main>

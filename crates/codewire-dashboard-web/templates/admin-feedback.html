@@ -25,7 +25,7 @@
           <label class="cw-field"><span>Sender</span><select class="cw-select" name="sender"><option value="">Everyone</option><option value="signed-in"{% if filter == FeedbackFilter::SignedIn %} selected{% endif %}>Signed in</option><option value="anonymous"{% if filter == FeedbackFilter::Anonymous %} selected{% endif %}>Anonymous</option></select></label>
           <button class="cw-button cw-button--outline" type="submit">Filter</button>
         </form>
-        <section class="cw-card" aria-labelledby="feedback-list-title"><h2 id="feedback-list-title" class="cw-sr-only">Feedback received</h2><div class="cw-card-body">
+        <section class="cw-section" aria-labelledby="feedback-list-title"><h2 id="feedback-list-title" class="cw-sr-only">Feedback received</h2>
           {% if rows.is_empty() %}<p class="cw-muted">{% if later_page %}No older feedback.{% else %}{% match filter %}{% when FeedbackFilter::All %}No feedback yet. It appears here when someone runs <code>cw feedback</code>.{% when FeedbackFilter::SignedIn %}No signed-in feedback yet.{% when FeedbackFilter::Anonymous %}No anonymous feedback yet.{% endmatch %}{% endif %}</p>{% else %}
           <ol class="cw-row-list">
             {% for row in rows %}<li><article class="cw-feedback" aria-labelledby="feedback-{{ loop.index }}-sender">
@@ -34,8 +34,8 @@
               <dl class="cw-feedback-facts"><div><dt>CLI</dt><dd>{{ row.cli_version }}</dd></div><div><dt>Platform</dt><dd>{{ row.platform }}</dd></div>{% if !row.placement.is_empty() %}<div><dt>Placement</dt><dd>{{ row.placement }}</dd></div>{% endif %}{% if let Some(environment_id) = row.environment_id %}<div><dt>Sandbox</dt><dd><code>{{ environment_id }}</code></dd></div>{% endif %}</dl>
             </article></li>{% endfor %}
           </ol>{% endif %}
-        </div></section>
-        {% if !first_page_url.is_empty() || !next_page_url.is_empty() %}<nav class="cw-pagination" aria-label="Feedback pages">{% if !first_page_url.is_empty() %}<a class="cw-button cw-button--outline" href="{{ first_page_url }}">Newest</a>{% endif %}{% if !next_page_url.is_empty() %}<a class="cw-button cw-button--outline" href="{{ next_page_url }}">Older</a>{% endif %}</nav>{% endif %}
+        </section>
+        {% if !first_page_url.is_empty() || !next_page_url.is_empty() %}<nav class="cw-pagination" aria-label="Feedback pages">{% if !first_page_url.is_empty() %}<a class="cw-text-action" href="{{ first_page_url }}">Newest</a>{% endif %}{% if !next_page_url.is_empty() %}<a class="cw-text-action" href="{{ next_page_url }}">Older</a>{% endif %}</nav>{% endif %}
       </div></div></main>
     </div>
   </body>

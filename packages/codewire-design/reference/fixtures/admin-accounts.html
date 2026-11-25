@@ -10,71 +10,71 @@
 <body class="cw-body" data-route="admin" data-dashboard-app>
 <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>accounts</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Manage account access</h1><p>Review verified access requests and control who can sign in to Codewire.</p></div></header>
-        <section class="cw-card" aria-labelledby="account-access-heading">
-          <header class="cw-card-header"><div><h2 id="account-access-heading">Accounts</h2><p>7 accounts</p></div></header>
-          <div class="cw-table-wrap"><table class="cw-table cw-access-table"><thead><tr><th scope="col">Account</th><th scope="col">Request</th><th scope="col">Email</th><th scope="col">Sign-in providers</th><th scope="col">Created</th><th scope="col">Access</th><th scope="col">Delete</th></tr></thead><tbody>
+        <section class="cw-section" aria-labelledby="account-access-heading">
+          <header class="cw-section-header"><div><h2 id="account-access-heading" class="cw-section-title">Accounts</h2><p class="cw-section-description">7 accounts</p></div></header>
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table cw-access-table"><thead><tr><th scope="col">Account</th><th scope="col">Request</th><th scope="col">Email</th><th scope="col">Sign-in providers</th><th scope="col">Created</th><th scope="col">Access</th><th scope="col">Delete</th></tr></thead><tbody>
             <tr>
               <td><strong>Grace Hopper</strong><span class="cw-access-email">grace@example.test</span></td>
               <td><span class="cw-muted">No access request supplied</span></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><span class="cw-muted">None</span></td>
               <td><time datetime="2026-11-02T09:14:00Z">2026-11-02T09:14:00Z</time></td>
-              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="11111111111111111111111111111111"><input type="hidden" name="enabled" value="false"><span class="cw-badge" data-tone="success">Enabled</span><button class="cw-button cw-button--outline cw-button--pill" type="submit">Disable</button></form></td>
+              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="11111111111111111111111111111111"><input type="hidden" name="enabled" value="false"><span class="cw-status cw-status--quiet" data-tone="success">Enabled</span><button class="cw-text-action" type="submit">Disable</button></form></td>
               <td><span class="cw-muted">Your account. Delete it in Settings.</span></td>
             </tr>
             <tr>
               <td><strong>Linus Pauling</strong><span class="cw-access-email">linus@example.test</span></td>
               <td><span class="cw-muted">No access request supplied</span></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><span class="cw-muted">None</span></td>
               <td><time datetime="2026-11-04T16:02:00Z">2026-11-04T16:02:00Z</time></td>
-              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="22222222222222222222222222222222"><input type="hidden" name="enabled" value="false"><span class="cw-badge" data-tone="success">Enabled</span><button class="cw-button cw-button--outline cw-button--pill" type="submit">Disable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-2-suspend" aria-haspopup="dialog" aria-controls="account-2-suspend"><span>Suspend</span><span class="cw-sr-only"> linus@example.test</span></button></td>
+              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="22222222222222222222222222222222"><input type="hidden" name="enabled" value="false"><span class="cw-status cw-status--quiet" data-tone="success">Enabled</span><button class="cw-text-action" type="submit">Disable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-2-suspend" aria-haspopup="dialog" aria-controls="account-2-suspend"><span>Suspend</span><span class="cw-sr-only"> linus@example.test</span></button></td>
               <td><span class="cw-muted">An admin. Demote them first.</span></td>
             </tr>
             <tr>
               <td><strong>Ada Lovelace</strong><span class="cw-access-email">ada@example.test</span></td>
               <td><p class="cw-access-reason">Running agents against our monorepo.</p></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><ul class="cw-access-identities"><li><strong>GitHub</strong><span class="cw-access-email">ada-l · <code>583231</code> · linked <time datetime="2026-11-12T23:12:00Z">2026-11-12T23:12:00Z</time></span></li></ul></td>
               <td><time datetime="2026-11-12T23:10:00Z">2026-11-12T23:10:00Z</time></td>
-              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="0123456789abcdef0123456789abcdef"><input type="hidden" name="enabled" value="false"><span class="cw-badge" data-tone="success">Enabled</span><button class="cw-button cw-button--outline cw-button--pill" type="submit">Disable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-3-suspend" aria-haspopup="dialog" aria-controls="account-3-suspend"><span>Suspend</span><span class="cw-sr-only"> ada@example.test</span></button></td>
-              <td><a class="cw-button cw-button--outline cw-button--pill cw-button--small" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> ada@example.test</span></a></td>
+              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="0123456789abcdef0123456789abcdef"><input type="hidden" name="enabled" value="false"><span class="cw-status cw-status--quiet" data-tone="success">Enabled</span><button class="cw-text-action" type="submit">Disable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-3-suspend" aria-haspopup="dialog" aria-controls="account-3-suspend"><span>Suspend</span><span class="cw-sr-only"> ada@example.test</span></button></td>
+              <td><a class="cw-text-action cw-text-action--danger" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> ada@example.test</span></a></td>
             </tr>
             <tr>
               <td><strong>Alan Turing</strong><span class="cw-access-email">alan@example.test</span></td>
               <td><p class="cw-access-reason">Trying cloud sandboxes for a course.</p></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><ul class="cw-access-identities"><li><strong>Google</strong><span class="cw-access-email">alan@example.test · <code>104392811771230055512</code> · linked <time datetime="2026-11-19T08:40:00Z">2026-11-19T08:40:00Z</time></span></li></ul></td>
               <td><time datetime="2026-11-19T08:40:00Z">2026-11-19T08:40:00Z</time></td>
-              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="33333333333333333333333333333333"><input type="hidden" name="enabled" value="true"><span class="cw-badge" data-tone="warning">Disabled</span><button class="cw-button cw-button--accent cw-button--pill" type="submit">Enable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-4-suspend" aria-haspopup="dialog" aria-controls="account-4-suspend"><span>Suspend</span><span class="cw-sr-only"> alan@example.test</span></button></td>
-              <td><a class="cw-button cw-button--outline cw-button--pill cw-button--small" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> alan@example.test</span></a></td>
+              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="33333333333333333333333333333333"><input type="hidden" name="enabled" value="true"><span class="cw-status cw-status--quiet" data-tone="warning">Disabled</span><button class="cw-button cw-button--accent cw-button--pill" type="submit">Enable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-4-suspend" aria-haspopup="dialog" aria-controls="account-4-suspend"><span>Suspend</span><span class="cw-sr-only"> alan@example.test</span></button></td>
+              <td><a class="cw-text-action cw-text-action--danger" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> alan@example.test</span></a></td>
             </tr>
             <tr>
               <td><strong>No name supplied</strong><span class="cw-access-email">barbara@example.test</span></td>
               <td><p class="cw-access-reason">Evaluating for my team.</p></td>
-              <td><span class="cw-badge" data-tone="warning">Unverified</span><form class="cw-access-resend" method="post" action="/admin/accounts/_actions/resend-verification"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="44444444444444444444444444444444"><button class="cw-button cw-button--outline cw-button--pill cw-button--small" type="submit">Resend verification email</button></form></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="warning">Unverified</span><form class="cw-access-resend" method="post" action="/admin/accounts/_actions/resend-verification"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="44444444444444444444444444444444"><button class="cw-text-action" type="submit">Resend verification email</button></form></td>
               <td><span class="cw-muted">None</span></td>
               <td><time datetime="2026-11-20T11:05:00Z">2026-11-20T11:05:00Z</time></td>
-              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="44444444444444444444444444444444"><input type="hidden" name="enabled" value="true"><span class="cw-badge" data-tone="warning">Disabled</span><button class="cw-button cw-button--accent cw-button--pill" type="submit" disabled title="Email verification is required first">Enable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-5-suspend" aria-haspopup="dialog" aria-controls="account-5-suspend"><span>Suspend</span><span class="cw-sr-only"> barbara@example.test</span></button></td>
-              <td><a class="cw-button cw-button--outline cw-button--pill cw-button--small" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> barbara@example.test</span></a></td>
+              <td><form class="cw-access-action" method="post" action="/admin/accounts/_actions/enabled"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="44444444444444444444444444444444"><input type="hidden" name="enabled" value="true"><span class="cw-status cw-status--quiet" data-tone="warning">Disabled</span><button class="cw-button cw-button--accent cw-button--pill" type="submit" disabled title="Email verification is required first">Enable</button></form><button class="cw-button cw-danger-button cw-button--pill cw-button--small cw-access-suspend" type="button" data-dialog-open="account-5-suspend" aria-haspopup="dialog" aria-controls="account-5-suspend"><span>Suspend</span><span class="cw-sr-only"> barbara@example.test</span></button></td>
+              <td><a class="cw-text-action cw-text-action--danger" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> barbara@example.test</span></a></td>
             </tr>
             <tr>
               <td><strong>Edsger Dijkstra</strong><span class="cw-access-email">edsger@example.test</span></td>
               <td><span class="cw-muted">No access request supplied</span></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><span class="cw-muted">None</span></td>
               <td><time datetime="2026-11-08T10:20:00Z">2026-11-08T10:20:00Z</time></td>
-              <td><p class="cw-access-action"><span class="cw-badge" data-tone="warning">Disabled</span></p></td>
+              <td><p class="cw-access-action"><span class="cw-status cw-status--quiet" data-tone="warning">Disabled</span></p></td>
               <td><span class="cw-muted">Deleting</span></td>
             </tr>
             <tr>
               <td><strong>Mallory Example</strong><span class="cw-access-email">mallory@example.test</span></td>
               <td><span class="cw-muted">No access request supplied</span></td>
-              <td><span class="cw-badge" data-tone="success">Verified</span></td>
+              <td><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></td>
               <td><span class="cw-muted">None</span></td>
               <td><time datetime="2026-11-15T19:30:00Z">2026-11-15T19:30:00Z</time></td>
-              <td><p class="cw-access-action"><span class="cw-badge" data-tone="danger">Suspended</span><button class="cw-button cw-button--outline cw-button--pill" type="button" data-dialog-open="account-6-unsuspend" aria-haspopup="dialog" aria-controls="account-6-unsuspend"><span>Unsuspend</span><span class="cw-sr-only"> mallory@example.test</span></button></p></td>
-              <td><a class="cw-button cw-button--outline cw-button--pill cw-button--small" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> mallory@example.test</span></a></td>
+              <td><p class="cw-access-action"><span class="cw-status cw-status--quiet" data-tone="danger">Suspended</span><button class="cw-text-action" type="button" data-dialog-open="account-6-unsuspend" aria-haspopup="dialog" aria-controls="account-6-unsuspend"><span>Unsuspend</span><span class="cw-sr-only"> mallory@example.test</span></button></p></td>
+              <td><a class="cw-text-action cw-text-action--danger" href="admin-account-delete.html"><span>Delete account</span><span class="cw-sr-only"> mallory@example.test</span></a></td>
             </tr>
           </tbody></table></div>
           <dialog class="cw-dialog" data-dialog id="account-2-suspend" aria-labelledby="account-2-suspend-title"><header class="cw-dialog-header"><h2 id="account-2-suspend-title">Suspend linus@example.test?</h2></header><div class="cw-dialog-body"><p>Suspending signs this account out everywhere and disables its API keys. Unsuspending does not bring them back.</p><p>Organizations it alone owns can&#39;t create, start or snapshot Sandboxes, their running Sandboxes stop, and their public ports become creator-only. Sandboxes it created in other organizations stop too.</p><form class="cw-form" id="account-2-suspend-form" method="post" action="/admin/accounts/_actions/suspend"><input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="user_id" value="22222222222222222222222222222222"><div class="cw-field"><label class="cw-label" for="account-2-suspend-reason">Reason</label><textarea class="cw-textarea" id="account-2-suspend-reason" name="reason" rows="3" maxlength="2000" required aria-describedby="account-2-suspend-reason-help"></textarea><p class="cw-field-help" id="account-2-suspend-reason-help">Recorded in the audit log.</p></div></form></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button cw-danger-button" type="submit" form="account-2-suspend-form">Suspend account</button></footer></dialog>

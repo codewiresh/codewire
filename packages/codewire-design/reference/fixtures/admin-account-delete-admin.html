@@ -10,12 +10,11 @@
 <body class="cw-body" data-route="admin" data-dashboard-app>
 <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>delete account</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Delete account</h1><p>Deleting an account cannot be undone.</p></div></header>
-        <section class="cw-card" aria-labelledby="delete-account-refused-title">
-          <header class="cw-card-header"><h2 id="delete-account-refused-title" class="cw-card-title">Demote this admin first</h2><p class="cw-card-description" id="delete-account-refused">This account is an admin. An admin is demoted before their account is deleted.</p></header>
+        <section class="cw-section" aria-labelledby="delete-account-refused-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-refused-title" class="cw-section-title">Demote this admin first</h2><p class="cw-section-description" id="delete-account-refused">This account is an admin. An admin is demoted before their account is deleted.</p></div></header>
         </section>
-        <section class="cw-card cw-card--danger" aria-labelledby="delete-account-title">
-          <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete linus@example.test</h2><p class="cw-card-description">Sign-in stops at once: the account's sessions, API keys and CLI sign-ins stop working. Its organizations and data are then deleted.</p></header>
-          <div class="cw-card-content">
+        <section class="cw-section cw-section--danger" aria-labelledby="delete-account-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-title" class="cw-section-title">Delete linus@example.test</h2><p class="cw-section-description">Sign-in stops at once: the account's sessions, API keys and CLI sign-ins stop working. Its organizations and data are then deleted.</p></div></header>
             <h3 class="cw-section-label">Deleted with the account</h3>
             <ul class="cw-row-list"><li><strong>Linus&#39;s lab</strong><p class="cw-muted">0 sandboxes deleted with it</p></li></ul>
             <h3 class="cw-section-label">Memberships that end</h3>
@@ -27,7 +26,6 @@
               <div class="cw-field"><label class="cw-label" for="delete-account-proof">Authenticator or recovery code</label><input class="cw-input cw-input--mono" id="delete-account-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="delete-account-proof-help" disabled><p class="cw-field-help" id="delete-account-proof-help">The six-digit code your authenticator shows now, or one unused recovery code.</p></div>
               <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="index.html">Cancel</a><button class="cw-button cw-danger-button" type="submit" disabled aria-describedby="delete-account-refused">Delete account</button></div>
             </form>
-          </div>
         </section>
 </div></div></main>
 </body>

@@ -23,10 +23,10 @@
         {% if !message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ message }}</p>{% endif %}
         {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
 
-        <section class="cw-card" aria-labelledby="quota-heading">
-          <header class="cw-card-header"><div><h2 id="quota-heading">Environment quota and usage</h2><p>{% if organization.has_explicit_quota %}This organization has its own quota.{% else %}No quota of its own: the defaults apply.{% endif %} Creates are checked against the limits below.</p></div></header>
-          <div class="cw-card-body cw-admin-section">
-            <dl class="cw-stat-grid">
+        <section class="cw-section" aria-labelledby="quota-heading">
+          <header class="cw-section-header"><div><h2 id="quota-heading" class="cw-section-title">Environment quota and usage</h2><p class="cw-section-description">{% if organization.has_explicit_quota %}This organization has its own quota.{% else %}No quota of its own: the defaults apply.{% endif %} Creates are checked against the limits below.</p></div></header>
+          <div class="cw-admin-section">
+            <dl class="cw-stat-grid cw-stat-grid--plain">
               <div class="cw-stat"><dt>Environments</dt><dd>{{ organization.active_environments }} <small>of {{ organization.effective_quota.environments.display }}</small></dd></div>
               <div class="cw-stat"><dt>Sandboxes</dt><dd>{{ organization.active_sandboxes }} <small>of {{ organization.effective_quota.sandboxes.display }}</small></dd></div>
               <div class="cw-stat"><dt>CPU</dt><dd>{{ organization.used_cpu }} <small>of {{ organization.effective_quota.cpu_millicores.display }}</small></dd></div>
@@ -38,29 +38,29 @@
                 <input type="hidden" name="organization_id" value="{{ organization.id }}">
                 <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
                 {% if enabled %}<input type="hidden" name="enabled" value="false">
-                <p>Confidential environments <span class="cw-badge" data-tone="success">Opted in</span></p>
-                <button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>{% else %}<input type="hidden" name="enabled" value="true">
-                <p>Confidential environments <span class="cw-badge">Not opted in</span></p>
-                <button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>{% endif %}
+                <p>Confidential environments <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>
+                <button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>{% else %}<input type="hidden" name="enabled" value="true">
+                <p>Confidential environments <span class="cw-status cw-status--quiet">Not opted in</span></p>
+                <button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>{% endif %}
               </form>{% when None %}<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
               <li>{% match organization.systemd_environments %}{% when Some(enabled) %}<form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/systemd/set">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="organization_id" value="{{ organization.id }}">
                 <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
                 {% if enabled %}<input type="hidden" name="enabled" value="false">
-                <p>Systemd workspaces <span class="cw-badge" data-tone="success">Opted in</span></p>
-                <button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>{% else %}<input type="hidden" name="enabled" value="true">
-                <p>Systemd workspaces <span class="cw-badge">Not opted in</span></p>
-                <button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>{% endif %}
+                <p>Systemd workspaces <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>
+                <button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>{% else %}<input type="hidden" name="enabled" value="true">
+                <p>Systemd workspaces <span class="cw-status cw-status--quiet">Not opted in</span></p>
+                <button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>{% endif %}
               </form>{% when None %}<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
               <li><form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/dedicated-cpu/set">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="organization_id" value="{{ organization.id }}">
                 {% if organization.dedicated_cpu %}<input type="hidden" name="dedicated_cpu" value="false">
-                <p>CPU reservation <span class="cw-badge" data-tone="info">Dedicated</span></p>
-                <button class="cw-button cw-button--outline" type="submit">Return to shared CPU</button>{% else %}<input type="hidden" name="dedicated_cpu" value="true">
-                <p>CPU reservation <span class="cw-badge">Shared</span></p>
-                <button class="cw-button cw-button--outline" type="submit">Give dedicated CPU</button>{% endif %}
+                <p>CPU reservation <span class="cw-status cw-status--quiet" data-tone="info">Dedicated</span></p>
+                <button class="cw-text-action" type="submit">Return to shared CPU</button>{% else %}<input type="hidden" name="dedicated_cpu" value="true">
+                <p>CPU reservation <span class="cw-status cw-status--quiet">Shared</span></p>
+                <button class="cw-text-action" type="submit">Give dedicated CPU</button>{% endif %}
               </form></li>
             </ul>
             <p class="cw-muted">Each change writes an audit entry. A CPU change applies to new sandboxes; while the deployment shares CPU, dedicated ones start cold.</p>
@@ -74,14 +74,14 @@
               <p class="cw-muted">Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Save quota</button></div>
             </form>
-            {% if organization.has_explicit_quota %}<form class="cw-danger-zone" method="post" action="/admin/organizations/_actions/quota/clear"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="organization_id" value="{{ organization.id }}"><p class="cw-muted">Clearing removes this organization's own quota, so the defaults apply again.</p><button class="cw-button cw-button--outline" type="submit">Clear quota</button></form>{% endif %}
+            {% if organization.has_explicit_quota %}<form class="cw-danger-zone" method="post" action="/admin/organizations/_actions/quota/clear"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="organization_id" value="{{ organization.id }}"><p class="cw-muted">Clearing removes this organization's own quota, so the defaults apply again.</p><button class="cw-text-action" type="submit">Clear quota</button></form>{% endif %}
           </div>
         </section>
 
-        <section class="cw-card" aria-labelledby="credit-heading">
-          <header class="cw-card-header"><div><h2 id="credit-heading">Rate card and credit</h2><p>Regular and Discounted draw running sandboxes from prepaid credit and refuse creates and starts without it. Unlimited is never charged and has no quota.</p></div></header>
-          <div class="cw-card-body cw-admin-section">
-            <dl class="cw-stat-grid">
+        <section class="cw-section" aria-labelledby="credit-heading">
+          <header class="cw-section-header"><div><h2 id="credit-heading" class="cw-section-title">Rate card and credit</h2><p class="cw-section-description">Regular and Discounted draw running sandboxes from prepaid credit and refuse creates and starts without it. Unlimited is never charged and has no quota.</p></div></header>
+          <div class="cw-admin-section">
+            <dl class="cw-stat-grid cw-stat-grid--plain">
               <div class="cw-stat"><dt>Rate card</dt><dd>{{ organization.rate_card }}</dd></div>
               <div class="cw-stat"><dt>Credit balance</dt><dd>{% if organization.credit_negative %}<span class="cw-badge" data-tone="warning">{{ organization.credit_balance }}</span>{% else %}{{ organization.credit_balance }}{% endif %}</dd></div>
             </dl>
@@ -100,7 +100,7 @@
               <input type="hidden" name="amount" value="{{ confirm.amount }}">
               <input type="hidden" name="reason" value="{{ confirm.reason }}">
               <input type="hidden" name="confirmed_balance" value="{{ confirm.confirmed_balance_nano_eur }}">
-              <div class="cw-form-action"><a class="cw-button cw-button--outline" href="/admin/organizations/{{ organization.id }}/">Go back</a><button class="cw-button" type="submit">Confirm</button></div>
+              <div class="cw-form-action"><a class="cw-text-action" href="/admin/organizations/{{ organization.id }}/">Go back</a><button class="cw-button" type="submit">Confirm</button></div>
             </form>{% else %}
             <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/credit/adjust" aria-label="Grant or remove credit">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -112,41 +112,41 @@
               <div class="cw-form-action"><button class="cw-button" type="submit">Adjust credit</button></div>
             </form>{% endif %}
             {% if organization.credit_entries.is_empty() %}<p class="cw-muted">No credit entries yet.</p>{% else %}
-            <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Recent credit entries, newest first</caption><thead><tr><th scope="col">Entry</th><th scope="col">Amount</th><th scope="col">When</th><th scope="col">Reason</th></tr></thead><tbody>
+            <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><caption class="cw-sr-only">Recent credit entries, newest first</caption><thead><tr><th scope="col">Entry</th><th scope="col">Amount</th><th scope="col">When</th><th scope="col">Reason</th></tr></thead><tbody>
               {% for entry in organization.credit_entries %}<tr><th scope="row">{{ entry.kind }}</th><td>{{ entry.amount }}</td><td>{{ entry.when }}</td><td>{{ entry.note }}</td></tr>{% endfor %}
             </tbody></table></div>{% endif %}
           </div>
         </section>
 
-        <section class="cw-card" aria-labelledby="billing-heading">
-          <header class="cw-card-header"><div><h2 id="billing-heading">Billing</h2><p>The effective plan is the one quotas and billing resolve.</p></div></header>
-          <div class="cw-card-body cw-admin-section">
-            <dl class="cw-stat-grid">
+        <section class="cw-section" aria-labelledby="billing-heading">
+          <header class="cw-section-header"><div><h2 id="billing-heading" class="cw-section-title">Billing</h2><p class="cw-section-description">The effective plan is the one quotas and billing resolve.</p></div></header>
+          <div class="cw-admin-section">
+            <dl class="cw-stat-grid cw-stat-grid--plain">
               <div class="cw-stat"><dt>Effective plan</dt><dd>{{ organization.effective_plan }}</dd></div>
               <div class="cw-stat"><dt>Organization plan</dt><dd>{{ organization.billing_plan }}</dd></div>
               <div class="cw-stat"><dt>Billing status</dt><dd>{{ organization.billing_status }}</dd></div>
               <div class="cw-stat"><dt>Billing exempt</dt><dd>{% if organization.billing_exempt %}Yes{% else %}No{% endif %}</dd></div>
             </dl>
             {% if organization.subscriptions.is_empty() %}<p class="cw-muted">No active, trialing or past-due subscriptions.</p>{% else %}
-            <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Live subscriptions</caption><thead><tr><th scope="col">Subscription</th><th scope="col">Plan</th><th scope="col">Status</th><th scope="col">Updated</th></tr></thead><tbody>
+            <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><caption class="cw-sr-only">Live subscriptions</caption><thead><tr><th scope="col">Subscription</th><th scope="col">Plan</th><th scope="col">Status</th><th scope="col">Updated</th></tr></thead><tbody>
               {% for subscription in organization.subscriptions %}<tr><th scope="row">{{ subscription.kind }}</th><td>{{ subscription.plan }}</td><td>{{ subscription.status }}</td><td>{{ subscription.updated }}</td></tr>{% endfor %}
             </tbody></table></div>{% endif %}
           </div>
         </section>
 
-        <section class="cw-card" aria-labelledby="members-heading">
-          <header class="cw-card-header"><div><h2 id="members-heading">Members</h2><p>{{ organization.members.len() }} members</p></div></header>
-          {% if organization.members.is_empty() %}<div class="cw-card-body"><p class="cw-muted">This organization has no members.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Joined</th></tr></thead><tbody>
+        <section class="cw-section" aria-labelledby="members-heading">
+          <header class="cw-section-header"><div><h2 id="members-heading" class="cw-section-title">Members</h2><p class="cw-section-description">{{ organization.members.len() }} members</p></div></header>
+          {% if organization.members.is_empty() %}<p class="cw-muted">This organization has no members.</p>{% else %}
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Joined</th></tr></thead><tbody>
             {% for member in organization.members %}<tr><th scope="row">{{ member.email }}</th><td>{{ member.role }}</td><td>{{ member.joined }}</td></tr>{% endfor %}
           </tbody></table></div>{% endif %}
         </section>
 
-        <section class="cw-card" aria-labelledby="api-keys-heading">
-          <header class="cw-card-header"><div><h2 id="api-keys-heading">API keys</h2><p>{{ organization.api_keys.len() }} keys. Names and dates only.</p></div></header>
-          {% if organization.api_keys.is_empty() %}<div class="cw-card-body"><p class="cw-muted">This organization has no API keys.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Key</th><th scope="col">State</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Expires</th></tr></thead><tbody>
-            {% for key in organization.api_keys %}<tr><th scope="row">{{ key.name }}</th><td>{% if key.disabled %}<span class="cw-badge" data-tone="warning">Disabled</span>{% else %}<span class="cw-badge" data-tone="success">Active</span>{% endif %}</td><td>{{ key.created }}</td><td>{{ key.last_used }}</td><td>{{ key.expires }}</td></tr>{% endfor %}
+        <section class="cw-section" aria-labelledby="api-keys-heading">
+          <header class="cw-section-header"><div><h2 id="api-keys-heading" class="cw-section-title">API keys</h2><p class="cw-section-description">{{ organization.api_keys.len() }} keys. Names and dates only.</p></div></header>
+          {% if organization.api_keys.is_empty() %}<p class="cw-muted">This organization has no API keys.</p>{% else %}
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><thead><tr><th scope="col">Key</th><th scope="col">State</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Expires</th></tr></thead><tbody>
+            {% for key in organization.api_keys %}<tr><th scope="row">{{ key.name }}</th><td>{% if key.disabled %}<span class="cw-status cw-status--quiet" data-tone="warning">Disabled</span>{% else %}<span class="cw-status cw-status--quiet" data-tone="success">Active</span>{% endif %}</td><td>{{ key.created }}</td><td>{{ key.last_used }}</td><td>{{ key.expires }}</td></tr>{% endfor %}
           </tbody></table></div>{% endif %}
         </section>
       </div></div></main>

@@ -495,10 +495,10 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         1
     );
     assert!(body.contains(
-        "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span> <span class=\"cw-badge\" data-tone=\"danger\">Bounced</span><form"
+        "<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">Unverified</span> <span class=\"cw-status cw-status--quiet\" data-tone=\"danger\">Bounced</span><form"
     ));
     assert!(body.contains(
-        "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span><form class=\"cw-access-resend\" method=\"post\" action=\"/admin/accounts/_actions/resend-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"csrf-marker\"><input type=\"hidden\" name=\"user_id\" value=\"user-waiting\"><button class=\"cw-button cw-button--outline cw-button--pill cw-button--small\" type=\"submit\">Resend verification email</button></form>"
+        "<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">Unverified</span><form class=\"cw-access-resend\" method=\"post\" action=\"/admin/accounts/_actions/resend-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"csrf-marker\"><input type=\"hidden\" name=\"user_id\" value=\"user-waiting\"><button class=\"cw-text-action\" type=\"submit\">Resend verification email</button></form>"
     ));
 }
 
@@ -591,7 +591,7 @@ fn account_access_offers_suspend_and_unsuspend_behind_a_confirmation() {
 
     // The suspended account says so and offers Unsuspend, not Enable.
     assert!(body.contains(
-        "<span class=\"cw-badge\" data-tone=\"danger\">Suspended</span><button class=\"cw-button cw-button--outline cw-button--pill\" type=\"button\" data-dialog-open=\"account-2-unsuspend\""
+        "<span class=\"cw-status cw-status--quiet\" data-tone=\"danger\">Suspended</span><button class=\"cw-text-action\" type=\"button\" data-dialog-open=\"account-2-unsuspend\""
     ));
     assert_eq!(
         body.matches("action=\"/admin/accounts/_actions/unsuspend\"")
@@ -949,9 +949,9 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
     assert_eq!(body.matches(r#"class="cw-row-link""#).count(), 1);
     // The confidential opt-in is a column of state, not a control in the row.
     assert!(body.contains(r#"<th scope="col">Confidential environments</th>"#));
-    assert!(
-        body.contains(r#"<td><span class="cw-badge" data-tone="success">Opted in</span></td>"#)
-    );
+    assert!(body.contains(
+        r#"<td><span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></td>"#
+    ));
     assert!(!body.contains("_actions/confidential"));
     // The defaults form: labelled, starting at the stored defaults, and
     // saying that the Unlimited rate card has no limits.
@@ -990,7 +990,7 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
     ] {
         assert!(
             body.contains(&format!(
-                r#"<article class="cw-card cw-admin-stat"><span>{label}</span><strong>{value}</strong></article>"#
+                r#"<article class="cw-admin-stat"><span>{label}</span><strong>{value}</strong></article>"#
             )),
             "{label}"
         );
@@ -1031,7 +1031,7 @@ fn admin_organizations_template_says_when_the_sandbox_counts_are_unavailable() {
     .render()
     .expect("render admin organizations page");
     assert!(body.contains(
-        r#"<article class="cw-card cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>"#
+        r#"<article class="cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>"#
     ));
     assert!(!body.contains("Sandboxes running"));
     assert!(body.contains(r#"<td colspan="6">Unavailable</td>"#));
@@ -1131,13 +1131,15 @@ fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
         .expect("render admin organization page")
     };
     let shared = render(false);
-    assert!(shared.contains(r#"<p>CPU reservation <span class="cw-badge">Shared</span></p>"#));
+    assert!(shared.contains(
+        r#"<p>CPU reservation <span class="cw-status cw-status--quiet">Shared</span></p>"#
+    ));
     assert!(shared.contains(r#"<input type="hidden" name="dedicated_cpu" value="true">"#));
     assert!(shared.contains(">Give dedicated CPU</button>"));
     assert!(!shared.contains(">Return to shared CPU</button>"));
     let dedicated = render(true);
     assert!(dedicated.contains(
-        r#"<p>CPU reservation <span class="cw-badge" data-tone="info">Dedicated</span></p>"#
+        r#"<p>CPU reservation <span class="cw-status cw-status--quiet" data-tone="info">Dedicated</span></p>"#
     ));
     assert!(dedicated.contains(r#"<input type="hidden" name="dedicated_cpu" value="false">"#));
     assert!(dedicated.contains(">Return to shared CPU</button>"));
@@ -1177,20 +1179,20 @@ fn admin_organization_systemd_toggle_follows_the_opt_in() {
     assert!(off.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#));
     assert!(off.contains(r#"<input type="hidden" name="organization_slug" value="safe-org">"#));
     assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
-    assert!(
-        off.contains(r#"<p>Systemd workspaces <span class="cw-badge">Not opted in</span></p>"#)
-    );
     assert!(off.contains(
-        r#"<button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>"#
+        r#"<p>Systemd workspaces <span class="cw-status cw-status--quiet">Not opted in</span></p>"#
+    ));
+    assert!(off.contains(
+        r#"<button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>"#
     ));
 
     let on = form(&render(Some(true)));
     assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
     assert!(on.contains(
-        r#"<p>Systemd workspaces <span class="cw-badge" data-tone="success">Opted in</span></p>"#
+        r#"<p>Systemd workspaces <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>"#
     ));
     assert!(on.contains(
-        r#"<button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>"#
+        r#"<button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>"#
     ));
 
     let unknown = render(None);
@@ -1235,18 +1237,18 @@ fn admin_organization_confidential_toggle_follows_the_opt_in() {
     assert!(off.contains(action) && off.contains(ids));
     assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
     assert!(off.contains(
-        r#"<p>Confidential environments <span class="cw-badge">Not opted in</span></p>"#
+        r#"<p>Confidential environments <span class="cw-status cw-status--quiet">Not opted in</span></p>"#
     ));
     assert!(off.contains(
-        r#"<button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>"#
+        r#"<button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>"#
     ));
 
     let on = render(Some(true));
     assert!(on.contains(action) && on.contains(ids));
     assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
-    assert!(on.contains(r#"<p>Confidential environments <span class="cw-badge" data-tone="success">Opted in</span></p>"#));
+    assert!(on.contains(r#"<p>Confidential environments <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>"#));
     assert!(on.contains(
-        r#"<button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>"#
+        r#"<button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>"#
     ));
 
     let unknown = render(None);

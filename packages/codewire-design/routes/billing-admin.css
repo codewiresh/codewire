@@ -36,7 +36,7 @@ dl.cw-stat-grid { margin: 0; }
 /* Positioned, so a row's screen-reader text scrolls with the table instead of widening the page. */
 .cw-table-wrap { position: relative; max-width: 100%; overflow-x: auto; }
 
-.cw-admin-stat { padding: var(--space-4); }
+.cw-admin-stat { min-width: 0; }
 .cw-admin-stat > span, .cw-admin-stat > strong, .cw-admin-stat > p { display: block; margin: 0; }
 .cw-admin-stat > span, .cw-admin-stat > p { color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-admin-stat > strong { margin: var(--space-2) 0 var(--space-0-5); font-family: var(--font-mono); font-size: var(--text-page); font-weight: var(--weight-medium); line-height: var(--leading-tight); }

@@ -322,7 +322,7 @@ async fn the_page_shows_each_card_and_edits_only_the_charged_ones() {
         "<title>Pricing · Codewire</title>",
         "<h1 class=\"cw-page-title\">Pricing</h1><p>A change applies from the next metering draw and never re-prices past usage.</p>",
         "<a class=\"cw-nav-link\" href=\"/admin/pricing/\">Pricing</a>",
-        "<h2 id=\"rate-card-regular-title\" class=\"cw-card-title\">Regular</h2><p class=\"cw-card-description\">Updated <time datetime=\"2026-11-23T00:00:00Z\">Nov 23, 2026, 00:00 UTC</time></p>",
+        "<h2 id=\"rate-card-regular-title\" class=\"cw-section-title\">Regular</h2><p class=\"cw-section-description\">Updated <time datetime=\"2026-11-23T00:00:00Z\">Nov 23, 2026, 00:00 UTC</time></p>",
         "<input type=\"hidden\" name=\"expected_updated_at\" value=\"1795392000.123456000\">",
         "<label class=\"cw-label\" for=\"rate-regular-cpu\">vCPU, per hour<span class=\"cw-sr-only\">, in euros</span></label><span class=\"cw-input-group\"><span aria-hidden=\"true\">€</span><input id=\"rate-regular-cpu\" name=\"cpu\" type=\"text\" inputmode=\"decimal\" value=\"0.0438\"",
         "name=\"memory\" type=\"text\" inputmode=\"decimal\" value=\"0.0141\"",
@@ -377,7 +377,7 @@ async fn a_failed_read_or_no_cards_still_renders_the_page() {
     .await;
     let page = get(&dashboard, "/admin/pricing/").await;
     assert!(page.body.contains(
-        "<section class=\"cw-card cw-empty\" aria-labelledby=\"rate-cards-empty-title\"><h2 id=\"rate-cards-empty-title\" class=\"cw-empty-title\">No rate cards</h2></section>"
+        "<section class=\"cw-empty\" aria-labelledby=\"rate-cards-empty-title\"><h2 id=\"rate-cards-empty-title\" class=\"cw-empty-title\">No rate cards</h2></section>"
     ));
 }
 
@@ -392,7 +392,7 @@ async fn the_review_shows_now_and_new_for_changed_rates_only() {
     .await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     for text in [
-        "<h2 id=\"price-review-title\" class=\"cw-card-title\">Review Regular's prices</h2>",
+        "<h2 id=\"price-review-title\" class=\"cw-section-title\">Review Regular's prices</h2>",
         "<thead><tr><th scope=\"col\">Rate</th><th scope=\"col\">Now</th><th scope=\"col\">New</th></tr></thead><tbody><tr><th scope=\"row\">vCPU, per hour</th><td>€0.0438</td><td>€0.0538</td></tr></tbody>",
         "<input type=\"hidden\" name=\"rate_card\" value=\"regular\"><input type=\"hidden\" name=\"expected_updated_at\" value=\"1795392000.123456000\"><input type=\"hidden\" name=\"cpu_nano\" value=\"53800000\"><input type=\"hidden\" name=\"memory_nano\" value=\"14100000\"><input type=\"hidden\" name=\"disk_nano\" value=\"87000\"><input type=\"hidden\" name=\"storage_nano\" value=\"0\">",
         "<a class=\"cw-button cw-button--outline\" href=\"/admin/pricing/\">Back</a><button class=\"cw-button\" type=\"submit\">Save prices</button>",
@@ -407,7 +407,7 @@ async fn the_review_shows_now_and_new_for_changed_rates_only() {
 
     let large = post(&dashboard, REVIEW, &review_form(&[("storage", "0.0001")])).await;
     assert!(large.body.contains(
-        "<th scope=\"row\">Storage while suspended or hibernated, per GiB-hour</th><td>€0</td><td>€0.0001<span class=\"cw-badge\" data-tone=\"warning\">More than double</span></td>"
+        "<th scope=\"row\">Storage while suspended or hibernated, per GiB-hour</th><td>€0</td><td>€0.0001<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
     ));
     assert!(large.body.contains(
         "<label class=\"cw-choice\"><input class=\"cw-checkbox\" type=\"checkbox\" name=\"confirm_increase\" value=\"yes\" required><span>I confirm these increases.</span></label>"
@@ -466,7 +466,7 @@ async fn a_large_increase_needs_the_confirmation_checked_against_the_current_car
         refused.body
     );
     assert!(refused.body.contains(
-        "<td>€0.0438</td><td>€0.1<span class=\"cw-badge\" data-tone=\"warning\">More than double</span></td>"
+        "<td>€0.0438</td><td>€0.1<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
     ));
     assert!(refused.body.contains("I confirm these increases."));
     assert_eq!(calls.count("ListRateCards"), 1);

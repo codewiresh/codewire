@@ -21,10 +21,10 @@
       <main class="cw-main">{% let crumb_scope = "admin" %}{% let crumb_page = "overview" %}{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <h1 class="cw-page-title">Overview</h1>
         <section class="cw-stat-grid" aria-label="Platform statistics">
-          <article class="cw-card cw-admin-stat"><span>Active Sandboxes</span><strong>{{ stats.active_environments }}</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Monthly Cost</span><strong>{{ stats.monthly_cost }}</strong><p>This month</p></article>
-          <article class="cw-card cw-admin-stat"><span>CPU Hours</span><strong>{{ stats.monthly_cpu_hours }}</strong><p>This month</p></article>
-          <article class="cw-card cw-admin-stat"><span>Memory GB-Hours</span><strong>{{ stats.monthly_memory_hours }}</strong><p>This month</p></article>
+          <article class="cw-admin-stat"><span>Active Sandboxes</span><strong>{{ stats.active_environments }}</strong></article>
+          <article class="cw-admin-stat"><span>Monthly Cost</span><strong>{{ stats.monthly_cost }}</strong><p>This month</p></article>
+          <article class="cw-admin-stat"><span>CPU Hours</span><strong>{{ stats.monthly_cpu_hours }}</strong><p>This month</p></article>
+          <article class="cw-admin-stat"><span>Memory GB-Hours</span><strong>{{ stats.monthly_memory_hours }}</strong><p>This month</p></article>
         </section>
       </div></div></main>
     </div>

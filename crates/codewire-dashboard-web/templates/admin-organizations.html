@@ -22,9 +22,8 @@
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Organizations</h1><p>Inspect any organization's members, billing, environment quota, usage and API keys.</p></div></header>
         {% if !message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ message }}</p>{% endif %}
         {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
-        <section class="cw-card" aria-labelledby="defaults-heading">
-          <header class="cw-card-header"><div><h2 id="defaults-heading">Defaults for organizations without their own quota</h2><p>Every organization without its own quota gets these limits. An organization on the Unlimited rate card has no limits.</p></div></header>
-          <div class="cw-card-body">
+        <section class="cw-section" aria-labelledby="defaults-heading">
+          <header class="cw-section-header"><div><h2 id="defaults-heading" class="cw-section-title">Defaults for organizations without their own quota</h2><p class="cw-section-description">Every organization without its own quota gets these limits. An organization on the Unlimited rate card has no limits.</p></div></header>
             <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/defaults/set" aria-labelledby="defaults-heading">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <label class="cw-field"><span>Concurrent environments</span><input class="cw-input" type="number" name="environments" min="-1" step="1" value="{{ defaults.environments.value }}" required></label>
@@ -34,26 +33,25 @@
               <p class="cw-muted">Now {{ defaults.environments.display }} environments, {{ defaults.sandboxes.display }} sandboxes, {{ defaults.cpu_millicores.display }} and {{ defaults.memory_mb.display }}. Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Save defaults</button></div>
             </form>
-          </div>
         </section>
         <section class="cw-stat-grid cw-stat-grid--five" aria-label="Sandboxes across every organization">
-          {% match organizations.sandbox_totals %}{% when Some(totals) %}<article class="cw-card cw-admin-stat"><span>Sandboxes created</span><strong>{{ totals.created }}</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes running</span><strong>{{ totals.running }}</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes stopped</span><strong>{{ totals.stopped }}</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes failed</span><strong>{{ totals.failed }}</strong></article>
-          <article class="cw-card cw-admin-stat"><span>Sandboxes deleted</span><strong>{{ totals.deleted }}</strong></article>{% when None %}<article class="cw-card cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>{% endmatch %}
+          {% match organizations.sandbox_totals %}{% when Some(totals) %}<article class="cw-admin-stat"><span>Sandboxes created</span><strong>{{ totals.created }}</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes running</span><strong>{{ totals.running }}</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes stopped</span><strong>{{ totals.stopped }}</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes failed</span><strong>{{ totals.failed }}</strong></article>
+          <article class="cw-admin-stat"><span>Sandboxes deleted</span><strong>{{ totals.deleted }}</strong></article>{% when None %}<article class="cw-admin-stat"><span>Sandboxes</span><strong>Unavailable</strong></article>{% endmatch %}
         </section>
-        <section class="cw-card" aria-labelledby="organizations-heading">
-          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>{{ organizations.rows.len() }} organizations</p></div></header>
-          {% if organizations.rows.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No organizations exist yet.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
+        <section class="cw-section" aria-labelledby="organizations-heading">
+          <header class="cw-section-header"><div><h2 id="organizations-heading" class="cw-section-title">All organizations</h2><p class="cw-section-description">{{ organizations.rows.len() }} organizations</p></div></header>
+          {% if organizations.rows.is_empty() %}<p class="cw-muted">No organizations exist yet.</p>{% else %}
+          <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table cw-table--row-groups"><thead><tr><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Sandboxes created</th><th scope="col">Running</th><th scope="col">Stopped</th><th scope="col">Failed</th><th scope="col">Deleted</th><th scope="col">Last Sandbox</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead>
             {% for organization in organizations.rows %}<tbody>
               <tr><th scope="rowgroup" colspan="10"><a class="cw-row-link" href="{{ organization.url }}">{{ organization.name }}</a> <code>{{ organization.slug }}</code></th></tr>
               <tr>
                 <td>{{ organization.billing_plan }}</td>
                 <td>{{ organization.billing_status }}</td>
                 {% match organization.sandboxes %}{% when Some(sandboxes) %}<td>{{ sandboxes.counts.created }}</td><td>{{ sandboxes.counts.running }}</td><td>{{ sandboxes.counts.stopped }}</td><td>{{ sandboxes.counts.failed }}</td><td>{{ sandboxes.counts.deleted }}</td><td>{{ sandboxes.last_created }}</td>{% when None %}<td colspan="6">Unavailable</td>{% endmatch %}
-                <td>{% match organization.confidential_environments %}{% when Some(true) %}<span class="cw-badge" data-tone="success">Opted in</span>{% when Some(false) %}Not opted in{% when None %}Unavailable{% endmatch %}</td>
+                <td>{% match organization.confidential_environments %}{% when Some(true) %}<span class="cw-status cw-status--quiet" data-tone="success">Opted in</span>{% when Some(false) %}Not opted in{% when None %}Unavailable{% endmatch %}</td>
                 <td>{{ organization.created }}</td>
               </tr>
             </tbody>{% endfor %}

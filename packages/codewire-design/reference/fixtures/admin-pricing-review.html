@@ -10,10 +10,10 @@
 <body class="cw-body" data-route="admin" data-dashboard-app>
 <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>admin</span><span>/</span><strong>pricing</strong></div></header><div class="cw-main-inner"><div class="cw-page cw-admin-stack">
         <header class="cw-admin-heading"><div><h1 class="cw-page-title">Pricing</h1><p>A change applies from the next metering draw and never re-prices past usage.</p></div></header>
-        <section class="cw-card" aria-labelledby="price-review-title">
-          <header class="cw-card-header"><h2 id="price-review-title" class="cw-card-title">Review Regular's prices</h2></header>
-          <div class="cw-card-body cw-admin-section">
-            <div class="cw-table-shell"><table class="cw-table"><thead><tr><th scope="col">Rate</th><th scope="col">Now</th><th scope="col">New</th></tr></thead><tbody><tr><th scope="row">vCPU, per hour</th><td>€0.0438</td><td>€0.1<span class="cw-badge" data-tone="warning">More than double</span></td></tr><tr><th scope="row">Memory, per GiB-hour</th><td>€0.0141</td><td>€0.015</td></tr><tr><th scope="row">Storage while suspended or hibernated, per GiB-hour</th><td>€0</td><td>€0.00002<span class="cw-badge" data-tone="warning">More than double</span></td></tr></tbody></table></div>
+        <section class="cw-section" aria-labelledby="price-review-title">
+          <header class="cw-section-header"><div><h2 id="price-review-title" class="cw-section-title">Review Regular's prices</h2></div></header>
+          <div class="cw-admin-section">
+            <div class="cw-table-shell cw-table-shell--plain"><table class="cw-table"><thead><tr><th scope="col">Rate</th><th scope="col">Now</th><th scope="col">New</th></tr></thead><tbody><tr><th scope="row">vCPU, per hour</th><td>€0.0438</td><td>€0.1<span class="cw-status cw-status--quiet" data-tone="warning">More than double</span></td></tr><tr><th scope="row">Memory, per GiB-hour</th><td>€0.0141</td><td>€0.015</td></tr><tr><th scope="row">Storage while suspended or hibernated, per GiB-hour</th><td>€0</td><td>€0.00002<span class="cw-status cw-status--quiet" data-tone="warning">More than double</span></td></tr></tbody></table></div>
             <form class="cw-form" method="post" action="/admin/pricing/_actions/update">
               <input type="hidden" name="_csrf" value="fixture"><input type="hidden" name="rate_card" value="regular"><input type="hidden" name="expected_updated_at" value="1795392000.123456000"><input type="hidden" name="cpu_nano" value="100000000"><input type="hidden" name="memory_nano" value="15000000"><input type="hidden" name="disk_nano" value="87000"><input type="hidden" name="storage_nano" value="20000">
               <label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="confirm_increase" value="yes" required><span>I confirm these increases.</span></label>

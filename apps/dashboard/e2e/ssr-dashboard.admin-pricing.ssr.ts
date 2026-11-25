@@ -65,8 +65,8 @@ test("the review lists the changed rates and asks to confirm a large increase", 
   ]);
   const cpu = table.getByRole("row", { name: /vCPU, per hour/ });
   await expect(cpu.getByRole("cell")).toHaveText(["€0.0438", "€0.1More than double"]);
-  await expect(cpu.locator('.cw-badge[data-tone="warning"]')).toHaveText("More than double");
-  await expect(table.getByRole("row", { name: /Memory/ }).locator(".cw-badge")).toHaveCount(0);
+  await expect(cpu.locator('.cw-status[data-tone="warning"]')).toHaveText("More than double");
+  await expect(table.getByRole("row", { name: /Memory/ }).locator(".cw-status")).toHaveCount(0);
 
   const confirm = review.getByRole("checkbox", { name: "I confirm these increases." });
   await expect(confirm).not.toBeChecked();
