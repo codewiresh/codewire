@@ -432,7 +432,7 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
       ...credentialRows(page),
       ["git-identity", async () => {
         await expect(identity.getByRole("heading", { name: "Git commit identity", exact: true, level: 2 })).toBeVisible();
-        await expect(identity.locator(".cw-card-description"))
+        await expect(identity.locator(".cw-section-description"))
           .toHaveText("Author name and email for Sandbox commits. This is commit attribution, not a GitHub login, provider credential or profile member.");
         await expect(identity.getByText("Clear either field to use its independent account fallback. Connecting GitHub does not overwrite your Codewire email.")).toBeVisible();
         for (const field of ["Commit author name", "Commit author email"]) await expect(identity.getByLabel(field, { exact: true })).toBeVisible();
