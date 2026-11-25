@@ -5,7 +5,8 @@ test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reduced
 // The privacy policy and the terms of service are long text on the public
 // sheet: each part's text keeps a readable measure, nothing scrolls sideways
 // (the processor table included) and the footer links both pages, as do the
-// home and pricing footers and the sign-up form.
+// home and pricing footers and the sign-up form. The privacy policy says what
+// the website analytics do (infra#2677).
 const pages = [
   { fixture: "privacy.html", heading: "Privacy policy", current: "Privacy" },
   { fixture: "terms.html", heading: "Terms of service", current: "Terms" },
@@ -50,6 +51,7 @@ test("the legal pages read at a measure with no sideways scroll", { tag: "@mobil
         }));
         expect(fits.table, `${colorScheme}: the processor table is wider than its column`).toBeLessThanOrEqual(fits.column);
         await expect(table.locator("tbody tr")).toHaveCount(6);
+        await expect(page.getByRole("heading", { level: 2, name: "Website analytics" })).toBeVisible();
       } else {
         await expect(table).toHaveCount(0);
       }
