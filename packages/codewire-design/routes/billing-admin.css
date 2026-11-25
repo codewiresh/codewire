@@ -42,7 +42,7 @@ dl.cw-stat-grid { margin: 0; }
 .cw-admin-stat > strong { margin: var(--space-2) 0 var(--space-0-5); font-family: var(--font-mono); font-size: var(--text-page); font-weight: var(--weight-medium); line-height: var(--leading-tight); }
 .cw-admin-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .cw-admin-heading p { max-width: var(--measure); margin: var(--space-1-5) 0 0; color: var(--fg-secondary); font-size: var(--text-body); }
-.cw-filter-form { display: flex; align-items: end; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); }
+.cw-filter-form { display: flex; align-items: end; gap: var(--space-3); }
 .cw-filter-form .cw-field:first-child { width: min(var(--control-width), 100%); }
 .cw-filter-form .cw-field:nth-child(2) { width: var(--control-width-sm); }
 .cw-pagination { display: flex; justify-content: flex-end; gap: var(--space-2); }
@@ -61,9 +61,11 @@ dl.cw-stat-grid { margin: 0; }
 .cw-audit-details pre { width: min(var(--dialog-width), 75vw); max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .cw-admin-section { display: grid; gap: var(--space-4); }
-.cw-catalog-form, .cw-plan-form, .cw-price-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
-.cw-plan-form { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: var(--space-3); }
-.cw-price-form { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: var(--space-3); }
+.cw-catalog-form, .cw-plan-form, .cw-price-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
+/* Each plan and price is a row of the list: a hairline divides it from the one above. */
+.cw-plan-form, .cw-price-form { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border); }
+.cw-plan-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cw-price-form { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .cw-form-action { display: flex; align-items: end; }
 /* Add credit and automatic top-up are two panels of one kind. Add credit: its title and terms, the amount chips, the custom amount while Custom is chosen, then the button that names what it adds. */
 /* The balance heads the page: its label over the figure, the runway on the right. */
