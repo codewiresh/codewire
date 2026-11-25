@@ -545,6 +545,7 @@ async fn boot_and_wait(
                 if exit != ExitClass::StillRunning {
                     break exit;
                 }
+                suspender.write_state_when_due().await;
                 suspender.refresh().await?;
             }
         }

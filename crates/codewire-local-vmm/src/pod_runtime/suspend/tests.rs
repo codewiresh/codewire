@@ -48,7 +48,7 @@ impl PausableVm for FakeVm {
 }
 
 type Current = Arc<Mutex<HostedTokens>>;
-type Records = Arc<Mutex<Vec<PauseRecord>>>;
+type Records = Arc<Mutex<Vec<Record>>>;
 
 /// A fresh fake VM, kubelet tokens reading "first", and no records.
 fn parts() -> (FakeVm, Current, Records) {
@@ -100,7 +100,23 @@ fn events(records: &Records) -> Vec<(PauseEvent, u64, u64)> {
         .lock()
         .unwrap()
         .iter()
-        .map(|record| (record.event, record.generation, record.sequence))
+        .filter_map(|record| match record {
+            Record::Pause(record) => Some((record.event, record.generation, record.sequence)),
+            Record::State(_) => None,
+        })
+        .collect()
+}
+
+/// The state records written, as (sequence, paused).
+fn states(records: &Records) -> Vec<(u64, bool)> {
+    records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            Record::State(state) => Some((state.sequence, state.paused)),
+            Record::Pause(_) => None,
+        })
         .collect()
 }
 
@@ -280,6 +296,111 @@ fn a_record_is_one_marked_line_no_guest_line_can_start_with() {
     // Every line of guest output starts with the guest log's prefix.
     assert!(!RECORD_MARKER.starts_with(super::super::guest_log::PREFIX));
     assert!(!record.line().contains('\n'));
+
+    let state = StateRecord {
+        generation: 3,
+        sequence: 2,
+        paused: false,
+        since_unix_ms: 1_764_000_000_000,
+    };
+    assert_eq!(
+        Record::State(state).line(),
+        "standard runtime: vm-pause-state {\"generation\":3,\"sequence\":2,\"state\":\"running\",\"since_unix_ms\":1764000000000}"
+    );
+    let paused = StateRecord {
+        paused: true,
+        ..state
+    };
+    assert!(paused.line().contains("\"state\":\"paused\""));
+    assert!(!STATE_MARKER.starts_with(super::super::guest_log::PREFIX));
+    assert!(!paused.line().contains('\n'));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_state_is_written_at_each_pause_and_resume_and_every_interval_paused_or_not() {
+    let (vm, current, records) = parts();
+    let suspender = suspender(&vm, &current, &records);
+    // The first tick writes the boot's state: no record yet, running.
+    suspender.write_state_when_due().await;
+    suspender.write_state_when_due().await;
+    assert_eq!(states(&records), [(0, false)]);
+    let Some(Record::State(first)) = records.lock().unwrap().first().copied() else {
+        panic!("no state record");
+    };
+    assert_eq!((first.generation, first.sequence), (7, 0));
+
+    tokio::time::advance(STATE_RECORD_INTERVAL).await;
+    suspender.write_state_when_due().await;
+    assert_eq!(states(&records), [(0, false), (0, false)]);
+
+    // A pause writes its record, then the state it leaves.
+    assert_eq!(ask(&suspender, HOSTED_SUSPEND_REQUEST).await, b"ok\n");
+    let pause = records.lock().unwrap()[2..].to_vec();
+    let [Record::Pause(paused), Record::State(state)] = &pause[..] else {
+        panic!("a pause writes its record then the state: {pause:?}");
+    };
+    assert_eq!((state.sequence, state.paused), (1, true));
+    assert_eq!(state.since_unix_ms, paused.at_unix_ms);
+
+    // Paused, the state is still written every interval, and only then.
+    tokio::time::advance(STATE_RECORD_INTERVAL - Duration::from_millis(1)).await;
+    suspender.write_state_when_due().await;
+    assert_eq!(states(&records).len(), 3);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    suspender.write_state_when_due().await;
+    assert_eq!(
+        states(&records),
+        [(0, false), (0, false), (1, true), (1, true)]
+    );
+
+    assert!(suspender.wake().await.unwrap());
+    assert_eq!(
+        states(&records),
+        [(0, false), (0, false), (1, true), (1, true), (2, false)]
+    );
+    assert_eq!(
+        events(&records),
+        [(PauseEvent::Paused, 7, 1), (PauseEvent::Resumed, 7, 2)]
+    );
+}
+
+#[tokio::test]
+async fn requests_are_answered_at_most_once_a_second() {
+    let directory = tempfile::tempdir().unwrap();
+    let vsock_socket = directory.path().join("vsock");
+    let (vm, current, records) = parts();
+    let suspender = Arc::new(suspender(&vm, &current, &records));
+    let listening = listen(&vsock_socket, Arc::clone(&suspender)).unwrap();
+    let path = super::super::guest_log::host_socket(&vsock_socket, HOSTED_SUSPEND_VSOCK_PORT);
+
+    let mut answered = Vec::new();
+    for _ in 0..3 {
+        let asked = async {
+            let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+            stream.write_all(HOSTED_SUSPEND_REQUEST).await.unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).await.unwrap();
+            reply
+        };
+        let reply = tokio::time::timeout(BOUND, asked)
+            .await
+            .expect("the request hung");
+        answered.push((reply, std::time::Instant::now()));
+    }
+    listening.abort();
+
+    let replies: Vec<&[u8]> = answered.iter().map(|(reply, _)| &reply[..]).collect();
+    assert_eq!(replies, [&b"ok\n"[..], b"no\n", b"no\n"]);
+    // Measured at the guest's end, so allow for scheduling; unpaced, the
+    // three answers come within milliseconds.
+    for pair in answered.windows(2) {
+        let gap = pair[1].1 - pair[0].1;
+        assert!(
+            gap >= ANSWER_INTERVAL - Duration::from_millis(100),
+            "answered {gap:?} after the last"
+        );
+    }
+    assert_eq!(vm.calls(), ["pause"]);
 }
 
 /// The guest's end of the VM's hybrid vsock socket: answers each CONNECT,

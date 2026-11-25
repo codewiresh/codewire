@@ -8,8 +8,9 @@
 //! renewals are held. A wake resumes the vCPUs, delivers the tokens renewed
 //! meanwhile while the workload is still frozen, then thaws it, and only then
 //! does the waking connection reach the guest. Each pause and resume this
-//! runtime performs is recorded on its own line ([`PauseRecord`]), which
-//! billing reads.
+//! runtime performs is recorded on its own line ([`PauseRecord`]), and the
+//! boot's state on another ([`StateRecord`]) at each of them and every
+//! [`STATE_RECORD_INTERVAL`]; billing reads both.
 
 use std::future::Future;
 use std::path::Path;
@@ -31,6 +32,21 @@ use super::PodRuntimeError;
 /// [`super::guest_log::PREFIX`], so a line starting with this was written
 /// here and nowhere else.
 pub(super) const RECORD_MARKER: &str = "standard runtime: vm-pause-record ";
+
+/// What starts this runtime's record of a boot's pause state, for the same
+/// reason.
+pub(super) const STATE_MARKER: &str = "standard runtime: vm-pause-state ";
+
+/// How often the state record is written, paused or not, besides at each
+/// pause and resume. Billing rebuilds a boot's state from the latest one it
+/// has, so one lost line leaves at most this long unknown.
+pub(super) const STATE_RECORD_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The guest's suspend requests are answered at most this often. A freeze
+/// that fails after `ok` leaves the VM running and writes an error line, so
+/// a guest asking in a loop could otherwise multiply that line in the Pod log
+/// billing reads.
+pub(super) const ANSWER_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The VM a [`Suspender`] pauses and wakes. Production's is the boot's
 /// [`crate::runner::SuspendControl`]; a test's records what was asked.
@@ -98,8 +114,45 @@ impl PauseRecord {
     }
 }
 
+/// A boot's pause state: its latest pause or resume record's sequence and
+/// time, or 0 and the boot's start before the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StateRecord {
+    pub(super) generation: u64,
+    pub(super) sequence: u64,
+    pub(super) paused: bool,
+    pub(super) since_unix_ms: u128,
+}
+
+impl StateRecord {
+    /// The record's line: the marker, then one JSON object.
+    pub(super) fn line(&self) -> String {
+        let state = if self.paused { "paused" } else { "running" };
+        format!(
+            "{STATE_MARKER}{{\"generation\":{},\"sequence\":{},\"state\":\"{state}\",\"since_unix_ms\":{}}}",
+            self.generation, self.sequence, self.since_unix_ms
+        )
+    }
+}
+
+/// A line this runtime writes for billing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Record {
+    Pause(PauseRecord),
+    State(StateRecord),
+}
+
+impl Record {
+    pub(super) fn line(&self) -> String {
+        match self {
+            Self::Pause(record) => record.line(),
+            Self::State(record) => record.line(),
+        }
+    }
+}
+
 type ReadTokens = Box<dyn Fn() -> Result<HostedTokens, PodRuntimeError> + Send + Sync>;
-type RecordSink = Box<dyn Fn(&PauseRecord) + Send + Sync>;
+type RecordSink = Box<dyn Fn(&Record) + Send + Sync>;
 
 /// A boot's suspend state. One lock serializes every pause, wake and token
 /// delivery, so a wake can't come between a pause's answer and the pause.
@@ -117,6 +170,10 @@ struct State {
     /// The tokens the guest last applied.
     delivered: HostedTokens,
     sequence: u64,
+    /// The latest pause or resume record's time, or the boot's start.
+    since_unix_ms: u128,
+    /// When the state record was last written.
+    state_written: Option<tokio::time::Instant>,
 }
 
 impl<V: PausableVm> Suspender<V> {
@@ -136,6 +193,8 @@ impl<V: PausableVm> Suspender<V> {
                 paused: None,
                 delivered,
                 sequence: 0,
+                since_unix_ms: now_unix_ms(),
+                state_written: None,
             }),
         }
     }
@@ -205,17 +264,46 @@ impl<V: PausableVm> Suspender<V> {
         Ok(())
     }
 
+    /// Writes the state record when it wasn't written in the last
+    /// [`STATE_RECORD_INTERVAL`], paused or not. The boot's loop calls it
+    /// every tick.
+    pub(super) async fn write_state_when_due(&self) {
+        let mut state = self.state.lock().await;
+        if state
+            .state_written
+            .is_none_or(|written| written.elapsed() >= STATE_RECORD_INTERVAL)
+        {
+            self.write_state(&mut state);
+        }
+    }
+
     fn note(&self, state: &mut State, event: PauseEvent) {
         state.sequence += 1;
-        (self.record)(&PauseRecord {
+        state.since_unix_ms = now_unix_ms();
+        (self.record)(&Record::Pause(PauseRecord {
             event,
             generation: self.generation,
             sequence: state.sequence,
-            at_unix_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis()),
-        });
+            at_unix_ms: state.since_unix_ms,
+        }));
+        self.write_state(state);
     }
+
+    fn write_state(&self, state: &mut State) {
+        state.state_written = Some(tokio::time::Instant::now());
+        (self.record)(&Record::State(StateRecord {
+            generation: self.generation,
+            sequence: state.sequence,
+            paused: state.paused.is_some(),
+            since_unix_ms: state.since_unix_ms,
+        }));
+    }
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis())
 }
 
 /// A stop of a paused VM wakes it first, so the guest shuts down cleanly
@@ -246,17 +334,21 @@ pub(super) fn listen<V: PausableVm>(
     Ok(tokio::spawn(serve(listener, suspender)))
 }
 
-/// One request at a time: a second waits for the first to be answered.
+/// One request at a time, each at least [`ANSWER_INTERVAL`] after the last
+/// one ended: a second waits.
 async fn serve<V: PausableVm>(listener: UnixListener, suspender: Arc<Suspender<V>>) {
+    let mut next = tokio::time::Instant::now();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             // An accept error such as EMFILE would otherwise spin.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
+        tokio::time::sleep_until(next).await;
         if let Err(error) = answer(stream, &suspender).await {
             eprintln!("standard runtime: the guest's suspend request failed: {error}");
         }
+        next = tokio::time::Instant::now() + ANSWER_INTERVAL;
     }
 }
 
