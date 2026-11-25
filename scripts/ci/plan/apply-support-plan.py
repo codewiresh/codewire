@@ -99,10 +99,16 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
     # commit tag, so every main commit has a releasable pair without a
     # rebuild. Only a valid baseline can leave both unaffected, and the
     # aliased digests are the ones the planner validated.
-    alias = valid and not selected and baseline_sha != head
+    # A head already tagged with that pair, by its own push's alias, needs
+    # nothing more: a dispatch for it publishes nothing.
+    images = (baseline.get("provenance") or {}).get("images")
+    already_aliased = isinstance(images, dict) and all(
+        isinstance(images.get(name), dict) and images[name].get("tag") == head
+        for name in ("base", "workspace")
+    )
+    alias = valid and not selected and baseline_sha != head and not already_aliased
     alias_digests = {"base": "", "workspace": ""}
     if alias:
-        images = (baseline.get("provenance") or {}).get("images")
         if not isinstance(images, dict):
             raise AdapterError("plan baseline omits the published pair digests")
         for name in alias_digests:

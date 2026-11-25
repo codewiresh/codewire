@@ -135,6 +135,22 @@ class SupportPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["build_support_images"], "false")
         self.assertEqual(outputs["alias_support_pair"], "false")
 
+    def test_a_head_already_aliased_by_its_push_needs_nothing(self) -> None:
+        # A dispatch for a commit whose push aliased BASE's pair reads that
+        # pair under the commit's own tag (#6405).
+        document = plan_document()
+        for image in document["baseline"]["provenance"]["images"].values():
+            image["tag"] = HEAD
+        outputs, _ = self.apply(document)
+        self.assertEqual(outputs["build_support_images"], "false")
+        self.assertEqual(outputs["alias_support_pair"], "false")
+        self.assertEqual(outputs["reason"], "artifacts_unaffected")
+
+        # Only both tags naming the head skip the alias.
+        document["baseline"]["provenance"]["images"]["workspace"]["tag"] = "latest"
+        outputs, _ = self.apply(document)
+        self.assertEqual(outputs["alias_support_pair"], "true")
+
     def test_alias_without_exact_validated_digests_fails_closed_to_a_build(self) -> None:
         for mutate in (
             lambda images: images.pop("workspace"),

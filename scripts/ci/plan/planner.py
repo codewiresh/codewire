@@ -1488,6 +1488,7 @@ def make_published_support_baseline(
     }
     baseline_commit = head
     revisions: dict[str, str] = {}
+    commit_tags: set[str] = set()
 
     if target_base != head:
         reasons.append("published support planning target is not the exact canonical head")
@@ -1523,8 +1524,13 @@ def make_published_support_baseline(
                     reasons.append(f"published support {name} repository is invalid")
                 # The push run reads the moving latest pair; a dispatch for an
                 # earlier commit reads its newest ancestor's pair by commit tag.
+                # That tag may be an alias (alias-support-pair.sh): an earlier
+                # pair under a later commit's tag, checked against Git below.
                 if tag != "latest" and tag != revision:
-                    reasons.append(f"published support {name} tag is neither latest nor its revision")
+                    if isinstance(tag, str) and HEX40_RE.fullmatch(tag):
+                        commit_tags.add(tag)
+                    else:
+                        reasons.append(f"published support {name} tag is neither latest nor a commit")
                 if not isinstance(digest, str) or not SHA256_DIGEST_RE.fullmatch(digest):
                     reasons.append(f"published support {name} digest is invalid")
                 if not isinstance(revision, str) or not HEX40_RE.fullmatch(revision):
@@ -1546,6 +1552,15 @@ def make_published_support_baseline(
                     reasons.append("published support source is not an ancestor of the exact head")
                 else:
                     baseline_commit = resolved_source
+                for tag in sorted(commit_tags):
+                    try:
+                        resolved_tag = resolve_commit(repository, tag)
+                    except PlannerError:
+                        reasons.append("published support alias tag is absent from canonical Git history")
+                        continue
+                    if not (_git_is_ancestor(repository, resolved_source, resolved_tag)
+                            and _git_is_ancestor(repository, resolved_tag, head)):
+                        reasons.append("published support alias tag is not between its revision and the exact head")
 
     normalized_reasons = sorted(set(reasons))
     return {

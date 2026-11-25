@@ -1428,23 +1428,46 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
         self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
 
-    def test_commit_tagged_support_pair_is_a_baseline_only_for_its_own_commit(self) -> None:
+    def test_commit_tagged_support_pair_is_its_own_or_an_alias_before_the_head(self) -> None:
         # A dispatch for an earlier commit reads its newest ancestor's pair by
-        # that commit's tag; the tag must name the pair's own revision.
-        head = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")
-        tagged = self.repo.support_candidate(self.repo.base, tag=self.repo.base)
-        document = self.repo.support_plan(tagged, head)
-        self.assertTrue(document["baseline"]["validation"]["valid"])
-        self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
-        self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+        # that commit's tag: the pair's own revision, or an alias of an
+        # earlier revision published for a commit up to the head (#6405).
+        middle = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")
+        head = self.repo.change("apps/dashboard/README.md", "another unrelated change\n")
+        for tag in (self.repo.base, middle, head):
+            tagged = self.repo.support_candidate(self.repo.base, tag=tag)
+            document = self.repo.support_plan(tagged, head)
+            self.assertTrue(document["baseline"]["validation"]["valid"], tag)
+            self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
+            self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
 
-        other = self.repo.support_candidate(self.repo.base, tag=head)
-        other_document = self.repo.support_plan(other, head)
+        # An alias tag must lie between its revision and the head.
+        before = self.repo.support_candidate(middle, tag=self.repo.base)
+        before_document = self.repo.support_plan(before, head)
         self.assertIn(
-            "published support base tag is neither latest nor its revision",
-            other_document["baseline"]["validation"]["reasons"],
+            "published support alias tag is not between its revision and the exact head",
+            before_document["baseline"]["validation"]["reasons"],
         )
-        self.assertEqual(self.workspace_states(other_document), ("unclassified", "unclassified", "unclassified"))
+        self.assertEqual(self.workspace_states(before_document), ("unclassified", "unclassified", "unclassified"))
+
+        beyond = self.repo.support_candidate(self.repo.base, tag=head)
+        beyond_document = self.repo.support_plan(beyond, middle)
+        self.assertIn(
+            "published support alias tag is not between its revision and the exact head",
+            beyond_document["baseline"]["validation"]["reasons"],
+        )
+
+        unknown = self.repo.support_candidate(self.repo.base, tag="f" * 40)
+        self.assertIn(
+            "published support alias tag is absent from canonical Git history",
+            self.repo.support_plan(unknown, head)["baseline"]["validation"]["reasons"],
+        )
+
+        named = self.repo.support_candidate(self.repo.base, tag="stable")
+        self.assertIn(
+            "published support base tag is neither latest nor a commit",
+            self.repo.support_plan(named, head)["baseline"]["validation"]["reasons"],
+        )
 
     def test_published_support_pair_selects_relevant_changes(self) -> None:
         self.repo.write("images/base/entrypoint.sh", "#!/bin/sh\nset -eu\nexec \"$@\"\n", 0o755)
