@@ -189,6 +189,10 @@ def unpack_disk(tar, digest, output):
 
     unpack(tar, digest, output, allowed)
     require(names in DISK_FILES, "the tar does not hold exactly a built disk's files")
+    # The KVM runner's bytes reach a credentialed job here: only the modes
+    # pack_disk writes are accepted.
+    for name in names:
+        require(mode(output / name) == 0o644, f"{name} is not mode 0644")
 
 
 def main(argv=None):

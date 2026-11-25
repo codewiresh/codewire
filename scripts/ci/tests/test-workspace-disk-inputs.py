@@ -149,6 +149,16 @@ class Disk(Base):
         with self.assertRaisesRegex(wdi.Refused, "exactly a built disk's files"):
             wdi.pack_disk(directory, self.work / "disk.tar")
 
+    def test_a_disk_file_with_another_mode_is_refused(self):
+        tar = self.work / "mode.tar"
+        with tarfile.open(tar, "w") as archive:
+            for name in ("config.json", "image.raw", "record.json"):
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = 1, 0o755 if name == "image.raw" else 0o644
+                archive.addfile(info, io.BytesIO(b"x"))
+        with self.assertRaisesRegex(wdi.Refused, "image.raw is not mode 0644"):
+            wdi.unpack_disk(tar, wdi.sha256_file(tar), self.work / "out")
+
     def test_a_short_disk_tar_is_refused(self):
         tar = self.work / "short.tar"
         with tarfile.open(tar, "w") as archive:

@@ -478,6 +478,7 @@
         "images/workspace-disk/**",
         "scripts/ci/images/workspace-disk.sh",
         "scripts/ci/images/workspace-disk-inputs.py",
+        "scripts/ci/images/workspace-image-pin.py",
         "scripts/ci/images/workspace-disk-image-tag.sh",
         "scripts/ci/images/egress-image-tag.sh",
         "scripts/ci/images/verify-runtime-image-signatures.sh",
