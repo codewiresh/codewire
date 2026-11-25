@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-24. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-25. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -52,7 +52,7 @@ separately.
 | `agent-own-key` | #3999, #4001 | partly observed 2026-11-21, main e62d4d033 (`locked`: another key and no key refused, the placeholder served; an unselected provider's host refused under every policy, #5555) | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
-| `local-vm-disk-cleared` | #6277 | not yet observed | not yet observed | n/a | n/a |
+| `local-vm-disk-cleared` | #6277 | observed 2026-11-25, source a76dad14ba (#6277) | partly observed 2026-11-25, source c6470caabd: off then on, the scans and the flags (#6277) | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
 | `hosted-enforcement` | #4000 | n/a | n/a | partly observed 2026-11-23, Dev source 42306388f8 (`cw info` on a selected and a changed revision and on `locked`), and 2026-11-24, Dev source d9abce139c (a lockdown not applied fails closed) | not yet observed |
 
@@ -2067,8 +2067,49 @@ Issue: #6277.
     recorded.
 - **Gotchas:** clearing changes only the VM's own image. A checkpoint that
   shares its blocks keeps its own copy, and host blocks freed by the
-  punching are protected only by host disk encryption.
-- **Observed:** not yet observed.
+  punching are protected only by host disk encryption. On an upgrade, while
+  the previous install's supervisor still runs a VM, `cw` refuses every
+  change to local VMs first (`Your local VMs … still run on the cw you
+  updated from`), so the protocol-26 refusal isn't what a user sees there.
+  No released build's checkpoint reaches `checkpoint_disk_uncleared`: one
+  from v0.4.31 is `unrestorable` under this build's guest runtime.
+- **Observed:** Linux (x86_64, KVM), 2026-11-25. The `cw` (the featured
+  synthetic-sign-in build) and the guest runtime came from `main` at
+  a76dad14ba. The walk used a scratch `HOME` and synthetic Claude and Codex
+  sign-ins. Every disk scan ran in a scanner VM, never on the host (#6277).
+  - Off, then on: the start logged `egress_intercept switch=on`, then
+    `state_disk_clear outcome=cleared removed_logins=2`, and both login files
+    held placeholders. The next start logged no clearing.
+  - The raw-byte canary scan found 2 matches each in the state disk before
+    the clear and in the checkpoint taken with interception off, and 0 in
+    the state disk after the clear and in the checkpoint taken after it.
+    The shape scan didn't run: the scanner guest has no tmpfs large enough
+    to spill to.
+  - `cw checkpoint ls` showed the two checkpoints as `uncleared` and
+    `ready`. Restoring or forking the first was refused with
+    `restore_interception_switched_on`, with or without the override.
+  - With 13 GiB in use on a 20 GiB state disk, the clearing took about
+    334 ms, and the start 14.5 s.
+  - A clearing made to fail, by zeroing the stopped disk's superblock,
+    refused the start with `start_state_disk_not_cleared` and logged
+    `outcome=failed step=check`. The override was logged as
+    `outcome=overridden`, and after the superblock was restored the next
+    start cleared again. On a platform profile, as the Dev personal-walk
+    identity, the override was refused and nothing was logged as
+    overridden.
+  - A VM made by v0.4.31 cleared on its first start on this build
+    (`removed_logins=0`, with an API key), and not on the next.
+  - The walk found that `cw` printed only the code for a failed clearing.
+    #6435 adds the ways out and the supervisor-log step, and #6451 keeps
+    only the latest failure.
+
+  macOS (Apple silicon), 2026-11-25, `cw` (featured build) and guest
+  runtime from `main` at c6470caabd. Off, then on, gave the same log lines
+  (`removed_logins=2`), placeholders and flags. The canary scan, in a
+  scanner VM, found 2 matches before the clear and 1 in the interception-off
+  checkpoint, taken before Claude's login had arrived, and none after the clear, in the checkpoint taken after it or
+  in either Docker disk. The clearing took 1.2 s with 0.3 GiB in use. The
+  failure, override, upgrade and platform states weren't walked on macOS.
 
 ## `agent-hosted`: a hosted Sandbox's front door serves that Sandbox alone
 
