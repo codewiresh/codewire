@@ -86,6 +86,19 @@ WRITER_POLICY = "codewire-sandbox-broker-mode"
 OTHER = f"system:serviceaccount:{SERVER}:another-writer"
 ENVIRONMENT_ID = "8f0c3a52-6b1e-4f0e-9d3b-2a7c41e5d901"
 NO_PARAM = "failed to configure binding: no params found"
+# The NetworkPolicies orchestration writes, its claims, and the tier label
+# (#5002).
+NETWORK_POLICY = "codewire-orchestration-network-policy"
+CLAIM_POLICY = "codewire-orchestration-sandbox-claim"
+CLAIM_CRD = ROOT / "deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
+OWN_POLICY = "orchestration creates, updates and deletes only an environment's own policies"
+POLICY_EGRESS = "with hosted egress on, an environment's policy allows egress only to the broker peers"
+POLICY_INGRESS = "with hosted egress on, an environment's policy admits ingress only from orchestration's identity"
+CLAIM_LABELS = "a claim adds only the environment's runtime identity labels to its Pod"
+TIER = "a Pod carries codewire.sh/isolation-tier, as confidential, exactly when it runs under the confidential RuntimeClass"
+DEFAULT_DENY = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                "metadata": {"name": "codewire-sandbox-default-deny", "namespace": SANDBOXES},
+                "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}}
 
 OFF: dict[str, str] = {}
 ON = {
@@ -1224,6 +1237,148 @@ def wait_for(cluster: Cluster, probe: dict, rule: str) -> None:
     sys.exit(f"the policy change never reached admission (wanted {rule!r})")
 
 
+def named(document: dict, name: str) -> dict:
+    return mutate(document, lambda d: d["metadata"].__setitem__("name", name))
+
+
+def stored_change(cluster: "Cluster", kind: str, before: dict, change: Callable[[dict], object] | None,
+                  creator: str | None = None) -> str | None:
+    """Create `before` as `creator` (None, the default, is the cluster's
+    administrator, as infra's Flux or the sandbox controller writes), then as
+    orchestration replace it with `change` applied, or delete it when
+    `change` is None, both as dry runs; then remove it."""
+    create_as = [f"--as={creator}"] if creator else []
+    stored = cluster.kubectl("create", *create_as, "-f", "-", stdin=json.dumps(before))
+    if stored.returncode != 0:
+        return "create failed: " + stored.stderr.strip()
+    name, namespace = before["metadata"]["name"], before["metadata"]["namespace"]
+    if change is None:
+        result = cluster.kubectl("delete", kind, name, "-n", namespace, "--dry-run=server", f"--as={AS}")
+        text = result.stderr.strip()
+        denial = None if result.returncode == 0 else text.split("denied request: ", 1)[-1]
+    else:
+        live = json.loads(cluster.kubectl("get", kind, name, "-n", namespace, "-o", "json").stdout)
+        change(live)
+        denial = cluster.admit("replace", live)
+    cluster.kubectl("delete", kind, name, "-n", namespace, "--wait=true")
+    return denial
+
+
+def network_policy_cases(cluster: "Cluster") -> list[bool]:
+    """The NetworkPolicies orchestration writes (#5002): only an environment's
+    own two, in every mode; with hosted egress on, only the broker shape
+    either way; never a write to the default deny or another writer's policy.
+    Its claims add only the runtime identity, and a Pod's tier label is its
+    runtime class."""
+    env = load("environment-broker-daemon-networkpolicy.golden.json")
+    conf = load("confidential-broker-daemon-networkpolicy.golden.json")
+    warm = load("warm-member-bridge-broker-daemon-networkpolicy.golden.json")
+    direct_warm = load("warm-member-bridge-daemon-networkpolicy.golden.json")
+    claim = mutate(load("sandboxclaim.golden.json"), lambda c: c["metadata"].__setitem__("namespace", SANDBOXES),
+                   lambda c: c["metadata"].pop("finalizers", None))
+    rule = lambda p, component: next(r for r in p["spec"]["egress"] if any(
+        t.get("podSelector", {}).get("matchLabels", {}).get("app.kubernetes.io/component") == component for t in r["to"]))
+    orchestration_in = lambda p: p["spec"]["ingress"][0]
+    world_udp = {"from": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": WORLD["to"][0]["ipBlock"]["except"]}},
+                          {"ipBlock": {"cidr": "::/0", "except": ["fc00::/7"]}}],
+                 "ports": [{"protocol": "UDP", "port": 31000}]}
+    pod_labels = lambda t: t["spec"]["podTemplate"]["metadata"].setdefault("labels", {})
+    results = []
+    cluster.param(ON)
+    wait_for(cluster, named(env, "codewire-sandbox-default-deny"), OWN_POLICY)
+    for name, param, document, expected in [
+        ("on: an environment's broker policy", ON, env, None),
+        ("on: a confidential environment's broker policy, with its KBS", ON, conf, None),
+        ("on: an adopted warm member's bridge", ON, warm, None),
+        ("on: a direct-mode bridge, with the world's tailnet UDP", ON, direct_warm, POLICY_INGRESS),
+        ("off: a direct-mode bridge, with the world's tailnet UDP", OFF, direct_warm, None),
+        ("off: an environment's policy is not held to the broker shape", OFF,
+         mutate(env, lambda p: p["spec"]["egress"].append(copy.deepcopy(WORLD))), None),
+        ("off: still only its own names: the default deny", OFF, DEFAULT_DENY, OWN_POLICY),
+        ("on: the default deny", ON, DEFAULT_DENY, OWN_POLICY),
+        ("on: a template's policy name", ON, named(env, "workspace-1199030a-e4ff"), OWN_POLICY),
+        ("on: a name that is not an environment ID", ON, named(env, "cw-daemon-net-not-an-id"), OWN_POLICY),
+        ("on: world egress added", ON, mutate(env, lambda p: p["spec"]["egress"].append(copy.deepcopy(WORLD))),
+         POLICY_EGRESS),
+        ("on: a private range on 443", ON, mutate(env, lambda p: p["spec"]["egress"].append(
+            {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 443}]})), POLICY_EGRESS),
+        ("on: an extra peer, cluster DNS", ON, mutate(env, lambda p: p["spec"]["egress"].append(
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}],
+             "ports": [{"protocol": "UDP", "port": 53}]})), POLICY_EGRESS),
+        ("on: orchestration's namespace with no Pod selector", ON, mutate(
+            env, lambda p: rule(p, "orchestration")["to"][0].pop("podSelector")), POLICY_EGRESS),
+        ("on: a broker peer with an extra label", ON, mutate(
+            env, lambda p: rule(p, "egress")["to"][0]["podSelector"]["matchLabels"].__setitem__("x", "y")),
+         POLICY_EGRESS),
+        ("on: a broker peer on another port", ON, mutate(
+            env, lambda p: rule(p, "derp")["ports"][0].__setitem__("port", 3478)), POLICY_EGRESS),
+        ("on: a broker peer with no port", ON, mutate(env, lambda p: rule(p, "egress").pop("ports")), POLICY_EGRESS),
+        ("on: the KBS on another port", ON, mutate(conf, lambda p: p["spec"]["egress"][-1]["ports"][0].__setitem__(
+            "port", 443)), POLICY_EGRESS),
+        ("on: the world on the daemon's tailnet UDP port, which a direct-mode policy admits", ON, mutate(
+            env, lambda p: p["spec"]["ingress"].append(copy.deepcopy(world_udp))), POLICY_INGRESS),
+        ("on: the world on TCP 22", ON, mutate(env, lambda p: p["spec"]["ingress"].append(
+            mutate(world_udp, lambda r: r.__setitem__("ports", [{"protocol": "TCP", "port": 22}])))), POLICY_INGRESS),
+        ("on: a private range's ingress", ON, mutate(env, lambda p: p["spec"]["ingress"].append(
+            {"from": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 7777}]})),
+         POLICY_INGRESS),
+        ("on: orchestration's identity on a UDP port", ON, mutate(
+            env, lambda p: orchestration_in(p)["ports"].append({"protocol": "UDP", "port": 31000})), POLICY_INGRESS),
+        ("off: the world on the daemon's tailnet UDP port, as direct mode renders it", OFF, mutate(
+            env, lambda p: p["spec"]["ingress"].append(copy.deepcopy(world_udp))), None),
+        ("on: ingress from orchestration's whole namespace", ON, mutate(
+            env, lambda p: orchestration_in(p)["from"][0].pop("podSelector")), POLICY_INGRESS),
+        ("on: ingress from a Pod in any namespace", ON, mutate(
+            env, lambda p: orchestration_in(p)["from"][0].pop("namespaceSelector")), POLICY_INGRESS),
+    ]:
+        if param is not None:
+            cluster.param(param)
+        results.append(check(name, cluster.admit("create", document), expected))
+    cluster.param(ON)
+    for name, kind, before, change, creator, expected in [
+        ("on: deleting the default deny", "networkpolicy", DEFAULT_DENY, None, None, OWN_POLICY),
+        ("on: updating the default deny to allow everything", "networkpolicy", DEFAULT_DENY,
+         lambda p: p["spec"].__setitem__("egress", [{}]), None, OWN_POLICY),
+        ("on: deleting a template's policy", "networkpolicy", named(env, "workspace-1199030a-e4ff"), None, None,
+         OWN_POLICY),
+        ("on: deleting an environment's own policy", "networkpolicy", env, None, AS, None),
+        ("on: an update keeping an environment's own policy", "networkpolicy", env,
+         lambda p: p["metadata"].setdefault("labels", {}).__setitem__("x", "y"), AS, None),
+        ("on: an update adding world egress to an environment's own policy", "networkpolicy", env,
+         lambda p: p["spec"]["egress"].append(copy.deepcopy(WORLD)), AS, POLICY_EGRESS),
+    ]:
+        results.append(check(name, stored_change(cluster, kind, before, change, creator), expected))
+    for name, document, expected in [
+        ("a claim adding the runtime identity", claim, None),
+        ("a claim adding the confidential tier", mutate(claim, lambda c: c["spec"]["additionalPodMetadata"]["labels"]
+                                                       .__setitem__("codewire.sh/isolation-tier", "confidential")),
+         CLAIM_LABELS),
+        ("a claim adding the broker label", mutate(claim, lambda c: c["spec"]["additionalPodMetadata"]["labels"]
+                                                   .__setitem__("codewire.sh/egress", "broker")), CLAIM_LABELS),
+        ("a claim adding an annotation", mutate(claim, lambda c: c["spec"]["additionalPodMetadata"]
+                                                .__setitem__("annotations", {"x": "y"})), CLAIM_LABELS),
+    ]:
+        results.append(check(name, cluster.admit("create", document), expected))
+    cluster.param(OFF)
+    env_today = pinned(load("identity-free-sandboxtemplate.golden.json"))
+    conf_today = load("confidential-sandboxtemplate.golden.json")
+    for name, document, expected in [
+        ("off: a commodity template claiming the confidential tier", mutate(
+            env_today, lambda t: pod_labels(t).__setitem__("codewire.sh/isolation-tier", "confidential")), TIER),
+        ("off: a confidential template without its tier", mutate(
+            conf_today, lambda t: pod_labels(t).pop("codewire.sh/isolation-tier")), TIER),
+        ("off: a confidential template naming another tier", mutate(
+            conf_today, lambda t: pod_labels(t).__setitem__("codewire.sh/isolation-tier", "standard")), TIER),
+    ]:
+        results.append(check(name, cluster.admit("create", document), expected))
+    results.append(check("off: a Sandbox update claiming the confidential tier on a commodity Pod", sandbox_change(
+        cluster, sandbox({"codewire.sh/type": "workspace"}, "commodity"),
+        lambda s: s["spec"]["podTemplate"]["metadata"]["labels"].__setitem__("codewire.sh/isolation-tier",
+                                                                            "confidential"), OFF), TIER))
+    cluster.param(OFF)
+    return results
+
+
 def check(name: str, denial: str | None, expected: str | None) -> bool:
     ok = denial is None if expected is None else denial is not None and denial.startswith(expected)
     print(f"{'ok  ' if ok else 'FAIL'} {name}: {'admitted' if denial is None else 'denied: ' + denial[:150]}")
@@ -1237,7 +1392,7 @@ def main() -> int:
     cluster = Cluster(args.kubeconfig)
     for namespace in (SERVER, SANDBOXES):
         cluster.kubectl("create", "namespace", namespace)
-    for crd in (CRD, SANDBOX_CRD):
+    for crd in (CRD, SANDBOX_CRD, CLAIM_CRD):
         if cluster.kubectl("apply", "--server-side", "-f", str(crd)).returncode != 0:
             sys.exit(f"{crd.name} did not apply")
     cluster.apply({"apiVersion": "v1", "kind": "List", "items": [
@@ -1246,7 +1401,11 @@ def main() -> int:
          "rules": [{"apiGroups": ["extensions.agents.x-k8s.io"], "resources": ["sandboxtemplates"],
                     "verbs": ["get", "create", "update"]},
                    {"apiGroups": ["agents.x-k8s.io"], "resources": ["sandboxes"],
-                    "verbs": ["get", "create", "update"]}]},
+                    "verbs": ["get", "create", "update"]},
+                   {"apiGroups": ["extensions.agents.x-k8s.io"], "resources": ["sandboxclaims"],
+                    "verbs": ["get", "create", "update"]},
+                   {"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"],
+                    "verbs": ["get", "create", "update", "delete"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
          "metadata": {"name": "warm-pool-admission-proof"},
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
@@ -1257,7 +1416,8 @@ def main() -> int:
     cluster.param(OFF)
     cluster.apply(policy)
     cluster.apply(binding)
-    for document in rendered_policy(MEMBER_POLICY) + rendered_policy(WRITER_POLICY):
+    for document in (rendered_policy(MEMBER_POLICY) + rendered_policy(WRITER_POLICY) +
+                     rendered_policy(NETWORK_POLICY) + rendered_policy(CLAIM_POLICY)):
         cluster.apply(document)
     today = load("warm-pool-sandboxtemplate.golden.json")
     broker = load("warm-pool-broker-sandboxtemplate.golden.json")
@@ -1372,6 +1532,7 @@ def main() -> int:
         results.append(check(name, cluster.admit("create", template), expected))
     cluster.apply(policy)
     cluster.param(OFF)
+    results.extend(network_policy_cases(cluster))
 
     print(f"{sum(results)}/{len(results)} as expected")
     return 0 if all(results) else 1

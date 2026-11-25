@@ -369,11 +369,17 @@ pub fn render_workspace_daemon_network_policy(namespace: &str, opts: &TemplateOp
     })
 }
 
+/// Whether the world may send to the daemon's tailnet UDP port. Never in
+/// broker mode (#5002, cw-security, 2026-11-25): world ingress is a reply
+/// channel, and the daemon doesn't hold that port for the Pod's whole life,
+/// so a workload could bind it. A broker-mode tailnet runs over DERP and the
+/// UDP relay, both broker peers.
 pub(super) fn tailnet_udp_listener_enabled(opts: &TemplateOpts) -> bool {
-    direct_udp_ingress_enabled(opts)
-        || direct_udp_endpoint(opts).is_some()
-        || !opts.udp_relay_allocator_url.trim().is_empty()
-        || !opts.udp_relay_bind_addrs.trim().is_empty()
+    opts.hosted_egress.is_none()
+        && (direct_udp_ingress_enabled(opts)
+            || direct_udp_endpoint(opts).is_some()
+            || !opts.udp_relay_allocator_url.trim().is_empty()
+            || !opts.udp_relay_bind_addrs.trim().is_empty())
 }
 
 fn direct_udp_ingress_enabled(opts: &TemplateOpts) -> bool {
@@ -381,7 +387,7 @@ fn direct_udp_ingress_enabled(opts: &TemplateOpts) -> bool {
 }
 
 fn direct_udp_endpoint(opts: &TemplateOpts) -> Option<String> {
-    if !opts.direct_udp_lb_enabled {
+    if !opts.direct_udp_lb_enabled || opts.hosted_egress.is_some() {
         return None;
     }
     let ip = opts.direct_udp_lb_ip.trim();

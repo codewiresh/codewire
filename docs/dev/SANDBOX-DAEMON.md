@@ -190,9 +190,10 @@ same process:
   pin that recorded key.
 - **Tailnet** on UDP 31000: the daemon joins the coordinator as the
   environment's node with the coordinate capability from its binding, and
-  serves the same SSH server over tailnet. The world reaches 31000 through
-  the environment's direct-UDP LoadBalancer `cw-tailnet-udp-<env>`, and
-  clients fall back to the shared UDP relay (allocated through
+  serves the same SSH server over tailnet. Outside broker mode the world
+  reaches 31000 through the environment's direct-UDP LoadBalancer
+  `cw-tailnet-udp-<env>`; in broker mode nothing outside reaches it (#5002),
+  and clients fall back to the shared UDP relay (allocated through
   `AllocatePeerRelay`) and then DERP. The daemon keeps one peer per node
   key: when a client's coordinator session reconnects and the coordinator
   announces its node again under the new session's ID, that entry replaces

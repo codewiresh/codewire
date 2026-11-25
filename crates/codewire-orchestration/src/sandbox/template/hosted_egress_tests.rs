@@ -487,3 +487,73 @@ fn the_template_policy_the_lockdown_check_expects_carries_the_templates_rules() 
         );
     }
 }
+
+/// What a broker-mode environment's own policy renders, standard and
+/// confidential, with the tailnet's world UDP ingress (#5002): the shapes the
+/// NetworkPolicy admission policy admits, proved against a real API server
+/// by scripts/dev/kind/warm-pool-admission-proof.py.
+#[test]
+fn broker_mode_environment_policies_match_their_golden_files() {
+    for (golden, profile) in [
+        (
+            "environment-broker-daemon-networkpolicy.golden.json",
+            RUNTIME_PROFILE_COMMODITY,
+        ),
+        (
+            "confidential-broker-daemon-networkpolicy.golden.json",
+            RUNTIME_PROFILE_CONFIDENTIAL,
+        ),
+    ] {
+        let opts = TemplateOpts {
+            stun_host: "stun.codewire-dev.sh".into(),
+            ..opts(profile, true, Some(egress_template()))
+        };
+        crate::test_golden::assert_golden(
+            golden,
+            &network::render_workspace_daemon_network_policy(NAMESPACE, &opts),
+        );
+    }
+    let opts = TemplateOpts {
+        stun_host: "stun.codewire-dev.sh".into(),
+        ..opts(RUNTIME_PROFILE_COMMODITY, true, Some(egress_template()))
+    };
+    crate::test_golden::assert_golden(
+        "warm-member-bridge-broker-daemon-networkpolicy.golden.json",
+        &render_warm_member_bridge(NAMESPACE, &opts, "0b6f4a52-5d1e-4c2a-9a4e-3f1d2c7b8e90")
+            .unwrap(),
+    );
+}
+
+/// The world never reaches a broker-mode workspace (#5002): no tailnet UDP
+/// ingress and no direct-UDP LoadBalancer, whatever STUN, relay or
+/// LoadBalancer the deployment configures. Its tailnet runs over DERP and the
+/// UDP relay. Direct mode keeps both.
+#[test]
+fn broker_mode_admits_no_world_ingress_and_no_direct_udp_service() {
+    let configured = |egress: Option<HostedEgressTemplate>| TemplateOpts {
+        stun_host: "stun.codewire-dev.sh".into(),
+        direct_udp_lb_enabled: true,
+        direct_udp_lb_ip: "203.0.113.7".into(),
+        direct_udp_lb_port: 41700,
+        ..opts(RUNTIME_PROFILE_COMMODITY, true, egress)
+    };
+    let world = |opts: &TemplateOpts| {
+        network::render_workspace_daemon_network_policy(NAMESPACE, opts)["spec"]["ingress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| {
+                rule["from"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|peer| peer.get("ipBlock").is_some())
+            })
+    };
+    let broker = configured(Some(egress_template()));
+    assert!(!world(&broker));
+    assert!(render_direct_udp_service(NAMESPACE, &broker).is_none());
+    let direct = configured(None);
+    assert!(world(&direct));
+    assert!(render_direct_udp_service(NAMESPACE, &direct).is_some());
+}

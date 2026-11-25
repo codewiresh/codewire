@@ -1441,7 +1441,7 @@ pin.
 | Boundary | Enforced by | What it means |
 | --- | --- | --- |
 | VM per environment | Kata RuntimeClass (hosted); Cloud Hypervisor or Virtualization.framework (local) | A workload's kernel is its own. Docker runs inside the same VM. The node's or host's container runtime never reaches an environment. |
-| Daemon admission | NetworkPolicy and the daemon credential (hosted); the owner-only socket (local) | Only orchestration reaches 7777 and 2222 in a hosted Pod; only the world reaches UDP 31000. Every daemon RPC carries the bound Pod's credential. |
+| Daemon admission | NetworkPolicy and the daemon credential (hosted); the owner-only socket (local) | Only orchestration reaches 7777 and 2222 in a hosted Pod; outside broker mode only the world reaches UDP 31000, and in broker mode nothing outside the platform reaches the Pod. Every daemon RPC carries the bound Pod's credential. |
 | Identity-free Pod | The template renderer and the `identity-free-workspace` policy guard | A workspace Pod carries no daemon token, environment ID or secret, only a Pod-bound binding token (600 s) that grants its own binding and nothing else; `automountServiceAccountToken` is false. |
 | Credential non-disclosure | The credential service's broker (hosted), the host authority (local) | Provider material stays outside the environment behind a transparent HTTP proxy that injects and redacts the credential, an SSH signer that returns only signatures, and a repository executor. The relay legs carry typed requests and ciphertext. |
 | Application secrets | The launch projection | Selected values reach the workload's processes for one launch, under their original names; they are not written to durable configuration, Temporal history, session metadata or VM seeds. |
@@ -1522,7 +1522,14 @@ Hosted network policy today
 orchestration renders one `NetworkPolicy` per environment. Ingress admits the
 orchestration Pods to the daemon's 7777 and 2222 and to every TCP port, so
 the preview proxy can reach a registered application port, and admits
-non-private addresses to UDP 31000 when the tailnet listener is enabled.
+non-private addresses to UDP 31000 when the tailnet listener is enabled. In
+broker mode (hosted egress on) the listener is never enabled: no world
+ingress and no direct-UDP LoadBalancer, and the tailnet runs over DERP and
+the UDP relay (#5002). Admission holds every NetworkPolicy orchestration
+writes to an environment's own two (`cw-daemon-net-<env>` and
+`cw-daemon-warm-<env>`), and in broker mode to the broker shape
+(`deployments/k8s/orchestration/network-policy-authz.yaml`), over a default
+deny that infra owns in each shared Sandbox namespace.
 Egress admits the public Internet (the private, loopback, link-local and
 carrier-grade NAT ranges are excluded), cluster DNS, the ingress controller on
 80 and 443, STUN, the UDP relay and the confidential key broker where

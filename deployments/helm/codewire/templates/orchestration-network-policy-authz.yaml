@@ -1,0 +1,170 @@
+{{- if .Values.orchestration.enabled }}
+# The NetworkPolicies orchestration writes in a Sandbox namespace (#5002,
+# private-docs designs/hosted-egress.md, "Per-environment admission and the
+# fence's selector").
+#
+# Every Sandbox namespace carries a default deny that infra owns
+# (platform-rbac), so each policy orchestration writes is an additive allow
+# over it. This policy holds two things:
+# - orchestration creates, updates and deletes only the two policies it
+#   renders per environment (cw-daemon-net-<env> and cw-daemon-warm-<env>),
+#   never the default deny, a sandbox controller's template policy or another
+#   component's, so a delete only ever narrows what a Pod may reach;
+# - with hosted egress on, those two policies admit only the broker shape:
+#   egress to the broker peers, each by its namespace and exact Pod labels on
+#   its own ports, and the KBS on its one port; ingress only from
+#   orchestration's identity, never from the world. Off, nothing about their
+#   shape changes.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-network-policy
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  # Removing this policy would admit any policy orchestration writes, so a
+  # source change that drops it never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  failurePolicy: Fail
+  # The hosted-egress switch and its broker peers (codewire-hosted-egress,
+  # hosted-egress.yaml), as the template policy reads them.
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["networkpolicies"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  variables:
+    # The orchestration Service Account's own namespace: the server namespace
+    # the renderer names for orchestration, cw-egress, DERP and the UDP relay.
+    - name: serverNamespace
+      expression: request.userInfo.username.split(':')[2]
+    - name: hostedEgress
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_ENABLED' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'
+    # The policy as written: a delete has only the old one.
+    - name: policy
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    # The public gateway's proxies and every broker peer, each as one list:
+    # its namespace, its ports (PROTOCOL/port, comma-separated), then each Pod
+    # label as key=value. Copied from the template policy, which the
+    # orchestration-authz repository check holds equal.
+    - name: gatewayPeers
+      expression: >-
+        has(params.data) &&
+        ['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME',
+        'CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT'].all(k,
+        k in params.data && size(params.data[k]) > 0) ?
+        [[string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE']),
+        'TCP/' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT']),
+        'gateway.envoyproxy.io/owning-gateway-name=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME']),
+        'gateway.envoyproxy.io/owning-gateway-namespace=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE'])]] : []
+    - name: brokerEgressPeers
+      expression: >-
+        [[variables.serverNamespace, 'TCP/8089', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=egress'],
+        [variables.serverNamespace, 'TCP/8087', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=orchestration'],
+        [variables.serverNamespace, 'TCP/8443', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=derp'],
+        [variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] +
+        variables.gatewayPeers
+    # The Trustee KBS, as namespace, PROTOCOL/port and any Pod labels, copied
+    # from the template policy.
+    - name: kbsPeer
+      expression: "['codewire-trustee', 'TCP/8080']"
+    # The TCP ports orchestration reaches the daemon on: the daemon, SSH, and
+    # every preview port.
+    - name: orchestrationPorts
+      expression: "['TCP/7777', 'TCP/2222', 'TCP/1-65535']"
+  validations:
+    # In every mode: only the environment's own two policies, by their
+    # rendered names (sandbox/template/naming.rs). The default deny, a
+    # template's policy (the sandbox controller's) and any other component's
+    # are never orchestration's to change or remove.
+    - expression: >-
+        request.name.matches('^cw-daemon-(net|warm)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      message: orchestration creates, updates and deletes only an environment's own policies, cw-daemon-net-<environment> and cw-daemon-warm-<environment>
+    # Hosted egress on: no address range, no namespace-only peer. Each peer
+    # is exactly one broker peer (one namespace and the whole Pod label map)
+    # on only that peer's ports, or the KBS on its one port.
+    - expression: >-
+        request.operation == 'DELETE' || !variables.hostedEgress ||
+        !has(variables.policy.spec.egress) ||
+        variables.policy.spec.egress.all(r,
+        dyn(r).all(k, k in ['to', 'ports']) && has(r.to) && size(r.to) > 0 && has(r.ports) && size(r.ports) > 0 &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) && type(p.port) == int) &&
+        r.to.all(t, dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(t.namespaceSelector.matchLabels) && size(t.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in t.namespaceSelector.matchLabels &&
+        (variables.brokerEgressPeers.exists(b,
+        b[0] == t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] &&
+        has(t.podSelector) && dyn(t.podSelector).all(k, k == 'matchLabels') && has(t.podSelector.matchLabels) &&
+        size(t.podSelector.matchLabels) == size(b) - 2 &&
+        t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b) &&
+        r.ports.all(p, (p.protocol + '/' + string(p.port)) in b[1].split(','))) ||
+        t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.kbsPeer[0] &&
+        (size(variables.kbsPeer) == 2 ? !has(t.podSelector) :
+        has(t.podSelector) && dyn(t.podSelector).all(k, k == 'matchLabels') && has(t.podSelector.matchLabels) &&
+        size(t.podSelector.matchLabels) == size(variables.kbsPeer) - 2 &&
+        t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in variables.kbsPeer)) &&
+        size(r.ports) == 1 && (r.ports[0].protocol + '/' + string(r.ports[0].port)) == variables.kbsPeer[1])))
+      message: with hosted egress on, an environment's policy allows egress only to the broker peers, each by its namespace and exact Pod labels on its own ports, or to the KBS on its one port, never an address range
+    # Hosted egress on: exactly the ingress the renderer writes
+    # (sandbox/template/network.rs, workspace_daemon_ingress_rules):
+    # orchestration's identity in one peer, its namespace and exact labels, on
+    # the daemon, SSH and preview ports. No world ingress: it would be a reply
+    # channel, and the daemon doesn't hold its tailnet UDP port for the Pod's
+    # whole life (cw-security, 2026-11-25).
+    - expression: >-
+        request.operation == 'DELETE' || !variables.hostedEgress ||
+        !has(variables.policy.spec.ingress) ||
+        variables.policy.spec.ingress.all(r,
+        dyn(r).all(k, k in ['from', 'ports']) && has(r.from) && size(r.from) == 1 && has(r.ports) && size(r.ports) > 0 &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol', 'endPort']) && has(p.port) && has(p.protocol) && type(p.port) == int) &&
+        dyn(r.from[0]).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(r.from[0].namespaceSelector) && dyn(r.from[0].namespaceSelector).all(k, k == 'matchLabels') &&
+        has(r.from[0].namespaceSelector.matchLabels) && size(r.from[0].namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in r.from[0].namespaceSelector.matchLabels &&
+        r.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.serverNamespace &&
+        has(r.from[0].podSelector) && dyn(r.from[0].podSelector).all(k, k == 'matchLabels') &&
+        has(r.from[0].podSelector.matchLabels) && size(r.from[0].podSelector.matchLabels) == 2 &&
+        'app.kubernetes.io/name' in r.from[0].podSelector.matchLabels &&
+        r.from[0].podSelector.matchLabels['app.kubernetes.io/name'] == 'codewire' &&
+        'app.kubernetes.io/component' in r.from[0].podSelector.matchLabels &&
+        r.from[0].podSelector.matchLabels['app.kubernetes.io/component'] == 'orchestration' &&
+        r.ports.all(p, (p.protocol + '/' + string(p.port) + (has(p.endPort) ? '-' + string(p.endPort) : '')) in variables.orchestrationPorts))
+      message: with hosted egress on, an environment's policy admits ingress only from orchestration's identity, on the daemon, SSH and preview ports, never from the world
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-network-policy
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  policyName: codewire-orchestration-network-policy
+  validationActions: [Deny]
+  # The hosted-egress switch, from the namespace orchestration runs in.
+  # Kustomize writes that namespace (kustomizeconfig.yaml); a missing
+  # ConfigMap denies every policy orchestration writes.
+  paramRef:
+    name: codewire-hosted-egress
+    namespace: {{ $.Release.Namespace }}
+    parameterNotFoundAction: Deny
+  # No namespace selector: the identity match bounds the policy, and follows
+  # the writer into every namespace.
+{{- end }}

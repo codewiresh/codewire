@@ -1,0 +1,177 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {
+    "labels": {
+      "app.kubernetes.io/component": "workspace-daemon",
+      "app.kubernetes.io/managed-by": "codewire",
+      "app.kubernetes.io/name": "codewire-workspace-daemon",
+      "codewire.sh/environment-id": "be31063a-8ec8-46d5-aa17-75cda1729370"
+    },
+    "name": "cw-daemon-net-be31063a-8ec8-46d5-aa17-75cda1729370",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 8089,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "dev"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/component": "egress",
+                "app.kubernetes.io/name": "codewire"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 8087,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "dev"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/component": "orchestration",
+                "app.kubernetes.io/name": "codewire"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 8443,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "dev"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/component": "derp",
+                "app.kubernetes.io/name": "codewire"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 10443,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "gateway-proxies"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "gateway.envoyproxy.io/owning-gateway-name": "public",
+                "gateway.envoyproxy.io/owning-gateway-namespace": "gateway"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 41641,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "dev"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/component": "udp-relay",
+                "app.kubernetes.io/name": "codewire"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "ingress": [
+      {
+        "from": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "dev"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/component": "orchestration",
+                "app.kubernetes.io/name": "codewire"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 7777,
+            "protocol": "TCP"
+          },
+          {
+            "port": 2222,
+            "protocol": "TCP"
+          },
+          {
+            "endPort": 65535,
+            "port": 1,
+            "protocol": "TCP"
+          }
+        ]
+      }
+    ],
+    "podSelector": {
+      "matchLabels": {
+        "codewire.sh/environment-id": "be31063a-8ec8-46d5-aa17-75cda1729370",
+        "codewire.sh/type": "workspace"
+      }
+    },
+    "policyTypes": [
+      "Ingress",
+      "Egress"
+    ]
+  }
+}

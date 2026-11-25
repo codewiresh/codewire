@@ -969,6 +969,25 @@ spec:
         (!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
       message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker (a pool's to guest-carried), and every standard template sets it
+    # The tier label is the Pod's real tier (#5002, cw-security): infra's
+    # trustee deny reads codewire.sh/isolation-tier from the Pod, so a Pod
+    # carries it, always as confidential, exactly when it runs under the
+    # confidential RuntimeClass. A standard Pod can't claim the KBS. A
+    # snapshot's clearing template (by its type label) runs the deployment's
+    # default class and is never a workspace, so only the first direction
+    # holds for it: its deny-all policy reaches nothing either way.
+    - expression: >-
+        (has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/isolation-tier' in object.spec.podTemplate.metadata.labels ?
+        has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'confidential' :
+        has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/type' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/type'] == 'snapshot-clearing' ||
+        !has(object.spec.podTemplate.spec.runtimeClassName) || object.spec.podTemplate.spec.runtimeClassName != 'confidential') &&
+        (!has(object.spec.podTemplate.metadata) || !has(object.spec.podTemplate.metadata.labels) ||
+        !('codewire.sh/isolation-tier' in object.spec.podTemplate.metadata.labels) ||
+        object.spec.podTemplate.metadata.labels['codewire.sh/isolation-tier'] == 'confidential')
+      message: a Pod carries codewire.sh/isolation-tier, as confidential, exactly when it runs under the confidential RuntimeClass
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -1376,6 +1395,18 @@ spec:
         variables.volumes.all(v, !has(v.image) || v.name == 'image-disk' &&
         has(v.image.reference) && v.image.reference == variables.standardDiskReference)
       message: a standard Pod mounts exactly the deployment's workspace disk (CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE) as image-disk and no other image, unless an update keeps its image volumes; while that names no disk by digest, no new standard template is admitted
+    # The tier label is the Pod's real tier (#5002, cw-security): infra's
+    # trustee deny reads codewire.sh/isolation-tier from the Pod, so a Pod
+    # carries it, always as confidential, exactly when it runs under the
+    # confidential RuntimeClass. A standard Pod can't claim the KBS.
+    - expression: >-
+        (has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/isolation-tier' in object.spec.podTemplate.metadata.labels) ==
+        (has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == 'confidential') &&
+        (!has(object.spec.podTemplate.metadata) || !has(object.spec.podTemplate.metadata.labels) ||
+        !('codewire.sh/isolation-tier' in object.spec.podTemplate.metadata.labels) ||
+        object.spec.podTemplate.metadata.labels['codewire.sh/isolation-tier'] == 'confidential')
+      message: a Pod carries codewire.sh/isolation-tier, as confidential, exactly when it runs under the confidential RuntimeClass
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

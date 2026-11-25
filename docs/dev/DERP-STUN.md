@@ -388,6 +388,9 @@ does not guarantee arbitrary external peer packets will be DNATed back into the
 pod. Codewire therefore creates no per-sandbox UDP NodePort Service; the
 environment's `cw-tailnet-udp-<env>` LoadBalancer and the shared UDP relay
 carry the external paths.
+In broker mode (hosted egress on) there is no LoadBalancer and no world
+ingress to 31000: the tailnet runs over DERP and the shared UDP relay alone
+(#5002).
 
 STUN is still required, for clients. The CLI uses public STUN to discover its
 own endpoint, and so does any client running inside a Sandbox, such as a nested

@@ -962,11 +962,82 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 output.append(f"{label}: {SANDBOX_BROKER_WRITER_POLICY} variable {name} must be "
                               f"{WARM_POOL_MEMBER_POLICY}'s, verbatim: {ours.get(name)}")
     assert_hosted_egress_param(resources, target, label, output)
+    assert_network_policy_admission(resources, target, label, output)
     output.extend(orchestration_configmap_writes(resources, label))
 
 
 def prune_protected(document: str) -> bool:
     return "kustomize.toolkit.fluxcd.io/prune: disabled" in compact(top_level_block(document, "metadata"))
+
+
+NETWORK_POLICY_POLICY = "codewire-orchestration-network-policy"
+SANDBOX_CLAIM_POLICY = "codewire-orchestration-sandbox-claim"
+# codewire#5002: the peers an environment's own NetworkPolicy may name are the
+# template policy's, verbatim, so the two can't drift apart.
+NETWORK_POLICY_SHARED_VARIABLES = ("gatewayPeers", "brokerEgressPeers", "kbsPeer")
+NETWORK_POLICY_OWN_NAMES = (
+    "request.name.matches('^cw-daemon-(net|warm)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"
+)
+NETWORK_POLICY_OPERATIONS = "operations: - CREATE - UPDATE - DELETE resources: - networkpolicies"
+# The labels a claim may add to its Pod: the runtime identity alone
+# (sandbox/mod.rs, runtime_identity_labels), never the tier.
+CLAIM_POD_LABELS = ("codewire.sh/environment-id", "codewire.sh/org-id", "codewire.sh/type",
+                    "codewire.sh/environment-operation-generation")
+TIER_RULE_MESSAGE = ("a Pod carries codewire.sh/isolation-tier, as confidential, exactly when it runs under "
+                     "the confidential RuntimeClass")
+
+
+def assert_network_policy_admission(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """codewire#5002: orchestration's NetworkPolicies, its claims' Pod labels
+    and the tier label are admitted wherever orchestration runs."""
+    # Every admission policy and binding is cluster-scoped: the API server
+    # refuses one that names a namespace, and the whole apply with it.
+    for resource in resources:
+        kind = top_level_field(resource, "kind")
+        if kind in ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding") and (
+            metadata_field(resource, "namespace") is not None
+        ):
+            output.append(f"{label}: {kind}/{metadata_field(resource, 'name')} must be cluster-scoped, with no namespace")
+    for policy_name in (NETWORK_POLICY_POLICY, SANDBOX_CLAIM_POLICY):
+        policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
+        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", policy_name, label, output)
+        if policy and not prune_protected(policy):
+            output.append(f"{label}: {policy_name} must never be pruned")
+        if policy and "codewire-orchestration$')" not in compact(policy):
+            output.append(f"{label}: {policy_name} must match orchestration's Service Account")
+        if binding:
+            spec = compact(top_level_block(binding, "spec"))
+            if "validationActions: - Deny" not in spec or "namespaceSelector" in spec or "matchResources" in spec:
+                output.append(f"{label}: {policy_name}'s binding denies, in every namespace")
+            if policy_name == NETWORK_POLICY_POLICY and (
+                f"name: {HOSTED_EGRESS_CONFIGMAP} namespace: {target['subject_namespace']} parameterNotFoundAction: Deny"
+                not in spec
+            ):
+                output.append(f"{label}: {policy_name} reads {HOSTED_EGRESS_CONFIGMAP} from orchestration's namespace and denies without it")
+    policy = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", NETWORK_POLICY_POLICY)
+    template = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY)
+    if len(policy) == 1:
+        if NETWORK_POLICY_OPERATIONS not in compact(policy[0]):
+            output.append(f"{label}: {NETWORK_POLICY_POLICY} admits every create, update and delete of a NetworkPolicy")
+        rules = policy_items(policy[0], "validations")
+        if len(rules) != 3 or compact(rules[0]["expression"]) != compact(NETWORK_POLICY_OWN_NAMES):
+            output.append(f"{label}: {NETWORK_POLICY_POLICY} has its three rules, the first holding orchestration "
+                          f"to its own environments' policies: {NETWORK_POLICY_OWN_NAMES}")
+    if len(policy) == 1 and len(template) == 1:
+        ours = {item["name"]: item["expression"] for item in policy_items(policy[0], "variables")}
+        theirs = {item["name"]: item["expression"] for item in policy_items(template[0], "variables")}
+        for name in NETWORK_POLICY_SHARED_VARIABLES:
+            if name not in theirs or ours.get(name) != theirs[name]:
+                output.append(f"{label}: {NETWORK_POLICY_POLICY} variable {name} must be "
+                              f"{WARM_POOL_TEMPLATE_POLICY}'s, verbatim: {ours.get(name)}")
+    claim = resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", SANDBOX_CLAIM_POLICY)
+    if len(claim) == 1 and not any(cel_list(CLAIM_POD_LABELS) in item["expression"]
+                                   for item in policy_items(claim[0], "validations")):
+        output.append(f"{label}: {SANDBOX_CLAIM_POLICY} lets a claim add only {cel_list(CLAIM_POD_LABELS)}")
+    for policy_name in (WARM_POOL_TEMPLATE_POLICY, WARM_POOL_MEMBER_POLICY):
+        for found in resources_by_kind_and_name(resources, "ValidatingAdmissionPolicy", policy_name):
+            if [item["message"] for item in policy_items(found, "validations")].count(TIER_RULE_MESSAGE) != 1:
+                output.append(f"{label}: {policy_name} ties codewire.sh/isolation-tier to the confidential RuntimeClass once")
 
 
 def assert_hosted_egress_param(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:

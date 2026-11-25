@@ -1,0 +1,52 @@
+# The Pod metadata orchestration's SandboxClaims add (#5002). The controller
+# copies a claim's additionalPodMetadata onto the Pod it adopts or creates, so
+# a claim may add only the environment's runtime identity
+# (sandbox/mod.rs, runtime_identity_labels). Above all it never adds
+# codewire.sh/isolation-tier: infra's trustee deny reads the tier from the
+# Pod, and only the template, under the confidential RuntimeClass, sets it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-sandbox-claim
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  # Removing this policy would let a claim relabel any Pod, so a source
+  # change that drops it never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxclaims"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  validations:
+    - expression: >-
+        !has(object.spec.additionalPodMetadata) ||
+        dyn(object.spec.additionalPodMetadata).all(k, k == 'labels') &&
+        (!has(object.spec.additionalPodMetadata.labels) ||
+        object.spec.additionalPodMetadata.labels.all(k, k in
+        ['codewire.sh/environment-id', 'codewire.sh/org-id', 'codewire.sh/type', 'codewire.sh/environment-operation-generation']))
+      message: a claim adds only the environment's runtime identity labels to its Pod (environment, organization, type and generation), never a tier, egress or other label, and no annotation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-sandbox-claim
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  policyName: codewire-orchestration-sandbox-claim
+  validationActions: [Deny]
+  # No namespace selector: the identity match bounds the policy, and follows
+  # the writer into every namespace.
