@@ -9,9 +9,11 @@ mod desktop;
 mod entry;
 mod exec;
 mod navigation;
+mod place;
 mod platform_attach;
 mod reattach;
 use attach_mode::{AttachKind, attaches_interactively, session_is_terminal};
+use place::{SessionPlace, cleanup_unknown_refusal, duplicate_session_name, session_reference};
 use platform_attach::attach_platform_environment_session;
 pub(crate) mod setup;
 mod short_id;
@@ -76,6 +78,8 @@ enum EnvironmentSessionTarget {
         target: config::CurrentTargetConfig,
         org_id: String,
         environment_id: String,
+        /// The host it runs on, when it runs on one.
+        host: Option<String>,
         client: Box<codewire_client::CodewireClient>,
     },
 }
@@ -380,6 +384,7 @@ impl EnvironmentSessionTarget {
             org_id,
             environment_id,
             client,
+            ..
         } = self
         else {
             let mut call = call;
@@ -690,11 +695,15 @@ async fn environment_session_target_from_current(
             let platform = resolve_platform(globals, paths, env)?;
             let orgs = organization_client(&platform)?.list_orgs().await?;
             let environment_id = target.target_ref.clone();
+            let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
+            let client = codewire_client(&platform)?;
+            let host = place::environment_host(&client, &org_id, &environment_id).await;
             Ok(EnvironmentSessionTarget::Platform {
                 target,
-                org_id: resolve_org_id(&platform, &orgs, globals.org.as_deref())?,
+                org_id,
                 environment_id,
-                client: Box::new(codewire_client(&platform)?),
+                host,
+                client: Box::new(client),
             })
         }
         _ => Err(no_environment_selected()),
@@ -1877,146 +1886,6 @@ pub(crate) fn check_run_request(args: &EnvironmentRunArgs, can_ask: bool) -> any
     Ok(bare)
 }
 
-/// Where a session runs, for what `run` and `attach` print: the
-/// environment's name, its location, and the placement flag that finds it
-/// again.
-struct SessionPlace {
-    environment: String,
-    location: &'static str,
-    placement: &'static str,
-}
-
-impl SessionPlace {
-    fn of(target: &EnvironmentSessionTarget) -> Self {
-        let (location, placement) = match target {
-            #[cfg(unix)]
-            EnvironmentSessionTarget::Host { .. } => ("host", ""),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            EnvironmentSessionTarget::NativeLocal { .. } => ("local VM", "--local "),
-            EnvironmentSessionTarget::Platform { .. } => ("cloud", "--cloud "),
-        };
-        Self {
-            environment: crate::commands::progress::terminal_text(&target.current_target().name),
-            location,
-            placement,
-        }
-    }
-
-    /// `cw --local attach app --session coding`.
-    fn reconnect(&self, session: &EnvironmentSessionView) -> String {
-        format!(
-            "cw {}attach {} --session {}",
-            self.placement,
-            self.environment,
-            session_reference(session)
-        )
-    }
-
-    /// `Started Claude Code in app/coding · local VM`.
-    fn started(&self, session: &EnvironmentSessionView, agent: Option<NativeAgent>) -> String {
-        let what = match agent {
-            Some(agent) => format!("{} in", agent.title()),
-            None => "session".to_owned(),
-        };
-        format!(
-            "Started {what} {}/{} · {}",
-            self.environment,
-            session_reference(session),
-            self.location
-        )
-    }
-
-    /// `Restarted session app/coding · local VM`.
-    fn restarted(&self, session: &EnvironmentSessionView) -> String {
-        format!(
-            "Restarted session {}/{} · {}",
-            self.environment,
-            session_reference(session),
-            self.location
-        )
-    }
-
-    /// What a foreground run says once its command ended: `Exited with
-    /// status 3 · Output: cw --local logs app --session test · Restart: cw
-    /// --local restart app --session test`.
-    fn ended_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
-        let ended = match session.exit_code {
-            Some(0) => "Exited".to_owned(),
-            Some(code) => format!("Exited with status {code}"),
-            None => session.state.clone(),
-        };
-        let (placement, environment) = (self.placement, &self.environment);
-        let reference = session_reference(session);
-        style.paint(
-            crate::output::Role::Dim,
-            &format!(
-                "{ended} · Output: cw {placement}logs {environment} --session {reference} · Restart: cw {placement}restart {environment} --session {reference}"
-            ),
-        )
-    }
-
-    /// The key named here is the one [`AttachNavigationDecoder`] detaches
-    /// on: a lowercase `d`, like the other prefix keys (#3185).
-    fn detach_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
-        style.paint(
-            crate::output::Role::Dim,
-            &format!(
-                "Detach: Ctrl-B, then d · Reconnect: {}",
-                self.reconnect(session)
-            ),
-        )
-    }
-}
-
-/// A session's name when it has one, else its canonical ID.
-fn session_reference(session: &EnvironmentSessionView) -> String {
-    crate::commands::progress::terminal_text(if session.name.is_empty() {
-        &session.session_id
-    } else {
-        &session.name
-    })
-}
-
-/// The refusal of a `--name` an existing session holds. It starts with its
-/// own words, not the environment's name, which the error report would
-/// capitalize ("U5471a", #5471).
-fn duplicate_session_name(
-    place: &SessionPlace,
-    existing: &EnvironmentSessionView,
-) -> anyhow::Error {
-    let name = &existing.name;
-    let environment = &place.environment;
-    let placement = place.placement;
-    let state = existing.state.to_lowercase();
-    if existing.cleanup_unknown {
-        anyhow::anyhow!("{}", cleanup_unknown_refusal(place, name))
-    } else if session_is_terminal(existing) {
-        anyhow::anyhow!(
-            "a session named {name} already exists in {environment} ({state}); `--name` never reuses one: restart it with `cw {placement}restart {environment} --session {name}`, or choose another --name"
-        )
-    } else {
-        anyhow::anyhow!(
-            "a session named {name} already exists in {environment} ({state}); `--name` never reuses one: attach with `cw {placement}attach {environment} --session {name}`, or choose another --name"
-        )
-    }
-}
-
-/// Why a session whose cleanup is unknown cannot be restarted, and what ends
-/// its processes so it can be (#5471).
-fn cleanup_unknown_refusal(place: &SessionPlace, name: &str) -> String {
-    let environment = &place.environment;
-    let placement = place.placement;
-    if place.location == "host" {
-        format!(
-            "session {name}'s processes may still be running on this host, so it is not restarted; end them, then run `cw restart {environment} --session {name}`"
-        )
-    } else {
-        format!(
-            "session {name}'s processes may still be running, because their end could not be confirmed, so it is not restarted; `cw {placement}stop {environment}` then `cw {placement}start {environment}` ends them, and then `cw {placement}restart {environment} --session {name}` starts it again"
-        )
-    }
-}
-
 /// Asks whether to restart the session that already holds a `--name`, when
 /// it has ended and can be: the owner's "cw run should probably ask if you
 /// want a restart" (2026-11-19, #5471). Default yes. A running or stopping
@@ -2484,7 +2353,7 @@ async fn attach_session_until_detached(
         // session the pane shows and where it runs.
         let place = SessionPlace::of(&target);
         rex.retitle(&place.environment, &session_reference(&session));
-        rex.report(RexState::Attached, place.location);
+        rex.report(RexState::Attached, &place.location);
         let exit = match &target {
             #[cfg(unix)]
             EnvironmentSessionTarget::Host { environment, .. } => {
@@ -3458,6 +3327,7 @@ mod attach_offset_tests {
             target: config::CurrentTargetConfig::default(),
             org_id: "org".into(),
             environment_id: "env".into(),
+            host: None,
             client: Box::new(client),
         }
     }

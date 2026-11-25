@@ -167,6 +167,7 @@ impl DesktopTarget {
                 org_id,
                 environment_id,
                 client,
+                ..
             } => Ok(Self::Cloud {
                 name: target.name,
                 org_id,

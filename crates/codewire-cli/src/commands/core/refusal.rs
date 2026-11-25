@@ -8,7 +8,7 @@
 
 use codewire_client::{ClientError, EnvironmentState, ErrorCode};
 
-use crate::commands::lifecycle_output::environment_command;
+use crate::commands::lifecycle_output::Address;
 use crate::output::VmLocation;
 
 /// The server's refusal of a session in an environment that isn't running.
@@ -108,16 +108,18 @@ pub(crate) fn explain_local(
 /// (#3384). The command that helps is the error's next step, printed on its
 /// own `→` line. Both placements say it in these words.
 pub(crate) fn state_error(
-    location: VmLocation,
+    location: impl Into<Address>,
     name: &str,
     state: Option<EnvironmentState>,
     idle_stop: Option<i32>,
 ) -> Option<anyhow::Error> {
-    let start = environment_command(location, "start", name);
-    let info = environment_command(location, "info", name);
-    let environment = match location {
-        VmLocation::Local => "local environment",
-        VmLocation::Cloud => "cloud environment",
+    let address = location.into();
+    let start = address.command("start", name);
+    let info = address.command("info", name);
+    let environment = match address {
+        Address::Placement(VmLocation::Local) => "local environment",
+        Address::Placement(VmLocation::Cloud) => "cloud environment",
+        Address::OnHost => "environment",
     };
     let (message, step) = match state {
         Some(EnvironmentState::Running) => return None,
@@ -185,22 +187,32 @@ pub(crate) fn coordinator_answer(error: &anyhow::Error) -> Option<anyhow::Error>
     .then(|| crate::environment_client::display_client_error(refused.clone().into()))
 }
 
-/// `error` from reaching a cloud environment, explained by what the lookup
-/// `found` (its name and state), or `None` when the lookup failed. A running
+/// What a lookup found of a platform environment: its name, state, idle
+/// timeout when it stopped itself, and the host it runs on.
+pub(crate) type Found<'a> = (
+    &'a str,
+    Option<EnvironmentState>,
+    Option<i32>,
+    Option<&'a str>,
+);
+
+/// `error` from reaching a platform environment, explained by what the lookup
+/// `found` (its name, state, idle timeout and host), or `None` when the
+/// lookup failed. A running
 /// environment keeps `error`. A failed lookup keeps it too, unless the server
 /// had refused it as not running; then `fallback` names it.
 pub(crate) fn explain(
     error: anyhow::Error,
     fallback: &str,
-    found: Option<(&str, Option<EnvironmentState>, Option<i32>)>,
+    found: Option<Found<'_>>,
 ) -> anyhow::Error {
-    let (name, state, idle_stop) = match found {
+    let (name, state, idle_stop, host) = match found {
         Some(found) => found,
-        None if is_refusal(&error) => (fallback, None, None),
+        None if is_refusal(&error) => (fallback, None, None, None),
         None => return error,
     };
     state_error(
-        VmLocation::Cloud,
+        Address::platform(host),
         &crate::commands::progress::terminal_text(name),
         state,
         idle_stop,
@@ -287,8 +299,8 @@ mod tests {
     /// exec's connect error, or a refusal, explained by the state found.
     #[test]
     fn a_lookup_explains_the_failure_or_leaves_it() {
-        let connect = || anyhow::anyhow!("no host key is recorded for the environment's bound Pod");
-        let stopped = Some(("walk", Some(EnvironmentState::Stopped), None));
+        let connect = || anyhow::anyhow!("no SSH host key is recorded for the environment yet");
+        let stopped = Some(("walk", Some(EnvironmentState::Stopped), None, None));
         assert_eq!(
             said(&explain(connect(), "env-1", stopped)),
             says(
@@ -296,21 +308,15 @@ mod tests {
                 Some("cw --cloud start walk")
             )
         );
-        let running = Some(("walk", Some(EnvironmentState::Running), None));
+        let running = Some(("walk", Some(EnvironmentState::Running), None, None));
         assert_eq!(
             said(&explain(connect(), "env-1", running)),
-            says(
-                "no host key is recorded for the environment's bound Pod",
-                None
-            ),
+            says("no SSH host key is recorded for the environment yet", None),
             "a running environment keeps exec's own error"
         );
         assert_eq!(
             said(&explain(connect(), "env-1", None)),
-            says(
-                "no host key is recorded for the environment's bound Pod",
-                None
-            ),
+            says("no SSH host key is recorded for the environment yet", None),
             "a failed lookup keeps exec's own error"
         );
         let refused = typed(ClientError::new(ErrorCode::InvalidArgument, NOT_RUNNING));
@@ -322,13 +328,20 @@ mod tests {
             ),
             "a failed lookup after a refusal still names it"
         );
+        // An environment on a host is no cloud environment, and `cw` finds
+        // it with no placement flag (#6397).
+        let on_host = Some(("walk", Some(EnvironmentState::Stopped), None, Some("h4")));
+        assert_eq!(
+            said(&explain(connect(), "env-1", on_host)),
+            says("environment walk is stopped", Some("cw start walk"))
+        );
     }
 
     /// One that stopped itself says why, in the owner's words, with its own
     /// timeout (#3384).
     #[test]
     fn an_idle_stop_says_it_stopped_itself_and_how_to_start_it() {
-        let idle = Some(("walk", Some(EnvironmentState::Stopped), Some(21_600)));
+        let idle = Some(("walk", Some(EnvironmentState::Stopped), Some(21_600), None));
         assert_eq!(
             said(&explain(anyhow::anyhow!("not running"), "env-1", idle)),
             says(

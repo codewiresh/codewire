@@ -436,7 +436,7 @@ pub(crate) fn ended_by_stop(environment: &Environment, shown: &str) -> Option<an
     let idle_stop = (environment.stop_reason.as_deref() == Some("idle"))
         .then_some(environment.idle_stop_seconds);
     refusal::state_error(
-        crate::output::VmLocation::Cloud,
+        platform_address(environment),
         &terminal_text(shown),
         Some(codewire_client::EnvironmentState::Stopped),
         idle_stop,
@@ -531,9 +531,17 @@ pub(crate) async fn explain_by_state(
             given.unwrap_or(&environment.name),
             environment.state.as_known(),
             (environment.stop_reason == "idle").then_some(environment.idle_stop_seconds),
+            environment.host.as_option().map(|host| host.name.as_str()),
         )
     });
     refusal::explain(error, given.unwrap_or(environment_id), found)
+}
+
+/// How a next step names `environment`: on its host with no placement flag.
+fn platform_address(environment: &Environment) -> crate::commands::lifecycle_output::Address {
+    crate::commands::lifecycle_output::Address::platform(
+        environment.host.as_ref().map(|host| host.name.as_str()),
+    )
 }
 
 /// Refuses a cloud environment that is stopped, naming the command that
@@ -550,7 +558,7 @@ pub(crate) fn ensure_cloud_connectable(
     let idle_stop = (environment.stop_reason.as_deref() == Some("idle"))
         .then_some(environment.idle_stop_seconds);
     refusal::state_error(
-        crate::output::VmLocation::Cloud,
+        platform_address(environment),
         &terminal_text(shown),
         Some(state),
         idle_stop,

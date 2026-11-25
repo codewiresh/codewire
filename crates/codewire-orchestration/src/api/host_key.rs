@@ -40,7 +40,7 @@ pub async fn get_environment_host_key_core(
 }
 
 fn not_recorded() -> AppError {
-    AppError::NotFound("no host key is recorded for the environment's bound Pod".into())
+    AppError::NotFound("no SSH host key is recorded for the environment yet".into())
 }
 
 /// The bound Pod's recorded key, with the generation it was recorded at, only
