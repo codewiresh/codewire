@@ -237,6 +237,89 @@ async fn db_removing_an_audience_is_audited_and_a_new_registration_has_a_new_ver
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_ninth_file_audience_is_refused_and_a_socket_only_one_is_not() -> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        organization(&db, "ia-org").await?;
+        organization(&db, "ia-other").await?;
+        let admin = session("ia-org-admin");
+        let denylist = denylist();
+        let with_file = |audience: &'static str, file_name: &'static str| AudienceRequest {
+            audience,
+            file_name: Some(file_name),
+            ..Default::default()
+        };
+        const EIGHT: [(&str, &str); 8] = [
+            ("https://one.example", "one"),
+            ("https://two.example", "two"),
+            ("https://three.example", "three"),
+            ("https://four.example", "four"),
+            ("https://five.example", "five"),
+            ("https://six.example", "six"),
+            ("https://seven.example", "seven"),
+            ("https://eight.example", "eight"),
+        ];
+        for (audience, file_name) in EIGHT {
+            bounded(register_audience(
+                &db.pool,
+                &denylist,
+                &admin,
+                "ia-org",
+                with_file(audience, file_name),
+            ))
+            .await??;
+        }
+        let ninth = bounded(register_audience(
+            &db.pool,
+            &denylist,
+            &admin,
+            "ia-org",
+            with_file("https://nine.example", "nine"),
+        ))
+        .await?;
+        anyhow::ensure!(code(ninth.unwrap_err()) == "identity_file_limit");
+        // The limit counts files only, and only this organization's.
+        bounded(register_audience(
+            &db.pool,
+            &denylist,
+            &admin,
+            "ia-org",
+            plain("https://socket.example"),
+        ))
+        .await??;
+        let other_admin = session("ia-other-admin");
+        bounded(register_audience(
+            &db.pool,
+            &denylist,
+            &other_admin,
+            "ia-other",
+            with_file("https://nine.example", "nine"),
+        ))
+        .await??;
+        // Removing one frees its place.
+        bounded(remove_audience(
+            &db.pool,
+            &admin,
+            "ia-org",
+            "https://one.example",
+        ))
+        .await??;
+        bounded(register_audience(
+            &db.pool,
+            &denylist,
+            &admin,
+            "ia-org",
+            with_file("https://nine.example", "nine"),
+        ))
+        .await??;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_only_an_owner_or_admin_manages_audiences_and_each_refusal_names_its_rule()
 -> anyhow::Result<()> {
     let db = TestDatabase::create().await?;

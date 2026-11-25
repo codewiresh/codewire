@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use super::service::{BindError, IdentityCallError, WorkspaceBindingState};
+use super::store::IdentityFileRow;
 use super::tests::{
     ENVIRONMENT_ID, FakeCluster, FakeStore, Fixture, OTHER_PEER, PEER, fixture_with, valid_bearer,
 };
@@ -305,4 +306,63 @@ async fn the_minting_switch_off_answers_identity_unavailable() {
     assert_eq!(signer.signs(), 0);
     assert_eq!(signer.reads.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.reviews(), 1, "authenticated first, then refused");
+}
+
+fn file_row(audience: &str, file_name: &str) -> IdentityFileRow {
+    IdentityFileRow {
+        audience: audience.into(),
+        file_name: file_name.into(),
+    }
+}
+
+async fn grant_files(state: &WorkspaceBindingState) -> Result<Vec<(String, String)>, BindError> {
+    let response = tokio::time::timeout(CALL_TIMEOUT, state.bind(&valid_bearer(), Some(PEER), 0))
+        .await
+        .expect("the bind answers within its bound")?;
+    let access = response.access.as_option().expect("an access grant");
+    let files = access
+        .identity_files
+        .as_option()
+        .expect("the grant always sends the list");
+    Ok(files
+        .files
+        .iter()
+        .map(|file| (file.audience.clone(), file.file_name.clone()))
+        .collect())
+}
+
+#[tokio::test]
+async fn a_grant_lists_the_file_audiences_while_identity_is_on() {
+    let store = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *store.identity_files.lock().unwrap() = Some(vec![
+        file_row("https://bao.example", "bao"),
+        file_row("https://k8s.example", "k8s"),
+    ]);
+    let minter = mint::minting(
+        FakeSigner::new(),
+        mint::FakeStore::for_environment(ENVIRONMENT_ID),
+        MintingSwitch::On,
+    );
+    let fixture = fixture_with(FakeCluster::valid(), store.clone(), |state| {
+        state.with_identity(Some(Arc::new(minter)))
+    });
+    assert_eq!(
+        grant_files(&fixture.state).await.unwrap(),
+        [
+            ("https://bao.example".to_owned(), "bao".to_owned()),
+            ("https://k8s.example".to_owned(), "k8s".to_owned()),
+        ]
+    );
+    // The daemon deletes what a grant leaves out, so an unknown list fails
+    // the grant rather than sending an empty one.
+    *store.identity_files.lock().unwrap() = None;
+    assert!(grant_files(&fixture.state).await.is_err());
+}
+
+#[tokio::test]
+async fn with_identity_off_a_grant_sends_an_empty_list() {
+    let store = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *store.identity_files.lock().unwrap() = Some(vec![file_row("https://k8s.example", "k8s")]);
+    let fixture = fixture_with(FakeCluster::valid(), store, |state| state);
+    assert!(grant_files(&fixture.state).await.unwrap().is_empty());
 }

@@ -160,6 +160,15 @@ pub trait BindingStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The audiences of the environment's own organization registered with
+    /// a file name, by file name, for its access grant (#4664).
+    async fn identity_files(
+        &self,
+        _environment_id: &str,
+    ) -> Result<Vec<IdentityFileRow>, BindingStoreUnavailable> {
+        Ok(Vec::new())
+    }
+
     /// The Mesh network the environment joins, if any.
     async fn mesh_attachment(
         &self,
@@ -437,6 +446,18 @@ impl BindingStore for PgBindingStore {
             })
     }
 
+    async fn identity_files(
+        &self,
+        environment_id: &str,
+    ) -> Result<Vec<IdentityFileRow>, BindingStoreUnavailable> {
+        identity_file_audiences(&self.pool, environment_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "workspace binding identity file lookup failed");
+                BindingStoreUnavailable
+            })
+    }
+
     async fn app_ports(&self, environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
         exposed_app_ports(&self.pool, environment_id)
             .await
@@ -506,6 +527,32 @@ pub async fn exposed_app_ports(
             .map(i32::from)
             .to_vec(),
     )
+    .fetch_all(pool)
+    .await
+}
+
+/// One audience registered with a file name: the token the daemon keeps at
+/// `/codewire/run/identity/<file_name>.jwt`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct IdentityFileRow {
+    pub audience: String,
+    pub file_name: String,
+}
+
+/// The file audiences of `environment_id`'s own organization, by file name.
+/// The organization comes from the environment, so no other organization's
+/// audiences are ever listed.
+pub async fn identity_file_audiences(
+    pool: &sqlx::PgPool,
+    environment_id: &str,
+) -> Result<Vec<IdentityFileRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT a.audience, a.file_name FROM identity_audiences a \
+         JOIN environments e ON e.org_id = a.org_id \
+         WHERE e.id = $1 AND a.file_name IS NOT NULL \
+         ORDER BY a.file_name",
+    )
+    .bind(environment_id)
     .fetch_all(pool)
     .await
 }

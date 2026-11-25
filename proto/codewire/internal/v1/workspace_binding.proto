@@ -141,6 +141,25 @@ message WorkspaceAccess {
   // The hosted Mesh network the environment joins, or absent. Non-secret:
   // the daemon asks IssueMeshEnrollment for the capability to join it.
   WorkspaceMeshAttachment mesh = 8;
+  // The Sandbox's own organization's audiences registered with a file name,
+  // which the daemon keeps as identity token files. Absent from a server
+  // that doesn't send it, and the daemon then keeps the files it has; an
+  // empty list deletes them all.
+  WorkspaceIdentityFiles identity_files = 9;
+}
+
+// WorkspaceIdentityFiles is the list of identity token files a grant names.
+message WorkspaceIdentityFiles {
+  repeated WorkspaceIdentityFile files = 1;
+}
+
+// WorkspaceIdentityFile is one audience the daemon mints a token for and
+// keeps at `/codewire/run/identity/<file_name>.jwt`. It holds no credential.
+message WorkspaceIdentityFile {
+  // The canonical audience, passed to IssueIdentityToken as is.
+  string audience = 1;
+  // `[a-z0-9-]{1,63}`; the daemon checks it again.
+  string file_name = 2;
 }
 
 // WorkspaceMeshAttachment names the one hosted Mesh network node the bound

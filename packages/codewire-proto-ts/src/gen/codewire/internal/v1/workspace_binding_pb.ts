@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/workspace_binding.proto.
  */
 export const file_codewire_internal_v1_workspace_binding: GenFile = /*@__PURE__*/
-  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIv4CChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCRI1CgZhY2Nlc3MYByABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VBY2Nlc3MSGQoRd29ya2luZ19kaXJlY3RvcnkYCCABKAkSOQoIZGVmYXVsdHMYCSABKAsyJy5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VEZWZhdWx0cxISCgpzZXJ2ZXJfdXJsGAogASgJEhQKDGludGVyY2VwdGlvbhgLIAEoCCLLAQoRV29ya3NwYWNlRGVmYXVsdHMSUgoLZW52aXJvbm1lbnQYASADKAsyOC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VEZWZhdWx0cy5FbnZpcm9ubWVudEVudHJ5QgOAAQESLgoDZ2l0GAIgASgLMiEuY29kZXdpcmUuaW50ZXJuYWwudjEuR2l0SWRlbnRpdHkaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIjQKC0dpdElkZW50aXR5EhIKBWVtYWlsGAEgASgJQgOAAQESEQoEbmFtZRgCIAEoCUIDgAEBIowCCg9Xb3Jrc3BhY2VBY2Nlc3MSFwoKcGVlcl90b2tlbhgBIAEoCUIDgAEBEh0KFXBlZXJfdG9rZW5fZXhwaXJlc19hdBgCIAEoAxIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIXCg9jb29yZGluYXRvcl91cmwYBCABKAkSHAoUZGlyZWN0X3VkcF9lbmRwb2ludHMYBSADKAkSHAoUcGVlcl9yZWxheV9lbmRwb2ludHMYBiADKAkSEQoJYXBwX3BvcnRzGAcgAygFEjsKBG1lc2gYCCABKAsyLS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VNZXNoQXR0YWNobWVudCJiChdXb3Jrc3BhY2VNZXNoQXR0YWNobWVudBIQCghtZXNoX3VybBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSEgoKbmV0d29ya19pZBgDIAEoCRIRCglub2RlX25hbWUYBCABKAkiFgoUUmVmcmVzaEFjY2Vzc1JlcXVlc3QiTgoVUmVmcmVzaEFjY2Vzc1Jlc3BvbnNlEjUKBmFjY2VzcxgBIAEoCzIlLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZUFjY2VzcyKjAQoUUmVjb3JkSG9zdEtleVJlcXVlc3QSGgoScHVibGljX2tleV9vcGVuc3NoGAEgASgJElIKGGd1ZXN0X2NhcnJpZWRfc2VsZl9jaGVjaxgCIAEoCzIrLmNvZGV3aXJlLmludGVybmFsLnYxLkd1ZXN0Q2FycmllZFNlbGZDaGVja0gAiAEBQhsKGV9ndWVzdF9jYXJyaWVkX3NlbGZfY2hlY2siTQoVR3Vlc3RDYXJyaWVkU2VsZkNoZWNrEjQKBnByb2JlcxgBIAMoCzIkLmNvZGV3aXJlLmludGVybmFsLnYxLlNlbGZDaGVja1Byb2JlIj8KDlNlbGZDaGVja1Byb2JlEgwKBG5hbWUYASABKAkSDgoGdGFyZ2V0GAIgASgJEg8KB3JlZnVzZWQYAyABKAgiFwoVUmVjb3JkSG9zdEtleVJlc3BvbnNlIkgKGEFsbG9jYXRlUGVlclJlbGF5UmVxdWVzdBISCgpkaXNjb19rZXlzGAEgAygJEhgKEHJlbGF5X2dlbmVyYXRpb24YAiABKA0i1AEKGUFsbG9jYXRlUGVlclJlbGF5UmVzcG9uc2USGAoQcmVsYXlfZ2VuZXJhdGlvbhgBIAEoDRIYChBzZXJ2ZXJfZGlzY29fa2V5GAIgASgJEhIKCmRpc2NvX2tleXMYAyADKAkSEgoKbGFtcG9ydF9pZBgEIAEoBBILCgN2bmkYBSABKA0SGAoQYmluZF9saWZldGltZV9ucxgGIAEoBBIgChhzdGVhZHlfc3RhdGVfbGlmZXRpbWVfbnMYByABKAQSEgoKYWRkcl9wb3J0cxgIIAMoCSIcChpJc3N1ZU1lc2hFbnJvbGxtZW50UmVxdWVzdCKSAQobSXNzdWVNZXNoRW5yb2xsbWVudFJlc3BvbnNlEhwKD2Vucm9sbG1lbnRfY29kZRgBIAEoCUIDgAEBEhIKCmV4cGlyZXNfYXQYAiABKAMSQQoKYXR0YWNobWVudBgDIAEoCzItLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZU1lc2hBdHRhY2htZW50IlkKG1JlcG9ydE1lc2hBdHRhY2htZW50UmVxdWVzdBI6CgZyZXBvcnQYASABKA4yKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5NZXNoQXR0YWNobWVudFJlcG9ydCIeChxSZXBvcnRNZXNoQXR0YWNobWVudFJlc3BvbnNlIi0KGUlzc3VlSWRlbnRpdHlUb2tlblJlcXVlc3QSEAoIcmVzb3VyY2UYASABKAkiRAoaSXNzdWVJZGVudGl0eVRva2VuUmVzcG9uc2USEgoFdG9rZW4YASABKAlCA4ABARISCgpleHBpcmVzX2F0GAIgASgDKtsCChRNZXNoQXR0YWNobWVudFJlcG9ydBImCiJNRVNIX0FUVEFDSE1FTlRfUkVQT1JUX1VOU1BFQ0lGSUVEEAASIwofTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9BVFRBQ0hFRBABEisKJ01FU0hfQVRUQUNITUVOVF9SRVBPUlRfTUVTSF9VTlJFQUNIQUJMRRACEiwKKE1FU0hfQVRUQUNITUVOVF9SRVBPUlRfTkVUV09SS19OT1RfRk9VTkQQAxInCiNNRVNIX0FUVEFDSE1FTlRfUkVQT1JUX05PVF9BX01FTUJFUhAEEioKJk1FU0hfQVRUQUNITUVOVF9SRVBPUlRfTk9ERV9OQU1FX1RBS0VOEAUSIgoeTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9SRVZPS0VEEAYSIgoeTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9SRUZVU0VEEAcy1gYKF1dvcmtzcGFjZUJpbmRpbmdTZXJ2aWNlEm0KDUJpbmRXb3Jrc3BhY2USKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5CaW5kV29ya3NwYWNlUmVxdWVzdBorLmNvZGV3aXJlLmludGVybmFsLnYxLkJpbmRXb3Jrc3BhY2VSZXNwb25zZSIDkAICEm0KDVJlZnJlc2hBY2Nlc3MSKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZWZyZXNoQWNjZXNzUmVxdWVzdBorLmNvZGV3aXJlLmludGVybmFsLnYxLlJlZnJlc2hBY2Nlc3NSZXNwb25zZSIDkAIBEm0KDVJlY29yZEhvc3RLZXkSKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZWNvcmRIb3N0S2V5UmVxdWVzdBorLmNvZGV3aXJlLmludGVybmFsLnYxLlJlY29yZEhvc3RLZXlSZXNwb25zZSIDkAICEnQKEUFsbG9jYXRlUGVlclJlbGF5Ei4uY29kZXdpcmUuaW50ZXJuYWwudjEuQWxsb2NhdGVQZWVyUmVsYXlSZXF1ZXN0Gi8uY29kZXdpcmUuaW50ZXJuYWwudjEuQWxsb2NhdGVQZWVyUmVsYXlSZXNwb25zZRJ6ChNJc3N1ZU1lc2hFbnJvbGxtZW50EjAuY29kZXdpcmUuaW50ZXJuYWwudjEuSXNzdWVNZXNoRW5yb2xsbWVudFJlcXVlc3QaMS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZU1lc2hFbnJvbGxtZW50UmVzcG9uc2USggEKFFJlcG9ydE1lc2hBdHRhY2htZW50EjEuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVwb3J0TWVzaEF0dGFjaG1lbnRSZXF1ZXN0GjIuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVwb3J0TWVzaEF0dGFjaG1lbnRSZXNwb25zZSIDkAICEncKEklzc3VlSWRlbnRpdHlUb2tlbhIvLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlSWRlbnRpdHlUb2tlblJlcXVlc3QaMC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZUlkZW50aXR5VG9rZW5SZXNwb25zZULvAQoYY29tLmNvZGV3aXJlLmludGVybmFsLnYxQhVXb3Jrc3BhY2VCaW5kaW5nUHJvdG9QAVpKZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2ludGVybmFsL3YxO2ludGVybmFsdjGiAgNDSViqAhRDb2Rld2lyZS5JbnRlcm5hbC5WMcoCFENvZGV3aXJlXEludGVybmFsXFYx4gIgQ29kZXdpcmVcSW50ZXJuYWxcVjFcR1BCTWV0YWRhdGHqAhZDb2Rld2lyZTo6SW50ZXJuYWw6OlYxYgZwcm90bzM");
+  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIv4CChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCRI1CgZhY2Nlc3MYByABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VBY2Nlc3MSGQoRd29ya2luZ19kaXJlY3RvcnkYCCABKAkSOQoIZGVmYXVsdHMYCSABKAsyJy5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VEZWZhdWx0cxISCgpzZXJ2ZXJfdXJsGAogASgJEhQKDGludGVyY2VwdGlvbhgLIAEoCCLLAQoRV29ya3NwYWNlRGVmYXVsdHMSUgoLZW52aXJvbm1lbnQYASADKAsyOC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VEZWZhdWx0cy5FbnZpcm9ubWVudEVudHJ5QgOAAQESLgoDZ2l0GAIgASgLMiEuY29kZXdpcmUuaW50ZXJuYWwudjEuR2l0SWRlbnRpdHkaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIjQKC0dpdElkZW50aXR5EhIKBWVtYWlsGAEgASgJQgOAAQESEQoEbmFtZRgCIAEoCUIDgAEBItICCg9Xb3Jrc3BhY2VBY2Nlc3MSFwoKcGVlcl90b2tlbhgBIAEoCUIDgAEBEh0KFXBlZXJfdG9rZW5fZXhwaXJlc19hdBgCIAEoAxIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIXCg9jb29yZGluYXRvcl91cmwYBCABKAkSHAoUZGlyZWN0X3VkcF9lbmRwb2ludHMYBSADKAkSHAoUcGVlcl9yZWxheV9lbmRwb2ludHMYBiADKAkSEQoJYXBwX3BvcnRzGAcgAygFEjsKBG1lc2gYCCABKAsyLS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VNZXNoQXR0YWNobWVudBJECg5pZGVudGl0eV9maWxlcxgJIAEoCzIsLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZUlkZW50aXR5RmlsZXMiVAoWV29ya3NwYWNlSWRlbnRpdHlGaWxlcxI6CgVmaWxlcxgBIAMoCzIrLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZUlkZW50aXR5RmlsZSI8ChVXb3Jrc3BhY2VJZGVudGl0eUZpbGUSEAoIYXVkaWVuY2UYASABKAkSEQoJZmlsZV9uYW1lGAIgASgJImIKF1dvcmtzcGFjZU1lc2hBdHRhY2htZW50EhAKCG1lc2hfdXJsGAEgASgJEg4KBm9yZ19pZBgCIAEoCRISCgpuZXR3b3JrX2lkGAMgASgJEhEKCW5vZGVfbmFtZRgEIAEoCSIWChRSZWZyZXNoQWNjZXNzUmVxdWVzdCJOChVSZWZyZXNoQWNjZXNzUmVzcG9uc2USNQoGYWNjZXNzGAEgASgLMiUuY29kZXdpcmUuaW50ZXJuYWwudjEuV29ya3NwYWNlQWNjZXNzIqMBChRSZWNvcmRIb3N0S2V5UmVxdWVzdBIaChJwdWJsaWNfa2V5X29wZW5zc2gYASABKAkSUgoYZ3Vlc3RfY2FycmllZF9zZWxmX2NoZWNrGAIgASgLMisuY29kZXdpcmUuaW50ZXJuYWwudjEuR3Vlc3RDYXJyaWVkU2VsZkNoZWNrSACIAQFCGwoZX2d1ZXN0X2NhcnJpZWRfc2VsZl9jaGVjayJNChVHdWVzdENhcnJpZWRTZWxmQ2hlY2sSNAoGcHJvYmVzGAEgAygLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuU2VsZkNoZWNrUHJvYmUiPwoOU2VsZkNoZWNrUHJvYmUSDAoEbmFtZRgBIAEoCRIOCgZ0YXJnZXQYAiABKAkSDwoHcmVmdXNlZBgDIAEoCCIXChVSZWNvcmRIb3N0S2V5UmVzcG9uc2UiSAoYQWxsb2NhdGVQZWVyUmVsYXlSZXF1ZXN0EhIKCmRpc2NvX2tleXMYASADKAkSGAoQcmVsYXlfZ2VuZXJhdGlvbhgCIAEoDSLUAQoZQWxsb2NhdGVQZWVyUmVsYXlSZXNwb25zZRIYChByZWxheV9nZW5lcmF0aW9uGAEgASgNEhgKEHNlcnZlcl9kaXNjb19rZXkYAiABKAkSEgoKZGlzY29fa2V5cxgDIAMoCRISCgpsYW1wb3J0X2lkGAQgASgEEgsKA3ZuaRgFIAEoDRIYChBiaW5kX2xpZmV0aW1lX25zGAYgASgEEiAKGHN0ZWFkeV9zdGF0ZV9saWZldGltZV9ucxgHIAEoBBISCgphZGRyX3BvcnRzGAggAygJIhwKGklzc3VlTWVzaEVucm9sbG1lbnRSZXF1ZXN0IpIBChtJc3N1ZU1lc2hFbnJvbGxtZW50UmVzcG9uc2USHAoPZW5yb2xsbWVudF9jb2RlGAEgASgJQgOAAQESEgoKZXhwaXJlc19hdBgCIAEoAxJBCgphdHRhY2htZW50GAMgASgLMi0uY29kZXdpcmUuaW50ZXJuYWwudjEuV29ya3NwYWNlTWVzaEF0dGFjaG1lbnQiWQobUmVwb3J0TWVzaEF0dGFjaG1lbnRSZXF1ZXN0EjoKBnJlcG9ydBgBIAEoDjIqLmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hBdHRhY2htZW50UmVwb3J0Ih4KHFJlcG9ydE1lc2hBdHRhY2htZW50UmVzcG9uc2UiLQoZSXNzdWVJZGVudGl0eVRva2VuUmVxdWVzdBIQCghyZXNvdXJjZRgBIAEoCSJEChpJc3N1ZUlkZW50aXR5VG9rZW5SZXNwb25zZRISCgV0b2tlbhgBIAEoCUIDgAEBEhIKCmV4cGlyZXNfYXQYAiABKAMq2wIKFE1lc2hBdHRhY2htZW50UmVwb3J0EiYKIk1FU0hfQVRUQUNITUVOVF9SRVBPUlRfVU5TUEVDSUZJRUQQABIjCh9NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX0FUVEFDSEVEEAESKwonTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9NRVNIX1VOUkVBQ0hBQkxFEAISLAooTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9ORVRXT1JLX05PVF9GT1VORBADEicKI01FU0hfQVRUQUNITUVOVF9SRVBPUlRfTk9UX0FfTUVNQkVSEAQSKgomTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9OT0RFX05BTUVfVEFLRU4QBRIiCh5NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX1JFVk9LRUQQBhIiCh5NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX1JFRlVTRUQQBzLWBgoXV29ya3NwYWNlQmluZGluZ1NlcnZpY2USbQoNQmluZFdvcmtzcGFjZRIqLmNvZGV3aXJlLmludGVybmFsLnYxLkJpbmRXb3Jrc3BhY2VSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuQmluZFdvcmtzcGFjZVJlc3BvbnNlIgOQAgISbQoNUmVmcmVzaEFjY2VzcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlZnJlc2hBY2Nlc3NSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVmcmVzaEFjY2Vzc1Jlc3BvbnNlIgOQAgESbQoNUmVjb3JkSG9zdEtleRIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlY29yZEhvc3RLZXlSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVjb3JkSG9zdEtleVJlc3BvbnNlIgOQAgISdAoRQWxsb2NhdGVQZWVyUmVsYXkSLi5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlcXVlc3QaLy5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlc3BvbnNlEnoKE0lzc3VlTWVzaEVucm9sbG1lbnQSMC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZU1lc2hFbnJvbGxtZW50UmVxdWVzdBoxLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlTWVzaEVucm9sbG1lbnRSZXNwb25zZRKCAQoUUmVwb3J0TWVzaEF0dGFjaG1lbnQSMS5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRNZXNoQXR0YWNobWVudFJlcXVlc3QaMi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRNZXNoQXR0YWNobWVudFJlc3BvbnNlIgOQAgISdwoSSXNzdWVJZGVudGl0eVRva2VuEi8uY29kZXdpcmUuaW50ZXJuYWwudjEuSXNzdWVJZGVudGl0eVRva2VuUmVxdWVzdBowLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlSWRlbnRpdHlUb2tlblJlc3BvbnNlQu8BChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCFVdvcmtzcGFjZUJpbmRpbmdQcm90b1ABWkpnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvaW50ZXJuYWwvdjE7aW50ZXJuYWx2MaICA0NJWKoCFENvZGV3aXJlLkludGVybmFsLlYxygIUQ29kZXdpcmVcSW50ZXJuYWxcVjHiAiBDb2Rld2lyZVxJbnRlcm5hbFxWMVxHUEJNZXRhZGF0YeoCFkNvZGV3aXJlOjpJbnRlcm5hbDo6VjFiBnByb3RvMw");
 
 /**
  * @generated from message codewire.internal.v1.BindWorkspaceRequest
@@ -252,6 +252,16 @@ export type WorkspaceAccess = Message<"codewire.internal.v1.WorkspaceAccess"> & 
    * @generated from field: codewire.internal.v1.WorkspaceMeshAttachment mesh = 8;
    */
   mesh?: WorkspaceMeshAttachment | undefined;
+
+  /**
+   * The Sandbox's own organization's audiences registered with a file name,
+   * which the daemon keeps as identity token files. Absent from a server
+   * that doesn't send it, and the daemon then keeps the files it has; an
+   * empty list deletes them all.
+   *
+   * @generated from field: codewire.internal.v1.WorkspaceIdentityFiles identity_files = 9;
+   */
+  identityFiles?: WorkspaceIdentityFiles | undefined;
 };
 
 /**
@@ -260,6 +270,54 @@ export type WorkspaceAccess = Message<"codewire.internal.v1.WorkspaceAccess"> & 
  */
 export const WorkspaceAccessSchema: GenMessage<WorkspaceAccess> = /*@__PURE__*/
   messageDesc(file_codewire_internal_v1_workspace_binding, 4);
+
+/**
+ * WorkspaceIdentityFiles is the list of identity token files a grant names.
+ *
+ * @generated from message codewire.internal.v1.WorkspaceIdentityFiles
+ */
+export type WorkspaceIdentityFiles = Message<"codewire.internal.v1.WorkspaceIdentityFiles"> & {
+  /**
+   * @generated from field: repeated codewire.internal.v1.WorkspaceIdentityFile files = 1;
+   */
+  files: WorkspaceIdentityFile[];
+};
+
+/**
+ * Describes the message codewire.internal.v1.WorkspaceIdentityFiles.
+ * Use `create(WorkspaceIdentityFilesSchema)` to create a new message.
+ */
+export const WorkspaceIdentityFilesSchema: GenMessage<WorkspaceIdentityFiles> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 5);
+
+/**
+ * WorkspaceIdentityFile is one audience the daemon mints a token for and
+ * keeps at `/codewire/run/identity/<file_name>.jwt`. It holds no credential.
+ *
+ * @generated from message codewire.internal.v1.WorkspaceIdentityFile
+ */
+export type WorkspaceIdentityFile = Message<"codewire.internal.v1.WorkspaceIdentityFile"> & {
+  /**
+   * The canonical audience, passed to IssueIdentityToken as is.
+   *
+   * @generated from field: string audience = 1;
+   */
+  audience: string;
+
+  /**
+   * `[a-z0-9-]{1,63}`; the daemon checks it again.
+   *
+   * @generated from field: string file_name = 2;
+   */
+  fileName: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.WorkspaceIdentityFile.
+ * Use `create(WorkspaceIdentityFileSchema)` to create a new message.
+ */
+export const WorkspaceIdentityFileSchema: GenMessage<WorkspaceIdentityFile> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 6);
 
 /**
  * WorkspaceMeshAttachment names the one hosted Mesh network node the bound
@@ -298,7 +356,7 @@ export type WorkspaceMeshAttachment = Message<"codewire.internal.v1.WorkspaceMes
  * Use `create(WorkspaceMeshAttachmentSchema)` to create a new message.
  */
 export const WorkspaceMeshAttachmentSchema: GenMessage<WorkspaceMeshAttachment> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 5);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 7);
 
 /**
  * @generated from message codewire.internal.v1.RefreshAccessRequest
@@ -311,7 +369,7 @@ export type RefreshAccessRequest = Message<"codewire.internal.v1.RefreshAccessRe
  * Use `create(RefreshAccessRequestSchema)` to create a new message.
  */
 export const RefreshAccessRequestSchema: GenMessage<RefreshAccessRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 6);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 8);
 
 /**
  * @generated from message codewire.internal.v1.RefreshAccessResponse
@@ -328,7 +386,7 @@ export type RefreshAccessResponse = Message<"codewire.internal.v1.RefreshAccessR
  * Use `create(RefreshAccessResponseSchema)` to create a new message.
  */
 export const RefreshAccessResponseSchema: GenMessage<RefreshAccessResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 7);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 9);
 
 /**
  * @generated from message codewire.internal.v1.RecordHostKeyRequest
@@ -357,7 +415,7 @@ export type RecordHostKeyRequest = Message<"codewire.internal.v1.RecordHostKeyRe
  * Use `create(RecordHostKeyRequestSchema)` to create a new message.
  */
 export const RecordHostKeyRequestSchema: GenMessage<RecordHostKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 8);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 10);
 
 /**
  * What a guest-carried daemon's self-check found before it served: each
@@ -379,7 +437,7 @@ export type GuestCarriedSelfCheck = Message<"codewire.internal.v1.GuestCarriedSe
  * Use `create(GuestCarriedSelfCheckSchema)` to create a new message.
  */
 export const GuestCarriedSelfCheckSchema: GenMessage<GuestCarriedSelfCheck> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 9);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 11);
 
 /**
  * @generated from message codewire.internal.v1.SelfCheckProbe
@@ -412,7 +470,7 @@ export type SelfCheckProbe = Message<"codewire.internal.v1.SelfCheckProbe"> & {
  * Use `create(SelfCheckProbeSchema)` to create a new message.
  */
 export const SelfCheckProbeSchema: GenMessage<SelfCheckProbe> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 10);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 12);
 
 /**
  * @generated from message codewire.internal.v1.RecordHostKeyResponse
@@ -425,7 +483,7 @@ export type RecordHostKeyResponse = Message<"codewire.internal.v1.RecordHostKeyR
  * Use `create(RecordHostKeyResponseSchema)` to create a new message.
  */
 export const RecordHostKeyResponseSchema: GenMessage<RecordHostKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 11);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 13);
 
 /**
  * @generated from message codewire.internal.v1.AllocatePeerRelayRequest
@@ -452,7 +510,7 @@ export type AllocatePeerRelayRequest = Message<"codewire.internal.v1.AllocatePee
  * Use `create(AllocatePeerRelayRequestSchema)` to create a new message.
  */
 export const AllocatePeerRelayRequestSchema: GenMessage<AllocatePeerRelayRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 12);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 14);
 
 /**
  * @generated from message codewire.internal.v1.AllocatePeerRelayResponse
@@ -506,7 +564,7 @@ export type AllocatePeerRelayResponse = Message<"codewire.internal.v1.AllocatePe
  * Use `create(AllocatePeerRelayResponseSchema)` to create a new message.
  */
 export const AllocatePeerRelayResponseSchema: GenMessage<AllocatePeerRelayResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 13);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 15);
 
 /**
  * @generated from message codewire.internal.v1.IssueMeshEnrollmentRequest
@@ -519,7 +577,7 @@ export type IssueMeshEnrollmentRequest = Message<"codewire.internal.v1.IssueMesh
  * Use `create(IssueMeshEnrollmentRequestSchema)` to create a new message.
  */
 export const IssueMeshEnrollmentRequestSchema: GenMessage<IssueMeshEnrollmentRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 14);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 16);
 
 /**
  * @generated from message codewire.internal.v1.IssueMeshEnrollmentResponse
@@ -550,7 +608,7 @@ export type IssueMeshEnrollmentResponse = Message<"codewire.internal.v1.IssueMes
  * Use `create(IssueMeshEnrollmentResponseSchema)` to create a new message.
  */
 export const IssueMeshEnrollmentResponseSchema: GenMessage<IssueMeshEnrollmentResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 15);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 17);
 
 /**
  * @generated from message codewire.internal.v1.ReportMeshAttachmentRequest
@@ -567,7 +625,7 @@ export type ReportMeshAttachmentRequest = Message<"codewire.internal.v1.ReportMe
  * Use `create(ReportMeshAttachmentRequestSchema)` to create a new message.
  */
 export const ReportMeshAttachmentRequestSchema: GenMessage<ReportMeshAttachmentRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 16);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 18);
 
 /**
  * @generated from message codewire.internal.v1.ReportMeshAttachmentResponse
@@ -580,7 +638,7 @@ export type ReportMeshAttachmentResponse = Message<"codewire.internal.v1.ReportM
  * Use `create(ReportMeshAttachmentResponseSchema)` to create a new message.
  */
 export const ReportMeshAttachmentResponseSchema: GenMessage<ReportMeshAttachmentResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 17);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 19);
 
 /**
  * @generated from message codewire.internal.v1.IssueIdentityTokenRequest
@@ -600,7 +658,7 @@ export type IssueIdentityTokenRequest = Message<"codewire.internal.v1.IssueIdent
  * Use `create(IssueIdentityTokenRequestSchema)` to create a new message.
  */
 export const IssueIdentityTokenRequestSchema: GenMessage<IssueIdentityTokenRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 18);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 20);
 
 /**
  * @generated from message codewire.internal.v1.IssueIdentityTokenResponse
@@ -626,7 +684,7 @@ export type IssueIdentityTokenResponse = Message<"codewire.internal.v1.IssueIden
  * Use `create(IssueIdentityTokenResponseSchema)` to create a new message.
  */
 export const IssueIdentityTokenResponseSchema: GenMessage<IssueIdentityTokenResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 19);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 21);
 
 /**
  * MeshAttachmentReport is what the daemon observed of its Mesh membership.

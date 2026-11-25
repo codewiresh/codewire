@@ -19,6 +19,11 @@ use crate::api::environments::{coded, coded_owned};
 use crate::identity::audience::{AudienceDenylist, CanonicalAudience};
 use crate::identity::groups::{AudienceLifetime, GroupSet, ProjectedFileName, VisibleGroups};
 
+/// At most this many of an organization's audiences carry a file name, so the
+/// files' renewals stay well inside a Sandbox's minting limit
+/// (docs/dev/SANDBOX-IDENTITY.md, "Audiences").
+pub const MAX_FILE_AUDIENCES: i64 = 8;
+
 /// A registration as a request asks for it, before parsing.
 #[derive(Debug, Clone, Default)]
 pub struct AudienceRequest<'a> {
@@ -94,6 +99,33 @@ pub async fn register_audience(
 
     run_organization_database_mutation(pool, org_id, async {
         let mut tx = pool.begin().await?;
+        if file_name.is_some() {
+            // One file registration at a time per organization, so two can't
+            // both pass the count.
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended('identity-file-audiences:' || $1, 0))",
+            )
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+            let files: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM identity_audiences \
+                 WHERE org_id = $1 AND file_name IS NOT NULL",
+            )
+            .bind(org_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if files >= MAX_FILE_AUDIENCES {
+                return Err(coded_owned(
+                    StatusCode::CONFLICT,
+                    "identity_file_limit",
+                    format!(
+                        "this organization already has {MAX_FILE_AUDIENCES} audiences with a \
+                         file; remove one first"
+                    ),
+                ));
+            }
+        }
         let inserted: Result<AudienceView, sqlx::Error> = sqlx::query_as(&format!(
             "INSERT INTO identity_audiences (org_id, audience, visible_groups, lifetime_seconds, \
              claim_created_by, claim_environment_name, file_name, created_by) \

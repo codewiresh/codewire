@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use codewire_daemon::access::{AccessFields, MeshFields, WorkspaceAccessGrant};
+use codewire_daemon::access::{AccessFields, IdentityFileFields, MeshFields, WorkspaceAccessGrant};
 #[cfg(any(target_os = "linux", test))]
 use codewire_daemon::identity_socket::{IdentityRefusal, IssuedIdentityToken};
 use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConfig};
@@ -548,9 +548,15 @@ fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, Att
                 network_id: &mesh.network_id,
                 node_name: &mesh.node_name,
             }),
-            // set from WorkspaceAccess.identity_files in piece 5 of #4664, once
-            // the protocol carries it; until then a grant keeps the files.
-            identity_files: None,
+            identity_files: access.identity_files.as_option().map(|list| {
+                list.files
+                    .iter()
+                    .map(|file| IdentityFileFields {
+                        audience: &file.audience,
+                        file_name: &file.file_name,
+                    })
+                    .collect()
+            }),
         },
         SystemTime::now(),
     )

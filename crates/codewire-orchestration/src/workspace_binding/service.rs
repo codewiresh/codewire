@@ -19,7 +19,7 @@ use codewire_proto::codewire::internal::v1::{
     MeshAttachmentReport as ProtoMeshAttachmentReport, RecordHostKeyRequest, RecordHostKeyResponse,
     RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest,
     ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService, WorkspaceDefaults,
-    WorkspaceMeshAttachment,
+    WorkspaceIdentityFile, WorkspaceIdentityFiles, WorkspaceMeshAttachment,
 };
 use codewire_server_core::bounded_http1::PeerAddr;
 use codewire_server_core::peer_token::{self, PEER_TOKEN_LIFETIME_SECS};
@@ -40,8 +40,8 @@ use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
 use super::self_check;
 use super::store::{
-    BindDefaults, BindingNotifications, BindingStore, HostKeyRecord, LiveBinding, MeshAttachment,
-    MeshAttachmentReport, MeshIssueOutcome,
+    BindDefaults, BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord,
+    LiveBinding, MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
 };
 use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
 use crate::environment_mesh::{
@@ -745,11 +745,12 @@ impl WorkspaceBindingState {
         // the paths the daemon advertises.
         let runtime = self.runtime()?;
         let placement = Placement::new(&binding.namespace);
-        let (direct_udp_endpoints, zone, app_ports, mesh) = tokio::join!(
+        let (direct_udp_endpoints, zone, app_ports, mesh, identity_files) = tokio::join!(
             runtime.direct_udp_endpoints(&placement, &binding.environment_id),
             self.node_zone(member),
             self.store.app_ports(&binding.environment_id),
             self.mesh_target(binding),
+            self.identity_files(&binding.environment_id),
         );
         // The daemon leaves its network when a grant names none, so an
         // unknown attachment fails the grant rather than detaching it.
@@ -757,6 +758,9 @@ impl WorkspaceBindingState {
         // The daemon replaces its served ports with this set, so an unknown
         // set fails the grant rather than clearing them.
         let app_ports = app_ports.map_err(|_| BindError::Unavailable)?;
+        // The daemon deletes the files a grant doesn't name, so an unknown
+        // list fails the grant rather than clearing them (#4664).
+        let identity_files = identity_files.map_err(|_| BindError::Unavailable)?;
         let peer_relay_endpoints = zone
             .ok()
             .flatten()
@@ -772,6 +776,30 @@ impl WorkspaceBindingState {
             peer_relay_endpoints,
             app_ports,
             mesh: mesh.into(),
+            identity_files: identity_files.into(),
+            ..Default::default()
+        })
+    }
+
+    /// The Sandbox's identity token files, all of its organization's file
+    /// audiences; none while identity minting is off here.
+    async fn identity_files(
+        &self,
+        environment_id: &str,
+    ) -> Result<WorkspaceIdentityFiles, BindingStoreUnavailable> {
+        let rows = match self.identity {
+            Some(_) => self.store.identity_files(environment_id).await?,
+            None => Vec::new(),
+        };
+        Ok(WorkspaceIdentityFiles {
+            files: rows
+                .into_iter()
+                .map(|row| WorkspaceIdentityFile {
+                    audience: row.audience,
+                    file_name: row.file_name,
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         })
     }

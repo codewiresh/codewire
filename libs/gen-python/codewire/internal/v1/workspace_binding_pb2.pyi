@@ -82,7 +82,7 @@ class GitIdentity(_message.Message):
     def __init__(self, email: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
 
 class WorkspaceAccess(_message.Message):
-    __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints", "app_ports", "mesh")
+    __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints", "app_ports", "mesh", "identity_files")
     PEER_TOKEN_FIELD_NUMBER: _ClassVar[int]
     PEER_TOKEN_EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -91,6 +91,7 @@ class WorkspaceAccess(_message.Message):
     PEER_RELAY_ENDPOINTS_FIELD_NUMBER: _ClassVar[int]
     APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     MESH_FIELD_NUMBER: _ClassVar[int]
+    IDENTITY_FILES_FIELD_NUMBER: _ClassVar[int]
     peer_token: str
     peer_token_expires_at: int
     operation_generation: int
@@ -99,7 +100,22 @@ class WorkspaceAccess(_message.Message):
     peer_relay_endpoints: _containers.RepeatedScalarFieldContainer[str]
     app_ports: _containers.RepeatedScalarFieldContainer[int]
     mesh: WorkspaceMeshAttachment
-    def __init__(self, peer_token: _Optional[str] = ..., peer_token_expires_at: _Optional[int] = ..., operation_generation: _Optional[int] = ..., coordinator_url: _Optional[str] = ..., direct_udp_endpoints: _Optional[_Iterable[str]] = ..., peer_relay_endpoints: _Optional[_Iterable[str]] = ..., app_ports: _Optional[_Iterable[int]] = ..., mesh: _Optional[_Union[WorkspaceMeshAttachment, _Mapping]] = ...) -> None: ...
+    identity_files: WorkspaceIdentityFiles
+    def __init__(self, peer_token: _Optional[str] = ..., peer_token_expires_at: _Optional[int] = ..., operation_generation: _Optional[int] = ..., coordinator_url: _Optional[str] = ..., direct_udp_endpoints: _Optional[_Iterable[str]] = ..., peer_relay_endpoints: _Optional[_Iterable[str]] = ..., app_ports: _Optional[_Iterable[int]] = ..., mesh: _Optional[_Union[WorkspaceMeshAttachment, _Mapping]] = ..., identity_files: _Optional[_Union[WorkspaceIdentityFiles, _Mapping]] = ...) -> None: ...
+
+class WorkspaceIdentityFiles(_message.Message):
+    __slots__ = ("files",)
+    FILES_FIELD_NUMBER: _ClassVar[int]
+    files: _containers.RepeatedCompositeFieldContainer[WorkspaceIdentityFile]
+    def __init__(self, files: _Optional[_Iterable[_Union[WorkspaceIdentityFile, _Mapping]]] = ...) -> None: ...
+
+class WorkspaceIdentityFile(_message.Message):
+    __slots__ = ("audience", "file_name")
+    AUDIENCE_FIELD_NUMBER: _ClassVar[int]
+    FILE_NAME_FIELD_NUMBER: _ClassVar[int]
+    audience: str
+    file_name: str
+    def __init__(self, audience: _Optional[str] = ..., file_name: _Optional[str] = ...) -> None: ...
 
 class WorkspaceMeshAttachment(_message.Message):
     __slots__ = ("mesh_url", "org_id", "network_id", "node_name")

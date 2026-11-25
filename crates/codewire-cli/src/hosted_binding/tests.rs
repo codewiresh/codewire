@@ -10,7 +10,7 @@ use codewire_proto::codewire::internal::v1::{
     GitIdentity, IssueIdentityTokenResponse, IssueMeshEnrollmentRequest,
     IssueMeshEnrollmentResponse, RecordHostKeyResponse, RefreshAccessResponse,
     ReportMeshAttachmentRequest, ReportMeshAttachmentResponse, WorkspaceBindingService,
-    WorkspaceDefaults,
+    WorkspaceDefaults, WorkspaceIdentityFile, WorkspaceIdentityFiles,
 };
 use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
@@ -662,6 +662,47 @@ async fn an_access_grant_is_validated_with_the_binding() {
     assert_eq!(
         fixture.client.attempt(&fixture.config).await.unwrap_err(),
         AttemptError::InvalidResponse
+    );
+}
+
+#[test]
+fn a_grant_passes_its_identity_files_list_on_absent_empty_or_named() {
+    let file = |audience: &str, file_name: &str| WorkspaceIdentityFile {
+        audience: audience.into(),
+        file_name: file_name.into(),
+        ..Default::default()
+    };
+    let with_files = |files| WorkspaceAccess {
+        identity_files: WorkspaceIdentityFiles {
+            files,
+            ..Default::default()
+        }
+        .into(),
+        ..synthetic_access(4)
+    };
+    // A server that sends no list leaves the daemon's files as they are.
+    let absent = validate_access(&synthetic_access(4)).unwrap();
+    assert!(absent.identity_files().is_none());
+    let empty = validate_access(&with_files(Vec::new())).unwrap();
+    assert!(empty.identity_files().unwrap().files().is_empty());
+    let named = validate_access(&with_files(vec![
+        file("https://k8s.example", "k8s"),
+        file("https://bao.example", "bao"),
+    ]))
+    .unwrap();
+    let listed: Vec<_> = named
+        .identity_files()
+        .unwrap()
+        .files()
+        .iter()
+        .map(|file| (file.audience().to_owned(), file.file_name()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("https://bao.example".to_owned(), "bao.jwt".to_owned()),
+            ("https://k8s.example".to_owned(), "k8s.jwt".to_owned()),
+        ]
     );
 }
 

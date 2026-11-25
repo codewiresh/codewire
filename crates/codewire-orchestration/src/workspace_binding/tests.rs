@@ -32,7 +32,7 @@ use super::limits::RequestLimits;
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{
     BindDefaults, BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord,
-    LiveBinding, MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
+    IdentityFileRow, LiveBinding, MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
 };
 use super::{app, workspace_binding_router};
 use crate::runtime_transport::{PeerRelayTransport, RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
@@ -466,6 +466,9 @@ pub(super) struct FakeStore {
     /// The environment's exposed application ports; `None` models an
     /// unavailable lookup.
     app_ports: Mutex<Option<Vec<i32>>>,
+    /// The organization's file audiences; `None` models an unavailable
+    /// lookup.
+    pub(super) identity_files: Mutex<Option<Vec<IdentityFileRow>>>,
     /// The environment's Mesh attachment; `Err` models an unavailable lookup.
     mesh: Mutex<Result<Option<MeshAttachment>, BindingStoreUnavailable>>,
     /// Issued enrollment digests: (environment, Pod, generation, digest).
@@ -488,6 +491,7 @@ impl FakeStore {
             host_keys: Mutex::new(HashMap::new()),
             zones: Mutex::new(HashMap::from([(ZONE.into(), zone())])),
             app_ports: Mutex::new(Some(vec![3000, 5173])),
+            identity_files: Mutex::new(Some(Vec::new())),
             mesh: Mutex::new(Ok(None)),
             issued: Mutex::new(Vec::new()),
             issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
@@ -589,6 +593,18 @@ impl BindingStore for FakeStore {
         name: &str,
     ) -> Result<Option<RuntimeTransportZone>, BindingStoreUnavailable> {
         Ok(self.zones.lock().unwrap().get(name).cloned())
+    }
+
+    async fn identity_files(
+        &self,
+        environment_id: &str,
+    ) -> Result<Vec<IdentityFileRow>, BindingStoreUnavailable> {
+        assert_eq!(environment_id, ENVIRONMENT_ID);
+        self.identity_files
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(BindingStoreUnavailable)
     }
 
     async fn app_ports(&self, environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
@@ -1500,6 +1516,7 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         host_keys: Mutex::new(HashMap::new()),
         zones: Mutex::new(HashMap::new()),
         app_ports: Mutex::new(Some(Vec::new())),
+        identity_files: Mutex::new(Some(Vec::new())),
         mesh: Mutex::new(Ok(None)),
         issued: Mutex::new(Vec::new()),
         issue_outcome: Mutex::new(MeshIssueOutcome::Issued),

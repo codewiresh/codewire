@@ -1,7 +1,8 @@
 //! Disposable-PostgreSQL proof for the daemon access store: SSH host keys
 //! write-once per Pod and trusted only for the environment's bound Pod, the
-//! generation the live binding carries, and enabled transport zones. Only
-//! synthetic rows in an isolated test database are used.
+//! generation the live binding carries, enabled transport zones, application
+//! ports and identity token files. Only synthetic rows in an isolated test
+//! database are used.
 
 use anyhow::{Result, ensure};
 
@@ -10,6 +11,7 @@ use crate::test_database_support::TestDatabase;
 
 const CREATOR: &str = "host-key-creator";
 const ORGANIZATION: &str = "host-key-organization";
+const OTHER_ORGANIZATION: &str = "identity-files-other-organization";
 const PRESET: &str = "host-key-preset";
 const NAMESPACE: &str = "binding-sandboxes";
 const ENV: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -341,6 +343,58 @@ async fn db_app_ports_follow_expose_and_unexpose() -> Result<()> {
         ensure!(
             store
                 .app_ports("6f1c1e2a-0000-4000-8000-000000000000")
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_identity_files_are_the_environments_own_organizations_by_file_name() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, 3).await?;
+        db.organization(OTHER_ORGANIZATION).await?;
+        let store = PgBindingStore::from_pool(db.pool.clone());
+        let register =
+            |org: &'static str, audience: &'static str, file_name: Option<&'static str>| {
+                sqlx::query(
+                    "INSERT INTO identity_audiences (org_id, audience, file_name, created_by) \
+                 VALUES ($1, $2, $3, $4)",
+                )
+                .bind(org)
+                .bind(audience)
+                .bind(file_name)
+                .bind(CREATOR)
+                .execute(&db.pool)
+            };
+        let row = |audience: &str, file_name: &str| IdentityFileRow {
+            audience: audience.into(),
+            file_name: file_name.into(),
+        };
+        ensure!(store.identity_files(ENV).await?.is_empty());
+        register(ORGANIZATION, "https://k8s.example", Some("k8s")).await?;
+        register(ORGANIZATION, "https://bao.example", Some("bao")).await?;
+        // An audience without a file is the socket's only.
+        register(ORGANIZATION, "https://socket.example", None).await?;
+        // Another organization's file audience, under the same file name.
+        register(OTHER_ORGANIZATION, "https://other.example", Some("k8s")).await?;
+        let files = store.identity_files(ENV).await?;
+        ensure!(
+            files
+                == vec![
+                    row("https://bao.example", "bao"),
+                    row("https://k8s.example", "k8s")
+                ],
+            "{files:?}"
+        );
+        ensure!(
+            store
+                .identity_files("6f1c1e2a-0000-4000-8000-000000000000")
                 .await?
                 .is_empty()
         );
