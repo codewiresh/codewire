@@ -1,0 +1,1325 @@
+{
+ "snapshot": "2026/08/11",
+ "files": [
+  {
+   "repository": "core",
+   "name": "archlinux-keyring-20260727-1-any.pkg.tar.zst",
+   "sha256": "694c4236ff403b5be549436d2df2910092cb6d778bb027fd232be9dddf4ea090",
+   "size": 1272229
+  },
+  {
+   "repository": "core",
+   "name": "archlinux-keyring-20260727-1-any.pkg.tar.zst.sig",
+   "sha256": "7a031ea0c9cf912a85ab117db6bf6ffd4b7d8f41d2593ddaed72569dc3997301",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "autoconf-2.73-1-any.pkg.tar.zst",
+   "sha256": "70be528019e04291fe52125c59121a99a3d39da8f1b89826f323ab81a92f492e",
+   "size": 668651
+  },
+  {
+   "repository": "core",
+   "name": "autoconf-2.73-1-any.pkg.tar.zst.sig",
+   "sha256": "a90dea2badb5cbcc2ef10c5b536df1c78caed1f7d243654901198167c3991f6e",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "automake-1.18.1-1-any.pkg.tar.zst",
+   "sha256": "47416f72d0d579b391f9be5a55f5b3fa204a09097512b8179d6be5fa0527510a",
+   "size": 649767
+  },
+  {
+   "repository": "core",
+   "name": "automake-1.18.1-1-any.pkg.tar.zst.sig",
+   "sha256": "4de1db79f39e807a8828fbb33614614eee1a47b7fbfc0798a7ff80c82cd4b763",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "base-devel-1-2-any.pkg.tar.zst",
+   "sha256": "412a2effe23751e1c11b2fa68155f1a29ecea5d9dc8ea8cef4e87b7b429d3201",
+   "size": 2100
+  },
+  {
+   "repository": "core",
+   "name": "base-devel-1-2-any.pkg.tar.zst.sig",
+   "sha256": "9238c2903bf9628e9cb3ffaa24c94d0ea085215b72f9613cca4b2d9759149d12",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "bash-5.3.15-1-x86_64.pkg.tar.zst",
+   "sha256": "2c14ce3c72790ec6b344267b39f04f921bbb34f0c1399460e71492547f6b6c65",
+   "size": 2002014
+  },
+  {
+   "repository": "core",
+   "name": "bash-5.3.15-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "56b34cc3fe8dad5cb1ab7aaf8471a34d67007ac0799b19eddce8ecda825dd1c6",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "binutils-2.47-1-x86_64.pkg.tar.zst",
+   "sha256": "b1d7ad4d4b0f451282d5ff2c9c1605fbae485fcdd6d5683d59c3c6a5bcf92496",
+   "size": 8597515
+  },
+  {
+   "repository": "core",
+   "name": "binutils-2.47-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "10f3379643080face1f99f6b7612e05153732f3b2f5793fadc34a2525508bea2",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "bison-3.8.2-8-x86_64.pkg.tar.zst",
+   "sha256": "417f8e94f7088e6de69cd36d7927d82988266f298e8d4fed3166abb13e971941",
+   "size": 784715
+  },
+  {
+   "repository": "core",
+   "name": "bison-3.8.2-8-x86_64.pkg.tar.zst.sig",
+   "sha256": "78ffaf7ebcdc7acc5780d50587a4e0d0887600e4e0d596c61e7edf524d10d947",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "ca-certificates-mozilla-3.126-1-x86_64.pkg.tar.zst",
+   "sha256": "a734f218ff0c21f97edbd3304cd9f35aa083aa59dbae977856facc798daab415",
+   "size": 391545
+  },
+  {
+   "repository": "core",
+   "name": "ca-certificates-mozilla-3.126-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "f32a69a5e77a0cdcfc562b2ea336481f1a2e11d2318166084e2d3654bf2d05d7",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "core.db",
+   "sha256": "0f5807bee1fb0621c6e4cf5d1bb77b0bfef724b0b5efe9d9e79172a8cd89639a",
+   "size": 130678
+  },
+  {
+   "repository": "core",
+   "name": "coreutils-9.11-2-x86_64.pkg.tar.zst",
+   "sha256": "8d6668fba51085e680b1510f16ff43d32fbfdd068e78b2000783a4dab1c15513",
+   "size": 3062677
+  },
+  {
+   "repository": "core",
+   "name": "coreutils-9.11-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "afc8f23698419ee9e9aed53301424f98a72c63887571a6a913480414867363d1",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "cryptsetup-2.8.7-1-x86_64.pkg.tar.zst",
+   "sha256": "3e77b353731dd4432a7b451fca4b6880b89405c5914324b82a294f3c5fd75393",
+   "size": 868833
+  },
+  {
+   "repository": "core",
+   "name": "cryptsetup-2.8.7-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "9aa2373f04174d1b8492eef7934c77d61e127f0b6ecea61f0466aace927571bc",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "curl-8.21.0-1-x86_64.pkg.tar.zst",
+   "sha256": "67f9275b591d3cc12c2c54bc38727363575d2d8c665aa4e3c26bf60b0856867b",
+   "size": 1341008
+  },
+  {
+   "repository": "core",
+   "name": "curl-8.21.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "9791823970446249891fb4dfc575dac5810f854f97f78bfb78d389e62e1a09c6",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "db5.3-5.3.28-7-x86_64.pkg.tar.zst",
+   "sha256": "abac3474e766fa8a36fcae945f5e8c8e818665fc41a56daff92db81cd176d389",
+   "size": 1320537
+  },
+  {
+   "repository": "core",
+   "name": "db5.3-5.3.28-7-x86_64.pkg.tar.zst.sig",
+   "sha256": "6d924ad6b7de7e882484cd7478956df824fcd88612c70ce48a90a5c8eafba499",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "debugedit-5.3-1-x86_64.pkg.tar.zst",
+   "sha256": "df04d259bf6281ba090362d3173e21e4a3bb2ed77156704f5e3d664ae167b9d8",
+   "size": 52186
+  },
+  {
+   "repository": "core",
+   "name": "debugedit-5.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "4c05efb2c0ea27b2c85e5ba7d878b54f03be4662bc7d27e3e3a03196895e4ed7",
+   "size": 590
+  },
+  {
+   "repository": "core",
+   "name": "diffutils-3.12-2-x86_64.pkg.tar.zst",
+   "sha256": "53830e09d46ceccde48a0fc1dcee026902e2a639a1b8a5e2a091d2a9d90b6967",
+   "size": 350156
+  },
+  {
+   "repository": "core",
+   "name": "diffutils-3.12-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "1ee58a31caa30784e8bc0f157542599c1fae3380fd0b4d8290d720598db6e685",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "elfutils-0.195-2-x86_64.pkg.tar.zst",
+   "sha256": "b5ccba580b5d75ccc38acd4a37cf059fd260275de92812d00cac0ef4eaee792b",
+   "size": 626384
+  },
+  {
+   "repository": "core",
+   "name": "elfutils-0.195-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "06b5ecf4e6f669917ac52159c3ddb29f077ce435609f9b3d24fdf143c6eaf536",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "expat-2.8.2-1-x86_64.pkg.tar.zst",
+   "sha256": "7df6034eb09e2c7fc6300c2d7588ee9a6c5954e2f775461fbb6521ba51ddfe37",
+   "size": 132140
+  },
+  {
+   "repository": "core",
+   "name": "expat-2.8.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "7bfc3b998192d0045873aca25f40e6e1f90b2b4b506f7d511c8d6ce73165399b",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst",
+   "sha256": "701b3f060240ce9392613a4dcb132589f1e1d8251b159074d8dbca3cfc032f22",
+   "size": 79236
+  },
+  {
+   "repository": "core",
+   "name": "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "2fc0666b39683ed161c56ef7ea31dc557b1a99f6a6ab7fa2c33b14d7f1d2578b",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "flex-2.6.4-6-x86_64.pkg.tar.zst",
+   "sha256": "2a4479da79f8f50c940c4bcc7b5c5945081af3f6d8ebbec802d5118800a184ae",
+   "size": 301900
+  },
+  {
+   "repository": "core",
+   "name": "flex-2.6.4-6-x86_64.pkg.tar.zst.sig",
+   "sha256": "b9c24e56e2041287adbc598e1cff9de7050f558a4db49e18facea4ee23691263",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "gc-8.2.12-1-x86_64.pkg.tar.zst",
+   "sha256": "f81f6053b8986150529ad125827f00cc8f7652f827cea34fe3f0e97ce078434e",
+   "size": 241204
+  },
+  {
+   "repository": "core",
+   "name": "gc-8.2.12-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "dee7cad686cda712b301bb86735f9de9da9c445ee05c3da7807783fae1e2ab2c",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "gcc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "d44729e212926d42dda48d2e8f1ec9f3133fec1089209f4914fad170b19d9c3e",
+   "size": 60748209
+  },
+  {
+   "repository": "core",
+   "name": "gcc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "a383850a4bde44795e50302d930775c9de2b4b46e8a5d33d24188cf56e7501a6",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "gcc-libs-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "a3088c9ab302a5dcaaff385c62c47e50cb096d618a171c1d32adbb96978cac36",
+   "size": 2730
+  },
+  {
+   "repository": "core",
+   "name": "gcc-libs-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "19e9e993bf0eb4bca4a162b3c8a616443261a0d287bac9ceaf104d63cfe02c9c",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "glibc-2.44+r5+g7cba77790f32-1-x86_64.pkg.tar.zst",
+   "sha256": "e9a1ae5e9a7176dcf10b339a13961ceb65bd35042acd134ac7ea84e938b745ed",
+   "size": 10873467
+  },
+  {
+   "repository": "core",
+   "name": "glibc-2.44+r5+g7cba77790f32-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "a639fadfa3297eae1c82f3c6b43926dbc954c681d4461a286d57b6d92c875f1b",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "gnupg-2.4.9-2-x86_64.pkg.tar.zst",
+   "sha256": "81dbb4bd69f7fef0a23a0464ada8ec22ce3dbd9d70ec4cf7eaf466f66240f190",
+   "size": 3028428
+  },
+  {
+   "repository": "core",
+   "name": "gnupg-2.4.9-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "850ae044dd161f66bf83b5ca8a596b9499fbba58091cfc7fa204a5929c748d31",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "gnutls-3.8.13-2-x86_64.pkg.tar.zst",
+   "sha256": "381e8679ec096bba9d25e6bf8de1d186b1f46e892215aa2a63e1582c34a036f1",
+   "size": 1871527
+  },
+  {
+   "repository": "core",
+   "name": "gnutls-3.8.13-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "6f00c51a3f59a8a02cf23746281687caf1c5f7af35c4d7dbca473835fc5d47fe",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "gpgme-2.1.2-1-x86_64.pkg.tar.zst",
+   "sha256": "ff938d81d232ab173bb51673f47d3402206ea5f0f7e999f746266a3256853f49",
+   "size": 339305
+  },
+  {
+   "repository": "core",
+   "name": "gpgme-2.1.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "f0dde7f54a1d53d2306754a81bebe318f640a8d327a555e80c8edc48deef1bb1",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "groff-1.24.1-1-x86_64.pkg.tar.zst",
+   "sha256": "eadef618a9e22a72c657efeb923e8f6991161842d4ac30540dc5d4f29ae57228",
+   "size": 2513494
+  },
+  {
+   "repository": "core",
+   "name": "groff-1.24.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "3511193cd2359c49d4d71647fac6e380c85bb9ce551282cee9bf528dfbcaf64a",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "guile-3.0.11-1-x86_64.pkg.tar.zst",
+   "sha256": "dbc4c775e0474a5ac8784aab95a77f6fd23ebc930abea34c7a5e0f83dd00873d",
+   "size": 8798834
+  },
+  {
+   "repository": "core",
+   "name": "guile-3.0.11-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "302dad168a0490837940b47447224f684a4e749d5c179537d05c1c38ba0e56d6",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "gzip-1.14-2-x86_64.pkg.tar.zst",
+   "sha256": "e08b33c6aa9a19108d7941a78a6d137e3f700a544d21f14bf863d3c392c3a88e",
+   "size": 88751
+  },
+  {
+   "repository": "core",
+   "name": "gzip-1.14-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "9382d76e68ed85686d4e3a16127fa56a8a7950820d79f487f0478a87307b6951",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "hwdata-0.410-1-any.pkg.tar.zst",
+   "sha256": "7fdb0f7f95bca493778d939f3a47580fb950a3c827aba337ca34412c672be083",
+   "size": 1776624
+  },
+  {
+   "repository": "core",
+   "name": "hwdata-0.410-1-any.pkg.tar.zst.sig",
+   "sha256": "0ff94c3fffbe91dccefead7796d423cabf06d25b1dcdf5ece2a471c73db6105a",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "iana-etc-20260530-1-any.pkg.tar.zst",
+   "sha256": "023d4bd30530ac507c297286b307a86432483c237c11569ad827406e19767604",
+   "size": 411461
+  },
+  {
+   "repository": "core",
+   "name": "iana-etc-20260530-1-any.pkg.tar.zst.sig",
+   "sha256": "4ae98e61c906e5155d5aae0a48e50c5538750c40dc89512bb6e2a04d9946977e",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "iproute2-7.1.0-1-x86_64.pkg.tar.zst",
+   "sha256": "836aceaa7e68984f5222a879cc8543b643cfc8fcb56ead50a6aa4a36efb345c1",
+   "size": 1238974
+  },
+  {
+   "repository": "core",
+   "name": "iproute2-7.1.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "7bbef224e279ac47c22188038e01ad46f40c8f389a6747da034ecdf2a214b0f1",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "jansson-2.15.0-1-x86_64.pkg.tar.zst",
+   "sha256": "d58e6b36a8a8dcd81ae4a943b859d9b7b9d72c77455aef4f82226aa8909dadb0",
+   "size": 90651
+  },
+  {
+   "repository": "core",
+   "name": "jansson-2.15.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "7f9abe6ee23da108dca5dde120cbfd0c86babe71a5f615289e244c62cb681ea3",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "leancrypto-1.8.0-1-x86_64.pkg.tar.zst",
+   "sha256": "5b793364a382b3f46857ce5ed96cde520466aeec5443cad04339f76078ab6589",
+   "size": 1487902
+  },
+  {
+   "repository": "core",
+   "name": "leancrypto-1.8.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "aa1b4d4bafbf541c4ad9a627d971850e2f9e0c8a6021b7a47de569304b5a1f1f",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "libasan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "7c41fc21b41606f7c37efaf0837e5566e5b9056e6978f741d124ebbf6311e164",
+   "size": 533456
+  },
+  {
+   "repository": "core",
+   "name": "libasan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "5fd3df07bc85bb06633911d286da6e2115c5f80e5c23bef73147363b5083fe06",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libatomic-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "150a3310b362db672c4444e95080c677c1ca433fa03b1c4f80ac007af8decdc0",
+   "size": 14361
+  },
+  {
+   "repository": "core",
+   "name": "libatomic-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "babde305948061cab73859e84df2695a75ebacff9bd018635748c76b0e42521b",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libcap-ng-0.9.3-1-x86_64.pkg.tar.zst",
+   "sha256": "858f3b207f2601f1ed32756bd8a46eaa266376efa6dd9c7ba16350c08908e41b",
+   "size": 69550
+  },
+  {
+   "repository": "core",
+   "name": "libcap-ng-0.9.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "499fabc9c406f92ec95c9a2c9f0f2fc6bb218579702d35a8e27d8bf2ee1eb8f1",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "libedit-20260512_3.1-1-x86_64.pkg.tar.zst",
+   "sha256": "70cb736e4fdee330cd0dfab45875f6ea378ae819958dd15748c300b8d7285b42",
+   "size": 120327
+  },
+  {
+   "repository": "core",
+   "name": "libedit-20260512_3.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "6f61da87117c55f2eef074dc61bb9aa33539e0b80edb2e0e7be9af98e2609f61",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "libelf-0.195-2-x86_64.pkg.tar.zst",
+   "sha256": "a78ba310d8d6df92cda1a25909bece8942aee6fe9e29e2d69d8c0d9e3256cfbf",
+   "size": 729668
+  },
+  {
+   "repository": "core",
+   "name": "libelf-0.195-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "32e80228a66b2193762e4065a036cc09690ed4429ba4e933c24e3cc750db42a6",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "libgcc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "dc8e53852e71b2196ffd05f2b96d1b30bf7bad5c103c3368c4b20debdccb4b90",
+   "size": 81941
+  },
+  {
+   "repository": "core",
+   "name": "libgcc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "f584681afcb14d92e25f34dcb546d4b943a90f7e75c1f7175e87a8d409b61e5b",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libgcrypt-1.12.2-1-x86_64.pkg.tar.zst",
+   "sha256": "27429de23607abb32994f589574d6e680ca3ddf0fdebae82b23fddb4f66ec64c",
+   "size": 753181
+  },
+  {
+   "repository": "core",
+   "name": "libgcrypt-1.12.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "dc6663fdac1b41292a6abb1ab92b928d380096e1176549e89719939ba3cfed37",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "libgfortran-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "3167014e245690cb957eeab42f8e2a68708e3f054b37114b43c86fecc84c033a",
+   "size": 948680
+  },
+  {
+   "repository": "core",
+   "name": "libgfortran-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "a0ff3097644b1340db474f903928e8589368118bfa5b962af2cfeda991f63aa9",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libgomp-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "92c9acb2cd1cd1aab8bc991c12ec6785c546d9be621900ee7323cc099daec8ac",
+   "size": 236362
+  },
+  {
+   "repository": "core",
+   "name": "libgomp-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "20ce9cb141d274a80c69579149628b237d75250e95c0ac26e1e3bf2957b3ddc3",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libhwasan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "3e3180c93989abdeeb4e4845da024ce98a1fdd48ce8639b21f5f30986985e8ac",
+   "size": 281707
+  },
+  {
+   "repository": "core",
+   "name": "libhwasan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "04bebbb482cb337da5b5e4580efc4d979441f209081a2af4fcf17386bbca78ea",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libisl-0.28-1-x86_64.pkg.tar.zst",
+   "sha256": "e72fd1165d674f440ff9882b514c999423098a5852ea41fa692db65f391c98c1",
+   "size": 980886
+  },
+  {
+   "repository": "core",
+   "name": "libisl-0.28-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "104503cf4b110a2e53021de8d85ebba051244c423281985b0fd63de9000f6c0a",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libksba-1.8.0-1-x86_64.pkg.tar.zst",
+   "sha256": "9f0edb97199189416356d1902be4ca605b5bc71525f1604cffbc5d6b28894f3c",
+   "size": 154824
+  },
+  {
+   "repository": "core",
+   "name": "libksba-1.8.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "71cf95cb2edd6c61ae0a5584e447fbe99dbf63f5b7b735074da823ed97cfe5b9",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "libldap-2.6.13-1-x86_64.pkg.tar.zst",
+   "sha256": "9d37ed49d0da014fbdf89e8b1c5e55b2d58fbffc850d79ddda5f8d1d151ba3b6",
+   "size": 289146
+  },
+  {
+   "repository": "core",
+   "name": "libldap-2.6.13-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "8f04b3cb2a163b6e24e2404968776ce650466cb8d3ac6b4105fedb41533c4cd5",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "liblsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "bc63bf5584c9228f932bf922cb44c9f576df2dcac94942f1a984200991018f25",
+   "size": 233834
+  },
+  {
+   "repository": "core",
+   "name": "liblsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "0ab8779d8ba9f333331126951e64963910401519128da8612af1648667780d41",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libmakepkg-dropins-20-1-any.pkg.tar.zst",
+   "sha256": "fa733001ee4fe5ec5ebbf7f7a9873ff87c92c1a2ec368114d16e45c7a58118ea",
+   "size": 6254
+  },
+  {
+   "repository": "core",
+   "name": "libmakepkg-dropins-20-1-any.pkg.tar.zst.sig",
+   "sha256": "73ebf52867ae6a0e13b9d870885d741cc7594a29085b049fb2c7ae6f9d1bec84",
+   "size": 590
+  },
+  {
+   "repository": "core",
+   "name": "libmpc-1.4.1-1-x86_64.pkg.tar.zst",
+   "sha256": "880bdba957ebe5136449c7b61821e92628d7bdd43f370e5a0818d229372d3851",
+   "size": 94077
+  },
+  {
+   "repository": "core",
+   "name": "libmpc-1.4.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "4bdb0ec0256b9ffab7c89951458d424d68397ae84740899abb9813be788f48e0",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "libnftnl-1.3.1-1-x86_64.pkg.tar.zst",
+   "sha256": "b5e01ab808719277bf77b14014ec2940edfba4d34ede5b3a9761c5274eb7d6cf",
+   "size": 75007
+  },
+  {
+   "repository": "core",
+   "name": "libnftnl-1.3.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "50a6b75205009d9e4af32fa1e35726c3c07d77c5af6e30bd6f9dbc3a6fbbdf62",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "libobjc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "c523051bbd453f2d194a74cb3ce4285b4801addd388b77fe21cd3aca4430b5e9",
+   "size": 38461
+  },
+  {
+   "repository": "core",
+   "name": "libobjc-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "4d390599945b7a2a6f4a74250636d934ba6cca158849296f1dbf0912a0d2b0e7",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libpcap-1.10.6-1-x86_64.pkg.tar.zst",
+   "sha256": "a0ab9d77269182e4b734d68a14f74f2ab080171c5ce61b52166e02749667a898",
+   "size": 300150
+  },
+  {
+   "repository": "core",
+   "name": "libpcap-1.10.6-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "1171ab1abb5732c1fc53fe6766b233d4d765ce75930df168498fe2da80eefafb",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "libquadmath-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "1c413092fddca442bf4b600b6c03562424e328f1b73bcdc2b9ca7f798c26d5e3",
+   "size": 170448
+  },
+  {
+   "repository": "core",
+   "name": "libquadmath-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "7b08e69965979a3610ae3291d646cf585a70f6525b8bbbcaa92a8730aea5eb6d",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libsecret-0.21.7-1-x86_64.pkg.tar.zst",
+   "sha256": "21c96fe82e3a1ed013450a471047f5717a62a5de91212cfb1d69e7302028cc40",
+   "size": 192713
+  },
+  {
+   "repository": "core",
+   "name": "libsecret-0.21.7-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "8f6acafda04d2614391d52ecac1be92cef004498d98161ab5811aff4bae10440",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "libstdc++-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "14d6eea64e005e54e7fdecdd461cd770aa24c13cca5142f6753b9eaf7efb5631",
+   "size": 883694
+  },
+  {
+   "repository": "core",
+   "name": "libstdc++-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "4f97974ae615ec34807c2c27b1a07fc86bc989bb5980ba6ef53b6a61f0488192",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libtirpc-1.3.7-1-x86_64.pkg.tar.zst",
+   "sha256": "2d43a2bab8dbe99fa817d327bdf23ec559a337ebd25b48c691cff73f3eb138ec",
+   "size": 176427
+  },
+  {
+   "repository": "core",
+   "name": "libtirpc-1.3.7-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "5e4b4689d6ab734a6d1ad437192b99aaea57d67743aef7208e9da0233b6fb208",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "libtool-2.6.2-3-x86_64.pkg.tar.zst",
+   "sha256": "48378998228920babc3f757e35d51fc3c1dfbf0057b4d0b0d887302c063ee255",
+   "size": 439360
+  },
+  {
+   "repository": "core",
+   "name": "libtool-2.6.2-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "e73d0c676aeecdf16902993fea37b801dacdca72669b01ec61111c96c68b6033",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libtsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "7dc2e4dc22789cf180ab617a3947558c79c550d43a2975f8295ae4c7d8e74419",
+   "size": 472186
+  },
+  {
+   "repository": "core",
+   "name": "libtsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "6323d1d76b7180de0f0c12cbf33522bdf30574e59bed6ec14ec04bf520b049fa",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libubsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst",
+   "sha256": "e30a1eadd6e37fbf5c8dec8a823de2c25d0057bb90567459bd4a820c83814517",
+   "size": 211611
+  },
+  {
+   "repository": "core",
+   "name": "libubsan-16.1.1+r595+g171d15ac6959-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "09dcd86bbb201d287a8e1e8b235128fb6eb8008b6996a6e40bcc81c65acb0c4d",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "libxml2-2.15.3-1-x86_64.pkg.tar.zst",
+   "sha256": "51807c20a300bf85db48ae7f2f8967bec291439764b29279e3297dff3247ed4f",
+   "size": 789927
+  },
+  {
+   "repository": "core",
+   "name": "libxml2-2.15.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "9a1a958a89e50ca4d8c6e4440b79d3bae00eea7d927ec9bbba5183d682ffdda6",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "linux-api-headers-7.1-1-x86_64.pkg.tar.zst",
+   "sha256": "a6edb1e19a58c43abb93b38e70eb327b2e8b0c15aa74abf31a187c0ee6a5d732",
+   "size": 1576198
+  },
+  {
+   "repository": "core",
+   "name": "linux-api-headers-7.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "69fa70da4d8812260f42ad067caa7b024059cc09692c5ba6a3d1813da5ed38f4",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "m4-1.4.21-2-x86_64.pkg.tar.zst",
+   "sha256": "d33224f8f2aad6a4f38cf997f88c23b2a4e4dffba20348a80a50805f98455934",
+   "size": 281037
+  },
+  {
+   "repository": "core",
+   "name": "m4-1.4.21-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "de9b397373d5f8ac117f036fde55c3b7e3fbbce3cb3da24782e419e9506c45d9",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "make-4.4.1-3-x86_64.pkg.tar.zst",
+   "sha256": "b03efac9175b986a5f29302336fb1271874464644de3191e6a40079eb8cc5276",
+   "size": 529562
+  },
+  {
+   "repository": "core",
+   "name": "make-4.4.1-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "2663c270c1a72183d040bfe01ab56ec47ffac1a41d7ad458f7d18bb4958f1d0c",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "mpdecimal-4.0.1-3-x86_64.pkg.tar.zst",
+   "sha256": "8679f71ed9a982c91883adfaaf0f87a1b74d92d4060283180c4a105a6c7afb19",
+   "size": 105687
+  },
+  {
+   "repository": "core",
+   "name": "mpdecimal-4.0.1-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "bcc17af7b801c1eb181f32c1ce9fe6e087f8998fef087dff61669442ff711406",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "openssl-3.6.3-1-x86_64.pkg.tar.zst",
+   "sha256": "85fdbdd57b6773a9b94d4d54c39deecd808aac6bc48d6d42c36ce712283665b3",
+   "size": 5750527
+  },
+  {
+   "repository": "core",
+   "name": "openssl-3.6.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "775957a041eb614f883e1c78497034758e7ca5693c95cf9cf7a7102d10883d8e",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "pam-1.7.2-2-x86_64.pkg.tar.zst",
+   "sha256": "49f54d6b632d0e83cde032eb01f903b71ac09e7dc9bbafbd64fea70227337d48",
+   "size": 611282
+  },
+  {
+   "repository": "core",
+   "name": "pam-1.7.2-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "5d5043937da6e2011372775421c283ba521b658f7d844382c54740322cf98a70",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "patch-2.8-1-x86_64.pkg.tar.zst",
+   "sha256": "b4685fc56dfc18afb754f64099b82396885fefe43e82f20b37477650f642303c",
+   "size": 87289
+  },
+  {
+   "repository": "core",
+   "name": "patch-2.8-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "641f5ae1be1677b1873982a1f98b664193227b12b3a88f160f98f9820e7aa460",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "pcre2-10.47-1-x86_64.pkg.tar.zst",
+   "sha256": "54e0d8c998d2748f47fead1926b04357719bdd00fa1cea84901c3af501aab002",
+   "size": 1698422
+  },
+  {
+   "repository": "core",
+   "name": "pcre2-10.47-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "8f62903856672a8f7f108476bffff61e752460f2208c2144a6ce641071ab5f5e",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "perl-5.42.2-1-x86_64.pkg.tar.zst",
+   "sha256": "a324d4c08853ba0dd0062dd7b5f0a3ae15868200fb65e837b332adbb81605cdc",
+   "size": 21429275
+  },
+  {
+   "repository": "core",
+   "name": "perl-5.42.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "f191adf57e1fd2e1b098f452e0c881168d585398263ecbcc3c3589cc6fd2f852",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "pkgconf-3.0.5-1-x86_64.pkg.tar.zst",
+   "sha256": "f77dca2094799742a9a9a32d41c50563e9bb6792c15de8e55c3faba1001d386e",
+   "size": 124458
+  },
+  {
+   "repository": "core",
+   "name": "pkgconf-3.0.5-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "59de2851bed9e7bcd8db4f7395560df65efcf64d460078b9c4672a1baef5f41f",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "procps-ng-4.0.6-3-x86_64.pkg.tar.zst",
+   "sha256": "c9d23753d896d16d1edff79dbc02cf859e6c396b6582b3467fee70110a3f0816",
+   "size": 1022125
+  },
+  {
+   "repository": "core",
+   "name": "procps-ng-4.0.6-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "2491d3c9c8150ef2b4f50511fdc921ea171bfa698a43e2eae1f668d713101a45",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "python-3.14.6-1-x86_64.pkg.tar.zst",
+   "sha256": "fda7dc7b67bd316a0e6a18164ffd122599458f4f9736caa0c35a9eb649bade8d",
+   "size": 14166875
+  },
+  {
+   "repository": "core",
+   "name": "python-3.14.6-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "7e8e0ee559d7453c0ba89473f6ee7affaa670edfab38650aa6b89f156034239a",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "readline-8.3.003-1-x86_64.pkg.tar.zst",
+   "sha256": "a4e861378069dcb15c6fbd52a1f5d9ed01b4bce5fb208268c7c182341f5f3960",
+   "size": 419558
+  },
+  {
+   "repository": "core",
+   "name": "readline-8.3.003-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "474a824fa64afb7080f44fd841a09be1b1eeeec4e20ba85badddb0da6a564536",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "sudo-1.9.17.p2-6-x86_64.pkg.tar.zst",
+   "sha256": "20c0467521c96e6ebdd14e23d4b9388252834adb8dcf4c4763092a117c4932ea",
+   "size": 1946096
+  },
+  {
+   "repository": "core",
+   "name": "sudo-1.9.17.p2-6-x86_64.pkg.tar.zst.sig",
+   "sha256": "8430589dbe9d54915e407efbf09c4243d020d1c8b43e0e425a359ba23f223a63",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "systemd-261.2-1-x86_64.pkg.tar.zst",
+   "sha256": "88ed13de43e53e6b8ba6039e7e58c1bc2a15c47234b05f48e68319c93b661cd7",
+   "size": 10886495
+  },
+  {
+   "repository": "core",
+   "name": "systemd-261.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "71a438a519a0f9a304df4dc45077a24a79e9d0eb14899e122463db6eb1977512",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "systemd-libs-261.2-1-x86_64.pkg.tar.zst",
+   "sha256": "c12d5a2c4bb7cc0088af3f6addddac3219277a14b4aefb135b508d6d9ea15de9",
+   "size": 1482646
+  },
+  {
+   "repository": "core",
+   "name": "systemd-libs-261.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "ed7cbdcbad66d2190f1468a2ec3aea9ba77c58c1aefb136ee67037a3a193266b",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst",
+   "sha256": "010928040f6e84df439f820e7fa9b4c684d9651f07e24ff6d27bc0f3f50eacca",
+   "size": 6717
+  },
+  {
+   "repository": "core",
+   "name": "systemd-sysvcompat-261.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "303fba4fe1e34c841021aff404df0f88d4209b4139499eb3f8afb4055db64348",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "tar-1.35-3-x86_64.pkg.tar.zst",
+   "sha256": "16ac2194fb6cee545e550cb1ed0a462d0f9d98c664d311b34caec50863e538f0",
+   "size": 790258
+  },
+  {
+   "repository": "core",
+   "name": "tar-1.35-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "869c74ed6742a610f5e5b3ab918eb7bdb33417af0b1828b6755638456970beaf",
+   "size": 566
+  },
+  {
+   "repository": "core",
+   "name": "texinfo-7.3-1-x86_64.pkg.tar.zst",
+   "sha256": "9abef101e4e04d5f9e3fd943631ceb47102898cce909382b17ccff22d71486aa",
+   "size": 2226205
+  },
+  {
+   "repository": "core",
+   "name": "texinfo-7.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "bf429b547ee1c9696c4261c5fe051d330e112f7a40d9a5b07c15b863155ca67f",
+   "size": 215
+  },
+  {
+   "repository": "core",
+   "name": "tpm2-tss-4.1.3-1-x86_64.pkg.tar.zst",
+   "sha256": "b1098a8ecc8886023c466827ea057861ea53ef4dc36a2142afee8b85fdf27c3c",
+   "size": 961309
+  },
+  {
+   "repository": "core",
+   "name": "tpm2-tss-4.1.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "0f6292bbc26340dae9d962dae7518177b37b8c13d61f5e157472329537c79bf1",
+   "size": 590
+  },
+  {
+   "repository": "core",
+   "name": "tzdata-2026c-1-x86_64.pkg.tar.zst",
+   "sha256": "3be0345f3a9393f30b5e1167ab4593f55c75031daa123526a581b975d45ec5e3",
+   "size": 312226
+  },
+  {
+   "repository": "core",
+   "name": "tzdata-2026c-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "78e34b1935b9c2fb2408fa18c345a8160aa7b8a7bbb439985a477481bfb38356",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "util-linux-2.42.2-1-x86_64.pkg.tar.zst",
+   "sha256": "60b672fad41b2b2657d8d38bfcea3029f3cf388ee3414d6cc48071507d1ac241",
+   "size": 6475975
+  },
+  {
+   "repository": "core",
+   "name": "util-linux-2.42.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "9bdbfc0fc4050cc5bc1fce6f2fc373e3edb18634419ef9b79e120e33e27da0ce",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "util-linux-libs-2.42.2-1-x86_64.pkg.tar.zst",
+   "sha256": "50e5541bafc8e7013d1cfe7fe90cba2d5e96ac05acf3e8d1540f21daf24fb9c9",
+   "size": 539571
+  },
+  {
+   "repository": "core",
+   "name": "util-linux-libs-2.42.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "f09d691603d4771969a313c39e187f27a060c35f7d719e1e421918d575c65cea",
+   "size": 119
+  },
+  {
+   "repository": "core",
+   "name": "which-2.25-1-x86_64.pkg.tar.zst",
+   "sha256": "f9a30aca3eba69a4ad5e9b0117f8fcc60a33770e4ed435634b8d4c167363fe4f",
+   "size": 16798
+  },
+  {
+   "repository": "core",
+   "name": "which-2.25-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "8edf3db15dfba49663e3d8868d7389bf6c72f042b75a262afb85a1111031e268",
+   "size": 310
+  },
+  {
+   "repository": "core",
+   "name": "xz-5.8.3-1-x86_64.pkg.tar.zst",
+   "sha256": "03b9eefeb02c27c4f30fce4481cb5bd2922c0391f628665911c156970285d5d9",
+   "size": 896293
+  },
+  {
+   "repository": "core",
+   "name": "xz-5.8.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "2aa0c7754f88824fc060eee1d61650b400f5958636282442b4bcf43e4835d502",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-binutils-2.47-1-x86_64.pkg.tar.zst",
+   "sha256": "db7e7e0829ff5c97b2d5e746dc1218d4ac8e11229b9eeae7b667b48be1260170",
+   "size": 2939234
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-binutils-2.47-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "77b99d1d3cb3756d0285f72c92ec446432a36efcc09187e66aa83531eb1025b2",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-gcc-16.1.0-1-x86_64.pkg.tar.zst",
+   "sha256": "ecfeabeb6e243f9a41409b0195a308ae7fc8a1044bf154cbc473b4e58b4642f4",
+   "size": 94887001
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-gcc-16.1.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "134219f8309961e877c4fc2cafc63c279fcf778adcb72f6d842709ab4b337295",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-glibc-2.44-1-any.pkg.tar.zst",
+   "sha256": "e897101616a45e8a4c72e3f0349eb14bd8f1422a86af504d6f0eb846c32c3d65",
+   "size": 3887910
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-glibc-2.44-1-any.pkg.tar.zst.sig",
+   "sha256": "11242e1bd05689fc9fc7874b043a8ec44555837ca54f7d77807809aba2ef1fbf",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-linux-api-headers-7.0-1-any.pkg.tar.zst",
+   "sha256": "721307e67978f51c2b25a7401731bf8129e50c2f19e2bf7ab34e71c1e5fcdfde",
+   "size": 1542680
+  },
+  {
+   "repository": "extra",
+   "name": "aarch64-linux-gnu-linux-api-headers-7.0-1-any.pkg.tar.zst.sig",
+   "sha256": "bd6c32ae4c0331f0741f973d46bd0b2c80a64c8d2e885eabf4d3cec99b0634df",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "boost-libs-1.91.0-2-x86_64.pkg.tar.zst",
+   "sha256": "62cfd278b0260bd2ce5c93f6ab4669d2eefe840eab19e2c3854762f295924655",
+   "size": 6444794
+  },
+  {
+   "repository": "extra",
+   "name": "boost-libs-1.91.0-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "19f010ca07031a7b4a3666648e6e909f409f6a92f9c9f12016ca32019646a3e1",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "compiler-rt-22.1.8-1-x86_64.pkg.tar.zst",
+   "sha256": "e7531589d13fcbacf3fe4a64624b2a62081f2532b690e77bbf88fbe0a5d1b75e",
+   "size": 4824931
+  },
+  {
+   "repository": "extra",
+   "name": "compiler-rt-22.1.8-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "a3158bbef6b1a91178a5de28a86c665440f9113547cf1b958118ccebf26417c5",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "cpio-2.15-3-x86_64.pkg.tar.zst",
+   "sha256": "ba1197b73ee8ceaeeb9c1edff84db6550827f94eede50d04b330edcc27b3933c",
+   "size": 234991
+  },
+  {
+   "repository": "extra",
+   "name": "cpio-2.15-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "e44f78356515dc773c4762c1994753842c7dad7d14f82ce1a0c6878a7b7f68e8",
+   "size": 310
+  },
+  {
+   "repository": "extra",
+   "name": "extra.db",
+   "sha256": "869e17baff43dfe0024fca51f2543190d25a9981b21e2340643cac94187a3793",
+   "size": 8774630
+  },
+  {
+   "repository": "extra",
+   "name": "gdb-17.2-1-x86_64.pkg.tar.zst",
+   "sha256": "df022fa98d48a109c09caa8bd9a65bec3c49e39cc8b3e8d5c37dc69fcbb11948",
+   "size": 8561162
+  },
+  {
+   "repository": "extra",
+   "name": "gdb-17.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "383a47776dfa85e246d58701b18688e855c7a0bd2719447d42ba19423e2efa0e",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "gdb-common-17.2-1-x86_64.pkg.tar.zst",
+   "sha256": "bf7e03b3ee643a9bb5a6bf7641328b91273e720ab5a29fdcac972d68d6db3e1c",
+   "size": 123267
+  },
+  {
+   "repository": "extra",
+   "name": "gdb-common-17.2-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "5859d26e04e91eb64d54f42b6fec0a74d4b4a8b787cc2add0775a087b0b91f0b",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "git-2.55.0-1-x86_64.pkg.tar.zst",
+   "sha256": "fbb24f455cb1de1c004a76b5a4dab92e4a9137764fbc3bc46afe13b7a38814fe",
+   "size": 7458872
+  },
+  {
+   "repository": "extra",
+   "name": "git-2.55.0-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "53c9abe5f6b7610b1f0c915f90e7a73f95fade7bd8d5ed9c53568575deae82ab",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "libgit2-1:1.9.6-1-x86_64.pkg.tar.zst",
+   "sha256": "ecad55ff6d0ee582faded4c2056c061fde9537627df77481d93b22f1a9b12e49",
+   "size": 1041815
+  },
+  {
+   "repository": "extra",
+   "name": "libgit2-1:1.9.6-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "d18fa1aaf0b569dd07466c24010ddd12e710ed4f8253d6509371ee56f69f3cc3",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "libsysprof-capture-50.0-4-x86_64.pkg.tar.zst",
+   "sha256": "4f547dfd1827d92b3f0db5d2a6aac8fb2ed1fae3606eadfdae14a62ce76ee1a8",
+   "size": 53196
+  },
+  {
+   "repository": "extra",
+   "name": "libsysprof-capture-50.0-4-x86_64.pkg.tar.zst.sig",
+   "sha256": "9ddbd4a7f91b06912fda057d19d09e013224972f19dbf64c7b2aa899cd4ca54d",
+   "size": 215
+  },
+  {
+   "repository": "extra",
+   "name": "lld-22.1.8-1-x86_64.pkg.tar.zst",
+   "sha256": "3032282365f09110922c8df0ef6afc56be2427b9396044334e22dced1aadc31c",
+   "size": 2168467
+  },
+  {
+   "repository": "extra",
+   "name": "lld-22.1.8-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "d1bee4ed33286fe7a7171cadda62bb67ddd488ad8a663e56e37cd6b70be6b0fe",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "llhttp-9.3.1-1-x86_64.pkg.tar.zst",
+   "sha256": "e93332a577aacebdef11d0626df9a4f45dd6468187309693ccaa8de1547dc71c",
+   "size": 31498
+  },
+  {
+   "repository": "extra",
+   "name": "llhttp-9.3.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "c83f14a215a73db0af0d90ecb27820565a160620048e24bbb2d52b102a410ae6",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "llvm-libs-22.1.8-2-x86_64.pkg.tar.zst",
+   "sha256": "ad4454d1b969192e7a878066400a583b984210322d67c6fa8958ad1175342658",
+   "size": 42954702
+  },
+  {
+   "repository": "extra",
+   "name": "llvm-libs-22.1.8-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "5f61bd0f6a3bb486949a6bcf84ee18044ef10da17d247a378d53aa827fe57e6b",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "nftables-1:1.1.6-3-x86_64.pkg.tar.zst",
+   "sha256": "be60816ae334b9a9fd2752cc14ef5c6cc61dbfeb380143131ce743384ac3a9bf",
+   "size": 444668
+  },
+  {
+   "repository": "extra",
+   "name": "nftables-1:1.1.6-3-x86_64.pkg.tar.zst.sig",
+   "sha256": "dc3b79feb0057fc26e6e65590e69b75e5aaf754346a46397f3eb88f879f8deec",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "pahole-1:1.31-2-x86_64.pkg.tar.zst",
+   "sha256": "35a3519cfdaa71090b1743fd8714564f9246b3b8b7e93d749c5beed427160067",
+   "size": 338642
+  },
+  {
+   "repository": "extra",
+   "name": "pahole-1:1.31-2-x86_64.pkg.tar.zst.sig",
+   "sha256": "330f3e760b3b1b1f46ea6480e0865e410c611847be6e97532859cbea6cb27df0",
+   "size": 310
+  },
+  {
+   "repository": "extra",
+   "name": "perl-error-0.17030-3-any.pkg.tar.zst",
+   "sha256": "2a6df48b14b3ea0cd6154b46825b4d056b9525a9a3e9afe761decda1d115d196",
+   "size": 21635
+  },
+  {
+   "repository": "extra",
+   "name": "perl-error-0.17030-3-any.pkg.tar.zst.sig",
+   "sha256": "09e982cc6edfe66099bb6b8e6e03864de5e86591aa4fa6eb7cdcf18cceea4d8b",
+   "size": 310
+  },
+  {
+   "repository": "extra",
+   "name": "perl-mailtools-2.22-3-any.pkg.tar.zst",
+   "sha256": "d93f6c122fa2301c2bd02095b8aaf9c225b5f26f64bb25d2199bfa9a1d3f47ba",
+   "size": 59900
+  },
+  {
+   "repository": "extra",
+   "name": "perl-mailtools-2.22-3-any.pkg.tar.zst.sig",
+   "sha256": "3bf340c8444991d8d8a16193da0f45f40245491adafeb82f8a82f1e2fb667ef8",
+   "size": 310
+  },
+  {
+   "repository": "extra",
+   "name": "perl-timedate-2.35-1-any.pkg.tar.zst",
+   "sha256": "225b05f5d301b7e168299240b9369cece8d0bddee8627117ce23a57880679715",
+   "size": 63820
+  },
+  {
+   "repository": "extra",
+   "name": "perl-timedate-2.35-1-any.pkg.tar.zst.sig",
+   "sha256": "cd483a6b3b5f8e7af69dec3df347cff644ea2e5323d4384bec2e04d5e36953be",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "rust-1:1.97.1-1-x86_64.pkg.tar.zst",
+   "sha256": "c13025b265ed7070ec74f5afd32723e18e1610a9bc6231a76d9156d30e372000",
+   "size": 82242481
+  },
+  {
+   "repository": "extra",
+   "name": "rust-1:1.97.1-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "90caecee75314a17dae3c4b36adc8d5ba942645e3295e5f4ea51f861d6acac1b",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "source-highlight-3.1.9-18-x86_64.pkg.tar.zst",
+   "sha256": "484308cf6fda007f653b2f2c9a1b8750292e714df00ee1aec19e9771e35a2743",
+   "size": 707001
+  },
+  {
+   "repository": "extra",
+   "name": "source-highlight-3.1.9-18-x86_64.pkg.tar.zst.sig",
+   "sha256": "592fde2eac2d476a0018ee39d043f4f2b243407cc4dad8031624a4e921115d26",
+   "size": 566
+  },
+  {
+   "repository": "extra",
+   "name": "xxhash-0.8.3-1-x86_64.pkg.tar.zst",
+   "sha256": "3d48ff40b744aa4503cd5638f620c2c39a12d27967d1db3ab46bf18ff4b2fd80",
+   "size": 100356
+  },
+  {
+   "repository": "extra",
+   "name": "xxhash-0.8.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "ea0cabb3dfacdad66afc31eb39e7708593e0aaa6220d524465098bde95a63b15",
+   "size": 119
+  },
+  {
+   "repository": "extra",
+   "name": "zlib-ng-2.3.3-1-x86_64.pkg.tar.zst",
+   "sha256": "52971dcf5ca5e763a070518da9d615be52ea8f645fd44ee323211b6251d1cc67",
+   "size": 114796
+  },
+  {
+   "repository": "extra",
+   "name": "zlib-ng-2.3.3-1-x86_64.pkg.tar.zst.sig",
+   "sha256": "64e21f43c06cb7827f04e09a12fc99bfb3092c38433fd2cf3f0026f97560b306",
+   "size": 119
+  }
+ ]
+}

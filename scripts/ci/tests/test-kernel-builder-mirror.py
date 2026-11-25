@@ -188,6 +188,18 @@ class MirrorTest(unittest.TestCase):
         self.assertTrue('for try in 1 2 3; do' in collect and "timeout -s INT -k 30 900 pacman " in collect,
                         "a collector pacman call is not bounded and retried")
         self.assertTrue('--cachedir "$cache"' in collect, "a retry would fetch again what it already has")
+    def test_the_kernel_build_reads_only_the_checked_mirror_with_no_network(self):
+        build = (fx.ROOT / "scripts/ci/release/build-runtime-kernel.sh").read_text()
+        fetch = build.index("kernel_builder_mirror.py\" fetch --dir \"$mirror\" ||\n  die ")
+        run = build.index("docker run ")
+        self.assertLess(fetch, run, "the mirror is not fetched and checked before the container starts")
+        self.assertTrue("docker run --rm --init --network none " in build, "the build's container can reach a network")
+        servers = [line for line in build.splitlines() if "Server = " in line]
+        self.assertEqual(servers, ['printf "Server = file://%s/\\$repo/os/\\$arch\\n" "$MIRROR" > /etc/pacman.d/mirrorlist'],
+                         "pacman reads a server other than the checked mirror")
+        self.assertFalse("archive.archlinux.org/repos" in build, "the build still names the archive")
+        for refresh in ("--refresh-keys", "--recv-keys", "--keyserver"):
+            self.assertFalse(refresh in build, f"the build fetches keys from the network ({refresh})")
 
     def test_the_lock_matches_the_pinned_snapshot_once_it_exists(self):
         # Until the first refresh there is no lock; once there is, it must

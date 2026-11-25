@@ -38,6 +38,8 @@ PINS = ROOT / "scripts/ci/release/local-runtime-sources.json"
 RECORD_SCHEMA = "codewire.cw.runtime-part/v1"
 HOST_FACTS = {"macos", "sdk", "clang"}
 KERNEL_FILES = ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/release/runtime-container.sh",
+                # The toolchain's exact packages and how they are read (#5619).
+                "scripts/ci/release/kernel-builder-packages.json", "scripts/ci/release/kernel_builder_mirror.py",
                 "scripts/ci/verify/build-linux-vmm-kernel.py",
                 "scripts/ci/verify/linux-vmm-kernel/dax.patch",
                 "scripts/ci/verify/linux-vmm-kernel/provenance.json")

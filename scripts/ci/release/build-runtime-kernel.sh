@@ -10,9 +10,12 @@ Builds one of the local VM runtime's guest kernels with
 scripts/ci/verify/build-linux-vmm-kernel.py --arch ARCH inside the pinned Arch
 Linux container from scripts/ci/release/local-runtime-sources.json: the arm64
 Image for macOS hosts (#2539), cross-compiled, or the x86_64 bzImage for Linux
-hosts (#2733). pacman reads the pinned archive.archlinux.org snapshot and
-installs exactly the toolchain packages pinned there, native and cross; the
-recipe checks the versions it requires again.
+hosts (#2733). pacman installs exactly the toolchain packages of the pinned
+archive.archlinux.org snapshot, native and cross, from their mirror in the
+release blob store (kernel_builder_mirror.py, #5619): each file is checked
+against kernel-builder-packages.json before pacman reads it, and the container
+has no network, so a build never contacts the archive. The recipe checks the
+versions it requires again.
 
 The build runs as the caller's uid. The kernel source and this checkout are
 mounted read-only at their own paths. A CI job runs in a container beside its
@@ -72,7 +75,6 @@ else:
     print(pins[sys.argv[2]])' "$pins" "$1"
 }
 image="$(read_pin image)"
-snapshot="$(read_pin snapshot)"
 packages="$(read_pin packages)"
 tools="$(read_pin tools)"
 uid="$(id -u)" gid="$(id -g)"
@@ -82,28 +84,11 @@ name="$(basename "$output")"
 # shellcheck disable=SC2016 # expanded inside the container
 inner='
 set -euo pipefail
-printf "Server = https://archive.archlinux.org/repos/%s/\$repo/os/\$arch\n" "$SNAPSHOT" > /etc/pacman.d/mirrorlist
-# The archive can stall for minutes (cli-release 65835: "Operation too slow.
-# Less than 1 bytes/sec transferred the last 10 seconds"). pacman gives up
-# after 10 s of that, so its own stall abort is off and each call is bounded
-# here instead, and retried. Files already fetched stay in the pacman cache,
-# so a retry fetches only what is missing, and pacman still checks every
-# package signature as it installs it (#5619).
-sed -i "/^\[options\]/a DisableDownloadTimeout" /etc/pacman.conf
-grep -qx DisableDownloadTimeout /etc/pacman.conf
-# SIGINT, not the default SIGTERM of timeout: pacman removes its db.lck on INT
-# but leaves it on TERM, which made every retry fail at once on the lock (shown
-# in the pinned image). A lock left anyway is stale: nothing else here runs
-# pacman.
+# The snapshot files, already checked against the lock, are the only server.
+# pacman still checks every package signature as it installs it (#5619).
+printf "Server = file://%s/\$repo/os/\$arch\n" "$MIRROR" > /etc/pacman.d/mirrorlist
 fetch() {
-  local try
-  for try in 1 2 3; do
-    rm -f /var/lib/pacman/db.lck
-    timeout -s INT -k 30 900 pacman "$@" --noconfirm --noprogressbar >/dev/null && return 0
-    echo "build-runtime-kernel: pacman $1 failed (try $try of 3)" >&2
-    [ "$try" = 3 ] || sleep $((try * 20))
-  done
-  return 1
+  pacman "$@" --noconfirm --noprogressbar >/dev/null
 }
 # The keyring package populates the local keyring on install; give it one.
 pacman-key --init >/dev/null 2>&1
@@ -124,11 +109,16 @@ exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
 '
 # shellcheck source=scripts/ci/release/runtime-container.sh
 . "$repo/scripts/ci/release/runtime-container.sh"
+# Beside the output, in the parent the build already mounts; removed on exit.
+mirror="$parent/.kernel-builder-mirror-$name"
+trap 'rm -rf -- "$mirror"' EXIT
+python3 -I "$repo/scripts/ci/release/kernel_builder_mirror.py" fetch --dir "$mirror" ||
+  die "the kernel builder's packages could not be read from their mirror"
 runtime_container_mounts "$job_container" "$repo" "$git_common" "$source_dir" "$bc" -- "$parent" ||
   die "the build's paths cannot be mounted"
 started="$(date +%s)"
-docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
-  -e SNAPSHOT="$snapshot" -e TOOLS="$tools" -e PACKAGES="$packages" \
+docker run --rm --init --network none "${RUNTIME_MOUNTS[@]}" \
+  -e MIRROR="$mirror" -e TOOLS="$tools" -e PACKAGES="$packages" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SOURCE="$source_dir" -e ARCH="$arch" \
   -e BC="$bc" -e OUTPUT="$output" -e JOBS="$jobs" \
   "$image" bash -c "$inner" ||
