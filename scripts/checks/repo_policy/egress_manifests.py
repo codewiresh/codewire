@@ -123,6 +123,10 @@ def daemonset_failures(document: str, label: str = DAEMONSET) -> list[str]:
                 f"{label}: {key} must be {wanted}, so cw-egress runs unprivileged and reads its token "
                 "through the Pod's group"
             )
+    if re.search(r"^\s*envFrom:", document, re.MULTILINE):
+        failures.append(
+            f"{label}: cw-egress takes no envFrom; a shared ConfigMap's hashed name rolls it on every key change"
+        )
     if values(document, "containerPort") != [STREAM_PORT]:
         failures.append(f"{label}: cw-egress serves only the stream port {STREAM_PORT}; declare no other")
     if not values(nested(document, "readinessProbe"), "port"):
@@ -399,6 +403,7 @@ def self_test() -> list[str]:
         "a grace period equal to the drain": ("terminationGracePeriodSeconds: 1830", "terminationGracePeriodSeconds: 1800"),
         "a grace period shorter than the drain": ("terminationGracePeriodSeconds: 1830", "terminationGracePeriodSeconds: 15"),
         "no grace period": ("      terminationGracePeriodSeconds: 1830\n", ""),
+        "the shared ConfigMap": ("          env:\n", "          envFrom:\n            - configMapRef:\n                name: codewire-config\n          env:\n"),
         "no drain setting": ('            - name: CODEWIRE_EGRESS_DRAIN_SECONDS\n              value: "1800"\n', ""),
         "a drain of zero": ('value: "1800"', 'value: "0"'),
         "a drain that is not a number": ('value: "1800"', 'value: "30m"'),

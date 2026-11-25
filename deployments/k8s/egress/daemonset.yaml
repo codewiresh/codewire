@@ -72,9 +72,10 @@ spec:
             - containerPort: 8089
               protocol: TCP
               name: stream
-          envFrom:
-            - configMapRef:
-                name: codewire-config
+          # Only the settings below, never the shared codewire-config:
+          # cw-egress reads none of its keys, and its hashed name changes
+          # with every key, so taking it rolled cw-egress, and moved every
+          # Sandbox's egress stream, on unrelated changes (#6483).
           env:
             # How long a stopping cw-egress keeps a sandbox that has open
             # connections before it resets them once; a sandbox with none
