@@ -520,7 +520,7 @@ suite_tests() {
 # SUITE_LIST_ONLY=true it only lists, reusing an earlier listing to run.
 counted_suite() {
   local label="$1" name="$2" logfile="$RUN_DIR/$2.log" listing package="" arg previous=""
-  local expected passed
+  local expected passed started
   shift 2
   local -a variables=()
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
@@ -551,6 +551,7 @@ counted_suite() {
     return 1
   fi
   [ "${SUITE_LIST_ONLY:-false}" != true ] || return 0
+  started=$SECONDS
   (
     for arg in "${variables[@]}"; do export "${arg?}"; done
     "$@"
@@ -566,6 +567,11 @@ counted_suite() {
     echo "::error::${label} passed ${passed:-no} of the ${expected} tests its filter lists"
     return 1
   fi
+  # Its run's wall time, the test runner's start-up and its own listing of the
+  # test binary included, is what its lane spends on it; the lanes are balanced
+  # from these (infra#1534). The listing above, done once before the lanes, is
+  # not.
+  echo "[database suite] $name: $expected tests in $((SECONDS - started)) s"
 }
 
 # listed_run LABEL LOGFILE [VARIABLE=VALUE...] -- COMMAND...: a service lane's

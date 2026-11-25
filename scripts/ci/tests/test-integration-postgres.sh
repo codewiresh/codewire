@@ -368,6 +368,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -752,6 +753,11 @@ lane_executions = executions_of(shared_commands)
 assert lane_executions and all(command['threads'] == '2' for command in lane_executions), lane_executions[:2]
 for lane in lane_order:
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in shared.stdout, lane
+# Every suite that passes prints its wall time, which the lanes are balanced from.
+suite_times = [line for line in shared.stdout.splitlines() if line.startswith('[database suite] ')]
+assert len(suite_times) == sum(suites_per_lane.values()), (len(suite_times), sum(suites_per_lane.values()))
+assert all(re.fullmatch(r'\[database suite\] [a-z0-9-]+: [1-9][0-9]* tests in [0-9]+ s', line)
+           for line in suite_times), suite_times[:3]
 # A heavy guest's share of 16 runs all eleven at once, as does a share of 40,
 # with more threads each; a share of 2 runs two at a time, with two threads.
 heavy, heavy_commands, heavy_environment = cases['heavy'].result()
