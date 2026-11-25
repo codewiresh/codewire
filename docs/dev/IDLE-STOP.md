@@ -184,12 +184,15 @@ guest shuts down cleanly.
 - **Candidates:** the same check as the stop's, every 30 seconds, for a
   running `standard` Sandbox with `idle_suspend` on and activity older than
   its suspend timeout.
-- **The ask:** the worker asks the daemon to suspend, under the daemon
-  credential the activity check uses. The daemon closes its platform
-  connections whose far end sends periodic traffic (the coordinator, the DERP
-  relay, the credential relay's epoch), so that traffic can't wake it,
-  acknowledges, and asks the supervisor on host vsock port 7784
-  (`suspend\n`, answered `ok\n` or `no\n`). The supervisor answers, then
+- **The ask:** the worker calls the daemon's `Suspend` (`DaemonService`,
+  `libs/daemon-proto`), under the daemon credential the activity check uses.
+  A daemon already suspending answers `refused`. Otherwise it quiets the
+  platform connections whose far end sends periodic traffic, so that traffic
+  can't wake it: it ends its tailnet and mesh coordinator sessions and its
+  DERP connection and holds them closed, and ends the credential relay's open
+  epoch and refuses new ones. Then it answers `accepted` and asks the
+  supervisor on host vsock port 7784 (`suspend\n`, answered `ok\n` or
+  `no\n`). The supervisor answers, then
   freezes the workload through PID 1's checkpoint hook and pauses the VM; a
   VM already paused answers `no`, and a freeze that fails leaves it running.
   The acknowledgement marks the Sandbox `suspended`, so no periodic call
@@ -209,8 +212,13 @@ guest shuts down cleanly.
   acknowledgement the worker reads the Pod's pause records (see "Billing");
   when no `paused` record follows within 30 seconds, the pause failed, and
   the mark is cleared. The daemon, which closed its platform
-  connections, redials them when it is still running 30 seconds after `ok`
-  or when the answer is `no`.
+  connections, redials them at once when the answer is `no` or the request
+  fails. After `ok` it ticks every second: a tick more than 3 seconds of
+  wall-clock time after the one before means the VM was paused and has
+  resumed, so it redials and reports the wake (see "On resume"). After
+  thirty ticks with no such gap it redials and reports the wake too: either
+  there was no pause, or one too short to leave a gap, and either way a
+  ticking daemon is running.
 - **Any guest process can ask.** The request on 7784 is unauthenticated: any
   process in the guest with `AF_VSOCK` can send it, from the start of the
   boot, setup included, not only the daemon. That is harmless: a paused guest
@@ -250,16 +258,18 @@ guest shuts down cleanly.
   1. **The vCPUs resume** while the workload is still frozen.
   2. **The tokens the kubelet renewed during the pause are delivered,** as
      the first exchange after the resume: a paused guest can't receive them.
-     The hosted daemon runs outside the frozen workload, so in the
-     milliseconds before they land it could redial `cw-egress` with its old
-     token. `cw-egress` then refuses that one Admit, and the daemon retries
-     with the token file it rereads, within `cw-egress`'s start limit (10 per
-     60 s per Pod IP).
+     On `standard` the hosted daemon is the workspace container's own
+     command, so it is frozen with the workload and dials nothing before
+     they land.
   3. **The workload thaws.** A Linux guest keeps time through a pause on
      kvm-clock (observed right to the second after 150 s), so the supervisor
      doesn't step it; only a macOS guest's thaw carries the host's clock.
   4. **The waking connection goes through,** and the daemon redials its
-     platform connections and reports the wake, which clears the mark.
+     platform connections and reports the wake with `ReportWake` on the
+     workspace binding service, authenticated as its other binding calls are
+     (its Pod's projected token and address). The report clears the mark; for
+     a Sandbox that isn't marked it changes nothing. It moves no second
+     between billing rates.
 
   The `resumed` record is written once the vCPUs run, before the thaw, so a
   thaw that fails leaves a running VM whose workload stays frozen. Liveness
@@ -336,11 +346,12 @@ into a Sandbox adds its row.
 | Kubelet startup and readiness probes | `sandbox/template/workspace.rs` (`apply_daemon_ready_probes`: `test -f /codewire/run/daemon/ready`) | No: on `standard` the file is the runtime container's | Unchanged; the file stays |
 | Idle activity check, every 30 s | `worker/idle_stop.rs` (`environment_daemon_activity_for_worker`) | Yes, the daemon over 7777 | Never asks a `suspended` Sandbox's daemon. While suspended, `last_activity_at` doesn't move (nothing runs), so the time counts toward idle stop: a suspended Sandbox is a stop candidate like a running one, and is stopped without the daemon call (see "The stop") |
 | Credential relay epochs, reconcile every 1 s, epoch at most 600 s | `worker/credential_relay.rs` (`daemon_target`, `RECONCILE_INTERVAL`), `credential_relay/epoch.rs` (`EPOCH_MAX_LIFETIME`) | Yes, the daemon over its cluster Service | Opens no epoch for a `suspended` Sandbox; the daemon closed its own before the pause |
-| Coordinator session heartbeat, every 15 s | `crates/codewire-coordinator/src/lib.rs` (`COORDINATE_HEARTBEAT_INTERVAL`), `session.rs` | Yes, over the daemon's coordinator session | The daemon closes that session before the pause; a hello naming the Sandbox wakes it through orchestration |
+| Coordinator sessions' heartbeat, every 15 s: the tailnet session and the mesh session | `crates/codewire-coordinator/src/lib.rs` (`COORDINATE_HEARTBEAT_INTERVAL`), `session.rs`; `crates/codewire-mesh/src/mesh_coordinate.rs` (`HEARTBEAT_INTERVAL`) | Yes, over each of the daemon's coordinator sessions | The daemon ends both before the pause and redials them at the wake; a hello naming the Sandbox wakes it through orchestration |
 | DERP relay traffic to the daemon | `crates/codewire-derp` | Yes, over the daemon's relay connection | The daemon closes it before the pause and redials at the wake |
 | `cw-egress` stream for broker mode | `crates/codewire-egress-node` | Yes, the admitted stream | Kept: `cw-egress` has no keepalive, idle timer or read deadline after the hello, and the stream's TCP peer is the Pod runtime's worker (it dials 8089 from the Pod's namespace), which keeps acknowledging while the VM is paused. Between that socket and the guest, though, the worker's user-space TCP stack (`codewire-netstack`) aborts a connection whose peer answers nothing for `tcp_idle_timeout` (120 s). It sends a keep-alive every 30 s (#6399), so a live but idle guest answers and keeps its connections; a paused guest can't answer, so a pause longer than about 2 minutes ends the stream, and the daemon redials at the wake; open workload connections through egress reset once. A shorter pause resumes on the old stream. The stream also ends on a `cw-egress` drain or an assignment change. The daemon handles both resuming on the old stream and redialing. Before the VM resumes, the supervisor writes the current egress token at the daemon's token path, since a pause of more than about 10 minutes outlives the copy the guest holds and a redial with it fails admission. Each redial counts against `cw-egress`'s start limit (10 per 60 s per Pod IP); a newer admitted stream replaces an older one for the same Pod |
 | Kubelet token rotations | the Pod's projected tokens | No: the supervisor reads them | The supervisor holds each renewed token and delivers it at the wake |
 | Billing sessions, every 60 s | `worker/billing_sessions.rs` | No: database and Kubernetes only | Counts suspended seconds from the supervisor's record |
+| Daemon status, for each Sandbox `cw ls` lists, `cw info`, and a create's or start's wait | `api/environment_daemon.rs` (`get_environment_daemon_status_core`) | Yes, the daemon over 7777 | Not periodic, but one listing asks it of every Sandbox listed, and a client from before suspend can't skip it. Answered from the mark without reaching the daemon: `ready`, with the message "suspended; any use wakes it" |
 | Setup, resize and app-port pushes | `worker/setup.rs`, `worker/resize.rs` | Yes, but only for a person's action or a create | A person's action wakes it, which is intended |
 
 ## What a person sees
