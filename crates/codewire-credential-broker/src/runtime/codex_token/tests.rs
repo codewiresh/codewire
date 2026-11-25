@@ -561,6 +561,9 @@ async fn where_the_policy_allows_it_the_users_own_request_is_forwarded_untouched
         );
         assert_eq!(body, sent.body);
         assert_eq!(headers["content-type"].as_bytes(), sent.headers[0].value);
+        // Asked for an uncompressed answer, which the transport passes on
+        // (#6362).
+        assert_eq!(headers["accept-encoding"], "identity");
     }
     assert_eq!(harness.outbound().len(), 2);
     assert_eq!(harness.leases(), 0);

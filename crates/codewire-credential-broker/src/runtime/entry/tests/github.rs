@@ -153,6 +153,9 @@ async fn a_request_without_a_placeholder_is_forwarded_as_it_was_sent() {
             format!("https://{host}{path}?{query}")
         };
         assert_eq!(outbound[0].1, expected);
+        // Asked for an uncompressed answer, which the transport passes on
+        // (#6362).
+        assert_eq!(header(&outbound[0], "accept-encoding"), [&b"identity"[..]]);
         assert_eq!(
             header(&outbound[0], "authorization"),
             headers

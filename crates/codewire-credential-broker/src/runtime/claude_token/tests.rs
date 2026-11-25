@@ -506,6 +506,8 @@ async fn the_users_own_refresh_is_forwarded_untouched() {
     assert_eq!((method, target.as_str()), (&Method::POST, TOKEN_URL));
     assert_eq!(sent, &body);
     assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+    // Asked for an uncompressed answer, which the transport passes on (#6362).
+    assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
     assert_eq!(harness.leases(), 0);
 }
 
