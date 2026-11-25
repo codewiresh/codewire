@@ -64,6 +64,12 @@ impl Drop for FilesystemIdentity {
     }
 }
 
+/// `NO_XDEV` also keeps the platform's run directory out under a root that
+/// contains it: a relative link to `../codewire/run` stays beneath `/`, and
+/// is refused only because `/codewire/run` is its own mount wherever the
+/// identity token files exist (admission pins the volume, and the standard
+/// guest bind-mounts it). If that ever stops holding, refusing the platform
+/// directory needs a check of the opened path too (#4664).
 const RESOLVE_WORKSPACE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
@@ -1002,6 +1008,57 @@ mod tests {
         rename(&config, "dir-link/value", "dir-link/renamed")
             .expect("rename beneath internal directory link");
         remove(&config, "dir-link/renamed").expect("remove beneath internal directory link");
+    }
+
+    #[test]
+    fn the_run_directory_is_refused_by_path_and_through_a_link() {
+        use std::os::unix::fs::symlink;
+
+        // By path, under a root override that contains it (#4664).
+        let (_temp, mut everything, _) = roots();
+        everything.home_root = PathBuf::from("/");
+        let token = "/codewire/run/identity/k8s.jwt";
+        for refused in [
+            list(&everything, "/codewire/run/identity").map(drop),
+            stat(&everything, token, true).map(drop),
+            open_file(&everything, token, None, 0),
+            read(&everything, token, 0, 0).map(drop),
+        ] {
+            assert!(
+                matches!(refused, Err(FileError::PlatformDirectory)),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(
+            crate::service::status_from_file_error(FileError::PlatformDirectory).code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // Through links from the workspace into a stand-in run directory:
+        // resolution never leaves the root, so the link is refused.
+        let (temp, config, workspace) = roots();
+        let run = temp.path().join("run");
+        fs::create_dir_all(run.join("identity")).expect("run directory");
+        fs::write(run.join("identity/k8s.jwt"), b"token-sentinel").expect("token file");
+        symlink(&run, workspace.join("run")).expect("directory link");
+        symlink(run.join("identity/k8s.jwt"), workspace.join("k8s.jwt")).expect("file link");
+        for refused in [
+            list(&config, "run/identity").map(drop),
+            stat(&config, "run/identity/k8s.jwt", true).map(drop),
+            stat(&config, "k8s.jwt", true).map(drop),
+            open_file(&config, "k8s.jwt", None, 0),
+            read(&config, "k8s.jwt", 0, 0).map(drop),
+            read(&config, "run/identity/k8s.jwt", 0, 0).map(drop),
+        ] {
+            assert!(
+                matches!(refused, Err(FileError::TraversalDenied)),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(
+            fs::read(run.join("identity/k8s.jwt")).expect("token file kept"),
+            b"token-sentinel"
+        );
     }
 
     #[test]

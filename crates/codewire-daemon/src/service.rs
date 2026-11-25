@@ -1382,6 +1382,7 @@ pub const NESTED_MOUNT_STATUS: &str = "path crosses a separate mount inside the 
 pub fn status_from_file_error(err: files::FileError) -> Status {
     match err {
         files::FileError::PathOutsideWorkspace
+        | files::FileError::PlatformDirectory
         | files::FileError::InvalidPath
         | files::FileError::NotRegularFile
         | files::FileError::NotSymlink

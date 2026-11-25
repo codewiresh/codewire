@@ -47,6 +47,11 @@ const GO_MODE_CHAR_DEVICE: u32 = 1 << 21;
 pub enum FileError {
     #[error("path must stay under /workspace or /home/codewire")]
     PathOutsideWorkspace,
+    /// The platform's own directories, `/codewire/run` and its identity
+    /// token files among them, are never served, whatever root is
+    /// configured (#4664).
+    #[error("path is in the platform's own directory")]
+    PlatformDirectory,
     #[error("configured workspace root is not a stable canonical directory")]
     UntrustedRoot,
     #[error("the live mount here is not mounted or has moved; restart the environment")]
@@ -109,6 +114,10 @@ pub fn resolve_workspace_path(config: &Config, raw: &str) -> Result<PathBuf> {
         clean_path(&config.workspace_root.join(raw_path))
     };
 
+    #[cfg(unix)]
+    if crate::platform_sockets::platform_directory(&cleaned).is_some() {
+        return Err(FileError::PlatformDirectory);
+    }
     if is_allowed_workspace_path(config, &cleaned) {
         Ok(cleaned)
     } else {
@@ -519,6 +528,38 @@ mod tests {
             )),
             ..config
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_platform_directories_are_refused_whatever_the_root() {
+        // A root override of `/` would otherwise reach the identity token
+        // files in `/codewire/run/identity` (#4664).
+        let everything = config(PathBuf::from("/"), PathBuf::from("/"));
+        for raw in [
+            "/codewire/run/identity/k8s.jwt",
+            "/codewire",
+            "/run/codewire/daemon.sock",
+            "/workspace/../codewire/run",
+            "codewire/run",
+        ] {
+            assert!(
+                matches!(
+                    resolve_workspace_path(&everything, raw),
+                    Err(FileError::PlatformDirectory)
+                ),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            resolve_workspace_path(&everything, "/workspace/notes").unwrap(),
+            PathBuf::from("/workspace/notes")
+        );
+        let usual = config(PathBuf::from("/workspace"), PathBuf::from("/home/codewire"));
+        assert!(matches!(
+            resolve_workspace_path(&usual, "../codewire/run/identity/k8s.jwt"),
+            Err(FileError::PlatformDirectory)
+        ));
     }
 
     #[cfg(target_os = "linux")]

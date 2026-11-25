@@ -397,6 +397,59 @@ async fn sftp_reaches_the_workspace_through_the_in_process_daemon() {
     let _ = daemon.shutdown.send(true);
 }
 
+#[tokio::test]
+async fn sftp_and_scp_refuse_a_link_into_the_run_directory() {
+    // A stand-in for `/codewire/run/identity` beside the workspace, linked
+    // from it: the daemon's file operations never leave the workspace, so
+    // neither copy path reads the token (#4664).
+    let daemon = spawn_daemon_ssh().await;
+    let run = daemon.workspace_root.parent().unwrap().join("run");
+    fs::create_dir_all(run.join("identity")).unwrap();
+    fs::write(run.join("identity/k8s.jwt"), b"token-sentinel").unwrap();
+    std::os::unix::fs::symlink(&run, daemon.workspace_root.join("run")).unwrap();
+    let linked = daemon.workspace_root.join("run/identity/k8s.jwt");
+    let client = timeout(Duration::from_secs(20), connect(daemon.ssh))
+        .await
+        .expect("SSH connected");
+
+    let read = timeout(Duration::from_secs(20), async {
+        let channel = client.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+            .await
+            .unwrap();
+        sftp.read(linked.to_string_lossy()).await
+    })
+    .await
+    .expect("sftp read finished");
+    assert!(read.is_err(), "sftp read through the link must be refused");
+
+    // scp's source mode starts once the client sends a zero byte.
+    let (stdout, exit) = timeout(
+        Duration::from_secs(30),
+        exec_with_input(
+            &client,
+            &format!("scp -f {}", linked.display()),
+            vec![0],
+            Duration::from_secs(20),
+        ),
+    )
+    .await
+    .expect("scp finished");
+    assert_ne!(exit, Some(0));
+    assert!(
+        !stdout
+            .windows(b"token-sentinel".len())
+            .any(|window| window == b"token-sentinel"),
+        "scp must not send the token"
+    );
+    assert_eq!(
+        fs::read(run.join("identity/k8s.jwt")).unwrap(),
+        b"token-sentinel"
+    );
+    let _ = daemon.shutdown.send(true);
+}
+
 /// No acknowledgement of `request` arrives on `channel` within a short
 /// window: the forwarding it asked for is never granted.
 async fn never_granted(channel: &mut russh::Channel<client::Msg>, request: &str) {
