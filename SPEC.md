@@ -854,7 +854,11 @@ policy's default. A placeholder on a path the route does not serve is refused
 before any lease, whatever the policy. Every other request to that host
 follows the policy as if the host were not intercepted:
 a rule that allows it lets it through untouched, and without one it is
-refused and counted. That answer is for the host the forward would dial, the
+refused and counted. Untouched means as sent, framing aside, except that it
+asks for an uncompressed answer (`accept-encoding: identity`): the broker
+passes on no reply in a content coding, since it doesn't decode one, so the
+client's own request for one would end a compressed reply as a failure
+(#6362). That answer is for the host the forward would dial, the
 route's own provider origin, never a name the request gives. The credential
 broker that serves or forwards these requests never sees the policy. On a
 local VM the supervisor, which holds the policy, gives the broker its answer

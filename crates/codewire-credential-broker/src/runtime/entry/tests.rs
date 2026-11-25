@@ -2856,3 +2856,38 @@ async fn a_new_credential_never_goes_to_the_old_credentials_routed_origin() {
         .unwrap();
     assert_eq!(collect(response).await.0, StatusCode::OK);
 }
+
+/// Claude Code's own requests to its API host, which carry no placeholder,
+/// are forwarded asking for an uncompressed answer whatever the guest asked
+/// for (#6362): the transport passes on no reply in a content coding, so the
+/// guest's `gzip, br` ended Claude Code's MCP registry fetch and event export
+/// in a 502. Every other header is the guest's.
+#[tokio::test]
+async fn an_untouched_forward_asks_for_an_uncompressed_answer() {
+    for (method, path) in [
+        ("GET", "/api/directory/server-urls"),
+        ("POST", "/api/event_logging/batch"),
+    ] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            ..Recorded::default()
+        };
+        let broker = recorded.broker();
+        let mut request = anthropic(
+            "api.anthropic.com",
+            &[("accept-encoding", "gzip, compress, deflate, br".to_owned())],
+        );
+        request.method = method.into();
+        request.path = path.into();
+        let (status, _, _) = collect(broker.execute_front_door(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{method} {path}");
+        assert_eq!(recorded.leases(), 0, "no placeholder costs no lease");
+        let outbound = recorded.outbound();
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(header(&outbound[0], "accept-encoding"), [&b"identity"[..]]);
+        assert_eq!(
+            header(&outbound[0], "anthropic-version"),
+            [&b"2023-06-01"[..]]
+        );
+    }
+}

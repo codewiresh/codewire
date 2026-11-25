@@ -196,6 +196,20 @@ pub(crate) fn without_framing(headers: &HeaderMap) -> HeaderMap {
     kept
 }
 
+/// [`without_framing`] for a request forwarded untouched, which asks for an
+/// uncompressed answer and keeps every other header: the broker passes on
+/// no reply in a content coding, since it doesn't decode one, so the
+/// guest's own `accept-encoding` would end a compressed reply in a 502
+/// (#6362).
+pub(crate) fn untouched_request_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut kept = without_framing(headers);
+    kept.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
+    kept
+}
+
 /// Header names listed in `Connection`, which are hop-by-hop by declaration.
 fn connection_tokens(headers: &HeaderMap) -> Vec<String> {
     headers

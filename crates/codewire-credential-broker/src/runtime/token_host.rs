@@ -17,7 +17,7 @@ use super::{
     BrokerUpstreamTransport, OpenAiBroker, Phase, ValidatedGuestRequest, current_unix_time,
     map_upstream_error, timing,
 };
-use crate::transparent::{TransparentRequest, without_framing};
+use crate::transparent::{TransparentRequest, untouched_request_headers, without_framing};
 
 /// What a token host logs for each failure, and what its agent is told when
 /// its sign-in must be renewed.
@@ -68,7 +68,7 @@ where
             self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
-                headers: without_framing(&headers),
+                headers: untouched_request_headers(&headers),
                 body,
                 body_stream: None,
                 pinned: None,

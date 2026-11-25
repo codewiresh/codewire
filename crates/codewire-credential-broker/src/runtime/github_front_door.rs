@@ -44,7 +44,7 @@ use super::{
 use crate::BrokerCredentialLease as _;
 use crate::network::RouteHost;
 use crate::network_policy;
-use crate::transparent::without_framing;
+use crate::transparent::{untouched_request_headers, without_framing};
 
 /// Stable machine-readable code of the refusal of a placeholder outside the
 /// route's grammar.
@@ -207,7 +207,7 @@ where
             self.upstream.forward_github(BrokerUpstreamRequest {
                 method: request.method,
                 target,
-                headers: without_framing(&request.headers),
+                headers: untouched_request_headers(&request.headers),
                 body: request.body,
                 body_stream,
                 pinned: None,

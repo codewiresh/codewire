@@ -328,7 +328,7 @@ where
             self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
-                headers: without_framing(headers),
+                headers: crate::transparent::untouched_request_headers(headers),
                 body,
                 body_stream: None,
                 pinned,
