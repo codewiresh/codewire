@@ -981,29 +981,46 @@ def clearing_sandbox(block: bool) -> dict:
                      "volumeClaimTemplates": copy.deepcopy(template["spec"]["volumeClaimTemplates"])}}
 
 
+def with_run_directory(template: dict) -> None:
+    """Give a template that is almost a snapshot's clearing template the run
+    directory every other template must have: codewire-run in memory, mounted
+    at /codewire/run by its one container, named workspace. The run rules come
+    before the broker arm and except only a clearing template (#6310), so
+    without it they would report the case first."""
+    spec = template["spec"]["podTemplate"]["spec"]
+    spec.setdefault("volumes", []).append(
+        {"name": "codewire-run", "emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}})
+    (only,) = spec["containers"]
+    only["name"] = "workspace"
+    only.setdefault("volumeMounts", []).append({"name": "codewire-run", "mountPath": "/codewire/run"})
+
+
 def clearing_cases() -> list[tuple[str, dict | None, str, dict, str | None]]:
     """codewire#4000: with hosted egress on, a snapshot's clearing template,
     exactly as rendered, is excepted from the broker arm's shape. A template
-    that is not quite one has no exception: the run directory rule, which
-    excepts only a clearing template too, comes first and reports it (#6310)."""
+    that is not quite one has no exception, and the broker arm refuses it; each
+    has the run directory, so the run rules pass and the arm is what reports."""
     filesystem, block = clearing_template(False), clearing_template(True)
+    near = lambda t, *changes: mutate(t, *changes, with_run_directory)  # noqa: E731
     dns = {"ports": [{"port": 53, "protocol": "UDP"}], "to": [
         {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}]}
     return [
         ("on, clearing: Filesystem", ON, "create", filesystem, None),
         ("on, clearing: Block", ON, "create", block, None),
+        # The run directory alone keeps it a clearing template.
+        ("on, clearing: Filesystem, with a run directory", ON, "create", near(filesystem), None),
         ("on, clearing: an egress rule added", ON, "create",
-         mutate(filesystem, lambda t: egress(t).append(dns)), RUN),
-        ("on, clearing: an ingress rule added", ON, "create", mutate(block, lambda t: t["spec"]["networkPolicy"][
-            "ingress"].append({"from": [{"namespaceSelector": {}}]})), RUN),
+         near(filesystem, lambda t: egress(t).append(dns)), GATE),
+        ("on, clearing: an ingress rule added", ON, "create", near(block, lambda t: t["spec"]["networkPolicy"][
+            "ingress"].append({"from": [{"namespaceSelector": {}}]})), GATE),
         ("on, clearing: the template's type changed", ON, "create",
-         mutate(filesystem, lambda t: t["metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), RUN),
-        ("on, clearing: the Pod's type changed", ON, "create", mutate(block, lambda t: t["spec"]["podTemplate"][
-            "metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), RUN),
+         near(filesystem, lambda t: t["metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
+        ("on, clearing: the Pod's type changed", ON, "create", near(block, lambda t: t["spec"]["podTemplate"][
+            "metadata"]["labels"].__setitem__("codewire.sh/type", "workspace")), GATE),
         ("on, clearing: another name", ON, "create",
-         mutate(filesystem, lambda t: t["metadata"].__setitem__("name", "cw-snap-x-clear")), RUN),
-        ("on, clearing: with the egress label", ON, "create", mutate(filesystem, lambda t: t["spec"]["podTemplate"][
-            "metadata"]["labels"].__setitem__("codewire.sh/egress", "broker")), RUN),
+         near(filesystem, lambda t: t["metadata"].__setitem__("name", "cw-snap-x-clear")), GATE),
+        ("on, clearing: with the egress label", ON, "create", near(filesystem, lambda t: t["spec"]["podTemplate"][
+            "metadata"]["labels"].__setitem__("codewire.sh/egress", "broker")), ADDRESSES),
         ("off, clearing: Filesystem", OFF, "create", filesystem, None),
         ("off, clearing: Block", OFF, "create", block, None),
     ]
