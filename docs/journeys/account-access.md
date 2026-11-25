@@ -9,7 +9,7 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-24.
+Updated 2026-11-25.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ Updated 2026-11-24.
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80); the terminal's sign-out leg and its revoked wording observed on Dev 2026-11-24, source 3e020c3405 | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); not on Dev | not yet observed |
-| `access-org-removal` | not yet observed | not yet observed |
+| `access-org-removal` | a removal and a leave observed on Dev 2026-11-24, source 4d9d003f35, before a departure ended grants; the desktop viewer and another organization's streams not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -380,7 +380,7 @@ comment 123530). Not yet observed.
 
 ## `access-org-removal`: a member removed from an organization
 
-Issue: #3586, the `membership` kind. Not yet observed.
+Issue: #3586, the `membership` kind.
 
 - **Entry points:** `cw org member rm USER --org ORG` and the dashboard's
   Members page, as an owner; `cw org leave`, as the member.
@@ -392,21 +392,51 @@ Issue: #3586, the `membership` kind. Not yet observed.
     --follow`; then the owner removes them, and in a second run they leave;
   - the same member's streams into another organization: they keep running;
   - another member's streams into the same organization: they keep running;
-  - the member invited back: new streams open at once.
+  - the member invited back: new streams open at once, but only as their
+    role allows: a grant they held on a Sandbox before is gone.
 - **Driving it:** a walk organization with one running Sandbox, its owner
-  and a second member, both test accounts. Open the streams as the member,
-  remove them as the owner, and time when each stream ends.
+  and a second member, both test accounts. A member reaches a Sandbox they
+  didn't create only through a grant, so the owner first runs
+  `cw share grant SANDBOX --user MEMBER_ID --permission operator`. Open the
+  streams as the member, remove them as the owner, and time when each stream
+  ends.
 - **Proof:** every stream of the removed member into the organization ends
   within 30 seconds: a WebSocket closes with 1008 "access revoked", the
   dashboard's terminal shows its revoked line, and a Connect stream ends
   `permission_denied`, "access revoked". A `stream.revoked` audit event
   names the member, the kind `membership`, the surface and the environment.
   The other member's streams and the member's other organization keep
-  running. After the member is invited back, new streams open.
+  running. After the member is invited back, new streams open, and
+  `cw share list SANDBOX` no longer lists the member: one
+  `environment.access.removed_with_membership` audit row, by whoever ended
+  the membership, named the Sandbox when it ended.
 - **Gotchas:** a stream opened with one of the organization's API keys ended
   before this kind, because a removal disables the member's keys for that
   organization; walk with a browser session and `cw login` to see the new
   kind.
+- **Observed:** on Dev, 2026-11-24, source 4d9d003f35 (live images checked),
+  with cw built from 013f98d865 (it differs only in the credentials
+  commands); recorded on #3586. The smoke identity owned the organization,
+  made the Sandbox and granted the synthetic invitee `operator`; the invitee
+  opened a browser terminal, both `cw shell`s, a `cw exec` loop and
+  `cw logs --session tick --follow`; the smoke identity kept its own exec
+  open.
+  - Removed by exact user id at 23:22:27.121 (the call returned at
+    29.314): logs ended at 23:22:29.311, the WebSocket shell at 29.335, the
+    browser's two sockets at 30.301 (1008 "access revoked"), exec at 30.312
+    and the tailnet shell at 30.581, after `[cw] connection lost;
+    reconnecting to the same shell`. Each CLI stream printed
+    `✗ Access revoked`; the browser's footer read "Access revoked. Sign in
+    again to continue." with no Reconnect.
+  - Six `stream.revoked` rows named the member, `membership`, the Sandbox
+    and the surfaces `terminal`, `attach` and `tailnet`, two each.
+  - The smoke identity's exec kept printing; invited back, the invitee's new
+    exec ran at once.
+  - `cw org leave` in a second run ended the same streams 0.26–1.54 s after
+    it, with the same lines and audit rows.
+  - Before this change the old `operator` grant was still listed after the
+    re-invite and applied again; the re-invite state above is not yet
+    observed.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 

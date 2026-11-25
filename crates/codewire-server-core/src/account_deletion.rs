@@ -457,6 +457,9 @@ pub(crate) async fn request_in(
         crate::org::clear_departed_creator_startup_scripts(tx, &organization.id, user_id)
             .await
             .map_err(AppError::from)?;
+        crate::org::delete_departed_member_grants(tx, &organization.id, user_id, requested_by)
+            .await
+            .map_err(AppError::from)?;
     }
 
     // The trigger revokes sessions, OIDC tokens and grants, and disables

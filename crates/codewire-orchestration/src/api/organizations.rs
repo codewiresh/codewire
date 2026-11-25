@@ -339,7 +339,7 @@ pub(crate) async fn remove_member_core(
         if target_role == "owner" {
             leave_as_owner(&state.pool, &org_id, &user_id).await?;
         } else {
-            delete_membership(&state.pool, &org_id, &user_id)
+            delete_membership(&state.pool, &org_id, &user_id, &user.user_id)
                 .await
                 .map_err(|e| {
                     tracing::error!(error = %e, "organizations: remove member failed");
@@ -361,13 +361,19 @@ pub(crate) async fn remove_member_core(
 }
 
 /// Deletes a membership, clears the saved startup scripts of the
-/// environments the member created there (#5949) and disables the member's
-/// API keys for that organization in one transaction. A key bound to the
-/// organization must not outlive the membership, and a later re-add does not
-/// revive it (#3254).
-async fn delete_membership(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> sqlx::Result<()> {
+/// environments the member created there (#5949), deletes the member's
+/// grants on that organization's environments (#3586) and disables the
+/// member's API keys for that organization in one transaction. A key or a
+/// grant must not outlive the membership, and a later re-add does not revive
+/// it (#3254). `actor` is who ended it: the member when they leave.
+async fn delete_membership(
+    pool: &sqlx::PgPool,
+    org_id: &str,
+    user_id: &str,
+    actor: &str,
+) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    delete_membership_in(&mut tx, org_id, user_id).await?;
+    delete_membership_in(&mut tx, org_id, user_id, actor).await?;
     tx.commit().await
 }
 
@@ -375,6 +381,7 @@ async fn delete_membership_in(
     conn: &mut sqlx::PgConnection,
     org_id: &str,
     user_id: &str,
+    actor: &str,
 ) -> sqlx::Result<()> {
     sqlx::query(r#"DELETE FROM org_members WHERE org_id = $1 AND user_id = $2"#)
         .bind(org_id)
@@ -383,6 +390,7 @@ async fn delete_membership_in(
         .await?;
     codewire_server_core::org::clear_departed_creator_startup_scripts(conn, org_id, user_id)
         .await?;
+    codewire_server_core::org::delete_departed_member_grants(conn, org_id, user_id, actor).await?;
     sqlx::query(
         r#"UPDATE api_keys SET disabled_at = NOW()
            WHERE org_id = $1 AND user_id = $2 AND disabled_at IS NULL"#,
@@ -406,7 +414,8 @@ async fn leave_as_owner(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> App
         "you are the organization's only owner; make someone else an owner first, or delete the organization",
     )
     .await?;
-    delete_membership_in(&mut tx, org_id, user_id).await?;
+    // Only the owner themself leaves this way.
+    delete_membership_in(&mut tx, org_id, user_id, user_id).await?;
     tx.commit().await?;
     Ok(())
 }

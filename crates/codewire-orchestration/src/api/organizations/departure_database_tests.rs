@@ -1,7 +1,9 @@
 //! A saved startup script runs only for its creator (#5949, SPEC.md "The
 //! rules for the startup script after create"): when the creator leaves or
 //! is removed, the scripts of the Sandboxes they created there are cleared
-//! with the departure, whether create or a later update saved them.
+//! with the departure, whether create or a later update saved them. The
+//! member's grants on that organization's Sandboxes go with it too, audited
+//! in one row, and a re-add brings none back (#3586).
 
 use std::time::Duration;
 
@@ -56,6 +58,28 @@ async fn sandbox(fixture: &LeaseFixture, id: &str, org: &str, creator: &str, scr
     .await;
 }
 
+/// `user` is granted `permission` on `environment` by the fixture's owner.
+async fn grant(fixture: &LeaseFixture, environment: &str, user: &str, permission: &str) {
+    execute(
+        fixture,
+        "INSERT INTO environment_access (environment_id, user_id, permission, granted_by) \
+         VALUES ($1, $2, $3, $4)",
+        &[environment, user, permission, &fixture.id],
+    )
+    .await;
+}
+
+/// The environments `user` holds a grant on, sorted.
+async fn grants(fixture: &LeaseFixture, user: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT environment_id FROM environment_access WHERE user_id = $1 ORDER BY environment_id",
+    )
+    .bind(user)
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap()
+}
+
 async fn script(fixture: &LeaseFixture, environment: &str) -> Option<String> {
     sqlx::query_scalar("SELECT project_spec->>'startup_script' FROM environments WHERE id = $1")
         .bind(environment)
@@ -104,6 +128,12 @@ async fn scene(fixture: &LeaseFixture, creator: &str) -> Scene {
     sandbox(fixture, &scene.updated, org, creator, "").await;
     update(fixture, creator, &scene.updated).await;
     sandbox(fixture, &scene.owners, org, org, AT_CREATE).await;
+    // The departing member's grants: on the owner's Sandbox and on its own,
+    // as create writes; the owner's grant on the member's Sandbox is not
+    // the member's to lose.
+    grant(fixture, &scene.owners, creator, "operator").await;
+    grant(fixture, &scene.created, creator, "owner").await;
+    grant(fixture, &scene.created, org, "viewer").await;
     execute(
         fixture,
         "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $1, $1, $2)",
@@ -124,6 +154,7 @@ async fn scene(fixture: &LeaseFixture, creator: &str) -> Scene {
         AT_CREATE,
     )
     .await;
+    grant(fixture, &scene.elsewhere, creator, "owner").await;
     assert_eq!(
         script(fixture, &scene.created).await.as_deref(),
         Some(AT_CREATE)
@@ -135,7 +166,45 @@ async fn scene(fixture: &LeaseFixture, creator: &str) -> Scene {
     scene
 }
 
-async fn assert_cleared_with_the_departure(fixture: &LeaseFixture, scene: &Scene) {
+async fn assert_cleared_with_the_departure(
+    fixture: &LeaseFixture,
+    scene: &Scene,
+    creator: &str,
+    actor: &str,
+) {
+    // Only the grant in the other organization is left, and one audit row,
+    // by whoever ended the membership, names the Sandboxes whose grants went.
+    assert_eq!(grants(fixture, creator).await, [scene.elsewhere.as_str()]);
+    assert_eq!(grants(fixture, &fixture.id).await, [scene.created.as_str()]);
+    let audited: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT user_id, metadata FROM audit_logs \
+         WHERE action = 'environment.access.removed_with_membership' \
+           AND metadata->>'target_user_id' = $1",
+    )
+    .bind(creator)
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap();
+    let mut removed = [scene.created.clone(), scene.owners.clone()];
+    removed.sort();
+    assert_eq!(
+        audited,
+        [(
+            actor.to_owned(),
+            serde_json::json!({
+                "org_id": fixture.id, "target_user_id": creator, "environment_ids": removed,
+            })
+        )]
+    );
+    // Invited back, the member starts from its role's defaults alone.
+    execute(
+        fixture,
+        "INSERT INTO org_members (id, org_id, user_id, role) VALUES ($2 || '-back', $1, $2, 'member')",
+        &[&fixture.id, creator],
+    )
+    .await;
+    assert_eq!(grants(fixture, creator).await, [scene.elsewhere.as_str()]);
+
     assert_eq!(script(fixture, &scene.created).await, None);
     assert_eq!(script(fixture, &scene.updated).await, None);
     assert_eq!(
@@ -164,6 +233,10 @@ async fn cleanup(fixture: LeaseFixture, creator: &str, scene: Scene) {
     }
     for (sql, binds) in [
         ("DELETE FROM audit_logs WHERE user_id = $1", &[creator][..]),
+        (
+            "DELETE FROM audit_logs WHERE metadata->>'target_user_id' = $1",
+            &[creator],
+        ),
         ("DELETE FROM org_members WHERE user_id = $1", &[creator]),
         (
             "DELETE FROM organizations WHERE id = $1",
@@ -178,18 +251,18 @@ async fn cleanup(fixture: LeaseFixture, creator: &str, scene: Scene) {
 
 #[tokio::test]
 #[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
-async fn db_a_removed_or_leaving_member_s_scripts_are_cleared_with_the_membership() {
+async fn db_a_removed_or_leaving_member_s_scripts_and_grants_end_with_the_membership() {
     let fixture = LeaseFixture::seed("synthetic-departure-member").await;
     let creator = format!("{}-member", fixture.id);
     join(&fixture, &creator, "member").await;
     let scene = tokio::time::timeout(HANG, async {
         let scene = scene(&fixture, &creator).await;
         // Removal by an admin and `cw org leave` by a member both end the
-        // membership here.
-        delete_membership(&fixture.pool, &fixture.id, &creator)
+        // membership here; this is the owner's removal.
+        delete_membership(&fixture.pool, &fixture.id, &creator, &fixture.id)
             .await
             .unwrap();
-        assert_cleared_with_the_departure(&fixture, &scene).await;
+        assert_cleared_with_the_departure(&fixture, &scene, &creator, &fixture.id).await;
         scene
     })
     .await
@@ -199,7 +272,7 @@ async fn db_a_removed_or_leaving_member_s_scripts_are_cleared_with_the_membershi
 
 #[tokio::test]
 #[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
-async fn db_a_leaving_owner_s_scripts_are_cleared_with_the_membership() {
+async fn db_a_leaving_owner_s_scripts_and_grants_end_with_the_membership() {
     let fixture = LeaseFixture::seed("synthetic-departure-owner").await;
     let creator = format!("{}-co-owner", fixture.id);
     join(&fixture, &creator, "owner").await;
@@ -208,7 +281,7 @@ async fn db_a_leaving_owner_s_scripts_are_cleared_with_the_membership() {
         leave_as_owner(&fixture.pool, &fixture.id, &creator)
             .await
             .unwrap();
-        assert_cleared_with_the_departure(&fixture, &scene).await;
+        assert_cleared_with_the_departure(&fixture, &scene, &creator, &creator).await;
         scene
     })
     .await

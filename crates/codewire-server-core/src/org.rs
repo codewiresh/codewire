@@ -120,6 +120,47 @@ pub async fn clear_departed_creator_startup_scripts(
     .map(|done| done.rows_affected())
 }
 
+/// Deletes every per-environment grant `user_id` holds on `org_id`'s
+/// environments as their membership there ends, and writes one
+/// `environment.access.removed_with_membership` audit row, by `actor`, naming
+/// those environments, so a member invited back starts with their role's
+/// defaults alone (#3586). A grant can mean terminal access, which reaches the
+/// creator's delivered sign-ins; without this, only the membership check
+/// (#3254) holds a stale grant back. Call it in the transaction that ends the
+/// membership. Returns the environments whose grants it deleted, sorted; with
+/// none it writes nothing.
+pub async fn delete_departed_member_grants(
+    conn: &mut sqlx::PgConnection,
+    org_id: &str,
+    user_id: &str,
+    actor: &str,
+) -> sqlx::Result<Vec<String>> {
+    let mut environments: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM environment_access a USING environments e \
+         WHERE a.environment_id = e.id AND e.org_id = $1 AND a.user_id = $2 \
+         RETURNING a.environment_id",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if environments.is_empty() {
+        return Ok(environments);
+    }
+    environments.sort();
+    sqlx::query(
+        "INSERT INTO audit_logs (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity) \
+         VALUES (gen_random_uuid()::text, NOW(), 'environment.access.removed_with_membership', $1, '', '', $2, 'info')",
+    )
+    .bind(actor)
+    .bind(serde_json::json!({
+        "org_id": org_id, "target_user_id": user_id, "environment_ids": environments,
+    }))
+    .execute(conn)
+    .await?;
+    Ok(environments)
+}
+
 /// An email address shown to someone who may not own it (#3840): the first
 /// character of the local part, then "•••", then the domain, as in
 /// "j•••@example.com". Comparing two masks can only say two addresses

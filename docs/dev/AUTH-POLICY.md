@@ -568,6 +568,16 @@ request already being proxied to a public port, such as a WebSocket opened
 through a public preview, which has no caller to end and runs until the
 deletion stops its environment.
 
+A member's per-environment grants (`cw share grant`) end with their
+membership. Leaving, being removed and deleting the account each delete the
+member's grants on that organization's environments, in the transaction that
+deletes the membership. One `environment.access.removed_with_membership`
+audit row, by whoever ended the membership, names those environments by id.
+A member invited back starts with their role's defaults only, and an owner who
+wants a grant back makes it again. A grant can mean terminal access, which
+reaches the creator's delivered sign-ins, so a stale one must not wait for a
+re-invite (#3586).
+
 Some changes to access end no open stream yet; each is checked again at the
 next admission:
 - a lowered role in the organization, such as an admin made a member;

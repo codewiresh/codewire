@@ -97,7 +97,9 @@ async fn db_removed_member_keys_stop_working_and_stay_disabled() {
 
     // Removal disables the member's keys for that organization only, and a
     // later re-add does not revive them.
-    delete_membership(&fixture.pool, org, member).await.unwrap();
+    delete_membership(&fixture.pool, org, member, member)
+        .await
+        .unwrap();
     assert!(key_disabled(&fixture, &key_id).await);
     assert!(!key_disabled(&fixture, &other_key_id).await);
     assert!(authenticates(&fixture, &other_key).await);
@@ -336,7 +338,9 @@ async fn contend_with_a_leave_in_progress(
     refuse_only_owner(&mut leave, org, leaver, "")
         .await
         .unwrap();
-    delete_membership_in(&mut leave, org, leaver).await.unwrap();
+    delete_membership_in(&mut leave, org, leaver, leaver)
+        .await
+        .unwrap();
 
     let mut contender = tokio::spawn(contender);
     assert!(
