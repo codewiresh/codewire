@@ -24,7 +24,7 @@ Updated 2026-11-24.
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
-| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked; a home another tool wrote first, and a refusal's words, not yet observed (#6315); the hand-off to the release's copy, not yet observed (#6331) | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | observed 2026-11-23 (#5202); a real agent's `cw` not walked; a home another tool wrote first, and a refusal's words, observed 2026-11-24 (#6315); the hand-off to the release's copy, not yet observed (#6331) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-update-startup` | cw-cli | observed 2026-11-23 (#5949); other members, admins, the audit row and the creator leaving not yet observed | not yet observed |
@@ -572,17 +572,19 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - `cw ls` says it isn't signed in, as `cw whoami` does. It never mentions a
     local VM store or a development build, on Dev too.
   - The agent's bare `cw` gives the same answers.
-  - Not yet observed (#6315): `~/.local` and `~/.local/share` are 2755, and
-    `cw --version` still runs and exits 0.
-  - Not yet observed (#6315): with `~/.local/share` writable by its group,
+  - `~/.local` and `~/.local/share` are 2755, and `cw --version` still runs
+    and exits 0 (#6315).
+  - With `~/.local/share` writable by its group,
     `cw` exits 1, says "Your cw version store under ~/.local is not
     private", and gives a `→` line with the `ls -ld` to check. It never
-    prints only "platform CW default selection refused".
+    prints only "platform CW default selection refused" (#6315).
   - Not yet observed (#6331): in the trace, the first `execve` is
-    `/usr/local/bin/cw`. The next one runs `/codewire/bin/cw` through its
-    open file (`/proc/self/fd/N`, from an `openat` of `/codewire/bin/cw`),
-    and no `openat` under `~/.local/share/codewire/cli` comes before it.
-    There is exactly one hand-off.
+    `/usr/local/bin/cw`. The next one runs `/codewire/bin/cw` through the
+    descriptor an `openat` of `/codewire/bin/cw` returned: an
+    `execveat(N, "", …, AT_EMPTY_PATH)`, or an `execve` of
+    `/proc/self/fd/N` where the kernel lacks it. No `openat` under
+    `~/.local/share/codewire/cli` comes before it, and there is exactly one
+    hand-off.
 - **Gotchas:**
   - A workload started by a custom image's own entrypoint does not see the
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
@@ -611,6 +613,17 @@ server it belongs to and says what it can do, instead of asking for a URL.
     `CODEWIRE_SERVER_URL` won, and `cw ls` gave the not-signed-in sentence
     with no local VM store, from a login and a non-login shell. A real
     agent's `cw` was not walked. Evidence: #5202.
+  - Dev, 2026-11-24 (cw-sandbox-images), source c4ff29d60b, as the Dev
+    smoke identity, in a fresh sandbox on the workspace image #6329 pinned
+    (`/usr/local/bin/cw` sha256 `ee4bd27e09cc…`). After `mkdir -p
+    ~/.local/share` both directories were 2755 and the bare `cw --version`
+    exited 0. With `~/.local/share` at 2775 it exited 1 with "✗ Your cw
+    version store under ~/.local is not private: …" and `→ ls -ld ~/.local
+    ~/.local/bin ~/.local/share ~/.local/share/codewire`. After `chmod g-w`
+    it exited 0 again. At 9faa38a7b5 the same `cw --version` printed only
+    "platform CW default selection refused". A sandbox made before its pool
+    rotated to that image keeps the old `cw`. Evidence: #6315 comment
+    140400.
 
 ## `sandbox-attach-stays`: an attached session stays connected
 
