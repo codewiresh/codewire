@@ -195,11 +195,11 @@ impl OpenBaoWorkloadIdentity for KubernetesOpenBaoWorkloadIdentity {
     async fn token(&self) -> Result<Zeroizing<String>, WorkloadIdentityError> {
         let request = TokenRequest {
             metadata: Default::default(),
-            spec: TokenRequestSpec {
-                audiences: vec![
+            spec: Some(TokenRequestSpec {
+                audiences: Some(vec![
                     self.config.kubernetes_api_audience.clone(),
                     self.config.openbao_audience.clone(),
-                ],
+                ]),
                 bound_object_ref: Some(BoundObjectReference {
                     api_version: Some("v1".to_owned()),
                     kind: Some("Pod".to_owned()),
@@ -207,7 +207,7 @@ impl OpenBaoWorkloadIdentity for KubernetesOpenBaoWorkloadIdentity {
                     uid: Some(self.config.pod_uid.clone()),
                 }),
                 expiration_seconds: Some(TOKEN_EXPIRATION_SECONDS),
-            },
+            }),
             status: None,
         };
         let response = tokio::time::timeout(
@@ -220,12 +220,17 @@ impl OpenBaoWorkloadIdentity for KubernetesOpenBaoWorkloadIdentity {
         let status = response
             .status
             .ok_or(WorkloadIdentityError::InvalidResponse("missing status"))?;
-        let token = Zeroizing::new(status.token);
+        let token = Zeroizing::new(
+            status
+                .token
+                .ok_or(WorkloadIdentityError::InvalidResponse("missing token"))?,
+        );
         if token.is_empty() || token.trim() != token.as_str() {
             return Err(WorkloadIdentityError::InvalidResponse("invalid token"));
         }
         let remaining = status
             .expiration_timestamp
+            .ok_or(WorkloadIdentityError::InvalidResponse("missing expiration"))?
             .0
             .duration_since(k8s_openapi::jiff::Timestamp::now())
             .as_secs();
@@ -335,14 +340,14 @@ mod tests {
     fn response(token: &str, expires_in_seconds: i64) -> TokenRequest {
         TokenRequest {
             metadata: Default::default(),
-            spec: TokenRequestSpec::default(),
+            spec: None,
             status: Some(k8s_openapi::api::authentication::v1::TokenRequestStatus {
-                expiration_timestamp: Time(
+                expiration_timestamp: Some(Time(
                     Timestamp::now()
                         .checked_add(SignedDuration::from_secs(expires_in_seconds))
                         .unwrap(),
-                ),
-                token: token.to_owned(),
+                )),
+                token: Some(token.to_owned()),
             }),
         }
     }
@@ -362,16 +367,19 @@ mod tests {
         assert_eq!(requests.len(), 2, "workload JWTs must not be retained");
         let (service_account, request) = &requests[0];
         assert_eq!(service_account, "codewire-orchestration");
+        let spec = request.spec.as_ref().expect("the request names its spec");
         assert_eq!(
-            request.spec.audiences,
-            [
-                "https://192.0.2.100:6443",
-                "openbao-codewire-tenant-example-cluster"
-            ]
+            spec.audiences.as_deref(),
+            Some(
+                &[
+                    "https://192.0.2.100:6443".to_owned(),
+                    "openbao-codewire-tenant-example-cluster".to_owned()
+                ][..]
+            )
         );
-        assert_eq!(request.spec.expiration_seconds, Some(600));
+        assert_eq!(spec.expiration_seconds, Some(600));
         assert_eq!(
-            request.spec.bound_object_ref,
+            spec.bound_object_ref,
             Some(BoundObjectReference {
                 api_version: Some("v1".to_owned()),
                 kind: Some("Pod".to_owned()),
@@ -385,11 +393,19 @@ mod tests {
     async fn rejects_missing_invalid_or_out_of_range_responses() {
         let missing = TokenRequest {
             metadata: Default::default(),
-            spec: TokenRequestSpec::default(),
+            spec: None,
             status: None,
         };
+        // k8s-openapi 0.28 makes the token and its expiry optional; an
+        // absent one is refused, never defaulted.
+        let mut no_token = response("unused", 600);
+        no_token.status.as_mut().unwrap().token = None;
+        let mut no_expiry = response("jwt", 600);
+        no_expiry.status.as_mut().unwrap().expiration_timestamp = None;
         let requester = Arc::new(FakeRequester::with_responses(vec![
             Ok(missing),
+            Ok(no_token),
+            Ok(no_expiry),
             Ok(response("", 600)),
             Ok(response("short", 30)),
             Ok(response("long", 3600)),
@@ -399,6 +415,14 @@ mod tests {
         assert_eq!(
             identity.token().await.unwrap_err(),
             WorkloadIdentityError::InvalidResponse("missing status")
+        );
+        assert_eq!(
+            identity.token().await.unwrap_err(),
+            WorkloadIdentityError::InvalidResponse("missing token")
+        );
+        assert_eq!(
+            identity.token().await.unwrap_err(),
+            WorkloadIdentityError::InvalidResponse("missing expiration")
         );
         assert_eq!(
             identity.token().await.unwrap_err(),

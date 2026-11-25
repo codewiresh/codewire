@@ -1,13 +1,15 @@
 //! Connection tasks that never hold a request's span (#3581).
 //!
-//! `kube-client` turns on hyper-util's `tracing` feature, and the workspace
-//! unifies it everywhere. With it, `hyper_util::rt::TokioExecutor` spawns
-//! every future as `tokio::spawn(fut.in_current_span())`, and hyper and tonic
-//! spawn each new connection's driver through it. A request that opens a
-//! connection then keeps its span, and every parent of that span, open for
-//! the connection's whole life: for an HTTP/2 connection to the Kubernetes API
-//! that is until the process exits, so the trace is never exported and the
-//! span chain stays in memory. [`DetachedExecutor`] spawns without the span.
+//! With hyper-util's `tracing` feature, which kube-client 3 turned on for the
+//! whole workspace, `hyper_util::rt::TokioExecutor` spawns every future as
+//! `tokio::spawn(fut.in_current_span())`, and hyper and tonic spawn each new
+//! connection's driver through it. A request that opens a connection then
+//! keeps its span, and every parent of that span, open for the connection's
+//! whole life: for an HTTP/2 connection to the Kubernetes API that is until
+//! the process exits, so the trace is never exported and the span chain stays
+//! in memory. kube 4 no longer turns the feature on (#6488), but any
+//! dependency can again, so [`DetachedExecutor`] still spawns without the span
+//! and the kube client is still built on it.
 
 #[cfg(feature = "kubernetes-identity")]
 use crate::kube_api_dial::{PreferredApiServers, PreferredDialer};
@@ -230,11 +232,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hyper_utils_executor_holds_the_request_span() {
-        assert!(!request_closes_while_task_lives(hyper_util::rt::TokioExecutor::new()).await);
-    }
-
-    #[tokio::test]
     async fn the_detached_executor_never_holds_the_request_span() {
         assert!(request_closes_while_task_lives(super::DetachedExecutor).await);
     }
@@ -315,12 +312,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|name| name == "request")
-    }
-
-    #[cfg(feature = "kubernetes-identity")]
-    #[tokio::test]
-    async fn kubes_own_client_holds_the_request_span_while_connected() {
-        assert!(!kube_request_span_closes(|config| kube::Client::try_from(config).unwrap()).await);
     }
 
     #[cfg(feature = "kubernetes-identity")]

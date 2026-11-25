@@ -111,7 +111,7 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
             let response = if method == "POST" && path.ends_with("/tokenreviews") {
                 reviews.fetch_add(1, Ordering::SeqCst);
                 let review: TokenReview = serde_json::from_slice(&body).unwrap();
-                let presented = review.spec.token.unwrap_or_default();
+                let presented = review.spec.token;
                 let pod = pods
                     .iter()
                     .find(|pod| token_subject(&presented) == Some(pod.name))

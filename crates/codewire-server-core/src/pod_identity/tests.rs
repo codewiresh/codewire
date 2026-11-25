@@ -121,7 +121,7 @@ async fn fixed_purposes_are_pairwise_separated_and_record_exact_review_input() {
                 requests[0].audiences.as_deref(),
                 Some(&[purpose.audience().to_owned()][..])
             );
-            assert_eq!(requests[0].token.as_deref(), Some(token.as_str()));
+            assert_eq!(requests[0].token.as_str(), token.as_str());
         }
     }
 }
@@ -321,8 +321,8 @@ async fn a_body_token_is_reviewed_exactly_as_a_bearer_is() {
     let identity = verifier.authenticate_token(&token).await.unwrap();
     assert_eq!(identity.purpose(), purpose);
     assert_eq!(
-        reviewer.requests.lock().unwrap()[0].token.as_deref(),
-        Some(token.as_str())
+        reviewer.requests.lock().unwrap()[0].token.as_str(),
+        token.as_str()
     );
 
     for garbage in ["", " leading", "trailing ", "two\nlines"] {
@@ -392,7 +392,7 @@ async fn only_the_exact_reviewed_request_supplies_expiry_not_echo_or_payload_coo
     ));
     let reviewer = FakeReviewer::reply(Ok(TokenReview {
         spec: TokenReviewSpec {
-            token: Some(token(r#"{"exp":9999999999}"#)),
+            token: token(r#"{"exp":9999999999}"#),
             audiences: None,
         },
         status: Some(status(purpose)),
@@ -582,14 +582,14 @@ fn token_review_owner_clears_request_and_echo_tokens() {
     for original in [CANARY.to_owned(), future_token()] {
         let mut owned = SensitiveReview(TokenReview {
             spec: TokenReviewSpec {
-                token: Some(original),
+                token: original,
                 audiences: None,
             },
             ..Default::default()
         });
         // This same zeroization runs from Drop on every return and cancellation.
         owned.zeroize();
-        assert_eq!(owned.0.spec.token.as_deref(), Some(""));
+        assert_eq!(owned.0.spec.token.as_str(), "");
     }
 }
 

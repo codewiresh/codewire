@@ -283,8 +283,8 @@ url = "2"
 # the stack; latest-supported k8s version feature. "ws" is required for
 # the pod exec/port-forward subresources the worker uses during
 # environment setup.
-kube = { version = "3", default-features = false, features = ["client", "rustls-tls", "ws"] }
-k8s-openapi = { version = "0.27", features = ["latest"] }
+kube = { version = "4.2.1", default-features = false, features = ["client", "rustls-tls", "ws"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
 
 # Rust-owned request schemas and boundary validation.
 schemars = { version = "1", features = ["derive"] }

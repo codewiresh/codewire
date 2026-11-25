@@ -1,13 +1,12 @@
 """kube is built with rustls-tls only, never its openssl-tls connector.
 
-RUSTSEC-2026-0600 (GHSA-hm5x-4x3m-4w8m) affects kube-client, and kube which
+RUSTSEC-2026-0600 (GHSA-hm5x-4x3m-4w8m) affected kube-client, and kube which
 re-exports it, from 0.64.0 until 4.2.1 and 5.2.0: with a cluster CA
 configured, the openssl-tls connector started from OpenSSL's default verify
 paths and added the CA, so any root in the default store passed. rustls-tls
-trusts only the configured CA. No 3.x release is patched, so
-.supplychain/source-policy.json excepts the advisory for kube-client until the
-move to kube 4.2.1 or later. This check is what narrows that exception to the
-rustls build:
+trusts only the configured CA. Codewire was excepted from the advisory while it
+was on kube 3.x (#6490) and moved to kube 4.2.1 (#6488). This check stays, so
+that no later change turns the openssl connector on:
 
 - no tracked Cargo.toml enables openssl-tls on kube or kube-client, in a
   dependency's features or in a [features] entry;
@@ -16,7 +15,8 @@ rustls build:
   locks, which supplychain does not read);
 - no Rust source under crates/ calls the openssl connector methods, which
   reach the flaw even with rustls-tls on;
-- the exception, while it exists, has not passed its expiry date.
+- an exception for the advisory, if one is ever added again, has not passed
+  its expiry date.
 """
 
 from __future__ import annotations

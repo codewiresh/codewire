@@ -139,9 +139,7 @@ struct SensitiveReview(TokenReview);
 
 impl Zeroize for SensitiveReview {
     fn zeroize(&mut self) {
-        if let Some(token) = self.0.spec.token.as_mut() {
-            token.zeroize();
-        }
+        self.0.spec.token.zeroize();
     }
 }
 
@@ -227,7 +225,7 @@ impl KubernetesPodIdentityVerifier {
             metadata: Default::default(),
             spec: TokenReviewSpec {
                 audiences: Some(vec![self.purpose.audience().to_owned()]),
-                token: Some(std::mem::take(&mut *token)),
+                token: std::mem::take(&mut *token),
             },
             status: None,
         });
@@ -244,15 +242,11 @@ impl KubernetesPodIdentityVerifier {
         let (namespace, pod_name, pod_uid) = validated_coordinates(status, self.purpose)?;
         // Only these same request bytes were authenticated. The response spec
         // is an untrusted echo and must never supply identity or a longer exp.
-        let expires_at_unix = reviewed_expiry(
-            request
-                .0
-                .spec
-                .token
-                .as_deref()
-                .ok_or(PodIdentityError::Unauthenticated)?,
-            unix_now()?,
-        )?;
+        let reviewed_token = request.0.spec.token.as_str();
+        if reviewed_token.is_empty() {
+            return Err(PodIdentityError::Unauthenticated);
+        }
+        let expires_at_unix = reviewed_expiry(reviewed_token, unix_now()?)?;
         Ok(VerifiedPodIdentity {
             namespace,
             pod_name,

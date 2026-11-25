@@ -298,11 +298,13 @@ async fn keep_ready(state: Weak<DialState>, client: kube::Client) {
     }
 }
 
-/// Addresses of the endpoints not marked unready.
+/// Addresses of the endpoints not marked unready; a slice with no endpoints
+/// has none.
 fn ready_addresses(slice: &EndpointSlice) -> HashSet<IpAddr> {
     slice
         .endpoints
         .iter()
+        .flatten()
         .filter(|endpoint| {
             endpoint
                 .conditions

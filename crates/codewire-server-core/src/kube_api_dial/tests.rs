@@ -43,13 +43,15 @@ fn only_endpoints_not_marked_unready_count() {
         ..Default::default()
     };
     let slice = EndpointSlice {
-        endpoints: vec![
+        endpoints: Some(vec![
             endpoint("192.0.2.1", Some(true)),
             endpoint("192.0.2.2", None),
             endpoint("192.0.2.3", Some(false)),
-        ],
+        ]),
         ..Default::default()
     };
+    // k8s-openapi 0.28 makes the list optional: an absent one has no address.
+    assert!(ready_addresses(&EndpointSlice::default()).is_empty());
     let ready = ready_addresses(&slice);
     assert_eq!(ready.len(), 2);
     assert!(ready.contains(&"192.0.2.1".parse().unwrap()));
