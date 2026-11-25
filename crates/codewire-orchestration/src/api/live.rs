@@ -46,7 +46,7 @@ pub const MAX_WATCHES_PER_PROCESS: usize = 4096;
 /// How long one watch lasts before its caller opens a new one, which bounds
 /// how long a removed member's cached organizations stay in use.
 pub(crate) const WATCH_LIFETIME: Duration = Duration::from_secs(10 * 60);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Events queued for one watch's reader. A reader this far behind gets one
 /// resync when it catches up instead of every change it missed.
 const QUEUE_CAPACITY: usize = 256;
@@ -327,12 +327,23 @@ async fn listen(pool: &PgPool, notifications: &LiveNotifications) -> anyhow::Res
     }
 }
 
-/// Opens a watch for `user`: its organizations now, within the account's
-/// limit. An API key sees only its own organization.
+/// Opens a watch for `user` with the default production heartbeat interval.
+#[cfg(test)]
 pub(crate) async fn open_live_watch(
     pool: &PgPool,
     notifications: &Arc<LiveNotifications>,
     user: &AuthUser,
+) -> AppResult<mpsc::Receiver<LiveEvent>> {
+    open_live_watch_with_heartbeat(pool, notifications, user, HEARTBEAT_INTERVAL).await
+}
+
+/// Opens a watch for `user`: its organizations now, within the account's
+/// limit. An API key sees only its own organization.
+pub(crate) async fn open_live_watch_with_heartbeat(
+    pool: &PgPool,
+    notifications: &Arc<LiveNotifications>,
+    user: &AuthUser,
+    heartbeat: Duration,
 ) -> AppResult<mpsc::Receiver<LiveEvent>> {
     let permit = notifications
         .acquire_watch(&user.user_id)
@@ -376,7 +387,7 @@ pub(crate) async fn open_live_watch(
         audience,
         permit,
         WATCH_LIFETIME,
-        HEARTBEAT_INTERVAL,
+        heartbeat,
         QUEUE_CAPACITY,
     ))
 }

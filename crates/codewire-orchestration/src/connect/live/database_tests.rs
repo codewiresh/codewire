@@ -4,6 +4,7 @@
 //! 60-second deadline.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::http::header::AUTHORIZATION;
@@ -11,6 +12,7 @@ use codewire_proto::codewire::console::v1::{
     LiveServiceClient, WatchRequest, WatchResponse, watch_response::Event,
 };
 use codewire_server_core::auth::{AuthState, api_key_prefix, generate_api_key, hash_api_key};
+use codewire_server_core::connect::CONNECT_UNARY_SERVER_TIMEOUT;
 use connectrpc::ErrorCode;
 use connectrpc::client::{ClientConfig, HttpClient};
 
@@ -18,13 +20,24 @@ use super::*;
 use crate::api::live::start;
 use crate::test_database_support::TestDatabase;
 
-/// Past the unary dispatcher's 60-second cap, with a heartbeat to spare.
-const PAST_THE_UNARY_DEADLINE: Duration = Duration::from_secs(65);
+/// Short test heartbeat so the watch proves multiple heartbeats in under a second.
+const TEST_HEARTBEAT: Duration = Duration::from_millis(150);
+/// Window long enough for >= 4 heartbeats at `TEST_HEARTBEAT`.
+const WATCH_WINDOW: Duration = Duration::from_millis(700);
 /// The longest any one wait may take.
 const HANG: Duration = Duration::from_secs(30);
 
-async fn serve(db: &TestDatabase) -> anyhow::Result<SocketAddr> {
-    let router = router_for(db.pool.clone(), start(db.pool.clone()), Drain::default());
+type ObservedDeadline = Arc<Mutex<Option<Option<Duration>>>>;
+
+async fn serve(db: &TestDatabase) -> anyhow::Result<(SocketAddr, ObservedDeadline)> {
+    let observed = Arc::new(Mutex::new(None));
+    let router = router_for_test(
+        db.pool.clone(),
+        start(db.pool.clone()),
+        Drain::default(),
+        TEST_HEARTBEAT,
+        Arc::clone(&observed),
+    );
     let app = AppBuilder::new("live-watch-test")
         .with_live_watch(
             router,
@@ -36,7 +49,30 @@ async fn serve(db: &TestDatabase) -> anyhow::Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     tokio::spawn(codewire_server_core::serve_with_listener(app, listener));
-    Ok(addr)
+    Ok((addr, observed))
+}
+
+async fn serve_on_unary_mount(db: &TestDatabase) -> anyhow::Result<(SocketAddr, ObservedDeadline)> {
+    let observed = Arc::new(Mutex::new(None));
+    let router = router_for_test(
+        db.pool.clone(),
+        start(db.pool.clone()),
+        Drain::default(),
+        TEST_HEARTBEAT,
+        Arc::clone(&observed),
+    );
+    let app = AppBuilder::new("live-watch-unary-control")
+        .with_unary_connect_routes_auth(
+            router,
+            ConnectAuthLayer::authenticated(AuthState {
+                pool: db.pool.clone(),
+            }),
+        )
+        .into_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(codewire_server_core::serve_with_listener(app, listener));
+    Ok((addr, observed))
 }
 
 fn client(addr: SocketAddr, api_key: Option<&str>) -> LiveServiceClient<HttpClient> {
@@ -73,7 +109,31 @@ async fn db_watch_is_an_authenticated_scoped_stream_that_outlives_the_unary_dead
         .bind(api_key_prefix(&api_key))
         .execute(&db.pool)
         .await?;
-        let addr = serve(&db).await?;
+        let (addr, live_deadline) = serve(&db).await?;
+        let (unary_addr, unary_deadline) = serve_on_unary_mount(&db).await?;
+
+        // Negative control: mounting `LiveService` via
+        // `with_unary_connect_routes_auth` attaches the 60-second server
+        // deadline to the request context.
+        let mut unary_stream = tokio::time::timeout(
+            HANG,
+            client(unary_addr, Some(&api_key)).watch(WatchRequest::default()),
+        )
+        .await??;
+        let first = tokio::time::timeout(HANG, unary_stream.message::<WatchResponse>()).await??;
+        anyhow::ensure!(
+            matches!(
+                first.map(|m| m.to_owned_message().event),
+                Some(Some(Event::Resync(_)))
+            ),
+            "unary control watch did not open"
+        );
+        drop(unary_stream);
+        let unary_seen = *unary_deadline.lock().expect("unary deadline slot");
+        anyhow::ensure!(
+            matches!(unary_seen, Some(Some(remaining)) if remaining <= CONNECT_UNARY_SERVER_TIMEOUT),
+            "expected unary control mount to attach a <= 60s server deadline, got {unary_seen:?}"
+        );
 
         // No credential: refused before any watch opens.
         let refused = tokio::time::timeout(HANG, async {
@@ -84,8 +144,8 @@ async fn db_watch_is_an_authenticated_scoped_stream_that_outlives_the_unary_dead
         .expect_err("a watch without a credential must be refused");
         anyhow::ensure!(refused.code == ErrorCode::Unauthenticated, "{refused:?}");
 
-        // An API key for organization A: its stream carries A, never B, and
-        // keeps going past the unary deadline.
+        // An API key for organization A: its stream carries A, never B, has no
+        // server-applied unary deadline, and keeps heartbeating across the window.
         let mut stream =
             tokio::time::timeout(HANG, client(addr, Some(&api_key)).watch(WatchRequest::default()))
                 .await??;
@@ -93,7 +153,7 @@ async fn db_watch_is_an_authenticated_scoped_stream_that_outlives_the_unary_dead
         let mut heartbeats = 0;
         let mut credited = Vec::new();
         let mut notified = false;
-        while opened.elapsed() < PAST_THE_UNARY_DEADLINE {
+        while opened.elapsed() < WATCH_WINDOW {
             let Some(message) = tokio::time::timeout(HANG, stream.message::<WatchResponse>())
                 .await??
             else {
@@ -115,9 +175,14 @@ async fn db_watch_is_an_authenticated_scoped_stream_that_outlives_the_unary_dead
                 _ => {}
             }
         }
+        let live_seen = *live_deadline.lock().expect("live deadline slot");
+        anyhow::ensure!(
+            live_seen == Some(None),
+            "with_live_watch must not attach a server deadline, got {live_seen:?}"
+        );
         anyhow::ensure!(credited.iter().all(|org| org == "live-mount-a"), "{credited:?}");
         anyhow::ensure!(credited.iter().any(|org| org == "live-mount-a"), "{credited:?}");
-        anyhow::ensure!(heartbeats >= 4, "{heartbeats} heartbeats in {PAST_THE_UNARY_DEADLINE:?}");
+        anyhow::ensure!(heartbeats >= 4, "{heartbeats} heartbeats in {WATCH_WINDOW:?}");
         Ok(())
     }
     .await;

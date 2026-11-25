@@ -3,6 +3,7 @@
 //! The dashboard relays `Watch` to signed-in pages as Server-Sent Events.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use buffa_types::Timestamp;
 use codewire_daemon_bridge::drain::{Restart, end_at};
@@ -18,7 +19,9 @@ use codewire_server_core::connect::ConnectAuthLayer;
 use sqlx::PgPool;
 
 use crate::api::ApiState;
-use crate::api::live::{LiveEvent, LiveNotifications, open_live_watch};
+use crate::api::live::{
+    HEARTBEAT_INTERVAL, LiveEvent, LiveNotifications, open_live_watch_with_heartbeat,
+};
 use crate::drain::Drain;
 
 const WATCH_RESTARTED: &str = "Codewire is restarting this server; watch again to continue";
@@ -33,7 +36,31 @@ pub(crate) fn router_for(
     live: Arc<LiveNotifications>,
     drain: Drain,
 ) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(LiveConnectService { pool, live, drain }))
+    connectrpc::Router::new().add_service(Arc::new(LiveConnectService {
+        pool,
+        live,
+        drain,
+        heartbeat: HEARTBEAT_INTERVAL,
+        #[cfg(test)]
+        observed_deadline: None,
+    }))
+}
+
+#[cfg(test)]
+pub(crate) fn router_for_test(
+    pool: PgPool,
+    live: Arc<LiveNotifications>,
+    drain: Drain,
+    heartbeat: Duration,
+    observed_deadline: Arc<std::sync::Mutex<Option<Option<Duration>>>>,
+) -> connectrpc::Router {
+    connectrpc::Router::new().add_service(Arc::new(LiveConnectService {
+        pool,
+        live,
+        drain,
+        heartbeat,
+        observed_deadline: Some(observed_deadline),
+    }))
 }
 
 /// Mounts LiveService behind `auth` on the streaming mount. A watch lives for
@@ -52,6 +79,9 @@ struct LiveConnectService {
     pool: PgPool,
     live: Arc<LiveNotifications>,
     drain: Drain,
+    heartbeat: Duration,
+    #[cfg(test)]
+    observed_deadline: Option<Arc<std::sync::Mutex<Option<Option<Duration>>>>>,
 }
 
 #[allow(refining_impl_trait)]
@@ -61,8 +91,12 @@ impl LiveService for LiveConnectService {
         ctx: RequestContext,
         _request: ServiceRequest<'_, WatchRequest>,
     ) -> ServiceResult<ServiceStream<WatchResponse>> {
+        #[cfg(test)]
+        if let Some(slot) = &self.observed_deadline {
+            *slot.lock().expect("deadline slot lock") = Some(ctx.time_remaining());
+        }
         let user = auth_user(&ctx)?.clone();
-        let events = open_live_watch(&self.pool, &self.live, &user)
+        let events = open_live_watch_with_heartbeat(&self.pool, &self.live, &user, self.heartbeat)
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         let stream = futures::stream::unfold(events, |mut events| async move {
