@@ -77,6 +77,7 @@ required_paths=(
   usr/share/codewire/rust-workspace-metadata.json
   usr/share/licenses/codewire/LICENSE
   usr/share/licenses/htmx/LICENSE
+  usr/share/licenses/umami/LICENSE
   usr/share/licenses/xterm/LICENSE
 )
 for path in "${required_paths[@]}"; do

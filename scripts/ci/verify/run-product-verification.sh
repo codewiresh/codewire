@@ -2133,6 +2133,10 @@ run_security() {
     # esbuild; the self-test also proves a changed byte fails (#3223).
     install_bun_dependencies
     scripts/checks/security/check-novnc-bundle.sh --self-test
+    # The Umami tracker extracted again from its pinned image layer, and the
+    # public pages' before-send hook (infra#2677).
+    scripts/checks/security/check-vendor-images.sh --self-test
+    bun test packages/codewire-design/analytics.test.js
   fi
   if selected security_go; then
     local module

@@ -37,6 +37,8 @@ pub(crate) struct AppState {
     pub(crate) github_checks: std::sync::Arc<crate::github_check::GithubChecks>,
     /// The public Updates page's source; `None` turns the page off.
     pub(crate) updates: Option<std::sync::Arc<crate::updates_connect::Updates>>,
+    /// The public pages' analytics tag; `None` leaves them untagged.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
 }
 
 impl AppState {
@@ -90,6 +92,7 @@ impl AppState {
             updates: config
                 .updates_site
                 .map(|site| std::sync::Arc::new(crate::updates_connect::Updates::new(site))),
+            analytics: config.analytics,
         }
     }
 }

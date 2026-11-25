@@ -99,6 +99,11 @@ fn config(updates_origin: Option<&str>, media_origin: Option<&str>) -> crate::Co
                 media_origin.map(str::to_owned),
             )
         }),
+        analytics: Some(crate::analytics::Analytics {
+            origin: "https://umami.codewire.test".into(),
+            website_id: "00000000-0000-4000-8000-0000000000aa".into(),
+            domain: "codewire.test".into(),
+        }),
     }
 }
 
@@ -141,13 +146,46 @@ async fn the_page_shows_cleaned_posts_and_keeps_them_through_a_liminal_failure()
         "{policy}"
     );
     assert!(policy.contains("script-src 'self';"), "{policy}");
+    // The analytics tag's one connection, beside the media origin (infra#2677).
+    assert!(
+        policy.contains("connect-src 'self' https://umami.codewire.test;"),
+        "{policy}"
+    );
     let body = response.text().await.unwrap();
+    assert!(body.contains("/assets/codewire/umami-tracker-3.5.0.js"));
     assert!(body.contains(r#"<h2 id="update-snapshots">Snapshots &#60;and&#62; forks</h2>"#));
     assert!(body.contains(r#"<time datetime="2026-11-18">Nov 18, 2026</time>"#));
     assert!(body.contains("<p>Fork a sandbox.</p>"));
     assert!(!body.contains("alert(1)"));
     assert!(body.contains(r#"<img src="https://media.synthetic.test/fork.png" alt="Fork">"#));
     assert!(!body.contains("tracker.synthetic.test"));
+
+    // With a session the page has no tag and keeps its connections.
+    let signed_in = reqwest::Client::builder()
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .get(format!("{}/updates", dashboard.origin))
+        .header(
+            header::COOKIE,
+            format!(
+                "{}=synthetic",
+                codewire_server_core::auth::SESSION_COOKIE_NAME
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    let policy = signed_in.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(policy.contains("connect-src 'self';"), "{policy}");
+    assert!(
+        policy.contains("img-src 'self' data: https://media.synthetic.test;"),
+        "{policy}"
+    );
+    assert!(!signed_in.text().await.unwrap().contains("umami-tracker"));
 
     state.failing.store(true, Ordering::SeqCst);
     let response = get_updates(&dashboard).await;

@@ -84,6 +84,20 @@ spec:
                   name: codewire-dashboard-public-config
                   key: LIMINAL_MEDIA_ORIGIN
                   optional: true
+            # The public pages' analytics tag (docs/CONFIGURATION.md, "Web
+            # analytics"): both unset, the default, leaves every page untagged.
+            - name: CODEWIRE_ANALYTICS_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: CODEWIRE_ANALYTICS_ORIGIN
+                  optional: true
+            - name: CODEWIRE_ANALYTICS_WEBSITE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: CODEWIRE_ANALYTICS_WEBSITE_ID
+                  optional: true
           ports:
             - containerPort: 5173
               name: http

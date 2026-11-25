@@ -188,6 +188,36 @@ pub(crate) fn render_updates_page(
     response
 }
 
+/// `response`, a page rendered with the analytics tag (infra#2677), with its
+/// policy allowing the tracker's one connection, to `origin`. Its script is
+/// the page's own, so only connect-src changes; a page whose render failed
+/// keeps its policy.
+pub(crate) fn with_analytics_policy(
+    mut response: Response,
+    status: StatusCode,
+    origin: &str,
+) -> Response {
+    if response.status() != status {
+        return response;
+    }
+    let policy = response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .map(|policy| {
+            policy.replace(
+                "connect-src 'self'",
+                &format!("connect-src 'self' {origin}"),
+            )
+        });
+    if let Some(policy) = policy.and_then(|policy| HeaderValue::from_str(&policy).ok()) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, policy);
+    }
+    response
+}
+
 pub(crate) fn render_page_with_connect_origin(
     template: impl Template,
     connect_origin: &str,

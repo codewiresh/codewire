@@ -1582,7 +1582,7 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      .supplychain/vendor-artifacts.json|.supplychain/vendor-bundles.json)
+      .supplychain/vendor-artifacts.json|.supplychain/vendor-bundles.json|.supplychain/vendor-images.json)
         # The external instance-scoped scanner verifies the package registry
         # signature, tarball, and exact local bytes; the JavaScript security
         # policy rebuilds the vendored bundles. Repository CI runs that focused
@@ -2886,7 +2886,8 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/checks/security/audit-js-supply-chain.sh|\
-      scripts/checks/security/check-novnc-bundle.sh)
+      scripts/checks/security/check-novnc-bundle.sh|\
+      scripts/checks/security/check-vendor-images.sh)
         select_token security
         select_token security_js
         recognized=true

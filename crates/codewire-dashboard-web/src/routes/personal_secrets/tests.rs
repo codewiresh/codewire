@@ -156,6 +156,7 @@ async fn fixture() -> (AppState, Source, tokio::task::JoinHandle<()>) {
         github_app_client_id: String::new(),
         support_email: None,
         updates_site: None,
+        analytics: None,
     });
     (state, source, server)
 }

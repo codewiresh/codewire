@@ -20,11 +20,18 @@ use crate::view::{
 
 #[derive(Template)]
 #[template(path = "home.html")]
-pub(crate) struct HomeTemplate;
+pub(crate) struct HomeTemplate {
+    /// The analytics tag (infra#2677), for every visitor where it is
+    /// configured: a shared cache gives them all the same homepage.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
+}
 
 #[derive(Template)]
 #[template(path = "pricing.html")]
 pub(crate) struct PricingTemplate {
+    /// The analytics tag (infra#2677), where it is configured and the
+    /// request carries no session: a cache never shares this page.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
     /// The sign-up credit as the page says it ("€10"), or `None` when there
     /// is none and the page promises nothing.
     pub(crate) signup_credit: Option<String>,
@@ -35,16 +42,27 @@ pub(crate) struct PricingTemplate {
 
 #[derive(Template)]
 #[template(path = "privacy.html")]
-pub(crate) struct PrivacyTemplate;
+pub(crate) struct PrivacyTemplate {
+    /// The analytics tag (infra#2677), where it is configured and the
+    /// request carries no session: a cache never shares this page.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
+}
 
 #[derive(Template)]
 #[template(path = "terms.html")]
-pub(crate) struct TermsTemplate;
+pub(crate) struct TermsTemplate {
+    /// The analytics tag (infra#2677), where it is configured and the
+    /// request carries no session: a cache never shares this page.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
+}
 
 /// The public Updates page. `posts` is `None` when Liminal has never answered.
 #[derive(Template)]
 #[template(path = "updates.html")]
 pub(crate) struct UpdatesTemplate {
+    /// The analytics tag (infra#2677), where it is configured and the
+    /// request carries no session: a cache never shares this page.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
     pub(crate) posts: Option<std::sync::Arc<Vec<crate::updates_connect::UpdatePost>>>,
 }
 

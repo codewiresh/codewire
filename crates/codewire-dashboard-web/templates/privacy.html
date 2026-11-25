@@ -8,7 +8,8 @@
 <title>Privacy policy — Codewire</title>
 <meta name="description" content="What Codewire collects when you use codewire.sh, the cw command line tool and the dashboard, why, and who else sees it.">
 <link rel="stylesheet" href="/assets/codewire/routes/public-v2.css">
-<script src="/assets/codewire/pricing-v1.js" defer></script>
+<script src="/assets/codewire/pricing-v1.js" defer></script>{% if let Some(analytics) = analytics %}
+{% include "analytics.html" %}{% endif %}
 </head>
 <body data-route="privacy">
 <a class="skip" href="#main-content">Skip to content</a>

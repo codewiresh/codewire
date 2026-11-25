@@ -40,6 +40,10 @@ pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
 pub(crate) const SCRIPT_PATH: &str = "/assets/codewire/dashboard-v1.js";
 pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v2.js";
 pub(crate) const PRICING_SCRIPT_PATH: &str = "/assets/codewire/pricing-v1.js";
+/// The public pages' analytics tag: Codewire's own before-send hook, then
+/// Umami's tracker, copied from the Umami image Production runs (infra#2677).
+pub(crate) const ANALYTICS_SCRIPT_PATH: &str = "/assets/codewire/analytics-v1.js";
+pub(crate) const UMAMI_TRACKER_SCRIPT_PATH: &str = "/assets/codewire/umami-tracker-3.5.0.js";
 pub(crate) const THEME_SCRIPT_PATH: &str = "/assets/codewire/theme-v1.js";
 pub(crate) const ORGANIZATIONS_SCRIPT_PATH: &str = "/assets/codewire/organizations-v1.js";
 pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments-v2.js";
@@ -74,6 +78,7 @@ pub(crate) const SCHIBSTED_GROTESK_LATIN_EXT_PATH: &str =
 pub(crate) const GEIST_MONO_PATH: &str = "/assets/codewire/fonts/geist-mono-1.9.0.woff2";
 
 const HTMX: &str = include_str!("../assets/htmx-2.0.10.min.js");
+const UMAMI_TRACKER: &str = include_str!("../assets/umami-tracker-3.5.0.js");
 const STYLES: &str = concat!(
     include_str!("../../../packages/codewire-design/styles.css"),
     "\n",
@@ -112,6 +117,7 @@ const DASHBOARD_SCRIPT: &str = concat!(
 );
 const PUBLIC_SCRIPT: &str = include_str!("../../../packages/codewire-design/public.js");
 const PRICING_SCRIPT: &str = include_str!("../../../packages/codewire-design/pricing.js");
+const ANALYTICS_SCRIPT: &str = include_str!("../../../packages/codewire-design/analytics.js");
 const THEME_SCRIPT: &str = include_str!("../../../packages/codewire-design/theme.js");
 const ORGANIZATIONS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/organizations.js");
@@ -216,6 +222,8 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (SCRIPT_PATH, JS, DASHBOARD_SCRIPT.as_bytes()),
     (PUBLIC_SCRIPT_PATH, JS, PUBLIC_SCRIPT.as_bytes()),
     (PRICING_SCRIPT_PATH, JS, PRICING_SCRIPT.as_bytes()),
+    (ANALYTICS_SCRIPT_PATH, JS, ANALYTICS_SCRIPT.as_bytes()),
+    (UMAMI_TRACKER_SCRIPT_PATH, JS, UMAMI_TRACKER.as_bytes()),
     (THEME_SCRIPT_PATH, JS, THEME_SCRIPT.as_bytes()),
     (
         ORGANIZATIONS_SCRIPT_PATH,
@@ -437,11 +445,14 @@ mod tests {
         for (fixture, html) in [
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
-                crate::templates::HomeTemplate.render().unwrap(),
+                crate::templates::HomeTemplate { analytics: None }
+                    .render()
+                    .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
                 crate::templates::PricingTemplate {
+                    analytics: None,
                     signup_credit: None,
                     rates: Some(crate::public_rates::fixture_rates()),
                 }
@@ -453,6 +464,7 @@ mod tests {
                     "../../../packages/codewire-design/reference/fixtures/pricing-unavailable.html"
                 ),
                 crate::templates::PricingTemplate {
+                    analytics: None,
                     signup_credit: None,
                     rates: None,
                 }
@@ -461,15 +473,20 @@ mod tests {
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/privacy.html"),
-                crate::templates::PrivacyTemplate.render().unwrap(),
+                crate::templates::PrivacyTemplate { analytics: None }
+                    .render()
+                    .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/terms.html"),
-                crate::templates::TermsTemplate.render().unwrap(),
+                crate::templates::TermsTemplate { analytics: None }
+                    .render()
+                    .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/updates.html"),
                 crate::templates::UpdatesTemplate {
+                    analytics: None,
                     posts: Some(std::sync::Arc::new(crate::updates_connect::fixture_posts())),
                 }
                 .render()
@@ -479,9 +496,12 @@ mod tests {
                 include_str!(
                     "../../../packages/codewire-design/reference/fixtures/updates-unavailable.html"
                 ),
-                crate::templates::UpdatesTemplate { posts: None }
-                    .render()
-                    .unwrap(),
+                crate::templates::UpdatesTemplate {
+                    analytics: None,
+                    posts: None,
+                }
+                .render()
+                .unwrap(),
             ),
         ] {
             let prefix = "../../";
@@ -686,7 +706,12 @@ mod tests {
             None
         );
         assert_eq!(versioned("<p>No assets here.</p>"), None);
-        let home = versioned(&crate::templates::HomeTemplate.render().unwrap()).unwrap();
+        let home = versioned(
+            &crate::templates::HomeTemplate { analytics: None }
+                .render()
+                .unwrap(),
+        )
+        .unwrap();
         for path in [PUBLIC_STYLE_PATH, PUBLIC_SCRIPT_PATH, THEME_SCRIPT_PATH] {
             assert!(home.contains(&format!("{path}?h={}", SERVED[path].version)));
         }

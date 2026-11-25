@@ -347,12 +347,13 @@ image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
 assert set(image_guards) <= {Path(helper).name for helper in policy_helpers}
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 # Merge lanes run beside policy, so every selected family's terminal helper is
-# synthetic too (a selected security family audits the JS supply chain and
-# rebuilds the noVNC bundle).
+# synthetic too (a selected security family audits the JS supply chain,
+# rebuilds the noVNC bundle and extracts the Umami tracker again).
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
                'scripts/ci/verify/compile-all-targets.sh',
                'scripts/checks/security/audit-js-supply-chain.sh',
-               'scripts/checks/security/check-novnc-bundle.sh']:
+               'scripts/checks/security/check-novnc-bundle.sh',
+               'scripts/checks/security/check-vendor-images.sh']:
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.suffix == '.sh':

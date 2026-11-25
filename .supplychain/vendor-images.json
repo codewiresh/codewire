@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "images": [
+    {
+      "package": "umami",
+      "version": "3.5.0",
+      "image": "ghcr.io/noeljackson/umami@sha256:4db3c917a4c69c9749e727aeca08c22c42970215f05273155e6df0aaac296e0b",
+      "platform": "linux/amd64",
+      "manifest": "sha256:688a1367f8eaafb9bb34abb6b988992d00748fcff3ab0b24afb500fd282a0eae",
+      "layer": "sha256:d41b4bd08e2af916b6ba7d81fb12ccc2c30f70ddd82869ab4b155f9cdc600c68",
+      "member": "app/public/script.js",
+      "path": "crates/codewire-dashboard-web/assets/umami-tracker-3.5.0.js",
+      "size": 9297,
+      "sha384": "sha384-Ts03XUTV1nsmqXjhMgA3LGXKFnW1NLMAzbKGEaaDFUy7wUETechGFTNIXF7rAuqP",
+      "extract": "scripts/checks/security/check-vendor-images.sh --write",
+      "license": {
+        "source": "https://github.com/noeljackson/umami/blob/8b4f1a42c6f89a1e0959870450ff123601bb6779/LICENSE",
+        "path": "crates/codewire-dashboard-web/vendor/umami-3.5.0/LICENSE",
+        "size": 1093,
+        "sha384": "sha384-hJr2o4WwlQMJ3cwcpHXaXa8swdmGVbHlLSbM3Om49I6Z7soIENfKrDaF6x7dBpzT"
+      }
+    }
+  ]
+}

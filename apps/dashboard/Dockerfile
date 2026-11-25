@@ -88,6 +88,7 @@ COPY --from=docs-builder /out/docs.sha256 ./usr/share/codewire/docs.sha256
 COPY apps/dashboard/runtime-inventory.json ./usr/share/codewire/runtime-inventory.json
 COPY LICENSE ./usr/share/licenses/codewire/LICENSE
 COPY crates/codewire-dashboard-web/assets/LICENSE-HTMX ./usr/share/licenses/htmx/LICENSE
+COPY crates/codewire-dashboard-web/vendor/umami-3.5.0/LICENSE ./usr/share/licenses/umami/LICENSE
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-xterm-6.0.0 ./usr/share/licenses/xterm/LICENSE
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-fit-0.11.0 ./usr/share/licenses/xterm-addon-fit/LICENSE
 COPY crates/codewire-dashboard-web/assets/xterm/LICENSE-addon-web-links-0.12.0 ./usr/share/licenses/xterm-addon-web-links/LICENSE

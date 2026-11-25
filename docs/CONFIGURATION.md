@@ -470,6 +470,17 @@ Each read of the CMS is one `updates.read` trace span, exported when the dashboa
 | `LIMINAL_API_KEY` | No | The site-scoped read key from the site's API keys screen. A secret: deliver it from a Secret, never a ConfigMap. The manifests read it from the `codewire-dashboard-liminal` Secret and `LIMINAL_ORIGIN` from the `codewire-dashboard-public-config` ConfigMap, both optional. | |
 | `LIMINAL_MEDIA_ORIGIN` | No | The origin the CMS serves post images from, `https://` with no path (plain `http://` only on loopback). Image URLs elsewhere lose their `src`. Needs the two values above; from the same ConfigMap. | `https://media.example.com` |
 
+## Web analytics
+
+The dashboard can count page views on its public pages with a self-hosted Umami (infra#2677). The tag is Umami's own tracker, served from the dashboard's assets with its Subresource Integrity hash, and a small hook of Codewire's that runs first. It sets no cookie and stores nothing in the browser. It sends the page's path with no query string or fragment, and no referrer from the dashboard's own host or its subdomains. It sends only when the page's host is the host of `CODEWIRE_PUBLIC_ORIGIN`. Tagged pages' Content-Security-Policy adds `CODEWIRE_ANALYTICS_ORIGIN` to `connect-src` and changes nothing else.
+
+The tagged pages are `/`, `/pricing`, `/privacy`, `/terms` and `/updates`. The homepage is tagged for every visitor, signed in or not, because a shared cache keeps one copy of it for everyone (see [Caching at the edge](#caching-at-the-edge)). The other four leave the tag out for a request that carries a session cookie, or a Cookie header that can't be read. No other page is ever tagged, sign-in, sign-up, password reset, verification, invitation and device pages included. The docs are not tagged yet. Without both values, no page is tagged and no policy changes.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_ANALYTICS_ORIGIN` | No | The Umami origin the tracker sends to, `https://` with no path. Set together with `CODEWIRE_ANALYTICS_WEBSITE_ID`; one without the other stops the dashboard at startup. From the `codewire-dashboard-public-config` ConfigMap. | `https://analytics.example.com` |
+| `CODEWIRE_ANALYTICS_WEBSITE_ID` | No | The Umami website's ID, a UUID. It isn't a secret: every tagged page shows it. From the same ConfigMap. | `00000000-0000-4000-8000-000000000000` |
+
 ## Operator notices
 
 The IdP emails the operator once per new person: when an email sign-up's

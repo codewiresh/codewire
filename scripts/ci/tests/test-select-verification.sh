@@ -654,6 +654,9 @@ run_paths_case js_audit_scanned_package_json pull_request refs/pull/10106/head f
 run_paths_case js_audit_novnc_bundle_check pull_request refs/pull/10108/head false \
   'policy policy_shell security security_js' \
   scripts/checks/security/check-novnc-bundle.sh
+run_paths_case js_audit_vendor_images_check pull_request refs/pull/10110/head false \
+  'policy policy_shell security security_js' \
+  scripts/checks/security/check-vendor-images.sh
 run_paths_case js_audit_novnc_vendored_source pull_request refs/pull/10109/head false \
   'ci_plan_tests_omittable ci_script_tests_omittable deploy policy policy_shell_omittable repo_check_self_tests_omittable rust rust_pkg_codewire_dashboard_web security security_js web' \
   crates/codewire-dashboard-web/vendor/novnc-1.7.0/core/rfb.js
@@ -1852,6 +1855,8 @@ run_paths_case vendored_browser_manifest pull_request refs/pull/1201/head false 
   'policy security security_js' .supplychain/vendor-artifacts.json
 run_paths_case vendored_bundle_manifest pull_request refs/pull/1202/head false \
   'policy security security_js' .supplychain/vendor-bundles.json
+run_paths_case vendored_image_manifest pull_request refs/pull/1203/head false \
+  'policy security security_js' .supplychain/vendor-images.json
 run_paths_case sdk_go pull_request refs/pull/13/head false \
   'go_consumer_interop go_support policy sdk_go' libs/sdk-go/client.go
 run_paths_case go_consumer_interop_harness pull_request refs/pull/131/head false \

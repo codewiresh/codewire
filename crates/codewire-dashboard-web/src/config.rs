@@ -57,6 +57,9 @@ pub struct Config {
     /// and `LIMINAL_API_KEY`; both unset turns the page and its sidebar link
     /// off, so a self-hosted deployment points at no one else's CMS.
     pub(crate) updates_site: Option<crate::updates_connect::LiminalSite>,
+    /// The public pages' analytics tag, from `CODEWIRE_ANALYTICS_ORIGIN` and
+    /// `CODEWIRE_ANALYTICS_WEBSITE_ID`; both unset leaves every page untagged.
+    pub(crate) analytics: Option<crate::analytics::Analytics>,
 }
 
 impl Config {
@@ -124,6 +127,11 @@ impl Config {
             optional_env("LIMINAL_API_KEY")?,
             optional_env("LIMINAL_MEDIA_ORIGIN")?,
         )?;
+        let analytics = crate::analytics::parse(
+            optional_env("CODEWIRE_ANALYTICS_ORIGIN")?,
+            optional_env("CODEWIRE_ANALYTICS_WEBSITE_ID")?,
+            &public_origin,
+        )?;
 
         Ok(Self {
             listen_addr,
@@ -141,6 +149,7 @@ impl Config {
             github_app_client_id,
             support_email,
             updates_site,
+            analytics,
         })
     }
 }
@@ -265,7 +274,7 @@ fn parse_bool_value(name: &str, value: Option<&str>, default: bool) -> anyhow::R
     }
 }
 
-fn parse_origin(label: &str, raw: String) -> anyhow::Result<(http::Uri, String)> {
+pub(crate) fn parse_origin(label: &str, raw: String) -> anyhow::Result<(http::Uri, String)> {
     let trimmed = raw.trim().trim_end_matches('/');
     let url = Url::parse(trimmed)
         .with_context(|| format!("{label} must be an absolute HTTP(S) origin"))?;

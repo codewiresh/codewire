@@ -1406,6 +1406,7 @@ mod tests {
 
         let render = |signup_credit: Option<&str>| {
             crate::templates::PricingTemplate {
+                analytics: None,
                 signup_credit: signup_credit.map(str::to_owned),
                 rates: Some(crate::public_rates::fixture_rates()),
             }
@@ -1542,6 +1543,7 @@ mod tests {
             github_app_client_id: String::new(),
             support_email: None,
             updates_site: None,
+            analytics: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         // The browser wrote its own entries; the edge appended the last one.

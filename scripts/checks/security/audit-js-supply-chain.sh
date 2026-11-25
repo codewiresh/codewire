@@ -137,6 +137,37 @@ if ! jq -e '
   echo "supply-chain audit: invalid vendored bundle manifest $bundle_manifest" >&2
   exit 1
 fi
+# Files copied out of a pinned container image, beside the npm entries for the
+# same reason. scripts/checks/security/check-vendor-images.sh extracts each one
+# again and compares the bytes; here, the shape.
+image_manifest=".supplychain/vendor-images.json"
+if ! jq -e '
+  .schema_version == 1 and
+  ((keys_unsorted - ["schema_version", "images"]) | length == 0) and
+  (.images | type == "array" and length > 0) and
+  all(.images[];
+    ((keys_unsorted - ["package", "version", "image", "platform", "manifest", "layer", "member",
+      "path", "size", "sha384", "extract", "license"]) | length == 0) and
+    (.package | type == "string" and length > 0) and
+    (.version | type == "string" and length > 0) and
+    (.image | test("@sha256:[0-9a-f]{64}$")) and
+    (.platform | test("^[a-z0-9]+/[a-z0-9]+$")) and
+    (.manifest | test("^sha256:[0-9a-f]{64}$")) and
+    (.layer | test("^sha256:[0-9a-f]{64}$")) and
+    (.member | type == "string" and length > 0) and
+    (.path | type == "string" and length > 0) and
+    (.size | type == "number" and . > 0) and
+    (.sha384 | startswith("sha384-")) and
+    (.extract | type == "string" and length > 0) and
+    ((.license | keys_unsorted) - ["source", "path", "size", "sha384"] | length == 0) and
+    (.license.source | startswith("https://")) and
+    (.license.path | type == "string" and length > 0) and
+    (.license.size | type == "number" and . > 0) and
+    (.license.sha384 | startswith("sha384-")))
+' "$image_manifest" >/dev/null; then
+  echo "supply-chain audit: invalid vendored image manifest $image_manifest" >&2
+  exit 1
+fi
 if ! jq -e '
   .schema_version == 1 and
   (.npm | type == "array" and length > 0) and
@@ -170,12 +201,15 @@ while IFS=$'\t' read -r package version member path expected_size expected_sha38
     echo "supply-chain audit: SHA-384 mismatch for $path" >&2
     fail=1
   fi
-done < <(jq -r --slurpfile built "$bundle_manifest" '(.npm[] | [.package, .version, .member, .path, (.size | tostring), .sha384]),
-  ($built[0].bundles[] | [.package, .version, "bundle", .path, (.size | tostring), .sha384]) | @tsv' "$vendor_manifest")
+done < <(jq -r --slurpfile built "$bundle_manifest" --slurpfile copied "$image_manifest" \
+  '(.npm[] | [.package, .version, .member, .path, (.size | tostring), .sha384]),
+  ($built[0].bundles[] | [.package, .version, "bundle", .path, (.size | tostring), .sha384]),
+  ($copied[0].images[] | [.package, .version, .member, .path, (.size | tostring), .sha384]),
+  ($copied[0].images[] | [.package, .version, "license", .license.path, (.license.size | tostring), .license.sha384]) | @tsv' "$vendor_manifest")
 
 while IFS= read -r asset; do
-  if ! jq -e --arg path "$asset" --slurpfile built "$bundle_manifest" \
-      'any(.npm[], $built[0].bundles[]; .path == $path)' "$vendor_manifest" >/dev/null; then
+  if ! jq -e --arg path "$asset" --slurpfile built "$bundle_manifest" --slurpfile copied "$image_manifest" \
+      'any(.npm[], $built[0].bundles[], $copied[0].images[]; .path == $path)' "$vendor_manifest" >/dev/null; then
     echo "supply-chain audit: undeclared vendored browser asset $asset" >&2
     fail=1
   fi
@@ -203,7 +237,8 @@ while IFS=$'\t' read -r path expected_sha384; do
       fi
     done <<<"$matches"
   fi
-done < <(jq -r --slurpfile built "$bundle_manifest" '(.npm[], $built[0].bundles[]) | [.path, .sha384] | @tsv' "$vendor_manifest")
+done < <(jq -r --slurpfile built "$bundle_manifest" --slurpfile copied "$image_manifest" \
+  '(.npm[], $built[0].bundles[], $copied[0].images[]) | [.path, .sha384] | @tsv' "$vendor_manifest")
 
 # Match an attribute token, not the suffix of a BuildKit option or data attribute.
 # Keep the same scan paths and exercise the exact pattern used by the audit.

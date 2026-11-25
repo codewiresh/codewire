@@ -1,12 +1,13 @@
 use axum::{
     extract::{Query, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse as _, Response},
 };
 use serde::Deserialize;
 
 use crate::{
-    response::{render_page, render_template, render_updates_page},
+    analytics::Analytics,
+    response::{render_page, render_template, render_updates_page, with_analytics_policy},
     security::HOME_CACHE_CONTROL,
     state::AppState,
     templates::{
@@ -22,8 +23,17 @@ struct VerifyEmailResponse {
     access_pending: bool,
 }
 
-pub(super) async fn home() -> Response {
-    let mut response = render_page(HomeTemplate);
+/// The homepage carries the analytics tag for every visitor: a shared cache
+/// keeps one copy for all of them (infra#2677).
+pub(super) async fn home(State(state): State<AppState>) -> Response {
+    let analytics = state.analytics;
+    let mut response = tagged(
+        render_page(HomeTemplate {
+            analytics: analytics.clone(),
+        }),
+        analytics.as_ref(),
+        StatusCode::OK,
+    );
     if response.status() == StatusCode::OK {
         response.headers_mut().insert(
             header::CACHE_CONTROL,
@@ -33,29 +43,50 @@ pub(super) async fn home() -> Response {
     response
 }
 
-pub(super) async fn pricing(State(state): State<AppState>) -> Response {
+/// `response` with the analytics policy when its page carries the tag.
+fn tagged(response: Response, analytics: Option<&Analytics>, status: StatusCode) -> Response {
+    match analytics {
+        Some(analytics) => with_analytics_policy(response, status, &analytics.origin),
+        None => response,
+    }
+}
+
+pub(super) async fn pricing(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
     let credit = crate::billing_connect::signup_credit_nano_eur(&state).await;
-    render_page(PricingTemplate {
+    let response = render_page(PricingTemplate {
+        analytics: analytics.clone(),
         signup_credit: crate::billing_connect::signup_credit_text(credit),
         rates: crate::public_rates::public_rates(&state).await,
-    })
+    });
+    tagged(response, analytics.as_ref(), StatusCode::OK)
 }
 
-/// The privacy policy: public, the same signed in or out.
-pub(super) async fn privacy() -> Response {
-    render_page(PrivacyTemplate)
+/// The privacy policy: public, the same signed in or out but for the
+/// analytics tag.
+pub(super) async fn privacy(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
+    let response = render_page(PrivacyTemplate {
+        analytics: analytics.clone(),
+    });
+    tagged(response, analytics.as_ref(), StatusCode::OK)
 }
 
-/// The terms of service: public, the same signed in or out.
-pub(super) async fn terms() -> Response {
-    render_page(TermsTemplate)
+/// The terms of service: public, the same signed in or out but for the
+/// analytics tag.
+pub(super) async fn terms(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
+    let response = render_page(TermsTemplate {
+        analytics: analytics.clone(),
+    });
+    tagged(response, analytics.as_ref(), StatusCode::OK)
 }
 
 /// What's new: the configured Liminal site's posts, the same signed in or
 /// out. Not found where no site is configured; unavailable while Liminal has
 /// never answered. Like every page but the homepage it is never shared by a
 /// cache (#5054); `updates_connect` keeps the posts for five minutes instead.
-pub(super) async fn updates(State(state): State<AppState>) -> Response {
+pub(super) async fn updates(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(updates) = state.updates.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -65,11 +96,16 @@ pub(super) async fn updates(State(state): State<AppState>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    render_updates_page(
+    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
+    let response = render_updates_page(
         status,
-        UpdatesTemplate { posts },
+        UpdatesTemplate {
+            analytics: analytics.clone(),
+            posts,
+        },
         updates.site().media_origin(),
-    )
+    );
+    tagged(response, analytics.as_ref(), status)
 }
 
 pub(super) async fn verify_email(
@@ -174,6 +210,7 @@ mod tests {
             github_app_client_id: String::new(),
             support_email: None,
             updates_site: None,
+            analytics: None,
         }
     }
 
@@ -253,6 +290,7 @@ mod tests {
             github_app_client_id: String::new(),
             support_email: None,
             updates_site: None,
+            analytics: None,
         });
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -312,3 +350,7 @@ mod tests {
 #[cfg(test)]
 #[path = "updates_tests.rs"]
 mod updates_tests;
+
+#[cfg(test)]
+#[path = "analytics_tests.rs"]
+mod analytics_tests;

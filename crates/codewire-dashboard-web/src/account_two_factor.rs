@@ -477,21 +477,13 @@ mod tests {
                 .unwrap();
         });
         let state = AppState::new(crate::Config {
-            listen_addr: "127.0.0.1:0".parse().unwrap(),
-            runtime_mode: crate::RuntimeMode::CurrentThread,
             public_origin: "https://app.example.test".into(),
             api_origin: origin.parse().unwrap(),
             credential_origin: origin.parse().unwrap(),
             identity_origin_string: origin.clone(),
             browser_api_origin: origin.clone(),
             billing_origin: origin.parse().unwrap(),
-            docs_root: Default::default(),
-            confidential_storage_enabled: false,
-            turnstile_site_key: String::new(),
-            github_app_slug: String::new(),
-            github_app_client_id: String::new(),
-            support_email: None,
-            updates_site: None,
+            ..crate::test_support::unreachable_config()
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         let start_with = |n| {
@@ -607,6 +599,7 @@ mod tests {
             github_app_client_id: String::new(),
             support_email: None,
             updates_site: None,
+            analytics: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         for (password, proof) in [
@@ -667,6 +660,7 @@ mod tests {
             github_app_client_id: String::new(),
             support_email: None,
             updates_site: None,
+            analytics: None,
         });
         let built = request(
             &state,
