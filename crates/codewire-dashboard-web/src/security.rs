@@ -35,20 +35,6 @@ pub(crate) const OAUTH_LINK_PATH: &str = "/login/link";
 /// confirmation; the confirmation completes only with it.
 pub(crate) const OAUTH_LINK_REQUESTER_COOKIE: &str = "codewire_oauth_link_requester";
 
-/// Whether the request may carry a session: it names the session cookie,
-/// well-formed or not, or has a Cookie header that cannot be read. The
-/// public pages that a cache never shares leave out the analytics tag for
-/// such a request (infra#2677).
-pub(crate) fn carries_session(headers: &HeaderMap) -> bool {
-    headers.get_all(header::COOKIE).iter().any(|value| {
-        value.to_str().map_or(true, |cookies| {
-            cookies
-                .split(';')
-                .any(|pair| pair.trim().split('=').next() == Some(SESSION_COOKIE_NAME))
-        })
-    })
-}
-
 pub(crate) fn canonical_cookie(headers: &HeaderMap) -> Result<HeaderValue, ()> {
     let token = session_cookie(headers).ok_or(())?;
     HeaderValue::from_str(&format!("{SESSION_COOKIE_NAME}={token}")).map_err(|_| ())

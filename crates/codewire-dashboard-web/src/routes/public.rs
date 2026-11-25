@@ -1,13 +1,12 @@
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse as _, Response},
 };
 use serde::Deserialize;
 
 use crate::{
-    analytics::Analytics,
-    response::{render_page, render_template, render_updates_page, with_analytics_policy},
+    response::{render_page, render_template, render_updates_page},
     security::HOME_CACHE_CONTROL,
     state::AppState,
     templates::{
@@ -23,18 +22,11 @@ struct VerifyEmailResponse {
     access_pending: bool,
 }
 
-/// The homepage carries the analytics tag for every visitor: a shared cache
-/// keeps one copy for all of them (infra#2677).
+/// The homepage, which a shared cache keeps one copy of (#5054).
 pub(super) async fn home(State(state): State<AppState>) -> Response {
-    let analytics = state.analytics;
-    let mut response = tagged(
-        render_page(HomeTemplate {
-            public_origin: state.public_origin.clone(),
-            analytics: analytics.clone(),
-        }),
-        analytics.as_ref(),
-        StatusCode::OK,
-    );
+    let mut response = render_page(HomeTemplate {
+        public_origin: state.public_origin.clone(),
+    });
     if response.status() == StatusCode::OK {
         response.headers_mut().insert(
             header::CACHE_CONTROL,
@@ -44,53 +36,34 @@ pub(super) async fn home(State(state): State<AppState>) -> Response {
     response
 }
 
-/// `response` with the analytics policy when its page carries the tag.
-fn tagged(response: Response, analytics: Option<&Analytics>, status: StatusCode) -> Response {
-    match analytics {
-        Some(analytics) => with_analytics_policy(response, status, &analytics.origin),
-        None => response,
-    }
-}
-
-pub(super) async fn pricing(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
+pub(super) async fn pricing(State(state): State<AppState>) -> Response {
     let credit = crate::billing_connect::signup_credit_nano_eur(&state).await;
-    let response = render_page(PricingTemplate {
+    render_page(PricingTemplate {
         public_origin: state.public_origin.clone(),
-        analytics: analytics.clone(),
         signup_credit: crate::billing_connect::signup_credit_text(credit),
         rates: crate::public_rates::public_rates(&state).await,
-    });
-    tagged(response, analytics.as_ref(), StatusCode::OK)
+    })
 }
 
-/// The privacy policy: public, the same signed in or out but for the
-/// analytics tag.
-pub(super) async fn privacy(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
-    let response = render_page(PrivacyTemplate {
+/// The privacy policy: public, the same signed in or out.
+pub(super) async fn privacy(State(state): State<AppState>) -> Response {
+    render_page(PrivacyTemplate {
         public_origin: state.public_origin.clone(),
-        analytics: analytics.clone(),
-    });
-    tagged(response, analytics.as_ref(), StatusCode::OK)
+    })
 }
 
-/// The terms of service: public, the same signed in or out but for the
-/// analytics tag.
-pub(super) async fn terms(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
-    let response = render_page(TermsTemplate {
+/// The terms of service: public, the same signed in or out.
+pub(super) async fn terms(State(state): State<AppState>) -> Response {
+    render_page(TermsTemplate {
         public_origin: state.public_origin.clone(),
-        analytics: analytics.clone(),
-    });
-    tagged(response, analytics.as_ref(), StatusCode::OK)
+    })
 }
 
 /// What's new: the configured Liminal site's posts, the same signed in or
 /// out. Not found where no site is configured; unavailable while Liminal has
 /// never answered. Like every page but the homepage it is never shared by a
 /// cache (#5054); `updates_connect` keeps the posts for five minutes instead.
-pub(super) async fn updates(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn updates(State(state): State<AppState>) -> Response {
     let Some(updates) = state.updates.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -100,17 +73,14 @@ pub(super) async fn updates(State(state): State<AppState>, headers: HeaderMap) -
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
-    let response = render_updates_page(
+    render_updates_page(
         status,
         UpdatesTemplate {
             public_origin: state.public_origin.clone(),
-            analytics: analytics.clone(),
             posts,
         },
         updates.site().media_origin(),
-    );
-    tagged(response, analytics.as_ref(), status)
+    )
 }
 
 pub(super) async fn verify_email(
@@ -286,7 +256,6 @@ mod tests {
                 "/",
                 HomeTemplate {
                     public_origin: origin(),
-                    analytics: None,
                 }
                 .render(),
             ),
@@ -295,7 +264,6 @@ mod tests {
                 "/pricing",
                 PricingTemplate {
                     public_origin: origin(),
-                    analytics: None,
                     signup_credit: None,
                     rates: None,
                 }
@@ -306,7 +274,6 @@ mod tests {
                 "/privacy",
                 PrivacyTemplate {
                     public_origin: origin(),
-                    analytics: None,
                 }
                 .render(),
             ),
@@ -315,7 +282,6 @@ mod tests {
                 "/terms",
                 TermsTemplate {
                     public_origin: origin(),
-                    analytics: None,
                 }
                 .render(),
             ),
@@ -324,7 +290,6 @@ mod tests {
                 "/updates",
                 UpdatesTemplate {
                     public_origin: origin(),
-                    analytics: None,
                     posts: None,
                 }
                 .render(),

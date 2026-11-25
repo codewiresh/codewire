@@ -42,3 +42,27 @@ test('a subdomain is dropped too, and a look-alike host is not one', () => {
 test('an event without a referrer passes through', () => {
   expect(hook('event', { url: '/' })).toEqual({ url: '/' });
 });
+
+// A page inside the account (the server marked the hook's script with its route pattern) sends only
+// that pattern and a fixed title, never its own address or title.
+const onPage = (route, send) => {
+  globalThis.document = {
+    querySelector: (selector) =>
+      selector === 'script[data-analytics-route]' && route ? { dataset: { analyticsRoute: route } } : null,
+  };
+  try { return send(); } finally { delete globalThis.document; }
+};
+
+test('a page inside the account sends its route pattern and a fixed title', () => {
+  const payload = onPage('/:slug/:environment_id/', () =>
+    hook('event', { url: 'https://codewire.sh/acme-corp/sandbox-0123/', title: 'payments-api · Acme Corp', referrer: '' }));
+  expect(payload.url).toBe('https://codewire.sh/:slug/:environment_id/');
+  expect(payload.title).toBe('Codewire');
+  expect(JSON.stringify(payload)).not.toContain('acme');
+  expect(JSON.stringify(payload)).not.toContain('payments-api');
+});
+
+test('a public page, with no route on its script, keeps its address and title', () => {
+  const payload = onPage(null, () => hook('event', { url: 'https://codewire.sh/pricing', title: 'Pricing' }));
+  expect(payload).toEqual({ url: 'https://codewire.sh/pricing', title: 'Pricing' });
+});

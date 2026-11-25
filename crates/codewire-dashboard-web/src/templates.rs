@@ -23,9 +23,6 @@ use crate::view::{
 pub(crate) struct HomeTemplate {
     /// Where this deployment is served, for the share tags' absolute URLs.
     pub(crate) public_origin: String,
-    /// The analytics tag (infra#2677), for every visitor where it is
-    /// configured: a shared cache gives them all the same homepage.
-    pub(crate) analytics: Option<crate::analytics::Analytics>,
 }
 
 #[derive(Template)]
@@ -33,9 +30,6 @@ pub(crate) struct HomeTemplate {
 pub(crate) struct PricingTemplate {
     /// Where this deployment is served, for the share tags' absolute URLs.
     pub(crate) public_origin: String,
-    /// The analytics tag (infra#2677), where it is configured and the
-    /// request carries no session: a cache never shares this page.
-    pub(crate) analytics: Option<crate::analytics::Analytics>,
     /// The sign-up credit as the page says it ("€10"), or `None` when there
     /// is none and the page promises nothing.
     pub(crate) signup_credit: Option<String>,
@@ -49,9 +43,6 @@ pub(crate) struct PricingTemplate {
 pub(crate) struct PrivacyTemplate {
     /// Where this deployment is served, for the share tags' absolute URLs.
     pub(crate) public_origin: String,
-    /// The analytics tag (infra#2677), where it is configured and the
-    /// request carries no session: a cache never shares this page.
-    pub(crate) analytics: Option<crate::analytics::Analytics>,
 }
 
 #[derive(Template)]
@@ -59,9 +50,6 @@ pub(crate) struct PrivacyTemplate {
 pub(crate) struct TermsTemplate {
     /// Where this deployment is served, for the share tags' absolute URLs.
     pub(crate) public_origin: String,
-    /// The analytics tag (infra#2677), where it is configured and the
-    /// request carries no session: a cache never shares this page.
-    pub(crate) analytics: Option<crate::analytics::Analytics>,
 }
 
 /// The public Updates page. `posts` is `None` when Liminal has never answered.
@@ -70,9 +58,6 @@ pub(crate) struct TermsTemplate {
 pub(crate) struct UpdatesTemplate {
     /// Where this deployment is served, for the share tags' absolute URLs.
     pub(crate) public_origin: String,
-    /// The analytics tag (infra#2677), where it is configured and the
-    /// request carries no session: a cache never shares this page.
-    pub(crate) analytics: Option<crate::analytics::Analytics>,
     pub(crate) posts: Option<std::sync::Arc<Vec<crate::updates_connect::UpdatePost>>>,
 }
 

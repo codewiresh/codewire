@@ -1,6 +1,5 @@
 use std::path::{Component, Path, PathBuf};
 
-use askama::Template;
 use axum::{
     Router,
     extract::{OriginalUri, Path as AxumPath, State},
@@ -9,7 +8,7 @@ use axum::{
     routing::get,
 };
 
-use crate::{analytics::Analytics, response::with_analytics_policy, state::AppState};
+use crate::state::AppState;
 
 const DOCS_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'";
 const INSTALLER: &str = include_str!("../../../apps/cli/install.sh");
@@ -95,19 +94,10 @@ async fn serve_docs_file(state: &AppState, relative: impl AsRef<Path>) -> Respon
     } else {
         load_docs_file_async(&state.docs_root, relative).await
     };
-    let Some((target, mut body)) = loaded else {
+    let Some((target, body)) = loaded else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let content_type = content_type(&target);
-    let tagged = state
-        .analytics
-        .as_ref()
-        .filter(|_| content_type == HTML)
-        .and_then(|analytics| Some((tag_page(&body, analytics)?, analytics.origin.as_str())));
-    let connect_origin = tagged.map(|(page, origin)| {
-        body = page.into_bytes();
-        origin
-    });
     let mut response = (
         StatusCode::OK,
         [
@@ -128,40 +118,8 @@ async fn serve_docs_file(state: &AppState, relative: impl AsRef<Path>) -> Respon
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(DOCS_CSP),
     );
-    match connect_origin {
-        Some(origin) => with_analytics_policy(response, StatusCode::OK, origin),
-        None => response,
-    }
+    response
 }
-
-#[derive(Template)]
-#[template(path = "analytics.html")]
-struct AnalyticsTag<'a> {
-    analytics: &'a Analytics,
-}
-
-/// A docs page with the analytics tag (infra#2677). The docs are static and a
-/// shared cache keeps one copy of each, so like the homepage they carry it for
-/// every visitor. Each page also states its own policy in a meta tag, which
-/// the browser enforces beside the header, so that policy gains the
-/// tracker's one connection too. A page whose head doesn't hold exactly one
-/// `connect-src 'self'`, such as a redirect, is served as built.
-fn tag_page(body: &[u8], analytics: &Analytics) -> Option<String> {
-    let page = std::str::from_utf8(body).ok()?;
-    let (head, rest) = page.split_once("</head>")?;
-    if head.matches(SELF_CONNECT).count() != 1 {
-        return None;
-    }
-    let tag = AnalyticsTag { analytics }.render().ok()?;
-    let head = head.replace(
-        SELF_CONNECT,
-        &format!("{SELF_CONNECT} {}", analytics.origin),
-    );
-    Some(format!("{head}{tag}\n  </head>{rest}"))
-}
-
-const SELF_CONNECT: &str = "connect-src 'self'";
-const HTML: &str = "text/html; charset=utf-8";
 
 async fn load_docs_file_async(root: &Path, relative: &Path) -> Option<(PathBuf, Vec<u8>)> {
     let root = tokio::fs::canonicalize(root).await.ok()?;

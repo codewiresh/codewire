@@ -85,6 +85,10 @@ pub fn app(config: Config) -> Router {
         )
         .merge(assets::router())
         .merge(docs::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            analytics::tag_pages,
+        ))
         .with_state(state)
         .layer(axum::middleware::map_response(
             security::mark_unmarked_responses_private,

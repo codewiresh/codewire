@@ -160,7 +160,7 @@ async fn the_page_shows_cleaned_posts_and_keeps_them_through_a_liminal_failure()
     assert!(body.contains(r#"<img src="https://media.synthetic.test/fork.png" alt="Fork">"#));
     assert!(!body.contains("tracker.synthetic.test"));
 
-    // With a session the page has no tag and keeps its connections.
+    // With a session the page is tagged too, and keeps its media origin.
     let signed_in = reqwest::Client::builder()
         .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
@@ -180,12 +180,15 @@ async fn the_page_shows_cleaned_posts_and_keeps_them_through_a_liminal_failure()
         .to_str()
         .unwrap()
         .to_owned();
-    assert!(policy.contains("connect-src 'self';"), "{policy}");
+    assert!(
+        policy.contains("connect-src 'self' https://umami.codewire.test;"),
+        "{policy}"
+    );
     assert!(
         policy.contains("img-src 'self' data: https://media.synthetic.test;"),
         "{policy}"
     );
-    assert!(!signed_in.text().await.unwrap().contains("umami-tracker"));
+    assert!(signed_in.text().await.unwrap().contains("umami-tracker"));
 
     state.failing.store(true, Ordering::SeqCst);
     let response = get_updates(&dashboard).await;

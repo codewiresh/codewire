@@ -1,2 +1,2 @@
-<script src="/assets/codewire/analytics-v1.js" defer></script>
+<script src="/assets/codewire/analytics-v1.js" defer{% if let Some(route) = route %} data-analytics-route="{{ route }}"{% endif %}></script>
 <script src="/assets/codewire/umami-tracker-3.5.0.js" integrity="sha384-Ts03XUTV1nsmqXjhMgA3LGXKFnW1NLMAzbKGEaaDFUy7wUETechGFTNIXF7rAuqP" defer data-website-id="{{ analytics.website_id }}" data-host-url="{{ analytics.origin }}" data-domains="{{ analytics.domain }}" data-exclude-search="true" data-exclude-hash="true" data-before-send="codewireAnalyticsBeforeSend"></script>

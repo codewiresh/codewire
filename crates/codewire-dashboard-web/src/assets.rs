@@ -458,7 +458,6 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
                 crate::templates::HomeTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                 }
                 .render()
                 .unwrap(),
@@ -467,7 +466,6 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
                 crate::templates::PricingTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                     signup_credit: None,
                     rates: Some(crate::public_rates::fixture_rates()),
                 }
@@ -480,7 +478,6 @@ mod tests {
                 ),
                 crate::templates::PricingTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                     signup_credit: None,
                     rates: None,
                 }
@@ -491,7 +488,6 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/privacy.html"),
                 crate::templates::PrivacyTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                 }
                 .render()
                 .unwrap(),
@@ -500,7 +496,6 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/terms.html"),
                 crate::templates::TermsTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                 }
                 .render()
                 .unwrap(),
@@ -509,7 +504,6 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/updates.html"),
                 crate::templates::UpdatesTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                     posts: Some(std::sync::Arc::new(crate::updates_connect::fixture_posts())),
                 }
                 .render()
@@ -521,7 +515,6 @@ mod tests {
                 ),
                 crate::templates::UpdatesTemplate {
                     public_origin: "https://codewire.sh".into(),
-                    analytics: None,
                     posts: None,
                 }
                 .render()
@@ -742,7 +735,6 @@ mod tests {
         let home = versioned(
             &crate::templates::HomeTemplate {
                 public_origin: "https://codewire.sh".into(),
-                analytics: None,
             }
             .render()
             .unwrap(),
