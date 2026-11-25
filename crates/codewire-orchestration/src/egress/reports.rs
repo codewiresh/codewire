@@ -4,7 +4,9 @@
 //! A Pod's environment is written only by the bind transaction
 //! ([`record_bind`]), or taken back from the live binding when a row is
 //! re-created; a report never names one. Records are kept for the
-//! environment the bind recorded, at most [`EGRESS_RECORD_LIMIT`] of them.
+//! environment the bind recorded, at most [`EGRESS_RECORD_LIMIT`] of them,
+//! and each refused one is also a `refused` event in the environment's audit
+//! log ([`audit`]), written in the same transaction.
 //!
 //! One column is orchestration's own (migration 0033, #5068): the lockdown
 //! check's refusal of the Pod. No report writes it, and it outlives every
@@ -58,11 +60,23 @@ impl FailureCode {
     }
 }
 
-/// One folded record as cw-egress reported it.
+/// What a record was about, as orchestration keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportedDestination {
+    /// A name that passed the host check.
+    Name(String),
+    /// An address no name leads to.
+    Address(String),
+    /// A name that failed the host check: counted, never its text. Only the
+    /// audit log keeps it; the records table names every row.
+    Withheld,
+}
+
+/// One folded record as cw-egress reported it. Its count is a delta: the
+/// observations since cw-egress last reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportedRecord {
-    pub destination: String,
-    pub destination_is_name: bool,
+    pub destination: ReportedDestination,
     pub address: Option<String>,
     pub transport: Transport,
     pub outcome: Option<RefusalReason>,
@@ -89,6 +103,8 @@ pub enum ReportError {
     TooManyRecords,
     #[error("a record's times or count are out of range")]
     InvalidRecord,
+    #[error(transparent)]
+    Audit(#[from] crate::audit::AuditError),
 }
 
 /// The bind transaction's part: the Pod now serves `environment_id`, and
@@ -237,13 +253,15 @@ pub async fn record_records(
         return Err(ReportError::TooManyRecords);
     }
     let mut tx = pool.begin().await?;
-    let environment: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT environment_id FROM sandbox_egress_enforcement WHERE pod_uid = $1",
+    let environment: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT s.environment_id, e.org_id FROM sandbox_egress_enforcement s \
+           LEFT JOIN environments e ON e.id = s.environment_id \
+          WHERE s.pod_uid = $1",
     )
     .bind(pod_uid)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(Some(environment)) = environment else {
+    let Some((Some(environment), Some(org))) = environment else {
         // An unbound warm member has no log. Visible, never silent.
         tracing::info!(
             pod_uid,
@@ -254,6 +272,7 @@ pub async fn record_records(
     };
     // A reporter's clock never puts a record in the future.
     let now = chrono::Utc::now();
+    let mut names = audit::PolicyNames::default();
     for record in records {
         let (transport, port) = match record.transport {
             Transport::Dns => ("dns", 0_i32),
@@ -278,6 +297,18 @@ pub async fn record_records(
         {
             return Err(ReportError::InvalidRecord);
         }
+        let (first, last) = (first.min(now), last.min(now));
+        if record.outcome.is_some() {
+            let policy = names.name(&mut tx, &org, &record.policy_reference).await?;
+            if let Some(event) = audit::refused(&org, &environment, record, policy, first, last) {
+                crate::audit::record(&mut tx, &event).await?;
+            }
+        }
+        let (destination, destination_is_name) = match &record.destination {
+            ReportedDestination::Name(name) => (name, true),
+            ReportedDestination::Address(address) => (address, false),
+            ReportedDestination::Withheld => continue,
+        };
         sqlx::query(
             "INSERT INTO environment_egress_records
                 (environment_id, destination, destination_is_name, transport, port, outcome,
@@ -296,8 +327,8 @@ pub async fn record_records(
                 count = environment_egress_records.count + EXCLUDED.count",
         )
         .bind(&environment)
-        .bind(&record.destination)
-        .bind(record.destination_is_name)
+        .bind(destination)
+        .bind(destination_is_name)
         .bind(transport)
         .bind(port)
         .bind(outcome)
@@ -306,8 +337,8 @@ pub async fn record_records(
         .bind(&record.policy_reference)
         .bind(i32::try_from(record.policy_revision).map_err(|_| ReportError::InvalidRecord)?)
         .bind(record.policy_digest.to_vec())
-        .bind(first.min(now))
-        .bind(last.min(now))
+        .bind(first)
+        .bind(last)
         .bind(count)
         .execute(&mut *tx)
         .await?;
@@ -357,5 +388,6 @@ fn unix_ms(ms: u64) -> Result<chrono::DateTime<chrono::Utc>, ReportError> {
     chrono::DateTime::from_timestamp_millis(ms).ok_or(ReportError::InvalidRecord)
 }
 
+mod audit;
 #[cfg(test)]
 mod database_tests;

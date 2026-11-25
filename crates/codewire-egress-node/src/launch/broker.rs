@@ -1,10 +1,19 @@
 //! One Pod's egress broker, as a process.
+//!
+//! Its control socket carries the supervisor's frames down and the broker's
+//! up: an acknowledgement for each policy it was sent, and its folded
+//! refusals at most once a second (SPEC.md "The refusal path"). The broker
+//! reports refusals only because the supervisor starts it with
+//! [`REPORT_REFUSALS_FLAG`], and one task reads every frame it sends from
+//! then on.
 
 use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use codewire_confinement::spawn::{OwnImage, duplicate_inherited_descriptor};
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
+use codewire_egress_broker::refusals::RefusalBatch;
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::intercept::InterceptSet;
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest};
@@ -15,13 +24,16 @@ use codewire_egress_worker::broker::{
     EgressBrokerStartupStatus, decode_egress_broker_startup_status, encode_egress_broker_bootstrap,
 };
 use codewire_egress_worker::broker_control::{
-    POLICY_ACK_TIMEOUT, encode_intercept_frame, encode_policy_frame, read_policy_ack,
+    BrokerFrame, POLICY_ACK_TIMEOUT, encode_intercept_frame, encode_policy_frame, read_broker_frame,
 };
 use codewire_egress_worker::host_addresses::encode_frame;
 use codewire_egress_worker::parent::{fresh_egress_broker_key, read_status_frame};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncWriteExt as _};
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedWriteHalf;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -29,12 +41,28 @@ use super::StartError;
 use super::spawner::{Process, Spawner};
 use codewire_egress_worker::hosted::HOSTED_GENERATION;
 
-use crate::children::{BROKER_WORD, INTERCEPT_HANDOFF_FLAG, INTERCEPT_REFUSE_FLAG, POD_UID_FLAG};
+use crate::children::{
+    BROKER_WORD, INTERCEPT_HANDOFF_FLAG, INTERCEPT_REFUSE_FLAG, POD_UID_FLAG, REPORT_REFUSALS_FLAG,
+};
+
+/// Refusal reports read and not yet taken. The broker sends at most one a
+/// second and the supervisor takes each as it comes, but none during the
+/// guest's ten-second self-check, so a full queue is a supervisor that
+/// stopped taking them.
+const REPORTS_WAITING: usize = 16;
 
 /// A broker that is confined and enforcing its policy. Dropping it kills it.
 pub(super) struct Broker {
     process: Process,
-    control: UnixStream,
+    control: OwnedWriteHalf,
+    /// Where the reader sends the next acknowledgement: set only while a
+    /// replacement waits for one.
+    waiting: Arc<Mutex<Option<oneshot::Sender<PolicyDigest>>>>,
+    /// Taken by the supervisor once.
+    reports: Option<mpsc::Receiver<RefusalBatch>>,
+    /// Cancelled when the reader stops: the socket closed, a frame was
+    /// malformed, or an acknowledgement came that nobody asked for.
+    gone: CancellationToken,
 }
 
 /// What the worker needs to reach a started broker: its ends of the IPC
@@ -123,6 +151,8 @@ pub(super) async fn start(
             Some(hosts)
         }
     };
+    // Last, after any interception flag.
+    arguments.push(REPORT_REFUSALS_FLAG);
     let intercepts = hosts
         .map(encode_intercept_frame)
         .transpose()
@@ -169,12 +199,33 @@ pub(super) async fn start(
     // The bootstrap stream becomes the admission session.
     endpoints.insert(0, bootstrap.into_std().map_err(|_| StartError::Bootstrap)?);
     Ok((
-        Broker { process, control },
+        Broker::new(process, control),
         BrokerSessions { endpoints, key },
     ))
 }
 
 impl Broker {
+    /// Starts the task that reads every frame the broker sends on `control`.
+    fn new(process: Process, control: UnixStream) -> Self {
+        let (reader, writer) = control.into_split();
+        let waiting = Arc::new(Mutex::new(None));
+        let (reports, taken) = mpsc::channel(REPORTS_WAITING);
+        let gone = CancellationToken::new();
+        tokio::spawn(read_from_broker(
+            reader,
+            Arc::clone(&waiting),
+            reports,
+            gone.clone(),
+        ));
+        Self {
+            process,
+            control: writer,
+            waiting,
+            reports: Some(taken),
+            gone,
+        }
+    }
+
     /// Has the broker enforce `policy` from now on and returns the digest it
     /// acknowledged. It ends the flows the policy refuses before it answers.
     pub(super) async fn replace(
@@ -182,29 +233,83 @@ impl Broker {
         policy: &CompiledPolicy,
     ) -> Result<PolicyDigest, StartError> {
         let frame = encode_policy_frame(policy).map_err(|_| StartError::Bootstrap)?;
-        tokio::time::timeout(POLICY_ACK_TIMEOUT, async {
-            self.control.write_all(&frame).await?;
-            read_policy_ack(&mut self.control).await
+        let (answer, acknowledged) = oneshot::channel();
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some(answer);
+        let replaced = match tokio::time::timeout(POLICY_ACK_TIMEOUT, async {
+            self.control
+                .write_all(&frame)
+                .await
+                .map_err(|_| StartError::Bootstrap)?;
+            // Dropped unanswered when the reader stops.
+            acknowledged.await.map_err(|_| StartError::Bootstrap)
         })
         .await
-        .map_err(|_| StartError::Timeout)?
-        .map_err(|_| StartError::Bootstrap)
+        {
+            Ok(replaced) => replaced,
+            Err(_) => Err(StartError::Timeout),
+        };
+        // A late acknowledgement then has no one waiting, and ends the pair.
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        replaced
     }
 
-    /// Resolves when the broker is gone. Outside a replacement it writes
-    /// nothing to its control socket, so the socket has something to read
-    /// only once the broker's end is closed, which the kernel does when the
-    /// process dies. A byte it was never asked for is a broker that can no
-    /// longer be trusted, and counts the same. Cancel-safe.
+    /// Resolves when the broker is gone: its socket closed, which the kernel
+    /// does when the process dies, or it sent something malformed or an
+    /// acknowledgement nobody asked for, which is a broker that can no longer
+    /// be trusted. Cancel-safe.
     pub(super) async fn exited(&mut self) {
-        let mut byte = [0_u8; 1];
-        // End-of-file, an error and an unasked byte all mean the same here.
-        let _ = self.control.read(&mut byte).await;
+        self.gone.cancelled().await;
+    }
+
+    /// The broker's refusal reports, as its reader reads them; `None` once
+    /// taken. They end when the reader stops, which [`Broker::exited`] says.
+    pub(super) fn refusals(&mut self) -> Option<mpsc::Receiver<RefusalBatch>> {
+        self.reports.take()
     }
 
     /// Kills the process and returns once it is reaped.
     pub(super) async fn end(self) {
         self.process.end().await;
+    }
+}
+
+/// Reads every frame the broker sends until its socket closes or a frame is
+/// one it must not send, then cancels `gone`.
+async fn read_from_broker<R: AsyncRead + Unpin>(
+    mut reader: R,
+    waiting: Arc<Mutex<Option<oneshot::Sender<PolicyDigest>>>>,
+    reports: mpsc::Sender<RefusalBatch>,
+    gone: CancellationToken,
+) {
+    let _gone = gone.drop_guard();
+    loop {
+        match read_broker_frame(&mut reader).await {
+            Ok(BrokerFrame::PolicyAck(digest)) => {
+                let answer = waiting
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                let Some(answer) = answer else {
+                    tracing::warn!("an egress broker acknowledged a policy nobody sent");
+                    return;
+                };
+                // The replacement gave up waiting; it ends the pair itself.
+                let _ = answer.send(digest);
+            }
+            Ok(BrokerFrame::Refusals(batch)) => {
+                if let Err(mpsc::error::TrySendError::Full(batch)) = reports.try_send(batch) {
+                    tracing::warn!(
+                        rows = batch.rows.len(),
+                        dropped = batch.dropped,
+                        "an egress broker's refusal report was dropped: the supervisor is not taking them"
+                    );
+                }
+            }
+            Err(_) => return,
+        }
     }
 }
 

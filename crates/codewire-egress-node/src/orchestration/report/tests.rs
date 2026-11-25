@@ -115,3 +115,17 @@ fn a_refused_datagram_crosses_as_udp_with_its_port_and_reason() {
         Some(RefusalReason::UdpNotCarried)
     );
 }
+
+/// SPEC.md "The host check": a name that failed the check crosses withheld,
+/// with its count, and no text.
+#[test]
+fn a_withheld_name_crosses_as_withheld_with_its_count() {
+    let wire = wire_record(&record(
+        Destination::checked_name("evil\x1b[2J.example.com"),
+        Transport::Dns,
+        Outcome::Refused(RefusalReason::NameNotAllowed),
+    ))
+    .unwrap();
+    assert_eq!(wire.destination, Some(WireDestination::Withheld(true)));
+    assert_eq!(wire.count, 4);
+}

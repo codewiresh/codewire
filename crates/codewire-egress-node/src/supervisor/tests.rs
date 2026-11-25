@@ -2,6 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use codewire_egress_broker::refusals::{RefusalBatch, RefusedRow};
+use codewire_egress_policy::lease::RefusalReason;
+use codewire_egress_policy::record::{Destination, EgressRecord, Outcome, Transport};
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy, PolicyDigest};
 use codewire_network_session::NetworkKey;
 use tokio::net::{TcpListener, TcpStream};
@@ -38,6 +41,8 @@ struct World {
     did: Vec<Did>,
     /// How each Pod's newest pair is told its next status.
     statuses: HashMap<Uuid, mpsc::UnboundedSender<PairStatus>>,
+    /// How each Pod's newest broker reports its refusals.
+    reports: HashMap<Uuid, mpsc::Sender<RefusalBatch>>,
     failing: Vec<Uuid>,
     /// Starts that wait here until notified.
     held: HashMap<Uuid, Arc<Notify>>,
@@ -69,12 +74,17 @@ impl Fake {
     fn tell(&self, pod: Uuid, status: PairStatus) {
         self.world().statuses[&pod].send(status).unwrap();
     }
+
+    fn report(&self, pod: Uuid, batch: RefusalBatch) {
+        self.world().reports[&pod].try_send(batch).unwrap();
+    }
 }
 
 struct FakePair {
     pod: Uuid,
     fake: Fake,
     statuses: mpsc::UnboundedReceiver<PairStatus>,
+    reports: Option<mpsc::Receiver<RefusalBatch>>,
     /// Set for a pair started with a front door.
     front_door_key: Option<Vec<u8>>,
 }
@@ -94,6 +104,8 @@ impl Launch for Fake {
         }
         let (tell, statuses) = mpsc::unbounded_channel();
         world.statuses.insert(spec.pod_uid, tell);
+        let (report, reports) = mpsc::channel(8);
+        world.reports.insert(spec.pod_uid, report);
         world
             .did
             .push(Did::Started(spec.pod_uid, spec.policy.digest()));
@@ -104,6 +116,7 @@ impl Launch for Fake {
             pod: spec.pod_uid,
             fake: self.clone(),
             statuses,
+            reports: Some(reports),
             front_door_key,
         })
     }
@@ -117,6 +130,10 @@ impl Pair for FakePair {
             Some(status) => status,
             None => std::future::pending().await,
         }
+    }
+
+    fn refusals(&mut self) -> Option<mpsc::Receiver<RefusalBatch>> {
+        self.reports.take()
     }
 
     async fn replace(&mut self, policy: &CompiledPolicy) -> Result<PolicyDigest, &'static str> {
@@ -991,4 +1008,126 @@ async fn the_asking_stops_with_the_pair() {
     settle().await;
     assert_eq!(harness.fake.world().asks.len(), 6);
     assert!(harness.fake.world().installed.is_empty());
+}
+
+/// One refused row of `name` under `policy`, `count` times.
+fn refused(name: &str, policy: &CompiledPolicy, count: u64) -> RefusedRow {
+    RefusedRow {
+        destination: Destination::checked_name(name),
+        address: None,
+        transport: Transport::Tcp { port: 443 },
+        reason: RefusalReason::NameNotAllowed,
+        policy_digest: policy.digest(),
+        count,
+    }
+}
+
+fn records(event: PodEvent) -> Vec<EgressRecord> {
+    match event {
+        PodEvent::Records(records) => records,
+        other => panic!("expected records, got {other:?}"),
+    }
+}
+
+/// SPEC.md "The refusal path": each report becomes records under the
+/// reference and revision sent for its digest, an older revision's rows
+/// included after a replacement, and a row under a digest never sent is
+/// dropped. The pair carries on throughout.
+#[tokio::test]
+async fn a_brokers_refusals_are_reported_under_the_policy_it_was_sent() {
+    let harness = Harness::new().await;
+    let first = open();
+    let mut pod = harness.enforcing(POD, bound("env", 3, first.clone())).await;
+    let second = locked();
+    pod.changes
+        .send(Ok(bound("env", 4, second.clone())))
+        .unwrap();
+    assert_eq!(pod.next().await, enforced(4, &second));
+
+    let unsent = PolicyDigest::from_bytes([0xee; 32]);
+    harness.fake.report(
+        POD,
+        RefusalBatch {
+            rows: vec![
+                refused("a.example.com", &first, 2),
+                refused("b.example.com", &second, 1),
+                RefusedRow {
+                    policy_digest: unsent,
+                    ..refused("c.example.com", &second, 5)
+                },
+            ],
+            dropped: 3,
+        },
+    );
+    let records = records(pod.next().await);
+    let labels: Vec<_> = records
+        .iter()
+        .map(|record| {
+            (
+                record.destination.clone(),
+                record.policy.name.as_str(),
+                record.policy.revision,
+                record.count,
+                record.outcome,
+            )
+        })
+        .collect();
+    let refused_by_name = Outcome::Refused(RefusalReason::NameNotAllowed);
+    assert_eq!(
+        labels,
+        [
+            (
+                Destination::Name("a.example.com".into()),
+                "platform:web",
+                3,
+                2,
+                refused_by_name
+            ),
+            (
+                Destination::Name("b.example.com".into()),
+                "platform:web",
+                4,
+                1,
+                refused_by_name
+            ),
+        ]
+    );
+    assert!(pod.has_none().await);
+    assert!(!harness.fake.did().contains(&Did::Ended(POD)));
+}
+
+/// A warm member runs a policy for no environment: its refusals are not
+/// reported, and once bound, the environment's are.
+#[tokio::test]
+async fn an_unbound_members_refusals_are_not_reported_and_a_bound_ones_are() {
+    let harness = Harness::new().await;
+    let mut pod = harness.enforcing(POD, unbound()).await;
+    harness.fake.report(
+        POD,
+        RefusalBatch {
+            rows: vec![refused("a.example.com", &locked(), 1)],
+            dropped: 0,
+        },
+    );
+    assert!(pod.has_none().await);
+
+    let web = open();
+    pod.changes.send(Ok(bound("env", 1, web.clone()))).unwrap();
+    assert_eq!(pod.next().await, enforced(1, &web));
+    harness.fake.report(
+        POD,
+        RefusalBatch {
+            rows: vec![
+                refused("a.example.com", &locked(), 1),
+                refused("b.example.com", &web, 1),
+            ],
+            dropped: 0,
+        },
+    );
+    let records = records(pod.next().await);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].destination,
+        Destination::Name("b.example.com".into())
+    );
 }

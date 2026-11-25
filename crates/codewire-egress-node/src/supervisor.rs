@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_egress_broker::refusals::RefusalBatch;
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest};
 use codewire_network_session::EgressTrust;
 use codewire_network_session::NetworkKey;
@@ -31,6 +32,7 @@ use crate::interception::PairIntercepts;
 use crate::leaves::LeafSigner;
 
 mod pod;
+mod refusals;
 #[cfg(test)]
 mod tests;
 
@@ -117,6 +119,10 @@ pub trait Pair: Send + 'static {
         &mut self,
         policy: &CompiledPolicy,
     ) -> impl Future<Output = Result<PolicyDigest, Self::Error>> + Send;
+
+    /// The broker's reports of the refusals it folded, each as it comes;
+    /// `None` once taken.
+    fn refusals(&mut self) -> Option<mpsc::Receiver<RefusalBatch>>;
 
     /// Asks the worker to say when it holds no flow of the workload's, once,
     /// as [`PairStatus::NoFlow`].

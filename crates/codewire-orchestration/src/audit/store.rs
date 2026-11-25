@@ -6,7 +6,7 @@
 use std::net::IpAddr;
 
 use chrono::{DateTime, DurationRound as _, TimeDelta, Utc};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection as _, PgConnection, PgPool};
 
 use super::event::{Actor, Columns, Kind, What};
 
@@ -161,7 +161,10 @@ async fn insert_event(
 }
 
 /// Adds `event` to its subject's row for the hour it began in. The row keeps
-/// the fields of the latest event, such as a refusal's latest address.
+/// the fields of the latest event, such as a refusal's latest address. A
+/// refusal past the hour's subject bound adds to the hour's overflow row
+/// instead ([`super::bound`]); the check and the write share one
+/// transaction, a savepoint inside the caller's, so its lock covers both.
 async fn add_to_fold(
     connection: &mut PgConnection,
     event: &Event,
@@ -171,6 +174,14 @@ async fn add_to_fold(
         .first
         .duration_trunc(TimeDelta::hours(1))
         .map_err(|_| AuditError::Hour(event.first))?;
+    let pending_key = format!("{}|{}", columns.subject, hour.to_rfc3339());
+    let mut tx = connection.begin().await?;
+    if columns.kind == Kind::Refused
+        && super::bound::overflowed(&mut tx, event, columns, hour, &pending_key).await?
+    {
+        tx.commit().await?;
+        return Ok(());
+    }
     let actor = actor_columns(&event.actor);
     sqlx::query(
         "INSERT INTO sandbox_audit_pending (org_id, environment_id, kind, action, subject, \
@@ -189,7 +200,7 @@ async fn add_to_fold(
     .bind(columns.kind.as_str())
     .bind(&columns.action)
     .bind(&columns.subject)
-    .bind(format!("{}|{}", columns.subject, hour.to_rfc3339()))
+    .bind(&pending_key)
     .bind(event.first)
     .bind(event.last.max(event.first))
     .bind(count(event))
@@ -199,8 +210,9 @@ async fn add_to_fold(
     .bind(actor.role)
     .bind(event.client_ip.map(|ip| ip.to_string()))
     .bind(&columns.detail)
-    .execute(connection)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

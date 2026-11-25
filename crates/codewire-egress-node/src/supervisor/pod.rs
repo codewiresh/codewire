@@ -2,11 +2,14 @@
 
 use std::sync::Arc;
 
+use codewire_egress_broker::refusals::RefusalBatch;
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
-use tokio::sync::watch;
+use codewire_egress_worker::broker_control::now_unix_ms;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::refusals::{self, SentPolicies};
 use super::{Launch, Pair, PairSpec, PairStatus, SELF_CHECK_TIMEOUT, Signals};
 use crate::admitted::{AdmittedStream, FailureCode, PodEvent, PodEvents};
 use crate::interception::{Interception, InterceptionRefusal, PairIntercepts};
@@ -35,6 +38,8 @@ struct Enforcing {
     /// nothing in it reaches the outside until it is bound. The platform's
     /// own services are reached inside the cluster, never through the pair.
     environment: Option<String>,
+    /// The policy's reference, for a bound Pod: refusals are labelled with it.
+    reference: Option<String>,
     policy: CompiledPolicy,
     revision: u32,
     /// Started with the pair: a pair's front door, its broker's hand-off
@@ -50,6 +55,7 @@ impl Enforcing {
         match assignment {
             Assignment::Unbound { .. } => Ok(Self {
                 environment: None,
+                reference: None,
                 policy: BuiltinPolicy::Locked.compile(),
                 revision: 0,
                 intercepts: PairIntercepts::Off,
@@ -75,12 +81,22 @@ impl Enforcing {
                 }
                 Ok(Self {
                     environment: Some(environment_id),
+                    reference: Some(policy.reference),
                     policy: policy.policy,
                     revision: policy.revision,
                     intercepts: interception.pair()?,
                 })
             }
         }
+    }
+
+    /// Has `sent` label refusals under this policy from now on.
+    fn sent_to(&self, sent: &mut SentPolicies) {
+        let label = self
+            .reference
+            .as_deref()
+            .map(|reference| (reference, self.revision));
+        sent.sent(self.policy.digest(), label);
     }
 
     fn event(&self) -> PodEvent {
@@ -105,7 +121,10 @@ impl Enforcing {
         }
         if self.policy.digest() != next.policy.digest() {
             Change::Replace
-        } else if self.environment != next.environment || self.revision != next.revision {
+        } else if self.environment != next.environment
+            || self.revision != next.revision
+            || self.reference != next.reference
+        {
             Change::Report
         } else {
             Change::None
@@ -148,6 +167,22 @@ struct Session<'a, P, S> {
     stop: &'a CancellationToken,
     signals: &'a Signals,
     draining: bool,
+    /// The broker's refusal reports, and what it was sent, to label them.
+    reports: Option<mpsc::Receiver<RefusalBatch>>,
+    sent: SentPolicies,
+    lost: Lost,
+}
+
+/// Refusals this pair's reports did not carry to orchestration, since it
+/// started. Each is logged with its running total, as cw-egress counts.
+#[derive(Debug, Default)]
+struct Lost {
+    /// Rows the broker's fold dropped to stay within its bound.
+    broker_rows: u64,
+    /// Refusals under a policy an unbound warm member ran.
+    unbound: u64,
+    /// Refusals under a digest this supervisor never sent the broker.
+    unknown: u64,
 }
 
 /// A shutdown during a drain is the drain's deadline.
@@ -199,6 +234,9 @@ impl<L: Launch, S: LeafSigner> Pod<L, S> {
         };
         let end = match started {
             Ok((mut pair, enforcing)) => {
+                let reports = pair.refusals();
+                let mut sent = SentPolicies::default();
+                enforcing.sent_to(&mut sent);
                 let leaves = pair.front_door_key().map(|key| {
                     Renewal::new(
                         Arc::clone(&self.signer),
@@ -218,6 +256,9 @@ impl<L: Launch, S: LeafSigner> Pod<L, S> {
                     stop: &self.stop,
                     signals: &self.signals,
                     draining: false,
+                    reports,
+                    sent,
+                    lost: Lost::default(),
                 }
                 .run()
                 .await;
@@ -291,6 +332,7 @@ impl<P: Pair, S: LeafSigner> Session<'_, P, S> {
                     Err(_) => Err(End::Told),
                 },
                 status = self.pair.status() => self.on_status(status),
+                batch = next_report(&mut self.reports) => self.file_refusals(batch).await,
                 asked = ask(self.leaves.as_ref()) => {
                     self.install(asked).await;
                     Ok(())
@@ -362,6 +404,37 @@ impl<P: Pair, S: LeafSigner> Session<'_, P, S> {
         }
     }
 
+    /// Sends the broker's report on as records, labelled with what it was
+    /// sent. What it cannot carry is counted and logged.
+    async fn file_refusals(&mut self, batch: RefusalBatch) -> Result<(), End> {
+        let broker_rows = batch.dropped;
+        let labelled = refusals::label(batch, &self.sent, now_unix_ms());
+        if broker_rows > 0 || labelled.unbound > 0 || labelled.unknown > 0 {
+            let lost = &mut self.lost;
+            lost.broker_rows = lost.broker_rows.saturating_add(broker_rows);
+            lost.unbound = lost.unbound.saturating_add(labelled.unbound);
+            lost.unknown = lost.unknown.saturating_add(labelled.unknown);
+            tracing::warn!(
+                pod_uid = %self.pod_uid,
+                broker_rows,
+                unbound = labelled.unbound,
+                unknown = labelled.unknown,
+                total_broker_rows = lost.broker_rows,
+                total_unbound = lost.unbound,
+                total_unknown = lost.unknown,
+                "egress refusals not reported: rows the broker dropped, or refused under no environment's policy or one never sent"
+            );
+        }
+        if labelled.records.is_empty() {
+            return Ok(());
+        }
+        if self.events.send(PodEvent::Records(labelled.records)).await {
+            Ok(())
+        } else {
+            Err(End::ReporterGone)
+        }
+    }
+
     async fn apply_latest(&mut self) -> Result<(), End> {
         let latest = self.changes.borrow_and_update().clone();
         let next = match latest {
@@ -388,6 +461,7 @@ impl<P: Pair, S: LeafSigner> Session<'_, P, S> {
                 }
             }
         }
+        next.sent_to(&mut self.sent);
         self.enforcing = next;
         self.report().await
     }
@@ -409,6 +483,18 @@ impl<P: Pair, S: LeafSigner> Session<'_, P, S> {
                 Err(End::Lost)
             }
         }
+    }
+}
+
+/// The broker's next refusal report; never, once its reports have ended,
+/// which the pair's status says.
+async fn next_report(reports: &mut Option<mpsc::Receiver<RefusalBatch>>) -> RefusalBatch {
+    match reports.as_mut() {
+        Some(reports) => match reports.recv().await {
+            Some(batch) => batch,
+            None => std::future::pending().await,
+        },
+        None => std::future::pending().await,
     }
 }
 

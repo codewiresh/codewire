@@ -103,8 +103,7 @@ async fn enforcement(db: &TestDatabase, pod: &str) -> anyhow::Result<Option<Enfo
 
 fn refused(destination: &str, port: u16, first: u64, last: u64, count: u64) -> ReportedRecord {
     ReportedRecord {
-        destination: destination.to_owned(),
-        destination_is_name: true,
+        destination: ReportedDestination::Name(destination.to_owned()),
         address: None,
         transport: Transport::Tcp { port },
         outcome: Some(RefusalReason::NameNotAllowed),
@@ -235,6 +234,187 @@ async fn db_records_fold_into_the_bound_environment_and_stay_bounded() -> anyhow
             record_records(&db.pool, POD, &oversized).await,
             Err(ReportError::TooManyRecords)
         ));
+        anyhow::Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[derive(sqlx::FromRow, Debug, PartialEq, Eq)]
+struct AuditRow {
+    org_id: String,
+    environment_id: String,
+    subject: String,
+    count: i64,
+    actor_type: String,
+    withheld: Option<bool>,
+}
+
+/// The refusals the audit log holds, as their subjects, oldest first.
+async fn audit_rows(db: &TestDatabase) -> anyhow::Result<Vec<AuditRow>> {
+    Ok(sqlx::query_as(
+        "SELECT org_id, environment_id, subject, count, actor_type, \
+                (detail->>'withheld')::boolean AS withheld \
+           FROM sandbox_audit_pending WHERE kind = 'refused' ORDER BY first_at, subject",
+    )
+    .fetch_all(&db.pool)
+    .await?)
+}
+
+fn ms(at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
+    Ok(u64::try_from(at.timestamp_millis())?)
+}
+
+/// SPEC.md "The refusal path": each refused record is a `refused` event of
+/// the Sandbox, under the environment its binding names and never one a
+/// report gives, its count the report's delta, folded per subject and hour.
+/// A pass is no event; a name that failed the host check is one, withheld;
+/// a Pod bound to no environment writes nothing.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_refused_records_are_the_sandboxs_refused_events_folded_per_hour() -> anyhow::Result<()>
+{
+    let db = TestDatabase::create().await?;
+    let result = async {
+        environment(&db).await?;
+        let now = chrono::Utc::now();
+        let earlier = now - chrono::TimeDelta::hours(2);
+
+        // A warm member's refusals go nowhere.
+        record_enforcement(&db.pool, POD, "runtime-a", &Enforcement::Disconnected).await?;
+        let at = ms(now)?;
+        anyhow::ensure!(
+            !record_records(&db.pool, POD, &[refused("a.example", 443, at, at, 1)]).await?
+        );
+        anyhow::ensure!(audit_rows(&db).await?.is_empty(), "unbound writes nothing");
+
+        bind(&db, POD).await?;
+        let withheld = ReportedRecord {
+            destination: ReportedDestination::Withheld,
+            ..refused("", 22, at, at, 4)
+        };
+        let pass = ReportedRecord {
+            outcome: None,
+            ..refused("passed.example", 443, at, at, 9)
+        };
+        record_records(
+            &db.pool,
+            POD,
+            &[refused("example.com", 443, at, at, 2), withheld, pass],
+        )
+        .await?;
+        // The next report's delta adds to the same hour's fold.
+        record_records(&db.pool, POD, &[refused("example.com", 443, at, at, 3)]).await?;
+        // The same subject in another hour is another fold.
+        let before = ms(earlier)?;
+        record_records(
+            &db.pool,
+            POD,
+            &[refused("example.com", 443, before, before, 1)],
+        )
+        .await?;
+
+        let row = |subject: &str, count: i64, withheld: bool| AuditRow {
+            org_id: ORG.to_owned(),
+            environment_id: ENV.to_owned(),
+            subject: subject.to_owned(),
+            count,
+            actor_type: "sandbox".to_owned(),
+            withheld: Some(withheld),
+        };
+        let rows = audit_rows(&db).await?;
+        anyhow::ensure!(
+            rows == [
+                row("example.com|tcp|443|name_not_allowed|web|2", 1, false),
+                row("(withheld)|tcp|22|name_not_allowed|web|2", 4, true),
+                row("example.com|tcp|443|name_not_allowed|web|2", 5, false),
+            ],
+            "{rows:#?}"
+        );
+        // The records table names every row, so it keeps no withheld one.
+        let named: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM environment_egress_records WHERE destination = ''",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        anyhow::ensure!(named == 0);
+        anyhow::Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// SPEC.md "Sandbox audit log": a refusal names its policy as the read
+/// words it. A `platform:id:` reference is looked up in the Sandbox's own
+/// organization; one it doesn't hold, another organization's included, is
+/// recorded with no name, its revision kept, and never with the id.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_refusal_under_a_stored_policy_id_names_the_organizations_policy() -> anyhow::Result<()>
+{
+    const OTHER_ORG: &str = "org-reports-other";
+    const MINE: &str = "6b1f7c55-2a4f-4b8e-9d4b-1f2e3d4c5b61";
+    const THEIRS: &str = "6b1f7c55-2a4f-4b8e-9d4b-1f2e3d4c5b62";
+    const NOBODYS: &str = "6b1f7c55-2a4f-4b8e-9d4b-1f2e3d4c5b63";
+    let db = TestDatabase::create().await?;
+    let result = async {
+        environment(&db).await?;
+        db.organization(OTHER_ORG).await?;
+        for (id, org, name) in [
+            (MINE, ORG, "team-docs"),
+            (THEIRS, OTHER_ORG, "their-secret"),
+        ] {
+            sqlx::query(
+                "INSERT INTO platform_network_policies (id, org_id, name, current_revision) \
+                 VALUES ($1, $2, $3, 2)",
+            )
+            .bind(id)
+            .bind(org)
+            .bind(name)
+            .execute(&db.pool)
+            .await?;
+        }
+        bind(&db, POD).await?;
+        let at = u64::try_from(chrono::Utc::now().timestamp_millis())?;
+        let under = |destination: &str, id: &str| ReportedRecord {
+            policy_reference: format!("platform:id:{id}"),
+            ..refused(destination, 443, at, at, 1)
+        };
+        record_records(
+            &db.pool,
+            POD,
+            &[
+                under("mine.example", MINE),
+                under("theirs.example", THEIRS),
+                under("nobodys.example", NOBODYS),
+            ],
+        )
+        .await?;
+        let rows: Vec<(String, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT detail->>'destination', detail->>'policy', (detail->>'revision')::bigint \
+               FROM sandbox_audit_pending WHERE kind = 'refused' ORDER BY 1",
+        )
+        .fetch_all(&db.pool)
+        .await?;
+        anyhow::ensure!(
+            rows == [
+                (
+                    "mine.example".to_owned(),
+                    Some("team-docs".to_owned()),
+                    Some(2)
+                ),
+                ("nobodys.example".to_owned(), None, Some(2)),
+                ("theirs.example".to_owned(), None, Some(2)),
+            ],
+            "{rows:?}"
+        );
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sandbox_audit_pending \
+              WHERE detail::text LIKE '%their-secret%' OR detail::text LIKE '%platform:id:%'",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        anyhow::ensure!(leaked == 0, "no other organization's name and no id");
         anyhow::Ok(())
     }
     .await;

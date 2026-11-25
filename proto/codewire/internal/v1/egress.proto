@@ -220,6 +220,9 @@ message EgressRecord {
   oneof destination {
     string name = 1;
     string address_only = 2;
+    // A name that failed the host check, kept for its count, never its
+    // text. Only true is sent.
+    bool withheld = 13;
   }
   // The address of the latest observation, when it had one.
   string address = 3;

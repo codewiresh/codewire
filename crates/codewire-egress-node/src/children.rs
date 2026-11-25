@@ -26,6 +26,10 @@ pub const INTERCEPT_HANDOFF_FLAG: &str = "--intercept-handoff";
 /// After a broker's Pod UID: it refuses intercepted dials, for a Pod whose
 /// bindings no front door serves.
 pub const INTERCEPT_REFUSE_FLAG: &str = "--intercept-refuse";
+/// A broker's last flag: it reports its refusals on its control channel,
+/// whose every frame the supervisor reads (SPEC.md "The refusal path").
+/// Without it the broker sends nothing there but acknowledgements.
+pub const REPORT_REFUSALS_FLAG: &str = "--report-refusals";
 
 /// Exit status of a child whose command line is not one the supervisor
 /// writes: the conventional status for a usage error.
@@ -36,6 +40,7 @@ enum Child {
     Broker {
         pod_uid: Uuid,
         intercepts: BrokerIntercepts,
+        report_refusals: bool,
     },
     Worker(Uuid),
     FrontDoor(Uuid),
@@ -55,27 +60,43 @@ fn child(arguments: impl IntoIterator<Item = OsString>) -> Option<Result<Child, 
         }
         _ => None,
     };
-    let extra = match (arguments.next(), arguments.next()) {
-        (None, _) => Some(None),
-        (Some(flag), None) => Some(Some(flag)),
-        (Some(_), Some(_)) => None,
-    };
-    let broker_intercepts = |flag: Option<OsString>| match flag {
-        None => Some(BrokerIntercepts::Off),
-        Some(flag) if flag == INTERCEPT_HANDOFF_FLAG => Some(BrokerIntercepts::HandOff),
-        Some(flag) if flag == INTERCEPT_REFUSE_FLAG => Some(BrokerIntercepts::Refuse),
-        Some(_) => None,
-    };
-    Some(match (word, pod_uid, extra) {
-        (BROKER_WORD, Some(pod_uid), Some(flag)) => broker_intercepts(flag)
-            .map(|intercepts| Child::Broker {
-                pod_uid,
-                intercepts,
-            })
-            .ok_or(()),
-        (WORKER_WORD, Some(pod_uid), Some(None)) => Ok(Child::Worker(pod_uid)),
-        (FRONT_DOOR_WORD, Some(pod_uid), Some(None)) => Ok(Child::FrontDoor(pod_uid)),
+    // No child takes more than two flags after its Pod UID.
+    let flags: Vec<OsString> = arguments.take(3).collect();
+    Some(match (word, pod_uid) {
+        (BROKER_WORD, Some(pod_uid)) => broker(pod_uid, &flags),
+        (WORKER_WORD, Some(pod_uid)) if flags.is_empty() => Ok(Child::Worker(pod_uid)),
+        (FRONT_DOOR_WORD, Some(pod_uid)) if flags.is_empty() => Ok(Child::FrontDoor(pod_uid)),
         _ => Err(()),
+    })
+}
+
+/// A broker's flags after its Pod UID: what it does with intercepted dials,
+/// then whether it reports its refusals, each at most once and in that order.
+fn broker(pod_uid: Uuid, flags: &[OsString]) -> Result<Child, ()> {
+    let mut flags = flags.iter().peekable();
+    let intercepts = if flags
+        .next_if(|flag| *flag == INTERCEPT_HANDOFF_FLAG)
+        .is_some()
+    {
+        BrokerIntercepts::HandOff
+    } else if flags
+        .next_if(|flag| *flag == INTERCEPT_REFUSE_FLAG)
+        .is_some()
+    {
+        BrokerIntercepts::Refuse
+    } else {
+        BrokerIntercepts::Off
+    };
+    let report_refusals = flags
+        .next_if(|flag| *flag == REPORT_REFUSALS_FLAG)
+        .is_some();
+    if flags.next().is_some() {
+        return Err(());
+    }
+    Ok(Child::Broker {
+        pod_uid,
+        intercepts,
+        report_refusals,
     })
 }
 
@@ -98,9 +119,15 @@ pub fn run_child(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCo
             Child::Broker {
                 pod_uid,
                 intercepts,
-            } => run_inherited_egress_broker_intercepting(pod_uid, HOSTED_GENERATION, intercepts)
-                .await
-                .map_err(|error| error.exit_code()),
+                report_refusals,
+            } => run_inherited_egress_broker_intercepting(
+                pod_uid,
+                HOSTED_GENERATION,
+                intercepts,
+                report_refusals,
+            )
+            .await
+            .map_err(|error| error.exit_code()),
             Child::Worker(pod_uid) => run_hosted_worker(pod_uid)
                 .await
                 .map_err(|error| error.exit_code()),
@@ -144,7 +171,8 @@ mod tests {
             child(arguments(&["cw-egress", BROKER_WORD, POD_UID_FLAG, POD])),
             Some(Ok(Child::Broker {
                 pod_uid: pod,
-                intercepts: BrokerIntercepts::Off
+                intercepts: BrokerIntercepts::Off,
+                report_refusals: false,
             }))
         );
         assert_eq!(
@@ -157,7 +185,8 @@ mod tests {
             ])),
             Some(Ok(Child::Broker {
                 pod_uid: pod,
-                intercepts: BrokerIntercepts::HandOff
+                intercepts: BrokerIntercepts::HandOff,
+                report_refusals: false,
             }))
         );
         assert_eq!(
@@ -170,7 +199,8 @@ mod tests {
             ])),
             Some(Ok(Child::Broker {
                 pod_uid: pod,
-                intercepts: BrokerIntercepts::Refuse
+                intercepts: BrokerIntercepts::Refuse,
+                report_refusals: false,
             }))
         );
         assert_eq!(
@@ -186,6 +216,74 @@ mod tests {
             ])),
             Some(Ok(Child::FrontDoor(pod)))
         );
+    }
+
+    /// The broker reports its refusals only when the supervisor asks, after
+    /// any interception flag; without the flag it reports none.
+    #[test]
+    fn a_broker_reports_refusals_only_when_its_command_line_asks() {
+        let pod = Uuid::parse_str(POD).unwrap();
+        for (flags, intercepts) in [
+            (&[][..], BrokerIntercepts::Off),
+            (&[INTERCEPT_HANDOFF_FLAG][..], BrokerIntercepts::HandOff),
+            (&[INTERCEPT_REFUSE_FLAG][..], BrokerIntercepts::Refuse),
+        ] {
+            let mut line = vec!["cw-egress", BROKER_WORD, POD_UID_FLAG, POD];
+            line.extend_from_slice(flags);
+            line.push(REPORT_REFUSALS_FLAG);
+            assert_eq!(
+                child(arguments(&line)),
+                Some(Ok(Child::Broker {
+                    pod_uid: pod,
+                    intercepts,
+                    report_refusals: true,
+                })),
+                "{line:?}"
+            );
+        }
+        for refused in [
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                REPORT_REFUSALS_FLAG,
+                INTERCEPT_REFUSE_FLAG,
+            ][..],
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                REPORT_REFUSALS_FLAG,
+                REPORT_REFUSALS_FLAG,
+            ],
+            &[
+                "cw-egress",
+                WORKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                REPORT_REFUSALS_FLAG,
+            ],
+            &[
+                "cw-egress",
+                FRONT_DOOR_WORD,
+                POD_UID_FLAG,
+                POD,
+                REPORT_REFUSALS_FLAG,
+            ],
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_HANDOFF_FLAG,
+                REPORT_REFUSALS_FLAG,
+                "extra",
+            ],
+        ] {
+            assert_eq!(child(arguments(refused)), Some(Err(())), "{refused:?}");
+        }
     }
 
     #[test]

@@ -238,6 +238,12 @@ impl Pair for ProcessPair {
         self.broker.replace(policy).await
     }
 
+    fn refusals(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<codewire_egress_broker::refusals::RefusalBatch>> {
+        self.broker.refusals()
+    }
+
     async fn request_drain(&mut self) -> Result<(), StartError> {
         self.worker.request_drain().await
     }

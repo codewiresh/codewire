@@ -430,16 +430,38 @@ async fn find_policy(
             ("id", id)
         }
     };
-    let row: Option<(String, String, i32)> = sqlx::query_as(&format!(
+    let row = policy_row(connection, org_id, column, key, lock).await?;
+    let (id, name, revision) = row.ok_or_else(not_found)?;
+    Ok((id, name, u32::try_from(revision).map_err(|_| corrupt())?))
+}
+
+async fn policy_row(
+    connection: &mut PgConnection,
+    org_id: &str,
+    column: &str,
+    key: &str,
+    lock: &str,
+) -> Result<Option<(String, String, i32)>, sqlx::Error> {
+    sqlx::query_as(&format!(
         "SELECT id, name, current_revision FROM platform_network_policies \
          WHERE org_id = $1 AND {column} = $2 {lock}"
     ))
     .bind(org_id)
     .bind(key)
     .fetch_optional(&mut *connection)
-    .await?;
-    let (id, name, revision) = row.ok_or_else(not_found)?;
-    Ok((id, name, u32::try_from(revision).map_err(|_| corrupt())?))
+    .await
+}
+
+/// The name of `org_id`'s stored policy `id`, or `None` when the
+/// organization has no such policy, another organization's included.
+pub(crate) async fn stored_policy_name(
+    connection: &mut PgConnection,
+    org_id: &str,
+    id: &codewire_egress_policy::reference::PolicyId,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(policy_row(connection, org_id, "id", id.as_str(), "")
+        .await?
+        .map(|(_, name, _)| name))
 }
 
 /// One revision of the policy `id`.

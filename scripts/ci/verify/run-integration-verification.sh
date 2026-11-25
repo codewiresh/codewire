@@ -1126,6 +1126,12 @@ database_lane_orchestration() {
       'audit::store_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "Sandbox audit log refusal subject bound" sandbox-audit-bound \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit::bound_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "Sandbox audit log read matrix" sandbox-audit-read \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

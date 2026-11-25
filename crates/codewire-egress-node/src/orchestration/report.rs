@@ -89,7 +89,8 @@ impl Orchestration {
 }
 
 /// One folded record as orchestration takes it, or `None` for one it would
-/// refuse (a policy revision past its bound) or that has no name to send.
+/// refuse (a policy revision past its bound). A withheld name crosses as
+/// withheld, with its count and never its text.
 pub fn wire_record(record: &EgressRecord) -> Option<WireRecord> {
     let revision = u32::try_from(record.policy.revision)
         .ok()
@@ -102,7 +103,7 @@ pub fn wire_record(record: &EgressRecord) -> Option<WireRecord> {
     let destination = match &record.destination {
         Destination::Name(name) => WireDestination::Name(name.clone()),
         Destination::Address(address) => WireDestination::AddressOnly(address.to_string()),
-        Destination::Withheld => return None,
+        Destination::Withheld => WireDestination::Withheld(true),
     };
     Some(WireRecord {
         destination: Some(destination),

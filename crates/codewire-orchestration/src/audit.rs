@@ -5,6 +5,7 @@
 //! moves what is finished and expires what is old.
 
 pub mod allowed_since;
+mod bound;
 mod event;
 pub mod read;
 mod store;
@@ -15,6 +16,8 @@ pub use event::{
 };
 pub use store::{AuditError, Event, OpenSession, close_session, open_session, record};
 
+#[cfg(test)]
+mod bound_database_tests;
 #[cfg(test)]
 mod event_tests;
 #[cfg(test)]

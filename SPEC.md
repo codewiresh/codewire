@@ -1490,9 +1490,9 @@ unaffected.
     addresses passes. Every UDP send other than DNS to the environment's
     resolver is refused as `udp_not_carried`, and every send to a protected
     address is refused, so traffic inside the tunnel rides DERP over 443.
-    Each refusal is recorded by the Sandbox's egress broker, but a hosted
-    broker does not report its refusals yet, so no log shows them (#4000).
-    The Sandbox audit log (#6189) is where they will show.
+    Each refusal is recorded by the Sandbox's egress broker, which reports
+    it to the Sandbox audit log (#6189) as a `refused` event. Reading that
+    log is not shipped yet.
   - The control server must be at a public address, or the join is refused as
     protected.
   - The protected-address rule is unchanged because it is enforced on these
@@ -1827,8 +1827,9 @@ it is false. Where it is true, it says that UDP other than DNS is blocked.
 Target, not shipped (#6226): the dashboard reads it and says the same.
 
 The records cw-egress reports of what a Pod reached are folded per
-environment and kept to the most recent 1,000. The target reader of these
-records is the Sandbox audit log (#6189, below). Hosted egress is off by default
+environment and kept to the most recent 1,000. Each refused one is also
+written to the Sandbox audit log as a `refused` event (#6189, below), which
+no read shows yet. Hosted egress is off by default
 (`CODEWIRE_HOSTED_EGRESS_ENABLED`) and cw-egress does not run yet, so every
 hosted environment reads `NOT_ENFORCED` today, and its egress is bounded only
 by the `NetworkPolicy` above. The journey is `hosted-enforcement` in
@@ -1946,11 +1947,16 @@ refusals are in `cw --local policy log` ("Networking and egress").
   - for exec and preview access, the actor and the client IP.
 
   Every other event is one event. A fold never spans two hours.
-- **Bounds.** At most 1,000 subjects fold for one Sandbox, kind and hour,
-  #6144's bound. Past it, the hour's other subjects add to one overflow
-  event for that kind, which counts events and subjects. A Sandbox that
-  floods refusals raises counts, never the number of rows past the bound or
-  the rate of writes.
+- **Bounds.** At most 1,000 `refused` subjects fold for one Sandbox and
+  hour, #6144's bound. Past it, the hour's other subjects add to one
+  overflow event, which counts events and subjects. The overflow counts
+  its subjects exactly up to 1,000; past that it says at least 1,000. A
+  Sandbox that floods refusals raises counts, never the number of rows past
+  the bound or the rate of writes. Only refusals are bounded this way,
+  because only their subject is a destination the workload chooses. A
+  credential use's host is one its credential's routes serve, and an exec
+  or preview fold's actor is a signed-in person with their client IP, so
+  what creates those folds bounds them.
 - **The host check.** Every name the workload chooses passes #6144's check
   before it is stored or shown: ASCII only (an international name in its
   IDNA form), at most 253 characters, and no control or escape character.
@@ -1964,6 +1970,9 @@ refusals are in `cw --local policy log` ("Networking and egress").
   through `ReportRecords`, at most every 5 seconds and 256 records a call.
   Orchestration takes the environment from its own workspace binding, never
   from the report. A record from a Pod bound to no environment is dropped.
+  cw-egress starts each broker from its own executable, and asks it for
+  these reports on its command line, so a broker sends them only to a
+  cw-egress that reads them.
 - **The other sources.** Orchestration records access where it grants it,
   lifecycle where it acts or reconciles, and policy where it stores a
   selection, a revision or an enforcement status. The credential service

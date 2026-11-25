@@ -887,17 +887,38 @@ impl EgressService for EgressConnectService {
         if request.records.len() > reports::MAX_RECORDS_PER_REPORT {
             return Err(invalid_report());
         }
-        let records = request
+        let parsed = request
             .records
             .iter()
             .map(wire::record)
             .collect::<Option<Vec<_>>>()
             .ok_or_else(invalid_report)?;
+        let mut unknown = 0_u64;
+        let records: Vec<_> = parsed
+            .into_iter()
+            .filter_map(|parsed| match parsed {
+                wire::Parsed::Record(record) => Some(record),
+                wire::Parsed::UnknownReason { count } => {
+                    unknown = unknown.saturating_add(count);
+                    None
+                }
+            })
+            .collect();
+        if unknown > 0 {
+            tracing::warn!(
+                pod_uid = %guest.uid,
+                refusals = unknown,
+                "egress records dropped: a refusal reason this orchestration doesn't know"
+            );
+        }
         match reports::record_records(&self.state.pool, &guest.uid, &records).await {
             // An unbound warm member has no log; its records are dropped.
             Ok(_) => connectrpc::Response::ok(ReportRecordsResponse::default()),
             Err(reports::ReportError::Store(error)) => {
                 Err(unavailable("store the egress records", error))
+            }
+            Err(reports::ReportError::Audit(error)) => {
+                Err(unavailable("record the refusals in the audit log", error))
             }
             Err(_) => Err(invalid_report()),
         }

@@ -158,9 +158,10 @@ class ReportRecordsResponse(_message.Message):
     def __init__(self) -> None: ...
 
 class EgressRecord(_message.Message):
-    __slots__ = ("name", "address_only", "address", "transport", "port", "refusal", "policy_reference", "policy_revision", "policy_digest", "first_seen_unix_ms", "last_seen_unix_ms", "count")
+    __slots__ = ("name", "address_only", "withheld", "address", "transport", "port", "refusal", "policy_reference", "policy_revision", "policy_digest", "first_seen_unix_ms", "last_seen_unix_ms", "count")
     NAME_FIELD_NUMBER: _ClassVar[int]
     ADDRESS_ONLY_FIELD_NUMBER: _ClassVar[int]
+    WITHHELD_FIELD_NUMBER: _ClassVar[int]
     ADDRESS_FIELD_NUMBER: _ClassVar[int]
     TRANSPORT_FIELD_NUMBER: _ClassVar[int]
     PORT_FIELD_NUMBER: _ClassVar[int]
@@ -173,6 +174,7 @@ class EgressRecord(_message.Message):
     COUNT_FIELD_NUMBER: _ClassVar[int]
     name: str
     address_only: str
+    withheld: bool
     address: str
     transport: EgressTransport
     port: int
@@ -183,7 +185,7 @@ class EgressRecord(_message.Message):
     first_seen_unix_ms: int
     last_seen_unix_ms: int
     count: int
-    def __init__(self, name: _Optional[str] = ..., address_only: _Optional[str] = ..., address: _Optional[str] = ..., transport: _Optional[_Union[EgressTransport, str]] = ..., port: _Optional[int] = ..., refusal: _Optional[str] = ..., policy_reference: _Optional[str] = ..., policy_revision: _Optional[int] = ..., policy_digest: _Optional[bytes] = ..., first_seen_unix_ms: _Optional[int] = ..., last_seen_unix_ms: _Optional[int] = ..., count: _Optional[int] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., address_only: _Optional[str] = ..., withheld: _Optional[bool] = ..., address: _Optional[str] = ..., transport: _Optional[_Union[EgressTransport, str]] = ..., port: _Optional[int] = ..., refusal: _Optional[str] = ..., policy_reference: _Optional[str] = ..., policy_revision: _Optional[int] = ..., policy_digest: _Optional[bytes] = ..., first_seen_unix_ms: _Optional[int] = ..., last_seen_unix_ms: _Optional[int] = ..., count: _Optional[int] = ...) -> None: ...
 
 class FrontDoorSessionRequest(_message.Message):
     __slots__ = ("open", "bridge")

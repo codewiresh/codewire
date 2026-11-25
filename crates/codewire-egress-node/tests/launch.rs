@@ -27,9 +27,12 @@ use codewire_egress_node::supervisor::{
 };
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+use codewire_egress_policy::lease::RefusalReason;
+use codewire_egress_policy::record::{Destination, Transport};
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
 use codewire_egress_worker::hosted::HOSTED_GENERATION;
 use codewire_network_session::guest::{GuestSession, authenticate_guest};
+use codewire_network_session::hosted::{HOSTED_GATEWAY, HOSTED_GUEST_ADDRESS};
 use codewire_network_session::{NetworkKey, SelfCheck, SelfCheckFailure};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -66,6 +69,10 @@ const TESTS: &[(&str, Test)] = &[
     ("a_guest_that_drops_its_stream_ends_the_pair", || {
         Box::pin(a_guest_that_drops_its_stream_ends_the_pair())
     }),
+    (
+        "a_brokers_refusals_reach_its_supervisor_alongside_its_acknowledgements",
+        || Box::pin(a_brokers_refusals_reach_its_supervisor_alongside_its_acknowledgements()),
+    ),
     ("a_broker_that_dies_ends_the_pair", || {
         Box::pin(a_broker_that_dies_ends_the_pair())
     }),
@@ -325,7 +332,7 @@ async fn a_pair_is_two_children_of_the_image_that_take_a_new_policy_and_end_toge
     assert_eq!(
         commands,
         [
-            format!("cw-egress __egress-broker --pod-uid {POD} "),
+            format!("cw-egress __egress-broker --pod-uid {POD} --report-refusals "),
             format!("cw-egress __egress-worker --pod-uid {POD} "),
         ]
     );
@@ -389,6 +396,104 @@ async fn a_guest_that_drops_its_stream_ends_the_pair() {
     drop(guest);
     assert_eq!(next(&mut pair).await, PairStatus::Ended);
 
+    pair.end().await;
+    no_child_is_left().await;
+}
+
+/// A DNS question for `name` from the guest to its resolver, the netstack.
+fn dns_question(name: &str) -> Vec<u8> {
+    let mut dns = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in name.split('.') {
+        dns.push(u8::try_from(label.len()).unwrap());
+        dns.extend_from_slice(label.as_bytes());
+    }
+    dns.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let length = 8 + dns.len();
+    let mut udp = vec![0_u8; 8];
+    udp[..2].copy_from_slice(&53_000_u16.to_be_bytes());
+    udp[2..4].copy_from_slice(&53_u16.to_be_bytes());
+    udp[4..6].copy_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+    udp.extend_from_slice(&dns);
+    let mut pseudo = HOSTED_GUEST_ADDRESS.octets().to_vec();
+    pseudo.extend_from_slice(&HOSTED_GATEWAY.octets());
+    pseudo.extend_from_slice(&[0, 17]);
+    pseudo.extend_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+    pseudo.extend_from_slice(&udp);
+    let udp_checksum = match checksum(&pseudo) {
+        0 => u16::MAX,
+        sum => sum,
+    };
+    udp[6..8].copy_from_slice(&udp_checksum.to_be_bytes());
+    let mut packet = vec![0_u8; 20];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&u16::try_from(20 + length).unwrap().to_be_bytes());
+    packet[6] = 0x40;
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&HOSTED_GUEST_ADDRESS.octets());
+    packet[16..20].copy_from_slice(&HOSTED_GATEWAY.octets());
+    let header = checksum(&packet);
+    packet[10..12].copy_from_slice(&header.to_be_bytes());
+    packet.extend_from_slice(&udp);
+    packet
+}
+
+fn checksum(bytes: &[u8]) -> u16 {
+    let mut sum: u32 = bytes
+        .chunks(2)
+        .map(|chunk| u32::from(u16::from_be_bytes([chunk[0], *chunk.get(1).unwrap_or(&0)])))
+        .sum();
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !u16::try_from(sum).unwrap()
+}
+
+/// SPEC.md "The refusal path": the broker folds what it refuses and sends
+/// it up its control channel, and a policy replacement's acknowledgement
+/// still comes back on the same channel, before and after a report.
+async fn a_brokers_refusals_reach_its_supervisor_alongside_its_acknowledgements() {
+    let locked = BuiltinPolicy::Locked.compile();
+    let (pair, guest) = start(locked.clone(), key()).await;
+    let mut pair = pair.unwrap();
+    let mut guest = guest.unwrap();
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+    let mut reports = pair.refusals().expect("the broker's reports");
+    assert!(pair.refusals().is_none(), "taken once");
+
+    for _ in 0..3 {
+        let question = guest
+            .session
+            .encode_packet(&dns_question("refused.example.com"))
+            .unwrap();
+        guest.stream.write_all(&question).await.unwrap();
+    }
+    let report = tokio::time::timeout(PATIENCE, reports.recv())
+        .await
+        .expect("a report within the broker's second")
+        .expect("the reader is running");
+    let total: u64 = report.rows.iter().map(|row| row.count).sum();
+    let row = &report.rows[0];
+    assert_eq!(
+        (
+            row.destination.clone(),
+            row.transport,
+            row.reason,
+            row.policy_digest
+        ),
+        (
+            Destination::Name("refused.example.com".into()),
+            Transport::Dns,
+            RefusalReason::NameNotAllowed,
+            locked.digest()
+        )
+    );
+    assert!((1..=3).contains(&total), "{report:?}");
+
+    let open = BuiltinPolicy::Open.compile();
+    assert_eq!(pair.replace(&open).await, Ok(open.digest()));
+    assert_eq!(pair.replace(&locked).await, Ok(locked.digest()));
     pair.end().await;
     no_child_is_left().await;
 }
@@ -655,7 +760,9 @@ async fn a_pair_that_intercepts_runs_a_confined_front_door_that_takes_its_leaves
     assert_eq!(
         commands,
         [
-            format!("cw-egress __egress-broker --pod-uid {POD} --intercept-handoff "),
+            format!(
+                "cw-egress __egress-broker --pod-uid {POD} --intercept-handoff --report-refusals "
+            ),
             format!("cw-egress __egress-front-door --pod-uid {POD} "),
             format!("cw-egress __egress-worker --pod-uid {POD} "),
         ]
@@ -718,7 +825,9 @@ async fn a_pair_that_refuses_its_bindings_runs_a_refusing_broker_and_no_front_do
     assert_eq!(
         commands,
         [
-            format!("cw-egress __egress-broker --pod-uid {POD} --intercept-refuse "),
+            format!(
+                "cw-egress __egress-broker --pod-uid {POD} --intercept-refuse --report-refusals "
+            ),
             format!("cw-egress __egress-worker --pod-uid {POD} "),
         ]
     );

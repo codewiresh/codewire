@@ -421,15 +421,17 @@ pub async fn run_inherited_egress_broker(
     run_broker(environment_id, generation, intercepts, true).await
 }
 
-/// [`run_inherited_egress_broker`], with what it does with intercepted dials,
-/// for a control channel that carries only acknowledgements: it reports no
-/// refusals.
+/// [`run_inherited_egress_broker`], with what it does with intercepted dials.
+/// It reports its refusals only with `report_refusals`, which its runner
+/// asks for only when it reads every broker frame: a runner that reads
+/// acknowledgements alone ends the channel at the first report.
 pub async fn run_inherited_egress_broker_intercepting(
     environment_id: Uuid,
     generation: u64,
     intercepts: BrokerIntercepts,
+    report_refusals: bool,
 ) -> Result<(), EgressBrokerProcessError> {
-    run_broker(environment_id, generation, intercepts, false).await
+    run_broker(environment_id, generation, intercepts, report_refusals).await
 }
 
 /// The broker process. With `report_refusals`, it folds its refusals and
