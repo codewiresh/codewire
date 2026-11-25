@@ -1550,10 +1550,10 @@ run_paths_case billing_contract pull_request refs/pull/8/head false \
   'policy rust rust_pkg_codewire_billing service_billing service_integration' \
   crates/codewire-billing/src/connect/billing.rs
 run_paths_case retired_billing_driver_deletion pull_request refs/pull/800/head false \
-  'policy service_billing service_integration' \
+  'policy security security_go service_billing service_integration' \
   tests/contract/billing/billing_test.go
 run_paths_case retired_file_contract_deletion pull_request refs/pull/80/head false \
-  'policy' \
+  'policy security security_go' \
   tests/contract/file/file_connect_test.go
 run_paths_case idp_service pull_request refs/pull/81/head false \
   'policy rust rust_pkg_codewire_idp service_idp service_integration' \
@@ -1562,9 +1562,9 @@ run_paths_case coordinator_service pull_request refs/pull/82/head false \
   'policy service_coordinator service_integration transport transport_pkg_codewire_coordinator' \
   crates/codewire-coordinator/src/connect.rs
 run_paths_case dormant_coordinator_driver pull_request refs/pull/821/head false \
-  'policy' tests/contract/coordinator/connect_test.go
+  'policy security security_go' tests/contract/coordinator/connect_test.go
 run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false \
-  'policy service_billing service_connectcore service_integration service_orchestration' \
+  'policy security security_go service_billing service_connectcore service_integration service_orchestration' \
   tests/contract/connectcore/connectcore_test.go
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
   'database policy security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
@@ -1678,10 +1678,10 @@ run_paths_case go_tailnet pull_request refs/pull/10/head false \
   'go_support go_tailnet policy' \
   libs/tailnet/peer.go
 run_paths_case tailscale_golden pull_request refs/pull/10/head false \
-  'go_support go_tailnet policy transport transport_pkg_codewire_tailnet' \
+  'go_support go_tailnet policy security security_go transport transport_pkg_codewire_tailnet' \
   tests/contract/tailscalegolden/golden_test.go tests/fixtures/tailnet/tailscale_golden.json
 run_paths_case derp_contract pull_request refs/pull/101/head false \
-  'policy transport transport_derp_contract transport_pkg_codewire_derp' \
+  'policy security security_go transport transport_derp_contract transport_pkg_codewire_derp' \
   tests/contract/derp/derp_test.go
 run_paths_case proto pull_request refs/pull/11/head false \
   'contracts contracts_proto go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
@@ -1736,7 +1736,7 @@ run_paths_case proto_retirement_ledger_transition pull_request refs/pull/1142/he
   'contracts contracts_proto policy security security_js' \
   scripts/checks/contracts/proto-retirements.sha256
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
-  'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
+  'contracts contracts_proto go_consumer_interop go_support policy security security_go' libs/gen-go/codewire/v1/api_key.pb.go
 run_paths_case retired_generated_connect_oracle_go pull_request refs/pull/1110/head false \
   'policy' \
   apps/api/gen/coordinator/v1/coordinator.pb.go
@@ -1767,7 +1767,7 @@ run_paths_case retired_openapi_deletions pull_request refs/pull/1175/head false 
 run_paths_case mesh_policy_guard pull_request refs/pull/1171/head false \
   'policy security security_js' scripts/checks/contracts/mesh-final-surface-policy.json
 run_paths_case mesh_policy_go_sdk pull_request refs/pull/1172/head false \
-  'go_consumer_interop go_support policy sdk_go security security_js' \
+  'go_consumer_interop go_support policy sdk_go security security_go security_js' \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   libs/sdk-go/mesh_networks.go
 run_paths_case mesh_policy_rust_client pull_request refs/pull/1173/head false \
@@ -1869,7 +1869,18 @@ run_paths_case vendored_bundle_manifest pull_request refs/pull/1202/head false \
 run_paths_case vendored_image_manifest pull_request refs/pull/1203/head false \
   'policy security security_js' .supplychain/vendor-images.json
 run_paths_case sdk_go pull_request refs/pull/13/head false \
-  'go_consumer_interop go_support policy sdk_go' libs/sdk-go/client.go
+  'go_consumer_interop go_support policy sdk_go security security_go' libs/sdk-go/client.go
+# run_security's staticcheck, govulncheck and gosec cover every Go module in
+# GO_MODULE_DIRS, so the selector's security case must name each one's Go
+# sources: a libs/sdk-go change once reached main without staticcheck.
+go_modules="$(sed -n '/^GO_MODULE_DIRS=(/,/^)/s/^  \([^ ]*\)$/\1/p' "$ROOT/scripts/ci/verify/run-product-verification.sh")"
+[ -n "$go_modules" ] || { echo "::error::no GO_MODULE_DIRS in run-product-verification.sh" >&2; exit 1; }
+for go_module in $go_modules; do
+  grep -Eq "^[[:space:]]*([^)]*\\|)?${go_module//\//\\/}/\*\.go[|)]" "$SELECTOR" || {
+    echo "::error::the selector does not select the security family for $go_module's Go sources" >&2
+    exit 1
+  }
+done
 run_paths_case go_consumer_interop_harness pull_request refs/pull/131/head false \
   'go_consumer_interop go_support policy rust rust_pkg_codewire_server_core' \
   crates/codewire-server-core/tests/go_consumer_interop.rs
@@ -2349,7 +2360,7 @@ run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head f
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy security security_js' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'docs go_consumer_interop go_support policy release confidential_script_tests dev_smoke_script_tests rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web rust_pkg_codewire_dashboard_web' \
+  'confidential_script_tests dev_smoke_script_tests docs go_consumer_interop go_support policy release rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_dashboard_web rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_go security_js service_integration service_orchestration service_temporal web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \

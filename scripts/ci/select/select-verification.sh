@@ -1525,6 +1525,19 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      # The security family's staticcheck, govulncheck and gosec run over every
+      # Go module (run_security's GO_MODULE_DIRS), so a Go source or module
+      # file there selects it; a libs/sdk-go change once reached main without
+      # staticcheck. Recognition stays with the cases below.
+      libs/sdk-go/*.go|libs/sdk-go/go.mod|libs/sdk-go/go.sum|\
+      libs/gen-go/*.go|libs/gen-go/go.mod|libs/gen-go/go.sum|\
+      tests/contract/*.go)
+        select_token security
+        select_token security_go
+        ;;
+    esac
+
+    case "$path" in
       libs/sdk-go/*)
         select_token sdk_go
         select_token go_support
