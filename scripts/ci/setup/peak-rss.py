@@ -10,12 +10,37 @@ is a floor, not an exact peak. COMMAND's exit status is this script's.
 """
 
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 
 PAGE = os.sysconf("SC_PAGE_SIZE")
+JOBSERVER_FLAG = re.compile(r"--jobserver-(?:auth|fds)=(\d+),(\d+)")
+
+
+def jobserver_fds():
+    """Return open pipe descriptors named by GNU make / Cargo jobserver flags.
+
+    subprocess.Popen defaults to close_fds=True, which closes the descriptors
+    jobserver.py opened for Cargo and forces every leg back to its small
+    CARGO_BUILD_JOBS. Pass only the jobserver descriptors through so unrelated
+    descriptors (such as flock handles) stay closed.
+    """
+    fds = set()
+    for var in ("CARGO_MAKEFLAGS", "MAKEFLAGS"):
+        flags = os.environ.get(var, "")
+        for match in JOBSERVER_FLAG.finditer(flags):
+            for raw in match.groups():
+                fd = int(raw)
+                if fd > 2:
+                    try:
+                        os.fstat(fd)
+                    except OSError:
+                        continue
+                    fds.add(fd)
+    return sorted(fds)
 
 
 def tree_rss(root):
@@ -47,7 +72,7 @@ def main(argv):
         print("usage: peak-rss.py OUT -- COMMAND...", file=sys.stderr)
         return 2
     out, command = argv[1], argv[3:]
-    child = subprocess.Popen(command)
+    child = subprocess.Popen(command, pass_fds=jobserver_fds())
     peak = 0
     done = threading.Event()
 

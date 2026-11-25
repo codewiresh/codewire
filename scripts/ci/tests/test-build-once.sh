@@ -668,6 +668,13 @@ else
 fi
 echo "archive-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "archive-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
+if [[ "${CARGO_MAKEFLAGS:-}" =~ --jobserver-auth=([0-9]+),([0-9]+) ]]; then
+  if [ -e "/proc/$$/fd/${BASH_REMATCH[1]}" ] && [ -e "/proc/$$/fd/${BASH_REMATCH[2]}" ]; then
+    echo "archive-jobserver-fds open" >> "$LEGS_STATE/times"
+  else
+    echo "archive-jobserver-fds closed" >> "$LEGS_STATE/times"
+  fi
+fi
 while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; cp "${0%/*}/archive.tar.zst" "$1"; }; shift; done
 CARGO
 chmod +x "$work/legs-bin/cargo"
@@ -705,6 +712,49 @@ for leg in archive features; do
   [[ "$(at "$leg-makeflags")" == '-j6 '*'--jobserver-auth='*,* ]] || fail "the $leg leg had no jobserver: $(at "$leg-makeflags")"
 done
 [ "$(at archive-makeflags)" = "$(at features-makeflags)" ] || fail 'the legs had different jobservers'
+[ "$(at archive-jobserver-fds)" = open ] ||
+  fail "peak-rss.py closed the archive leg's jobserver descriptors: $(at archive-jobserver-fds)"
+# Direct unit check: peak-rss.py passes the jobserver pipe descriptors through
+# so a child can acquire and return a real token, while keeping unrelated
+# inherited descriptors closed.
+python3 - "$ROOT/scripts/ci/setup/jobserver.py" "$ROOT/scripts/ci/setup/peak-rss.py" "$work/jobserver-rss.out" "$work/unrelated.lock" <<'PY' ||
+import os
+import re
+import subprocess
+import sys
+
+jobserver_py, peak_rss_py, rss_out, lock_path = sys.argv[1:5]
+with open(lock_path, "w") as lock_file:
+    lock_fd = lock_file.fileno()
+    os.set_inheritable(lock_fd, True)
+    probe = (
+        "import os, re, sys\n"
+        "m = re.search(r'--jobserver-auth=(\\d+),(\\d+)', os.environ.get('CARGO_MAKEFLAGS', ''))\n"
+        "assert m, f'missing jobserver flag: {os.environ.get(\"CARGO_MAKEFLAGS\")}'\n"
+        "r, w = int(m.group(1)), int(m.group(2))\n"
+        "tok = os.read(r, 1)\n"
+        "assert tok == b'+', f'unexpected token: {tok!r}'\n"
+        "os.write(w, tok)\n"
+        "lock_fd = int(sys.argv[1])\n"
+        "try:\n"
+        "    os.fstat(lock_fd)\n"
+        "except OSError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError(f'unrelated fd {lock_fd} leaked through peak-rss.py')\n"
+    )
+    res = subprocess.run(
+        [sys.executable, jobserver_py, "4", "--", sys.executable, peak_rss_py, rss_out, "--",
+         sys.executable, "-c", probe, str(lock_fd)],
+        pass_fds=(lock_fd,),
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        sys.stderr.write(res.stdout + res.stderr)
+        sys.exit(res.returncode)
+PY
+  fail 'peak-rss.py did not preserve jobserver descriptors or leaked an unrelated descriptor'
 grep -q 'build-once: legs archive features at once, 6 compilers in all' "$work/legs.log" || fail 'the build did not report its legs'
 for leg in archive features; do
   grep -q "^\[build-once\] leg $leg: finish (status=0 elapsed_seconds=[0-9]*)$" "$work/legs.log" ||
