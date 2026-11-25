@@ -3996,10 +3996,7 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
     // on purpose, which is not the session's (#5490): it keeps running, and
     // the session ends as it would without it (#5635). Unconfirmed, a held
     // drain stays unknown.
-    let confirmed = matches!(
-        &completion,
-        ProcessCompletion::Exited(Ok(_)) | ProcessCompletion::Stopped { result: Ok(()), .. }
-    );
+    let confirmed = completion.confirmed();
     let held = [&stdout, &stderr]
         .into_iter()
         .any(|joined| matches!(joined, OutputJoin::Held));
@@ -4245,11 +4242,11 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
         _ if host => Some("host PTY control join could not be confirmed".into()),
         _ => Some("session PTY control join could not be confirmed".into()),
     };
-    // A PTY's reader stops when the session ends, so a held terminal does
-    // not hold its drain.
+    // A PTY's reader stops when the session ends; one still stopping when the
+    // budget runs out is unknown only while the session's end is (#5635).
     let output_error = bounded_output_join(output_task, group.cleanup(), host)
         .await
-        .error(host, false);
+        .error(host, completion.confirmed());
     let note = ended_note(&ended);
     record_ended_note(
         &inner,

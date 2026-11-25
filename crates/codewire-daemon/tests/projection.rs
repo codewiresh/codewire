@@ -11,6 +11,7 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use codewire_daemon::client::SessionClient;
@@ -28,7 +29,7 @@ use codewire_workload_secrets::{
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 use tokio::net::TcpListener;
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -90,6 +91,13 @@ fn projection_daemon_child() {
     };
     let root = PathBuf::from(root);
     let environment = Uuid::parse_str(&std::env::var(ENVIRONMENT_ID).unwrap()).unwrap();
+    // Warnings go to the parent's pipe, which keeps them for a failure: an
+    // unconfirmed cleanup names its step only in the log.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+        .init();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -179,12 +187,49 @@ fn create_launcher_adapter(root: &Path) {
     std::fs::set_permissions(adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// The daemon's logged causes of an unconfirmed cleanup, once they reach its
+/// pipe: the session's record keeps one closed message, and the log names
+/// the step that could not be confirmed.
+async fn cleanup_causes(logged: &Mutex<Vec<u8>>) -> String {
+    for _ in 0..100 {
+        let text = String::from_utf8_lossy(&logged.lock().unwrap()).into_owned();
+        let causes: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("cleanup could not be confirmed"))
+            .collect();
+        if !causes.is_empty() {
+            return causes.join("\n");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    "no cleanup cause was logged".into()
+}
+
+/// The daemon's stderr as it arrives, and all of it at its end.
+fn kept_stderr(mut errors: ChildStderr) -> (Arc<Mutex<Vec<u8>>>, JoinHandle<Vec<u8>>) {
+    let logged = Arc::new(Mutex::new(Vec::new()));
+    let kept = logged.clone();
+    let stderr = tokio::spawn(async move {
+        let mut chunk = [0; 4096];
+        loop {
+            let read = errors.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break kept.lock().unwrap().clone();
+            }
+            kept.lock().unwrap().extend_from_slice(&chunk[..read]);
+        }
+    });
+    (logged, stderr)
+}
+
 struct Harness {
     // Drop the kill-on-drop child before removing its owned scratch directory.
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: JoinHandle<Vec<u8>>,
     stderr: JoinHandle<Vec<u8>>,
+    /// The daemon's stderr so far, its warnings among it.
+    logged: Arc<Mutex<Vec<u8>>>,
     stop_projection: Option<oneshot::Sender<()>>,
     projection: Option<JoinHandle<ProjectionHistory>>,
     session_client: SessionClient,
@@ -273,12 +318,7 @@ impl Harness {
             output.read_to_end(&mut bytes).await.unwrap();
             bytes
         });
-        let mut errors = child.stderr.take().unwrap();
-        let stderr = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            errors.read_to_end(&mut bytes).await.unwrap();
-            bytes
-        });
+        let (logged, stderr) = kept_stderr(child.stderr.take().unwrap());
         let client = bounded(DaemonServiceClient::connect(endpoint.clone()))
             .await
             .unwrap();
@@ -400,6 +440,7 @@ impl Harness {
             stdin,
             stdout,
             stderr,
+            logged,
             stop_projection: Some(stop_projection),
             projection: Some(projection),
             session_client,
@@ -411,6 +452,7 @@ impl Harness {
     }
 
     async fn exited(&mut self, id: &str) -> v1::SessionRecord {
+        let logged = self.logged.clone();
         bounded(async {
             loop {
                 let record = self
@@ -430,8 +472,9 @@ impl Harness {
                     }
                     v1::SessionLifecycleState::Starting | v1::SessionLifecycleState::Running => {}
                     _ => panic!(
-                        "synthetic projected launch did not exit normally: {}",
-                        record.status_message
+                        "synthetic projected launch did not exit normally: {} ({})",
+                        record.status_message,
+                        cleanup_causes(&logged).await
                     ),
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

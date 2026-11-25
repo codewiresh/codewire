@@ -35,6 +35,20 @@ impl OutputJoin {
 }
 
 #[cfg(unix)]
+impl super::ProcessCompletion {
+    /// Whether every process of the session itself is confirmed gone: it
+    /// exited, or a stop confirmed its end. Output still open then is a
+    /// process that left the session on purpose (#5490), or a reader still
+    /// stopping, and neither leaves the session's cleanup unknown (#5635).
+    pub(super) fn confirmed(&self) -> bool {
+        matches!(
+            self,
+            Self::Exited(Ok(_)) | Self::Stopped { result: Ok(()), .. }
+        )
+    }
+}
+
+#[cfg(unix)]
 pub(super) async fn bounded_output_join(
     mut task: JoinHandle<Result<(), SessionError>>,
     budget: &crate::confirm::CheckBudget,

@@ -15,14 +15,54 @@ mod proc_children;
 /// Writes the session engine's warnings to the test's output: libtest shows
 /// it when the test fails, and an isolated fixture's child, which runs with
 /// `--nocapture`, always shows it. A stop whose cleanup is unknown names the
-/// step only in its log (#5929).
-fn stop_log() -> tracing::subscriber::DefaultGuard {
-    tracing::subscriber::set_default(
+/// step only in its log (#5929), so the log is also kept for a failure's
+/// message.
+fn stop_log() -> StopLog {
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = KeptLog(kept.clone());
+    let guard = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
-            .with_test_writer()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
             .with_max_level(tracing::Level::WARN)
             .finish(),
-    )
+    );
+    StopLog {
+        kept,
+        _guard: guard,
+    }
+}
+
+struct StopLog {
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+impl StopLog {
+    /// Each logged cause of a cleanup that could not be confirmed.
+    fn cleanup_causes(&self) -> Vec<String> {
+        String::from_utf8_lossy(&self.kept.lock().unwrap())
+            .lines()
+            .filter(|line| line.contains("cleanup could not be confirmed"))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// The test's output, as `with_test_writer` writes it, and a copy.
+#[derive(Clone)]
+struct KeptLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for KeptLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        print!("{}", String::from_utf8_lossy(bytes));
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2871,6 +2911,7 @@ async fn a_guest_session_leaves_a_process_started_with_setsid() {
     if isolated_descendant_fixture("a_guest_session_leaves_a_process_started_with_setsid").await {
         return;
     }
+    let log = stop_log();
     let temp = tempfile::tempdir().unwrap();
     let engine = guest_engine(temp.path());
     let kept = temp.path().join("kept.pid");
@@ -2882,7 +2923,13 @@ async fn a_guest_session_leaves_a_process_started_with_setsid() {
     let pid: u32 = wait_file(&kept).await.trim().parse().unwrap();
     let kept = FixtureDescendant::capture(pid);
     let ended = ended(&engine, &record.session_id).await;
-    assert_eq!(ended.state, v1::SessionLifecycleState::Exited as i32);
+    assert_eq!(
+        ended.state,
+        v1::SessionLifecycleState::Exited as i32,
+        "{:?}, logged {:?}",
+        ended.status_message,
+        log.cleanup_causes()
+    );
     assert_eq!(ended.status_message, "session exited with status 0");
     assert!(alive(pid), "a process in its own session was ended");
     kept.kill_and_reap();
@@ -3204,7 +3251,7 @@ async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output
     {
         return;
     }
-    let _log = stop_log();
+    let log = stop_log();
     let mut unsettled = Vec::new();
     for ((owner, engine_for), pty) in OWNERS
         .into_iter()
@@ -3227,8 +3274,11 @@ async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output
             .unwrap()
             .unwrap();
         let outcome = format!(
-            "{owner} (pty={pty}): state {} unknown {} {:?}",
-            stopped.state, stopped.cleanup_unknown, stopped.status_message
+            "{owner} (pty={pty}): state {} unknown {} {:?}, logged {:?}",
+            stopped.state,
+            stopped.cleanup_unknown,
+            stopped.status_message,
+            log.cleanup_causes()
         );
         assert!(alive(holder_pid), "{outcome}: the holder was signaled");
         held.kill_and_reap();
