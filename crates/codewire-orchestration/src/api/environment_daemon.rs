@@ -44,8 +44,10 @@ use crate::worker::workspace_binding::{
 mod activity;
 mod app_ports;
 mod desktop;
+mod host_daemon;
 #[cfg(test)]
 mod repair_database_tests;
+mod session_client;
 mod session_mutation;
 
 pub(crate) use activity::{DaemonActivity, environment_daemon_activity_for_worker};
@@ -53,6 +55,7 @@ pub(crate) use app_ports::push_environment_app_ports;
 #[cfg(test)]
 use app_ports::send_app_ports;
 pub(crate) use desktop::environment_desktop_daemon_core;
+use session_client::session_client_for_target;
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1068,41 +1071,6 @@ async fn daemon_status_for_target(
     let (channel, token) = daemon_channel_for_target(state, namespace, environment_id).await?;
 
     query_daemon(channel, token, known_pod_name).await
-}
-
-async fn session_client_for_target(
-    state: &ApiState,
-    user: &AuthUser,
-    org_id: &str,
-    environment_id: &str,
-    required_capabilities: &[&str],
-    budget: DaemonRequestBudget,
-) -> AppResult<(
-    v1::daemon_service_client::DaemonServiceClient<Channel>,
-    String,
-)> {
-    let target = resolve_target(state, user, org_id, environment_id).await?;
-    let (channel, token) = daemon_channel_for_endpoint(
-        &state.pool,
-        state.runtime.as_deref(),
-        &state.session_secret,
-        &target.environment_id,
-        state
-            .environment_daemon_endpoints
-            .endpoint(&target.namespace, &target.environment_id),
-        budget,
-    )
-    .await?;
-    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
-    // Even a launch-budget channel must prove readiness promptly. Do not let
-    // this pre-dispatch probe inherit the longer process-start deadline.
-    tokio::time::timeout(
-        DAEMON_CONTROL_TIMEOUT,
-        require_ready_daemon(&mut client, &token, required_capabilities),
-    )
-    .await
-    .map_err(|_| AppError::Upstream("environment daemon is unavailable".into()))??;
-    Ok((client, token))
 }
 
 async fn get_daemon_session(

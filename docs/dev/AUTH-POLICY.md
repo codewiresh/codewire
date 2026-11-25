@@ -1200,8 +1200,13 @@ method accepts a host key.
   host ID and the tunnel ID, within 10 seconds, once. A daemon tunnel's
   `ready` carries the running generation's daemon capability, which the
   control plane holds in memory for that tunnel only and never records.
-  Until the tunnel handler lands, no session asks for a tunnel, and every
-  tunnel is refused.
+  `ready` is accepted only after a verified `open`, once, for a daemon
+  tunnel, at most 512 bytes; until then no byte flows. A tunnel ends with
+  the session that asked for it, for any reason (superseded, revoked or
+  gone), and its capability is dropped with it. The capability never enters
+  the database, Temporal, control events, metadata, metrics, errors or audit,
+  and is never kept across tunnels. Only a host session on the same replica
+  can carry a tunnel today (#4511).
 - **Operations** go only to a host that reports capability version 2 or
   later, and only on its current session: claiming them and checking the
   session generation are one statement. A host's answer to an operation is

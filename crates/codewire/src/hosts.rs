@@ -12,15 +12,20 @@ use std::sync::Arc;
 pub use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, EnrollHostRequest, GetHostRequest, GrantHostRequest,
     Host, HostAttached, HostCreate, HostEnvironmentObservation, HostEnvironmentState, HostLimits,
-    HostOperation, HostOperationFailure, HostOperationResult, HostPlatform, HostStaleGeneration,
-    HostState, LeaveHostRequest, ListHostsRequest, RevokeHostGrantRequest, RevokeHostRequest,
-    UpdateHostProvideRequest, attach_host_request, attach_host_response, grant_host_request,
-    host_operation, host_operation_result, revoke_host_grant_request,
+    HostOpenTunnel, HostOperation, HostOperationFailure, HostOperationResult, HostPlatform,
+    HostStaleGeneration, HostState, HostTunnelKind, LeaveHostRequest, ListHostsRequest,
+    RevokeHostGrantRequest, RevokeHostRequest, UpdateHostProvideRequest, attach_host_request,
+    attach_host_response, grant_host_request, host_operation, host_operation_result,
+    revoke_host_grant_request,
 };
 use codewire_proto::codewire::v1::{
-    AttachHostResponseView, HostAgentServiceClient, HostServiceClient,
+    AttachHostResponseView, HostAgentServiceClient, HostServiceClient, OpenHostTunnelResponseView,
 };
-use codewire_proto::codewire::v1::{HostAttachOpen, HostAttachProof, HostHello};
+use codewire_proto::codewire::v1::{
+    HostAttachOpen, HostAttachProof, HostHello, HostTunnelOpen, HostTunnelReady,
+    OpenHostTunnelRequest, OpenHostTunnelResponse, open_host_tunnel_request,
+    open_host_tunnel_response,
+};
 use connectrpc::client::{BidiStream, CallOptions};
 
 use crate::{
@@ -32,6 +37,8 @@ use crate::{
 pub const ENROLLMENT_STATEMENT_CONTEXT: &str = "codewire-host-enroll-v1";
 /// The first line of the statement a host signs to attach.
 pub const ATTACH_STATEMENT_CONTEXT: &str = "codewire-host-attach-v1";
+/// The first line of the statement a host signs to open a tunnel.
+pub const TUNNEL_STATEMENT_CONTEXT: &str = "codewire-host-tunnel-v1";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -50,6 +57,16 @@ pub fn enrollment_statement(org_id: &str, user_id: &str, public_key: &[u8]) -> V
 /// The bytes a host signs to answer the challenge `nonce`.
 pub fn attach_statement(host_id: &str, nonce: &[u8]) -> Vec<u8> {
     format!("{ATTACH_STATEMENT_CONTEXT}\n{host_id}\n{}\n", hex(nonce)).into_bytes()
+}
+
+/// The bytes a host signs to open the tunnel `tunnel_id` it was asked for
+/// with `nonce`.
+pub fn tunnel_statement(host_id: &str, tunnel_id: &str, nonce: &[u8]) -> Vec<u8> {
+    format!(
+        "{TUNNEL_STATEMENT_CONTEXT}\n{host_id}\n{tunnel_id}\n{}\n",
+        hex(nonce)
+    )
+    .into_bytes()
 }
 
 /// The signed-in hosts API.
@@ -170,6 +187,8 @@ pub enum HostEvent {
     /// Run this lifecycle operation and answer with
     /// [`AttachedHost::send_result`].
     Operation(Box<HostOperation>),
+    /// Open this tunnel with [`HostAgentClient::open_tunnel`].
+    OpenTunnel(Box<HostOpenTunnel>),
     /// The stream ended without an error.
     Ended,
 }
@@ -285,6 +304,120 @@ impl HostAgentClient {
     }
 }
 
+/// A tunnel's stream, as the host opened it.
+pub type HostTunnelStream =
+    BidiStream<reqwest::Body, OpenHostTunnelRequest, OpenHostTunnelResponseView<'static>>;
+
+fn tunnel_input(input: open_host_tunnel_request::Input) -> OpenHostTunnelRequest {
+    OpenHostTunnelRequest {
+        input: Some(input),
+        ..Default::default()
+    }
+}
+
+impl HostAgentClient {
+    /// Opens the tunnel the session asked for in `request`, proving the key
+    /// with `sign`. The caller answers with [`HostTunnel::ready`] or
+    /// [`HostTunnel::failed`].
+    pub async fn open_tunnel(
+        &self,
+        host_id: &str,
+        request: &HostOpenTunnel,
+        sign: impl Fn(&[u8]) -> Vec<u8>,
+    ) -> Result<HostTunnel, ClientError> {
+        let mut stream = self
+            .agent
+            .open_host_tunnel_with_options(CallOptions::default())
+            .await
+            .map_err(ClientError::from)?;
+        stream
+            .send(tunnel_input(open_host_tunnel_request::Input::Open(
+                Box::new(HostTunnelOpen {
+                    host_id: host_id.to_owned(),
+                    tunnel_id: request.tunnel_id.clone(),
+                    signature: sign(&tunnel_statement(
+                        host_id,
+                        &request.tunnel_id,
+                        &request.nonce,
+                    )),
+                    ..Default::default()
+                }),
+            )))
+            .await
+            .map_err(ClientError::from)?;
+        Ok(HostTunnel { stream })
+    }
+}
+
+/// A tunnel the host opened.
+pub struct HostTunnel {
+    stream: HostTunnelStream,
+}
+
+impl HostTunnel {
+    /// The host reached the environment: bytes may flow. The caller keeps
+    /// the capability in memory it wipes.
+    pub async fn ready(&mut self, daemon_capability: &str) -> Result<(), ClientError> {
+        self.stream
+            .send(tunnel_input(open_host_tunnel_request::Input::Ready(
+                Box::new(HostTunnelReady {
+                    daemon_capability: daemon_capability.to_owned(),
+                    ..Default::default()
+                }),
+            )))
+            .await
+            .map_err(ClientError::from)
+    }
+
+    /// The host could not reach the environment; the tunnel ends.
+    pub async fn failed(&mut self, failure: HostOperationFailure) -> Result<(), ClientError> {
+        self.stream
+            .send(tunnel_input(open_host_tunnel_request::Input::Failed(
+                Box::new(failure),
+            )))
+            .await
+            .map_err(ClientError::from)
+    }
+
+    pub async fn send(&mut self, bytes: Vec<u8>) -> Result<(), ClientError> {
+        self.stream
+            .send(tunnel_input(open_host_tunnel_request::Input::Data(bytes)))
+            .await
+            .map_err(ClientError::from)
+    }
+
+    /// Ends this side of the tunnel; bytes may still arrive.
+    pub fn close_send(&mut self) {
+        self.stream.close_send();
+    }
+
+    /// The next bytes from the control plane; `None` when it ended its side.
+    pub async fn receive(&mut self) -> Result<Option<Vec<u8>>, ClientError> {
+        loop {
+            match self
+                .stream
+                .message::<OpenHostTunnelResponse>()
+                .await
+                .map_err(ClientError::from)?
+            {
+                Some(message) => {
+                    if let Some(open_host_tunnel_response::Output::Data(bytes)) =
+                        message.to_owned_message().output
+                    {
+                        return Ok(Some(bytes));
+                    }
+                }
+                None => {
+                    return match self.stream.error() {
+                        Some(error) => Err(ClientError::from(error.clone())),
+                        None => Ok(None),
+                    };
+                }
+            }
+        }
+    }
+}
+
 fn proof(signature: Vec<u8>) -> AttachHostRequest {
     input(attach_host_request::Input::Proof(Box::new(
         HostAttachProof {
@@ -353,9 +486,8 @@ impl AttachedHost {
             Some(attach_host_response::Output::Operation(operation)) => {
                 HostEvent::Operation(operation)
             }
-            // Not sent until this client can open tunnels.
-            Some(attach_host_response::Output::OpenTunnel(_)) => {
-                return Err(unexpected("a tunnel"));
+            Some(attach_host_response::Output::OpenTunnel(request)) => {
+                HostEvent::OpenTunnel(request)
             }
             None => HostEvent::Ended,
         })
@@ -377,6 +509,10 @@ mod tests {
         assert_eq!(
             attach_statement("host-1", &[0xab, 0x01]),
             b"codewire-host-attach-v1\nhost-1\nab01\n"
+        );
+        assert_eq!(
+            tunnel_statement("host-1", "tunnel-1", &[0xab, 0x01]),
+            b"codewire-host-tunnel-v1\nhost-1\ntunnel-1\nab01\n"
         );
     }
 }

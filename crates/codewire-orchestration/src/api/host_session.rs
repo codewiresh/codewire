@@ -15,6 +15,8 @@ use super::hosts::HostPlatform;
 
 /// The first line of the statement a host signs to attach.
 pub const ATTACH_STATEMENT_CONTEXT: &str = "codewire-host-attach-v1";
+/// The first line of the statement a host signs to open a tunnel.
+pub const TUNNEL_STATEMENT_CONTEXT: &str = "codewire-host-tunnel-v1";
 /// How often the host pings: a third of the offline window, the Mesh rule.
 pub const PING_INTERVAL_SECS: u32 = 15;
 /// How often an attached host proves its key again.
@@ -24,10 +26,23 @@ pub const PROOF_TIMEOUT_SECS: u32 = 30;
 /// The bytes in a challenge nonce.
 pub const NONCE_BYTES: usize = 32;
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The bytes a host signs to answer `nonce`.
 pub fn attach_statement(host_id: &str, nonce: &[u8]) -> Vec<u8> {
-    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{ATTACH_STATEMENT_CONTEXT}\n{host_id}\n{nonce}\n").into_bytes()
+    format!("{ATTACH_STATEMENT_CONTEXT}\n{host_id}\n{}\n", hex(nonce)).into_bytes()
+}
+
+/// The bytes a host signs to open the tunnel `tunnel_id`, asked for with
+/// `nonce`.
+pub fn tunnel_statement(host_id: &str, tunnel_id: &str, nonce: &[u8]) -> Vec<u8> {
+    format!(
+        "{TUNNEL_STATEMENT_CONTEXT}\n{host_id}\n{tunnel_id}\n{}\n",
+        hex(nonce)
+    )
+    .into_bytes()
 }
 
 /// A fresh challenge.
@@ -73,14 +88,30 @@ pub async fn attaching_host(pool: &PgPool, host_id: &str) -> sqlx::Result<Option
 /// Whether `signature` signs the attach statement for `nonce` with the
 /// host's key.
 pub fn proves_key(host: &AttachingHost, nonce: &[u8], signature: &[u8]) -> bool {
+    signs(host, &attach_statement(&host.id, nonce), signature)
+}
+
+/// Whether `signature` signs the statement opening `tunnel_id` for `nonce`
+/// with the host's key.
+pub fn proves_tunnel(
+    host: &AttachingHost,
+    tunnel_id: &str,
+    nonce: &[u8],
+    signature: &[u8],
+) -> bool {
+    signs(
+        host,
+        &tunnel_statement(&host.id, tunnel_id, nonce),
+        signature,
+    )
+}
+
+fn signs(host: &AttachingHost, statement: &[u8], signature: &[u8]) -> bool {
     let Ok(signature) = <[u8; 64]>::try_from(signature) else {
         return false;
     };
     host.public_key
-        .verify_strict(
-            &attach_statement(&host.id, nonce),
-            &Signature::from_bytes(&signature),
-        )
+        .verify_strict(statement, &Signature::from_bytes(&signature))
         .is_ok()
 }
 
@@ -163,6 +194,27 @@ mod tests {
             ))
             .to_bytes();
         assert!(!proves_key(&host, &nonce, &enrollment));
+    }
+
+    #[test]
+    fn a_tunnel_proof_binds_host_tunnel_and_nonce_and_is_not_an_attach_proof() {
+        assert_eq!(
+            tunnel_statement("host-1", "tunnel-1", &[0xab, 0x01]),
+            b"codewire-host-tunnel-v1\nhost-1\ntunnel-1\nab01\n"
+        );
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let host = host(&key);
+        let nonce = new_nonce();
+        let signature = key
+            .sign(&tunnel_statement(&host.id, "tunnel-1", &nonce))
+            .to_bytes();
+        assert!(proves_tunnel(&host, "tunnel-1", &nonce, &signature));
+        assert!(!proves_tunnel(&host, "tunnel-2", &nonce, &signature));
+        assert!(!proves_tunnel(&host, "tunnel-1", &new_nonce(), &signature));
+        // Neither proof stands for the other.
+        assert!(!proves_key(&host, &nonce, &signature));
+        let attach = key.sign(&attach_statement(&host.id, &nonce)).to_bytes();
+        assert!(!proves_tunnel(&host, "tunnel-1", &nonce, &attach));
     }
 
     #[test]

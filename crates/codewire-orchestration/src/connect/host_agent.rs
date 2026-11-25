@@ -33,10 +33,12 @@ use crate::api::host_session::{
     AttachingHost, NONCE_BYTES, PING_INTERVAL_SECS, PROOF_TIMEOUT_SECS, RECHALLENGE_INTERVAL_SECS,
     attaching_host, heard_from, new_nonce, proves_key, record_hello,
 };
+use crate::api::host_tunnels::{HostTunnels, Registration};
 use crate::api::hosts::{HostPlatform, OFFLINE_AFTER_SECS};
 use crate::drain::Drain;
 
 mod operations;
+mod tunnel_stream;
 
 use operations::{Heard, OPERATIONS_CAPABILITY, Relay};
 
@@ -74,11 +76,17 @@ impl Timing {
 }
 
 pub fn router(
-    pool: PgPool,
-    drain: Drain,
+    state: &crate::api::ApiState,
     signals: Arc<HostOperationSignals>,
 ) -> connectrpc::Router {
-    router_with(pool, Timing::DEFAULT, MAX_HANDSHAKES, drain, signals)
+    router_with(
+        state.pool.clone(),
+        Timing::DEFAULT,
+        MAX_HANDSHAKES,
+        state.drain.clone(),
+        signals,
+        Arc::clone(&state.host_tunnels),
+    )
 }
 
 pub fn router_with(
@@ -87,6 +95,7 @@ pub fn router_with(
     max_handshakes: usize,
     drain: Drain,
     signals: Arc<HostOperationSignals>,
+    tunnels: Arc<HostTunnels>,
 ) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(HostAgentConnectService {
         pool,
@@ -94,6 +103,7 @@ pub fn router_with(
         handshakes: Arc::new(Semaphore::new(max_handshakes)),
         drain,
         signals,
+        tunnels,
     }))
 }
 
@@ -107,6 +117,8 @@ struct HostAgentConnectService {
     drain: Drain,
     /// Operations enqueued for hosts, from this process's one listener.
     signals: Arc<HostOperationSignals>,
+    /// Tunnels asked for on this replica's host sessions.
+    tunnels: Arc<HostTunnels>,
 }
 
 type Outbound = mpsc::Sender<Result<AttachHostResponse, ConnectError>>;
@@ -116,6 +128,7 @@ struct Session {
     pool: PgPool,
     timing: Timing,
     signals: Arc<HostOperationSignals>,
+    tunnels: Arc<HostTunnels>,
 }
 
 #[allow(refining_impl_trait)]
@@ -136,6 +149,7 @@ impl HostAgentService for HostAgentConnectService {
                 pool: self.pool.clone(),
                 timing: self.timing,
                 signals: self.signals.clone(),
+                tunnels: self.tunnels.clone(),
             },
             permit,
             requests,
@@ -150,13 +164,25 @@ impl HostAgentService for HostAgentConnectService {
         ))
     }
 
-    /// No session sends `open_tunnel` yet, so no tunnel can be opened.
     async fn open_host_tunnel(
         &self,
         _ctx: RequestContext,
-        _requests: InboundStream<OpenHostTunnelRequest>,
+        requests: InboundStream<OpenHostTunnelRequest>,
     ) -> ServiceResult<ServiceStream<OpenHostTunnelResponse>> {
-        Err(unrecognised())
+        let (tx, rx) = mpsc::channel(8);
+        tokio::spawn(tunnel_stream::run(
+            self.pool.clone(),
+            self.tunnels.clone(),
+            requests,
+            tx,
+        ));
+        connectrpc::Response::stream_ok(end_at(
+            futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            }),
+            Some(self.drain.signal(Restart::Begins)),
+            HOST_SESSION_RESTARTED,
+        ))
     }
 }
 
@@ -287,11 +313,16 @@ async fn attached_session(
     if let Some(relay) = &relay {
         relay.send_outstanding(&context.pool, tx).await?;
     }
+    // A host that runs operations is reached through this session.
+    let tunnels = relay
+        .as_ref()
+        .map(|_| context.tunnels.register(&host.id, session_generation));
     Serving {
         context,
         host: &host,
         relay: relay.as_ref(),
         signals,
+        tunnels,
     }
     .serve(requests, tx)
     .await
@@ -409,6 +440,17 @@ async fn hello(
     ))
 }
 
+/// The next tunnel this session is asked to open; never, for a session that
+/// opens none.
+async fn next_tunnel(
+    tunnels: &mut Option<Registration>,
+) -> Option<codewire_proto::codewire::v1::HostOpenTunnel> {
+    match tunnels {
+        Some(registration) => registration.requests.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// An attached session, after its hello.
 struct Serving<'a> {
     context: &'a Session,
@@ -416,6 +458,8 @@ struct Serving<'a> {
     /// For a host that runs operations.
     relay: Option<&'a Relay>,
     signals: tokio::sync::broadcast::Receiver<HostOperationSignal>,
+    /// Ends this session's tunnels when the session ends.
+    tunnels: Option<Registration>,
 }
 
 impl Serving<'_> {
@@ -448,6 +492,9 @@ impl Serving<'_> {
                     if self.signalled(signal) {
                         self.claim(tx).await?;
                     }
+                }
+                Some(request) = next_tunnel(&mut self.tunnels) => {
+                    send(tx, attach_host_response::Output::OpenTunnel(Box::new(request))).await?;
                 }
                 input = next_input(requests, silent, "ping") => match input? {
                     attach_host_request::Input::Ping(_) => {

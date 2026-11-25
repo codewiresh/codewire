@@ -983,6 +983,7 @@ async fn leave(globals: &Globals, args: HostLeaveArgs) -> anyhow::Result<()> {
 
 mod agent;
 mod operations;
+mod tunnels;
 
 // ── The service ───────────────────────────────────────────────────────────
 

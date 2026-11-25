@@ -239,7 +239,10 @@ async fn session(
     let mut pings = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
     // Dropped with the session: what they were doing is in the supervisor's
     // journal, and the next session is sent them again.
-    let mut running = Running::new(placement);
+    let mut running = Running::new(placement.clone());
+    // Tunnels end with the session that asked for them, on both sides.
+    let mut open_tunnels: FuturesUnordered<Pin<Box<dyn Future<Output = ()>>>> =
+        FuturesUnordered::new();
     loop {
         tokio::select! {
             _ = pings.tick() => {
@@ -247,6 +250,7 @@ async fn session(
                     return attached_end(ended(error));
                 }
             }
+            Some(()) = open_tunnels.next(), if !open_tunnels.is_empty() => {}
             Some(result) = running.next(), if !running.is_empty() => {
                 if let Err(error) = host.send_result(result).await {
                     return attached_end(ended(error));
@@ -254,6 +258,15 @@ async fn session(
             }
             event = host.next_event() => match event {
                 Ok(HostEvent::Pong) => {}
+                Ok(HostEvent::OpenTunnel(request)) => {
+                    open_tunnels.push(Box::pin(super::tunnels::serve(
+                        agent.clone(),
+                        enrollment.host_id.clone(),
+                        Arc::clone(key),
+                        placement.clone(),
+                        *request,
+                    )));
+                }
                 Ok(HostEvent::Operation(operation)) => {
                     if let Some(refused) = running.start(*operation)
                         && let Err(error) = host.send_result(refused).await

@@ -26,6 +26,7 @@ pub mod host_operation_signals;
 pub mod host_operations;
 pub(crate) mod host_placement;
 pub mod host_session;
+pub mod host_tunnels;
 pub mod hosts;
 pub mod identity;
 pub mod live;
@@ -127,6 +128,8 @@ pub struct ApiState {
     pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,
     /// The process-wide live change notices signed-in pages watch (#4762).
     pub live: Arc<live::LiveNotifications>,
+    /// Tunnels to the environments of hosts attached to this replica.
+    pub host_tunnels: Arc<host_tunnels::HostTunnels>,
     /// This replica's drain, which ends its public streams (#4426).
     pub drain: crate::drain::Drain,
     /// This process's lease-owner lock, and whether it is fenced (#4523).

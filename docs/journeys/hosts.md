@@ -236,7 +236,8 @@ source.
 
 ### `host-attach`: `cw run` and `cw attach` over the API tunnel
 
-- **Entry points:** none yet: the API tunnel is not merged (#3609).
+- **Entry points:** `cw run` and `cw attach`, which reach the VM's daemon
+  through a tunnel from its host's session; `cw shell` doesn't yet (#3609).
 - **States to exercise:** attach, disconnect, reconnect with the result kept.
 - **Proof:** `cw run --agent …` runs in the host's VM; after a disconnect,
   `cw attach` shows the same session and its result.

@@ -45,6 +45,7 @@ pub(crate) async fn offline(pool: PgPool) -> ApiState {
             super::live::MAX_WATCHES_PER_ACCOUNT,
             super::live::MAX_WATCHES_PER_PROCESS,
         ),
+        host_tunnels: super::host_tunnels::HostTunnels::new(),
         drain: Default::default(),
         cw_runtime_staging: super::cw_runtime::staging::Staging::removed(),
         revocation: codewire_server_core::revocation::Fence::new(),

@@ -65,6 +65,8 @@ impl ClientTransport for Transport {
 
 struct Served {
     url: String,
+    /// The tunnels this server's sessions carry, as the API state holds them.
+    tunnels: Arc<crate::api::host_tunnels::HostTunnels>,
     client: reqwest::Client,
     stop: CancellationToken,
     /// The process-wide `LISTEN host_operation`, as production runs it.
@@ -91,12 +93,20 @@ async fn serve_with(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let signals = crate::api::host_operation_signals::HostOperationSignals::new();
+    let tunnels = crate::api::host_tunnels::HostTunnels::new();
     let operation_listener = crate::api::host_operation_signals::spawn_host_operation_listener(
         db.pool.clone(),
         signals.clone(),
     );
     let router = connect_router_with_protocol_policy(
-        router_with(db.pool.clone(), timing, max_handshakes, drain, signals),
+        router_with(
+            db.pool.clone(),
+            timing,
+            max_handshakes,
+            drain,
+            signals,
+            tunnels.clone(),
+        ),
         ProtocolPolicy::ConnectAndGrpc,
     );
     let stop = CancellationToken::new();
@@ -108,6 +118,7 @@ async fn serve_with(
     });
     Ok(Served {
         url: format!("http://{address}"),
+        tunnels,
         client: reqwest::Client::builder()
             .no_proxy()
             .http2_prior_knowledge()
@@ -1031,6 +1042,200 @@ async fn db_a_malformed_inventory_entry_is_skipped_and_the_host_attaches() -> Re
                 .await?
                 .context("the well-formed entry is recorded")?;
         ensure!(observation.state == crate::api::host_operations::HostEnvironmentState::Stopped);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+// ── Slice 2: tunnels ──────────────────────────────────────────────────────
+
+use codewire_proto::codewire::v1::{
+    HostTunnelOpen, HostTunnelReady, OpenHostTunnelRequest, OpenHostTunnelResponse,
+    OpenHostTunnelResponseView, open_host_tunnel_request, open_host_tunnel_response,
+};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+use crate::api::host_session::tunnel_statement;
+use crate::api::host_tunnels::TunnelTarget;
+
+type TunnelStream =
+    BidiStream<reqwest::Body, OpenHostTunnelRequest, OpenHostTunnelResponseView<'static>>;
+
+fn tunnel_input(input: open_host_tunnel_request::Input) -> OpenHostTunnelRequest {
+    OpenHostTunnelRequest {
+        input: Some(input),
+        ..Default::default()
+    }
+}
+
+async fn open_tunnel_stream(
+    served: &Served,
+    host_id: &str,
+    tunnel_id: &str,
+    signature: Vec<u8>,
+) -> Result<TunnelStream> {
+    let client = HostAgentServiceClient::new(
+        Transport(served.client.clone()),
+        connectrpc::client::ClientConfig::new(served.url.parse()?).with_protocol(Protocol::Grpc),
+    );
+    let mut stream = client.open_host_tunnel().await?;
+    stream
+        .send(tunnel_input(open_host_tunnel_request::Input::Open(
+            Box::new(HostTunnelOpen {
+                host_id: host_id.into(),
+                tunnel_id: tunnel_id.into(),
+                signature,
+                ..Default::default()
+            }),
+        )))
+        .await?;
+    Ok(stream)
+}
+
+fn tunnel_target(host_id: &str) -> TunnelTarget {
+    TunnelTarget {
+        host_id: host_id.into(),
+        environment_id: ENVIRONMENT.into(),
+        local_environment_id: LOCAL.into(),
+        generation: 1,
+    }
+}
+
+/// The session's request for a tunnel, among its pongs.
+async fn tunnel_request(
+    stream: &mut HostStream,
+) -> Result<codewire_proto::codewire::v1::HostOpenTunnel> {
+    match next_but_pongs(stream).await? {
+        attach_host_response::Output::OpenTunnel(request) => Ok(*request),
+        other => anyhow::bail!("expected a tunnel request, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_tunnel_the_session_asks_for_carries_bytes_both_ways() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "tunnels", 1).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = attach(&served, Protocol::Grpc, &id, &key).await?;
+        session.send(ping()).await?;
+        ensure!(matches!(
+            output(&mut session).await?,
+            attach_host_response::Output::Pong(_)
+        ));
+
+        let opening = tokio::spawn({
+            let tunnels = served.tunnels.clone();
+            let target = tunnel_target(&id);
+            async move { tunnels.open(&target).await }
+        });
+        let request = tunnel_request(&mut session).await?;
+        ensure!(request.environment_id == ENVIRONMENT && request.generation == 1);
+        let signature = key
+            .sign(&tunnel_statement(&id, &request.tunnel_id, &request.nonce))
+            .to_bytes()
+            .to_vec();
+        let mut host_end = open_tunnel_stream(&served, &id, &request.tunnel_id, signature).await?;
+        host_end
+            .send(tunnel_input(open_host_tunnel_request::Input::Ready(
+                Box::new(HostTunnelReady {
+                    daemon_capability: "synthetic-capability".into(),
+                    ..Default::default()
+                }),
+            )))
+            .await?;
+        let mut opened = tokio::time::timeout(BOUND, opening).await???;
+        ensure!(opened.daemon_capability.as_str() == "synthetic-capability");
+
+        // Caller to host.
+        opened.stream.write_all(b"to the daemon").await?;
+        let message = tokio::time::timeout(BOUND, host_end.message::<OpenHostTunnelResponse>())
+            .await??
+            .context("a data frame")?;
+        ensure!(
+            message.to_owned_message().output
+                == Some(open_host_tunnel_response::Output::Data(
+                    b"to the daemon".to_vec()
+                ))
+        );
+        // Host to caller.
+        host_end
+            .send(tunnel_input(open_host_tunnel_request::Input::Data(
+                b"from the daemon".to_vec(),
+            )))
+            .await?;
+        let mut received = [0; 15];
+        tokio::time::timeout(BOUND, opened.stream.read_exact(&mut received)).await??;
+        ensure!(&received == b"from the daemon");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_tunnel_opened_without_the_hosts_proof_is_refused() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "tunnel-proof", 1).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = attach(&served, Protocol::Grpc, &id, &key).await?;
+        session.send(ping()).await?;
+        ensure!(matches!(
+            output(&mut session).await?,
+            attach_host_response::Output::Pong(_)
+        ));
+        let opening = tokio::spawn({
+            let tunnels = served.tunnels.clone();
+            let target = tunnel_target(&id);
+            async move { tunnels.open(&target).await }
+        });
+        let request = tunnel_request(&mut session).await?;
+        // Another key, over the right statement.
+        let stranger = SigningKey::from_bytes(&[9; 32]);
+        let forged = stranger
+            .sign(&tunnel_statement(&id, &request.tunnel_id, &request.nonce))
+            .to_bytes()
+            .to_vec();
+        let mut forged_end = open_tunnel_stream(&served, &id, &request.tunnel_id, forged).await?;
+        // A forger goes on as a host would; the stream may already be closed.
+        let _ = forged_end
+            .send(tunnel_input(open_host_tunnel_request::Input::Ready(
+                Box::new(HostTunnelReady {
+                    daemon_capability: "forged-capability".into(),
+                    ..Default::default()
+                }),
+            )))
+            .await;
+        let refusal =
+            tokio::time::timeout(BOUND, forged_end.message::<OpenHostTunnelResponse>()).await?;
+        ensure!(
+            matches!(&refusal, Err(error) if error.code == ErrorCode::Unauthenticated),
+            "refused as unrecognised: {refusal:?}"
+        );
+        // The forged attempt spent nothing: the host's own proof still opens
+        // the tunnel, and the caller gets the host's capability, not the
+        // forger's.
+        let signature = key
+            .sign(&tunnel_statement(&id, &request.tunnel_id, &request.nonce))
+            .to_bytes()
+            .to_vec();
+        let mut host_end = open_tunnel_stream(&served, &id, &request.tunnel_id, signature).await?;
+        host_end
+            .send(tunnel_input(open_host_tunnel_request::Input::Ready(
+                Box::new(HostTunnelReady {
+                    daemon_capability: "synthetic-capability".into(),
+                    ..Default::default()
+                }),
+            )))
+            .await?;
+        let opened = tokio::time::timeout(BOUND, opening).await???;
+        ensure!(opened.daemon_capability.as_str() == "synthetic-capability");
         Ok(())
     }
     .await;

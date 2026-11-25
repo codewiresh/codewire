@@ -884,6 +884,7 @@ async fn main() -> anyhow::Result<()> {
         // every live page watch in this process.
         environment_logs: codewire_orchestration::api::log_notifications::start(pool.clone()),
         live: codewire_orchestration::api::live::start(pool.clone()),
+        host_tunnels: codewire_orchestration::api::host_tunnels::HostTunnels::new(),
         drain: drain.clone(),
         lease_owner: lease_owner.clone(),
         cw_runtime_staging,
@@ -1099,11 +1100,7 @@ async fn main() -> anyhow::Result<()> {
         // the stream, so it takes no user credential at the HTTP layer. Its
         // public CLI edge is native gRPC, like EnvironmentSessionService.
         .with_connect_routes_and_protocol_policy(
-            codewire_orchestration::connect::host_agent::router(
-                api_state.pool.clone(),
-                api_state.drain.clone(),
-                host_operation_signals,
-            ),
+            codewire_orchestration::connect::host_agent::router(&api_state, host_operation_signals),
             codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
         )
         // Connect conformance probe (doc 03 D8) — no-op unless

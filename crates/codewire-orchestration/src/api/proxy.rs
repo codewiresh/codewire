@@ -9,6 +9,8 @@ use sqlx::Row;
 
 use super::ApiState;
 use super::environments::require_environment_access;
+use super::host_operations::{HostEnvironmentState, latest_observation};
+use super::host_tunnels::TunnelTarget;
 use crate::confidential_storage::{confidential_refusal_reason, require_confidential_access};
 use crate::runtime::{Placement, RuntimeProbe};
 
@@ -48,12 +50,23 @@ pub(crate) async fn resolve_running_sandbox_target_for_role(
     resolve_running_sandbox_target_inner(state, user, org_id, env_id, required_role).await
 }
 
-#[tracing::instrument(
-    level = "debug",
-    name = "resolve_running_sandbox_target",
-    skip_all,
-    fields(environment_id = %env_id)
-)]
+/// A running environment's daemon: in a sandbox, or on a host (#3609).
+pub(crate) enum RunningTarget {
+    Sandbox(SandboxTarget),
+    Host(TunnelTarget),
+}
+
+/// Resolves a running environment wherever it runs, or returns its typed
+/// gate failure.
+pub(crate) async fn resolve_running_target(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    env_id: &str,
+) -> Result<RunningTarget, (StatusCode, &'static str)> {
+    resolve_running_target_inner(state, user, org_id, env_id, "operator").await
+}
+
 async fn resolve_running_sandbox_target_inner(
     state: &ApiState,
     user: &AuthUser,
@@ -61,6 +74,28 @@ async fn resolve_running_sandbox_target_inner(
     env_id: &str,
     required_role: &str,
 ) -> Result<SandboxTarget, (StatusCode, &'static str)> {
+    match resolve_running_target_inner(state, user, org_id, env_id, required_role).await? {
+        RunningTarget::Sandbox(target) => Ok(target),
+        RunningTarget::Host(_) => Err((
+            StatusCode::BAD_REQUEST,
+            "not supported yet for an environment on a host",
+        )),
+    }
+}
+
+#[tracing::instrument(
+    level = "debug",
+    name = "resolve_running_sandbox_target",
+    skip_all,
+    fields(environment_id = %env_id)
+)]
+async fn resolve_running_target_inner(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    env_id: &str,
+    required_role: &str,
+) -> Result<RunningTarget, (StatusCode, &'static str)> {
     if user_org_role(&state.pool, user, org_id)
         .await
         .ok()
@@ -84,7 +119,7 @@ async fn resolve_running_sandbox_target_inner(
     }
 
     let row = sqlx::query(
-        "SELECT id, state, desired_state, type, isolation_tier \
+        "SELECT id, state, desired_state, type, isolation_tier, runtime_backend, host_id \
          FROM environments WHERE id = $1 AND org_id = $2",
     )
     .bind(env_id)
@@ -106,6 +141,8 @@ async fn resolve_running_sandbox_target_inner(
         Ok(false) => return Err((StatusCode::CONFLICT, ORGANIZATION_DELETING)),
         Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, "organization unavailable")),
     }
+    let runtime_backend: String = row.get("runtime_backend");
+    let host_id: Option<String> = row.get("host_id");
     if let Err(error) = require_confidential_access(
         &state.pool,
         state.confidential_storage_flags,
@@ -130,6 +167,13 @@ async fn resolve_running_sandbox_target_inner(
             StatusCode::BAD_REQUEST,
             "only supported for sandbox environments",
         ));
+    }
+
+    if runtime_backend == "host" {
+        let host_id = host_id.ok_or((StatusCode::SERVICE_UNAVAILABLE, "host backend not found"))?;
+        return host_target(state, id, host_id)
+            .await
+            .map(RunningTarget::Host);
     }
 
     let backend = sqlx::query(
@@ -177,10 +221,46 @@ async fn resolve_running_sandbox_target_inner(
     }
     let pod_name = probe.pod_name;
 
-    Ok(SandboxTarget {
+    Ok(RunningTarget::Sandbox(SandboxTarget {
         environment_id: id,
         namespace,
         pod_name,
+    }))
+}
+
+/// The host environment's daemon, as its host last reported it: running,
+/// so its daemon is ready, at that generation.
+async fn host_target(
+    state: &ApiState,
+    environment_id: String,
+    host_id: String,
+) -> Result<TunnelTarget, (StatusCode, &'static str)> {
+    let reported = latest_observation(&state.pool, &host_id, &environment_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "host report is unavailable",
+            )
+        })?;
+    let Some((observation, _)) =
+        reported.filter(|(observation, _)| observation.state == HostEnvironmentState::Running)
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "environment is not running on its host",
+        ));
+    };
+    Ok(TunnelTarget {
+        host_id,
+        environment_id,
+        local_environment_id: observation.local_environment_id.to_string(),
+        generation: u64::try_from(observation.generation).map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "host report is unavailable",
+            )
+        })?,
     })
 }
 
