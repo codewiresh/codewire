@@ -85,7 +85,7 @@ the first Production release after codewire/deploy#245.
   the top-up was declined, and the banner says the organization is out of
   credit. The notice and any error sit outside the part of the page that
   refreshes on a credit change, so the refresh that follows the declined
-  charge no longer erases them, as it did before. Not yet observed.
+  charge no longer erases them, as it did before. Observed on Kind (below).
 - **Too many tries** (#4874, against card testing): an organization starts at
   most 10 card setups an hour, and a user at most 20 a day across all their
   organizations. One client address starts at most 60 an hour, across every
@@ -137,6 +137,18 @@ the first Production release after codewire/deploy#245.
       lists only after Stripe's `invoice.paid` webhook. Kind receives no
       Stripe webhooks.
     - Recorded on #4750, comments 115389 and 115402.
+  - Kind, a card saved whose charge declined (#6502), 2026-11-25, with Dev's
+    Stripe test keys. The dashboard ran main `e9e43f9843` merged into
+    #5688's user token branch, whose billing code is main's. At €0 with
+    top-up on, test card 4000 0000 0000 0341, at 1280 and at 390:
+    - the dialog stayed open with "Your card is saved, but its automatic
+      top-up was declined, so no credit was added. Try another card.";
+      Cancel went away and the button became **Done**;
+    - Done went to Billing, whose notice read "Visa •••• 0341 saved as your
+      default card. Its automatic top-up was declined, so no credit was
+      added." and was still there 15 s later, after the live refresh; the
+      banner said the organization is out of credit;
+    - recorded on #6502, comment 144350.
   - Production: not yet observed.
 
 ## 2. `billing-auto-top-up`: automatic top-up
@@ -323,8 +335,8 @@ Issue: #4754.
     within seconds; without one, new Sandboxes and starts are refused.";
   - on Unlimited, which is never charged or refused, the question names no
     charge and no refusal (#6503): "This leaves the balance at -€11.00. The
-    organization is on Unlimited, so nothing is charged or refused." Not yet
-    observed;
+    organization is on Unlimited, so nothing is charged or refused."
+    Observed on Kind;
   - confirming applies it, once; going back changes nothing;
   - the balance moving between the question and the answer: the answer
     confirms the result it was shown, and a different result asks again.
@@ -352,8 +364,12 @@ Issue: #4754.
     charged €20.00 within seconds" (#5094), and Stripe test mode charged it
     about 5 s after Confirm.
   - Not seen on Kind: the charge under **Invoices**, which needs Stripe's
-    webhooks. On Unlimited the question still names a charge that never
-    comes (#6503).
+    webhooks.
+  - On Unlimited, with Visa •••• 0341 saved and top-up on, 2026-11-25, on
+    the same tree as the declined card under `billing-card`: "This leaves the balance at -€20.00. The
+    organization is on Unlimited, so nothing is charged or refused." The
+    same removal on Regular named "Visa •••• 0341 is charged €20.00 within
+    seconds". Recorded on #6503, comment 144357.
 
 ## 10. `billing-banner`: every page says where credit stands
 
