@@ -192,7 +192,43 @@ guest shuts down cleanly.
   (`suspend\n`, answered `ok\n` or `no\n`). The supervisor answers, then
   freezes the workload through PID 1's checkpoint hook and pauses the VM; a
   VM already paused answers `no`, and a freeze that fails leaves it running.
-  The acknowledgement moves the Sandbox to `suspended`.
+  The acknowledgement marks the Sandbox `suspended`, so no periodic call
+  below wakes it.
+- **`suspended` is a mark on a running Sandbox, not a lifecycle state.** The
+  stored state stays `running`, and `suspended_at` records the
+  acknowledgement; the daemon's wake report, a stop or a failed pause clears
+  it. So every access check and every action treats a suspended Sandbox as
+  running, and the action's own connection, or the stop, wakes the VM. Only
+  the calls in the table below read the mark. The API reports it as
+  `Environment.suspended_at`, and `cw ls` and `cw info` show `suspended`
+  where it is set; the dashboard shows it once its design is agreed. A
+  client from before suspend sees `running`, which still works, since any
+  use wakes it.
+- **`ok` is not a pause.** It leaves before the freeze, so a freeze or pause
+  that fails after it leaves the VM running with no pause record. After the
+  acknowledgement the worker reads the Pod's pause records (see "Billing");
+  when no `paused` record follows within 30 seconds, the pause failed, and
+  the mark is cleared. The daemon, which closed its platform
+  connections, redials them when it is still running 30 seconds after `ok`
+  or when the answer is `no`.
+- **Any guest process can ask.** The request on 7784 is unauthenticated: any
+  process in the guest with `AF_VSOCK` can send it, from the start of the
+  boot, setup included, not only the daemon. That is harmless: a paused guest
+  runs nothing, nothing the guest sends resumes it, and any use resumes it (a
+  setup step's connection on 7777 included). A pause the daemon didn't ask
+  for has no acknowledgement, so the Sandbox isn't marked, and the next idle
+  activity check resumes it. Billing counts its seconds from the
+  records like any other pause. A pause record is written only for an
+  accepted pause, and the next one needs a host-side wake in between, so
+  records can't be multiplied. What a guest could multiply is the error line
+  a freeze that fails after `ok` leaves, since the VM keeps running; the
+  supervisor answers at most one request a second, which bounds it. A
+  malformed or refused request writes nothing.
+- **A Sandbox that can't suspend is never waited for.** A `standard`
+  Sandbox is never re-rendered, so a Pod made from a runtime image before
+  suspend shipped keeps running it; its daemon answers the request as
+  unknown. The worker then never asks that Pod again, and `cw info` prints
+  `IdleSuspend: 15m (this sandbox's runtime can't suspend)`.
 - **Kubernetes sees no change.** On `standard` the readiness file is the
   supervisor's, so the Pod stays Ready while the VM is paused.
 - **The wake is the supervisor's, never the guest's.** Nothing the guest
@@ -223,8 +259,13 @@ guest shuts down cleanly.
      kvm-clock (observed right to the second after 150 s), so the supervisor
      doesn't step it; only a macOS guest's thaw carries the host's clock.
   4. **The waking connection goes through,** and the daemon redials its
-     platform connections and reports the wake, which moves the Sandbox back
-     to `running`.
+     platform connections and reports the wake, which clears the mark.
+
+  The `resumed` record is written once the vCPUs run, before the thaw, so a
+  thaw that fails leaves a running VM whose workload stays frozen. Liveness
+  catches it: a `suspended` Sandbox with a `resumed` record and no wake
+  report from its daemon 60 seconds later moves to `error`, with the reason
+  "the sandbox resumed but its daemon did not report the wake".
 - **Billing:** a suspended second costs 0 until the owner sets a suspended
   rate in the admin panel's prices (#5782). A second counts as suspended only
   between the supervisor's record of a pause and its record of the resume,
@@ -233,17 +274,55 @@ guest shuts down cleanly.
     resume:
     `standard runtime: vm-pause-record {"event":"paused"|"resumed","generation":G,"sequence":N,"at_unix_ms":T}`.
     The generation is the boot, and the sequence counts that boot's records
-    from 1, so a missing record shows. The guest can't forge one: guest
-    output reaches the Pod log only escaped and prefixed `guest-daemon: `, so
-    no guest byte can start a line with the record's marker.
-  - **Orchestration reads it in part 3,** through the Kubernetes API, which
-    needs `pods/log` read for `standard` Pods. A record lost to the kubelet's
-    log rotation is billed as running.
-  - Acknowledged but no pause recorded: the Sandbox shows `suspended` and is
-    billed as running.
-  - A wake whose resume was never reported: billing reads the supervisor's
-    record when the Sandbox is next seen, and charges `running` for any time
-    the record doesn't cover.
+    from 1, so a missing record shows.
+  - **The state record** is a second line the runtime writes every 30
+    seconds and at each pause or resume:
+    `standard runtime: vm-pause-state {"generation":G,"sequence":N,"state":"paused"|"running","since_unix_ms":T}`,
+    where the sequence and time are those of the boot's latest pause or
+    resume record (0 and the boot's start before the first). Billing rebuilds
+    a boot's state from the latest state record it has, so one lost line
+    leaves at most 30 seconds unknown.
+  - **Only the runtime writes them.** Billing reads only the runtime
+    container's log, through the Kubernetes API, and only lines that start
+    `standard runtime: vm-pause-`. The guest can't forge one: guest output
+    reaches the Pod log only escaped and prefixed `guest-daemon: `, so no
+    guest byte can start a line, and the runtime's own lines carry no guest
+    text (every error they print is fixed text). Nothing the guest says, the
+    daemon's acknowledgement and wake report included, moves a second
+    between rates.
+  - **Reading them** needs `pods/log` read for `standard` Pods. The billing
+    loop reads each running or suspended `standard` Pod's new lines every 60
+    seconds, and keeps the last generation and sequence it saw.
+  - **A stop reads the last lines first.** Orchestration's stop of a
+    suspended Sandbox, a person's or idle stop's, first wakes it with a
+    connection to its 7777, reads the Pod's new lines, which then end on
+    `resumed`, and only then stops it. A boot whose last record says running
+    is billed as running to its end, and that end is not a gap.
+  - **A boot that ends paused** (the Pod evicted or its node lost while the
+    VM is paused, not orchestration's stop) counts as suspended only up to
+    the Pod's end: the runtime container's termination, or the Pod's
+    deletion when that comes first. The time from the last record seen to
+    that end is settled as a gap, below.
+  - **A gap** is time billing has no record for: a missing sequence number,
+    a boot whose first record seen is above 1, or more than 30 seconds
+    between state records. A gap of 60 seconds or less, two state-record
+    intervals, is billed as suspended. A longer gap bills the time past the
+    last state record before it as running, and is flagged: the billing session records it,
+    and the worker logs the Sandbox, generation and missing numbers, counted
+    in a metric an operator watches. An operator reviews every flagged gap
+    and refunds it when the Sandbox was in fact paused, so the customer's
+    favour holds in the outcome. A long gap needs the billing loop to miss
+    its reads, or a runtime line the guest can multiply: today the runtime
+    writes at most 64 KiB a second of guest output in at most 200 lines,
+    answers at most one suspend request a second, and the kubelet serves only
+    the current log file (10 MiB, the default our clusters keep). With the
+    kubelet's prefix of about 40 bytes a line, pushing a record out of it
+    takes about 140 seconds, more than two billing reads. A change to the
+    kubelet's log size keeps that bound.
+  - **Acknowledged but no pause recorded:** the pause failed (see "`ok` is
+    not a pause"), and the time is billed as running.
+  - **A wake whose resume was never reported:** billing reads the `resumed`
+    record when the Sandbox is next seen, and charges `running` from it.
 
 ### Calls that must not wake a suspended Sandbox
 

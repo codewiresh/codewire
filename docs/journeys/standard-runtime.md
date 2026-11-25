@@ -267,6 +267,12 @@ Target, not shipped (#5529). The contract is
   - a long-lived connection through a pause of 10+ minutes;
   - the guest clock after a 30-minute pause;
   - idle stop reached while suspended: the sandbox resumes, then stops cleanly;
+  - a pause asked by a guest process, not the daemon: the sandbox stays `running`, and the next activity check resumes it;
+  - a freeze that fails after `ok`: the sandbox is back to `running` within 30 seconds, and the time is billed as running;
+  - a sandbox on a runtime image from before suspend: never asked, and `cw info` says it can't suspend;
+  - a gap in a boot's pause records: up to 60 seconds billed as suspended; longer, billed as running past the last state record and flagged for review;
+  - a stop of a suspended sandbox: it is woken, its last lines are read, then it stops, and nothing is flagged;
+  - a Pod deleted while its VM is paused, not by orchestration's stop: suspended time ends at the Pod's end, and the end is settled as a gap;
   - from #6367:
     - after resume, the front door re-admits the Sandbox, its leaves are re-signed, and the first request waits rather than drops (#6267);
     - the first proxied request after resume refreshes a real token that expired while it slept;
@@ -278,4 +284,6 @@ Target, not shipped (#5529). The contract is
   3. Repeat with `ssh`, a preview visit and the dashboard's terminal, each from `suspended`.
   4. Hold an `ssh` session open across a 10-minute suspend: it survives. A TCP stream through `cw-egress` either survives or resets once, as the contract says.
   5. `cw update std-s --idle-suspend off`: it no longer suspends. On a `commodity` sandbox, `--idle-suspend 5m` is refused.
+  6. Inside `std-s`, a process other than the daemon sends `suspend` on vsock port 7784. The operator reads a `paused` record in the Pod log, `cw ls` still reads `running`, and the next activity check (at most 30 seconds later) resumes it, leaving a `resumed` record.
+  7. The operator compares the billing session's suspended seconds with the Pod log's `paused` and `resumed` records for the walk: they match to the second, and no gap is flagged.
 - **Proof:** the state transitions in `cw ls` and the API, the wake times, the `sleep`'s PID unchanged across the pause, the clock difference, the operator's Pod reads (Ready, the same Pod UID, no restart), the billing record's suspended seconds taken from the supervisor's pause record, and #6367's four checks.
