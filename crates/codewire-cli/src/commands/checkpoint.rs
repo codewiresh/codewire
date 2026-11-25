@@ -832,6 +832,52 @@ mod tests {
         command: CheckpointCommand,
     }
 
+    /// A cloud Sandbox has no VM checkpoint, so its memory, and the identity
+    /// token files in it, never reach one (#4664): every subcommand, as
+    /// clap defines them, is refused for a cloud environment before anything
+    /// is reached.
+    #[tokio::test]
+    async fn every_checkpoint_command_is_refused_for_a_cloud_environment() {
+        use clap::{CommandFactory as _, Parser as _};
+        let cloud = crate::Globals {
+            server: None,
+            member: None,
+            placement: Some(EnvironmentPlacement::Platform),
+            org: None,
+        };
+        let definition = Probe::command();
+        let subcommands: Vec<_> = definition.get_subcommands().collect();
+        assert!(subcommands.len() >= 5, "{}", subcommands.len());
+        for subcommand in subcommands {
+            let mut argv = vec!["probe".to_owned(), subcommand.get_name().to_owned()];
+            for arg in subcommand
+                .get_arguments()
+                .filter(|arg| arg.is_required_set())
+            {
+                if let Some(long) = arg.get_long() {
+                    argv.push(format!("--{long}"));
+                }
+                argv.push("synthetic".into());
+            }
+            let command = Probe::try_parse_from(&argv)
+                .unwrap_or_else(|error| panic!("{argv:?}: {error}"))
+                .command;
+            let refused = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                handle_checkpoint_command(&cloud, CheckpointArgs { command }),
+            )
+            .await
+            .expect("the refusal answers at once")
+            .unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains("cloud environments cannot be checkpointed"),
+                "{argv:?}: {refused}"
+            );
+        }
+    }
+
     #[test]
     fn a_restore_line_splits_the_stop_from_the_restore() {
         let ms = std::time::Duration::from_millis;

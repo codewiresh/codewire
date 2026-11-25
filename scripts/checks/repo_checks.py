@@ -24,6 +24,7 @@ from repo_policy.deployment_http_clients import check_deployment_http_clients
 from repo_policy.forgejo_list_paging import check_forgejo_list_paging
 from repo_policy.error_first_word import check_error_first_word
 from repo_policy.trace_context_callers import check_trace_context_callers
+from repo_policy.identity_file_exclusions import check_identity_file_exclusions
 from repo_policy.mcp_settings import check_mcp_settings
 from repo_policy.merge_queue_boundary import check_merge_queue_boundary
 from repo_policy.mesh import check_mesh_surface_freeze
@@ -94,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     trace_context_callers_parser = subparsers.add_parser("trace-context-callers")
     trace_context_callers_parser.add_argument("--self-test", action="store_true")
     trace_context_callers_parser.set_defaults(func=check_trace_context_callers)
+    identity_file_exclusions_parser = subparsers.add_parser("identity-file-exclusions")
+    identity_file_exclusions_parser.add_argument("--self-test", action="store_true")
+    identity_file_exclusions_parser.set_defaults(func=check_identity_file_exclusions)
     mcp_parser = subparsers.add_parser("mcp-settings")
     mcp_parser.add_argument("--self-test", action="store_true")
     mcp_parser.set_defaults(func=check_mcp_settings)
