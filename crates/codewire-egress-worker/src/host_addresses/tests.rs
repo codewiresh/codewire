@@ -109,9 +109,12 @@ async fn a_stun_server_reports_the_mapped_address_of_this_transaction_only() {
 
 #[tokio::test]
 async fn control_frames_round_trip_and_anything_malformed_is_refused() {
-    let set = HostAddressSet::new(
+    let set = HostAddressSet::with_prefixes(
         [v4(203, 0, 114, 7), "2a01:4f8::1".parse().unwrap()],
-        [v4(87, 0, 0, 180)],
+        [
+            AddressPrefix::host(v4(87, 0, 0, 180)),
+            "2001:db8:5:7::/64".parse().unwrap(),
+        ],
     )
     .unwrap();
     let frame = encode_frame(&set);
@@ -129,17 +132,45 @@ async fn control_frames_round_trip_and_anything_malformed_is_refused() {
         bad[index] = value;
         bad
     };
+    // The entries in order: two interfaces, then the public /32 and /64.
+    let length = |entry: usize| FRAME_HEADER_LEN + entry * ENTRY_LEN + 17;
     for bad in [
         mutate(0, b'X'),                   // magic
-        mutate(4, 2),                      // version
+        mutate(4, 1),                      // version 1, from before prefixes
+        mutate(4, 3),                      // a version from after
         mutate(5, 0xff),                   // interface count over its bound
         mutate(7, 0xff),                   // public count over its bound
         mutate(FRAME_HEADER_LEN, 5),       // family
         mutate(FRAME_HEADER_LEN + 1, 1),   // an IPv4 entry that is not IPv4-mapped
+        mutate(length(2), 24),             // host bits past the public /24
+        mutate(length(2), 33),             // longer than IPv4
+        mutate(length(3), 63),             // host bits past the /63
+        mutate(length(1), 127),            // an interface that is not whole
         frame[..frame.len() - 1].to_vec(), // truncated
     ] {
         assert!(read_frame(&mut bad.as_slice()).await.is_err());
     }
+    // Too wide alone, with no bits past the wider length either.
+    let widest = HostAddressSet::with_prefixes(
+        [],
+        [
+            "10.0.0.0/24".parse().unwrap(),
+            "2001:db8::/48".parse().unwrap(),
+        ],
+    )
+    .unwrap();
+    let widest = encode_frame(&widest);
+    assert!(read_frame(&mut widest.as_slice()).await.is_ok());
+    for (entry, length) in [(0, 23), (1, 47)] {
+        let mut bad = widest.clone();
+        bad[FRAME_HEADER_LEN + entry * ENTRY_LEN + 17] = length;
+        assert!(read_frame(&mut bad.as_slice()).await.is_err(), "/{length}");
+    }
+    // A whole-looking prefix is still refused as an interface.
+    let prefixed = HostAddressSet::with_prefixes([], ["203.0.113.0/24".parse().unwrap()]).unwrap();
+    let mut as_interface = encode_frame(&prefixed);
+    as_interface[5..9].copy_from_slice(&[0, 1, 0, 0]);
+    assert!(read_frame(&mut as_interface.as_slice()).await.is_err());
 }
 
 #[test]
@@ -253,18 +284,19 @@ async fn without_stun_only_interfaces_are_refused_and_nothing_is_lost() {
 
 #[tokio::test]
 async fn learned_addresses_are_bounded_oldest_first() {
-    let learned: Vec<Option<IpAddr>> = (0..20).map(|n| Some(v4(87, 0, 1, n))).collect();
+    let learns = MAX_NETWORK_PUBLIC_ADDRESSES as u8 + 4;
+    let learned: Vec<Option<IpAddr>> = (0..learns).map(|n| Some(v4(87, 0, 1, n))).collect();
     let mut monitor = HostAddressMonitor {
         source: FakeSource::new(vec![], learned),
         interfaces: vec![],
         learned: VecDeque::new(),
         warned: false,
     };
-    for _ in 0..20 {
+    for _ in 0..learns {
         monitor.learn().await;
     }
     let set = monitor.set().unwrap();
-    let public: Vec<IpAddr> = set.public().collect();
+    let public: Vec<IpAddr> = set.public().map(|prefix| prefix.network()).collect();
     assert_eq!(public.len(), MAX_NETWORK_PUBLIC_ADDRESSES);
-    assert!(!public.contains(&v4(87, 0, 1, 3)) && public.contains(&v4(87, 0, 1, 19)));
+    assert!(!public.contains(&v4(87, 0, 1, 3)) && public.contains(&v4(87, 0, 1, learns - 1)));
 }

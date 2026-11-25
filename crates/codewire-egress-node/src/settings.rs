@@ -1,11 +1,13 @@
 //! cw-egress's node settings (#4000), read once at start. A value that is
 //! missing or does not parse stops cw-egress before it serves anything.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use codewire_egress_policy::host_addresses::HostAddressSet;
+use codewire_egress_policy::host_addresses::{
+    AddressPrefix, HostAddressError, HostAddressSet, PrefixError,
+};
 
 use crate::drain::{DRAIN_SECONDS, DrainSettingError, drain_deadline};
 
@@ -17,9 +19,10 @@ pub const ORCHESTRATION_URL: &str = "CODEWIRE_EGRESS_ORCHESTRATION_URL";
 pub const ORCHESTRATION_ADDR: &str = "CODEWIRE_EGRESS_ORCHESTRATION_ADDR";
 pub const ORCHESTRATION_ROOTS: &str = "CODEWIRE_EGRESS_ORCHESTRATION_ROOTS";
 pub const NODE_TOKEN_PATH: &str = "CODEWIRE_EGRESS_NODE_TOKEN_PATH";
-/// The cluster's own public addresses, comma-separated, which every broker
-/// refuses as an ordinary "not allowed" (cw-security's condition on #4000).
-/// Rendered by the deployment; empty refuses none beyond the fixed ranges.
+/// The cluster's own public addresses and prefixes, comma-separated, which
+/// every broker refuses as an ordinary "not allowed" (#4000). Rendered by the
+/// deployment; empty refuses none beyond the fixed ranges. A prefix is at most
+/// a /24 or a /48, with no bits past its length.
 pub const REFUSED_ADDRESSES: &str = "CODEWIRE_EGRESS_REFUSED_ADDRESSES";
 
 #[derive(Debug)]
@@ -44,10 +47,10 @@ pub enum SettingsError {
     OrchestrationUrl,
     #[error("{ORCHESTRATION_ADDR} names port {addr}, but {ORCHESTRATION_URL} port {url}")]
     OrchestrationPorts { addr: u16, url: u16 },
-    #[error("{REFUSED_ADDRESSES}: {0:?} is not an IP address")]
-    RefusedAddress(String),
-    #[error("{REFUSED_ADDRESSES} names too many addresses")]
-    TooManyRefused,
+    #[error("{REFUSED_ADDRESSES}: {entry:?} {reason}")]
+    RefusedAddress { entry: String, reason: PrefixError },
+    #[error("{REFUSED_ADDRESSES}: {0}")]
+    TooManyRefused(HostAddressError),
 }
 
 impl NodeSettings {
@@ -68,8 +71,11 @@ impl NodeSettings {
             .filter(|entry| !entry.is_empty())
             .map(|entry| {
                 entry
-                    .parse::<IpAddr>()
-                    .map_err(|_| SettingsError::RefusedAddress(entry.to_owned()))
+                    .parse::<AddressPrefix>()
+                    .map_err(|reason| SettingsError::RefusedAddress {
+                        entry: entry.to_owned(),
+                        reason,
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let orchestration_url = required(ORCHESTRATION_URL)?;
@@ -90,7 +96,8 @@ impl NodeSettings {
             orchestration_roots: PathBuf::from(required(ORCHESTRATION_ROOTS)?),
             node_token_path: PathBuf::from(required(NODE_TOKEN_PATH)?),
             drain: drain_deadline(value(DRAIN_SECONDS).as_deref())?,
-            refused: HostAddressSet::new([], refused).map_err(|_| SettingsError::TooManyRefused)?,
+            refused: HostAddressSet::with_prefixes([], refused)
+                .map_err(SettingsError::TooManyRefused)?,
         })
     }
 }
@@ -226,7 +233,61 @@ mod tests {
         bad.push((REFUSED_ADDRESSES, "203.0.113.9, api.example.com"));
         assert_eq!(
             settings(&bad).unwrap_err(),
-            SettingsError::RefusedAddress("api.example.com".into())
+            SettingsError::RefusedAddress {
+                entry: "api.example.com".into(),
+                reason: PrefixError::Malformed
+            }
+        );
+    }
+
+    #[test]
+    fn refused_prefixes_parse_and_each_broken_rule_is_named() {
+        let mut with = BASE.to_vec();
+        with.push((REFUSED_ADDRESSES, "203.0.113.9,2001:db8:5:7::/64"));
+        let parsed = settings(&with).unwrap();
+        assert!(
+            parsed
+                .refused
+                .classify("2001:db8:5:7::abcd".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            parsed
+                .refused
+                .classify("2001:db8:5:8::".parse().unwrap())
+                .is_none()
+        );
+
+        for (value, error) in [
+            (
+                "203.0.113.9/24",
+                "CODEWIRE_EGRESS_REFUSED_ADDRESSES: \"203.0.113.9/24\" has bits set past its /24",
+            ),
+            (
+                "198.51.100.0/23",
+                "CODEWIRE_EGRESS_REFUSED_ADDRESSES: \"198.51.100.0/23\" is wider than /24, the widest allowed",
+            ),
+            (
+                "2001:db8::/32",
+                "CODEWIRE_EGRESS_REFUSED_ADDRESSES: \"2001:db8::/32\" is wider than /48, the widest allowed",
+            ),
+        ] {
+            let mut bad = BASE.to_vec();
+            bad.push((REFUSED_ADDRESSES, value));
+            assert_eq!(settings(&bad).unwrap_err().to_string(), error);
+        }
+
+        let at_cap: Vec<String> = (0..64).map(|n| format!("198.51.100.{n}")).collect();
+        let over_cap: Vec<String> = (0..65).map(|n| format!("198.51.100.{n}")).collect();
+        let (at_cap, over_cap) = (at_cap.join(","), over_cap.join(","));
+        let mut at = BASE.to_vec();
+        at.push((REFUSED_ADDRESSES, at_cap.as_str()));
+        assert!(settings(&at).is_ok());
+        let mut over = BASE.to_vec();
+        over.push((REFUSED_ADDRESSES, over_cap.as_str()));
+        assert_eq!(
+            settings(&over).unwrap_err().to_string(),
+            "CODEWIRE_EGRESS_REFUSED_ADDRESSES: 65 network public entries, over the cap of 64"
         );
     }
 }

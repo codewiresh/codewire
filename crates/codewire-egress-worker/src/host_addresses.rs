@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use codewire_egress_policy::classify_address;
-pub use codewire_egress_policy::host_addresses::HostAddressSet;
+pub use codewire_egress_policy::host_addresses::{AddressPrefix, HostAddressSet};
 use codewire_egress_policy::host_addresses::{
     MAX_HOST_INTERFACE_ADDRESSES, MAX_NETWORK_PUBLIC_ADDRESSES,
 };
@@ -38,9 +38,13 @@ const STUN_TIMEOUT: Duration = Duration::from_secs(2);
 const STUN_TRIES: usize = 3;
 
 const FRAME_MAGIC: [u8; 4] = *b"CWHA";
-const FRAME_VERSION: u8 = 1;
+/// 2 since each entry carries its prefix length (#4000); a version-1 frame
+/// is refused, never read as one.
+const FRAME_VERSION: u8 = 2;
 const FRAME_HEADER_LEN: usize = 9;
-const ENTRY_LEN: usize = 17;
+/// The family, the 16 octets of IPv6 or of IPv4's mapped form, and the
+/// prefix length in the family's own bits. An interface is always whole.
+const ENTRY_LEN: usize = 18;
 pub const MAX_FRAME_LEN: usize =
     FRAME_HEADER_LEN + (MAX_HOST_INTERFACE_ADDRESSES + MAX_NETWORK_PUBLIC_ADDRESSES) * ENTRY_LEN;
 
@@ -52,16 +56,16 @@ const STUN_HEADER_LEN: usize = 20;
 
 /// One control frame carrying the complete set.
 pub fn encode_frame(set: &HostAddressSet) -> Vec<u8> {
-    let interfaces: Vec<IpAddr> = set.interfaces().collect();
-    let public: Vec<IpAddr> = set.public().collect();
+    let interfaces: Vec<AddressPrefix> = set.interfaces().map(AddressPrefix::host).collect();
+    let public: Vec<AddressPrefix> = set.public().collect();
     let mut frame =
         Vec::with_capacity(FRAME_HEADER_LEN + (interfaces.len() + public.len()) * ENTRY_LEN);
     frame.extend_from_slice(&FRAME_MAGIC);
     frame.push(FRAME_VERSION);
     frame.extend_from_slice(&(interfaces.len() as u16).to_be_bytes());
     frame.extend_from_slice(&(public.len() as u16).to_be_bytes());
-    for address in interfaces.iter().chain(&public) {
-        match address {
+    for prefix in interfaces.iter().chain(&public) {
+        match prefix.network() {
             IpAddr::V4(v4) => {
                 frame.push(4);
                 frame.extend_from_slice(&v4.to_ipv6_mapped().octets());
@@ -71,6 +75,7 @@ pub fn encode_frame(set: &HostAddressSet) -> Vec<u8> {
                 frame.extend_from_slice(&v6.octets());
             }
         }
+        frame.push(prefix.length());
     }
     frame
 }
@@ -110,21 +115,33 @@ pub async fn read_frame_after_magic<R: AsyncRead + Unpin>(
     }
     let mut body = vec![0_u8; (interfaces + public) * ENTRY_LEN];
     reader.read_exact(&mut body).await?;
-    let mut addresses = Vec::with_capacity(interfaces + public);
+    let mut prefixes = Vec::with_capacity(interfaces + public);
     for entry in body.as_chunks::<ENTRY_LEN>().0 {
-        let octets: [u8; 16] = entry[1..].try_into().expect("entry length");
+        let octets: [u8; 16] = entry[1..17].try_into().expect("entry length");
         let v6 = Ipv6Addr::from(octets);
-        addresses.push(match entry[0] {
+        let network = match entry[0] {
             4 => IpAddr::V4(
                 v6.to_ipv4_mapped()
                     .ok_or_else(|| invalid("host address frame has a bad IPv4 entry"))?,
             ),
             6 => IpAddr::V6(v6),
             _ => return Err(invalid("host address frame has an unknown family")),
-        });
+        };
+        // The same rules as the setting: no host bits, nothing too wide.
+        let prefix = AddressPrefix::new(network, entry[17])
+            .map_err(|error| invalid(&format!("host address frame entry {network} {error}")))?;
+        prefixes.push(prefix);
     }
-    let public_addresses = addresses.split_off(interfaces);
-    HostAddressSet::new(addresses, public_addresses).map_err(|error| invalid(&error.to_string()))
+    let public_prefixes = prefixes.split_off(interfaces);
+    let mut interface_addresses = Vec::with_capacity(interfaces);
+    for prefix in prefixes {
+        if prefix != AddressPrefix::host(prefix.network()) {
+            return Err(invalid("host address frame has an interface prefix"));
+        }
+        interface_addresses.push(prefix.network());
+    }
+    HostAddressSet::with_prefixes(interface_addresses, public_prefixes)
+        .map_err(|error| invalid(&error.to_string()))
 }
 
 /// This host's interface addresses that the fixed protected ranges do not
