@@ -1272,3 +1272,27 @@ fn a_negative_balance_question_says_what_top_up_sets_off() {
         "Automatic top-up is on at €50.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
     ));
 }
+
+#[test]
+fn admin_overview_shows_the_month_s_cost_in_euros_from_compute_credit() {
+    // #5318: the old dollar field is ignored, whatever it holds.
+    let stats = crate::admin_connect::stats_view(
+        &codewire_admin_proto::codewire::admin::v1::GetStatsResponse {
+            active_environments: 2,
+            monthly_cpu_hours: 4.0,
+            monthly_memory_gb_hours: 8.0,
+            monthly_cost_cents: 1_234,
+            monthly_usage_nano_eur: 40_000_000,
+            ..Default::default()
+        },
+    );
+    let body = crate::templates::AdminOverviewTemplate {
+        view: &admin_view(),
+        stats: &stats,
+    }
+    .render()
+    .expect("render admin overview page");
+    assert!(body.contains("<span>Monthly Cost</span><strong>€0.04</strong>"));
+    assert!(body.contains("<span>CPU Hours</span><strong>4.0</strong>"));
+    assert!(!body.contains('$'), "a dollar sign on Admin → Overview");
+}

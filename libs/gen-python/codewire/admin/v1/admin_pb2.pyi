@@ -26,18 +26,20 @@ class GetStatsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class GetStatsResponse(_message.Message):
-    __slots__ = ("total_environments", "active_environments", "monthly_cpu_hours", "monthly_memory_gb_hours", "monthly_cost_cents")
+    __slots__ = ("total_environments", "active_environments", "monthly_cpu_hours", "monthly_memory_gb_hours", "monthly_cost_cents", "monthly_usage_nano_eur")
     TOTAL_ENVIRONMENTS_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_ENVIRONMENTS_FIELD_NUMBER: _ClassVar[int]
     MONTHLY_CPU_HOURS_FIELD_NUMBER: _ClassVar[int]
     MONTHLY_MEMORY_GB_HOURS_FIELD_NUMBER: _ClassVar[int]
     MONTHLY_COST_CENTS_FIELD_NUMBER: _ClassVar[int]
+    MONTHLY_USAGE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     total_environments: int
     active_environments: int
     monthly_cpu_hours: float
     monthly_memory_gb_hours: float
     monthly_cost_cents: int
-    def __init__(self, total_environments: _Optional[int] = ..., active_environments: _Optional[int] = ..., monthly_cpu_hours: _Optional[float] = ..., monthly_memory_gb_hours: _Optional[float] = ..., monthly_cost_cents: _Optional[int] = ...) -> None: ...
+    monthly_usage_nano_eur: int
+    def __init__(self, total_environments: _Optional[int] = ..., active_environments: _Optional[int] = ..., monthly_cpu_hours: _Optional[float] = ..., monthly_memory_gb_hours: _Optional[float] = ..., monthly_cost_cents: _Optional[int] = ..., monthly_usage_nano_eur: _Optional[int] = ...) -> None: ...
 
 class Organization(_message.Message):
     __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status", "dedicated_cpu")

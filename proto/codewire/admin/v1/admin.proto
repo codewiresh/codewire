@@ -171,9 +171,16 @@ message GetStatsRequest {}
 message GetStatsResponse {
   int64 total_environments = 1;
   int64 active_environments = 2;
+  // This month's running Sandboxes across every organization, from the
+  // sessions their organizations' own Billing pages read.
   double monthly_cpu_hours = 3;
   double monthly_memory_gb_hours = 4;
+  // Unset: the dollar record it summed is no longer written. See
+  // monthly_usage_nano_eur.
   int64 monthly_cost_cents = 5;
+  // What usage drew from compute credit this month across every organization,
+  // in nano-euros: the sum of each organization's "This month" (#5318).
+  int64 monthly_usage_nano_eur = 6;
 }
 
 message Organization {

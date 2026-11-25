@@ -78,7 +78,7 @@ impl AdminService for AdminConnectService {
             active_environments: stats.active_environments,
             monthly_cpu_hours: stats.monthly_cpu_hours,
             monthly_memory_gb_hours: stats.monthly_memory_gb_hours,
-            monthly_cost_cents: stats.monthly_cost,
+            monthly_usage_nano_eur: stats.monthly_usage_nano_eur,
             ..Default::default()
         })
     }

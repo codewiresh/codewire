@@ -6,7 +6,7 @@ use codewire_admin_proto::codewire::admin::v1::{
     ClearOrganizationEnvironmentQuotaRequest, CreatePlanRequest, CreatePriceRequest,
     EnvironmentQuota, FeedbackEntry, FeedbackSender, GetCatalogRequest,
     GetDefaultEnvironmentQuotaRequest, GetOrganizationDefaultCardRequest,
-    GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
+    GetOrganizationOverviewRequest, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
     ListConfidentialOrganizationsRequest, ListFeedbackRequest,
     ListOrganizationSandboxCountsRequest, ListOrganizationsRequest,
     ListStandardRuntimeOrganizationsRequest, ListSubscriptionMigrationsRequest,
@@ -397,12 +397,17 @@ pub(crate) async fn stats(
         .get_stats(GetStatsRequest::default())
         .await?
         .into_owned();
-    Ok(AdminStatsView {
+    Ok(stats_view(&stats))
+}
+
+/// Monthly Cost is the compute credit usage drew, in euros (#5318).
+pub(crate) fn stats_view(stats: &GetStatsResponse) -> AdminStatsView {
+    AdminStatsView {
         active_environments: stats.active_environments.to_string(),
-        monthly_cost: money(stats.monthly_cost_cents),
+        monthly_cost: euro_text(stats.monthly_usage_nano_eur),
         monthly_cpu_hours: format!("{:.1}", stats.monthly_cpu_hours),
         monthly_memory_hours: format!("{:.1}", stats.monthly_memory_gb_hours),
-    })
+    }
 }
 
 pub(crate) async fn audit_logs(
@@ -1429,12 +1434,6 @@ fn migration_view(
     }
 }
 
-fn money(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let absolute = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", absolute / 100, absolute % 100)
-}
-
 fn bounded(mut value: String, limit: usize) -> String {
     if value.len() <= limit {
         return value;
@@ -1494,8 +1493,8 @@ mod tests {
 
     #[test]
     fn admin_display_values_are_bounded_and_safe() {
-        assert_eq!(money(1234), "$12.34");
-        assert_eq!(money(-5), "-$0.05");
+        // Monthly Cost is compute credit, in euros (#5318).
+        assert_eq!(euro_text(40_000_000), "€0.04");
         assert!(bounded("é".repeat(3_000), 4_096).len() <= 4_099);
         assert_eq!(severity_tone("error"), "danger");
         assert_eq!(severity_tone("unknown"), "muted");

@@ -7,14 +7,14 @@
 //! lifecycle journal, and environment startup timing/summary port here, with
 //! the audited writes of one organization's environment quota.
 
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use std::borrow::Cow;
 
 use codewire_server_core::AppError;
 use codewire_server_core::AppResult;
 use codewire_server_core::ValidationIssue;
 use serde::{Serialize, Serializer};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 
 use super::ApiState;
 use super::environments::{
@@ -48,7 +48,8 @@ pub struct AdminStatsResponse {
     pub monthly_cpu_hours: f64,
     #[serde(serialize_with = "serialize_go_float")]
     pub monthly_memory_gb_hours: f64,
-    pub monthly_cost: i64,
+    /// What usage drew from compute credit this month, in nano-euros.
+    pub monthly_usage_nano_eur: i64,
 }
 
 fn serialize_go_float<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
@@ -93,29 +94,53 @@ pub(crate) async fn get_admin_stats_core(state: &ApiState) -> AppResult<AdminSta
         .single()
         .ok_or_else(|| AppError::InternalMsg("failed to compute month start".into()))?;
 
-    let row = sqlx::query(
-        r#"SELECT
-             COALESCE(SUM((metadata->>'elapsed_seconds')::float / 3600.0 * (metadata->>'cpu_millicores')::float / 1000.0), 0),
-             COALESCE(SUM((metadata->>'elapsed_seconds')::float / 3600.0 * (metadata->>'memory_mb')::float / 1024.0), 0),
-             COALESCE(SUM(amount_cents), 0)
-           FROM billing_events
-           WHERE event_type = 'environment_usage' AND created_at >= $1"#,
-    )
-    .bind(month_start)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "admin: query monthly usage stats failed");
-        AppError::InternalMsg("failed to query monthly usage stats".into())
-    })?;
+    let (monthly_cpu_hours, monthly_memory_gb_hours, monthly_usage_nano_eur) =
+        monthly_usage(&state.pool, month_start).await?;
 
     Ok(AdminStatsResponse {
         total_environments,
         active_environments,
-        monthly_cpu_hours: row.try_get::<f64, _>(0).map_err(AppError::from)?,
-        monthly_memory_gb_hours: row.try_get::<f64, _>(1).map_err(AppError::from)?,
-        monthly_cost: row.try_get::<i64, _>(2).map_err(AppError::from)?,
+        monthly_cpu_hours,
+        monthly_memory_gb_hours,
+        monthly_usage_nano_eur,
     })
+}
+
+/// This month's CPU hours, memory GB-hours and credit drawn, across every
+/// organization, from `month_start`.
+pub(crate) async fn monthly_usage(
+    pool: &PgPool,
+    month_start: DateTime<Utc>,
+) -> AppResult<(f64, f64, i64)> {
+    // The records an organization's own Billing page reads (#5318), summed over
+    // every organization: the hours from its running sessions, as billing's
+    // `session_usage_sums`, and the cost from what usage drew from credit, as
+    // billing's `month_usage_nano_eur`. A deleted organization's draw stays in
+    // the ledger and counts.
+    sqlx::query_as(
+            r#"WITH bounded AS (
+                   SELECT s.cpu_millicores, s.memory_mib,
+                          GREATEST(s.started_at, $1) AS bill_start,
+                          LEAST(COALESCE(s.ended_at, NOW()), $1 + interval '1 month') AS bill_end
+                   FROM sandbox_running_sessions s
+                   WHERE s.started_at < $1 + interval '1 month'
+                     AND COALESCE(s.ended_at, NOW()) > $1
+               )
+               SELECT
+                 COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start)) / 3600.0 * cpu_millicores / 1000.0), 0)::float8,
+                 COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start)) / 3600.0 * memory_mib / 1024.0), 0)::float8,
+                 (SELECT COALESCE(-SUM(amount_nano_eur), 0)::int8 FROM billing_credit_ledger
+                  WHERE entry_kind = 'usage' AND usage_ended_at >= $1)
+               FROM bounded
+               WHERE bill_end > bill_start"#,
+        )
+        .bind(month_start)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "admin: query monthly usage stats failed");
+            AppError::InternalMsg("failed to query monthly usage stats".into())
+        })
 }
 
 /// Mirrors `api.AdminOrg`. Bare-array body (`Body []AdminOrg`), so no
@@ -993,7 +1018,7 @@ mod tests {
             active_environments: 2,
             monthly_cpu_hours: 2.0,
             monthly_memory_gb_hours: 4.5,
-            monthly_cost: 0,
+            monthly_usage_nano_eur: 0,
         })
         .expect("serialize stats");
 

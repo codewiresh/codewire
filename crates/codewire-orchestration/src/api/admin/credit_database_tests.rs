@@ -304,3 +304,112 @@ async fn db_an_adjustment_below_zero_applies_only_once_its_balance_is_confirmed(
     .await;
     db.finish(result).await
 }
+
+/// One usage draw from `organization`, ending at `ended_at`.
+async fn usage(pool: &PgPool, organization: &str, nano_eur: i64, ended_at: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO billing_credit_ledger (organization_id, entry_kind, amount_nano_eur, \
+         idempotency_key, usage_started_at, usage_ended_at, rate_card) \
+         VALUES ($1, 'usage', $2, gen_random_uuid()::text, \
+         $3::timestamptz - interval '1 hour', $3::timestamptz, 'regular')",
+    )
+    .bind(organization)
+    .bind(-nano_eur)
+    .bind(ended_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One 1 vCPU, 2 GiB session of a new Sandbox of `organization`, from
+/// `started_at` to `ended_at`.
+async fn session(
+    pool: &PgPool,
+    organization: &str,
+    started_at: &str,
+    ended_at: &str,
+) -> Result<()> {
+    let environment: String = sqlx::query_scalar(
+        "INSERT INTO environments (id, org_id, created_by, type, preset_id, state, \
+         desired_state, project_spec) \
+         VALUES ($1 || '-' || gen_random_uuid(), $1, $2, 'sandbox', $1, 'stopped', 'stopped', \
+         '{}'::jsonb) RETURNING id",
+    )
+    .bind(organization)
+    .bind(ADMIN)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO sandbox_running_sessions (environment_id, organization_id, runtime_uid, \
+         runtime_name, runtime_namespace, cpu_millicores, memory_mib, disk_gib, started_at, \
+         last_observed_at, ended_at) \
+         VALUES ($1, $2, gen_random_uuid()::text, 'sandbox', 'sandboxes', 1000, 2048, \
+         10, $3::timestamptz, $4::timestamptz, $4::timestamptz)",
+    )
+    .bind(environment)
+    .bind(organization)
+    .bind(started_at)
+    .bind(ended_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Admin → Overview's month figures are every organization's draw and
+/// sessions, from the records their own Billing pages read (#5318).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_month_figures_sum_every_organization_s_draw_and_sessions() -> Result<()> {
+    const OTHER: &str = "credit-other-organization";
+    let db = TestDatabase::create().await?;
+    let result = async {
+        db.user(ADMIN).await?;
+        let pool = &db.pool;
+        for organization in [ORGANIZATION, OTHER] {
+            db.organization(organization).await?;
+            sqlx::query(
+                "INSERT INTO environment_presets (id, org_id, name, build_status, project_spec) \
+                 VALUES ($1, $1, 'Preset', 'ready', '{}'::jsonb)",
+            )
+            .bind(organization)
+            .execute(pool)
+            .await?;
+        }
+        let month_start = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")?.to_utc();
+        ensure!(monthly_usage(pool, month_start).await.map_err(app_error)? == (0.0, 0.0, 0));
+
+        usage(pool, ORGANIZATION, 30_000_000, "2026-11-03T10:00:00Z").await?;
+        usage(pool, OTHER, 10_000_000, "2026-11-04T10:00:00Z").await?;
+        // Last month's draw and an adjustment are not this month's usage.
+        usage(pool, OTHER, 99 * EURO, "2026-10-31T23:00:00Z").await?;
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger (organization_id, entry_kind, amount_nano_eur, \
+             idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', -1000000000, gen_random_uuid()::text, $2, 'test')",
+        )
+        .bind(ORGANIZATION)
+        .bind(ADMIN)
+        .execute(pool)
+        .await?;
+        session(
+            pool,
+            ORGANIZATION,
+            "2026-11-03T08:00:00Z",
+            "2026-11-03T10:00:00Z",
+        )
+        .await?;
+        session(pool, OTHER, "2026-11-04T09:00:00Z", "2026-11-04T10:00:00Z").await?;
+        // Only its hour inside the month counts.
+        session(pool, OTHER, "2026-10-31T23:00:00Z", "2026-11-01T01:00:00Z").await?;
+        session(pool, OTHER, "2026-10-30T00:00:00Z", "2026-10-30T05:00:00Z").await?;
+
+        let (cpu_hours, memory_gb_hours, nano_eur) =
+            monthly_usage(pool, month_start).await.map_err(app_error)?;
+        ensure!(nano_eur == 40_000_000, "{nano_eur}");
+        ensure!((cpu_hours - 4.0).abs() < 1e-9, "{cpu_hours}");
+        ensure!((memory_gb_hours - 8.0).abs() < 1e-9, "{memory_gb_hours}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
