@@ -1217,6 +1217,8 @@ for case in '124||timeout' '137||timeout' '1|HTTP error 502|http_502' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (Connect): tcp connect error: Connection refused (os error 111)|refused' \
     '1|list orgs: send request: error sending request for url (https://127.0.0.1:9/x); caused by: client error (Connect): tls error: received corrupt message of type InvalidContentType|tls' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: operation timed out|timeout' \
+    '1|list projects: send request: error sending request for url (https://synthetic.invalid/x); caused by: client error (Connect): operation timed out|conn_tcp' \
+    '1|list projects: send request: error sending request for url (https://synthetic.invalid/x); caused by: client error (Connect): dns error: no answer within 5s|dns' \
     '1|list orgs: client-side deadline exceeded|timeout' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection error: Connection reset by peer (os error 104)|conn_reset' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): stream closed because of a broken pipe|conn_pipe' \

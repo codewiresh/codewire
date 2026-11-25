@@ -23,6 +23,7 @@ export function cwFailureClass(status: number, stderr: string): FailureClass {
   if (code) return `http_${Number(code)}`;
   if (/dns error|failed to lookup address|name or service not known|temporary failure in name resolution/i.test(stderr)) return "dns";
   if (/tls error|certificate|tls handshake/i.test(stderr)) return "tls";
+  if (/client error \(Connect\): operation timed out/i.test(stderr)) return "conn_tcp";
   if (/timed out|deadline exceeded|deadline_exceeded/i.test(stderr)) return "timeout";
   if (/connection refused/i.test(stderr)) return "refused";
   if (/connection reset/i.test(stderr)) return "conn_reset";

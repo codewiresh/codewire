@@ -54,6 +54,9 @@ SMOKE_COLLECT_FAILURE_DIAGNOSTICS="${SMOKE_COLLECT_FAILURE_DIAGNOSTICS:-1}"
 SMOKE_PACKET_DIAGNOSTICS="${SMOKE_PACKET_DIAGNOSTICS:-0}"
 SMOKE_CLEANUP_ATTEMPTS="${SMOKE_CLEANUP_ATTEMPTS:-3}"
 SMOKE_CLEANUP_RETRY_DELAY="${SMOKE_CLEANUP_RETRY_DELAY:-2}"
+# A setup command's budget. It is above cw's 30 s call deadline, so a stalled
+# call ends with cw's own classified error rather than this timeout (#6510).
+SMOKE_PREPARE_SECONDS=40
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
@@ -872,9 +875,11 @@ cw_with_timeout() {
 # failure before any response as "error sending request for url (...); caused
 # by: <cause>", where the cause names a "dns error", a "tls error", a timeout
 # or a refused "tcp connect error". The conn_ classes tell the rest apart: a
-# connection reset, a broken pipe, one that never opened, one closed before its
-# reply, an HTTP/2 error, and conn_send for any other send failure. The deploy
-# relay repeats only these names, and dev-ux-ownership.ts mirrors them.
+# connection reset, a broken pipe, one that never opened (including one that
+# ran out cw's 10 s connect bound, docs/dev/CONNECT-ERROR-MODEL.md D7), one
+# closed before its reply, an HTTP/2 error, and conn_send for any other send
+# failure. The deploy relay repeats only these names, and dev-ux-ownership.ts
+# mirrors them.
 cw_failure_class() {
   local status="$1" error="$2" code=''
   if [[ "$status" == 124 || "$status" == 137 ]]; then printf timeout; return; fi
@@ -886,6 +891,7 @@ cw_failure_class() {
       printf dns; return
     fi
     if grep -Eqi -- 'tls error|certificate|tls handshake' "$error"; then printf tls; return; fi
+    if grep -Eqi -- 'client error \(Connect\): operation timed out' "$error"; then printf conn_tcp; return; fi
     if grep -Eqi -- 'timed out|deadline exceeded|deadline_exceeded' "$error"; then printf timeout; return; fi
     if grep -Eqi -- 'connection refused' "$error"; then printf refused; return; fi
     if grep -Eqi -- 'connection reset' "$error"; then printf conn_reset; return; fi
@@ -906,7 +912,7 @@ prepare_cw() {
   shift 3
   started_at="$(command_start_time)"
   started_ms="$(milliseconds_now)"
-  if cw_with_timeout 30 "$@" >"$output" 2>"$error"; then SMOKE_LAST_CW_CLASS=''; return 0; else status=$?; fi
+  if cw_with_timeout "$SMOKE_PREPARE_SECONDS" "$@" >"$output" 2>"$error"; then SMOKE_LAST_CW_CLASS=''; return 0; else status=$?; fi
   class="$(cw_failure_class "$status" "$error")"
   SMOKE_LAST_CW_CLASS="$class"
   printf '%s\t%s\t%s\n' "$step" "$status" "$class" >>"$TMPDIR_SMOKE/app-prepare-commands.tsv"

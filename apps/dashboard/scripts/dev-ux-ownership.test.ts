@@ -296,6 +296,8 @@ test("cw failures are classified like the shell smoke's cw_failure_class", () =>
     [1, `error sending request for url; caused by: stream closed because of a broken pipe ${canary}`, "conn_pipe"],
     [1, `error sending request for url; caused by: client error (Connect): tcp connect error: Network is unreachable ${canary}`, "conn_tcp"],
     [1, `error sending request for url; caused by: client error (Connect): invalid peer ${canary}`, "conn_tcp"],
+    [1, `error sending request for url; caused by: client error (Connect): operation timed out ${canary}`, "conn_tcp"],
+    [1, `error sending request for url; caused by: client error (Connect): dns error: no answer within 5s ${canary}`, "dns"],
     [1, `error sending request for url; caused by: client error (SendRequest): connection closed before message completed ${canary}`, "conn_closed"],
     [1, `error sending request for url; caused by: client error (SendRequest): http2 error: GOAWAY ${canary}`, "conn_http2"],
     [1, `error sending request for url; caused by: client error (SendRequest): connection error ${canary}`, "conn_send"],

@@ -157,7 +157,7 @@ credential.
 
 ## Error model
 
-The full contract (design decisions D1–D6) is
+The full contract (design decisions D1–D7) is
 [CONNECT-ERROR-MODEL.md](CONNECT-ERROR-MODEL.md); this section is the
 authoring/consuming summary.
 

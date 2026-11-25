@@ -1,6 +1,8 @@
 //! The HTTP transport every generated service client here is built on.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use connectrpc::ConnectError;
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
@@ -17,6 +19,19 @@ const BEARER_REFUSED_DOMAIN: &str = "codewire.sh";
 
 /// The most of a refused unary call's answer read to find its reason.
 const REFUSAL_BYTES: usize = 64 * 1024;
+
+/// How long a call waits for its connection: the DNS lookup, the TCP connect
+/// and the TLS handshake together. It is well inside a call's deadline, so a
+/// connection that never opens fails as a connection error before a caller's
+/// own timeout ends the process (docs/dev/CONNECT-ERROR-MODEL.md, D7).
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The DNS lookup's part of `CONNECT_TIMEOUT`, so a lookup that never answers
+/// fails as a `dns error` of its own.
+pub(crate) const DNS_TIMEOUT: Duration = Duration::from_secs(5);
+
+const _: () = assert!(DNS_TIMEOUT.as_secs() < CONNECT_TIMEOUT.as_secs());
+const _: () = assert!(CONNECT_TIMEOUT.as_secs() < crate::DEFAULT_UNARY_TIMEOUT.as_secs());
 
 /// Adapter for connect-rust's transport trait using the repository-standard
 /// rustls-backed reqwest client.
@@ -52,7 +67,11 @@ impl ReqwestConnectTransport {
 pub(crate) fn default_http_client(config: &ClientConfig) -> Result<reqwest::Client, ClientError> {
     // Connect bidi needs HTTP/2: cleartext direct endpoints use h2c prior
     // knowledge, and TLS endpoints negotiate it with ALPN.
-    let builder = config.http_client_builder()?;
+    let builder = bounded_connections(
+        config.http_client_builder()?,
+        CONNECT_TIMEOUT,
+        Lookup::system(DNS_TIMEOUT),
+    );
     let builder = if config.server_url().scheme() == "http" {
         builder.http2_prior_knowledge()
     } else {
@@ -64,6 +83,56 @@ pub(crate) fn default_http_client(config: &ClientConfig) -> Result<reqwest::Clie
             format!("build Codewire HTTP client: {error}"),
         )
     })
+}
+
+/// `builder` with each connection bounded at `connect`, and its DNS lookups
+/// made by `lookup`.
+pub(crate) fn bounded_connections(
+    builder: reqwest::ClientBuilder,
+    connect: Duration,
+    lookup: Lookup,
+) -> reqwest::ClientBuilder {
+    builder
+        .connect_timeout(connect)
+        .dns_resolver(Arc::new(lookup))
+}
+
+pub(crate) type LookupFuture = BoxFuture<'static, std::io::Result<Vec<SocketAddr>>>;
+
+/// A DNS lookup with its own bound. The system one is `getaddrinfo` on a
+/// blocking thread, as reqwest's own resolver is.
+pub(crate) struct Lookup {
+    bound: Duration,
+    lookup: fn(String) -> LookupFuture,
+}
+
+impl Lookup {
+    pub(crate) fn system(bound: Duration) -> Self {
+        Self::with(bound, |host| {
+            Box::pin(
+                async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) },
+            )
+        })
+    }
+
+    pub(crate) fn with(bound: Duration, lookup: fn(String) -> LookupFuture) -> Self {
+        Self { bound, lookup }
+    }
+}
+
+impl reqwest::dns::Resolve for Lookup {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let bound = self.bound;
+        let lookup = (self.lookup)(name.as_str().to_owned());
+        Box::pin(async move {
+            // Port 0: the connector takes the request's port.
+            match tokio::time::timeout(bound, lookup).await {
+                Ok(Ok(addresses)) => Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs),
+                Ok(Err(error)) => Err(error.into()),
+                Err(_) => Err(format!("no answer within {bound:?}").into()),
+            }
+        })
+    }
 }
 
 impl ClientTransport for ReqwestConnectTransport {

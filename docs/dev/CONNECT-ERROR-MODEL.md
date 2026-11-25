@@ -1,6 +1,6 @@
 # Connect error model
 
-This document records the six decisions (D1 to D6) that define the one error
+This document records the seven decisions (D1 to D7) that define the one error
 contract every Connect surface shares. The `connect_error` and `error`
 modules of `codewire-server-core` and [PROTO-STYLE.md](PROTO-STYLE.md) cite
 them by number. PROTO-STYLE.md has the summary for someone writing or
@@ -116,3 +116,23 @@ codes or details by hand.
 
 Reason: with one source, the HTTP and Connect surfaces cannot disagree
 about the same failure.
+
+## D7: Client bounds
+
+The Rust SDK (`crates/codewire`), and so `cw`, bounds each call's connection
+at 10 s: the DNS lookup, the TCP connect and the TLS handshake together. The
+lookup alone is bounded at 5 s. Both bounds are inside the 30 s call deadline
+(`DEFAULT_UNARY_TIMEOUT`).
+
+- A connection that never opens fails as `unavailable`, with its cause after
+  `; caused by: `.
+  - A lookup that never answers: `dns error: no answer within 5s`.
+  - A TCP connect or TLS handshake that never finishes:
+    `client error (Connect): operation timed out`. The client can't tell these
+    two apart.
+- A call that has connected is bounded by its deadline alone, and ends as
+  `deadline_exceeded`.
+
+Reason: with only the call deadline, a stalled connection and a slow answer
+looked the same. A caller that ran `cw` under its own timeout of the same
+length killed it before it could say which (#6510).

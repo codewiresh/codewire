@@ -156,9 +156,13 @@ mod tests {
     #[tokio::test]
     async fn a_name_that_does_not_resolve_names_the_dns_failure() {
         let url = "https://codewire-transport-test.invalid";
-        let message = failed_call(url, reqwest::Client::new()).await;
+        let lookup = crate::transport::Lookup::system(crate::transport::DNS_TIMEOUT);
+        let message = failed_call(url, bounded(lookup)).await;
         assert_stable_first_part(&message, url);
-        assert!(cause(&message).contains("dns error"), "{message}");
+        assert!(
+            cause(&message).contains("dns error: failed to lookup address"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
@@ -216,6 +220,90 @@ mod tests {
         server.abort();
         assert_stable_first_part(&message, &url);
         assert!(cause(&message).contains("timed out"), "{message}");
+    }
+
+    /// A client with the SDK's connection bounds, shortened: 300 ms for the
+    /// connection and `lookup` for its DNS (D7).
+    fn bounded(lookup: crate::transport::Lookup) -> reqwest::Client {
+        crate::transport::bounded_connections(
+            reqwest::Client::builder(),
+            Duration::from_millis(300),
+            lookup,
+        )
+        .build()
+        .expect("client")
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_never_answers_is_a_dns_error_within_its_bound() {
+        let lookup = crate::transport::Lookup::with(Duration::from_millis(100), |_| {
+            Box::pin(std::future::pending())
+        });
+        let url = "https://codewire-transport-test.invalid";
+        let started = std::time::Instant::now();
+        let message = failed_call(url, bounded(lookup)).await;
+        assert!(started.elapsed() < Duration::from_secs(5), "{message}");
+        assert_stable_first_part(&message, url);
+        assert!(
+            cause(&message).contains("dns error: no answer within 100ms"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_never_finishes_ends_at_the_connect_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        let url = format!("https://{address}");
+        let started = std::time::Instant::now();
+        let lookup = crate::transport::Lookup::system(Duration::from_millis(100));
+        let message = failed_call(&url, bounded(lookup)).await;
+        server.abort();
+        assert!(started.elapsed() < Duration::from_secs(5), "{message}");
+        assert_stable_first_part(&message, &url);
+        assert_eq!(
+            cause(&message),
+            "client error (Connect): operation timed out",
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_connected_ends_at_its_deadline_not_the_connect_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        let config = ClientConfig::new(format!("http://{address}"))
+            .expect("server URL")
+            .with_unary_timeout(Duration::from_millis(900));
+        let http = crate::transport::bounded_connections(
+            reqwest::Client::builder().http2_prior_knowledge(),
+            Duration::from_millis(100),
+            crate::transport::Lookup::system(Duration::from_millis(100)),
+        )
+        .build()
+        .expect("client");
+        let client = CodewireClient::with_http(
+            config,
+            StaticTokenProvider::new("synthetic-token").expect("token"),
+            http,
+        )
+        .expect("client");
+        let started = std::time::Instant::now();
+        let error = client
+            .list_api_keys(ListApiKeysRequest::default())
+            .await
+            .expect_err("the server never answers");
+        server.abort();
+        assert_eq!(error.code(), ErrorCode::DeadlineExceeded, "{error}");
+        assert!(started.elapsed() >= Duration::from_millis(900), "{error}");
     }
 
     #[tokio::test]
