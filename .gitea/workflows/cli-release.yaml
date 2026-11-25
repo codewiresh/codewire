@@ -238,13 +238,15 @@ jobs:
           work="$GITHUB_WORKSPACE/.kernel-builder"
           mkdir -m 0700 "$work"
           scripts/ci/release/collect-kernel-builder-packages.sh "$work/collected" --job-container "${HOSTNAME:?}"
+          # One archive, since an artifact path may not hold the colon of a
+          # package's epoch (fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst).
+          tar -C "$work/collected" -cf "$work/collected.tar" .
 
       - name: Hand the collected packages on
         uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: kernel-builder-collected-${{ github.run_id }}
-          path: .kernel-builder/collected
-          include-hidden-files: true
+          path: .kernel-builder/collected.tar
           if-no-files-found: error
           retention-days: 1
 
@@ -287,7 +289,7 @@ jobs:
           trap 'shred -u "$r2_work/aws-credentials" 2>/dev/null || rm -f "$r2_work/aws-credentials"' EXIT
           scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh "$r2_work/aws-credentials"
           python3 -I scripts/ci/release/kernel_builder_mirror.py record \
-            --collected "$RUNNER_TEMP/kernel-builder-collected" --credentials "$r2_work/aws-credentials"
+            --collected-tar "$RUNNER_TEMP/kernel-builder-collected/collected.tar" --credentials "$r2_work/aws-credentials"
 
       - name: Hand the lock on for a reviewed pull request
         uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf

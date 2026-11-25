@@ -6,9 +6,11 @@ in-process FakeR2. A build reads only locked bytes, and a missing or
 different object fails with no other source to fall back to.
 """
 
+import io
 import json
 import shutil
 import sys
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -27,6 +29,8 @@ FILES = {
     ("core", "gcc-16.1.1-1-x86_64.pkg.tar.zst"): b"synthetic gcc package\n",
     ("core", "gcc-16.1.1-1-x86_64.pkg.tar.zst.sig"): b"synthetic gcc signature\n",
     ("core", "archlinux-keyring-20260801-1-any.pkg.tar.zst"): b"synthetic keyring package\n",
+    # A package with an epoch: the colon an artifact path refuses.
+    ("extra", "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst"): b"synthetic fakeroot package\n",
 }
 
 
@@ -42,9 +46,19 @@ class MirrorTest(unittest.TestCase):
             folder = self.collected / repository / "os" / "x86_64"
             folder.mkdir(parents=True, exist_ok=True)
             (folder / name).write_bytes(data)
+        # As the collect job hands it on: `tar -C collected -cf collected.tar .`
+        self.archive = self.base / "collected.tar"
+        with tarfile.open(self.archive, "w") as tar:
+            tar.add(self.collected, arcname=".")
 
     def recorded(self):
-        return mirror.record(self.s3, self.collected, SNAPSHOT)
+        return mirror.record(self.s3, self.archive, SNAPSHOT)
+
+    def append(self, member, data=b""):
+        """Add one more member to the collected archive."""
+        with tarfile.open(self.archive, "a") as tar:
+            member.size = len(data) if member.isreg() else 0
+            tar.addfile(member, io.BytesIO(data) if member.isreg() else None)
 
     def test_record_then_fetch_writes_exactly_the_collected_tree(self):
         lock = self.recorded()
@@ -103,12 +117,37 @@ class MirrorTest(unittest.TestCase):
         if before is not None:
             self.assertEqual(len(self.fake.requests), before)
 
-    def test_a_collected_folder_that_is_a_link_is_refused(self):
-        real = self.collected / "extra" / "os" / "x86_64"
-        moved = self.base / "elsewhere"
-        real.rename(moved)
-        real.symlink_to(moved)
-        with self.assertRaisesRegex(mirror.MirrorError, "is a link"):
+    def test_an_archive_member_that_is_not_a_regular_file_is_refused(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
+            with self.subTest(kind=kind):
+                self.setUp()
+                member = tarfile.TarInfo("./extra/os/x86_64/linked.pkg.tar.zst")
+                member.type, member.linkname = kind, "/etc/passwd"
+                self.append(member)
+                with self.assertRaisesRegex(mirror.MirrorError, "is not a regular file"):
+                    self.recorded()
+
+    def test_an_archive_member_outside_the_repository_tree_is_refused(self):
+        for name, reason in (("./core/os/x86_64/../../../etc/x", "bad file name|not in a repository folder"),
+                             ("/core/os/x86_64/x.pkg.tar.zst", "not in a repository folder"),
+                             ("./community/os/x86_64/x.pkg.tar.zst", "unknown repository"),
+                             ("./core/x.pkg.tar.zst", "not in a repository folder"),
+                             ("./core/os/aarch64/x.pkg.tar.zst", "not in a repository folder")):
+            with self.subTest(name=name):
+                self.setUp()
+                self.append(tarfile.TarInfo(name), b"synthetic stray file\n")
+                with self.assertRaisesRegex(mirror.MirrorError, reason):
+                    self.recorded()
+        self.setUp()
+        folder = tarfile.TarInfo("./core/other")
+        folder.type = tarfile.DIRTYPE
+        self.append(folder)
+        with self.assertRaisesRegex(mirror.MirrorError, "is not a repository folder"):
+            self.recorded()
+
+    def test_a_file_listed_twice_in_the_archive_is_refused(self):
+        self.append(tarfile.TarInfo("./core/os/x86_64/core.db"), b"a second core database\n")
+        with self.assertRaisesRegex(mirror.MirrorError, "listed twice"):
             self.recorded()
 
     def test_a_lock_without_both_sync_databases_is_refused(self):

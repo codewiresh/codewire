@@ -14,9 +14,9 @@ fetch     writes the locked files into DIR as a pacman repository tree
           (DIR/<repo>/os/x86_64/<file>), each read by its digest from the public
           origin and checked against the lock before it is written. A missing
           or different object fails; there is no other source.
-record    reads a directory of files the refresh collected (already checked by
-          pacman's own signature verification), stores each by digest with an
-          immutable write, and writes the lock. Only a dispatched run on main
+record    reads the tar archive of files the refresh collected (already checked
+          by pacman's own signature verification), stores each by digest with
+          an immutable write, and writes the lock. Only a dispatched run on main
           does this; the lock changes only through a reviewed pull request.
 
 The lock's snapshot must be the pins' kernel_builder.snapshot, so a pin change
@@ -27,7 +27,8 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -39,7 +40,10 @@ PINS = HERE / "local-runtime-sources.json"
 # The builder container is x86_64; the arm64 kernel is cross-compiled there.
 ARCH = "x86_64"
 REPOSITORIES = ("core", "extra")
-FILE_NAME = re.compile(r"[A-Za-z0-9@._+-]+")
+# The folders a collected archive may hold, as path parts.
+FOLDERS = {(), *(folder for r in REPOSITORIES for folder in ((r,), (r, "os"), (r, "os", ARCH)))}
+# A package with an epoch is named NAME-EPOCH:VERSION-REL-ARCH (fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst).
+FILE_NAME = re.compile(r"[A-Za-z0-9@._+:-]+")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_FILES = 2000
 # Its own prefix in the release bucket, apart from the release's blobs.
@@ -117,23 +121,36 @@ def fetch(origin, lock_bytes, snapshot, directory):
     return len(blobs)
 
 
-def record(s3, collected, snapshot):
-    """Store each collected file by digest; return the lock's bytes."""
-    collected = Path(collected)
-    files = []
-    for repository in REPOSITORIES:
-        folder = collected / repository / "os" / ARCH
-        # The collected tree is data from the archive's container: no link.
-        for part in (collected, collected / repository, collected / repository / "os", folder):
-            require(not part.is_symlink(), f"{part} is a link")
-        require(folder.is_dir(), f"{folder} is missing")
-        for item in sorted(folder.iterdir()):
-            relative_path(repository, item.name)
-            data = release.read_regular(item, r2.MAX_OBJECT)
+def record(s3, archive, snapshot):
+    """Store each collected file by digest; return the lock's bytes.
+
+    The archive is data from the archive's container, handed on as one tar
+    file because an artifact path may not hold a package's epoch colon. It is
+    read in memory and never extracted: only regular files at
+    <repo>/os/x86_64/<file> and the folders above them, nothing else.
+    """
+    files, seen = [], set()
+    with tarfile.open(archive, "r:") as tar:
+        for member in tar:
+            parts = PurePosixPath(member.name).parts
+            if member.isdir():
+                require(parts in FOLDERS, f"{member.name} is not a repository folder")
+                continue
+            require(member.isreg(), f"{member.name} is not a regular file")
+            require(len(parts) == 4 and parts[1:3] == ("os", ARCH), f"{member.name} is not in a repository folder")
+            repository, name = parts[0], parts[3]
+            path = relative_path(repository, name)
+            require(path not in seen, f"{path} is listed twice")
+            require(len(seen) < MAX_FILES, "the archive holds too many files")
+            seen.add(path)
+            require(0 < member.size <= r2.MAX_OBJECT, f"{path} is empty or exceeds its bound")
+            data = tar.extractfile(member).read(member.size + 1)
+            require(len(data) == member.size, f"{path} is not the size the archive names")
             digest = release.sha256(data)
             outcome = r2.put_immutable(s3, key(digest), data, "application/octet-stream")
-            r2.log(f"kernel builder {repository}/{item.name} {outcome}")
-            files.append({"repository": repository, "name": item.name, "sha256": digest, "size": len(data)})
+            r2.log(f"kernel builder {repository}/{name} {outcome}")
+            files.append({"repository": repository, "name": name, "sha256": digest, "size": len(data)})
+    files.sort(key=lambda f: (REPOSITORIES.index(f["repository"]), f["name"]))
     lock = json.dumps({"snapshot": snapshot, "files": files}, indent=1) + "\n"
     parse_lock(lock, snapshot)
     return lock
@@ -145,7 +162,7 @@ def main(argv=None):
     fetch_command = commands.add_parser("fetch")
     fetch_command.add_argument("--dir", required=True, type=Path)
     record_command = commands.add_parser("record")
-    record_command.add_argument("--collected", required=True, type=Path)
+    record_command.add_argument("--collected-tar", required=True, type=Path)
     record_command.add_argument("--credentials", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -156,11 +173,12 @@ def main(argv=None):
             print(f"kernel builder mirror: {count} files for snapshot {snapshot} in {args.dir}")
         else:
             s3 = r2.S3(r2.HttpsTransport(), r2.load_credentials(args.credentials))
-            lock = record(s3, args.collected, snapshot)
+            lock = record(s3, args.collected_tar, snapshot)
             release.write_new(LOCK.with_suffix(".json.new"), lock.encode())
             LOCK.with_suffix(".json.new").replace(LOCK)
             print(f"kernel builder mirror: recorded {len(json.loads(lock)['files'])} files for snapshot {snapshot}")
-    except (MirrorError, release.ReleaseError, r2.PublishError, r2.TransportError, OSError, KeyError) as error:
+    except (MirrorError, release.ReleaseError, r2.PublishError, r2.TransportError, OSError, KeyError,
+            tarfile.TarError) as error:
         print(f"kernel builder mirror: {error}", file=sys.stderr)
         return 1
     return 0

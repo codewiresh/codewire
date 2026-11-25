@@ -349,6 +349,8 @@ def kernel_builder_mirror_errors(header, blocks):
     need("collect-kernel-builder-packages.sh" in collect and "collect-kernel-builder-packages.sh" not in record,
          "the collector runs where the R2 credential is reachable")
     need("upload-artifact" in collect, "the mirror's collect job does not hand its tree on")
+    need("          path: .kernel-builder/collected.tar\n" in collect and "--collected-tar" in record,
+         "the mirror hands its tree on as files, whose epoch colons an artifact path refuses")
     need("download-artifact" in record and "path: ${{ runner.temp }}/kernel-builder-collected" in record,
          "the mirror's record job does not receive the collected tree outside its checkout")
     parts = [text for _, text in steps(record)]
@@ -849,6 +851,8 @@ MUTATIONS = {
         "          scripts/ci/release/collect-kernel-builder-packages.sh \"$RUNNER_TEMP/c\"\n", 1),
     "mirror record receives the tree inside its checkout": lambda t: t.replace(
         "          path: ${{ runner.temp }}/kernel-builder-collected\n", "          path: .kernel-builder/collected\n", 1),
+    "mirror collect hands on its folder, not one archive": lambda t: t.replace(
+        "          path: .kernel-builder/collected.tar\n", "          path: .kernel-builder/collected\n", 1),
     "mirror record does not wait for collect": lambda t: t.replace(
         "    needs: [kernel-builder-mirror-collect]\n", "", 1),
     "kernel builder mirror holds the forge token": lambda t: t.replace(
