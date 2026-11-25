@@ -116,9 +116,9 @@ pub trait EgressBroker: Send + Sync + 'static {
     }
 
     /// Requests refused because the broker's answer missed its deadline, and
-    /// how long it has refused (#4965); `None` for a broker with no deadline
-    /// of its own.
-    fn late_answer_status(&self) -> Option<codewire_egress_broker::ipc::LateAnswerStatus> {
+    /// how long it has refused, with a wake when that changes (#4965); `None`
+    /// for a broker with no deadline of its own.
+    fn late_answer_watch(&self) -> Option<codewire_egress_broker::ipc::LateAnswerWatch> {
         None
     }
 }

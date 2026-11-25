@@ -48,7 +48,7 @@ use crate::{
 mod late;
 mod udp;
 
-pub use late::LateAnswerStatus;
+pub use late::{LateAnswerStatus, LateAnswerWatch};
 
 use late::{LateAnswer, LateOperation};
 
@@ -388,7 +388,7 @@ pub struct BrokerIpcClient {
     admission: Arc<SessionPool>,
     dns: Arc<SessionPool>,
     connect: Arc<SessionPool>,
-    late: late::LateAnswers,
+    late: Arc<late::LateAnswers>,
 }
 
 impl BrokerIpcClient {
@@ -422,7 +422,7 @@ impl BrokerIpcClient {
             admission: Arc::new(SessionPool::new(admission)),
             dns: Arc::new(SessionPool::new(dns)),
             connect: Arc::new(SessionPool::new(connect)),
-            late: late::LateAnswers::default(),
+            late: Arc::default(),
         })
     }
 
@@ -2598,6 +2598,7 @@ rules:
             }
         });
         let client = client(client_streams, binding);
+        let watch = client.late_answer_watch();
 
         let refused = {
             let late = client.connect_tcp(requested);
@@ -2619,6 +2620,11 @@ rules:
         let status = client.late_answer_status();
         assert_eq!(status.late_answers, 1);
         assert!(status.refusing_for.is_some(), "{status:?}");
+        // The late answer was signalled, with nobody waiting yet.
+        assert_eq!(watch.status().late_answers, 1);
+        timeout(HANG_GUARD, watch.changed())
+            .await
+            .expect("a late answer wakes the watch");
         assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
 
         answer.notify_one();
@@ -2649,6 +2655,9 @@ rules:
                 refusing_for: None
             }
         );
+        timeout(HANG_GUARD, watch.changed())
+            .await
+            .expect("the end of the refusing wakes the watch");
         drop(others);
         let _server_stream = server.await.unwrap();
         drop(server_streams);

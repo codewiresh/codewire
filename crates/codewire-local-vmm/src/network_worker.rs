@@ -240,10 +240,7 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         session.mesh_ingress_ports,
         vm_id,
         generation,
-        Arc::new({
-            let broker = Arc::clone(&broker);
-            move || broker.late_answer_status()
-        }),
+        broker.late_answer_watch(),
     ));
     let session = run_host_session_with_ingress(
         network,
@@ -440,7 +437,7 @@ mod tests {
             Vec::new(),
             vm_id,
             generation,
-            Arc::new(|| None),
+            None,
         ));
         status_tx.send(WORKER_READY_MESSAGE).unwrap();
         let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];
@@ -478,7 +475,7 @@ mod tests {
             vec![guest_port],
             vm_id,
             generation,
-            Arc::new(|| None),
+            None,
         ));
         status_tx.send(WORKER_READY_MESSAGE).unwrap();
         let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];

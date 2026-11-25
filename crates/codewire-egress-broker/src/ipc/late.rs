@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{
@@ -165,11 +165,44 @@ async fn drain_late_answer(mut session: CheckedOut, late: LateAnswer) {
 }
 
 /// The client's late answers: how many requests were refused because the
-/// broker's answer missed its deadline, and since when it has been refusing.
+/// broker's answer missed its deadline, since when it has been refusing, and
+/// the signal that either changed.
 #[derive(Debug, Default)]
 pub(super) struct LateAnswers {
     count: AtomicU64,
     refusing_since: Mutex<Option<Instant>>,
+    changed: Notify,
+}
+
+/// A client's late answers, for a reader that wakes when they change rather
+/// than looking on a timer (#4965).
+#[derive(Clone, Debug)]
+pub struct LateAnswerWatch(Arc<LateAnswers>);
+
+impl LateAnswerWatch {
+    pub fn status(&self) -> LateAnswerStatus {
+        self.0.status()
+    }
+
+    /// Completes after a late answer, or the answer in time that ends the
+    /// refusing. One wake is kept while no one waits, so none is missed;
+    /// dropping the future before it completes keeps it too.
+    pub async fn changed(&self) {
+        self.0.changed.notified().await;
+    }
+}
+
+impl LateAnswers {
+    fn status(&self) -> LateAnswerStatus {
+        let refusing_since = *self
+            .refusing_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        LateAnswerStatus {
+            late_answers: self.count.load(Ordering::Relaxed),
+            refusing_for: refusing_since.map(|since| since.elapsed()),
+        }
+    }
 }
 
 /// What a client reports about its late answers (#4965): how many in all,
@@ -191,15 +224,12 @@ impl BrokerIpcClient {
     /// The late answers and how long the client has been refusing, for the
     /// owner's "egress unavailable" line (#4965).
     pub fn late_answer_status(&self) -> LateAnswerStatus {
-        let refusing_since = *self
-            .late
-            .refusing_since
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        LateAnswerStatus {
-            late_answers: self.late_answers(),
-            refusing_for: refusing_since.map(|since| since.elapsed()),
-        }
+        self.late.status()
+    }
+
+    /// The late answers, with a wake when they change (#4965).
+    pub fn late_answer_watch(&self) -> LateAnswerWatch {
+        LateAnswerWatch(Arc::clone(&self.late))
     }
 
     /// Count a late answer, and note when refusing began. An answer in time,
@@ -225,7 +255,12 @@ impl BrokerIpcClient {
                 .refusing_since
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let was_refusing = since.is_some();
             *since = late.then(|| since.unwrap_or_else(Instant::now));
+            drop(since);
+            if late || was_refusing {
+                self.late.changed.notify_one();
+            }
         }
         result
     }

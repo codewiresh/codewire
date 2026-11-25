@@ -6,21 +6,23 @@
 
 use std::time::Duration;
 
-use codewire_egress_broker::ipc::LateAnswerStatus;
+use codewire_egress_broker::ipc::{LateAnswerStatus, LateAnswerWatch};
+use tokio::time::Instant;
 
 use super::*;
 use crate::mesh_ingress_ack::mesh_ingress_ack;
 
-/// How often the worker looks at the broker's late answers. A frame goes out
-/// only when the count rose or requests are answered again, so at most one a
-/// second while the broker stays late.
+/// The least time between two late-answer frames. The worker wakes when the
+/// broker's late answers change, and a frame goes out only when the count
+/// rose or requests are answered again, so at most one a second while the
+/// broker stays late.
 const LATE_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 const LATE_STATUS_MAGIC: &[u8; 8] = b"CWNETWL1";
 
-/// The broker's late answers, as the worker reports them; `None` for a
+/// The broker's late answers, with a wake when they change; `None` for a
 /// broker with no deadline of its own.
-pub(super) type LateStatus = Arc<dyn Fn() -> Option<LateAnswerStatus> + Send + Sync>;
+pub(super) type LateStatus = Option<LateAnswerWatch>;
 
 /// One late-answer frame: the magic, the count, and how long the broker has
 /// been refusing in milliseconds plus one, or 0 once requests are answered
@@ -62,27 +64,45 @@ impl LateStatusFrame {
     }
 }
 
-/// What the worker last told the runner.
+/// What the worker last told the runner, and when it may tell it again.
 #[derive(Debug, Default)]
 struct LateReport {
     late_answers: u64,
     refusing: bool,
+    next_frame: Option<Instant>,
 }
 
 impl LateReport {
-    /// The frame to send for `status`: when the count rose while refusing,
-    /// or once refusing ended.
-    fn next(&mut self, status: Option<LateAnswerStatus>) -> Option<LateStatusFrame> {
+    /// The frame to send for `status` at `now`: when the count rose while
+    /// refusing, or once refusing ended. A frame holds the next one back
+    /// until `LATE_STATUS_INTERVAL` has passed.
+    fn next(&mut self, status: Option<LateAnswerStatus>, now: Instant) -> Option<LateStatusFrame> {
         let status = status?;
         let refusing = status.refusing_for.is_some();
         let send =
             (refusing && status.late_answers != self.late_answers) || (self.refusing && !refusing);
         self.late_answers = status.late_answers;
         self.refusing = refusing;
+        if send {
+            self.next_frame = Some(now + LATE_STATUS_INTERVAL);
+        }
         send.then_some(LateStatusFrame {
             late_answers: status.late_answers,
             refusing_for: status.refusing_for,
         })
+    }
+
+    /// When a change seen now may be reported.
+    fn due(&self, now: Instant) -> Instant {
+        self.next_frame.map_or(now, |next| next.max(now))
+    }
+}
+
+/// Completes when `late` changes; never for a broker with no deadline.
+async fn late_changed(late: &LateStatus) {
+    match late {
+        Some(watch) => watch.changed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -106,22 +126,31 @@ pub(super) async fn run_ingress_control(
 
     let mut mesh_receiver = MeshIngressControlReceiver::new(vm_id, generation, &mesh_ingress_ports)
         .map_err(|_| NetworkWorkerError::Protocol)?;
-    let mut tick = tokio::time::interval(LATE_STATUS_INTERVAL);
     let mut reported = LateReport::default();
+    // A change seen and not yet reported: its frame waits for `due`.
+    let mut changed: Option<Instant> = None;
     let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
     let mut filled = 0;
     loop {
-        // Readiness and the tick are both cancel-safe, and a Mesh frame's
-        // bytes are kept across wakes, so a frame is always read whole.
-        let ticked = tokio::select! {
+        // Readiness, the watch and the sleep are all cancel-safe (a wait that
+        // doesn't finish keeps the watch's wake), and a Mesh frame's bytes
+        // are kept across wakes, so a frame is always read whole.
+        let due = changed.unwrap_or_else(Instant::now);
+        let report = tokio::select! {
             readable = control.readable() => {
                 readable.map_err(|_| NetworkWorkerError::FrameIo)?;
                 false
             }
-            _ = tick.tick() => true,
+            () = late_changed(&late), if changed.is_none() => {
+                changed = Some(reported.due(Instant::now()));
+                continue;
+            }
+            () = tokio::time::sleep_until(due), if changed.is_some() => true,
         };
-        if ticked {
-            if let Some(status) = reported.next(late()) {
+        if report {
+            changed = None;
+            let status = late.as_ref().map(LateAnswerWatch::status);
+            if let Some(status) = reported.next(status, Instant::now()) {
                 write_control_bytes(&control, &status.encode()).await?;
             }
             continue;
@@ -215,6 +244,10 @@ mod tests {
         assert_eq!(LateStatusFrame::decode(&other), None);
     }
 
+    fn next(report: &mut LateReport, status: Option<LateAnswerStatus>) -> Option<LateStatusFrame> {
+        report.next(status, Instant::now())
+    }
+
     /// A frame when the count rises while refusing, and one when refusing
     /// ends; nothing while it is unchanged, or for a broker with no deadline.
     #[test]
@@ -226,39 +259,71 @@ mod tests {
             })
         };
         let mut report = LateReport::default();
-        assert_eq!(report.next(None), None);
+        assert_eq!(next(&mut report, None), None);
         assert_eq!(
-            report.next(Some(LateAnswerStatus {
-                late_answers: 0,
-                refusing_for: None
-            })),
+            next(
+                &mut report,
+                Some(LateAnswerStatus {
+                    late_answers: 0,
+                    refusing_for: None
+                })
+            ),
             None
         );
         assert_eq!(
-            report.next(refusing(1, 0)).map(|frame| frame.late_answers),
+            next(&mut report, refusing(1, 0)).map(|frame| frame.late_answers),
             Some(1)
         );
-        assert_eq!(report.next(refusing(1, 1)), None);
+        assert_eq!(next(&mut report, refusing(1, 1)), None);
         assert_eq!(
-            report.next(refusing(4, 2)).map(|frame| frame.late_answers),
+            next(&mut report, refusing(4, 2)).map(|frame| frame.late_answers),
             Some(4)
         );
         assert_eq!(
-            report.next(Some(LateAnswerStatus {
-                late_answers: 4,
-                refusing_for: None
-            })),
+            next(
+                &mut report,
+                Some(LateAnswerStatus {
+                    late_answers: 4,
+                    refusing_for: None
+                })
+            ),
             Some(LateStatusFrame {
                 late_answers: 4,
                 refusing_for: None
             })
         );
         assert_eq!(
-            report.next(Some(LateAnswerStatus {
-                late_answers: 4,
-                refusing_for: None
-            })),
+            next(
+                &mut report,
+                Some(LateAnswerStatus {
+                    late_answers: 4,
+                    refusing_for: None
+                })
+            ),
             None
         );
+    }
+
+    /// A frame holds the next one back for a second: a change seen sooner is
+    /// reported once the second is up, with what is true then.
+    #[test]
+    fn late_frames_are_at_least_a_second_apart() {
+        let start = Instant::now();
+        let refusing = |late_answers| {
+            Some(LateAnswerStatus {
+                late_answers,
+                refusing_for: Some(Duration::ZERO),
+            })
+        };
+        let mut report = LateReport::default();
+        assert_eq!(report.due(start), start);
+        assert!(report.next(refusing(1), start).is_some());
+        let soon = start + Duration::from_millis(200);
+        assert_eq!(report.due(soon), start + LATE_STATUS_INTERVAL);
+        let later = start + Duration::from_secs(5);
+        assert_eq!(report.due(later), later);
+        // An unchanged status sends nothing and leaves the wait as it was.
+        assert_eq!(report.next(refusing(1), soon), None);
+        assert_eq!(report.due(soon), start + LATE_STATUS_INTERVAL);
     }
 }

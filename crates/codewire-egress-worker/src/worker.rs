@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use codewire_egress_broker::DnsRecordFamily;
 use codewire_egress_broker::ipc::{
     BrokerIpcBinding, BrokerIpcClient, BrokerIpcDnsResponse, BrokerIpcError, BrokerIpcKey,
-    LateAnswerStatus,
+    LateAnswerWatch,
 };
 use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
 use codewire_vmm_guest_probe::{NETWORK_KEY_LEN, NetworkKey};
@@ -605,8 +605,8 @@ impl IpcEgressBroker {
 
 #[async_trait]
 impl EgressBroker for IpcEgressBroker {
-    fn late_answer_status(&self) -> Option<LateAnswerStatus> {
-        Some(self.client.late_answer_status())
+    fn late_answer_watch(&self) -> Option<LateAnswerWatch> {
+        Some(self.client.late_answer_watch())
     }
 
     async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
