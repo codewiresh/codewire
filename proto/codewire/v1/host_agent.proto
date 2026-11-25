@@ -18,6 +18,17 @@ import "codewire/v1/host.proto";
 // operations (slice 2): the control plane sends `operation`, and the host
 // answers `operation_result` once it has finished. The operation set is the
 // placement's, not the local supervisor's: nothing else of the host crosses.
+//
+// From capability version 3 the session also carries the access calls of the
+// host's tailnet peers, one per running VM (slice 3): the host sends
+// `access_refresh`, `host_key_record` or `peer_relay_allocate`, and the control
+// plane answers each with its reply or `access_refused`, echoing its
+// `request_id`. They are the calls a hosted daemon makes over its Pod binding,
+// authorized here by the session instead. A call is admitted only on the
+// host's current session, for an environment placed on this host, whose VM the
+// host last reported RUNNING with the same local ID and generation. A session
+// whose hello declared a lower version is ended with INVALID_ARGUMENT if it
+// sends one.
 service HostAgentService {
   // AttachHost runs one host session:
   //
@@ -68,6 +79,9 @@ message AttachHostRequest {
     HostOperationProgress operation_progress = 5;
     HostOperationResult operation_result = 6;
     HostEnvironmentObservation environment_observed = 7;
+    HostAccessRefresh access_refresh = 8;
+    HostKeyRecord host_key_record = 9;
+    HostPeerRelayAllocate peer_relay_allocate = 10;
   }
 }
 
@@ -80,6 +94,10 @@ message AttachHostResponse {
     HostOperation operation = 5;
     HostSuperseded superseded = 6;
     HostOpenTunnel open_tunnel = 7;
+    HostAccessGrant access_grant = 8;
+    HostKeyRecorded host_key_recorded = 9;
+    HostPeerRelayAllocation peer_relay_allocation = 10;
+    HostAccessRefusal access_refused = 11;
   }
 }
 
@@ -293,4 +311,95 @@ message HostTunnelReady {
   // valid only for this boot generation. The control plane keeps it in
   // memory for the life of the tunnel and never records or logs it.
   string daemon_capability = 1 [debug_redact = true];
+}
+
+// Asks for a fresh access grant for the tailnet peer of one running VM. The
+// peer asks at half its current token's lifetime.
+message HostAccessRefresh {
+  // A UUID the host chose; the answer echoes it.
+  string request_id = 1;
+  string environment_id = 2;
+  // The host's own ID for the environment and the VM's boot generation, as
+  // the host last reported them RUNNING.
+  string local_environment_id = 3;
+  uint64 generation = 4;
+}
+
+// What one VM's tailnet peer needs to serve its environment's tailnet: no
+// wider than a Pod's grant, and narrower where a host needs less. It carries
+// no binding, credential-broker or workspace authority.
+message HostAccessGrant {
+  string request_id = 1;
+  // Peer token for the coordinator: the environment, scope "peer", the
+  // operation generation below and an expiry, signed with a key derived for
+  // this purpose only. The host keeps it in memory only.
+  string peer_token = 2 [debug_redact = true];
+  // Unix seconds at which peer_token expires.
+  int64 peer_token_expires_at = 3;
+  // The environment's operation generation, which the control plane assigns
+  // and the host never chooses. The token is bound to it, and a new one
+  // refuses the next refresh.
+  int64 operation_generation = 4;
+  // Public https origin of the coordinator, whose DERP map the peer uses.
+  string coordinator_url = 5;
+  // The environment's exposed application ports (1-65535, ascending, without
+  // duplicates), which the peer serves on its tailnet address. Empty when the
+  // host's peers serve none.
+  repeated int32 app_ports = 6;
+}
+
+// Records the SSH host key of one running VM, which its tailnet peer serves.
+// Write-once per environment and operation generation: the same key again
+// succeeds, and a different one is refused as `key_conflict`.
+message HostKeyRecord {
+  string request_id = 1;
+  string environment_id = 2;
+  string local_environment_id = 3;
+  uint64 generation = 4;
+  // One OpenSSH public key line: "ssh-ed25519 <base64>", no comment.
+  string public_key_openssh = 5;
+}
+
+message HostKeyRecorded {
+  string request_id = 1;
+}
+
+// Asks for a UDP peer-relay endpoint between one VM's tailnet node and one
+// peer. A control plane with no relay for hosts refuses it as `unsupported`,
+// and the peer uses DERP instead.
+message HostPeerRelayAllocate {
+  string request_id = 1;
+  string environment_id = 2;
+  string local_environment_id = 3;
+  uint64 generation = 4;
+  // Exactly two disco public keys ("discokey:<64 hex>"): this VM's node
+  // first, then the peer's. The order is kept in the answer.
+  repeated string disco_keys = 5;
+  // The caller's relay-allocation generation, echoed back.
+  uint32 relay_generation = 6;
+}
+
+message HostPeerRelayAllocation {
+  string request_id = 1;
+  uint32 relay_generation = 2;
+  string server_disco_key = 3;
+  repeated string disco_keys = 4;
+  uint64 lamport_id = 5;
+  uint32 vni = 6;
+  uint64 bind_lifetime_ns = 7;
+  uint64 steady_state_lifetime_ns = 8;
+  // Public host:port addresses of the relay endpoint.
+  repeated string addr_ports = 9;
+}
+
+// Why an access call was not answered.
+message HostAccessRefusal {
+  string request_id = 1;
+  // A machine-readable reason, at most 64 bytes: "not_held" (not placed on
+  // this host, or not this local environment), "not_running", "stale_generation",
+  // "key_conflict", "invalid_key", "unsupported" or "unavailable".
+  string code = 2;
+  // When true, the same call may succeed later, as after "unavailable".
+  // Otherwise the peer stops serving that VM at this generation.
+  bool retryable = 3;
 }

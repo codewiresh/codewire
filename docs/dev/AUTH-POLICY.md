@@ -1225,6 +1225,29 @@ method accepts a host key.
 - **Revocation** by the owner or an organization owner or admin is final. It
   refuses the next attach, and ends a live session at the host's next
   message.
+- **Access calls** (capability version 3; not shipped: the server answers
+  them from slice 3's PR 2, and hosts make them from its PR 4, #3609). The
+  host's tailnet peer for one running VM asks its session for an access
+  grant, records the VM's SSH host key, and asks for a peer relay, as a
+  hosted daemon does over its Pod binding. A call is admitted only on the
+  host's current session, for an environment placed on that host, whose VM
+  the host last reported RUNNING with the local ID and boot generation the
+  call names.
+  - **The peer token** in a grant is the one a hosted daemon gets
+    (`codewire-server-core` `peer_token`): an HMAC over the environment, scope
+    `peer`, an expiry 10 minutes out and the environment's operation
+    generation, signed with a key derived from the session secret for peer
+    tokens only. It lets the peer act as that environment's node at the
+    coordinator, and nothing else: no product method, binding,
+    credential-broker or workspace authority. The host keeps it in memory.
+  - **The operation generation** is the one orchestration assigns, never one
+    the host names. A host's own report of a new boot generation changes
+    nothing: the token and the write-once host-key slot stay at the
+    operation generation, and a different key there is refused.
+  - **What ends it:** revoking the host, moving or deleting the environment,
+    or a new operation generation refuses the next refresh, and the
+    coordinator ends the node's session once the record that admitted it is
+    gone. The token's 10 minutes is the outer bound.
 
 The stream mount takes no user credential at the HTTP layer
 (`with_connect_routes_and_protocol_policy`). Its public leg is native gRPC, on

@@ -489,6 +489,14 @@ impl AttachedHost {
             Some(attach_host_response::Output::OpenTunnel(request)) => {
                 HostEvent::OpenTunnel(request)
             }
+            // Answers to access calls (capability 3), which this host never
+            // makes.
+            Some(
+                attach_host_response::Output::AccessGrant(_)
+                | attach_host_response::Output::HostKeyRecorded(_)
+                | attach_host_response::Output::PeerRelayAllocation(_)
+                | attach_host_response::Output::AccessRefused(_),
+            ) => return Err(unexpected("an access answer it never asked for")),
             None => HostEvent::Ended,
         })
     }

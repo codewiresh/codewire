@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/host_agent.proto.
  */
 export const file_codewire_v1_host_agent: GenFile = /*@__PURE__*/
-  fileDesc("Chxjb2Rld2lyZS92MS9ob3N0X2FnZW50LnByb3RvEgtjb2Rld2lyZS52MSKRAwoRQXR0YWNoSG9zdFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RBdHRhY2hPcGVuSAASLQoFcHJvb2YYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0QXR0YWNoUHJvb2ZIABInCgVoZWxsbxgDIAEoCzIWLmNvZGV3aXJlLnYxLkhvc3RIZWxsb0gAEiUKBHBpbmcYBCABKAsyFS5jb2Rld2lyZS52MS5Ib3N0UGluZ0gAEkAKEm9wZXJhdGlvbl9wcm9ncmVzcxgFIAEoCzIiLmNvZGV3aXJlLnYxLkhvc3RPcGVyYXRpb25Qcm9ncmVzc0gAEjwKEG9wZXJhdGlvbl9yZXN1bHQYBiABKAsyIC5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uUmVzdWx0SAASRwoUZW52aXJvbm1lbnRfb2JzZXJ2ZWQYByABKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbkgAQgcKBWlucHV0IuoCChJBdHRhY2hIb3N0UmVzcG9uc2USLwoJY2hhbGxlbmdlGAEgASgLMhouY29kZXdpcmUudjEuSG9zdENoYWxsZW5nZUgAEi0KCGF0dGFjaGVkGAIgASgLMhkuY29kZXdpcmUudjEuSG9zdEF0dGFjaGVkSAASJQoEcG9uZxgDIAEoCzIVLmNvZGV3aXJlLnYxLkhvc3RQb25nSAASKwoHcmV2b2tlZBgEIAEoCzIYLmNvZGV3aXJlLnYxLkhvc3RSZXZva2VkSAASLwoJb3BlcmF0aW9uGAUgASgLMhouY29kZXdpcmUudjEuSG9zdE9wZXJhdGlvbkgAEjEKCnN1cGVyc2VkZWQYBiABKAsyGy5jb2Rld2lyZS52MS5Ib3N0U3VwZXJzZWRlZEgAEjIKC29wZW5fdHVubmVsGAcgASgLMhsuY29kZXdpcmUudjEuSG9zdE9wZW5UdW5uZWxIAEIICgZvdXRwdXQiIQoOSG9zdEF0dGFjaE9wZW4SDwoHaG9zdF9pZBgBIAEoCSIeCg1Ib3N0Q2hhbGxlbmdlEg0KBW5vbmNlGAEgASgMIiQKD0hvc3RBdHRhY2hQcm9vZhIRCglzaWduYXR1cmUYASABKAwirQEKDEhvc3RBdHRhY2hlZBIdChVwaW5nX2ludGVydmFsX3NlY29uZHMYASABKA0SHQoVb2ZmbGluZV9hZnRlcl9zZWNvbmRzGAIgASgNEiQKHHJlY2hhbGxlbmdlX2ludGVydmFsX3NlY29uZHMYAyABKA0SHQoVcHJvb2ZfdGltZW91dF9zZWNvbmRzGAQgASgNEhoKEnNlc3Npb25fZ2VuZXJhdGlvbhgFIAEoBCKQAQoJSG9zdEhlbGxvEhoKEmNhcGFiaWxpdHlfdmVyc2lvbhgBIAEoDRIrCghwbGF0Zm9ybRgCIAEoDjIZLmNvZGV3aXJlLnYxLkhvc3RQbGF0Zm9ybRI6CglpbnZlbnRvcnkYAyADKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbiIKCghIb3N0UGluZyIKCghIb3N0UG9uZyINCgtIb3N0UmV2b2tlZCIQCg5Ib3N0U3VwZXJzZWRlZCKoAgoNSG9zdE9wZXJhdGlvbhIUCgxvcGVyYXRpb25faWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAyABKAkSGwoTZXhwZWN0ZWRfZ2VuZXJhdGlvbhgEIAEoBBIpCgZjcmVhdGUYBSABKAsyFy5jb2Rld2lyZS52MS5Ib3N0Q3JlYXRlSAASJwoFc3RhcnQYBiABKAsyFi5jb2Rld2lyZS52MS5Ib3N0U3RhcnRIABIlCgRzdG9wGAcgASgLMhUuY29kZXdpcmUudjEuSG9zdFN0b3BIABIrCgdkZXN0cm95GAggASgLMhguY29kZXdpcmUudjEuSG9zdERlc3Ryb3lIAEIGCgRraW5kIpYBCgpIb3N0Q3JlYXRlEg0KBXZjcHVzGAEgASgNEhIKCm1lbW9yeV9taWIYAiABKA0SEgoKZGlza19ieXRlcxgDIAEoBBIZChFkb2NrZXJfZGlza19ieXRlcxgEIAEoBBIZChFwcm9qZWN0X3NwZWNfanNvbhgFIAEoDBIbChNwcm9qZWN0X3NwZWNfc2hhMjU2GAYgASgJIgsKCUhvc3RTdGFydCIKCghIb3N0U3RvcCINCgtIb3N0RGVzdHJveSJOChVIb3N0T3BlcmF0aW9uUHJvZ3Jlc3MSFAoMb3BlcmF0aW9uX2lkGAEgASgJEg0KBXN0YWdlGAIgASgJEhAKCHNlcXVlbmNlGAMgASgEIuIBChNIb3N0T3BlcmF0aW9uUmVzdWx0EhQKDG9wZXJhdGlvbl9pZBgBIAEoCRI3CgRkb25lGAIgASgLMicuY29kZXdpcmUudjEuSG9zdEVudmlyb25tZW50T2JzZXJ2YXRpb25IABIzCgZmYWlsZWQYAyABKAsyIS5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uRmFpbHVyZUgAEjwKEHN0YWxlX2dlbmVyYXRpb24YBCABKAsyIC5jb2Rld2lyZS52MS5Ib3N0U3RhbGVHZW5lcmF0aW9uSABCCQoHb3V0Y29tZSI1ChRIb3N0T3BlcmF0aW9uRmFpbHVyZRIMCgRjb2RlGAEgASgJEg8KB21lc3NhZ2UYAiABKAkiTgoTSG9zdFN0YWxlR2VuZXJhdGlvbhIbChNleHBlY3RlZF9nZW5lcmF0aW9uGAEgASgEEhoKEmN1cnJlbnRfZ2VuZXJhdGlvbhgCIAEoBCL5AQoaSG9zdEVudmlyb25tZW50T2JzZXJ2YXRpb24SFgoOZW52aXJvbm1lbnRfaWQYASABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAiABKAkSEgoKZ2VuZXJhdGlvbhgDIAEoBBIwCgVzdGF0ZRgEIAEoDjIhLmNvZGV3aXJlLnYxLkhvc3RFbnZpcm9ubWVudFN0YXRlEhIKCmVycm9yX2NvZGUYBSABKAkSDQoFdmNwdXMYBiABKA0SEgoKbWVtb3J5X21pYhgHIAEoDRISCgpkaXNrX2J5dGVzGAggASgEEhQKDHNzaF9ob3N0X2tleRgJIAEoCSKnAQoOSG9zdE9wZW5UdW5uZWwSEQoJdHVubmVsX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhwKFGxvY2FsX2Vudmlyb25tZW50X2lkGAMgASgJEhIKCmdlbmVyYXRpb24YBCABKAQSKQoEa2luZBgFIAEoDjIbLmNvZGV3aXJlLnYxLkhvc3RUdW5uZWxLaW5kEg0KBW5vbmNlGAYgASgMIsYBChVPcGVuSG9zdFR1bm5lbFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RUdW5uZWxPcGVuSAASLQoFcmVhZHkYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0VHVubmVsUmVhZHlIABIzCgZmYWlsZWQYAyABKAsyIS5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uRmFpbHVyZUgAEhMKBGRhdGEYBCABKAxCA4ABAUgAQgcKBWlucHV0IjcKFk9wZW5Ib3N0VHVubmVsUmVzcG9uc2USEwoEZGF0YRgBIAEoDEIDgAEBSABCCAoGb3V0cHV0IkcKDkhvc3RUdW5uZWxPcGVuEg8KB2hvc3RfaWQYASABKAkSEQoJdHVubmVsX2lkGAIgASgJEhEKCXNpZ25hdHVyZRgDIAEoDCIxCg9Ib3N0VHVubmVsUmVhZHkSHgoRZGFlbW9uX2NhcGFiaWxpdHkYASABKAlCA4ABASrwAQoUSG9zdEVudmlyb25tZW50U3RhdGUSJgoiSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiIKHkhPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RPUFBFRBABEiMKH0hPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RBUlRJTkcQAhIiCh5IT1NUX0VOVklST05NRU5UX1NUQVRFX1JVTk5JTkcQAxIgChxIT1NUX0VOVklST05NRU5UX1NUQVRFX0VSUk9SEAQSIQodSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9BQlNFTlQQBSpUCg5Ib3N0VHVubmVsS2luZBIgChxIT1NUX1RVTk5FTF9LSU5EX1VOU1BFQ0lGSUVEEAASIAocSE9TVF9UVU5ORUxfS0lORF9EQUVNT05fR1JQQxABMsQBChBIb3N0QWdlbnRTZXJ2aWNlElEKCkF0dGFjaEhvc3QSHi5jb2Rld2lyZS52MS5BdHRhY2hIb3N0UmVxdWVzdBofLmNvZGV3aXJlLnYxLkF0dGFjaEhvc3RSZXNwb25zZSgBMAESXQoOT3Blbkhvc3RUdW5uZWwSIi5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlcXVlc3QaIy5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlc3BvbnNlKAEwAUKxAQoPY29tLmNvZGV3aXJlLnYxQg5Ib3N0QWdlbnRQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_v1_host]);
+  fileDesc("Chxjb2Rld2lyZS92MS9ob3N0X2FnZW50LnByb3RvEgtjb2Rld2lyZS52MSLFBAoRQXR0YWNoSG9zdFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RBdHRhY2hPcGVuSAASLQoFcHJvb2YYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0QXR0YWNoUHJvb2ZIABInCgVoZWxsbxgDIAEoCzIWLmNvZGV3aXJlLnYxLkhvc3RIZWxsb0gAEiUKBHBpbmcYBCABKAsyFS5jb2Rld2lyZS52MS5Ib3N0UGluZ0gAEkAKEm9wZXJhdGlvbl9wcm9ncmVzcxgFIAEoCzIiLmNvZGV3aXJlLnYxLkhvc3RPcGVyYXRpb25Qcm9ncmVzc0gAEjwKEG9wZXJhdGlvbl9yZXN1bHQYBiABKAsyIC5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uUmVzdWx0SAASRwoUZW52aXJvbm1lbnRfb2JzZXJ2ZWQYByABKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbkgAEjgKDmFjY2Vzc19yZWZyZXNoGAggASgLMh4uY29kZXdpcmUudjEuSG9zdEFjY2Vzc1JlZnJlc2hIABI1Cg9ob3N0X2tleV9yZWNvcmQYCSABKAsyGi5jb2Rld2lyZS52MS5Ib3N0S2V5UmVjb3JkSAASQQoTcGVlcl9yZWxheV9hbGxvY2F0ZRgKIAEoCzIiLmNvZGV3aXJlLnYxLkhvc3RQZWVyUmVsYXlBbGxvY2F0ZUgAQgcKBWlucHV0ItwEChJBdHRhY2hIb3N0UmVzcG9uc2USLwoJY2hhbGxlbmdlGAEgASgLMhouY29kZXdpcmUudjEuSG9zdENoYWxsZW5nZUgAEi0KCGF0dGFjaGVkGAIgASgLMhkuY29kZXdpcmUudjEuSG9zdEF0dGFjaGVkSAASJQoEcG9uZxgDIAEoCzIVLmNvZGV3aXJlLnYxLkhvc3RQb25nSAASKwoHcmV2b2tlZBgEIAEoCzIYLmNvZGV3aXJlLnYxLkhvc3RSZXZva2VkSAASLwoJb3BlcmF0aW9uGAUgASgLMhouY29kZXdpcmUudjEuSG9zdE9wZXJhdGlvbkgAEjEKCnN1cGVyc2VkZWQYBiABKAsyGy5jb2Rld2lyZS52MS5Ib3N0U3VwZXJzZWRlZEgAEjIKC29wZW5fdHVubmVsGAcgASgLMhsuY29kZXdpcmUudjEuSG9zdE9wZW5UdW5uZWxIABI0CgxhY2Nlc3NfZ3JhbnQYCCABKAsyHC5jb2Rld2lyZS52MS5Ib3N0QWNjZXNzR3JhbnRIABI5ChFob3N0X2tleV9yZWNvcmRlZBgJIAEoCzIcLmNvZGV3aXJlLnYxLkhvc3RLZXlSZWNvcmRlZEgAEkUKFXBlZXJfcmVsYXlfYWxsb2NhdGlvbhgKIAEoCzIkLmNvZGV3aXJlLnYxLkhvc3RQZWVyUmVsYXlBbGxvY2F0aW9uSAASOAoOYWNjZXNzX3JlZnVzZWQYCyABKAsyHi5jb2Rld2lyZS52MS5Ib3N0QWNjZXNzUmVmdXNhbEgAQggKBm91dHB1dCIhCg5Ib3N0QXR0YWNoT3BlbhIPCgdob3N0X2lkGAEgASgJIh4KDUhvc3RDaGFsbGVuZ2USDQoFbm9uY2UYASABKAwiJAoPSG9zdEF0dGFjaFByb29mEhEKCXNpZ25hdHVyZRgBIAEoDCKtAQoMSG9zdEF0dGFjaGVkEh0KFXBpbmdfaW50ZXJ2YWxfc2Vjb25kcxgBIAEoDRIdChVvZmZsaW5lX2FmdGVyX3NlY29uZHMYAiABKA0SJAoccmVjaGFsbGVuZ2VfaW50ZXJ2YWxfc2Vjb25kcxgDIAEoDRIdChVwcm9vZl90aW1lb3V0X3NlY29uZHMYBCABKA0SGgoSc2Vzc2lvbl9nZW5lcmF0aW9uGAUgASgEIpABCglIb3N0SGVsbG8SGgoSY2FwYWJpbGl0eV92ZXJzaW9uGAEgASgNEisKCHBsYXRmb3JtGAIgASgOMhkuY29kZXdpcmUudjEuSG9zdFBsYXRmb3JtEjoKCWludmVudG9yeRgDIAMoCzInLmNvZGV3aXJlLnYxLkhvc3RFbnZpcm9ubWVudE9ic2VydmF0aW9uIgoKCEhvc3RQaW5nIgoKCEhvc3RQb25nIg0KC0hvc3RSZXZva2VkIhAKDkhvc3RTdXBlcnNlZGVkIqgCCg1Ib3N0T3BlcmF0aW9uEhQKDG9wZXJhdGlvbl9pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIcChRsb2NhbF9lbnZpcm9ubWVudF9pZBgDIAEoCRIbChNleHBlY3RlZF9nZW5lcmF0aW9uGAQgASgEEikKBmNyZWF0ZRgFIAEoCzIXLmNvZGV3aXJlLnYxLkhvc3RDcmVhdGVIABInCgVzdGFydBgGIAEoCzIWLmNvZGV3aXJlLnYxLkhvc3RTdGFydEgAEiUKBHN0b3AYByABKAsyFS5jb2Rld2lyZS52MS5Ib3N0U3RvcEgAEisKB2Rlc3Ryb3kYCCABKAsyGC5jb2Rld2lyZS52MS5Ib3N0RGVzdHJveUgAQgYKBGtpbmQilgEKCkhvc3RDcmVhdGUSDQoFdmNwdXMYASABKA0SEgoKbWVtb3J5X21pYhgCIAEoDRISCgpkaXNrX2J5dGVzGAMgASgEEhkKEWRvY2tlcl9kaXNrX2J5dGVzGAQgASgEEhkKEXByb2plY3Rfc3BlY19qc29uGAUgASgMEhsKE3Byb2plY3Rfc3BlY19zaGEyNTYYBiABKAkiCwoJSG9zdFN0YXJ0IgoKCEhvc3RTdG9wIg0KC0hvc3REZXN0cm95Ik4KFUhvc3RPcGVyYXRpb25Qcm9ncmVzcxIUCgxvcGVyYXRpb25faWQYASABKAkSDQoFc3RhZ2UYAiABKAkSEAoIc2VxdWVuY2UYAyABKAQi4gEKE0hvc3RPcGVyYXRpb25SZXN1bHQSFAoMb3BlcmF0aW9uX2lkGAEgASgJEjcKBGRvbmUYAiABKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbkgAEjMKBmZhaWxlZBgDIAEoCzIhLmNvZGV3aXJlLnYxLkhvc3RPcGVyYXRpb25GYWlsdXJlSAASPAoQc3RhbGVfZ2VuZXJhdGlvbhgEIAEoCzIgLmNvZGV3aXJlLnYxLkhvc3RTdGFsZUdlbmVyYXRpb25IAEIJCgdvdXRjb21lIjUKFEhvc3RPcGVyYXRpb25GYWlsdXJlEgwKBGNvZGUYASABKAkSDwoHbWVzc2FnZRgCIAEoCSJOChNIb3N0U3RhbGVHZW5lcmF0aW9uEhsKE2V4cGVjdGVkX2dlbmVyYXRpb24YASABKAQSGgoSY3VycmVudF9nZW5lcmF0aW9uGAIgASgEIvkBChpIb3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbhIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIcChRsb2NhbF9lbnZpcm9ubWVudF9pZBgCIAEoCRISCgpnZW5lcmF0aW9uGAMgASgEEjAKBXN0YXRlGAQgASgOMiEuY29kZXdpcmUudjEuSG9zdEVudmlyb25tZW50U3RhdGUSEgoKZXJyb3JfY29kZRgFIAEoCRINCgV2Y3B1cxgGIAEoDRISCgptZW1vcnlfbWliGAcgASgNEhIKCmRpc2tfYnl0ZXMYCCABKAQSFAoMc3NoX2hvc3Rfa2V5GAkgASgJIqcBCg5Ib3N0T3BlblR1bm5lbBIRCgl0dW5uZWxfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBBIpCgRraW5kGAUgASgOMhsuY29kZXdpcmUudjEuSG9zdFR1bm5lbEtpbmQSDQoFbm9uY2UYBiABKAwixgEKFU9wZW5Ib3N0VHVubmVsUmVxdWVzdBIrCgRvcGVuGAEgASgLMhsuY29kZXdpcmUudjEuSG9zdFR1bm5lbE9wZW5IABItCgVyZWFkeRgCIAEoCzIcLmNvZGV3aXJlLnYxLkhvc3RUdW5uZWxSZWFkeUgAEjMKBmZhaWxlZBgDIAEoCzIhLmNvZGV3aXJlLnYxLkhvc3RPcGVyYXRpb25GYWlsdXJlSAASEwoEZGF0YRgEIAEoDEIDgAEBSABCBwoFaW5wdXQiNwoWT3Blbkhvc3RUdW5uZWxSZXNwb25zZRITCgRkYXRhGAEgASgMQgOAAQFIAEIICgZvdXRwdXQiRwoOSG9zdFR1bm5lbE9wZW4SDwoHaG9zdF9pZBgBIAEoCRIRCgl0dW5uZWxfaWQYAiABKAkSEQoJc2lnbmF0dXJlGAMgASgMIjEKD0hvc3RUdW5uZWxSZWFkeRIeChFkYWVtb25fY2FwYWJpbGl0eRgBIAEoCUIDgAEBInEKEUhvc3RBY2Nlc3NSZWZyZXNoEhIKCnJlcXVlc3RfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBCKnAQoPSG9zdEFjY2Vzc0dyYW50EhIKCnJlcXVlc3RfaWQYASABKAkSFwoKcGVlcl90b2tlbhgCIAEoCUIDgAEBEh0KFXBlZXJfdG9rZW5fZXhwaXJlc19hdBgDIAEoAxIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgEIAEoAxIXCg9jb29yZGluYXRvcl91cmwYBSABKAkSEQoJYXBwX3BvcnRzGAYgAygFIokBCg1Ib3N0S2V5UmVjb3JkEhIKCnJlcXVlc3RfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBBIaChJwdWJsaWNfa2V5X29wZW5zc2gYBSABKAkiJQoPSG9zdEtleVJlY29yZGVkEhIKCnJlcXVlc3RfaWQYASABKAkiowEKFUhvc3RQZWVyUmVsYXlBbGxvY2F0ZRISCgpyZXF1ZXN0X2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhwKFGxvY2FsX2Vudmlyb25tZW50X2lkGAMgASgJEhIKCmdlbmVyYXRpb24YBCABKAQSEgoKZGlzY29fa2V5cxgFIAMoCRIYChByZWxheV9nZW5lcmF0aW9uGAYgASgNIuYBChdIb3N0UGVlclJlbGF5QWxsb2NhdGlvbhISCgpyZXF1ZXN0X2lkGAEgASgJEhgKEHJlbGF5X2dlbmVyYXRpb24YAiABKA0SGAoQc2VydmVyX2Rpc2NvX2tleRgDIAEoCRISCgpkaXNjb19rZXlzGAQgAygJEhIKCmxhbXBvcnRfaWQYBSABKAQSCwoDdm5pGAYgASgNEhgKEGJpbmRfbGlmZXRpbWVfbnMYByABKAQSIAoYc3RlYWR5X3N0YXRlX2xpZmV0aW1lX25zGAggASgEEhIKCmFkZHJfcG9ydHMYCSADKAkiSAoRSG9zdEFjY2Vzc1JlZnVzYWwSEgoKcmVxdWVzdF9pZBgBIAEoCRIMCgRjb2RlGAIgASgJEhEKCXJldHJ5YWJsZRgDIAEoCCrwAQoUSG9zdEVudmlyb25tZW50U3RhdGUSJgoiSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiIKHkhPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RPUFBFRBABEiMKH0hPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RBUlRJTkcQAhIiCh5IT1NUX0VOVklST05NRU5UX1NUQVRFX1JVTk5JTkcQAxIgChxIT1NUX0VOVklST05NRU5UX1NUQVRFX0VSUk9SEAQSIQodSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9BQlNFTlQQBSpUCg5Ib3N0VHVubmVsS2luZBIgChxIT1NUX1RVTk5FTF9LSU5EX1VOU1BFQ0lGSUVEEAASIAocSE9TVF9UVU5ORUxfS0lORF9EQUVNT05fR1JQQxABMsQBChBIb3N0QWdlbnRTZXJ2aWNlElEKCkF0dGFjaEhvc3QSHi5jb2Rld2lyZS52MS5BdHRhY2hIb3N0UmVxdWVzdBofLmNvZGV3aXJlLnYxLkF0dGFjaEhvc3RSZXNwb25zZSgBMAESXQoOT3Blbkhvc3RUdW5uZWwSIi5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlcXVlc3QaIy5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlc3BvbnNlKAEwAUKxAQoPY29tLmNvZGV3aXJlLnYxQg5Ib3N0QWdlbnRQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_v1_host]);
 
 /**
  * @generated from message codewire.v1.AttachHostRequest
@@ -63,6 +63,24 @@ export type AttachHostRequest = Message<"codewire.v1.AttachHostRequest"> & {
      */
     value: HostEnvironmentObservation;
     case: "environmentObserved";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostAccessRefresh access_refresh = 8;
+     */
+    value: HostAccessRefresh;
+    case: "accessRefresh";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostKeyRecord host_key_record = 9;
+     */
+    value: HostKeyRecord;
+    case: "hostKeyRecord";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostPeerRelayAllocate peer_relay_allocate = 10;
+     */
+    value: HostPeerRelayAllocate;
+    case: "peerRelayAllocate";
   } | { case: undefined; value?: undefined };
 };
 
@@ -122,6 +140,30 @@ export type AttachHostResponse = Message<"codewire.v1.AttachHostResponse"> & {
      */
     value: HostOpenTunnel;
     case: "openTunnel";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostAccessGrant access_grant = 8;
+     */
+    value: HostAccessGrant;
+    case: "accessGrant";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostKeyRecorded host_key_recorded = 9;
+     */
+    value: HostKeyRecorded;
+    case: "hostKeyRecorded";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostPeerRelayAllocation peer_relay_allocation = 10;
+     */
+    value: HostPeerRelayAllocation;
+    case: "peerRelayAllocation";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostAccessRefusal access_refused = 11;
+     */
+    value: HostAccessRefusal;
+    case: "accessRefused";
   } | { case: undefined; value?: undefined };
 };
 
@@ -858,6 +900,314 @@ export const HostTunnelReadySchema: GenMessage<HostTunnelReady> = /*@__PURE__*/
   messageDesc(file_codewire_v1_host_agent, 25);
 
 /**
+ * Asks for a fresh access grant for the tailnet peer of one running VM. The
+ * peer asks at half its current token's lifetime.
+ *
+ * @generated from message codewire.v1.HostAccessRefresh
+ */
+export type HostAccessRefresh = Message<"codewire.v1.HostAccessRefresh"> & {
+  /**
+   * A UUID the host chose; the answer echoes it.
+   *
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * The host's own ID for the environment and the VM's boot generation, as
+   * the host last reported them RUNNING.
+   *
+   * @generated from field: string local_environment_id = 3;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * @generated from field: uint64 generation = 4;
+   */
+  generation: bigint;
+};
+
+/**
+ * Describes the message codewire.v1.HostAccessRefresh.
+ * Use `create(HostAccessRefreshSchema)` to create a new message.
+ */
+export const HostAccessRefreshSchema: GenMessage<HostAccessRefresh> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 26);
+
+/**
+ * What one VM's tailnet peer needs to serve its environment's tailnet: no
+ * wider than a Pod's grant, and narrower where a host needs less. It carries
+ * no binding, credential-broker or workspace authority.
+ *
+ * @generated from message codewire.v1.HostAccessGrant
+ */
+export type HostAccessGrant = Message<"codewire.v1.HostAccessGrant"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * Peer token for the coordinator: the environment, scope "peer", the
+   * operation generation below and an expiry, signed with a key derived for
+   * this purpose only. The host keeps it in memory only.
+   *
+   * @generated from field: string peer_token = 2;
+   */
+  peerToken: string;
+
+  /**
+   * Unix seconds at which peer_token expires.
+   *
+   * @generated from field: int64 peer_token_expires_at = 3;
+   */
+  peerTokenExpiresAt: bigint;
+
+  /**
+   * The environment's operation generation, which the control plane assigns
+   * and the host never chooses. The token is bound to it, and a new one
+   * refuses the next refresh.
+   *
+   * @generated from field: int64 operation_generation = 4;
+   */
+  operationGeneration: bigint;
+
+  /**
+   * Public https origin of the coordinator, whose DERP map the peer uses.
+   *
+   * @generated from field: string coordinator_url = 5;
+   */
+  coordinatorUrl: string;
+
+  /**
+   * The environment's exposed application ports (1-65535, ascending, without
+   * duplicates), which the peer serves on its tailnet address. Empty when the
+   * host's peers serve none.
+   *
+   * @generated from field: repeated int32 app_ports = 6;
+   */
+  appPorts: number[];
+};
+
+/**
+ * Describes the message codewire.v1.HostAccessGrant.
+ * Use `create(HostAccessGrantSchema)` to create a new message.
+ */
+export const HostAccessGrantSchema: GenMessage<HostAccessGrant> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 27);
+
+/**
+ * Records the SSH host key of one running VM, which its tailnet peer serves.
+ * Write-once per environment and operation generation: the same key again
+ * succeeds, and a different one is refused as `key_conflict`.
+ *
+ * @generated from message codewire.v1.HostKeyRecord
+ */
+export type HostKeyRecord = Message<"codewire.v1.HostKeyRecord"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string local_environment_id = 3;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * @generated from field: uint64 generation = 4;
+   */
+  generation: bigint;
+
+  /**
+   * One OpenSSH public key line: "ssh-ed25519 <base64>", no comment.
+   *
+   * @generated from field: string public_key_openssh = 5;
+   */
+  publicKeyOpenssh: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostKeyRecord.
+ * Use `create(HostKeyRecordSchema)` to create a new message.
+ */
+export const HostKeyRecordSchema: GenMessage<HostKeyRecord> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 28);
+
+/**
+ * @generated from message codewire.v1.HostKeyRecorded
+ */
+export type HostKeyRecorded = Message<"codewire.v1.HostKeyRecorded"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostKeyRecorded.
+ * Use `create(HostKeyRecordedSchema)` to create a new message.
+ */
+export const HostKeyRecordedSchema: GenMessage<HostKeyRecorded> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 29);
+
+/**
+ * Asks for a UDP peer-relay endpoint between one VM's tailnet node and one
+ * peer. A control plane with no relay for hosts refuses it as `unsupported`,
+ * and the peer uses DERP instead.
+ *
+ * @generated from message codewire.v1.HostPeerRelayAllocate
+ */
+export type HostPeerRelayAllocate = Message<"codewire.v1.HostPeerRelayAllocate"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string local_environment_id = 3;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * @generated from field: uint64 generation = 4;
+   */
+  generation: bigint;
+
+  /**
+   * Exactly two disco public keys ("discokey:<64 hex>"): this VM's node
+   * first, then the peer's. The order is kept in the answer.
+   *
+   * @generated from field: repeated string disco_keys = 5;
+   */
+  discoKeys: string[];
+
+  /**
+   * The caller's relay-allocation generation, echoed back.
+   *
+   * @generated from field: uint32 relay_generation = 6;
+   */
+  relayGeneration: number;
+};
+
+/**
+ * Describes the message codewire.v1.HostPeerRelayAllocate.
+ * Use `create(HostPeerRelayAllocateSchema)` to create a new message.
+ */
+export const HostPeerRelayAllocateSchema: GenMessage<HostPeerRelayAllocate> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 30);
+
+/**
+ * @generated from message codewire.v1.HostPeerRelayAllocation
+ */
+export type HostPeerRelayAllocation = Message<"codewire.v1.HostPeerRelayAllocation"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: uint32 relay_generation = 2;
+   */
+  relayGeneration: number;
+
+  /**
+   * @generated from field: string server_disco_key = 3;
+   */
+  serverDiscoKey: string;
+
+  /**
+   * @generated from field: repeated string disco_keys = 4;
+   */
+  discoKeys: string[];
+
+  /**
+   * @generated from field: uint64 lamport_id = 5;
+   */
+  lamportId: bigint;
+
+  /**
+   * @generated from field: uint32 vni = 6;
+   */
+  vni: number;
+
+  /**
+   * @generated from field: uint64 bind_lifetime_ns = 7;
+   */
+  bindLifetimeNs: bigint;
+
+  /**
+   * @generated from field: uint64 steady_state_lifetime_ns = 8;
+   */
+  steadyStateLifetimeNs: bigint;
+
+  /**
+   * Public host:port addresses of the relay endpoint.
+   *
+   * @generated from field: repeated string addr_ports = 9;
+   */
+  addrPorts: string[];
+};
+
+/**
+ * Describes the message codewire.v1.HostPeerRelayAllocation.
+ * Use `create(HostPeerRelayAllocationSchema)` to create a new message.
+ */
+export const HostPeerRelayAllocationSchema: GenMessage<HostPeerRelayAllocation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 31);
+
+/**
+ * Why an access call was not answered.
+ *
+ * @generated from message codewire.v1.HostAccessRefusal
+ */
+export type HostAccessRefusal = Message<"codewire.v1.HostAccessRefusal"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * A machine-readable reason, at most 64 bytes: "not_held" (not placed on
+   * this host, or not this local environment), "not_running", "stale_generation",
+   * "key_conflict", "invalid_key", "unsupported" or "unavailable".
+   *
+   * @generated from field: string code = 2;
+   */
+  code: string;
+
+  /**
+   * When true, the same call may succeed later, as after "unavailable".
+   * Otherwise the peer stops serving that VM at this generation.
+   *
+   * @generated from field: bool retryable = 3;
+   */
+  retryable: boolean;
+};
+
+/**
+ * Describes the message codewire.v1.HostAccessRefusal.
+ * Use `create(HostAccessRefusalSchema)` to create a new message.
+ */
+export const HostAccessRefusalSchema: GenMessage<HostAccessRefusal> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 32);
+
+/**
  * What the host's VM for one environment is doing.
  *
  * @generated from enum codewire.v1.HostEnvironmentState
@@ -942,6 +1292,17 @@ export const HostTunnelKindSchema: GenEnum<HostTunnelKind> = /*@__PURE__*/
  * operations (slice 2): the control plane sends `operation`, and the host
  * answers `operation_result` once it has finished. The operation set is the
  * placement's, not the local supervisor's: nothing else of the host crosses.
+ *
+ * From capability version 3 the session also carries the access calls of the
+ * host's tailnet peers, one per running VM (slice 3): the host sends
+ * `access_refresh`, `host_key_record` or `peer_relay_allocate`, and the control
+ * plane answers each with its reply or `access_refused`, echoing its
+ * `request_id`. They are the calls a hosted daemon makes over its Pod binding,
+ * authorized here by the session instead. A call is admitted only on the
+ * host's current session, for an environment placed on this host, whose VM the
+ * host last reported RUNNING with the same local ID and generation. A session
+ * whose hello declared a lower version is ended with INVALID_ARGUMENT if it
+ * sends one.
  *
  * @generated from service codewire.v1.HostAgentService
  */

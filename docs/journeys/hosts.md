@@ -5,13 +5,14 @@ organization: `cw host` enrolls it and keeps its agent connected, `cw hosts`
 lists the organization's hosts, and the dashboard's Hosts page shows them.
 The contract is in [`SPEC.md`, section 5, Hosts](../../SPEC.md#hosts). This
 file is the journey for the placement program #3609: slice 1 (hosts enroll,
-connect and show their state) and slice 2 (environments created on a host). The commands are in the
+connect and show their state), slice 2 (environments created on a host) and
+slice 3 (direct access to them over their tailnet). The commands are in the
 CLI reference, `apps/docs/zola/content/reference/cli/hosts.md`. The format is
 in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-24. Slice 1's CLI and agent are observed on Dev: enroll with
+Updated 2026-11-25. Slice 1's CLI and agent are observed on Dev: enroll with
 either key store, the agent's connection directly and through a proxy, the
 user service across logout and reboot, and leave. The Hosts page waits for
 the owner's browser walk. Slice 2's lifecycle is observed on Dev on a Linux
@@ -20,7 +21,8 @@ revoked host, and create and start in part: the environment runs, but the
 CLI's create never returns and its start exits 1 (#6397). The host's
 generation, the platform's own refusals (offline, not granted, out of
 capacity, a request the host can't take) and the 25-minute bound are not
-yet observed, and `host-attach` waits for the API tunnel. Nothing is
+yet observed. `host-attach` has its tunnel (#6403) and is not yet walked,
+and slice 3 is not shipped. Nothing is
 observed on Production.
 
 | ID | Dev | Production |
@@ -38,6 +40,10 @@ observed on Production.
 | `host-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
 | `host-agent-restart` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
 | `host-revoked-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
+| `host-direct` | not yet observed | not yet observed |
+| `host-exec` | not yet observed | not yet observed |
+| `host-ssh` | not yet observed | not yet observed |
+| `host-key` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -192,8 +198,8 @@ The first walk is on Dev, on a Linux host, then on a Mac: create, run, stop,
 start and delete an environment with an empty workspace. `--repo`, resize and
 the platform-profile credential relay are later steps (#3609). Placement is
 `cw create --on host:NAME`, and stop, start and delete are the ordinary
-commands. Reaching the environment (`cw run`, `cw attach`, `cw shell`) needs
-the API tunnel, which is not merged yet.
+commands. `cw run` and `cw attach` reach the environment through the API
+tunnel (#6403); `cw shell`, `cw exec` and SSH come with slice 3.
 
 The first slice-2 walk ran on Dev on 2026-11-24, 21:40–22:38Z, as the Dev
 smoke identity. Dev was at 013f98d865 and was promoted to 2b3298196 (22:06Z),
@@ -315,3 +321,49 @@ source.
     so its record stays; this computer is no longer enrolled." `cw hosts`
     still showed the revoked host as providing `1 VMs` (#6397). Revoked
     mid-operation is not yet observed.
+
+## Slice 3: direct access to environments on a host
+
+Not shipped: the contract is in `proto/codewire/v1/host_agent.proto` (from
+capability version 3), and the server, supervisor and agent follow in their
+own pull requests (#3609; the design is private-docs
+`designs/2026-11-13-host-direct-access.md`).
+`cw shell`, `cw exec`, OpenSSH and VS Code reach an environment on a host over
+its own tailnet: the host agent runs one tailnet peer per running VM, direct
+UDP when it can, DERP otherwise. Codewire's servers carry no bytes except as
+DERP. The walk is on Dev, from this workstation to a Linux host, then to a
+Mac in slice 4.
+
+### `host-direct`: `cw shell` reaches the VM directly
+
+- **Entry points:** `cw shell ENV` for an environment on a host.
+- **States to exercise:** client and host on the same LAN; client outside the
+  host's network; UDP blocked for the agent, for example by a firewall deny.
+- **Proof:** on the same LAN, `cw shell` says `via direct UDP`; from outside,
+  `direct UDP` or `DERP`; with UDP blocked, `DERP`, and the shell works.
+- **Observed:** not yet observed.
+
+### `host-exec`: `cw exec` on a host environment
+
+- **Entry points:** `cw exec ENV -- uname -a`.
+- **Proof:** the command's output and exit status come back.
+- **Observed:** not yet observed.
+
+### `host-ssh`: OpenSSH and VS Code open the VM
+
+- **Entry points:** `cw setup ssh`, then `ssh cw-host-…` and VS Code
+  Remote-SSH.
+- **Proof:** both open a shell in the host's VM; VS Code's several channels
+  and windows don't exhaust the host owner's local SSH.
+- **Observed:** not yet observed.
+
+### `host-key`: the VM's host key is verified, and a new generation's key too
+
+- **Entry points:** `cw shell ENV`; `cw stop ENV` then `cw start ENV`.
+- **States to exercise:** the recorded key; a forged key; a stop and start,
+  which makes a new operation generation.
+- **Proof:** the client verifies the VM's recorded key and refuses a forged
+  one; after the stop and start it verifies the new generation's key, and
+  until that key is recorded the lookup answers not ready, never an older
+  generation's key.
+- **Observed:** not yet observed.

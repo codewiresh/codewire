@@ -178,6 +178,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.v1.CreateMeshNodeEnrollmentResponse" => v1::CreateMeshNodeEnrollmentResponse,
         "codewire.v1.GetInvitationByTokenRequest" => v1::GetInvitationByTokenRequest,
         "codewire.v1.GithubDeviceChallenge" => v1::GithubDeviceChallenge,
+        "codewire.v1.HostAccessGrant" => v1::HostAccessGrant,
         "codewire.v1.HostTunnelReady" => v1::HostTunnelReady,
         "codewire.v1.JoinMeshNetworkRequest" => v1::JoinMeshNetworkRequest,
         "codewire.v1.LaunchSessionRequest" => v1::LaunchSessionRequest,
