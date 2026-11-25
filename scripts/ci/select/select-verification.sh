@@ -2280,6 +2280,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provision-dev-scratch-account.sh|\
       scripts/runtime/dev/invitations-journey.sh|\
       scripts/runtime/dev/make-dev-acceptance-unlimited.sh|\
+      scripts/runtime/dev/grant-dev-walk-org-credit.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/smoke-dev-dind-storage.sh|\
       scripts/runtime/dev/docker-store-guest.sh|\
@@ -2316,6 +2317,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-hosted-interception-gate.sh|\
       scripts/runtime/tests/test-provision-dev-scratch-account.sh|\
       scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh|\
+      scripts/runtime/tests/test-grant-dev-walk-org-credit.sh|\
       scripts/runtime/tests/test-provision-prod-smoke-user.sh|\
       scripts/runtime/tests/test-with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\

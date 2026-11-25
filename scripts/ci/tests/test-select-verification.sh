@@ -2021,6 +2021,11 @@ run_paths_case runtime_dev_interception_gate pull_request refs/pull/6302/head fa
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/hosted-interception-gate.sh \
   scripts/runtime/tests/test-hosted-interception-gate.sh
+# A walk organization's bounded credit reads and writes no secret either.
+run_paths_case runtime_dev_walk_org_credit pull_request refs/pull/3586/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/grant-dev-walk-org-credit.sh \
+  scripts/runtime/tests/test-grant-dev-walk-org-credit.sh
 run_paths_case runtime_dev_scratch_account pull_request refs/pull/4541/head false \
   'policy dev_smoke_script_tests security security_dev_smoke_auth security_js' \
   scripts/runtime/dev/provision-dev-scratch-account.sh \

@@ -283,6 +283,14 @@ comment 123530). Not yet observed.
   members. Open a tailnet `cw shell` and a `CW_SSH_TRANSPORT=websocket cw
   shell` as the second member, then start `cw org delete` as the owner, and at once try a new `cw exec`, `cw shell`, terminal and
   `cw logs --follow` as each.
+  On Dev the walk organization is a throwaway `w3586-del-N` that the
+  synthetic invitee creates and owns (`with-dev-personal-walk.sh --identity
+  invitee`), with the personal-walk identity as its plain member. Before its
+  Sandbox is made, `grant-dev-walk-org-credit.sh --org-slug w3586-del-N`,
+  through scoped kube-access, bounds it: top-up off, one Sandbox of the
+  default shape and exactly EUR 2 of credit, never the unlimited card.
+  After the deletion, check that the organization, its Sandbox and both
+  memberships are gone.
 - **Proof:** every new stream is refused with a message that the
   organization is being deleted, and none reaches the Sandbox; every stream
   opened before ends within 30 seconds and says the organization is being
