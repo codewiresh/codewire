@@ -2496,19 +2496,33 @@ moves. Changing hosts does not move it. Setting a new value with the same
 binding moves neither. Deleting and setting the key again makes a new
 `binding_id`.
 
-**The placeholder.** `<prefix>cwp1_` and 43 base64url characters, from the
-[per-environment placeholder](#per-environment-placeholders) derivation, under
-the same keys: the environment's key hosted, and the owner's local root for
-a local VM. The inputs:
+**The placeholder.** `<prefix>cwp1_` and 43 base64url characters: an
+HMAC under its own domain, so it never equals a credential's
+[per-environment placeholder](#per-environment-placeholders), keyed by the
+environment's application-secret key (below). The inputs:
 
 - the environment;
-- the slot, `secret/<scope>/<collection id>/<key>`, where the scope is
-  `user`, `organization` or `project`, and the collection ID is the opaque
-  UUID of the set that stores the key, never a name. A rename of a project,
-  or sets added under a project later (#6314), changes no existing slot; a
-  key such a set overrides is another record with its own slot. The slot
-  grammar refuses a string that parses as a provider slot or a `bound/<id>`
-  slot, and a test holds that;
+- the slot, `secret/<kind>/<collection id>/<key>`. The kind is the kind of
+  set that stores the key: `project`, `organization`, `user`, or `local`
+  for a local VM's personal secrets. The collection ID is that set's stable
+  opaque ID, never a name, in one spelling per kind:
+  - a project's UUID, lowercase and hyphenated;
+  - an organization's or a user's ID as stored, 32 lowercase hex digits;
+  - for `local`, the ID the local authority already keeps, 32 lowercase hex
+    digits. A reset of the authority gives a new ID and new placeholders,
+    which fails closed.
+
+  A set whose stored ID isn't its kind's spelling has no slot: binding one
+  of its secrets is refused (`secret_binding_unavailable`), and a secret
+  already bound there is refused by name at projection, never projected
+  raw.
+
+  Because the kind is in the slot, one ID string in two kinds never gives
+  one slot; because each kind has one spelling, one set never has two
+  slots. A rename of a project, or sets added under a project later
+  (#6314), changes no existing slot; a key such a set overrides is another
+  record with its own slot. The slot grammar refuses a string that parses
+  as a provider slot or a `bound/<id>` slot, and a test holds that;
 - the credential, the secret's `binding_id` and `binding_generation`;
 - no profile revision: a secret is selected through a source, not a
   profile.
@@ -2518,8 +2532,25 @@ restarts, and across a new value with the same binding. A binding change
 that moves the generation, or a re-created secret, gives a new one. It is
 derived and never stored. It names nothing outside the environment's own
 front door: its string carries the prefix the user chose, the `cwp1_`
-marker, and an HMAC, never the key's name, its scope or any part of its
-value.
+marker, and an HMAC, never the key's name, its scope, its collection ID or
+any part of its value. The collection ID enters only the HMAC's input, and
+a test holds that a projected placeholder doesn't contain it.
+
+**The application-secret key.** The code that projects application
+secrets never holds a credential's placeholder key. Each environment's
+application-secret key is derived (HKDF, under its own application bound
+secret label) from the environment's placeholder key: hosted, the
+environment's key; in a local VM, the owner's local root for it. The part
+of the credential service that opens placeholder keys derives it and passes
+only that key into the projection; no credential-material key authority
+and no credential reaches the application-secret path, so what that path
+holds can't compute a credential's placeholder. A test holds that the two
+keys give different placeholders for the same input. Hosted, the key
+exists only while hosted placeholders are on
+(`CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED`); with them off, binding a secret
+is refused when it is set, and a bound secret is refused by name at
+projection, never projected raw. This needs no grant beyond the binding
+columns below.
 
 **Projection.** Values are already read at each launch, not at create
 (an `EnvironmentProjectionRequest`, rechecked against the selection digest). For a bound
@@ -2529,6 +2560,12 @@ so the value never leaves it for a launch:
 - hosted, through the daemon's per-launch projection;
 - in a local VM, through the local authority's projection for a local
   source, and through the delegation for a platform source.
+
+A bound row is never decrypted for a projection. The credential broker's
+database login reads its `binding`, `binding_id` and `binding_generation`
+columns, granted beside the nine it reads today, in infra's grants and
+audit before the code that reads them ships. Tests in both stores hold
+that a bound secret's value never reaches a projection.
 
 The raw value is projected only when the secret is plain now and the
 environment's boot or Pod recorded it plain. A secret that is bound now is
