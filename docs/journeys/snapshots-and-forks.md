@@ -31,7 +31,7 @@ finish in under 10 seconds on both (2026-11-24, #6124).
 | --- | --- | --- | --- |
 | `snap-capture` | a snapshot of a stopped cloud sandbox, and its refusals | observed 2026-11-13 with `v0.4.17` (#4370); the zero-credit refusal observed 2026-11-13 (#4379) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370); the refusals not yet observed |
 | `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370); a second `rm` refused (#4717) not yet observed | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
-| `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); one fork on its own not yet observed | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
+| `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); a fork with no `--disk` of a 100 GiB snapshot observed 2026-11-24 (#6276), its marker not checked | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
@@ -274,8 +274,12 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     Everything was removed afterwards.
   - One fork with `--name`, the not-ready refusal and the credit refusal
     for a fork: not yet observed on any surface.
-  - A fork with no `--disk` of a snapshot larger than the 80 GiB default
-    (#6276): not yet observed.
+  - Dev, 2026-11-24, source `2b32981961`, `cw` built from `694706e718`, as
+    the Dev smoke identity, with no `codewire.yaml` (#6276): a snapshot of
+    a source created with `--disk 100GB` reached `ready` at 100.0 GiB in
+    15 s; a fork of it with no `--disk` started running with a 100 GiB
+    disk; `--disk 80GB` was refused with "the disk must be at least as
+    large as the snapshot, 100 GiB". Everything was removed afterwards.
   - The launch walk's own step 10, by a new account on Production: not yet
     observed. deploy#242, which turns snapshots on, reached Production with
     the `v0.4.18` promotion (#4370).
