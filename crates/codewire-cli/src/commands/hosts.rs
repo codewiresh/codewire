@@ -347,6 +347,32 @@ fn timestamp(value: Option<&buffa_types::Timestamp>) -> Option<String> {
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
+/// Whether the host offers VMs now. A revoked host offers none, whatever its
+/// record last said (#6397).
+fn provides(host: &Host) -> bool {
+    host.provide && host.state.as_known() != Some(HostState::HOST_STATE_REVOKED)
+}
+
+/// The PROVIDES column of `cw hosts`.
+fn provides_text(host: &Host) -> String {
+    if provides(host) {
+        limits_text(host)
+    } else {
+        "not providing".into()
+    }
+}
+
+/// The `Provides:` line of `cw host status`, with the next step it needs.
+fn status_provides_text(host: &Host) -> String {
+    if host.state.as_known() == Some(HostState::HOST_STATE_REVOKED) {
+        "nothing: this host was revoked (`cw host leave` on this computer)".into()
+    } else if provides(host) {
+        limits_text(host)
+    } else {
+        "nothing (`cw host provide` to offer VMs)".into()
+    }
+}
+
 fn limits_text(host: &Host) -> String {
     let Some(limits) = host.limits.as_option() else {
         return "-".into();
@@ -373,7 +399,7 @@ fn host_json(host: &Host) -> serde_json::Value {
         "platform": platform_name(host.platform.as_known().unwrap_or_default()),
         "capability_version": host.capability_version,
         "state": state_name(host.state.as_known().unwrap_or_default()),
-        "provide": host.provide,
+        "provide": provides(host),
         "limits": host.limits.as_option().map(|limits| serde_json::json!({
             "max_vms": limits.max_vms,
             "max_vcpus": limits.max_vcpus,
@@ -533,11 +559,7 @@ pub(crate) async fn handle_hosts_command(globals: &Globals, args: HostsArgs) -> 
         if this.as_deref() == Some(host.id.as_str()) {
             name.push_str(" (this)");
         }
-        let provides = if host.provide {
-            limits_text(host)
-        } else {
-            "not providing".into()
-        };
+        let provides = provides_text(host);
         println!(
             "{:<24} {:<18} {:<9} {:<34} {}",
             name,
@@ -735,14 +757,7 @@ async fn status(globals: &Globals, args: HostOutputArgs) -> anyhow::Result<()> {
             .map(|seen| format!(", last seen {seen}"))
             .unwrap_or_else(|| ", never seen".into())
     );
-    println!(
-        "Provides:  {}",
-        if host.provide {
-            limits_text(&host)
-        } else {
-            "nothing (`cw host provide` to offer VMs)".into()
-        }
-    );
+    println!("Provides:  {}", status_provides_text(&host));
     let grants = match (host.organization_grant, host.granted_user_ids.len()) {
         (true, _) => "the whole organization".to_owned(),
         (false, 0) => "only you".to_owned(),
@@ -992,6 +1007,35 @@ pub(crate) mod service;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_revoked_host_provides_nothing() {
+        let mut host = Host {
+            provide: true,
+            limits: buffa::MessageField::some(HostLimits {
+                max_vms: 1,
+                ..Default::default()
+            }),
+            state: HostState::HOST_STATE_ONLINE.into(),
+            ..Default::default()
+        };
+        assert_eq!(provides_text(&host), "1 VMs");
+        assert_eq!(status_provides_text(&host), "1 VMs");
+        assert_eq!(host_json(&host)["provide"], true);
+        host.state = HostState::HOST_STATE_REVOKED.into();
+        assert_eq!(provides_text(&host), "not providing");
+        assert_eq!(host_json(&host)["provide"], false);
+        assert_eq!(
+            status_provides_text(&host),
+            "nothing: this host was revoked (`cw host leave` on this computer)"
+        );
+        host.provide = false;
+        host.state = HostState::HOST_STATE_ONLINE.into();
+        assert_eq!(
+            status_provides_text(&host),
+            "nothing (`cw host provide` to offer VMs)"
+        );
+    }
 
     #[test]
     fn the_preview_line_is_one_attention_line() {
