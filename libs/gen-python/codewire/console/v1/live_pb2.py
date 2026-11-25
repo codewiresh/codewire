@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x63odewire/console/v1/live.proto\x12\x13\x63odewire.console.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0e\n\x0cWatchRequest\"\xd4\x02\n\rWatchResponse\x12\x39\n\x06resync\x18\x01 \x01(\x0b\x32\x1f.codewire.console.v1.LiveResyncH\x00R\x06resync\x12\x42\n\theartbeat\x18\x02 \x01(\x0b\x32\".codewire.console.v1.LiveHeartbeatH\x00R\theartbeat\x12?\n\x07sandbox\x18\x03 \x01(\x0b\x32#.codewire.console.v1.SandboxChangedH\x00R\x07sandbox\x12<\n\x06resize\x18\x04 \x01(\x0b\x32\".codewire.console.v1.ResizeChangedH\x00R\x06resize\x12<\n\x06\x63redit\x18\x05 \x01(\x0b\x32\".codewire.console.v1.CreditChangedH\x00R\x06\x63reditB\x07\n\x05\x65vent\"\x0c\n\nLiveResync\"D\n\rLiveHeartbeat\x12\x33\n\x07sent_at\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x06sentAt\"N\n\x0eSandboxChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"M\n\rResizeChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"&\n\rCreditChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId2_\n\x0bLiveService\x12P\n\x05Watch\x12!.codewire.console.v1.WatchRequest\x1a\".codewire.console.v1.WatchResponse0\x01\x42\xdc\x01\n\x17\x63om.codewire.console.v1B\tLiveProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x63odewire/console/v1/live.proto\x12\x13\x63odewire.console.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0e\n\x0cWatchRequest\"\x8f\x03\n\rWatchResponse\x12\x39\n\x06resync\x18\x01 \x01(\x0b\x32\x1f.codewire.console.v1.LiveResyncH\x00R\x06resync\x12\x42\n\theartbeat\x18\x02 \x01(\x0b\x32\".codewire.console.v1.LiveHeartbeatH\x00R\theartbeat\x12?\n\x07sandbox\x18\x03 \x01(\x0b\x32#.codewire.console.v1.SandboxChangedH\x00R\x07sandbox\x12<\n\x06resize\x18\x04 \x01(\x0b\x32\".codewire.console.v1.ResizeChangedH\x00R\x06resize\x12<\n\x06\x63redit\x18\x05 \x01(\x0b\x32\".codewire.console.v1.CreditChangedH\x00R\x06\x63redit\x12\x39\n\x05\x61udit\x18\x06 \x01(\x0b\x32!.codewire.console.v1.AuditChangedH\x00R\x05\x61uditB\x07\n\x05\x65vent\"\x0c\n\nLiveResync\"D\n\rLiveHeartbeat\x12\x33\n\x07sent_at\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x06sentAt\"N\n\x0eSandboxChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"M\n\rResizeChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"L\n\x0c\x41uditChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"&\n\rCreditChanged\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId2_\n\x0bLiveService\x12P\n\x05Watch\x12!.codewire.console.v1.WatchRequest\x1a\".codewire.console.v1.WatchResponse0\x01\x42\xdc\x01\n\x17\x63om.codewire.console.v1B\tLiveProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,17 +36,19 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_WATCHREQUEST']._serialized_start=88
   _globals['_WATCHREQUEST']._serialized_end=102
   _globals['_WATCHRESPONSE']._serialized_start=105
-  _globals['_WATCHRESPONSE']._serialized_end=445
-  _globals['_LIVERESYNC']._serialized_start=447
-  _globals['_LIVERESYNC']._serialized_end=459
-  _globals['_LIVEHEARTBEAT']._serialized_start=461
-  _globals['_LIVEHEARTBEAT']._serialized_end=529
-  _globals['_SANDBOXCHANGED']._serialized_start=531
-  _globals['_SANDBOXCHANGED']._serialized_end=609
-  _globals['_RESIZECHANGED']._serialized_start=611
-  _globals['_RESIZECHANGED']._serialized_end=688
-  _globals['_CREDITCHANGED']._serialized_start=690
-  _globals['_CREDITCHANGED']._serialized_end=728
-  _globals['_LIVESERVICE']._serialized_start=730
-  _globals['_LIVESERVICE']._serialized_end=825
+  _globals['_WATCHRESPONSE']._serialized_end=504
+  _globals['_LIVERESYNC']._serialized_start=506
+  _globals['_LIVERESYNC']._serialized_end=518
+  _globals['_LIVEHEARTBEAT']._serialized_start=520
+  _globals['_LIVEHEARTBEAT']._serialized_end=588
+  _globals['_SANDBOXCHANGED']._serialized_start=590
+  _globals['_SANDBOXCHANGED']._serialized_end=668
+  _globals['_RESIZECHANGED']._serialized_start=670
+  _globals['_RESIZECHANGED']._serialized_end=747
+  _globals['_AUDITCHANGED']._serialized_start=749
+  _globals['_AUDITCHANGED']._serialized_end=825
+  _globals['_CREDITCHANGED']._serialized_start=827
+  _globals['_CREDITCHANGED']._serialized_end=865
+  _globals['_LIVESERVICE']._serialized_start=867
+  _globals['_LIVESERVICE']._serialized_end=962
 # @@protoc_insertion_point(module_scope)

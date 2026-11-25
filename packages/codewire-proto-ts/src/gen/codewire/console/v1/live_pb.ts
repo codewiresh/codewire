@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/console/v1/live.proto.
  */
 export const file_codewire_console_v1_live: GenFile = /*@__PURE__*/
-  fileDesc("Ch5jb2Rld2lyZS9jb25zb2xlL3YxL2xpdmUucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiDgoMV2F0Y2hSZXF1ZXN0IqgCCg1XYXRjaFJlc3BvbnNlEjEKBnJlc3luYxgBIAEoCzIfLmNvZGV3aXJlLmNvbnNvbGUudjEuTGl2ZVJlc3luY0gAEjcKCWhlYXJ0YmVhdBgCIAEoCzIiLmNvZGV3aXJlLmNvbnNvbGUudjEuTGl2ZUhlYXJ0YmVhdEgAEjYKB3NhbmRib3gYAyABKAsyIy5jb2Rld2lyZS5jb25zb2xlLnYxLlNhbmRib3hDaGFuZ2VkSAASNAoGcmVzaXplGAQgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5SZXNpemVDaGFuZ2VkSAASNAoGY3JlZGl0GAUgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5DcmVkaXRDaGFuZ2VkSABCBwoFZXZlbnQiDAoKTGl2ZVJlc3luYyI8Cg1MaXZlSGVhcnRiZWF0EisKB3NlbnRfYXQYASABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIjgKDlNhbmRib3hDaGFuZ2VkEg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCSI3Cg1SZXNpemVDaGFuZ2VkEg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCSIfCg1DcmVkaXRDaGFuZ2VkEg4KBm9yZ19pZBgBIAEoCTJfCgtMaXZlU2VydmljZRJQCgVXYXRjaBIhLmNvZGV3aXJlLmNvbnNvbGUudjEuV2F0Y2hSZXF1ZXN0GiIuY29kZXdpcmUuY29uc29sZS52MS5XYXRjaFJlc3BvbnNlMAFC3AEKF2NvbS5jb2Rld2lyZS5jb25zb2xlLnYxQglMaXZlUHJvdG9QAVpIZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2NvbnNvbGUvdjE7Y29uc29sZXYxogIDQ0NYqgITQ29kZXdpcmUuQ29uc29sZS5WMcoCE0NvZGV3aXJlXENvbnNvbGVcVjHiAh9Db2Rld2lyZVxDb25zb2xlXFYxXEdQQk1ldGFkYXRh6gIVQ29kZXdpcmU6OkNvbnNvbGU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("Ch5jb2Rld2lyZS9jb25zb2xlL3YxL2xpdmUucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiDgoMV2F0Y2hSZXF1ZXN0ItwCCg1XYXRjaFJlc3BvbnNlEjEKBnJlc3luYxgBIAEoCzIfLmNvZGV3aXJlLmNvbnNvbGUudjEuTGl2ZVJlc3luY0gAEjcKCWhlYXJ0YmVhdBgCIAEoCzIiLmNvZGV3aXJlLmNvbnNvbGUudjEuTGl2ZUhlYXJ0YmVhdEgAEjYKB3NhbmRib3gYAyABKAsyIy5jb2Rld2lyZS5jb25zb2xlLnYxLlNhbmRib3hDaGFuZ2VkSAASNAoGcmVzaXplGAQgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5SZXNpemVDaGFuZ2VkSAASNAoGY3JlZGl0GAUgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5DcmVkaXRDaGFuZ2VkSAASMgoFYXVkaXQYBiABKAsyIS5jb2Rld2lyZS5jb25zb2xlLnYxLkF1ZGl0Q2hhbmdlZEgAQgcKBWV2ZW50IgwKCkxpdmVSZXN5bmMiPAoNTGl2ZUhlYXJ0YmVhdBIrCgdzZW50X2F0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCI4Cg5TYW5kYm94Q2hhbmdlZBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkiNwoNUmVzaXplQ2hhbmdlZBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkiNgoMQXVkaXRDaGFuZ2VkEg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCSIfCg1DcmVkaXRDaGFuZ2VkEg4KBm9yZ19pZBgBIAEoCTJfCgtMaXZlU2VydmljZRJQCgVXYXRjaBIhLmNvZGV3aXJlLmNvbnNvbGUudjEuV2F0Y2hSZXF1ZXN0GiIuY29kZXdpcmUuY29uc29sZS52MS5XYXRjaFJlc3BvbnNlMAFC3AEKF2NvbS5jb2Rld2lyZS5jb25zb2xlLnYxQglMaXZlUHJvdG9QAVpIZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2NvbnNvbGUvdjE7Y29uc29sZXYxogIDQ0NYqgITQ29kZXdpcmUuQ29uc29sZS5WMcoCE0NvZGV3aXJlXENvbnNvbGVcVjHiAh9Db2Rld2lyZVxDb25zb2xlXFYxXEdQQk1ldGFkYXRh6gIVQ29kZXdpcmU6OkNvbnNvbGU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.console.v1.WatchRequest
@@ -77,6 +77,15 @@ export type WatchResponse = Message<"codewire.console.v1.WatchResponse"> & {
      */
     value: CreditChanged;
     case: "credit";
+  } | {
+    /**
+     * A Sandbox's audit log has new events. Sent only to a watcher who may
+     * read that log, at most once per Sandbox per write.
+     *
+     * @generated from field: codewire.console.v1.AuditChanged audit = 6;
+     */
+    value: AuditChanged;
+    case: "audit";
   } | { case: undefined; value?: undefined };
 };
 
@@ -162,6 +171,28 @@ export const ResizeChangedSchema: GenMessage<ResizeChanged> = /*@__PURE__*/
   messageDesc(file_codewire_console_v1_live, 5);
 
 /**
+ * @generated from message codewire.console.v1.AuditChanged
+ */
+export type AuditChanged = Message<"codewire.console.v1.AuditChanged"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+};
+
+/**
+ * Describes the message codewire.console.v1.AuditChanged.
+ * Use `create(AuditChangedSchema)` to create a new message.
+ */
+export const AuditChangedSchema: GenMessage<AuditChanged> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_live, 6);
+
+/**
  * @generated from message codewire.console.v1.CreditChanged
  */
 export type CreditChanged = Message<"codewire.console.v1.CreditChanged"> & {
@@ -176,7 +207,7 @@ export type CreditChanged = Message<"codewire.console.v1.CreditChanged"> & {
  * Use `create(CreditChangedSchema)` to create a new message.
  */
 export const CreditChangedSchema: GenMessage<CreditChanged> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_live, 6);
+  messageDesc(file_codewire_console_v1_live, 7);
 
 /**
  * LiveService tells a signed-in page that state it shows has changed, so the

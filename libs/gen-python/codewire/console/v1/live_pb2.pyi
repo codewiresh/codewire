@@ -13,18 +13,20 @@ class WatchRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class WatchResponse(_message.Message):
-    __slots__ = ("resync", "heartbeat", "sandbox", "resize", "credit")
+    __slots__ = ("resync", "heartbeat", "sandbox", "resize", "credit", "audit")
     RESYNC_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     SANDBOX_FIELD_NUMBER: _ClassVar[int]
     RESIZE_FIELD_NUMBER: _ClassVar[int]
     CREDIT_FIELD_NUMBER: _ClassVar[int]
+    AUDIT_FIELD_NUMBER: _ClassVar[int]
     resync: LiveResync
     heartbeat: LiveHeartbeat
     sandbox: SandboxChanged
     resize: ResizeChanged
     credit: CreditChanged
-    def __init__(self, resync: _Optional[_Union[LiveResync, _Mapping]] = ..., heartbeat: _Optional[_Union[LiveHeartbeat, _Mapping]] = ..., sandbox: _Optional[_Union[SandboxChanged, _Mapping]] = ..., resize: _Optional[_Union[ResizeChanged, _Mapping]] = ..., credit: _Optional[_Union[CreditChanged, _Mapping]] = ...) -> None: ...
+    audit: AuditChanged
+    def __init__(self, resync: _Optional[_Union[LiveResync, _Mapping]] = ..., heartbeat: _Optional[_Union[LiveHeartbeat, _Mapping]] = ..., sandbox: _Optional[_Union[SandboxChanged, _Mapping]] = ..., resize: _Optional[_Union[ResizeChanged, _Mapping]] = ..., credit: _Optional[_Union[CreditChanged, _Mapping]] = ..., audit: _Optional[_Union[AuditChanged, _Mapping]] = ...) -> None: ...
 
 class LiveResync(_message.Message):
     __slots__ = ()
@@ -45,6 +47,14 @@ class SandboxChanged(_message.Message):
     def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
 
 class ResizeChanged(_message.Message):
+    __slots__ = ("org_id", "environment_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class AuditChanged(_message.Message):
     __slots__ = ("org_id", "environment_id")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]

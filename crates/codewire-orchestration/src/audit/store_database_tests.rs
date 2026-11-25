@@ -307,3 +307,30 @@ database_case!(db_expiry_removes_what_began_before_the_retention, pool, {
     let left = rows(pool, "sandbox_audit_events").await?;
     ensure!(left.len() == 1 && left[0].action == "started", "{left:?}");
 });
+
+database_case!(db_a_write_tells_live_watches_only_when_it_commits, pool, {
+    let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
+    listener.listen("audit_changes").await?;
+    let started = Event::once(ORG, ENV, ana(), ago(5), What::Lifecycle(Lifecycle::Started));
+
+    let mut rolled_back = pool.begin().await?;
+    super::record(&mut rolled_back, &started).await?;
+    rolled_back.rollback().await?;
+    let mut committed = pool.begin().await?;
+    super::record(&mut committed, &started).await?;
+    super::record(&mut committed, &started).await?;
+    committed.commit().await?;
+
+    let notice =
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.recv()).await??;
+    ensure!(
+        notice.payload() == format!("{ORG}:{ENV}"),
+        "{}",
+        notice.payload()
+    );
+    let more = tokio::time::timeout(std::time::Duration::from_millis(500), listener.recv()).await;
+    ensure!(
+        more.is_err(),
+        "one notice for the committed transaction, none for the rolled back"
+    );
+});

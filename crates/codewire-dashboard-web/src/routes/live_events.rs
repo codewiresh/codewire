@@ -4,7 +4,7 @@
 //!
 //! - Orchestration authorizes the watch; a refusal is a plain HTTP status,
 //!   which EventSource does not retry.
-//! - Every event carries ids only: `sandbox` and `resize` name the
+//! - Every event carries ids only: `sandbox`, `resize` and `audit` name the
 //!   organization and the Sandbox, `credit` the organization. The page
 //!   re-fetches through routes that re-authorize.
 //! - `resync` passes through; heartbeats become comments; over the account's
@@ -46,6 +46,10 @@ pub(super) fn frame(response: &WatchResponse) -> Option<Bytes> {
             json!({"organization": change.org_id, "environment": change.environment_id}),
         ),
         Event::Credit(change) => ("credit", json!({"organization": change.org_id})),
+        Event::Audit(change) => (
+            "audit",
+            json!({"organization": change.org_id, "environment": change.environment_id}),
+        ),
     };
     Some(Bytes::from(format!("event: {name}\ndata: {data}\n\n")))
 }

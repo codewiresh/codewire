@@ -7,8 +7,8 @@ use std::sync::Arc;
 use buffa_types::Timestamp;
 use codewire_daemon_bridge::drain::{Restart, end_at};
 use codewire_proto::codewire::console::v1::{
-    CreditChanged, LiveHeartbeat, LiveService, ResizeChanged, SandboxChanged, WatchRequest,
-    WatchResponse, watch_response::Event,
+    AuditChanged, CreditChanged, LiveHeartbeat, LiveService, ResizeChanged, SandboxChanged,
+    WatchRequest, WatchResponse, watch_response::Event,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
@@ -100,6 +100,11 @@ fn proto_watch_event(event: LiveEvent) -> WatchResponse {
         })),
         LiveEvent::Credit { org } => Event::Credit(Box::new(CreditChanged {
             org_id: org.to_string(),
+            ..Default::default()
+        })),
+        LiveEvent::Audit { org, environment } => Event::Audit(Box::new(AuditChanged {
+            org_id: org.to_string(),
+            environment_id: environment.to_string(),
             ..Default::default()
         })),
     };

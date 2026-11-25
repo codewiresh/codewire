@@ -2075,12 +2075,15 @@ refusals are in `cw --local policy log` ("Networking and egress").
   either fails at once, as `rate_limited` or `deadline_exceeded`, and `cw`
   says which and suggests a shorter `--since`; neither slows orchestration's
   database.
-- **The live event.** `AuditEvent { org_id, environment_id }`, a new arm of
-  `WatchResponse` in `proto/codewire/console/v1/live.proto`, sent at most
-  once per environment per write batch, and only to watchers who may read
-  that environment's log, so a member doesn't learn when a Sandbox they
-  can't open is used. It carries ids only. A page that receives it fetches
-  again through the read, which authorizes as usual.
+- **The live event.** `AuditChanged { org_id, environment_id }`, the
+  `audit` arm of `WatchResponse` in `proto/codewire/console/v1/live.proto`.
+  The writer sends it on `audit_changes` in the write's own transaction, so
+  Postgres sends it once per environment per transaction and only if it
+  commits. A watch passes it on only to a caller who may read that
+  environment's log: an owner or admin of its organization, or a member who
+  can open it, as read when the watch opens. So a member doesn't learn when
+  a Sandbox they can't open is used. It carries ids only. A page that
+  receives it fetches again through the read, which authorizes as usual.
 - **`cw audit ENV`.** Text lists events grouped by local day: Today,
   Yesterday, then the weekday and date. Each line is the local time the
   event began, its kind and one sentence. A folded event adds its count and

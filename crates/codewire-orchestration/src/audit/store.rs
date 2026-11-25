@@ -123,10 +123,26 @@ fn count(event: &Event) -> i64 {
 pub async fn record(connection: &mut PgConnection, event: &Event) -> Result<(), AuditError> {
     let columns = event.what.columns(&actor_key(event))?;
     if columns.folds {
-        add_to_fold(connection, event, &columns).await
+        add_to_fold(connection, event, &columns).await?;
     } else {
-        insert_event(connection, event, &columns).await
+        insert_event(connection, event, &columns).await?;
     }
+    notify(connection, &event.org_id, &event.environment_id).await
+}
+
+/// Tells live watches the environment's log changed, as part of the write's
+/// own transaction: Postgres sends it only if that commits, and once however
+/// many writes the transaction made for the environment.
+async fn notify(
+    connection: &mut PgConnection,
+    org_id: &str,
+    environment_id: &str,
+) -> Result<(), AuditError> {
+    sqlx::query("SELECT pg_notify('audit_changes', $1)")
+        .bind(format!("{org_id}:{environment_id}"))
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 async fn insert_event(
@@ -219,6 +235,7 @@ async fn add_to_fold(
 /// An open session's row, to close when the session ends.
 #[derive(Debug)]
 pub struct OpenSession {
+    org_id: String,
     environment_id: String,
     key: String,
 }
@@ -238,6 +255,7 @@ pub async fn open_session(
     }
     if columns.folds {
         add_to_fold(&mut connection, event, &columns).await?;
+        notify(&mut connection, &event.org_id, &event.environment_id).await?;
         return Ok(None);
     }
     let key = uuid::Uuid::new_v4().to_string();
@@ -264,7 +282,9 @@ pub async fn open_session(
     .bind(&columns.detail)
     .execute(&mut *connection)
     .await?;
+    notify(&mut connection, &event.org_id, &event.environment_id).await?;
     Ok(Some(OpenSession {
+        org_id: event.org_id.clone(),
         environment_id: event.environment_id.clone(),
         key,
     }))
@@ -276,6 +296,7 @@ pub async fn close_session(
     session: &OpenSession,
     at: DateTime<Utc>,
 ) -> Result<(), AuditError> {
+    let mut connection = pool.acquire().await?;
     sqlx::query(
         "UPDATE sandbox_audit_pending SET last_at = GREATEST($3, first_at) \
          WHERE environment_id = $1 AND kind = 'access' AND pending_key = $2 \
@@ -284,9 +305,9 @@ pub async fn close_session(
     .bind(&session.environment_id)
     .bind(&session.key)
     .bind(at)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
-    Ok(())
+    notify(&mut connection, &session.org_id, &session.environment_id).await
 }
 
 /// Makes the partitions around now, by the database's clock.

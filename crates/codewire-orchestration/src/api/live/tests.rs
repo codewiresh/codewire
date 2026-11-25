@@ -239,3 +239,49 @@ async fn a_reader_that_stops_reading_gets_a_bounded_queue_and_one_resync() {
         Some(LiveEvent::Heartbeat(_))
     ));
 }
+
+#[test]
+fn an_audit_notice_is_parsed_and_passes_only_its_audience() {
+    let notice = LiveSignal::from_notice("audit_changes", &format!("{ORG}:{ENV}"))
+        .expect("an audit notice parses");
+    assert_eq!(
+        notice,
+        LiveSignal::Audit {
+            org: ORG.into(),
+            environment: ENV.into(),
+        }
+    );
+    assert_eq!(LiveSignal::from_notice("audit_changes", ORG), None);
+
+    let set = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| (*id).to_owned())
+            .collect::<HashSet<_>>()
+    };
+    let admin = Audience {
+        organizations: set(&[ORG]),
+        audit_organizations: set(&[ORG]),
+        audit_environments: HashSet::new(),
+    };
+    let granted = Audience {
+        organizations: set(&[ORG]),
+        audit_organizations: HashSet::new(),
+        audit_environments: set(&[ENV]),
+    };
+    let plain = Audience::from(set(&[ORG]));
+    let elsewhere = Audience {
+        organizations: set(&[OTHER_ORG]),
+        audit_organizations: set(&[OTHER_ORG]),
+        audit_environments: set(&[ENV]),
+    };
+    assert!(admin.passes(&notice));
+    assert!(granted.passes(&notice));
+    assert!(!plain.passes(&notice), "a member who can't open it");
+    assert!(!elsewhere.passes(&notice), "another organization's caller");
+    let other_sandbox = LiveSignal::Audit {
+        org: ORG.into(),
+        environment: "another-env".into(),
+    };
+    assert!(!granted.passes(&other_sandbox));
+    assert!(plain.passes(&LiveSignal::Credit { org: ORG.into() }));
+}

@@ -1,5 +1,5 @@
 use codewire_proto::codewire::console::v1::{
-    CreditChanged, LiveHeartbeat, ResizeChanged, SandboxChanged,
+    AuditChanged, CreditChanged, LiveHeartbeat, ResizeChanged, SandboxChanged,
 };
 
 use super::*;
@@ -48,6 +48,14 @@ fn each_event_is_one_frame_of_ids_named_by_its_kind() {
             ..Default::default()
         }))))),
         "event: credit\ndata: {\"organization\":\"org_a\"}\n\n"
+    );
+    assert_eq!(
+        text(frame(&response(Event::Audit(Box::new(AuditChanged {
+            org_id: "org_a".into(),
+            environment_id: "env_1".into(),
+            ..Default::default()
+        }))))),
+        "event: audit\ndata: {\"environment\":\"env_1\",\"organization\":\"org_a\"}\n\n"
     );
     // A heartbeat is a comment, which EventSource never dispatches.
     assert_eq!(

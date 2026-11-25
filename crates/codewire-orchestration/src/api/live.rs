@@ -1,8 +1,9 @@
 //! Live change notices for signed-in pages (#4762; private-docs
 //! designs/live-updates.md).
 //!
-//! One process-wide `LISTEN` on `environment_changes`, `resize_changes` and
-//! `credit_changes` fans each notice out over a broadcast channel, as
+//! One process-wide `LISTEN` on `environment_changes`, `resize_changes`,
+//! `credit_changes` and `audit_changes` fans each notice out over a broadcast
+//! channel, as
 //! [`super::log_notifications`] does for environment logs. Each watch keeps
 //! the notices for the organizations its caller belonged to when it opened,
 //! and passes on only identifiers: the page re-fetches what it shows, and
@@ -10,9 +11,10 @@
 //! it starts with a resync, and sends another after a listener reconnect or
 //! when it fell behind the channel.
 //!
-//! The organizations are read once per watch, so a member removed meanwhile
-//! keeps receiving that organization's identifiers until the watch ends, at
-//! most [`WATCH_LIFETIME`] later. That is safe only because every re-fetch
+//! The organizations, and whose audit logs the caller may read, are read once
+//! per watch, so a member removed meanwhile keeps receiving that
+//! organization's identifiers until the watch ends, at most
+//! [`WATCH_LIFETIME`] later. That is safe only because every re-fetch
 //! they lead to re-authorizes; a new watch no longer includes it.
 
 use std::collections::{HashMap, HashSet};
@@ -31,6 +33,9 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 pub(crate) const ENVIRONMENT_CHANGES_CHANNEL: &str = "environment_changes";
 pub(crate) const RESIZE_CHANGES_CHANNEL: &str = "resize_changes";
 pub(crate) const CREDIT_CHANGES_CHANNEL: &str = "credit_changes";
+/// A Sandbox's audit log changed (#6189); `org:environment`, sent by the
+/// audit log's writer.
+pub(crate) const AUDIT_CHANGES_CHANNEL: &str = "audit_changes";
 /// Watches one account may hold at once in this process: about one per open
 /// signed-in tab.
 pub const MAX_WATCHES_PER_ACCOUNT: usize = 16;
@@ -64,6 +69,10 @@ pub(crate) enum LiveSignal {
     Credit {
         org: Arc<str>,
     },
+    Audit {
+        org: Arc<str>,
+        environment: Arc<str>,
+    },
     /// Notices may have been missed while the listener was not listening.
     Resync,
 }
@@ -71,9 +80,10 @@ pub(crate) enum LiveSignal {
 impl LiveSignal {
     fn org(&self) -> Option<&str> {
         match self {
-            Self::Sandbox { org, .. } | Self::Resize { org, .. } | Self::Credit { org } => {
-                Some(org)
-            }
+            Self::Sandbox { org, .. }
+            | Self::Resize { org, .. }
+            | Self::Audit { org, .. }
+            | Self::Credit { org } => Some(org),
             Self::Resync => None,
         }
     }
@@ -85,16 +95,16 @@ impl LiveSignal {
             CREDIT_CHANGES_CHANNEL => valid_id(payload).then(|| Self::Credit {
                 org: payload.into(),
             }),
-            ENVIRONMENT_CHANGES_CHANNEL | RESIZE_CHANGES_CHANNEL => {
+            ENVIRONMENT_CHANGES_CHANNEL | RESIZE_CHANGES_CHANNEL | AUDIT_CHANGES_CHANNEL => {
                 let (org, environment) = payload.split_once(':')?;
                 if !valid_id(org) || !valid_id(environment) {
                     return None;
                 }
                 let (org, environment) = (org.into(), environment.into());
-                Some(if channel == RESIZE_CHANGES_CHANNEL {
-                    Self::Resize { org, environment }
-                } else {
-                    Self::Sandbox { org, environment }
+                Some(match channel {
+                    RESIZE_CHANGES_CHANNEL => Self::Resize { org, environment },
+                    AUDIT_CHANGES_CHANNEL => Self::Audit { org, environment },
+                    _ => Self::Sandbox { org, environment },
                 })
             }
             _ => None,
@@ -125,6 +135,47 @@ pub(crate) enum LiveEvent {
     Credit {
         org: Arc<str>,
     },
+    Audit {
+        org: Arc<str>,
+        environment: Arc<str>,
+    },
+}
+
+/// Whose notices a watch passes on: its caller's organizations, and whose
+/// audit logs it may read (SPEC "Who reads what"): every Sandbox's in the
+/// organizations it is an owner or admin of, and the Sandboxes it can open
+/// in the others. Read once when the watch opens, as the organizations are,
+/// so a member does not learn when a Sandbox they can't open is used.
+#[derive(Default)]
+pub(crate) struct Audience {
+    organizations: HashSet<String>,
+    audit_organizations: HashSet<String>,
+    audit_environments: HashSet<String>,
+}
+
+impl From<HashSet<String>> for Audience {
+    fn from(organizations: HashSet<String>) -> Self {
+        Self {
+            organizations,
+            ..Self::default()
+        }
+    }
+}
+
+impl Audience {
+    fn passes(&self, signal: &LiveSignal) -> bool {
+        match signal {
+            LiveSignal::Resync => true,
+            LiveSignal::Audit { org, environment } => {
+                self.organizations.contains(&**org)
+                    && (self.audit_organizations.contains(&**org)
+                        || self.audit_environments.contains(&**environment))
+            }
+            other => other
+                .org()
+                .is_some_and(|org| self.organizations.contains(org)),
+        }
+    }
 }
 
 pub struct LiveNotifications {
@@ -262,6 +313,7 @@ async fn listen(pool: &PgPool, notifications: &LiveNotifications) -> anyhow::Res
             ENVIRONMENT_CHANGES_CHANNEL,
             RESIZE_CHANGES_CHANNEL,
             CREDIT_CHANGES_CHANNEL,
+            AUDIT_CHANGES_CHANNEL,
         ])
         .await?;
     notifications.resync();
@@ -285,17 +337,43 @@ pub(crate) async fn open_live_watch(
     let permit = notifications
         .acquire_watch(&user.user_id)
         .ok_or_else(watch_limit_exceeded)?;
-    let organizations: Vec<String> =
-        sqlx::query_scalar("SELECT org_id FROM org_members WHERE user_id = $1")
+    let memberships: Vec<(String, String)> =
+        sqlx::query_as("SELECT org_id, role FROM org_members WHERE user_id = $1")
             .bind(&user.user_id)
             .fetch_all(pool)
             .await?;
-    let organizations = organizations
+    let memberships: Vec<(String, String)> = memberships
         .into_iter()
-        .filter(|org| user.permits_organization(org))
+        .filter(|(org, _)| user.permits_organization(org))
         .collect();
+    let member_of: Vec<&str> = memberships
+        .iter()
+        .filter(|(_, role)| role != "owner" && role != "admin")
+        .map(|(org, _)| org.as_str())
+        .collect();
+    // As `require_environment_access` decides for `operator`: the creator,
+    // or a grant of `operator` or `owner`.
+    let audit_environments: Vec<String> = sqlx::query_scalar(
+        "SELECT e.id FROM environments e \
+         WHERE e.org_id = ANY($2) AND e.state <> 'destroyed' AND (e.created_by = $1 \
+           OR EXISTS (SELECT 1 FROM environment_access a WHERE a.environment_id = e.id \
+                      AND a.user_id = $1 AND a.permission IN ('operator', 'owner')))",
+    )
+    .bind(&user.user_id)
+    .bind(&member_of)
+    .fetch_all(pool)
+    .await?;
+    let audience = Audience {
+        audit_organizations: memberships
+            .iter()
+            .filter(|(_, role)| role == "owner" || role == "admin")
+            .map(|(org, _)| org.clone())
+            .collect(),
+        organizations: memberships.into_iter().map(|(org, _)| org).collect(),
+        audit_environments: audit_environments.into_iter().collect(),
+    };
     Ok(start_live_watch(
-        organizations,
+        audience,
         permit,
         WATCH_LIFETIME,
         HEARTBEAT_INTERVAL,
@@ -318,12 +396,13 @@ fn watch_limit_exceeded() -> AppError {
 /// watch drops events and owes one resync, sent as soon as there is room, so a
 /// reader that stops reading costs a bounded queue, not a growing one.
 pub(crate) fn start_live_watch(
-    organizations: HashSet<String>,
+    audience: impl Into<Audience>,
     permit: WatchPermit,
     lifetime: Duration,
     heartbeat: Duration,
     capacity: usize,
 ) -> mpsc::Receiver<LiveEvent> {
+    let audience = audience.into();
     let (tx, rx) = mpsc::channel(capacity.max(1));
     tokio::spawn(async move {
         // Subscribe before the first resync, so a change committed while the
@@ -344,13 +423,14 @@ pub(crate) fn start_live_watch(
                 _ = beat.tick() => LiveEvent::Heartbeat(Utc::now()),
                 signal = signals.recv() => match signal {
                     Ok(signal) => {
-                        if !signal.org().is_none_or(|org| organizations.contains(org)) {
+                        if !audience.passes(&signal) {
                             continue;
                         }
                         match signal {
                             LiveSignal::Sandbox { org, environment } => LiveEvent::Sandbox { org, environment },
                             LiveSignal::Resize { org, environment } => LiveEvent::Resize { org, environment },
                             LiveSignal::Credit { org } => LiveEvent::Credit { org },
+                            LiveSignal::Audit { org, environment } => LiveEvent::Audit { org, environment },
                             LiveSignal::Resync => LiveEvent::Resync,
                         }
                     }
