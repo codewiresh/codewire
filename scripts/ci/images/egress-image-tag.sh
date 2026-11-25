@@ -16,9 +16,10 @@
 # never makes anything signed, and the pin proposal verifies the signature,
 # source and fingerprint itself before it proposes the digest.
 #
-# The standard pod-runtime image (#5602) and the /dev/kvm device plugin's
-# image (#6202) are built, signed and keyed the same way;
-# pod-runtime-image-tag.sh and kvm-device-plugin-image-tag.sh run this with
+# The standard pod-runtime image (#5602), the /dev/kvm device plugin's image
+# (#6202) and the standard workspace disk (#5602) are built, signed and keyed
+# the same way; pod-runtime-image-tag.sh, kvm-device-plugin-image-tag.sh and
+# workspace-disk-image-tag.sh run this with
 # CODEWIRE_SIGNED_IMAGE_REPOSITORY naming their repository. Nothing else may
 # be named.
 set -euo pipefail
@@ -30,9 +31,9 @@ usage() {
 
 readonly REGISTRY="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 case "${CODEWIRE_SIGNED_IMAGE_REPOSITORY:-codewire/egress}" in
-  codewire/egress|codewire/pod-runtime|codewire/kvm-device-plugin) ;;
+  codewire/egress|codewire/pod-runtime|codewire/kvm-device-plugin|codewire/workspace-disk) ;;
   *)
-    echo 'CODEWIRE_SIGNED_IMAGE_REPOSITORY must be codewire/egress, codewire/pod-runtime or codewire/kvm-device-plugin' >&2
+    echo 'CODEWIRE_SIGNED_IMAGE_REPOSITORY must be codewire/egress, codewire/pod-runtime, codewire/kvm-device-plugin or codewire/workspace-disk' >&2
     exit 2
     ;;
 esac

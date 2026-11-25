@@ -23,6 +23,7 @@ ARTIFACTS = ("dev_release_tree", "dev_acceptance_harness", *RUNTIME_ARTIFACTS)
 EGRESS_FINGERPRINT = "f" * 64
 POD_RUNTIME_FINGERPRINT = "a" * 64
 KVM_DEVICE_PLUGIN_FINGERPRINT = "c" * 64
+WORKSPACE_DISK_FINGERPRINT = "e" * 64
 
 
 def plan_document(
@@ -32,6 +33,7 @@ def plan_document(
     egress: dict | None = None,
     pod_runtime: dict | None = None,
     kvm_device_plugin: dict | None = None,
+    workspace_disk: dict | None = None,
 ) -> dict:
     effective_states = {name: "unaffected" for name in ARTIFACTS}
     effective_states.update(states or {})
@@ -67,6 +69,9 @@ def plan_document(
             "kvm_device_plugin_image": kvm_device_plugin
             if kvm_device_plugin is not None
             else {"state": "unaffected", "head_fingerprint": KVM_DEVICE_PLUGIN_FINGERPRINT},
+            "workspace_disk_image": workspace_disk
+            if workspace_disk is not None
+            else {"state": "unaffected", "head_fingerprint": WORKSPACE_DISK_FINGERPRINT},
         },
         "degraded_reasons": [],
     }
@@ -287,6 +292,28 @@ class DeployPlanAdapterTests(unittest.TestCase):
         )
         self.assertEqual(outputs["reason"], "plan_invalid")
         self.assertEqual(outputs["kvm_device_plugin_image_fingerprint"], "")
+
+    # The standard workspace disk (#5602), built on the KVM runner, likewise.
+    def test_the_workspace_disk_fingerprint_is_passed_on_and_selects_nothing(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(workspace_disk={"state": "affected", "head_fingerprint": "f" * 64})
+        )
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["workspace_disk_image_fingerprint"], "f" * 64)
+        self.assertNotIn("workspace_disk_image", outputs["matched_categories"])
+
+    def test_no_workspace_disk_fingerprint_builds_no_disk(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(workspace_disk={"state": "unclassified", "head_fingerprint": None})
+        )
+        self.assertEqual(outputs["workspace_disk_image_fingerprint"], "")
+
+    def test_a_malformed_workspace_disk_fingerprint_fails_closed(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(workspace_disk={"state": "unaffected", "head_fingerprint": "F" * 64})
+        )
+        self.assertEqual(outputs["reason"], "plan_invalid")
+        self.assertEqual(outputs["workspace_disk_image_fingerprint"], "")
 
 
 if __name__ == "__main__":

@@ -149,6 +149,20 @@ plugin="registry.example.invalid/codewire/kvm-device-plugin@sha256:$(printf 'd%.
 if "$PLUGIN_SCRIPT" tag "$pod" "$fingerprint" >/dev/null 2>&1; then
   fail 'the device plugin wrapper tagged a pod-runtime reference'
 fi
+# The standard workspace disk (#5602) likewise.
+readonly DISK_SCRIPT="$ROOT/scripts/ci/images/workspace-disk-image-tag.sh"
+disk="registry.example.invalid/codewire/workspace-disk@sha256:$(printf 'e%.0s' {1..64})"
+[[ "$("$DISK_SCRIPT" exists "$fingerprint")" == absent ]] ||
+  fail 'the workspace disk tag was read from another repository'
+"$DISK_SCRIPT" tag "$disk" "$fingerprint" | grep -Fq "Tagged $disk" || fail 'the workspace disk image was not tagged'
+[[ "$(cat "$FAKE_REGISTRY/workspace-disk_fp-$fingerprint")" == "${disk##*@}" ]] ||
+  fail 'the workspace disk tag does not name its image'
+[[ "$(cat "$FAKE_REGISTRY/pod-runtime_fp-$fingerprint")" == "${pod##*@}" ]] ||
+  fail 'tagging the workspace disk image moved the pod-runtime tag'
+: >"$FAKE_DOCKER_LOG"
+if "$DISK_SCRIPT" tag "$pod" "$fingerprint" >/dev/null 2>&1; then
+  fail 'the workspace disk wrapper tagged a pod-runtime reference'
+fi
 if CODEWIRE_SIGNED_IMAGE_REPOSITORY=codewire/mesh "$SCRIPT" exists "$fingerprint" >/dev/null 2>&1; then
   fail 'another repository was accepted'
 fi

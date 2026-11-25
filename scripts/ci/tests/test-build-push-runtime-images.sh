@@ -635,4 +635,27 @@ grep -Eq '^kvm-device-plugin_candidate_ref=registry\.example\.invalid/codewire/k
 grep -qx "kvm-device-plugin_built_from=$head_sha" "$plugin_output" ||
   fail 'the kvm-device-plugin group omitted its built-from source'
 
+# The standard workspace disk (#5602) builds alone from the disk directory
+# the KVM runner handed back, unpacked inside the checkout; anything else
+# builds nothing.
+disk_output="$work/disk-output"
+disk_context_log="$work/disk-context.log"
+mkdir "$fixture/.workspace-disk-context"
+run_group workspace-disk "$disk_output" "$work/disk-docker.log" "$work/disk-build.log" 56 \
+  CONTEXT_LOG="$disk_context_log" \
+  CODEWIRE_WORKSPACE_DISK_CONTEXT="$fixture/.workspace-disk-context" >/dev/null 2>"$work/disk.stderr" ||
+  fail "the workspace-disk group failed: $(cat "$work/disk.stderr")"
+[[ "$(cat "$disk_context_log")" == "workspace-disk images/workspace-disk/Dockerfile $fixture/.workspace-disk-context" ]] ||
+  fail "the workspace disk was not built alone from its Dockerfile and context: $(cat "$disk_context_log")"
+grep -Eq '^workspace-disk_candidate_ref=registry\.example\.invalid/codewire/workspace-disk@sha256:[0-9a-f]{64}$' "$disk_output" ||
+  fail 'the workspace-disk group omitted its exact candidate output'
+for context in '' "$outside" "$fixture/.missing-context"; do
+  : >"$work/disk-refused-build.log"
+  if run_group workspace-disk "$work/disk-refused-output" "$work/disk-refused-docker.log" "$work/disk-refused-build.log" 57 \
+      CODEWIRE_WORKSPACE_DISK_CONTEXT="$context" >/dev/null 2>&1; then
+    fail "the workspace-disk group built from context '$context'"
+  fi
+  [[ ! -s "$work/disk-refused-build.log" ]] || fail "a refused workspace disk context reached the build: '$context'"
+done
+
 printf '[test-build-push-runtime-images] split protected runtime build contract passed\n'

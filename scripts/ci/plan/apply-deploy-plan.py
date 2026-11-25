@@ -35,6 +35,8 @@ EGRESS_ARTIFACT = "egress_image"
 POD_RUNTIME_ARTIFACT = "pod_runtime_image"
 # And the /dev/kvm device plugin's own image (#6202).
 KVM_DEVICE_PLUGIN_ARTIFACT = "kvm_device_plugin_image"
+# And the standard workspace disk (#5602), built on the KVM runner.
+WORKSPACE_DISK_ARTIFACT = "workspace_disk_image"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
@@ -161,6 +163,7 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         "egress_image_fingerprint": egress_fingerprint(plan),
         "pod_runtime_image_fingerprint": egress_fingerprint(plan, POD_RUNTIME_ARTIFACT),
         "kvm_device_plugin_image_fingerprint": egress_fingerprint(plan, KVM_DEVICE_PLUGIN_ARTIFACT),
+        "workspace_disk_image_fingerprint": egress_fingerprint(plan, WORKSPACE_DISK_ARTIFACT),
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs
@@ -183,6 +186,7 @@ def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
         "egress_image_fingerprint": "",
         "pod_runtime_image_fingerprint": "",
         "kvm_device_plugin_image_fingerprint": "",
+        "workspace_disk_image_fingerprint": "",
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs

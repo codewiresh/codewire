@@ -2545,7 +2545,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/build-product-images.sh|\
       scripts/ci/images/pod-runtime-context.py|\
       scripts/ci/images/workspace-disk.sh|\
+      scripts/ci/images/workspace-disk-inputs.py|\
       scripts/ci/tests/test-pod-runtime-context.py|\
+      scripts/ci/tests/test-workspace-disk-inputs.py|\
       scripts/ci/tests/test-cw-image-context.py|\
       scripts/ci/tests/test-cw-runtime-source.py|\
       scripts/ci/tests/test-cw-image-consumer.py|\
@@ -2677,6 +2679,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/egress-image-tag.sh|\
       scripts/ci/images/pod-runtime-image-tag.sh|\
       scripts/ci/images/kvm-device-plugin-image-tag.sh|\
+      scripts/ci/images/workspace-disk-image-tag.sh|\
       scripts/ci/tests/test-egress-image-tag.sh|\
       scripts/ci/images/verify-runtime-image-signatures.sh|\
       scripts/ci/tests/test-verify-runtime-image-signatures.sh|\

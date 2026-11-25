@@ -12,6 +12,11 @@
 #                                           # the standard pod-runtime image (#5602),
 #                                           # likewise; its context is the directory
 #                                           # CODEWIRE_POD_RUNTIME_CONTEXT names
+#   build-push-runtime-images.sh workspace-disk
+#                                           # the standard workspace disk (#5602),
+#                                           # likewise; its context is the disk
+#                                           # directory CODEWIRE_WORKSPACE_DISK_CONTEXT
+#                                           # names
 #
 # Each half runs in its own protected job, so the daemon's static CW
 # producer, the longest single build, runs beside the service Bake instead of
@@ -34,7 +39,7 @@ readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image regi
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 if [ "$#" -ne 1 ]; then
-  echo 'Usage: build-push-runtime-images.sh services|daemon|egress|kvm-device-plugin|pod-runtime' >&2
+  echo 'Usage: build-push-runtime-images.sh services|daemon|egress|kvm-device-plugin|pod-runtime|workspace-disk' >&2
   exit 2
 fi
 readonly runtime_group="$1"
@@ -44,8 +49,9 @@ case "$runtime_group" in
   egress) image_families=(egress) ;;
   kvm-device-plugin) image_families=(kvm-device-plugin) ;;
   pod-runtime) image_families=(pod-runtime) ;;
+  workspace-disk) image_families=(workspace-disk) ;;
   *)
-    echo 'Runtime image group must be exactly services, daemon, egress, kvm-device-plugin or pod-runtime' >&2
+    echo 'Runtime image group must be exactly services, daemon, egress, kvm-device-plugin, pod-runtime or workspace-disk' >&2
     exit 2
     ;;
 esac
@@ -353,6 +359,15 @@ elif [ "$runtime_group" = egress ]; then
   build_one egress deployments/docker/egress.Dockerfile
 elif [ "$runtime_group" = kvm-device-plugin ]; then
   build_one kvm-device-plugin deployments/docker/kvm-device-plugin.Dockerfile
+elif [ "$runtime_group" = workspace-disk ]; then
+  # The disk directory the KVM runner built, unpacked inside this checkout,
+  # so the build's provenance names this commit as every runtime image's does.
+  disk_context="${CODEWIRE_WORKSPACE_DISK_CONTEXT:?set to the unpacked workspace disk}"
+  [[ -d "$disk_context" && ! -L "$disk_context" && "$(cd "$disk_context" && pwd -P)" == "$(cd "$ROOT" && pwd -P)"/* ]] || {
+    echo 'The workspace disk context must be a directory inside this checkout' >&2
+    exit 2
+  }
+  build_one workspace-disk images/workspace-disk/Dockerfile 0 "$disk_context"
 else
   # pod-runtime-context.py assembled the context inside this checkout, so the
   # build's provenance names this commit as every runtime image's does.

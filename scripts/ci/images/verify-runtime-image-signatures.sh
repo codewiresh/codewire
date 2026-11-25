@@ -20,10 +20,11 @@ set -euo pipefail
 # each such signature names, for the caller to check against main
 # (private-docs designs/hosted-egress.md, "The image and its deployment").
 # --pod-runtime verifies the standard pod-runtime image (#5602), and
-# --kvm-device-plugin the /dev/kvm device plugin's image (#6202), the same way.
+# --kvm-device-plugin the /dev/kvm device plugin's image (#6202) and
+# --workspace-disk the standard workspace disk (#5602), the same way.
 single_ref=''
 single_family=''
-if [[ "${1:-}" == --egress || "${1:-}" == --pod-runtime || "${1:-}" == --kvm-device-plugin ]]; then
+if [[ "${1:-}" == --egress || "${1:-}" == --pod-runtime || "${1:-}" == --kvm-device-plugin || "${1:-}" == --workspace-disk ]]; then
   single_family="${1#--}"
   single_ref="${2:-}"
   shift 2 || true
@@ -34,6 +35,7 @@ if [[ $# -ne 2 ]]; then
   echo '       verify-runtime-image-signatures.sh --egress HARBOR_EGRESS_REF PUBLIC_KEY' >&2
   echo '       verify-runtime-image-signatures.sh --pod-runtime HARBOR_POD_RUNTIME_REF PUBLIC_KEY' >&2
   echo '       verify-runtime-image-signatures.sh --kvm-device-plugin HARBOR_KVM_DEVICE_PLUGIN_REF PUBLIC_KEY' >&2
+  echo '       verify-runtime-image-signatures.sh --workspace-disk HARBOR_WORKSPACE_DISK_REF PUBLIC_KEY' >&2
   exit 2
 fi
 

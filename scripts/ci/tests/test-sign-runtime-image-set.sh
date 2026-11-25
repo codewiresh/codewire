@@ -568,4 +568,34 @@ for refused in \
   [[ ! -s "$signature_state" ]] || fail "device plugin signing signed something for $refused"
 done
 
+# The standard workspace disk (#5602) likewise (--workspace-disk).
+disk_ref="registry.example.invalid/codewire/workspace-disk@$digest"
+: >"$signature_state"
+: >"$signature_annotations"
+: >"$curl_log"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" --workspace-disk "$disk_ref" "$public_key" >"$work/disk.out" 2>"$work/disk.err"; then
+  sed -n '1,40p' "$work/disk.err" >&2
+  fail 'workspace disk signing fixture failed'
+fi
+[[ "$(wc -l <"$signature_state")" -eq 1 ]] && grep -Fxq "$disk_ref" "$signature_state" ||
+  fail 'workspace disk signing did not sign exactly the workspace disk reference'
+grep -Fq "$disk_ref dev.codewire.image-family=workspace-disk" "$signature_annotations" ||
+  fail 'workspace disk signature did not name its family'
+grep -Fq 'Verified and signed the exact workspace-disk image in Harbor' "$work/disk.out" ||
+  fail 'workspace disk signing omitted its result'
+for refused in \
+    "registry.example.invalid/codewire/pod-runtime@$digest" \
+    "registry.example.invalid/codewire/workspace-disk:$source_sha" \
+    "ghcr.io/codewiresh/workspace-disk@$digest"; do
+  : >"$signature_state"
+  if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+      "$SIGNER" --workspace-disk "$refused" "$public_key" >/dev/null 2>"$work/disk-refused.err"; then
+    fail "workspace disk signing accepted $refused"
+  fi
+  grep -Fq 'must be a codewire/workspace-disk digest reference in Harbor' "$work/disk-refused.err" ||
+    fail "workspace disk refusal of $refused was not attributable"
+  [[ ! -s "$signature_state" ]] || fail "workspace disk signing signed something for $refused"
+done
+
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'

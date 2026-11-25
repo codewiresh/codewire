@@ -305,4 +305,34 @@ for refused in "registry.example.invalid/codewire/pod-runtime@$digest" "registry
   fi
 done
 
+# --workspace-disk verifies the standard workspace disk (#5602) the
+# same way: a pod-runtime signature on the same digest does not count.
+disk_ref="registry.example.invalid/codewire/workspace-disk@$digest"
+verify_disk() {
+  PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    DOCKER_LOG="$docker_log" COSIGN_LOG="$cosign_log" FETCH_LOG="$fetch_log" \
+    SIGNATURES="$signatures" FAKE_COSIGN_BINARY="$work/fake-cosign" \
+    OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/fetcher" \
+    "$VERIFIER" --workspace-disk "$1" "$public_key"
+}
+: >"$signatures"
+printf '%s pod-runtime %s main-ci\n' "$disk_ref" "$source_sha" >>"$signatures"
+if verify_disk "$disk_ref" >"$work/disk-none.out" 2>"$work/disk-none.err"; then
+  fail 'a workspace disk image signed only as another family was accepted'
+fi
+grep -Fq 'The workspace-disk image has no valid main-CI-verified signature' "$work/disk-none.err" ||
+  fail 'the unsigned workspace disk refusal was not attributable'
+printf '%s workspace-disk %s main-ci\n' "$disk_ref" "$source_sha" >>"$signatures"
+verify_disk "$disk_ref" >"$work/disk.out" 2>"$work/disk.err" || {
+  cat "$work/disk.err" >&2
+  fail 'a signed workspace disk image was refused'
+}
+[[ "$(cat "$work/disk.out")" == "$source_sha" ]] ||
+  fail 'the verifier did not print exactly the source of the verified workspace disk signature'
+for refused in "registry.example.invalid/codewire/pod-runtime@$digest" "registry.example.invalid/codewire/workspace-disk:$source_sha"; do
+  if verify_disk "$refused" >/dev/null 2>&1; then
+    fail "the workspace disk verifier accepted $refused"
+  fi
+done
+
 printf '[test-verify-runtime-image-signatures] Production signature reuse contract passed\n'

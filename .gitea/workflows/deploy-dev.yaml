@@ -59,6 +59,7 @@ jobs:
       egress_image_fingerprint: ${{ steps.select.outputs.egress_image_fingerprint }}
       pod_runtime_image_fingerprint: ${{ steps.select.outputs.pod_runtime_image_fingerprint }}
       kvm_device_plugin_image_fingerprint: ${{ steps.select.outputs.kvm_device_plugin_image_fingerprint }}
+      workspace_disk_image_fingerprint: ${{ steps.select.outputs.workspace_disk_image_fingerprint }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -780,6 +781,271 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --pod-runtime "$CODEWIRE_POD_RUNTIME_CANDIDATE" \
             scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/pod-runtime-image-tag.sh tag "$CODEWIRE_POD_RUNTIME_CANDIDATE" "$CODEWIRE_POD_RUNTIME_FINGERPRINT"
+
+  # The standard workspace disk (#5602; docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md,
+  # "Building the workspace disk in CI") is built on the KVM runner, then
+  # pushed and signed here, and never delivered: only a merged pin of
+  # SANDBOX_STANDARD_IMAGE_DISK decides what a deployment runs. Like the
+  # pod-runtime image it builds only on the run that holds the delivery turn,
+  # once its publish job has finished or been skipped, and nothing on the
+  # delivery path needs it. This job prepares the build's inputs where the
+  # registry login is, so the KVM job holds no credential.
+  prepare-workspace-disk-inputs:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Prepare the workspace disk's build inputs
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 60
+    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]
+    if: ${{ always() && needs.deploy-selection.result == 'success' && needs.dev-delivery-turn.result == 'success' && needs.dev-delivery-turn.outputs.turn == 'go' && needs.deploy-selection.outputs.workspace_disk_image_fingerprint != '' }}
+    outputs:
+      inputs_sha256: ${{ steps.pack.outputs.sha256 }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      CODEWIRE_WORKSPACE_DISK_FINGERPRINT: ${{ needs.deploy-selection.outputs.workspace_disk_image_fingerprint }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # A fp- tag exists only once a disk of these inputs was signed
+      # (workspace-disk-image-tag.sh), so a present one means there is nothing to build.
+      - name: Look for a signed disk of these inputs
+        id: existing
+        run: |
+          set -euo pipefail
+          state="$(scripts/ci/images/workspace-disk-image-tag.sh exists "$CODEWIRE_WORKSPACE_DISK_FINGERPRINT")"
+          echo "workspace disk for fingerprint $CODEWIRE_WORKSPACE_DISK_FINGERPRINT: $state"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+
+      - name: Build codewire-local-vmm-smoke
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/.local-runtime/disk-target" CARGO_BUILD_JOBS=4 \
+            cargo build --locked --profile runtime -p codewire-local-vmm --bin codewire-local-vmm-smoke
+
+      # The disk boots over the runtime of the signed pod-runtime image this
+      # source pins, checked against main CI's signature before it is pulled,
+      # with the job's pull-only Harbor identity in a private Docker config.
+      - name: Take the runtime from the pinned, signed pod-runtime image
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        run: |
+          set -euo pipefail
+          ref="${CODEWIRE_IMAGE_REGISTRY:?}/codewire/pod-runtime@$(<deployments/k8s/orchestration/pod-runtime-image.digest)"
+          scripts/ci/images/verify-runtime-image-signatures.sh --pod-runtime "$ref" \
+            scripts/ci/trust/codewire-runtime-signing.pub >/dev/null
+          work="$GITHUB_WORKSPACE/.local-runtime/disk-runtime"
+          mkdir -m 0700 "$work" "$work/docker"
+          trap 'find "$work/docker" "$work/harbor-username" "$work/harbor-password" -type f -exec shred -u {} + 2>/dev/null || true' EXIT
+          scripts/ci/setup/fetch-openbao-harbor-credentials.sh --pull "$work/harbor-username" "$work/harbor-password"
+          DOCKER_CONFIG="$work/docker" docker login "$CODEWIRE_IMAGE_REGISTRY" \
+            --username "$(<"$work/harbor-username")" --password-stdin <"$work/harbor-password" >/dev/null
+          shred -u "$work/harbor-password"
+          DOCKER_CONFIG="$work/docker" docker pull "$ref" >/dev/null
+          container="$(docker create "$ref")"
+          docker cp "$container:/opt/codewire/runtime" "$work/runtime"
+          docker rm "$container" >/dev/null
+
+      - name: Pack the inputs, with their modes
+        id: pack
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 "$GITHUB_WORKSPACE/.local-runtime/disk-handoff"
+          sha256="$(python3 -I scripts/ci/images/workspace-disk-inputs.py pack-inputs \
+            --runtime "$GITHUB_WORKSPACE/.local-runtime/disk-runtime/runtime" \
+            --smoke "$GITHUB_WORKSPACE/.local-runtime/disk-target/runtime/codewire-local-vmm-smoke" \
+            --output "$GITHUB_WORKSPACE/.local-runtime/disk-handoff/inputs.tar")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Hand the inputs to the KVM job
+        if: ${{ steps.pack.outputs.sha256 != '' }}
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        with:
+          name: workspace-disk-inputs-${{ github.run_id }}
+          path: .local-runtime/disk-handoff/inputs.tar
+          # The upload action skips hidden paths unless asked.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  # The one CI runner with /dev/kvm, whose jobs run on the host kernel
+  # (infra docs/ci/runners.md section 2.6b). It holds no credential: its
+  # inputs arrive by sha256, the workspace image comes anonymously from its
+  # public mirror by the pinned digest, and the disk goes back by sha256 for
+  # the publisher to push and sign. Its /work is a volume that outlives the
+  # Pod, so the job clears its own directory there first and removes it last.
+  build-workspace-disk:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no OIDC token and reads no credential.
+    name: Build the workspace disk on the KVM runner
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM_KVM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM_KVM' }}
+    timeout-minutes: 60
+    needs: [deploy-selection, prepare-workspace-disk-inputs]
+    if: ${{ always() && needs.prepare-workspace-disk-inputs.result == 'success' && needs.prepare-workspace-disk-inputs.outputs.inputs_sha256 != '' }}
+    outputs:
+      disk_sha256: ${{ steps.handback.outputs.sha256 }}
+    env:
+      # At most 28 bytes for the scratch parent, which holds the VM's sockets
+      # (workspace-disk.sh).
+      DISK_WORK: /work/cw-disk
+      INPUTS_SHA256: ${{ needs.prepare-workspace-disk-inputs.outputs.inputs_sha256 }}
+    steps:
+      - name: Clear this job's work directory
+        run: |
+          set -euo pipefail
+          rm -rf -- "${DISK_WORK:?}"
+          mkdir -m 0700 "$DISK_WORK" "$DISK_WORK/scratch" "$DISK_WORK/handback"
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Receive the inputs
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
+        with:
+          name: workspace-disk-inputs-${{ github.run_id }}
+          path: ${{ env.DISK_WORK }}/received
+
+      - name: Check and unpack the inputs
+        run: |
+          python3 -I scripts/ci/images/workspace-disk-inputs.py unpack-inputs \
+            --tar "$DISK_WORK/received/inputs.tar" --sha256 "$INPUTS_SHA256" --output "$DISK_WORK/inputs"
+
+      - name: Build the disk of the pinned workspace image
+        run: |
+          set -euo pipefail
+          image="$(python3 -I scripts/ci/images/workspace-image-pin.py show public-image)"
+          [[ "${image##*@}" == "$(python3 -I scripts/ci/images/workspace-image-pin.py show digest)" ]] || {
+            echo "::error::the pinned public workspace image is not the pinned digest" >&2
+            exit 1
+          }
+          scripts/ci/images/workspace-disk.sh build \
+            --smoke "$DISK_WORK/inputs/codewire-local-vmm-smoke" \
+            --artifact-root "$DISK_WORK/inputs/runtime/artifacts" \
+            --artifact-lock "$DISK_WORK/inputs/runtime/artifacts.lock" \
+            --image "$image" --output "$DISK_WORK/disk" --scratch-parent "$DISK_WORK/scratch"
+
+      - name: Pack the disk to hand back
+        id: handback
+        run: |
+          set -euo pipefail
+          sha256="$(python3 -I scripts/ci/images/workspace-disk-inputs.py pack-disk \
+            --dir "$DISK_WORK/disk" --output "$DISK_WORK/handback/disk.tar")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Hand the disk back
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        with:
+          name: workspace-disk-${{ github.run_id }}
+          path: ${{ env.DISK_WORK }}/handback/disk.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove this job's work directory
+        if: ${{ always() }}
+        run: rm -rf -- "${DISK_WORK:?}"
+
+  # Pushes only the disk the KVM job handed back, checked by its sha256, the
+  # way the pod-runtime image is pushed.
+  publish-workspace-disk:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Push the workspace disk
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 60
+    needs: [deploy-selection, build-workspace-disk]
+    if: ${{ always() && needs.build-workspace-disk.result == 'success' && needs.build-workspace-disk.outputs.disk_sha256 != '' }}
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.workspace-disk_candidate_ref }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Receive the disk
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
+        with:
+          name: workspace-disk-${{ github.run_id }}
+          path: .local-runtime/disk-received
+
+      # The context sits inside this checkout, so the disk's provenance names
+      # this commit as every runtime image's does.
+      - name: Check and unpack the disk
+        env:
+          DISK_SHA256: ${{ needs.build-workspace-disk.outputs.disk_sha256 }}
+        run: |
+          python3 -I scripts/ci/images/workspace-disk-inputs.py unpack-disk \
+            --tar "$GITHUB_WORKSPACE/.local-runtime/disk-received/disk.tar" --sha256 "$DISK_SHA256" \
+            --output "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context"
+
+      - name: Build and push the workspace disk
+        id: build
+        env:
+          CODEWIRE_WORKSPACE_DISK_CONTEXT: ${{ github.workspace }}/.local-runtime/workspace-disk-context
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+        run: scripts/ci/images/build-push-runtime-images.sh workspace-disk
+
+      # The SANDBOX_STANDARD_IMAGE_DISK value for this disk, for the pin that
+      # follows its signature (docs/CONFIGURATION.md).
+      - name: Name the disk's configuration line
+        env:
+          DISK_REF: ${{ steps.build.outputs.workspace-disk_candidate_ref }}
+        run: |
+          set -euo pipefail
+          line="$(scripts/ci/images/workspace-disk.sh line --disk "$DISK_REF" \
+            --image "$(python3 -I scripts/ci/images/workspace-image-pin.py show harbor-image)" \
+            --dir "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context")"
+          echo "SANDBOX_STANDARD_IMAGE_DISK=$line"
+          printf 'SANDBOX_STANDARD_IMAGE_DISK=`%s`\n' "$line" >>"$GITHUB_STEP_SUMMARY"
+
+  # Signs only the digest this run's push reported, after main CI's verdict
+  # for this exact commit, as sign-pod-runtime-image does: family
+  # workspace-disk with the runtime key (owner, 2026-11-24, recorded on #5602).
+  sign-workspace-disk:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Sign the workspace disk
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [deploy-selection, publish-workspace-disk]
+    if: ${{ always() && needs.publish-workspace-disk.result == 'success' && needs.publish-workspace-disk.outputs.candidate_ref != '' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Read main CI's verdict for this commit
+        id: verdict
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/plan/main-ci-verdict.py check \
+            --sha "$GITHUB_SHA" --tree "$(git rev-parse "$GITHUB_SHA^{tree}")" --github-output
+
+      # Signs nothing a tag points at: only the push's reported digest, and
+      # only while this commit's source tag still names it.
+      - name: Sign the exact workspace disk this run pushed
+        if: ${{ steps.verdict.outputs.verified == 'true' }}
+        env:
+          CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}
+          CODEWIRE_WORKSPACE_DISK_CANDIDATE: ${{ needs.publish-workspace-disk.outputs.candidate_ref }}
+          CODEWIRE_WORKSPACE_DISK_FINGERPRINT: ${{ needs.deploy-selection.outputs.workspace_disk_image_fingerprint }}
+        run: |
+          set -euo pipefail
+          source_digest="$(scripts/ci/images/workspace-disk-image-tag.sh source-digest "$GITHUB_SHA")"
+          [[ "$source_digest" == "${CODEWIRE_WORKSPACE_DISK_CANDIDATE##*@}" ]] || {
+            echo "::error::the workspace disk source tag names $source_digest, not the digest this run pushed" >&2
+            exit 1
+          }
+          scripts/ci/images/sign-runtime-image-set.sh --workspace-disk "$CODEWIRE_WORKSPACE_DISK_CANDIDATE" \
+            scripts/ci/trust/codewire-runtime-signing.pub
+          scripts/ci/images/workspace-disk-image-tag.sh tag "$CODEWIRE_WORKSPACE_DISK_CANDIDATE" \
+            "$CODEWIRE_WORKSPACE_DISK_FINGERPRINT"
 
   # A run that deferred builds nothing; this job's success is how the delivery
   # in flight knows to hand it the turn (wait-for-dev-delivery-turn.py).

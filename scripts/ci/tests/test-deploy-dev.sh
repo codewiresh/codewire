@@ -161,7 +161,11 @@ egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  build-kvm-device-plugin-i
 plugin_build_job="$(sed -n '/^  build-kvm-device-plugin-image:/,/^  sign-kvm-device-plugin-image:/p' "$WORKFLOW")"
 plugin_sign_job="$(sed -n '/^  sign-kvm-device-plugin-image:/,/^  build-pod-runtime-image:/p' "$WORKFLOW")"
 pod_build_job="$(sed -n '/^  build-pod-runtime-image:/,/^  sign-pod-runtime-image:/p' "$WORKFLOW")"
-pod_sign_job="$(sed -n '/^  sign-pod-runtime-image:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
+pod_sign_job="$(sed -n '/^  sign-pod-runtime-image:/,/^  prepare-workspace-disk-inputs:/p' "$WORKFLOW")"
+disk_inputs_job="$(sed -n '/^  prepare-workspace-disk-inputs:/,/^  build-workspace-disk:/p' "$WORKFLOW")"
+disk_build_job="$(sed -n '/^  build-workspace-disk:/,/^  publish-workspace-disk:/p' "$WORKFLOW")"
+disk_publish_job="$(sed -n '/^  publish-workspace-disk:/,/^  sign-workspace-disk:/p' "$WORKFLOW")"
+disk_sign_job="$(sed -n '/^  sign-workspace-disk:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
 
 assert_build_half() {
   local half="$1" job="$2"
@@ -745,10 +749,67 @@ tag_line="$(grep -n 'kvm-device-plugin-image-tag.sh tag' <<<"$plugin_sign_job" |
 [[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
   ((source_check_line < sign_line && sign_line < tag_line)) ||
   fail 'the device plugin sign job does not check the source tag, then sign, then tag, in that order'
-# Only the publish job and the three single-image sign jobs sign, in every workflow.
+# Only the publish job and the four single-image sign jobs sign, in every workflow.
 signers="$(grep -l 'sign-runtime-image-set.sh' "$ROOT"/.gitea/workflows/*.yaml)"
 [[ "$signers" == "$WORKFLOW" ]] || fail "a workflow other than Deploy Dev signs runtime images: $signers"
-[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 5 ]] ||
-  fail 'a job other than the publish job and the cw-egress, device plugin and pod-runtime sign jobs signs runtime images'
+[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 6 ]] ||
+  fail 'a job other than the publish job and the cw-egress, device plugin, pod-runtime and workspace disk sign jobs signs runtime images'
+
+# The standard workspace disk (#5602): its inputs are prepared on the trusted
+# light runner, it is built on the KVM runner, which holds no credential, and
+# it is pushed and signed back on the trusted light runner. It builds only on
+# the run that holds the delivery turn, and nothing on the delivery path
+# waits for it.
+[[ -n "$disk_inputs_job" && -n "$disk_build_job" && -n "$disk_publish_job" && -n "$disk_sign_job" ]] ||
+  fail 'a workspace disk job is missing'
+grep -Fxq '    needs: [deploy-selection, dev-delivery-turn, publish-runtime-images]' <<<"$disk_inputs_job" &&
+  grep -Fq "needs.dev-delivery-turn.outputs.turn == 'go'" <<<"$disk_inputs_job" &&
+  grep -Fq "needs.deploy-selection.outputs.workspace_disk_image_fingerprint != ''" <<<"$disk_inputs_job" ||
+  fail 'the workspace disk inputs do not wait for the delivery turn, the publish job and a fingerprint'
+grep -Fq 'scripts/ci/images/workspace-disk-image-tag.sh exists' <<<"$disk_inputs_job" ||
+  fail 'the workspace disk inputs do not look for a signed disk of these inputs first'
+verify_line="$(grep -n 'verify-runtime-image-signatures.sh --pod-runtime' <<<"$disk_inputs_job" | cut -d: -f1)"
+pull_line="$(grep -n 'docker pull "$ref"' <<<"$disk_inputs_job" | cut -d: -f1)"
+[[ -n "$verify_line" && -n "$pull_line" ]] && ((verify_line < pull_line)) ||
+  fail 'the workspace disk inputs pull the pod-runtime image before checking its signature'
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fxq "    runs-on: \${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM_KVM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM_KVM' }}" <<<"$disk_build_job" ||
+  fail 'the workspace disk is not built on the KVM runner'
+if grep -Eq 'enable-openid-connect|OPENBAO|secrets\.|fetch-openbao|docker login|sign-runtime-image-set|GITEA_TOKEN|github\.token' <<<"$disk_build_job"; then
+  fail 'the KVM job requests or reads a credential'
+fi
+first_step="$(grep -m1 -E '^      - (name|uses):' <<<"$disk_build_job")"
+[[ "$first_step" == "      - name: Clear this job's work directory" ]] &&
+  grep -Fq 'rm -rf -- "${DISK_WORK:?}"' <<<"$disk_build_job" ||
+  fail 'the KVM job does not clear its own work directory before anything else'
+last_step="$(awk '/^      - name: /{name=$0} END{print name}' <<<"$disk_build_job")"
+[[ "$last_step" == '      - name: Remove this job'"'"'s work directory' ]] &&
+  grep -A1 -F "$last_step" <<<"$disk_build_job" | grep -Fq 'if: ${{ always() }}' ||
+  fail 'the KVM job does not remove its work directory last, failure included'
+grep -Fq -- '--sha256 "$INPUTS_SHA256"' <<<"$disk_build_job" &&
+  grep -Fq 'INPUTS_SHA256: ${{ needs.prepare-workspace-disk-inputs.outputs.inputs_sha256 }}' <<<"$disk_build_job" ||
+  fail 'the KVM job does not check its inputs against the sha256 the inputs job reported'
+grep -Fq 'DISK_SHA256: ${{ needs.build-workspace-disk.outputs.disk_sha256 }}' <<<"$disk_publish_job" &&
+  grep -Fq 'workspace-disk-inputs.py unpack-disk' <<<"$disk_publish_job" &&
+  grep -Fq -- '--sha256 "$DISK_SHA256"' <<<"$disk_publish_job" &&
+  grep -Fq 'run: scripts/ci/images/build-push-runtime-images.sh workspace-disk' <<<"$disk_publish_job" ||
+  fail 'the workspace disk is pushed without checking the sha256 the KVM job reported'
+git -C "$ROOT" check-ignore -q .local-runtime/workspace-disk-context/image.raw ||
+  fail 'the workspace disk context path is not ignored, so a protected build would refuse it'
+grep -Fq "if: \${{ steps.verdict.outputs.verified == 'true' }}" <<<"$disk_sign_job" &&
+  grep -Fq 'CODEWIRE_WORKSPACE_DISK_CANDIDATE: ${{ needs.publish-workspace-disk.outputs.candidate_ref }}' <<<"$disk_sign_job" ||
+  fail 'the workspace disk sign job signs without a verified verdict, or something other than the pushed digest'
+source_check_line="$(grep -n 'workspace-disk-image-tag.sh source-digest' <<<"$disk_sign_job" | cut -d: -f1)"
+sign_line="$(grep -n 'sign-runtime-image-set.sh --workspace-disk' <<<"$disk_sign_job" | cut -d: -f1)"
+tag_line="$(grep -n 'workspace-disk-image-tag.sh tag' <<<"$disk_sign_job" | cut -d: -f1)"
+[[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
+  ((source_check_line < sign_line && sign_line < tag_line)) ||
+  fail 'the workspace disk sign job does not check the source tag, then sign, then tag, in that order'
+for job in prepare-workspace-disk-inputs build-workspace-disk publish-workspace-disk sign-workspace-disk; do
+  waiting="$(grep -cE "^    needs:.*\b$job\b" "$WORKFLOW" || true)"
+  expected=1
+  [[ "$job" != sign-workspace-disk ]] || expected=0
+  [[ "$waiting" -eq "$expected" ]] || fail "a job outside the workspace disk chain waits for $job"
+done
 
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'
