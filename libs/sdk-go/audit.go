@@ -99,7 +99,8 @@ type AuditActor struct {
 	Sandbox *AuditSandbox `json:"sandbox,omitempty"`
 }
 
-// AuditUser's Role is "owner", "admin", "member" or "staff".
+// AuditUser is the person who acted. Role is "owner", "admin", "member" or
+// "staff".
 type AuditUser struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
@@ -115,7 +116,8 @@ type AuditPlatform struct{}
 
 type AuditSandbox struct{}
 
-// AuditAccess's Surface is "terminal", "ssh", "exec", "desktop" or "preview".
+// AuditAccess is a connection to the Sandbox. Surface is "terminal", "ssh",
+// "exec", "desktop" or "preview".
 type AuditAccess struct {
 	Surface  string `json:"surface"`
 	ClientIP string `json:"client_ip"`
@@ -126,9 +128,9 @@ type AuditSize struct {
 	MemoryMiB uint64 `json:"memory_mib"`
 }
 
-// AuditLifecycle's Action is "created", "started", "stopped", "restarted",
-// "resized", "snapshot_taken" or "deleted". Reason is why the platform did
-// it, such as "idle", and "" when a person did.
+// AuditLifecycle is a lifecycle change. Action is "created", "started",
+// "stopped", "restarted", "resized", "snapshot_taken" or "deleted". Reason is
+// why the platform did it, such as "idle", and "" when a person did.
 type AuditLifecycle struct {
 	Action       string     `json:"action"`
 	Reason       string     `json:"reason"`
@@ -142,8 +144,8 @@ type AuditLifecycle struct {
 	IdleStopSeconds uint32 `json:"idle_stop_seconds"`
 }
 
-// AuditPolicyChange's Action is "selected", "edited", "enforcing" or
-// "failed_closed".
+// AuditPolicyChange is a network policy change. Action is "selected",
+// "edited", "enforcing" or "failed_closed".
 type AuditPolicyChange struct {
 	Action       string   `json:"action"`
 	From         string   `json:"from"`
@@ -181,7 +183,8 @@ type AuditRefusalOverflow struct {
 	AtLeast  bool   `json:"at_least"`
 }
 
-// AuditCredentials' Action is "attached", "detached" or "used".
+// AuditCredentials is a credential event. Action is "attached", "detached"
+// or "used".
 type AuditCredentials struct {
 	Action   string `json:"action"`
 	Provider string `json:"provider"`
