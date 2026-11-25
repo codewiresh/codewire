@@ -20,7 +20,7 @@ Updated 2026-11-24.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-credential-links` | cw-accounts | partly observed 2026-11-24 (Create's GitHub link, on every delivery) | not yet observed |
 | `sandbox-failure-trace-id` | cw-tracing | observed 2026-11-23 (#5633) | not yet observed |
-| `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-run-exec` | cw-cleanup | observed 2026-11-14; a foreground `cw run` at a terminal returning with its status 2026-11-24 (#6355) | not yet observed |
 | `sandbox-run-env` | cw-cli | not yet observed (#5222) | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
@@ -320,6 +320,8 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
 - **States to exercise:**
   - a command that succeeds, with its output;
   - a command that exits non-zero;
+  - a foreground `cw run` at a terminal: it returns when its command ends,
+    with the command's status (#6355);
   - a program that doesn't exist, in a sandbox and in a local VM (#4717);
   - input on stdin;
   - `cw exec` in the background of its terminal, as under `timeout` without
@@ -351,11 +353,25 @@ Issue: #5633. The rule is in `docs/CONFIGURATION.md`, "Tracing".
   - the fourth exits 0 at once, the command having had no input, where `cw`
     used to be stopped (SIGTTIN) and `timeout` to exit 1;
   - `cw run` prints both lines, `cw ls walk` lists session `job` as `Exited`,
-    and `cw logs` prints the same two lines again.
+    and `cw logs` prints the same two lines again;
+  - at a terminal, `cw run` returns when its command ends, with its status,
+    after one line naming `cw logs` and `cw restart` for the session. `cw
+    attach` to the ended session stays until Ctrl+C, offering Ctrl+B r.
 - **Gotchas:**
   - `cw`'s own options go before the command. After `--`, every word is the
     command's.
 - **Observed:**
+  - Dev, 2026-11-24 (cw-cli), as the smoke identity, at a terminal, with
+    `cw` built from #6358's branch at 9da23f248b (#6355): `cw run --in S
+    --name sh -- sh -c "echo hi; exit 3"` printed `hi` and "Exited with
+    status 3 · Output: cw --cloud logs S --session sh · Restart: cw --cloud
+    restart S --session sh" and exited 3; `cw run --tty … bash` with `exit 4`
+    typed exited 4; the `job` run printed both lines and exited 0, and `cw
+    logs` printed them again. `cw attach` to the ended `sh` stayed until
+    Ctrl+C. Released `v0.4.26` on the same sandbox waited at "session
+    exited; Ctrl+B r restarts, Ctrl+C leaves" instead. On a local VM, one
+    such run of a command that ended at once failed, and `cw attach` to an
+    ended session returned at once (#6371). Evidence: #6355.
   - The terminal's background (#4883): not yet observed on Dev or
     Production. On a macOS local VM, 2026-11-15 (cw-mac), with the fix on the
     installed build, `/usr/bin/timeout 60 cw exec … /bin/echo` exited 0 with

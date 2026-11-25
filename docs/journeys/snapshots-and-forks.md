@@ -512,7 +512,7 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   cw checkpoint create app --name before-refactor
   cw run app -- sh -c 'echo after > ~/marker'
   cw checkpoint restore before-refactor --yes
-  cw run app -- cat ~/marker
+  cw run app -- sh -c 'cat ~/marker'
   ```
 
   `restore` prints "Restored app to VM checkpoint before-refactor: stop … s,
@@ -588,6 +588,13 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     - macOS 27.2.1, the Mac unlocked: "stop 0.09 s, restore 6.09 s, total
       6.18 s"; the marker read `before`, and the ticker counted on from 4 to
       7, still PID 13. The guest's clock read within 1 ms of the host's.
+  - A local VM on Linux, `cw` and runtime from #6358's branch at 9da23f248b,
+    2026-11-24, at a terminal, by cw-cli: each `cw run` above returned when
+    its command ended, with "Exited · Output: cw --local logs app --session
+    … · Restart: …" (#6355). `cw checkpoint restore before-refactor --yes`
+    printed "Restored app to VM checkpoint before-refactor: stop 1.54 s,
+    restore 16.26 s, total 17.81 s", and the marker read `before`. Evidence:
+    #6355.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -605,18 +612,18 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
 
   ```sh
   cw create --local --checkpoint before-refactor --name app-2
-  cw run app-2 -- cat ~/marker
+  cw run app-2 -- sh -c 'cat ~/marker'
   cw checkpoint rm before-refactor
-  cw run app-2 -- cat ~/marker
+  cw run app-2 -- sh -c 'cat ~/marker'
   ```
 
 - **Proof:** the fork has the source's files and the processes that were
   running at the checkpoint, its own environment ID, machine ID and SSH host
   key, and its first command succeeds.
 - **Gotchas:**
-  - At a terminal, `cw run` stays in its session once the command ends,
-    offering "Ctrl+B r restarts, Ctrl+C leaves"; press Ctrl+C to go on.
-    It is to return with the command's status instead (#6355).
+  - A VM that mounts host folders directly forks only with
+    `--share-mounts`: the fork mounts the same folders live, shared with the
+    source.
 - **Observed:**
   - Linux: the refusal of a fork of a checkpoint an upgrade left
     unrestorable, in [local-vm-upgrade.md](local-vm-upgrade.md).
@@ -659,6 +666,13 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     the ticker (at 5 on Linux, 4 on a Mac), its machine-id differed from lck's,
     and after `cw checkpoint rm before` its ticker kept counting with the
     marker `before`.
+  - A local VM on Linux, `cw` and runtime from #6358's branch at 9da23f248b,
+    2026-11-24, at a terminal, by cw-cli: `cw create --local --checkpoint
+    before-refactor --name app-2` was refused for a source that mounts host
+    folders, and asked for `--share-mounts`; with it, "Created app-2 from VM
+    checkpoint before-refactor in 15.9 s". Its first command, and its command
+    after `cw checkpoint rm before-refactor`, each read the marker `before`
+    and returned 0. Evidence: #6355.
 
 ## `snap-dashboard`: the Snapshots page
 
