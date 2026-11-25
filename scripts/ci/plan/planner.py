@@ -8,6 +8,7 @@ artifacts. Nodes without a trusted resolver remain unclassified and fail closed.
 from __future__ import annotations
 
 import argparse
+import bisect
 import fnmatch
 import hashlib
 import json
@@ -120,8 +121,27 @@ def _safe_symlink_target(member_name: str, target: str) -> None:
         raise PlannerError(f"symlink escapes the tree at {member_name!r}: {target!r}")
 
 
-def safe_extract_tar(stream: Any, destination: Path) -> None:
-    """Extract a streamed Git archive without trusting archive paths or types."""
+CARGO_CONFIG_NAMES = frozenset({"config", "config.toml", "credentials", "credentials.toml"})
+
+
+def _reject_cargo_config_path(name: str, parts: tuple[str, ...], *, is_symlink: bool) -> None:
+    if len(parts) >= 2 and parts[-2] == ".cargo" and parts[-1] in CARGO_CONFIG_NAMES:
+        raise PlannerError(f"candidate tree supplies Cargo configuration: {name}")
+    if is_symlink and parts and parts[-1] == ".cargo":
+        raise PlannerError(f"candidate tree supplies Cargo configuration: {name}")
+
+
+def safe_extract_tar(
+    stream: Any,
+    destination: Path,
+    *,
+    entries: dict[str, "IndexedPath"] | None = None,
+) -> None:
+    """Extract a streamed Git archive without trusting archive paths or types.
+
+    When `entries` is provided, record IndexedPath hashes while streaming so
+    callers can build a TreeIndex without re-walking and re-reading every file.
+    """
 
     destination.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
@@ -136,7 +156,9 @@ def safe_extract_tar(stream: Any, destination: Path) -> None:
             if name in seen:
                 raise PlannerError(f"archive contains duplicate path: {name}")
             seen.add(name)
-            target = destination.joinpath(*PurePosixPath(name).parts)
+            parts = PurePosixPath(name).parts
+            _reject_cargo_config_path(name, parts, is_symlink=member.issym())
+            target = destination.joinpath(*parts)
             target.parent.mkdir(parents=True, exist_ok=True)
 
             if member.isdir():
@@ -145,6 +167,10 @@ def safe_extract_tar(stream: Any, destination: Path) -> None:
             if member.issym():
                 _safe_symlink_target(name, member.linkname)
                 os.symlink(member.linkname, target)
+                if entries is not None:
+                    entries[name] = IndexedPath(
+                        name, "symlink", 0o777, sha256_bytes(member.linkname.encode())
+                    )
                 continue
             if member.islnk() or member.isdev() or member.isfifo():
                 raise PlannerError(f"unsupported archive member type: {name}")
@@ -158,6 +184,7 @@ def safe_extract_tar(stream: Any, destination: Path) -> None:
             source = archive.extractfile(member)
             if source is None:
                 raise PlannerError(f"archive file has no content: {name}")
+            digest = hashlib.sha256() if entries is not None else None
             with target.open("xb") as output:
                 remaining = member.size
                 while remaining:
@@ -165,11 +192,23 @@ def safe_extract_tar(stream: Any, destination: Path) -> None:
                     if not chunk:
                         raise PlannerError(f"archive file ended early: {name}")
                     output.write(chunk)
+                    if digest is not None:
+                        digest.update(chunk)
                     remaining -= len(chunk)
-            target.chmod(member.mode & 0o777)
+            mode = member.mode & 0o777
+            target.chmod(mode)
+            if digest is not None and entries is not None:
+                entries[name] = IndexedPath(name, "file", mode, digest.hexdigest())
 
 
-def export_git_tree(repository: Path, commit: str, destination: Path, paths: list[str] | None = None) -> None:
+def export_git_tree(
+    repository: Path,
+    commit: str,
+    destination: Path,
+    paths: list[str] | None = None,
+    *,
+    return_index: bool = False,
+) -> "TreeIndex | None":
     """Extract `commit`'s tree, or only `paths` of it, into `destination`."""
     try:
         process = subprocess.Popen(
@@ -182,8 +221,9 @@ def export_git_tree(repository: Path, commit: str, destination: Path, paths: lis
     except OSError as exc:
         raise PlannerError(f"git archive could not start: {exc}") from exc
     assert process.stdout is not None
+    entries: dict[str, IndexedPath] | None = {} if return_index else None
     try:
-        safe_extract_tar(process.stdout, destination)
+        safe_extract_tar(process.stdout, destination, entries=entries)
     except BaseException:
         process.kill()
         process.communicate()
@@ -194,7 +234,16 @@ def export_git_tree(repository: Path, commit: str, destination: Path, paths: lis
     _, stderr = process.communicate()
     if process.returncode != 0:
         raise PlannerError(f"git archive failed: {stderr.decode('utf-8', 'replace')[:2000]}")
+    if entries is not None:
+        root_resolved = destination.resolve()
+        for entry in entries.values():
+            if entry.kind == "symlink":
+                resolved = (destination / entry.path).resolve(strict=False)
+                if root_resolved != resolved and root_resolved not in resolved.parents:
+                    raise PlannerError(f"symlink escapes exported tree: {entry.path}")
+        return TreeIndex(destination, _precomputed_entries=entries)
     validate_exported_tree(destination)
+    return None
 
 
 POLICY_GRAPH = "scripts/ci/plan/artifact-graph.json"
@@ -220,6 +269,7 @@ def validate_exported_tree(root: Path) -> None:
     root_resolved = root.resolve()
     count = 0
     total = 0
+    cargo_config: str | None = None
     for directory, dirs, files in os.walk(root, followlinks=False):
         dirs.sort()
         files.sort()
@@ -229,7 +279,14 @@ def validate_exported_tree(root: Path) -> None:
                 raise PlannerError("exported tree contains too many paths")
             path = Path(directory, name)
             relative = path.relative_to(root).as_posix()
-            if path.is_symlink():
+            is_symlink = path.is_symlink()
+            parts = PurePosixPath(relative).parts
+            if cargo_config is None:
+                try:
+                    _reject_cargo_config_path(relative, parts, is_symlink=is_symlink)
+                except PlannerError:
+                    cargo_config = relative
+            if is_symlink:
                 _safe_symlink_target(relative, os.readlink(path))
                 resolved = path.resolve(strict=False)
                 if root_resolved != resolved and root_resolved not in resolved.parents:
@@ -241,15 +298,8 @@ def validate_exported_tree(root: Path) -> None:
                 total += size
                 if total > MAX_ARCHIVE_TOTAL_BYTES:
                     raise PlannerError("exported tree exceeds total size limit")
-    cargo_configs = [
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.parent.name == ".cargo"
-        and path.name in {"config", "config.toml", "credentials", "credentials.toml"}
-    ]
-    if cargo_configs:
-        raise PlannerError(f"candidate tree supplies Cargo configuration: {cargo_configs[0]}")
+    if cargo_config is not None:
+        raise PlannerError(f"candidate tree supplies Cargo configuration: {cargo_config}")
 
 
 # Rust test modules (#3194). A source file that Rust reaches only through test
@@ -274,19 +324,22 @@ RUST_MOD_DECLARATION_RE = re.compile(
     re.M,
 )
 RUST_ATTRIBUTE_RE = re.compile(r"#\[[^\]\n]*\]")
+RUST_ATTR_LINE_RE = re.compile(r"(?:#\[[^\]\n]*\][ \t]*)+")
+RUST_CFG_RE = re.compile(r"#\[cfg\((.*)\)\]")
+RUST_CFG_ALL_RE = re.compile(r"all\((.*)\)")
 RUST_PATH_ATTRIBUTE_RE = re.compile(r'^#\[path[ \t]*=[ \t]*"([^"\n]+)"[ \t]*\]$')
 RUST_INCLUDE_LITERAL_RE = re.compile(r'include(?:_str|_bytes)?!\s*\([^;]*?"([^"\n]+)"', re.S)
 
 
 def _cfg_requires_test(attribute: str) -> bool:
     """#[cfg(test)] or #[cfg(all(test, ...))]: compiled only into test builds."""
-    match = re.fullmatch(r"#\[cfg\((.*)\)\]", attribute.strip())
+    match = RUST_CFG_RE.fullmatch(attribute.strip())
     if not match:
         return False
     expression = match.group(1).strip()
     if expression == "test":
         return True
-    inner = re.fullmatch(r"all\((.*)\)", expression)
+    inner = RUST_CFG_ALL_RE.fullmatch(expression)
     if not inner:
         return False
     depth, part, parts = 0, "", []
@@ -302,21 +355,61 @@ def _cfg_requires_test(attribute: str) -> bool:
     return any(argument.strip() == "test" for argument in parts)
 
 
-def _declaration_attributes(text: str, match: re.Match[str]) -> list[str]:
+def _declaration_attributes_from_lines(lines: list[str], line_index: int, inline: str) -> list[str]:
     """The attributes on a declaration: inline, then the lines directly above."""
-    attributes = RUST_ATTRIBUTE_RE.findall(match.group(1))
-    lines = text[: match.start()].split("\n")
-    if lines and lines[-1].strip() == "":
-        lines.pop()
-    while lines:
-        line = lines.pop().strip()
+    attributes = RUST_ATTRIBUTE_RE.findall(inline)
+    idx = line_index - 1
+    while idx >= 0:
+        line = lines[idx].strip()
         # Only a line of attributes alone belongs to this declaration; an
         # attributed item above it (`#[cfg(test)] mod other;`) ends the run.
-        if re.fullmatch(r"(?:#\[[^\]\n]*\][ \t]*)+", line):
+        if RUST_ATTR_LINE_RE.fullmatch(line):
             attributes.extend(RUST_ATTRIBUTE_RE.findall(line))
-        elif not line.startswith("//"):
+            idx -= 1
+        elif line.startswith("//"):
+            idx -= 1
+        else:
             break
     return attributes
+
+
+def _declaration_attributes(text: str, match: re.Match[str]) -> list[str]:
+    """The attributes on a declaration: inline, then the lines directly above."""
+    lines = text[: match.start()].split("\n")
+    return _declaration_attributes_from_lines(lines, len(lines) - 1, match.group(1))
+
+
+def _iter_mod_declarations(text: str) -> list[tuple[str, list[str]]]:
+    """Return (module_name, attributes) for every mod declaration in `text`.
+
+    Pre-filtering lines containing `mod ` / `mod\\t` avoids running the anchored
+    attribute regex on every line of every Rust file in the repository.
+    """
+    if "mod " not in text and "mod\t" not in text:
+        return []
+    lines = text.split("\n")
+    found: list[tuple[str, list[str]]] = []
+    for idx, line in enumerate(lines):
+        if "mod " not in line and "mod\t" not in line:
+            continue
+        match = RUST_MOD_DECLARATION_RE.match(line)
+        if match is not None:
+            found.append((match.group(2), _declaration_attributes_from_lines(lines, idx, match.group(1))))
+    return found
+
+
+def _module_declarations(text: str) -> dict[str, bool]:
+    """Map each non-#[path] declared module name in `text` to whether all of its declarations are test-only."""
+    decls: dict[str, bool] = {}
+    for name, attributes in _iter_mod_declarations(text):
+        if any(RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute) for attribute in attributes):
+            continue
+        is_test = any(_cfg_requires_test(attribute) for attribute in attributes)
+        if name in decls:
+            decls[name] = decls[name] and is_test
+        else:
+            decls[name] = is_test
+    return decls
 
 
 def _declaration_test_only(text: str, name: str) -> bool | None:
@@ -324,22 +417,13 @@ def _declaration_test_only(text: str, name: str) -> bool | None:
 
     None when the text declares no such module by name.
     """
-    found = False
-    for match in RUST_MOD_DECLARATION_RE.finditer(text):
-        if match.group(2) != name:
-            continue
-        attributes = _declaration_attributes(text, match)
-        if any(RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute) for attribute in attributes):
-            continue
-        found = True
-        if not any(_cfg_requires_test(attribute) for attribute in attributes):
-            return False
-    return True if found else None
+    return _module_declarations(text).get(name)
 
 
 def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
     """Paths of Rust source files that only test builds compile (see above)."""
     texts: dict[str, str | None] = {}
+    mod_decls: dict[str, dict[str, bool]] = {}
 
     def text_of(path: str) -> str | None:
         if path not in texts:
@@ -353,10 +437,39 @@ def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
                     texts[path] = None
         return texts[path]
 
+    def decl_test_only(path: str, name: str) -> bool | None:
+        decls = mod_decls.get(path)
+        if decls is None:
+            decls = _module_declarations(text_of(path) or "")
+            mod_decls[path] = decls
+        return decls.get(name)
+
     by_root: dict[str, list[str]] = {}
+    all_rs_paths: list[str] = []
     for path, entry in index.entries.items():
-        if entry.kind == "file" and path.endswith(".rs") and "/src/" in path:
-            by_root.setdefault(path[: path.index("/src/") + len("/src")], []).append(path)
+        if entry.kind == "file" and path.endswith(".rs"):
+            all_rs_paths.append(path)
+            if "/src/" in path:
+                by_root.setdefault(path[: path.index("/src/") + len("/src")], []).append(path)
+
+    package_roots = [
+        source_root[: -len("/src")]
+        for source_root in by_root
+        if not any(
+            source_root == directory + "/src" or source_root.startswith(directory + "/")
+            for directory in TEST_BINARY_PACKAGE_DIRECTORIES
+        )
+    ]
+    # Group all .rs files under each package in one pass over .rs paths.
+    rs_by_package: dict[str, list[str]] = {pkg: [] for pkg in package_roots}
+    sorted_rs = sorted(all_rs_paths)
+    for pkg in package_roots:
+        prefix = pkg + "/"
+        lo = bisect.bisect_left(sorted_rs, prefix)
+        pkg_files = rs_by_package[pkg]
+        while lo < len(sorted_rs) and sorted_rs[lo].startswith(prefix):
+            pkg_files.append(sorted_rs[lo])
+            lo += 1
 
     result: set[str] = set()
     for source_root, sources in by_root.items():
@@ -367,23 +480,31 @@ def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
         included: set[str] = set()
         # #[path] declarations: target file -> whether each declaration is test-only.
         path_targets: dict[str, list[tuple[bool, str]]] = {}
-        for path, entry in index.entries.items():
-            if entry.kind != "file" or not path.endswith(".rs") or not path.startswith(package + "/"):
-                continue
+        for path in rs_by_package[package]:
             content = text_of(path) or ""
-            for literal in RUST_INCLUDE_LITERAL_RE.findall(content):
-                # include!("x") is relative to the including file; a
-                # concat!(env!("CARGO_MANIFEST_DIR"), "/x") literal to the package.
-                base = package if literal.startswith("/") else posixpath.dirname(path)
-                included.add(posixpath.normpath(posixpath.join(base, literal.lstrip("/"))))
-            for match in RUST_MOD_DECLARATION_RE.finditer(content):
-                attributes = _declaration_attributes(content, match)
-                for attribute in attributes:
-                    target = RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute)
-                    if target:
-                        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target.group(1)))
-                        path_targets.setdefault(resolved, []).append(
-                            (any(_cfg_requires_test(other) for other in attributes), path))
+            if "include" in content:
+                for literal in RUST_INCLUDE_LITERAL_RE.findall(content):
+                    # include!("x") is relative to the including file; a
+                    # concat!(env!("CARGO_MANIFEST_DIR"), "/x") literal to the package.
+                    base = package if literal.startswith("/") else posixpath.dirname(path)
+                    included.add(posixpath.normpath(posixpath.join(base, literal.lstrip("/"))))
+            if "mod " in content or "mod\t" in content:
+                decls: dict[str, bool] = {}
+                for mod_name, attributes in _iter_mod_declarations(content):
+                    has_path = False
+                    for attribute in attributes:
+                        target = RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute)
+                        if target:
+                            has_path = True
+                            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target.group(1)))
+                            path_targets.setdefault(resolved, []).append(
+                                (any(_cfg_requires_test(other) for other in attributes), path))
+                    if not has_path:
+                        is_test = any(_cfg_requires_test(other) for other in attributes)
+                        decls[mod_name] = decls[mod_name] and is_test if mod_name in decls else is_test
+                mod_decls[path] = decls
+            else:
+                mod_decls[path] = {}
 
         def module_file(parts: tuple[str, ...]) -> str | None:
             if not parts:
@@ -406,7 +527,7 @@ def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
             parent_file = module_file(parent)
             verdict = False
             if parent_file is not None:
-                declared = _declaration_test_only(text_of(parent_file) or "", parts[-1])
+                declared = decl_test_only(parent_file, parts[-1])
                 if declared is True:
                     verdict = True
                 elif declared is False:
@@ -417,7 +538,7 @@ def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
             elif len(parts) >= 2:
                 grandparent_file = module_file(parts[:-2])
                 if grandparent_file is not None:
-                    verdict = _declaration_test_only(text_of(grandparent_file) or "", parts[-1]) is True
+                    verdict = decl_test_only(grandparent_file, parts[-1]) is True
             decided[parts] = verdict
             return verdict
 
@@ -442,7 +563,7 @@ def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
             parent_file = module_file(tuple(parts[:-1]))
             if parent_file is None or module_file(tuple(parts)) != path:
                 return True
-            return _declaration_test_only(text_of(parent_file) or "", parts[-1]) is None
+            return decl_test_only(parent_file, parts[-1]) is None
 
         def file_test_only_parent(declarer: str) -> bool:
             relative = PurePosixPath(declarer[len(source_root) + 1:])
@@ -466,35 +587,69 @@ class IndexedPath:
 
 
 class TreeIndex:
-    def __init__(self, root: Path):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        _precomputed_entries: dict[str, IndexedPath] | None = None,
+    ):
         self.root = root
         self.entries: dict[str, IndexedPath] = {}
         self._test_only: frozenset[str] | None = None
-        for directory, dirs, files in os.walk(root, followlinks=False):
-            dirs.sort()
-            files.sort()
-            for name in [*dirs, *files]:
-                full = Path(directory, name)
-                relative = full.relative_to(root).as_posix()
-                info = full.lstat()
-                if stat.S_ISLNK(info.st_mode):
-                    self.entries[relative] = IndexedPath(
-                        relative, "symlink", info.st_mode & 0o777, sha256_bytes(os.readlink(full).encode())
-                    )
-                elif stat.S_ISREG(info.st_mode):
-                    digest = hashlib.sha256()
-                    with full.open("rb") as source:
-                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                            digest.update(chunk)
-                    self.entries[relative] = IndexedPath(relative, "file", info.st_mode & 0o777, digest.hexdigest())
-                elif not stat.S_ISDIR(info.st_mode):
-                    raise PlannerError(f"tree contains an unsupported path type: {relative}")
+        self._matching_cache: dict[str, list[IndexedPath]] = {}
+        self._artifact_matching_cache: dict[str, list[IndexedPath]] = {}
+        self._lockfile_cache: dict[str, tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]] = {}
+        if _precomputed_entries is not None:
+            for key in sorted(_precomputed_entries):
+                self.entries[key] = _precomputed_entries[key]
+        else:
+            for directory, dirs, files in os.walk(root, followlinks=False):
+                dirs.sort()
+                files.sort()
+                for name in [*dirs, *files]:
+                    full = Path(directory, name)
+                    relative = full.relative_to(root).as_posix()
+                    info = full.lstat()
+                    if stat.S_ISLNK(info.st_mode):
+                        self.entries[relative] = IndexedPath(
+                            relative, "symlink", info.st_mode & 0o777, sha256_bytes(os.readlink(full).encode())
+                        )
+                    elif stat.S_ISREG(info.st_mode):
+                        digest = hashlib.sha256()
+                        with full.open("rb") as source:
+                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                        self.entries[relative] = IndexedPath(relative, "file", info.st_mode & 0o777, digest.hexdigest())
+                    elif not stat.S_ISDIR(info.st_mode):
+                        raise PlannerError(f"tree contains an unsupported path type: {relative}")
+        self._sorted_paths: list[str] = sorted(self.entries)
 
     def matching(self, pattern: str) -> list[IndexedPath]:
+        cached = self._matching_cache.get(pattern)
+        if cached is not None:
+            return cached
         if pattern.endswith("/**"):
             prefix = pattern[:-3].rstrip("/")
-            return [entry for path, entry in self.entries.items() if path == prefix or path.startswith(prefix + "/")]
-        return [entry for path, entry in self.entries.items() if fnmatch.fnmatchcase(path, pattern)]
+            result: list[IndexedPath] = []
+            exact = self.entries.get(prefix)
+            if exact is not None:
+                result.append(exact)
+            dir_prefix = prefix + "/"
+            lo = bisect.bisect_left(self._sorted_paths, dir_prefix)
+            paths = self._sorted_paths
+            while lo < len(paths) and paths[lo].startswith(dir_prefix):
+                result.append(self.entries[paths[lo]])
+                lo += 1
+        elif "*" not in pattern and "?" not in pattern and "[" not in pattern:
+            entry = self.entries.get(pattern)
+            result = [entry] if entry is not None else []
+        elif pattern.startswith("*.") and not any(ch in pattern[2:] for ch in ("*", "?", "[")):
+            suffix = pattern[1:]
+            result = [entry for path, entry in self.entries.items() if path.endswith(suffix)]
+        else:
+            result = [entry for path, entry in self.entries.items() if fnmatch.fnmatchcase(path, pattern)]
+        self._matching_cache[pattern] = result
+        return result
 
     def test_only_sources(self) -> frozenset[str]:
         if self._test_only is None:
@@ -503,8 +658,35 @@ class TreeIndex:
 
     def artifact_matching(self, pattern: str) -> list[IndexedPath]:
         """matching, less the Rust test modules no shipped artifact compiles."""
+        cached = self._artifact_matching_cache.get(pattern)
+        if cached is not None:
+            return cached
         excluded = self.test_only_sources()
-        return [entry for entry in self.matching(pattern) if entry.path not in excluded]
+        result = [entry for entry in self.matching(pattern) if entry.path not in excluded]
+        self._artifact_matching_cache[pattern] = result
+        return result
+
+    def lockfile_records(
+        self, lockfile_relative: str
+    ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        cached = self._lockfile_cache.get(lockfile_relative)
+        if cached is not None:
+            return cached
+        lockfile = self.root / lockfile_relative
+        if not lockfile.is_file():
+            raise PlannerError(f"Cargo lockfile is missing: {lockfile_relative}")
+        document = tomllib.loads(lockfile.read_text())
+        records = document.get("package")
+        if not isinstance(records, list):
+            raise PlannerError(f"Cargo lockfile has no package records: {lockfile_relative}")
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            name = record.get("name")
+            if name is not None:
+                by_name.setdefault(str(name), []).append(record)
+        result = (records, by_name)
+        self._lockfile_cache[lockfile_relative] = result
+        return result
 
 
 def isolated_cargo_environment(temp_root: Path, trusted_toolchain: str | None = None) -> dict[str, str]:
@@ -837,9 +1019,15 @@ def lock_record_key(record: dict[str, Any]) -> tuple[str, str, str | None]:
     return str(record["name"]), str(record["version"]), record.get("source")
 
 
-def resolve_lock_reference(reference: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+def resolve_lock_reference(
+    reference: str,
+    records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
     name, version, source = parse_lock_reference(reference)
-    candidates = [record for record in records if record.get("name") == name]
+    if isinstance(records, dict):
+        candidates = records.get(name, ())
+    else:
+        candidates = [record for record in records if record.get("name") == name]
     if version is not None:
         candidates = [record for record in candidates if str(record.get("version")) == version]
     if source is not None:
@@ -854,14 +1042,23 @@ def reachable_lock_records(
     lockfile_relative: str,
     closure: list[dict[str, Any]],
     include_dev: bool = False,
+    index: TreeIndex | None = None,
 ) -> list[dict[str, Any]]:
-    lockfile = tree / lockfile_relative
-    if not lockfile.is_file():
-        raise PlannerError(f"Cargo lockfile is missing: {lockfile_relative}")
-    document = tomllib.loads(lockfile.read_text())
-    records = document.get("package")
-    if not isinstance(records, list):
-        raise PlannerError(f"Cargo lockfile has no package records: {lockfile_relative}")
+    if index is not None:
+        records, records_by_name = index.lockfile_records(lockfile_relative)
+    else:
+        lockfile = tree / lockfile_relative
+        if not lockfile.is_file():
+            raise PlannerError(f"Cargo lockfile is missing: {lockfile_relative}")
+        document = tomllib.loads(lockfile.read_text())
+        records = document.get("package")
+        if not isinstance(records, list):
+            raise PlannerError(f"Cargo lockfile has no package records: {lockfile_relative}")
+        records_by_name = {}
+        for record in records:
+            rec_name = record.get("name")
+            if rec_name is not None:
+                records_by_name.setdefault(str(rec_name), []).append(record)
     local_keys = {(str(package["name"]), str(package["version"]), None) for package in closure}
     local_records: dict[tuple[str, str, str | None], dict[str, Any]] = {}
     for record in records:
@@ -887,7 +1084,7 @@ def reachable_lock_records(
         for reference in local_record.get("dependencies", []):
             if parse_lock_reference(str(reference))[0] not in external_names:
                 continue
-            resolved = resolve_lock_reference(str(reference), records)
+            resolved = resolve_lock_reference(str(reference), records_by_name)
             if lock_record_key(resolved) not in local_keys:
                 queue.append(resolved)
 
@@ -901,7 +1098,7 @@ def reachable_lock_records(
         if len(reachable) > MAX_CARGO_PACKAGES * 20:
             raise PlannerError("Cargo.lock traversal exceeds record limit")
         for reference in record.get("dependencies", []):
-            dependency = resolve_lock_reference(str(reference), records)
+            dependency = resolve_lock_reference(str(reference), records_by_name)
             if lock_record_key(dependency) not in local_keys:
                 queue.append(dependency)
     return [
@@ -1031,7 +1228,7 @@ def rust_fingerprint(
         "release_targets": list(spec.get("release_targets", [])),
         "profiles": selected_profiles(tree, spec.get("profiles", []), spec["manifest"]),
         "packages": [normalized_package(package, tree) for package in closure],
-        "lock_records": reachable_lock_records(tree, spec["lockfile"], closure),
+        "lock_records": reachable_lock_records(tree, spec["lockfile"], closure, index=tree_index),
         "files": [files[key] for key in sorted(files)],
     }
     return RustFingerprint(
@@ -1137,7 +1334,7 @@ def rust_cache_fingerprint(
             normalized_package(package, tree, include_dev) for package in closure
         ],
         "lock_records": reachable_lock_records(
-            tree, spec["lockfile"], closure, include_dev
+            tree, spec["lockfile"], closure, include_dev, index=tree_index
         ),
         "compatibility_files": [
             compatibility_files[key] for key in sorted(compatibility_files)
@@ -1789,8 +1986,13 @@ def plan(
                 None if exact_head_policy else observed_policy_change
             )
             try:
-                export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
-                export_git_tree(repository, head, head_tree)
+                baseline_index = export_git_tree(
+                    repository, baseline["baseline_commit"], baseline_tree, return_index=True
+                )
+                head_index = export_git_tree(
+                    repository, head, head_tree, return_index=True
+                )
+                assert baseline_index is not None and head_index is not None
             except PlannerError as exc:
                 degraded.append(str(exc))
                 for name in graph["artifacts"]:
@@ -1810,8 +2012,6 @@ def plan(
                         candidate.get("kind", "artifact"),
                     )
                 }
-                baseline_index = TreeIndex(baseline_tree)
-                head_index = TreeIndex(head_tree)
                 baseline_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
                 head_fingerprints: dict[str, ArtifactFingerprint | RustFingerprint] = {}
                 baseline_cargo_universes: dict[str, CargoUniverse] = {}

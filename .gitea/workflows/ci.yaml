@@ -254,24 +254,24 @@ jobs:
           scripts/ci/tests/test-ci-runner-image-contract.sh
 
       # The trusted policy is only run, never asked for history: every planner
-      # and selector here works on `--repository .`, the checkout above. One
-      # commit is enough, as for the admission gate; the whole history with
-      # every branch took 22 to 47 s of each selection (infra#1534).
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ github.event_name == 'pull_request' }}
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: .trusted-ci-policy
-          fetch-depth: 1
-          persist-credentials: false
-
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ github.event_name == 'push' && (steps.batch.outputs.base != '' || github.event.before != '0000000000000000000000000000000000000000') }}
-        with:
-          ref: ${{ steps.batch.outputs.base || github.event.before }}
-          path: .trusted-ci-policy
-          fetch-depth: 1
-          persist-credentials: false
+      # and selector here works on `--repository .`, the checkout above. The
+      # full checkout already has the base commit locally, so extracting only
+      # scripts/ci and rust-toolchain.toml via git archive populates
+      # .trusted-ci-policy without a .git directory or credentials in <0.1 s,
+      # avoiding a second network clone and post-checkout step (infra#1534).
+      - name: Extract trusted CI policy
+        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && (steps.batch.outputs.base != '' || github.event.before != '0000000000000000000000000000000000000000')) }}
+        env:
+          TRUSTED_POLICY_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.batch.outputs.base || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$TRUSTED_POLICY_REF" =~ ^[0-9a-f]{40}$ ]]
+          if ! git cat-file -e "${TRUSTED_POLICY_REF}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$TRUSTED_POLICY_REF"
+          fi
+          rm -rf -- .trusted-ci-policy
+          mkdir -p .trusted-ci-policy
+          git archive --format=tar "$TRUSTED_POLICY_REF" -- scripts/ci rust-toolchain.toml | tar -x -C .trusted-ci-policy
 
       - name: Verify sealed Rust toolchain for trusted artifact planning
         if: ${{ github.event_name == 'pull_request' }}

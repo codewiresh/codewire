@@ -223,9 +223,11 @@ def dispatch_errors(jobs):
         for script in scripts:
             if TRUSTED_POLICY + script not in str(steps.get(step_id, {}).get("run", "")):
                 errors.append(f"selection step {step_id} does not run the trusted base's {script}")
+    trusted_extracts = 0
     for step in selection.get("steps") or []:
         options = step.get("with") or {}
         if options.get("path") == TRUSTED_POLICY.rstrip("/"):
+            trusted_extracts += 1
             if options.get("persist-credentials") is not False:
                 errors.append("the trusted policy checkout keeps its credentials")
             # A merge-queue batch's base is the main commit it was built on.
@@ -236,6 +238,20 @@ def dispatch_errors(jobs):
             )
             if options.get("ref") not in bases:
                 errors.append(f"the trusted policy checkout is not the base: {options.get('ref')!r}")
+        elif step.get("name") == "Extract trusted CI policy":
+            trusted_extracts += 1
+            ref = str((step.get("env") or {}).get("TRUSTED_POLICY_REF", ""))
+            expected_ref = (
+                "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha "
+                "|| steps.batch.outputs.base || github.event.before }}"
+            )
+            if ref != expected_ref:
+                errors.append(f"the trusted policy extraction is not the base: {ref!r}")
+            run_text = str(step.get("run", ""))
+            if 'git archive --format=tar "$TRUSTED_POLICY_REF"' not in run_text or ".trusted-ci-policy" not in run_text:
+                errors.append("the trusted policy extraction does not archive the base commit into .trusted-ci-policy")
+    if trusted_extracts == 0:
+        errors.append("selection never populates .trusted-ci-policy from the base commit")
     return errors
 
 
@@ -645,8 +661,10 @@ MUTATIONS = {
         "'scripts/ci/select/emit-verification-matrices.sh'", 1),
     "the planner runs from the candidate": lambda t: t.replace(
         "'.trusted-ci-policy/scripts/ci/plan/planner.py'", "'scripts/ci/plan/planner.py'", 1),
-    "the trusted checkout keeps credentials": lambda t: in_job(
-        t, SELECTION, "          persist-credentials: false\n", ""),
+    "the trusted policy extracts from the candidate head": lambda t: in_job(
+        t, SELECTION,
+        "TRUSTED_POLICY_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.batch.outputs.base || github.event.before }}",
+        "TRUSTED_POLICY_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.batch.outputs.base || github.event.before }}"),
     "a group step loses its tested-tree guard": lambda t: in_job(
         t, "database", "        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}\n"
         "        run: scripts/ci/setup/bound-cargo-jobs.sh", "        run: scripts/ci/setup/bound-cargo-jobs.sh"),

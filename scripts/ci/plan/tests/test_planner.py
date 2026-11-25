@@ -2437,6 +2437,38 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertTrue(document["degraded_reasons"])
         self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
 
+    def test_candidate_cargo_configuration_symlink_fails_closed(self) -> None:
+        self.repo.write("evil.toml", "[net]\noffline = false\n")
+        cargo_dir = self.repo.root / ".cargo"
+        cargo_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink("../evil.toml", cargo_dir / "config.toml")
+        self.repo.commit("add symlinked cargo config")
+        document = self.repo.plan()
+        self.assertTrue(any("Cargo configuration" in reason for reason in document["degraded_reasons"]))
+        self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary)
+            (tree / "evil.toml").write_text("[net]\noffline = false\n")
+            (tree / ".cargo").mkdir()
+            os.symlink("../evil.toml", tree / ".cargo" / "config.toml")
+            with self.assertRaisesRegex(planner.PlannerError, "Cargo configuration"):
+                planner.validate_exported_tree(tree)
+
+    def test_candidate_cargo_directory_symlink_fails_closed(self) -> None:
+        self.repo.write("evil_dir/config.toml", "[net]\noffline = false\n")
+        os.symlink("evil_dir", self.repo.root / ".cargo")
+        self.repo.commit("add symlinked .cargo directory")
+        document = self.repo.plan()
+        self.assertTrue(any("Cargo configuration" in reason for reason in document["degraded_reasons"]))
+        self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary)
+            (tree / "evil_dir").mkdir()
+            (tree / "evil_dir" / "config.toml").write_text("[net]\noffline = false\n")
+            os.symlink("evil_dir", tree / ".cargo")
+            with self.assertRaisesRegex(planner.PlannerError, "Cargo configuration"):
+                planner.validate_exported_tree(tree)
+
 
 class LockClosureTests(unittest.TestCase):
     def test_only_reachable_external_lock_records_are_hashed(self) -> None:
