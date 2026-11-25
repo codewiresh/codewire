@@ -552,10 +552,27 @@ refuses a noexec directory.
 
 Every Dev walk that takes `CW_BIN` uses it: `with-dev-personal-walk.sh`, the
 credentials and interception walks, and the Dev smokes. Those smokes compile
-`cw` only when `CW_BIN` is unset. A local VM walk also needs a runtime from
-the same source as its `cw`. Main CI publishes none per commit in the layout
-`cw setup --local --from` reads, so that walk still builds its runtime
-(`docs/dev/LINUX-LOCAL-VMS.md`) until it does.
+`cw` only when `CW_BIN` is unset.
+
+A local VM walk also needs a runtime from the same source as its `cw`. Take
+both from main CI's signed pod-runtime image:
+
+```sh
+scripts/dev/fetch-main-build runtime --commit <sha on main>
+export CW_BIN=…                          # the three lines it prints
+export CODEWIRE_NATIVE_ARTIFACT_ROOT=…
+export CODEWIRE_NATIVE_ARTIFACT_LOCK=…
+```
+
+It writes the image's `cw` to `target/ci/cw`, as `cw` does, and its runtime to
+`target/ci/runtime`: directories 0700, Cloud Hypervisor and virtiofsd 0500,
+everything else 0400. The image is the commit's own or the one tagged with its
+`pod_runtime_image` fingerprint. It is accepted only with main CI's signature,
+a signed source on the commit's first-parent history whose recomputed
+fingerprint is equal, and a runtime that matches its `artifacts.lock` and
+whose sealed `cw` names that source. It never replaces a runtime it did not
+write. Use an isolated `HOME` (0700) for the walk. A commit whose fingerprint
+has no signed image still builds its runtime (`docs/dev/LINUX-LOCAL-VMS.md`).
 
 ## Local Kind cluster for manual testing
 

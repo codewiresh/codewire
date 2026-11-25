@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/dev/fetch-main-build without a registry: its image choice and its cw extraction.
+"""scripts/dev/fetch-main-build without a registry: its image choices, its cw and runtime extraction, and its writes.
 
 The registry, cosign and planner calls are replaced with stand-ins; the
 layout is a synthetic OCI image. No network, Docker or build is used.
@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -197,6 +198,233 @@ class Output(unittest.TestCase):
         finally:
             fmb.auth_file = saved
         self.assertEqual(calls, [])
+
+
+RUNTIME = "opt/codewire/runtime"
+REAL_RELEASE = fmb.cw_release()
+ARTIFACT_BYTES = {"cloud-hypervisor": b"vmm", "virtiofsd": b"fs", "kernel": b"kern", "initramfs": b"root"}
+KEYS = {"cloud_hypervisor": "cloud-hypervisor", "virtiofsd": "virtiofsd", "kernel": "kernel", "initramfs": "initramfs"}
+
+
+def artifacts_lock(overrides=None):
+    lock = {"schema_version": 1}
+    for key, name in KEYS.items():
+        data = (overrides or {}).get(name, ARTIFACT_BYTES[name])
+        lock[key] = {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    return REAL_RELEASE.canonical(lock)
+
+
+def tree_layer(entries, markers=()):
+    """A layer holding directories (value None) and files, plus whiteout MARKERS."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for marker in markers:
+            tar.addfile(tarfile.TarInfo(marker), io.BytesIO(b""))
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                tar.addfile(info)
+            else:
+                info.size, info.mode = len(data), 0o644
+                tar.addfile(info, io.BytesIO(data))
+    return gzip.compress(buffer.getvalue())
+
+
+def runtime_entries(lock=None, artifacts=None, extra=None):
+    entries = {RUNTIME: None, f"{RUNTIME}/artifacts": None,
+               f"{RUNTIME}/artifacts.lock": lock if lock is not None else artifacts_lock(),
+               f"{RUNTIME}/cw-runtime.lock.json": b"{}", f"{RUNTIME}/runtime.pack": b"pack"}
+    for name, data in (artifacts or ARTIFACT_BYTES).items():
+        entries[f"{RUNTIME}/artifacts/{name}"] = data
+    entries.update(extra or {})
+    return entries
+
+
+class Release:
+    """cw_release with the sealed-pack check recorded instead of run: the
+    fixtures hold no real pack. parse_canonical and canonical stay real."""
+
+    def __init__(self):
+        self.real = REAL_RELEASE
+        self.packs = []
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def check_cw_runtime_pack(self, lock, pack, target, revision):
+        self.packs.append((lock, pack, target, revision))
+        return b"cw"
+
+
+class RuntimeTree(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.saved = fmb.cw_release
+        self.release = Release()
+        fmb.cw_release = lambda: self.release
+
+    def tearDown(self):
+        fmb.cw_release = self.saved
+        self.temporary.cleanup()
+
+    def tree(self, layers):
+        self.count = getattr(self, "count", 0) + 1
+        files = self.root / f"files-{self.count}"
+        files.mkdir()
+        return fmb.stacked_tree(layout(self.root / f"layout-{self.count}", layers), RUNTIME, files)
+
+    def test_the_runtime_is_checked_with_its_modes_and_sealed_source(self):
+        files = fmb.check_runtime(self.tree([tree_layer(runtime_entries())]), A)
+        modes = {name: mode for name, (_, mode) in files.items()}
+        self.assertEqual(modes, {"": 0o700, "artifacts": 0o700, "artifacts.lock": 0o400,
+                                 "cw-runtime.lock.json": 0o400, "runtime.pack": 0o400,
+                                 "artifacts/cloud-hypervisor": 0o500, "artifacts/virtiofsd": 0o500,
+                                 "artifacts/kernel": 0o400, "artifacts/initramfs": 0o400})
+        self.assertEqual(self.release.packs, [(b"{}", b"pack", fmb.CW_TARGET, A)])
+
+    def test_an_artifact_off_its_lock_is_refused(self):
+        changed = dict(ARTIFACT_BYTES, kernel=b"other")
+        with self.assertRaisesRegex(fmb.Refused, "kernel does not match"):
+            fmb.check_runtime(self.tree([tree_layer(runtime_entries(artifacts=changed))]), A)
+
+    def test_a_file_no_lock_names_is_refused(self):
+        entries = runtime_entries(extra={f"{RUNTIME}/artifacts/extra": b"x"})
+        with self.assertRaisesRegex(fmb.Refused, "artifacts/extra"):
+            fmb.check_runtime(self.tree([tree_layer(entries)]), A)
+
+    def test_a_link_in_the_runtime_is_refused(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as tar:
+            info = tarfile.TarInfo(f"{RUNTIME}/artifacts/kernel")
+            info.type, info.linkname = tarfile.SYMTYPE, "/etc/shadow"
+            tar.addfile(info)
+        with self.assertRaisesRegex(fmb.Refused, "not a regular file or directory"):
+            self.tree([gzip.compress(buffer.getvalue())])
+
+    def test_whiteouts_hide_lower_layers_only(self):
+        lower = tree_layer(runtime_entries(extra={f"{RUNTIME}/artifacts/old": b"gone"}))
+        upper = tree_layer({}, markers=(f"{RUNTIME}/artifacts/.wh.old",))
+        files = fmb.check_runtime(self.tree([lower, upper]), A)
+        self.assertNotIn("artifacts/old", files)
+
+        # An opaque marker in the runtime directory hides every lower entry;
+        # the same layer's own entries survive it.
+        replaced = tree_layer(runtime_entries(), markers=(f"{RUNTIME}/.wh..wh..opq",))
+        tree = self.tree([lower, replaced])
+        self.assertNotIn(f"{RUNTIME}/artifacts/old", tree)
+        self.assertIn(f"{RUNTIME}/artifacts/kernel", tree)
+
+        # A whiteout of a parent hides the whole lower runtime.
+        removed = tree_layer({}, markers=("opt/.wh.codewire",))
+        self.assertEqual(self.tree([lower, removed]), {})
+
+
+class RuntimeChoice(unittest.TestCase):
+    """SHA A, with first-parent ancestors B, C and D."""
+
+    def setUp(self):
+        names = ("git", "digest_of", "signed_sources", "fingerprint", "repository")
+        self.saved = {name: getattr(fmb, name) for name in names}
+        fmb.git = lambda *args: "\n".join([A, B, C, D])
+        fmb.repository = lambda name="daemon": f"registry.example.com/codewire/{name}"
+        self.tags, self.sources, self.fingerprints = {}, {}, {}
+        fmb.digest_of = lambda tag, auth, image=None: self.tags.get(tag)
+        fmb.signed_sources = lambda digest, config, image: self.sources.get(digest, set())
+        fmb.fingerprint = lambda sha, artifact=fmb.ARTIFACT: self.fingerprints[sha]
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(fmb, name, value)
+
+    def test_the_commit_s_own_signed_image(self):
+        self.fingerprints = {A: "f" * 64}
+        self.tags = {A: "sha256:" + "1" * 64}
+        self.sources = {"sha256:" + "1" * 64: {A}}
+        self.assertEqual(fmb.choose_runtime(A, None, None)[:2], (A, "sha256:" + "1" * 64))
+
+    def test_an_fp_tag_counts_only_with_an_equal_recomputed_fingerprint(self):
+        self.fingerprints = {A: "f" * 64, C: "f" * 64}
+        self.tags = {"fp-" + "f" * 64: "sha256:" + "3" * 64}
+        self.sources = {"sha256:" + "3" * 64: {C}}
+        built, digest, why = fmb.choose_runtime(A, None, None)
+        self.assertEqual((built, digest), (C, "sha256:" + "3" * 64))
+        self.assertIn("fingerprint equal", why)
+
+    def test_a_lying_fp_tag_is_refused(self):
+        # The tag names SHA's fingerprint, but its signed source's inputs differ.
+        self.fingerprints = {A: "f" * 64, C: "e" * 64}
+        self.tags = {"fp-" + "f" * 64: "sha256:" + "3" * 64}
+        self.sources = {"sha256:" + "3" * 64: {C}}
+        with self.assertRaisesRegex(fmb.Refused, "no signed pod-runtime image"):
+            fmb.choose_runtime(A, None, None)
+
+    def test_a_source_off_the_first_parent_history_is_refused(self):
+        self.fingerprints = {A: "f" * 64, "e" * 40: "f" * 64}
+        self.tags = {"fp-" + "f" * 64: "sha256:" + "3" * 64}
+        self.sources = {"sha256:" + "3" * 64: {"e" * 40}}
+        with self.assertRaisesRegex(fmb.Refused, "no signed pod-runtime image"):
+            fmb.choose_runtime(A, None, None)
+
+    def test_an_unsigned_image_is_refused(self):
+        self.fingerprints = {A: "f" * 64}
+        self.tags = {A: "sha256:" + "1" * 64}
+        with self.assertRaisesRegex(fmb.Refused, "no signed pod-runtime image"):
+            fmb.choose_runtime(A, None, None)
+
+
+class Writing(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(dir=ROOT / ".tmp" if (ROOT / ".tmp").is_dir() else None)
+        self.root = Path(self.temporary.name)
+        self.saved = fmb.cw_release
+        fmb.cw_release = lambda: Release()
+
+    def tearDown(self):
+        fmb.cw_release = self.saved
+        self.temporary.cleanup()
+
+    def files(self):
+        self.count = getattr(self, "count", 0) + 1
+        staged = self.root / f"staged-{self.count}"
+        staged.mkdir()
+        tree = fmb.stacked_tree(layout(self.root / f"layout-{self.count}", [tree_layer(runtime_entries())]),
+                                RUNTIME, staged)
+        return fmb.check_runtime(tree, A)
+
+    def test_the_runtime_is_renamed_into_place_with_its_modes_and_record(self):
+        directory = self.root / "target/ci/runtime"
+        directory.parent.mkdir(parents=True)
+        fmb.write_runtime(directory, self.files(), {"built_from": A})
+        self.assertFalse((self.root / "target/ci/.runtime.partial").exists())
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((directory / "artifacts").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((directory / "artifacts/virtiofsd").stat().st_mode & 0o777, 0o500)
+        self.assertEqual((directory / "artifacts/kernel").stat().st_mode & 0o777, 0o400)
+        self.assertEqual((directory / "artifacts/kernel").read_bytes(), b"kern")
+        self.assertTrue(fmb.runtime_written_here(directory))
+
+        # It replaces its own runtime, but never one changed since it wrote it.
+        fmb.write_runtime(directory, self.files(), {"built_from": A})
+        os.chmod(directory, 0o700)
+        (directory / "branch-file").write_bytes(b"x")
+        self.assertFalse(fmb.runtime_written_here(directory))
+        with self.assertRaisesRegex(fmb.Refused, "not a runtime this helper wrote"):
+            fmb.write_runtime(directory, self.files(), {"built_from": A})
+        self.assertTrue((directory / "branch-file").exists())
+        self.assertFalse((self.root / "target/ci/.runtime.partial").exists())
+
+    def test_a_cw_built_during_the_download_is_not_overwritten(self):
+        path = self.root / "target/ci/cw"
+        path.parent.mkdir(parents=True)
+        fmb.write_cw(path, b"first main build", {"built_from": A})
+        self.assertTrue(fmb.written_here(path))
+        path.write_bytes(b"a cargo build that landed meanwhile")
+        with self.assertRaisesRegex(fmb.Refused, "changed during the download"):
+            fmb.write_cw(path, b"second main build", {"built_from": A})
+        self.assertEqual(path.read_bytes(), b"a cargo build that landed meanwhile")
+        self.assertFalse(path.with_name(".cw.partial").exists())
 
 
 if __name__ == "__main__":

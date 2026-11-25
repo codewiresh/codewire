@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Fetch main CI's already-built `cw` for a main commit, so a walk of main never compiles it.
+"""Fetch main CI's already-built `cw` and local VM runtime for a main commit, so a walk of main never builds them.
 
   scripts/dev/fetch-main-build cw [--commit SHA] [--cw PATH]
+  scripts/dev/fetch-main-build runtime [--commit SHA] [--cw PATH] [--runtime DIR]
 
 The `cw` comes from the daemon image Deploy Dev builds and main CI signs:
 $CODEWIRE_IMAGE_REGISTRY/codewire/daemon:<sha>, a static x86_64 Linux build
@@ -26,9 +27,21 @@ checkout's cw. Its provenance goes beside it, in PATH.main-build.json. It never
 replaces a file there that it did not write itself, such as a branch's own
 build. It prints the CW_BIN line walks read.
 
-The local VM runtime is not fetched yet: main CI publishes none per commit in
-the layout `cw setup --local --from` reads (docs/dev/AGENT-WORKFLOW.md, "Walks
-of a main commit").
+`runtime` writes a pair from one signed standard pod-runtime image instead:
+its /usr/local/bin/cw to PATH, as `cw` does, and its /opt/codewire/runtime to
+DIR, by default target/ci/runtime in this checkout. The image is SHA's own
+($CODEWIRE_IMAGE_REGISTRY/codewire/pod-runtime:<sha>) or the one tagged with
+SHA's planner pod_runtime_image fingerprint (fp-<fingerprint>). Tags are not
+trusted: it needs main CI's signature on the digest (family pod-runtime,
+verified=main-ci), a signed source that is SHA or a first-parent ancestor of
+it, the planner's fingerprint recomputed at that source equal to SHA's, a cw
+whose build record names that source, and a runtime whose artifacts match its
+artifacts.lock and whose sealed cw names that source too. The runtime is
+written to a partial directory and renamed into place, with its modes:
+directories 0700, Cloud Hypervisor and virtiofsd 0500, every other file 0400.
+It never replaces a runtime directory it did not write. It prints CW_BIN,
+CODEWIRE_NATIVE_ARTIFACT_ROOT and CODEWIRE_NATIVE_ARTIFACT_LOCK, which a local
+VM walk reads instead of `cw setup --local --from`.
 """
 
 from __future__ import annotations
@@ -51,8 +64,21 @@ ROOT = Path(__file__).resolve().parents[2]
 PUBLIC_KEY = ROOT / "scripts/ci/trust/codewire-runtime-signing.pub"
 CW_PATH = "usr/local/bin/cw"
 ARTIFACT = "daemon_image"
+POD_RUNTIME_ARTIFACT = "pod_runtime_image"
 MAX_ANCESTORS = 30
+# How far back a pod-runtime image's signed source may be: an fp- tag can name
+# an image built many deliveries ago.
+MAX_SOURCE_ANCESTORS = 5000
 MAX_CW_BYTES = 256 * 1024 * 1024
+RUNTIME_PATH = "opt/codewire/runtime"
+MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_RUNTIME_BYTES = 4 * 1024 * 1024 * 1024
+# The lock keys the pod runtime holds, and those cw runs as executables
+# (crates/codewire-local-vmm/src/artifact.rs; scripts/ci/images/pod-runtime-context.py).
+RUNTIME_EXECUTABLES = ("cloud_hypervisor", "virtiofsd")
+RUNTIME_DATA = ("kernel", "initramfs")
+RUNTIME_FILES = ("artifacts.lock", "cw-runtime.lock.json", "runtime.pack")
+CW_TARGET = "x86_64-unknown-linux-musl"
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -61,12 +87,12 @@ class Refused(Exception):
     pass
 
 
-def repository():
-    """The daemon image's repository on CODEWIRE_IMAGE_REGISTRY (docs/dev/CI-CONFIGURATION.md)."""
+def repository(name="daemon"):
+    """An image's repository on CODEWIRE_IMAGE_REGISTRY (docs/dev/CI-CONFIGURATION.md)."""
     registry = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
     if not re.fullmatch(r"[a-z0-9.-]+(:[0-9]+)?", registry):
         raise Refused("set CODEWIRE_IMAGE_REGISTRY to the image registry host, with no scheme")
-    return f"{registry}/codewire/daemon"
+    return f"{registry}/codewire/{name}"
 
 
 def run(argv, timeout, env=None):
@@ -98,9 +124,9 @@ def auth_file():
     return path
 
 
-def digest_of(sha, auth):
+def digest_of(tag, auth, image=None):
     completed = run(["skopeo", "inspect", "--authfile", str(auth), "--no-tags", "--format", "{{.Digest}}",
-                     f"docker://{repository()}:{sha}"], 120)
+                     f"docker://{image or repository()}:{tag}"], 120)
     value = completed.stdout.strip()
     return value if completed.returncode == 0 and DIGEST.fullmatch(value) else None
 
@@ -118,7 +144,30 @@ def signed(sha, digest, docker_config):
     return completed.returncode == 0
 
 
-def fingerprint(sha):
+def signed_sources(digest, docker_config, image):
+    """The sources main CI's pod-runtime signatures on exactly this digest name; empty when none verifies."""
+    env = {key: value for key, value in os.environ.items() if key not in ("BAO_ADDR", "BAO_TOKEN")}
+    env.update(DOCKER_CONFIG=str(docker_config), GOMAXPROCS="2")
+    completed = run(["cosign", "verify", "--key", str(PUBLIC_KEY), "--insecure-ignore-tlog",
+                     "--new-bundle-format=true",
+                     "--annotations", "dev.codewire.image-family=pod-runtime",
+                     "--annotations", "dev.codewire.verified=main-ci",
+                     "--output", "json", f"{image}@{digest}"], 180, env)
+    if completed.returncode != 0:
+        return set()
+    try:
+        payloads = json.loads(completed.stdout)
+    except ValueError:
+        return set()
+    sources = set()
+    for payload in payloads if isinstance(payloads, list) else ():
+        value = (payload.get("optional") or {}).get("dev.codewire.source-sha") if isinstance(payload, dict) else None
+        if isinstance(value, str) and SHA.fullmatch(value):
+            sources.add(value)
+    return sources
+
+
+def fingerprint(sha, artifact=ARTIFACT):
     with tempfile.TemporaryDirectory(prefix="fetch-main-build-plan-") as temporary:
         plan = Path(temporary) / "plan.json"
         completed = run([sys.executable, str(ROOT / "scripts/ci/plan/planner.py"), "--repository", str(ROOT),
@@ -126,9 +175,9 @@ def fingerprint(sha):
                          "--output", str(plan)], 600)
         if completed.returncode != 0:
             raise Refused(f"the planner failed at {sha}: {completed.stderr.strip()[-300:]}")
-        value = json.loads(plan.read_text())["artifacts"].get(ARTIFACT, {}).get("head_fingerprint")
+        value = json.loads(plan.read_text())["artifacts"].get(artifact, {}).get("head_fingerprint")
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise Refused(f"the planner gave no {ARTIFACT} fingerprint at {sha}")
+        raise Refused(f"the planner gave no {artifact} fingerprint at {sha}")
     return value
 
 
@@ -152,6 +201,32 @@ def choose(sha, auth, docker_config):
         raise Refused(f"the newest signed daemon image before {sha[:12]} is {candidate[:12]}'s, and its "
                       f"inputs differ; no main build of this cw exists yet, so compile it in a build slot")
     raise Refused(f"no signed daemon image in {sha[:12]} or its {MAX_ANCESTORS} first-parent ancestors")
+
+
+def choose_runtime(sha, auth, docker_config):
+    """The signed pod-runtime image whose pair is SHA's: its source is SHA, or a first-parent
+    ancestor whose recomputed pod_runtime_image fingerprint equals SHA's."""
+    image = repository("pod-runtime")
+    wanted = fingerprint(sha, POD_RUNTIME_ARTIFACT)
+    ancestors = set(git("rev-list", "--first-parent", f"--max-count={MAX_SOURCE_ANCESTORS}", sha).split())
+    for tag, how in ((sha, "its own image"), (f"fp-{wanted}", f"the image tagged fp-{wanted[:12]}")):
+        digest = digest_of(tag, auth, image)
+        if not digest:
+            continue
+        sources = signed_sources(digest, docker_config, image)
+        if not sources:
+            print(f"fetch-main-build: {how} has no main-CI pod-runtime signature; skipped", file=sys.stderr)
+            continue
+        for source in sorted(sources, key=lambda value: value != sha):
+            if source not in ancestors:
+                continue
+            if source == sha or fingerprint(source, POD_RUNTIME_ARTIFACT) == wanted:
+                why = how if source == sha else f"{how}, {POD_RUNTIME_ARTIFACT} fingerprint equal at {source[:12]}"
+                return source, digest, why
+        print(f"fetch-main-build: {how} names no source on {sha[:12]}'s first-parent history with its "
+              f"{POD_RUNTIME_ARTIFACT} fingerprint; skipped", file=sys.stderr)
+    raise Refused(f"no signed pod-runtime image for {sha[:12]}'s {POD_RUNTIME_ARTIFACT} fingerprint "
+                  f"{wanted[:12]}; build the runtime from source (docs/dev/LINUX-LOCAL-VMS.md)")
 
 
 def layer_reader(blob, media_type):
@@ -197,6 +272,127 @@ def extract_cw(layout):
     return found
 
 
+def layers(layout):
+    index = json.loads((layout / "index.json").read_text())
+    manifest = json.loads((layout / "blobs" / index["manifests"][0]["digest"].replace(":", "/")).read_text())
+    return [(layout / "blobs" / layer["digest"].replace(":", "/"), layer["mediaType"]) for layer in manifest["layers"]]
+
+
+def stacked_tree(layout, prefix, work):
+    """The regular files and directories under PREFIX as the image's layers stack
+    them, with each file's bytes written under WORK: a later layer's entry wins,
+    and a whiteout or opaque marker hides only lower layers' entries."""
+    entries, total, count = {}, 0, 0
+    for blob, media_type in layers(layout):
+        hidden, opaque, own = set(), set(), {}
+        with layer_reader(blob, media_type) as tar:
+            for member in tar:
+                name = member.name.removeprefix("./").lstrip("/").rstrip("/")
+                head, _, leaf = name.rpartition("/")
+                if leaf == ".wh..wh..opq":
+                    opaque.add(head)
+                    continue
+                if leaf.startswith(".wh."):
+                    hidden.add(f"{head}/{leaf[4:]}" if head else leaf[4:])
+                    continue
+                if name != prefix and not name.startswith(prefix + "/"):
+                    continue
+                if member.isdir():
+                    own[name] = None
+                elif member.isreg():
+                    if member.size > MAX_RUNTIME_FILE_BYTES or total + member.size > MAX_RUNTIME_BYTES:
+                        raise Refused(f"{name} in the image is larger than this helper accepts")
+                    count += 1
+                    target = work / f"file-{count}"
+                    with tar.extractfile(member) as source, open(target, "wb") as sink:
+                        shutil.copyfileobj(source, sink, 1024 * 1024)
+                    total += member.size
+                    own[name] = target
+                else:
+                    raise Refused(f"{name} in the image is not a regular file or directory")
+        # A whiteout hides the named path and what is under it; an opaque marker
+        # hides what is under its directory. Both reach only lower layers.
+        for path in list(entries):
+            if any(path == gone or path.startswith(gone + "/") for gone in hidden) or \
+                    any(not directory or path.startswith(directory + "/") for directory in opaque):
+                del entries[path]
+        entries.update(own)
+    return entries
+
+
+def check_runtime(entries, source):
+    """The pod-runtime tree's files, keyed by their path under the runtime, with each one's mode.
+
+    It must hold exactly the lock's artifacts and the runtime's three files,
+    the artifacts must match the lock's bytes, and the sealed cw runtime must
+    name SOURCE."""
+    root = RUNTIME_PATH
+    relative = {path[len(root) + 1:] if path != root else "": value for path, value in entries.items()}
+    if relative.get("") is not None or relative.get("artifacts", 0) is not None:
+        raise Refused("the image's runtime has no artifacts directory")
+    release = cw_release()
+    lock_path = relative.get("artifacts.lock")
+    if not isinstance(lock_path, Path):
+        raise Refused("the image's runtime has no artifacts.lock")
+    lock = release.parse_canonical(lock_path.read_bytes())
+    if not isinstance(lock, dict) or set(lock) != {"schema_version", *RUNTIME_EXECUTABLES, *RUNTIME_DATA}:
+        raise Refused("the runtime's artifacts.lock is not exactly Cloud Hypervisor, virtiofsd, the kernel and the guest root")
+    modes = {"": 0o700, "artifacts": 0o700}
+    for name in RUNTIME_FILES:
+        if not isinstance(relative.get(name), Path):
+            raise Refused(f"the image's runtime has no {name}")
+        modes[name] = 0o400
+    for key in RUNTIME_EXECUTABLES + RUNTIME_DATA:
+        entry = lock[key]
+        name = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+            raise Refused(f"the lock's {key} path is not one file name")
+        path = relative.get(f"artifacts/{name}")
+        if not isinstance(path, Path):
+            raise Refused(f"the image's runtime has no artifacts/{name}")
+        if path.stat().st_size != entry.get("size") or sha256_file(path) != entry.get("sha256"):
+            raise Refused(f"artifacts/{name} does not match the runtime's artifacts.lock")
+        modes[f"artifacts/{name}"] = 0o500 if key in RUNTIME_EXECUTABLES else 0o400
+    extra = sorted(set(relative) - set(modes))
+    if extra:
+        raise Refused(f"the image's runtime holds {extra[0]}, which no lock or runtime file names")
+    release.check_cw_runtime_pack(relative["cw-runtime.lock.json"].read_bytes(),
+                                  relative["runtime.pack"].read_bytes(), CW_TARGET, source)
+    return {name: (relative[name], mode) for name, mode in modes.items()}
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def tree_digest(directory):
+    """One sha256 over each file's path, mode and bytes, and each directory's path and mode."""
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")) + [directory]:
+        if path.is_symlink():
+            return None
+        name = "." if path == directory else path.relative_to(directory).as_posix()
+        mode = path.stat().st_mode & 0o7777
+        digest.update(f"{name}\0{mode:o}\0".encode())
+        if path.is_file():
+            digest.update(sha256_file(path).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def runtime_written_here(directory):
+    """Whether DIRECTORY is still exactly the runtime this helper last wrote there."""
+    try:
+        recorded = json.loads(provenance(directory).read_text()).get("tree_sha256")
+        return directory.is_dir() and not directory.is_symlink() and tree_digest(directory) == recorded
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def cw_release():
     spec = importlib.util.spec_from_file_location("cw_release", ROOT / "scripts/ci/release/cw_release.py")
     module = importlib.util.module_from_spec(spec)
@@ -218,13 +414,30 @@ def written_here(path):
         return False
 
 
-def fetch_cw(sha, path):
+def writable_cw(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.statvfs(path.parent).f_flag & os.ST_NOEXEC:
         raise Refused(f"{path.parent} is on a noexec filesystem, so its cw could not run; choose another --cw")
     if (path.exists() or path.is_symlink()) and not written_here(path):
         raise Refused(f"{path} exists and is not a main build this helper wrote, so it may be a branch's "
                       "own cw; remove it, or choose another --cw")
+
+
+def write_cw(path, data, source):
+    partial = path.with_name(f".{path.name}.partial")
+    partial.write_bytes(data)
+    partial.chmod(0o755)
+    # A cargo build may have written PATH during the download.
+    if (path.exists() or path.is_symlink()) and not written_here(path):
+        partial.unlink()
+        raise Refused(f"{path} changed during the download and is not a main build this helper wrote; "
+                      "it was left as it is")
+    partial.replace(path)
+    provenance(path).write_text(json.dumps(dict(source, sha256=hashlib.sha256(data).hexdigest()), indent=2) + "\n")
+
+
+def fetch_cw(sha, path):
+    writable_cw(path)
     image = repository()
     auth = auth_file()
     with tempfile.TemporaryDirectory(prefix="fetch-main-build-") as temporary:
@@ -243,24 +456,89 @@ def fetch_cw(sha, path):
     record = cw_release().build_record(data)
     if record["source_revision"] != built:
         raise Refused(f"the image's cw says it was built from {record['source_revision']}, not {built}")
-    partial = path.with_name(f".{path.name}.partial")
-    partial.write_bytes(data)
-    partial.chmod(0o755)
-    partial.replace(path)
-    source = {"requested": sha, "built_from": built, "why": why, "image": f"{image}@{digest}",
-              "sha256": hashlib.sha256(data).hexdigest(),
-              "target": record["target"], "package_version": record["package_version"]}
-    provenance(path).write_text(json.dumps(source, indent=2) + "\n")
+    write_cw(path, data, {"requested": sha, "built_from": built, "why": why, "image": f"{image}@{digest}",
+                          "target": record["target"], "package_version": record["package_version"]})
     print(f"fetch-main-build: cw for {sha[:12]} is {built[:12]}'s main build ({why}), "
           f"from {image}@{digest}")
     print(f"export CW_BIN={path}")
 
 
+def write_runtime(directory, files, source):
+    """The checked runtime into DIRECTORY, through a partial directory renamed into place."""
+    partial = directory.with_name(f".{directory.name}.partial")
+    if partial.is_symlink():
+        raise Refused(f"{partial} is a link; remove it")
+    if partial.exists():
+        shutil.rmtree(partial)
+    partial.mkdir(mode=0o700)
+    (partial / "artifacts").mkdir(mode=0o700)
+    for name, (path, mode) in files.items():
+        if name in ("", "artifacts"):
+            continue
+        shutil.copyfile(path, partial / name)
+        os.chmod(partial / name, mode)
+    for name, (_, mode) in files.items():
+        if name in ("", "artifacts"):
+            os.chmod(partial / name if name else partial, mode)
+    if (directory.exists() or directory.is_symlink()) and not runtime_written_here(directory):
+        shutil.rmtree(partial)
+        raise Refused(f"{directory} changed during the download and is not a runtime this helper wrote; "
+                      "it was left as it is")
+    retired = directory.with_name(f".{directory.name}.retired")
+    if retired.exists() and not retired.is_symlink():
+        shutil.rmtree(retired)
+    if directory.exists():
+        directory.replace(retired)
+    partial.replace(directory)
+    if retired.exists():
+        shutil.rmtree(retired)
+    provenance(directory).write_text(json.dumps(dict(source, tree_sha256=tree_digest(directory)), indent=2) + "\n")
+
+
+def fetch_runtime(sha, path, directory):
+    writable_cw(path)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    if os.statvfs(directory.parent).f_flag & os.ST_NOEXEC:
+        raise Refused(f"{directory.parent} is on a noexec filesystem, so its runtime could not run; "
+                      "choose another --runtime")
+    if (directory.exists() or directory.is_symlink()) and not runtime_written_here(directory):
+        raise Refused(f"{directory} exists and is not a runtime this helper wrote; remove it, or choose "
+                      "another --runtime")
+    image = repository("pod-runtime")
+    auth = auth_file()
+    with tempfile.TemporaryDirectory(prefix="fetch-main-build-") as temporary:
+        work = Path(temporary)
+        (work / "docker").mkdir()
+        (work / "docker/config.json").symlink_to(auth)
+        built, digest, why = choose_runtime(sha, auth, work / "docker")
+        layout = work / "layout"
+        copied = run(["skopeo", "copy", "--authfile", str(auth), "--override-os", "linux",
+                      "--override-arch", "amd64", f"docker://{image}@{digest}", f"oci:{layout}:runtime"], 900)
+        if copied.returncode != 0:
+            raise Refused(f"skopeo could not copy {image}@{digest}: {copied.stderr.strip()[:300]}")
+        data = extract_cw(layout)
+        record = cw_release().build_record(data)
+        if record["source_revision"] != built:
+            raise Refused(f"the image's cw says it was built from {record['source_revision']}, not {built}")
+        (work / "files").mkdir()
+        files = check_runtime(stacked_tree(layout, RUNTIME_PATH, work / "files"), built)
+        source = {"requested": sha, "built_from": built, "why": why, "image": f"{image}@{digest}"}
+        write_runtime(directory, files, source)
+    write_cw(path, data, dict(source, target=record["target"], package_version=record["package_version"]))
+    print(f"fetch-main-build: cw and runtime for {sha[:12]} are {built[:12]}'s pod-runtime pair ({why}), "
+          f"from {image}@{digest}")
+    print(f"export CW_BIN={path}")
+    print(f"export CODEWIRE_NATIVE_ARTIFACT_ROOT={directory / 'artifacts'}")
+    print(f"export CODEWIRE_NATIVE_ARTIFACT_LOCK={directory / 'artifacts.lock'}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("what", choices=["cw"])
+    parser.add_argument("what", choices=["cw", "runtime"])
     parser.add_argument("--commit", default="origin/main", help="a commit on origin/main (default: its tip)")
     parser.add_argument("--cw", type=Path, help="where to write cw (default: target/ci/cw in this checkout)")
+    parser.add_argument("--runtime", type=Path,
+                        help="runtime: where to write the runtime (default: target/ci/runtime in this checkout)")
     args = parser.parse_args(argv)
     for tool in ("git", "skopeo", "cosign"):
         if shutil.which(tool) is None:
@@ -268,7 +546,11 @@ def main(argv=None):
             return 2
     try:
         sha = main_commit(args.commit)
-        fetch_cw(sha, (args.cw or ROOT / "target/ci/cw").absolute())
+        cw = (args.cw or ROOT / "target/ci/cw").absolute()
+        if args.what == "cw":
+            fetch_cw(sha, cw)
+        else:
+            fetch_runtime(sha, cw, (args.runtime or ROOT / "target/ci/runtime").absolute())
     except Refused as refusal:
         print(f"fetch-main-build: {refusal}", file=sys.stderr)
         return 1
