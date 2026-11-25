@@ -289,7 +289,7 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     assert_eq!(status, StatusCode::OK, "{calls:?}");
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit: new Sandboxes and starts are refused; running Sandboxes stop now, and their storage is kept.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit. New Sandboxes and starts are refused, and running Sandboxes stop now. Their storage is kept.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
     );
     assert_eq!(count(&calls, "/GetBillingOverview"), 1, "{calls:?}");
     assert_eq!(count(&calls, "/ListEnvironments"), 1, "{calls:?}");

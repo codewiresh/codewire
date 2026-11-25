@@ -22,7 +22,7 @@ const states = [
   {
     fixture: "sandboxes-credit-out",
     tone: "danger",
-    text: "Out of compute credit: new Sandboxes and starts are refused; running Sandboxes stop tomorrow at 09:12 UTC, and their storage is kept.",
+    text: "Out of compute credit. New Sandboxes and starts are refused, and running Sandboxes stop tomorrow at 09:12 UTC. Their storage is kept.",
     action: "Add a card",
   },
   {

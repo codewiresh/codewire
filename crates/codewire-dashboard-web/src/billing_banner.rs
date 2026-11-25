@@ -191,7 +191,7 @@ pub(crate) fn billing_banner(
         let any_running = sandboxes.is_some_and(|loads| loads.iter().any(|load| load.running));
         let text = if any_running {
             format!(
-                "Out of compute credit: new Sandboxes and starts are refused; running Sandboxes stop {}, and their storage is kept.",
+                "Out of compute credit. New Sandboxes and starts are refused, and running Sandboxes stop {}. Their storage is kept.",
                 stop_time(exhausted_at.saturating_add(STOP_AFTER_SECONDS), now)
             )
         } else {
@@ -415,7 +415,7 @@ mod tests {
             banner(&out, &[standard(true)]),
             Some(BillingBannerView {
                 tone: "danger",
-                text: "Out of compute credit: new Sandboxes and starts are refused; running Sandboxes stop today at 09:12 UTC, and their storage is kept.".into(),
+                text: "Out of compute credit. New Sandboxes and starts are refused, and running Sandboxes stop today at 09:12 UTC. Their storage is kept.".into(),
                 action: action("Add a card"),
             })
         );
@@ -423,18 +423,18 @@ mod tests {
             exhausted_at: Some(NOW + 3_600 + 12 * 60),
             ..out.clone()
         };
-        assert!(text(&tomorrow, &[standard(true)]).contains("stop tomorrow at 09:12 UTC,"));
+        assert!(text(&tomorrow, &[standard(true)]).contains("stop tomorrow at 09:12 UTC."));
         // A clock behind billing's still names the day.
         let later = CreditFacts {
             exhausted_at: Some(NOW + 2 * SECONDS_PER_DAY),
             ..out.clone()
         };
-        assert!(text(&later, &[standard(true)]).contains("stop on Nov 13, 2026, 08:00 UTC,"));
+        assert!(text(&later, &[standard(true)]).contains("stop on Nov 13, 2026, 08:00 UTC."));
         let past = CreditFacts {
             exhausted_at: Some(NOW - 2 * SECONDS_PER_DAY),
             ..out.clone()
         };
-        assert!(text(&past, &[standard(true)]).contains("Sandboxes stop now,"));
+        assert!(text(&past, &[standard(true)]).contains("Sandboxes stop now."));
         // Nothing running, or an inventory that could not be read: no stop time.
         for loads in [Some(&[standard(false)][..]), Some(&[][..]), None] {
             assert_eq!(
