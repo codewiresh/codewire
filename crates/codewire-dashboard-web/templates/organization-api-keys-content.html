@@ -11,8 +11,8 @@
       </summary>
       <section class="cw-drawer" aria-labelledby="create-key-title">
         <header class="cw-drawer-header">
-          <h2 id="create-key-title" class="cw-card-title">Create API key</h2>
-          <p class="cw-card-description">The key belongs to {{ organization.name }} and is shown once after creation.</p>
+          <h2 id="create-key-title" class="cw-section-title">Create API key</h2>
+          <p class="cw-section-description">The key belongs to {{ organization.name }} and is shown once after creation.</p>
         </header>
         <div class="cw-drawer-body">
           {% if !page.form.form_error.is_empty() %}
@@ -79,7 +79,7 @@
   {% if page.visible_count() == 0 %}
   <p class="cw-state" role="status">No API keys match these filters.</p>
   {% else %}
-  <div class="cw-table-shell cw-table-shell--menus">
+  <div class="cw-table-shell cw-table-shell--menus cw-table-shell--plain">
     <table class="cw-table">
       <caption class="cw-sr-only">API keys in {{ organization.name }}</caption>
       <thead>
@@ -90,7 +90,7 @@
         <tr>
           <th scope="row"><span class="cw-cell-stack"><strong>{{ key.name }}</strong><code class="cw-key">{{ key.prefix }}</code></span></th>
           <td class="cw-table-secondary">{{ key.created_by }}</td>
-          <td><span class="cw-status cw-status--pill" data-tone="{{ key.status_tone }}">{{ key.status }}</span></td>
+          <td><span class="cw-status cw-status--quiet" data-tone="{{ key.status_tone }}">{{ key.status }}</span></td>
           <td class="cw-table-secondary">{{ key.last_used }}</td>
           <td class="cw-table-secondary">{{ key.created }}</td>
           <td class="cw-table-actions">
@@ -140,15 +140,15 @@
   <div class="cw-dialog-backdrop" role="presentation">
     <section class="cw-dialog" role="dialog" aria-modal="true" aria-labelledby="key-created-title" data-api-key-reveal>
       <div class="cw-dialog-header">
-        <h2 id="key-created-title" class="cw-card-title">API key created</h2>
-        <p class="cw-card-description">Copy your key now. It will not be shown again.</p>
+        <h2 id="key-created-title" class="cw-section-title">API key created</h2>
+        <p class="cw-section-description">Copy your key now. It will not be shown again.</p>
       </div>
       <div class="cw-dialog-body">
         <p class="cw-secret-warning">Treat this value like a password.</p>
         <code class="cw-key-secret" data-secret-kind="api-key">{{ page.one_time_key }}</code>
       </div>
       <div class="cw-dialog-actions">
-        <button class="cw-button cw-button--outline" type="button" data-copy-api-key>Copy</button>
+        <button class="cw-text-action" type="button" data-copy-api-key>Copy</button>
         <a class="cw-button" href="{{ organization.api_keys_url }}">Done</a>
       </div>
     </section>

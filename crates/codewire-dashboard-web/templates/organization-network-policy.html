@@ -25,12 +25,12 @@
       <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "network policies" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main cw-network-policies">
         <a class="cw-back-link" href="/{{ organization.slug }}/network-policies/"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg><span>Network policies</span></a>
-        <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">{{ page.policy.name }}</h1><span class="cw-badge" data-tone="info">rev {{ page.policy.revision }}</span></div>{% if organization.can_admin %}<button class="cw-button cw-button--outline" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button>{% endif %}</div><p class="cw-page-description">{% if !page.policy.saved.is_empty() %}Revision {{ page.policy.revision }} saved {{ page.policy.saved }}. {% endif %}Every change is saved at once as a new revision.</p></header>
+        <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">{{ page.policy.name }}</h1><span class="cw-badge" data-tone="info">rev {{ page.policy.revision }}</span></div>{% if organization.can_admin %}<button class="cw-text-action" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button>{% endif %}</div><p class="cw-page-description">{% if !page.policy.saved.is_empty() %}Revision {{ page.policy.revision }} saved {{ page.policy.saved }}. {% endif %}Every change is saved at once as a new revision.</p></header>
         {% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
         {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
         <p class="cw-alert cw-alert--warning" role="status">{{ page.not_enforced() }}</p>
-        <section class="cw-card" aria-labelledby="network-policy-rules-title">
-          <div class="cw-card-header"><h2 id="network-policy-rules-title" class="cw-card-title">Allowed destinations</h2></div>
+        <section class="cw-section" aria-labelledby="network-policy-rules-title">
+          <div class="cw-section-header"><div><h2 id="network-policy-rules-title" class="cw-section-title">Allowed destinations</h2></div></div>
           {% if page.policy.rules.is_empty() %}<p class="cw-network-policy-none">Nothing. Sandboxes on this policy reach nothing on the Internet.</p>{% else %}
           <ul class="cw-list cw-network-policy-list">
             {% for rule in page.policy.rules %}
@@ -45,18 +45,18 @@
           </form>
           {% else %}<p class="cw-network-policy-none">Owners and admins change this policy.</p>{% endif %}
         </section>
-        <section class="cw-card" aria-labelledby="network-policy-check-title">
-          <div class="cw-card-header"><h2 id="network-policy-check-title" class="cw-card-title">Check a destination</h2></div>
+        <section class="cw-section" aria-labelledby="network-policy-check-title">
+          <div class="cw-section-header"><div><h2 id="network-policy-check-title" class="cw-section-title">Check a destination</h2></div></div>
           <form class="cw-field-row cw-network-policy-form" method="get" action="/{{ organization.slug }}/network-policies/{{ page.policy.name }}/" role="search" aria-label="Check a destination against revision {{ page.policy.revision }}">
             <div class="cw-field"><label class="cw-label" for="network-policy-check">Name or address, and port</label><input class="cw-input cw-input--mono" id="network-policy-check" name="check" value="{{ page.check_input }}" placeholder="static.crates.io:443" autocomplete="off" required{% if !page.check_error.is_empty() %} aria-invalid="true" aria-describedby="network-policy-check-error"{% endif %}>{% if !page.check_error.is_empty() %}<p class="cw-field-error" id="network-policy-check-error">{{ page.check_error }}</p>{% endif %}</div>
             <button class="cw-button cw-button--outline" type="submit">Check</button>
           </form>
           {% if let Some(answer) = page.check %}
-          <p class="cw-network-policy-answer" role="status"><span class="cw-mono">{{ answer.destination }}</span> {% if answer.allowed %}<span class="cw-status cw-status--pill" data-tone="success">Allowed</span>{% else %}<span class="cw-status cw-status--pill" data-tone="danger">Refused</span>{% endif %} <span>by {{ page.policy.name }} rev {{ page.policy.revision }}{% if !answer.detail.is_empty() %}{% if answer.allowed %}, {{ answer.detail }}{% else %} ({{ answer.detail }}){% endif %}{% endif %}</span></p>{% if !answer.within.is_empty() %}<p class="cw-network-policy-within">{{ answer.within }}</p>{% endif %}
+          <p class="cw-network-policy-answer" role="status"><span class="cw-mono">{{ answer.destination }}</span> {% if answer.allowed %}<span class="cw-status cw-status--quiet" data-tone="success">Allowed</span>{% else %}<span class="cw-status cw-status--quiet" data-tone="danger">Refused</span>{% endif %} <span>by {{ page.policy.name }} rev {{ page.policy.revision }}{% if !answer.detail.is_empty() %}{% if answer.allowed %}, {{ answer.detail }}{% else %} ({{ answer.detail }}){% endif %}{% endif %}</span></p>{% if !answer.within.is_empty() %}<p class="cw-network-policy-within">{{ answer.within }}</p>{% endif %}
           {% endif %}
         </section>
-        <section class="cw-card" aria-labelledby="network-policy-used-title">
-          <div class="cw-card-header"><h2 id="network-policy-used-title" class="cw-card-title">{% if page.policy.usage.sandboxes == 1 %}Used by 1 Sandbox{% else %}Used by {{ page.policy.usage.sandboxes }} Sandboxes{% endif %}</h2></div>
+        <section class="cw-section" aria-labelledby="network-policy-used-title">
+          <div class="cw-section-header"><div><h2 id="network-policy-used-title" class="cw-section-title">{% if page.policy.usage.sandboxes == 1 %}Used by 1 Sandbox{% else %}Used by {{ page.policy.usage.sandboxes }} Sandboxes{% endif %}</h2></div></div>
           {% if page.policy.usage.sandboxes == 0 %}<p class="cw-network-policy-none">No Sandbox selects this policy. Choose it with <code>cw --cloud create --policy {{ page.policy.name }}</code> or <code>cw update SANDBOX --policy {{ page.policy.name }}</code>.</p>{% else %}
           <ul class="cw-list cw-network-policy-list">{% for name in page.policy.usage.names %}<li class="cw-list-row">{{ name }}</li>{% endfor %}</ul>
           {% if page.policy.usage.more() > 0 %}<p class="cw-network-policy-none">and {{ page.policy.usage.more() }} more</p>{% endif %}{% endif %}

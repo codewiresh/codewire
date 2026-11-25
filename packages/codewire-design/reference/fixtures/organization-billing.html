@@ -26,9 +26,8 @@
             <p class="cw-muted">About 2 days at current use</p>
           </header>
 
-          <section class="cw-card" aria-labelledby="billing-stack-payment-methods-heading">
-            <header class="cw-card-header cw-billing-card-head"><div><h2 id="billing-stack-payment-methods-heading">Payment methods</h2><p>Stripe holds the cards; Codewire never sees their numbers.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-payment-methods-heading">
+            <header class="cw-section-header cw-billing-card-head"><div><h2 id="billing-stack-payment-methods-heading" class="cw-section-title">Payment methods</h2><p class="cw-section-description">Stripe holds the cards; Codewire never sees their numbers.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
               <ul class="cw-row-list">
                 <li class="cw-payment-method">
                   <div>
@@ -96,12 +95,10 @@
                   </dialog>
                 </li>
               </ul>
-            </div>
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-top-up-heading">
-            <header class="cw-card-header"><div><h2 id="billing-stack-top-up-heading">Automatic top-up</h2></div></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-top-up-heading">
+            <header class="cw-section-header"><div><h2 id="billing-stack-top-up-heading" class="cw-section-title">Automatic top-up</h2></div></header>
               <form class="cw-top-up-line" method="post" action="#auto-top-up">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-top-up-help" checked>
@@ -110,12 +107,10 @@
                 <p class="cw-field-help-popover" id="billing-stack-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Charges your default card €20 whenever the balance reaches €0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.</p>
                 <label class="cw-sr-only" for="billing-stack-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
               </form>
-            </div>
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-add-credit-heading">
-            <header class="cw-card-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-add-credit-heading">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-add-credit-help-trigger" type="button" popovertarget="billing-stack-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment, charged to Visa •••• 4242. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-add-credit-heading">
+            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-add-credit-help-trigger" type="button" popovertarget="billing-stack-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment, charged to Visa •••• 4242. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
               <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-add-credit-heading" data-add-credit>
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input type="hidden" name="request" value="design-fixture-request-0001">
@@ -130,23 +125,19 @@
                 </div>
 
               </form>
-            </div>
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-invoices-heading">
-            <header class="cw-card-header"><div><h2 id="billing-stack-invoices-heading">Invoices</h2><p>Every charge, with its receipt.</p></div></header>
-            <div class="cw-card-body">
-              <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Invoices</caption><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
+          <section class="cw-section" aria-labelledby="billing-stack-invoices-heading">
+            <header class="cw-section-header"><div><h2 id="billing-stack-invoices-heading" class="cw-section-title">Invoices</h2><p class="cw-section-description">Every charge, with its receipt.</p></div></header>
+              <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><caption class="cw-sr-only">Invoices</caption><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
                 <tr><td>2026-11-14</td><td>€50.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
                 <tr><td>2026-11-11</td><td>€20.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
               </tbody></table></div>
-            </div>
           </section>
           <!-- Example rates: the page shows the organization's live rate card. -->
-          <section class="cw-card" aria-labelledby="billing-stack-usage-heading">
-            <header class="cw-card-header"><div><h2 id="billing-stack-usage-heading">Sandbox Usage</h2><p>Credit drawn this month, per second of running Sandboxes: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk.</p></div></header>
-            <div class="cw-card-body">
-              <div class="cw-stat-grid cw-stat-grid--three">
+          <section class="cw-section" aria-labelledby="billing-stack-usage-heading">
+            <header class="cw-section-header"><div><h2 id="billing-stack-usage-heading" class="cw-section-title">Sandbox Usage</h2><p class="cw-section-description">Credit drawn this month, per second of running Sandboxes: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk.</p></div></header>
+              <div class="cw-stat-grid cw-stat-grid--three cw-stat-grid--plain">
                 <div class="cw-stat"><span>Current Month</span><strong>€17.82</strong></div>
                 <div class="cw-stat"><span>CPU Hours</span><strong>312.4</strong></div>
                 <div class="cw-stat"><span>Memory GiB-Hours</span><strong>624.8</strong></div>
@@ -164,7 +155,6 @@
                   </svg>
                 </div>
               </figure>
-            </div>
           </section>
         </div>
 
@@ -175,14 +165,13 @@
 
           </header>
 
-          <section class="cw-card" aria-labelledby="billing-stack-empty-payment-methods-heading">
-            <header class="cw-card-header cw-billing-card-head"><div><h2 id="billing-stack-empty-payment-methods-heading">Payment methods</h2><p>No card yet.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
+          <section class="cw-section" aria-labelledby="billing-stack-empty-payment-methods-heading">
+            <header class="cw-section-header cw-billing-card-head"><div><h2 id="billing-stack-empty-payment-methods-heading" class="cw-section-title">Payment methods</h2><p class="cw-section-description">No card yet.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
 
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-empty-top-up-heading">
-            <header class="cw-card-header"><div><h2 id="billing-stack-empty-top-up-heading">Automatic top-up</h2></div></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-empty-top-up-heading">
+            <header class="cw-section-header"><div><h2 id="billing-stack-empty-top-up-heading" class="cw-section-title">Automatic top-up</h2></div></header>
               <form class="cw-top-up-line" method="post" action="#auto-top-up">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-empty-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-empty-top-up-help" checked>
@@ -191,12 +180,10 @@
                 <p class="cw-field-help-popover" id="billing-stack-empty-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once.</p>
                 <label class="cw-sr-only" for="billing-stack-empty-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
               </form>
-            </div>
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-empty-add-credit-heading">
-            <header class="cw-card-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-empty-add-credit-heading">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-empty-add-credit-help-trigger" type="button" popovertarget="billing-stack-empty-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-empty-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment. The card is saved for next time. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-empty-add-credit-heading">
+            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-empty-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-empty-add-credit-help-trigger" type="button" popovertarget="billing-stack-empty-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-empty-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment. The card is saved for next time. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
               <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-empty-add-credit-heading" data-add-credit data-add-credit-new-card="billing-stack-empty-add-credit-card">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input type="hidden" name="request" value="design-fixture-request-0001">
@@ -220,14 +207,11 @@
                   <p class="cw-muted" role="status" data-card-status hidden></p>
                 </div>
               </form>
-            </div>
           </section>
 
-          <section class="cw-card" aria-labelledby="billing-stack-empty-invoices-heading">
-            <header class="cw-card-header"><div><h2 id="billing-stack-empty-invoices-heading">Invoices</h2><p>Every charge, with its receipt.</p></div></header>
-            <div class="cw-card-body">
+          <section class="cw-section" aria-labelledby="billing-stack-empty-invoices-heading">
+            <header class="cw-section-header"><div><h2 id="billing-stack-empty-invoices-heading" class="cw-section-title">Invoices</h2><p class="cw-section-description">Every charge, with its receipt.</p></div></header>
               <p class="cw-muted">No invoices yet.</p>
-            </div>
           </section>
         </div>
     <dialog class="cw-dialog" id="add-card-dialog" data-dialog aria-labelledby="add-card-title">

@@ -16,6 +16,8 @@
 .cw-stat-grid--five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .cw-stat { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
 dl.cw-stat-grid { margin: 0; }
+/* On pages without boxes a figure is its label and value, set by type alone. */
+.cw-stat-grid--plain .cw-stat { padding: 0; border: 0; border-radius: 0; background: none; }
 .cw-stat > span, .cw-stat > strong, .cw-stat > dt, .cw-stat > dd { display: block; margin: 0; }
 .cw-stat > span, .cw-stat > dt { color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-stat > strong, .cw-stat > dd { margin-top: var(--space-0-5); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-title); font-weight: var(--weight-medium); }

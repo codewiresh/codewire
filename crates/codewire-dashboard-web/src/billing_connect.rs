@@ -1069,11 +1069,11 @@ mod tests {
         });
         let order: Vec<usize> = [
             r#"<header class="cw-balance-head" aria-label="Compute credit">"#,
-            r#"<h2 id="payment-methods-heading">Payment methods</h2>"#,
-            r#"<h2 id="top-up-heading">Automatic top-up</h2>"#,
-            r#"<h2 id="add-credit-heading">Add credit</h2>"#,
-            r#"<h2 id="invoices-heading">Invoices</h2>"#,
-            r#"<h2 id="usage-heading">Sandbox Usage</h2>"#,
+            r#"<h2 id="payment-methods-heading" class="cw-section-title">Payment methods</h2>"#,
+            r#"<h2 id="top-up-heading" class="cw-section-title">Automatic top-up</h2>"#,
+            r#"<h2 id="add-credit-heading" class="cw-section-title">Add credit</h2>"#,
+            r#"<h2 id="invoices-heading" class="cw-section-title">Invoices</h2>"#,
+            r#"<h2 id="usage-heading" class="cw-section-title">Sandbox Usage</h2>"#,
         ]
         .iter()
         .map(|part| body.find(part).unwrap_or_else(|| panic!("{part}")))
@@ -1110,7 +1110,7 @@ mod tests {
         let on = render(&view);
         let line = part(
             &on,
-            r#"<section class="cw-card" aria-labelledby="top-up-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="top-up-heading">"#,
         );
         assert!(line.contains(r#"action="/test/billing/_actions/auto-top-up""#));
         assert!(line.contains(
@@ -1138,7 +1138,7 @@ mod tests {
         let none = render(&none);
         let line = part(
             &none,
-            r#"<section class="cw-card" aria-labelledby="top-up-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="top-up-heading">"#,
         );
         assert!(line.contains("Charge your card when the balance reaches €0"));
         assert!(line.contains("Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once."));
@@ -1194,7 +1194,7 @@ mod tests {
         let body = render(&credit_view(true));
         let add = part(
             &body,
-            r#"<section class="cw-card" aria-labelledby="add-credit-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="add-credit-heading">"#,
         );
         assert!(add.contains(
             r#"<form class="cw-add-credit" method="post" action="/test/billing/_actions/add-credit" aria-labelledby="add-credit-heading" data-add-credit>"#
@@ -1217,7 +1217,7 @@ mod tests {
         let none = render(&credit_view(false));
         let add = part(
             &none,
-            r#"<section class="cw-card" aria-labelledby="add-credit-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="add-credit-heading">"#,
         );
         assert!(add.contains(r#"data-add-credit data-add-credit-new-card="add-credit-card">"#));
         assert!(
@@ -1347,7 +1347,7 @@ mod tests {
         let body = render(&billing);
         let list = part(
             &body,
-            r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="payment-methods-heading">"#,
         );
         assert!(list.contains(
             r#"<p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge" data-tone="info">Default</span></p>"#
@@ -1376,7 +1376,7 @@ mod tests {
         });
         let list = part(
             &member,
-            r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#,
+            r#"<section class="cw-section" aria-labelledby="payment-methods-heading">"#,
         );
         assert!(list.contains("4242"));
         assert!(!list.contains("<button") && !list.contains("<form"));

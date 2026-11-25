@@ -16,10 +16,10 @@
 <ul aria-labelledby="settings-organization-title"><li><a class="cw-nav-link" href="sandboxes.html">Sandboxes</a></li><li><a class="cw-nav-link" href="/example-org/snapshots/">Snapshots <span class="cw-badge">Soon</span></a></li><li><a class="cw-nav-link" href="/example-org/presets/">Presets</a></li><li><a class="cw-nav-link" href="application-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="network-policies.html" aria-current="page">Network policies</a></li><li><a class="cw-nav-link" href="/example-org/api-keys/">API keys</a></li><li><a class="cw-nav-link" href="/example-org/members/">Members</a></li><li><a class="cw-nav-link" href="/example-org/billing/">Billing</a></li></ul>
 </nav></aside><div class="cw-context-main cw-network-policies">
     <a class="cw-back-link" href="network-policies.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg><span>Network policies</span></a>
-    <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">docs-and-crates</h1><span class="cw-badge" data-tone="info">rev 3</span></div><button class="cw-button cw-button--outline" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button></div><p class="cw-page-description">Revision 3 saved 4m ago. Every change is saved at once as a new revision.</p></header>
+    <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">docs-and-crates</h1><span class="cw-badge" data-tone="info">rev 3</span></div><button class="cw-text-action" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button></div><p class="cw-page-description">Revision 3 saved 4m ago. Every change is saved at once as a new revision.</p></header>
     <p class="cw-alert cw-alert--warning" role="status">Hosted Sandboxes don't enforce network policies yet, so a policy here changes nothing a Sandbox can reach.</p>
-    <section class="cw-card" aria-labelledby="network-policy-rules-title">
-      <div class="cw-card-header"><h2 id="network-policy-rules-title" class="cw-card-title">Allowed destinations</h2></div>
+    <section class="cw-section" aria-labelledby="network-policy-rules-title">
+      <div class="cw-section-header"><div><h2 id="network-policy-rules-title" class="cw-section-title">Allowed destinations</h2></div></div>
       <ul class="cw-list cw-network-policy-list">
         <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">docs.rs</strong> <span>port 443</span></p><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3"><input type="hidden" name="target" value="docs.rs"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> docs.rs</span></button></form></li>
         <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">*.crates.io</strong> <span>ports 22, 80, 443</span></p><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3"><input type="hidden" name="target" value="*.crates.io"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> *.crates.io</span></button></form></li>
@@ -31,16 +31,16 @@
         <button class="cw-button" type="submit">Allow</button>
       </form>
     </section>
-    <section class="cw-card" aria-labelledby="network-policy-check-title">
-      <div class="cw-card-header"><h2 id="network-policy-check-title" class="cw-card-title">Check a destination</h2></div>
+    <section class="cw-section" aria-labelledby="network-policy-check-title">
+      <div class="cw-section-header"><div><h2 id="network-policy-check-title" class="cw-section-title">Check a destination</h2></div></div>
       <form class="cw-field-row cw-network-policy-form" method="get" action="#" role="search" aria-label="Check a destination against revision 3">
         <div class="cw-field"><label class="cw-label" for="network-policy-check">Name or address, and port</label><input class="cw-input cw-input--mono" id="network-policy-check" name="check" value="pypi.org:443" placeholder="static.crates.io:443" autocomplete="off" required></div>
         <button class="cw-button cw-button--outline" type="submit">Check</button>
       </form>
-      <p class="cw-network-policy-answer" role="status"><span class="cw-mono">pypi.org:443</span> <span class="cw-status cw-status--pill" data-tone="danger">Refused</span> <span>by docs-and-crates rev 3 (name not allowed)</span></p>
+      <p class="cw-network-policy-answer" role="status"><span class="cw-mono">pypi.org:443</span> <span class="cw-status cw-status--quiet" data-tone="danger">Refused</span> <span>by docs-and-crates rev 3 (name not allowed)</span></p>
     </section>
-    <section class="cw-card" aria-labelledby="network-policy-used-title">
-      <div class="cw-card-header"><h2 id="network-policy-used-title" class="cw-card-title">Used by 2 Sandboxes</h2></div>
+    <section class="cw-section" aria-labelledby="network-policy-used-title">
+      <div class="cw-section-header"><div><h2 id="network-policy-used-title" class="cw-section-title">Used by 2 Sandboxes</h2></div></div>
       <ul class="cw-list cw-network-policy-list"><li class="cw-list-row">api-server</li><li class="cw-list-row">docs-agent</li></ul>
     </section>
     <details class="cw-disclosure"><summary>Revision details</summary><dl class="cw-network-policy-details"><div><dt>Revision</dt><dd>3</dd></div><div><dt>Digest</dt><dd><code>9f2c4e7a1b0d3c5e8f6a2b4c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e</code></dd></div></dl></details>
