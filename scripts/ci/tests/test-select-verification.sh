@@ -1513,6 +1513,11 @@ run_paths_case server_core_runtime_source pull_request refs/pull/6011/head false
 run_paths_case rust_migration_database pull_request refs/pull/61/head false \
   'database policy rust rust_pkg_codewire_billing service_billing service_integration' \
   crates/codewire-billing/src/subscription_migration.rs
+for audit_input in src/audit.rs src/audit/store.rs src/audit/store_database_tests.rs; do
+  run_paths_case orchestration_audit_log pull_request refs/pull/6227/head false \
+    'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+    "crates/codewire-orchestration/$audit_input"
+done
 run_paths_case orchestration_service pull_request refs/pull/7/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/api/environments.rs

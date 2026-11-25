@@ -10,7 +10,8 @@
 //!   SignalWithStart workflows; the warm-pool reconciler, inert until
 //!   `SANDBOX_WARM_POOL_SHAPES` names a shape; the credential relay, inert
 //!   without the platform credential runtime; the abandoned-leases sweep,
-//!   which settles runtime requests whose owner died (#4518); plus the per-replica
+//!   which settles runtime requests whose owner died (#4518); the audit log's
+//!   upkeep (#6189); plus the per-replica
 //!   `image-cache` reconciler for the runtime-node image cache DaemonSet
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
@@ -43,6 +44,7 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "warm-pool",
     "credential-relay",
     "abandoned-leases",
+    "audit-log",
 ];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
@@ -1319,6 +1321,7 @@ mod tests {
                 "warm-pool",
                 "credential-relay",
                 "abandoned-leases",
+                "audit-log",
             ]
         );
     }

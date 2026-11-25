@@ -1949,6 +1949,9 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "preview_auth_challenges:cascade",
             "preview_browser_grants:cascade",
             "repo_configs:no_action",
+            // A Sandbox audit log goes with its organization (0055, #6189).
+            "sandbox_audit_events:cascade",
+            "sandbox_audit_pending:cascade",
             "sandbox_running_sessions:cascade",
             "secret_projects:no_action",
             "stripe_invoices:cascade",

@@ -1923,7 +1923,7 @@ refusals are in `cw --local policy log` ("Networking and egress").
   subject is:
   - for `refused`, the destination, protocol, port, reason, policy and
     revision;
-  - for a credential use, the credential and the host;
+  - for a credential use, the provider and the host;
   - for exec and preview access, the actor and the client IP.
 
   Every other event is one event. A fold never spans two hours.
@@ -1976,7 +1976,12 @@ refusals are in `cw --local policy log` ("Networking and egress").
   row, and only the retention job deletes one. The current hour's folds
   wait in a separate table, where each report adds to its count. When the
   hour ends, orchestration inserts each fold as one row and removes it from
-  that table. A read covers both, so the current hour is never behind.
+  that table. An open session waits there too, until it closes; if the
+  orchestration process holding it stops, it moves once that process is
+  gone, closed at the process's last heartbeat. A read covers both, so the
+  current hour is never behind. The tables are `sandbox_audit_events` and
+  `sandbox_audit_pending`; `scripts/checks/repo_policy/sandbox_audit_writers.py`
+  refuses a write to either outside orchestration's audit module.
 - **Retention.** 90 days. A daily job deletes events older than that and
   drops a month's partition once it is empty. Events are kept after the
   Sandbox is deleted, until they expire. Deleting the organization deletes

@@ -141,6 +141,14 @@ pub fn start_loops(
                     super::abandoned_leases::abandoned_leases_loop(ctx, leadership).await;
                 });
             }
+            // #6189: the Sandbox audit log's partitions, flush and expiry.
+            "audit-log" => {
+                let ctx = ctx.clone();
+                let leadership = leadership.clone();
+                tokio::spawn(async move {
+                    crate::audit::audit_log_loop(ctx, leadership).await;
+                });
+            }
             // Not leader-gated: every orchestration Pod adds the image set it
             // renders, so a rolling deploy's new Pods warm their release
             // before the old leader steps down.

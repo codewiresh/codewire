@@ -11,6 +11,7 @@
 
 pub mod access_profiles;
 pub mod api;
+pub mod audit;
 pub mod confidential_storage;
 pub mod connect;
 pub mod credentials;

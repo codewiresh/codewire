@@ -1105,6 +1105,12 @@ database_lane_orchestration() {
       'worker::sandbox_stopped_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "Sandbox audit log writer matrix" sandbox-audit-writer \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit::store_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "abandoned lease sweep matrix" abandoned-lease-sweep \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
