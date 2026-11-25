@@ -1718,9 +1718,10 @@ async fn a_name_under_a_suffix_is_reported_as_the_suffix() {
 }
 
 /// The broker's refusals are reported by their code: one in a failure
-/// frame, and one it answers as a 403 with its header. A provider's answer
-/// is not a refusal, whatever header it carries, and a 403 claims only the
-/// codes the broker answers that way.
+/// frame, and those it answers with its header, as a 403 or, for a
+/// credential conflict, a 400. A provider's answer is not a refusal,
+/// whatever header it carries, and each status claims only the codes the
+/// broker answers with it.
 #[tokio::test]
 async fn the_brokers_refusals_are_reported_and_a_providers_answers_are_not() {
     use codewire_access::RefusalCode;
@@ -1734,6 +1735,13 @@ async fn the_brokers_refusals_are_reported_and_a_providers_answers_are_not() {
             "no_credential_selected",
             Some(RefusalCode::NoCredentialSelected),
         ),
+        (
+            400,
+            "credential_conflict",
+            Some(RefusalCode::CredentialConflict),
+        ),
+        (403, "credential_conflict", None),
+        (400, "no_credential_selected", None),
     ];
     for (status, header, expected) in answers {
         let task = tokio::spawn({

@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use codewire_access::{REFUSAL_HEADER, RefusalCode};
+use codewire_access::{REFUSAL_HEADER, Refusal, RefusalCode};
 use codewire_credential_bridge::AnsweredRefusal;
-use http::{Response, StatusCode};
+use http::Response;
 
 use crate::{INTERCEPT_PORT, RouteTable};
 
@@ -21,13 +21,15 @@ pub trait RefusalSink: Send + Sync + 'static {
 }
 
 /// The refusals the credential broker answers itself as an ordinary
-/// response rather than a failure frame (its `reconnect` answers), which the
-/// front door can tell only by their header. Each is a 403.
-const BROKER_ANSWERED: [RefusalCode; 4] = [
-    RefusalCode::NoCredentialSelected,
-    RefusalCode::CredentialRevoked,
-    RefusalCode::CredentialExpired,
-    RefusalCode::CredentialNeedsReconnect,
+/// response rather than a failure frame (its `reconnect` answers, 403, and
+/// a placeholder sent beside another credential, 400), which the front door
+/// can tell only by their status and header.
+const BROKER_ANSWERED: [Refusal; 5] = [
+    Refusal::NoCredentialSelected,
+    Refusal::CredentialRevoked,
+    Refusal::CredentialExpired,
+    Refusal::CredentialNeedsReconnect,
+    Refusal::CredentialConflict,
 ];
 
 /// The refusal `response` answers, if it is one: one the bridge or the
@@ -37,11 +39,12 @@ pub(crate) fn refusal_of(response: &Response<Body>) -> Option<RefusalCode> {
     if let Some(AnsweredRefusal(refusal)) = response.extensions().get::<AnsweredRefusal>() {
         return Some(refusal.code());
     }
-    if response.status() != StatusCode::FORBIDDEN {
-        return None;
-    }
     let header = response.headers().get(REFUSAL_HEADER)?.to_str().ok()?;
-    RefusalCode::from_code(header).filter(|code| BROKER_ANSWERED.contains(code))
+    let code = RefusalCode::from_code(header)?;
+    BROKER_ANSWERED
+        .iter()
+        .any(|refusal| refusal.code() == code && refusal.status() == response.status().as_u16())
+        .then_some(code)
 }
 
 impl RouteTable {
