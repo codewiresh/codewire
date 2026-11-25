@@ -1111,6 +1111,12 @@ printf '%s\n' "${#active[@]}" >> "$trace/running"
 printf '%s %s|%s\n' "$(date +%s%N)" "${CARGO_TARGET_DIR#"$ARCHIVE_TARGETS"}" "$args" >> "$trace/calls"
 rm -f -- "$trace/active/$$"
 [ "$package" != "${ARCHIVE_FAIL:-none}" ] || { echo "error: could not compile \`$package\`"; exit 101; }
+# --timings writes Cargo's report, one unit named for the package.
+if [[ " $* " == *' --timings '* ]]; then
+  mkdir -p "$CARGO_TARGET_DIR/cargo-timings"
+  printf '<script>\nconst UNIT_DATA = [{"name": "%s", "target": " \\"lib\\" (test)", "start": 1.0, "duration": 2.5}];\n</script>\n' \
+    "$package" > "$CARGO_TARGET_DIR/cargo-timings/cargo-timing.html"
+fi
 if [ "$1" = build ]; then
   profile=debug
   [[ " $* " != *' --profile ci '* ]] || profile=ci
@@ -1168,34 +1174,34 @@ archive_build_check() {
   [ "$(sort -n "$TMP/archive-build-$name/trace/running" | tail -n 1)" = "$batches" ] ||
     { echo "the $batches $name build batches did not run at the same time" >&2; exit 1; }
 }
-EXPECTED_DATABASE_ARCHIVES='nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
-nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
-nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
-nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
-nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
-nextest archive --locked -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
-nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
-nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst
-nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+EXPECTED_DATABASE_ARCHIVES='nextest archive --locked --timings -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
+nextest archive --locked --timings -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
+nextest archive --locked --timings -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
+nextest archive --locked --timings -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
+nextest archive --locked --timings -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
+nextest archive --locked --timings -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
+nextest archive --locked --timings -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
+nextest archive --locked --timings -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst
+nextest archive --locked --timings -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
 build --locked -p codewire-server-core --bin codewire-db-migrate'
 # The runner's own batch folder, from before it joined the first batch, goes.
 mkdir -p "$TMP/archive-build-database/build/targets/database/batch-migration-runner/ci"
 archive_build_case database database-archives database 4 '|valid:v3|database|complete|' ||
   { cat "$TMP/archive-build-database/log" >&2; echo 'the database archive build failed' >&2; exit 1; }
 archive_build_check database "$EXPECTED_DATABASE_ARCHIVES" 'database:
-  nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
-  nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+  nextest archive --locked --timings -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
+  nextest archive --locked --timings -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
   build --locked -p codewire-server-core --bin codewire-db-migrate
 database/batch-credential-service-enrollment:
-  nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
-  nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
-  nextest archive --locked -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
-  nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
+  nextest archive --locked --timings -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
+  nextest archive --locked --timings -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
+  nextest archive --locked --timings -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
+  nextest archive --locked --timings -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
 database/batch-orchestration:
-  nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
+  nextest archive --locked --timings -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
 database/batch-platform-credentials:
-  nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
-  nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 4
+  nextest archive --locked --timings -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
+  nextest archive --locked --timings -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 4
 [ ! -e "$TMP/archive-build-database/build/targets/database/batch-migration-runner" ] ||
   { echo 'the migration runner batch folder from before was kept' >&2; exit 1; }
 [ "$(find "$TMP/archive-build-database/out" -name '*.tar.zst' | wc -l)" -eq 9 ] &&
@@ -1207,6 +1213,11 @@ for batch in server_core orchestration; do
   grep -q "^\[build batch\] $batch: finish (elapsed_seconds=[0-9]* folder_size=[0-9.]\+[KMG])$" "$TMP/archive-build-database/log" ||
     { grep '^\[build batch\]' "$TMP/archive-build-database/log" >&2; echo "the $batch build batch did not report its time and folder size" >&2; exit 1; }
 done
+# Each archive names the units that held its build up, from its --timings
+# report (infra#1534).
+grep -qxF '[build batch] codewire-orchestration timings: longest    2.5 s at    1.0 s  codewire-orchestration "lib" (test)' \
+  "$TMP/archive-build-database/log" ||
+  { grep '^\[build batch\]' "$TMP/archive-build-database/log" >&2; echo 'the orchestration archive did not report its slowest units' >&2; exit 1; }
 # A failing build stops its own batch at once and fails the build, after
 # every other batch has run to its end.
 if archive_build_case database-failed database-archives database 4 '|valid:v3|database|complete|' codewire-server-core; then
@@ -1220,35 +1231,35 @@ grep -qF '::error::the server_core build batch failed' "$TMP/archive-build-datab
 [ "$(wc -l < "$TMP/archive-build-database-failed/trace/calls")" -eq 8 ] ||
   { echo 'the other build batches did not run to their end' >&2; exit 1; }
 
-EXPECTED_SERVICES_CONTROL_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate
-build --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
-nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --test invitation_email --test password_add --test signup_limit --archive-file OUT/codewire-idp.tar.zst
-nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
-nextest archive --locked -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
-nextest archive --locked -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst'
+EXPECTED_SERVICES_CONTROL_ARCHIVES='build --timings --locked -p codewire-server-core --bin codewire-db-migrate
+build --timings --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
+nextest archive --locked --timings -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --test invitation_email --test password_add --test signup_limit --archive-file OUT/codewire-idp.tar.zst
+nextest archive --locked --timings -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
+nextest archive --locked --timings -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
+nextest archive --locked --timings -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst'
 archive_build_case control services-control-archives services_control 4 "$full" ||
   { cat "$TMP/archive-build-control/log" >&2; echo 'the control-plane archive build failed' >&2; exit 1; }
 archive_build_check control "$EXPECTED_SERVICES_CONTROL_ARCHIVES" 'services_control:
-  build --locked -p codewire-server-core --bin codewire-db-migrate
-  build --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
-  nextest archive --locked -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst
+  build --timings --locked -p codewire-server-core --bin codewire-db-migrate
+  build --timings --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
+  nextest archive --locked --timings -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst
 services_control/batch-billing:
-  nextest archive --locked -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
+  nextest archive --locked --timings -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
 services_control/batch-coordinator:
-  nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
+  nextest archive --locked --timings -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
 services_control/batch-idp:
-  nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --test invitation_email --test password_add --test signup_limit --archive-file OUT/codewire-idp.tar.zst' 4
+  nextest archive --locked --timings -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --test invitation_email --test password_add --test signup_limit --archive-file OUT/codewire-idp.tar.zst' 4
 for binary in codewire-db-migrate codewire-idp codewire-coordinator codewire-billing; do
   [ -x "$TMP/archive-build-control/out/$binary" ] ||
     { echo "the control-plane archive build did not keep $binary" >&2; exit 1; }
 done
 
-EXPECTED_SERVICES_RUNTIME_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate
-build --locked -p codewire-coordinator
-build --locked -p codewire-cli-bin --bin cw
-nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
-nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
-nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst'
+EXPECTED_SERVICES_RUNTIME_ARCHIVES='build --timings --locked -p codewire-server-core --bin codewire-db-migrate
+build --timings --locked -p codewire-coordinator
+build --timings --locked -p codewire-cli-bin --bin cw
+nextest archive --locked --timings -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
+nextest archive --locked --timings -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+nextest archive --locked --timings -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst'
 # cw and the orchestration wire contract build beside the binaries, each in
 # its own folder: one after another, the plane was the build's longest leg
 # (#5146).
@@ -1256,14 +1267,14 @@ archive_build_case runtime services-runtime-archives services_runtime 3 \
   '|valid:v3|service_orchestration|service_nats|service_temporal|complete|' ||
   { cat "$TMP/archive-build-runtime/log" >&2; echo 'the runtime-plane archive build failed' >&2; exit 1; }
 archive_build_check runtime "$EXPECTED_SERVICES_RUNTIME_ARCHIVES" 'services_runtime:
-  build --locked -p codewire-server-core --bin codewire-db-migrate
-  build --locked -p codewire-coordinator
-  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
-  nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+  build --timings --locked -p codewire-server-core --bin codewire-db-migrate
+  build --timings --locked -p codewire-coordinator
+  nextest archive --locked --timings -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+  nextest archive --locked --timings -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
 services_runtime/batch-cw:
-  build --locked -p codewire-cli-bin --bin cw
+  build --timings --locked -p codewire-cli-bin --bin cw
 services_runtime/batch-orchestration:
-  nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst' 3
+  nextest archive --locked --timings -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst' 3
 for binary in codewire-db-migrate cw; do
   [ -x "$TMP/archive-build-runtime/out/$binary" ] ||
     { echo "the runtime-plane archive build did not keep $binary" >&2; exit 1; }

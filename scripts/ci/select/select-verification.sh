@@ -1042,6 +1042,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-local-smoke-isolation.py|\
       scripts/dev/fetch-main-build|scripts/ci/tests/test-fetch-main-build.py|\
       scripts/ci/tests/test-pinned-tool.sh|\
+      scripts/ci/setup/cargo-timings-summary.py|\
+      scripts/ci/tests/test-cargo-timings-summary.py|\
       scripts/ci/tests/test-fetch-pinned-gh.sh|\
       scripts/ci/verify/check-github-app-permissions.py|\
       scripts/ci/tests/test-check-github-app-permissions.py|\

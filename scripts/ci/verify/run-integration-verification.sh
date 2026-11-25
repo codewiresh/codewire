@@ -154,6 +154,13 @@ archive_key() {
   printf '%s' "$key"
 }
 
+batch_timings() {
+  # batch_timings LABEL: the units that held this build up, from the --timings
+  # report it just wrote to its batch folder (infra#1534). Measurement only.
+  python3 -I "$ROOT/scripts/ci/setup/cargo-timings-summary.py" \
+    "${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "[build batch] $1 timings:" || true
+}
+
 archive_cargo() {
   local command="${1:-}"
   shift || true
@@ -172,8 +179,9 @@ archive_cargo() {
         *) build_args+=("$1"); shift ;;
       esac
     done
-    command cargo build "${build_args[@]}"
-    return
+    command cargo build --timings "${build_args[@]}" || return
+    batch_timings build
+    return 0
   fi
   [ "$command" = test ] || { echo "::error::archive mode cannot run cargo $command" >&2; return 2; }
   local package="" features="" no_default=false no_run=false name="" exact=false ignored=default
@@ -225,9 +233,10 @@ archive_cargo() {
     [ -n "${ARCHIVE_BUILD_DIR:-}" ] || return 0
     [ ! -e "$ARCHIVE_BUILD_DIR/$key.tar.zst" ] ||
       { echo "::error::two build batches share the archive $key" >&2; return 2; }
-    command cargo nextest archive --locked "${cargo_args[@]}" \
-      --archive-file "$ARCHIVE_BUILD_DIR/$key.tar.zst"
-    return
+    command cargo nextest archive --locked --timings "${cargo_args[@]}" \
+      --archive-file "$ARCHIVE_BUILD_DIR/$key.tar.zst" || return
+    batch_timings "$key"
+    return 0
   fi
   local extracted="$RUN_DIR/archives/$key"
   [ -f "$extracted/target/nextest/binaries-metadata.json" ] ||
