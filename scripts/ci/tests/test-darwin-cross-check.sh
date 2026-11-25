@@ -241,7 +241,7 @@ else:
     install = 'cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"'
     export = 'echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"'
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
-    assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
+    assert 'scripts/ci/setup/pinned-tool.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256"' in setup
     # Rust checks runs the --cli check when the cw package changes (#3119
     # A13), and the local VMM's Darwin check, with the installed
     # cargo-zigbuild on PATH from the build folder's Cargo home (infra#1632:
@@ -261,7 +261,7 @@ else:
         assert "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')" in setup
         assert main_push not in setup
         assert install in setup and export in setup and setup.index(install) < setup.index(export)
-        assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
+        assert 'scripts/ci/setup/pinned-tool.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256"' in setup
         run = job.split(f'      - name: {run_name}\n', 1)[1].split('      - name:', 1)[0]
         assert "CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}" in run
         assert f'run: scripts/ci/setup/{command}' in run

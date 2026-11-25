@@ -970,10 +970,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (needs.verification-selection.outputs.cw_package_selected == 'true' || contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')) }}
         run: |
           set -euo pipefail
+          # Kept on the build disk when the runner has one (pinned-tool.sh).
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xf zig.tar.xz
+          zig_tar="$(scripts/ci/setup/pinned-tool.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256")"
+          tar -xf "$zig_tar"
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
@@ -1399,10 +1399,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|') && steps.local-vmm-archives.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
+          # Kept on the build disk when the runner has one (pinned-tool.sh).
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xf zig.tar.xz
+          zig_tar="$(scripts/ci/setup/pinned-tool.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256")"
+          tar -xf "$zig_tar"
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
