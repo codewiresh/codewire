@@ -2037,6 +2037,11 @@ run_paths_case runtime_dev_interception_gate pull_request refs/pull/6302/head fa
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/hosted-interception-gate.sh \
   scripts/runtime/tests/test-hosted-interception-gate.sh
+# The hosted front-door walk runs under a sign-in it is given, too.
+run_paths_case runtime_dev_interception_walk pull_request refs/pull/6349/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/hosted-interception-walk.sh \
+  scripts/runtime/tests/test-hosted-interception-walk.sh
 # A walk organization's bounded credit reads and writes no secret either.
 run_paths_case runtime_dev_walk_org_credit pull_request refs/pull/3586/head false \
   'policy dev_smoke_script_tests security security_js' \

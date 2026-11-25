@@ -302,9 +302,10 @@ cleanup() {
     fi
   done
   # Every entry of the first listing is still there, unchanged; anything
-  # new that is not this run's is another walk's, reported by name only.
+  # new that is not this run's is another walk's, reported by name only. A
+  # new account's first listing is empty, which is still a listing.
   local after
-  if [[ -n "$PROJECT" && -s "$PROJECT/first-listing" ]] && after="$(inventory)"; then
+  if [[ -n "$PROJECT" && -f "$PROJECT/first-listing" ]] && after="$(inventory)"; then
     local missing others
     missing="$(LC_ALL=C comm -23 "$PROJECT/first-listing" <(printf '%s\n' "$after") | wc -l)"
     others="$(LC_ALL=C comm -13 "$PROJECT/first-listing" <(printf '%s\n' "$after") | cut -f1,3 | tr '\t' ' ' | paste -sd, -)"
@@ -460,6 +461,20 @@ PROJECT="$(mktemp -d "$XDG_RUNTIME_DIR/hosted-walk.XXXXXX")"
 inventory >"$PROJECT/first-listing" || die 'cannot list the account before the walk'
 log "FIRST listing: $(wc -l <"$PROJECT/first-listing") entries (kind, id, name, provider or default, status or revision)"
 sed 's/^/FIRST /' "$PROJECT/first-listing"
+# The walk's own profile must never become the default, which can't be
+# deleted (#3550), so the account needs a default before anything is made.
+# Only the personal-walk identity may get the anchor default; any other
+# account's default is never made or changed.
+profiles="$(cw credentials --cloud profiles list --output json | json)" || die 'cannot list profiles'
+MAKE_ANCHOR=false
+if ! jq -e 'any(.[]; .is_default == true)' <<<"$profiles" >/dev/null; then
+  if [[ "$(jq 'length' <<<"$profiles")" != 0 ]]; then
+    die 'the account has profiles but no default'
+  elif [[ "$WALK_EMAIL" != "$PERSONAL_WALK_EMAIL" ]]; then
+    die "the account has no profile, so the walk's own would become its default; the walk makes a default only for the personal-walk identity, so give $WALK_EMAIL one first"
+  fi
+  MAKE_ANCHOR=true
+fi
 WALK_STARTED=true
 
 # --- 1. set up ------------------------------------------------------------------
@@ -474,17 +489,13 @@ B_ID="$(credential_id b)" || true
 [[ "$B_ID" =~ $UUID_PATTERN ]] || die 'credential B is not listed by its name'
 log "created credential_a=$A_ID credential_b=$B_ID"
 
-profiles="$(cw credentials --cloud profiles list --output json | json)" || die 'cannot list profiles'
-# Only the personal-walk identity may get the anchor default; any other
-# account's default is never made or changed.
-if [[ "$(jq 'length' <<<"$profiles")" == 0 && "$WALK_EMAIL" == "$PERSONAL_WALK_EMAIL" ]]; then
+if [[ "$MAKE_ANCHOR" == true ]]; then
   log "the account has no profile; making the empty default $ANCHOR_PROFILE"
   cw credentials --cloud --profile "$ANCHOR_PROFILE" set anthropic "id:$A_ID"
   cw credentials --cloud --profile "$ANCHOR_PROFILE" unset anthropic
-  profiles="$(cw credentials --cloud profiles list --output json | json)" || die 'cannot list profiles'
+  cw credentials --cloud profiles list --output json | json | jq -e 'any(.[]; .is_default == true)' >/dev/null ||
+    die "$ANCHOR_PROFILE did not become the default"
 fi
-jq -e 'any(.[]; .is_default == true)' <<<"$profiles" >/dev/null ||
-  die 'the account has profiles but no default'
 
 printf '\n$ cw credentials --cloud --profile %s set anthropic id:%s\n' "$NAME" "$A_ID"
 cw credentials --cloud --profile "$NAME" set anthropic "id:$A_ID"
