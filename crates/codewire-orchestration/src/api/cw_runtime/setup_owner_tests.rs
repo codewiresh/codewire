@@ -1,9 +1,10 @@
-//! #6251: a Sandbox left with another activity's `claimed` post-start setup
-//! owner is refused runtime admission (`GetEnvironmentCwRuntime` answers
-//! `failed_precondition`) until the running path releases that owner, and is
-//! admitted after. Each case runs in its own disposable database from
-//! `TEST_DATABASE_URL`. No Pod or daemon exists: the probe reports the bound
-//! Pod as the runtime would, and nothing connects.
+//! A Sandbox with a `claimed` post-start setup owner is refused runtime
+//! admission (`GetEnvironmentCwRuntime` answers `failed_precondition`) until
+//! that owner is released, and is admitted after: by the running path when
+//! another activity left it (#6251), or by the post-start mutation itself when
+//! it errors after its claim (#6258). Each case runs in its own disposable
+//! database from `TEST_DATABASE_URL`. No Pod or daemon exists: the probe
+//! reports the bound Pod as the runtime would, and nothing connects.
 
 use anyhow::{Result, ensure};
 use sqlx::PgPool;
@@ -189,6 +190,43 @@ async fn db_runtime_admission_follows_the_release_of_a_left_claimed_owner() -> R
 
         let retry = activity(pool, generation, "118", 2).await?;
         ensure!(retry.release_stale_claimed_owner().await?.is_some());
+        let (row, whole) = admission(&backend).await?;
+        ensure!(
+            row.is_ok() && whole.is_ok(),
+            "the released Sandbox is admitted: {row:?} {whole:?}"
+        );
+        Ok(())
+    }
+    .await;
+    database.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn db_runtime_admission_follows_a_post_start_error_exit() -> Result<()> {
+    let database = TestDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let generation = seed(pool).await?;
+        let backend = DatabaseBackend(pool.clone());
+        let (row, whole) = admission(&backend).await?;
+        ensure!(
+            row.is_ok() && whole.is_ok(),
+            "the seeded Sandbox is admitted: {row:?} {whole:?}"
+        );
+
+        let post_start = activity(pool, generation, "118", 1).await?;
+        ensure!(
+            post_start.prepare_post_start_mutation(0).await?
+                == PhasePreparation::Ready(PhaseAcquire::Acquired)
+        );
+        let (row, whole) = admission(&backend).await?;
+        ensure!(
+            not_ready(&row) && not_ready(&whole),
+            "a claimed owner is refused: {row:?} {whole:?}"
+        );
+
+        ensure!(post_start.release_own_claimed_owner(0).await?.is_some());
         let (row, whole) = admission(&backend).await?;
         ensure!(
             row.is_ok() && whole.is_ok(),

@@ -10,8 +10,6 @@ mod execute;
 mod intake;
 pub mod model;
 pub mod owner;
-#[cfg(test)]
-mod post_start_admission_tests;
 mod resolve;
 pub mod service;
 #[cfg(test)]

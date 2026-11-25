@@ -1196,6 +1196,7 @@ database_lane_orchestration_journals() {
       'api::cw_runtime::owner::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  # #6251 and #6258: admission after either release of a claimed setup owner.
   counted_suite "platform cw runtime admission after a setup owner release" platform-cw-runtime-setup-owner \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1530,12 +1531,6 @@ database_lane_orchestration_hosts() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::setup::post_start::tests::db_' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "platform cw runtime admission after a post-start error exit" platform-cw-runtime-post-start \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::cw_runtime::post_start_admission_tests::db_' \
       -- --ignored --nocapture --test-threads=1
 
   counted_suite "environment setup lease matrix" environment-setup-lease \
