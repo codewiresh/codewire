@@ -15,6 +15,7 @@ import lzma
 import os
 from pathlib import Path
 import secrets
+import select
 import shutil
 import string
 import subprocess
@@ -585,12 +586,18 @@ class Scanner(unittest.TestCase):
     def test_processes_environments_are_read_and_an_unreadable_one_fails(self):
         scanner = load_scanner()
         control = github()
+        # The child says it is running before it is scanned: until its exec
+        # completes, /proc/PID/environ still holds this process's environment.
         child = subprocess.Popen(
-            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            [sys.executable, "-c", "import sys; print(flush=True); sys.stdin.read()"],
             stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             env={"PLANTED": control},
         )
         try:
+            ready, _, _ = select.select([child.stdout], [], [], 30)
+            self.assertEqual(ready, [child.stdout], "the child never said it was running")
+            self.assertEqual(child.stdout.readline(), b"\n")
             results = scanner.Results({control.encode(): "environment"})
             with mock.patch.object(scanner.os, "listdir", return_value=[str(child.pid)]):
                 scanner.scan_processes(results, [])
@@ -601,7 +608,8 @@ class Scanner(unittest.TestCase):
                     scanner.scan_processes(scanner.Results({}), [])
         finally:
             child.stdin.close()
-            child.wait()
+            child.stdout.close()
+            child.wait(timeout=30)
 
     def test_the_scanned_list_names_every_file_read(self):
         self.write("a", "nothing")
