@@ -2333,6 +2333,9 @@ Issue: #4000.
     open, a second is in the middle of a long download, and a third has an
     open terminal or SSH session;
   - a Sandbox created, and one started, while that rollout is under way;
+  - a workload connection that carries nothing either way for 10 minutes,
+    then data, on Kata and on a broker-mode standard Pod; and one whose
+    Sandbox stops while it is open;
   - a new `cw-egress` version that never becomes ready;
   - a Sandbox whose daemon speaks a version of the egress stream that its
     node's `cw-egress` does not accept, as when a release reaches the
@@ -2493,7 +2496,12 @@ Issue: #4000.
   - through every move the status reads `ENFORCED`, never `UNCONFIRMED`,
     `NOT_ENFORCED` or `FAILED_CLOSED`, the refusal log keeps its counts,
     and `cw-egress`'s log names the Sandboxes that moved idle and those cut
-    at the deadline, with a count of each.
+    at the deadline, with a count of each;
+  - a connection silent both ways for longer than 120 s stays open and
+    carries data again: the egress netstack sends it a keep-alive every
+    30 s, which a live guest answers. A connection whose guest answers
+    nothing for 120 s is aborted, and one whose Sandbox stops ends with it
+    (#6399).
 - **Gotchas:**
   - With hosted egress on, `UNCONFIRMED` on a running Sandbox is a finding,
     not a default. `NOT_ENFORCED` means the deployment has hosted egress
@@ -2540,3 +2548,13 @@ Issue: #4000.
     `policy_differs`, naming the scratch policy, with `self_check_failed`.
     With the policy deleted, the same Pod's next admission passed: `Egress:
     enforced`, with no restart.
+  - on Dev, 2026-11-25, Dev source d91b9b7f69, as the Dev smoke identity,
+    from a broker-mode commodity (Kata) Sandbox on `open` (#6399 comment
+    143869):
+    - **A silent connection lives.** A connection to a public MySQL server
+      carried nothing either way for 610 s, then answered a query.
+    - **A stopped Sandbox's connection ends.** Polled from a second
+      Sandbox every 5 s, the server dropped it within 6 s of the stop.
+    - **Not yet observed:** the same on a broker-mode standard Pod, and a
+      guest present but answering nothing, which a Sandbox can't produce:
+      it has no network-admin capability, even through sudo.
