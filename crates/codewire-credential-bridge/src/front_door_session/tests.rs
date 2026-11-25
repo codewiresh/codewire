@@ -6,6 +6,8 @@ use uuid::Uuid;
 use v1::credential_bridge_guest_message::Payload as GuestPayload;
 use v1::credential_bridge_host_message::Payload as HostPayload;
 
+use codewire_access::Refusal;
+
 use super::*;
 use crate::MANAGED_OPENAI_API_PREFIX;
 
@@ -301,4 +303,64 @@ async fn the_open_lists_websocket_only_when_the_executor_serves_upgrades() {
             Err(FrontDoorSessionError::InvalidOpen)
         ));
     }
+}
+
+fn refused(identity: BridgeIdentity, refusal: Refusal) -> v1::CredentialBridgeHostMessage {
+    host_message(HostPayload::EpochRefused(
+        v1::CredentialBridgeEpochRefused {
+            protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+            environment_id: identity.environment_id.to_string(),
+            environment_generation: identity.environment_generation,
+            refusal: crate::wire_refusal(refusal) as i32,
+        },
+    ))
+}
+
+/// A session that opens with the broker's named refusal ends, and the front
+/// door answers its requests with that refusal, its header and its sentence
+/// alone (#6406).
+#[tokio::test(start_paused = true)]
+async fn a_refused_epoch_answers_the_front_doors_requests_by_name() {
+    let bridge = bridge();
+    let (guest, mut stream) = serve(&bridge);
+    write_frame(
+        &mut stream,
+        &refused(bridge.identity(), Refusal::CredentialOwnerDeparted),
+    )
+    .await
+    .unwrap();
+    assert_eq!(guest.await.unwrap(), Ok(()));
+
+    let response = bridge.respond_intercepted(HOST, request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.headers()[codewire_access::REFUSAL_HEADER],
+        "credential_owner_departed"
+    );
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        body,
+        "Codewire: this Sandbox's creator is no longer in its organization, so its credentials aren't used.\n"
+            .as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_for_another_identity_is_an_invalid_open() {
+    let bridge = bridge();
+    let other = BridgeIdentity {
+        environment_generation: bridge.identity().environment_generation + 1,
+        ..bridge.identity()
+    };
+    let (guest, mut stream) = serve(&bridge);
+    write_frame(
+        &mut stream,
+        &refused(other, Refusal::CredentialOwnerDeparted),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bounded(guest).await.unwrap(),
+        Err(FrontDoorSessionError::InvalidOpen)
+    );
 }

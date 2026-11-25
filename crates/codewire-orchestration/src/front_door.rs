@@ -84,7 +84,14 @@ pub struct FrontDoorEpochs {
     next: AtomicU64,
     /// Woken at each registration, for a session waiting between epochs.
     registered: tokio::sync::Notify,
+    /// The broker's last named refusal of each binding's epoch, and when
+    /// (#6406): what a front door that finds no epoch is answered with.
+    refused: Mutex<HashMap<BindingKey, (codewire_access::Refusal, tokio::time::Instant)>>,
 }
+
+/// How long a binding's named refusal is kept without a newer one: past the
+/// relay's longest wait between admissions, as the daemon keeps its own.
+pub const FRONT_DOOR_REFUSAL_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 struct LiveSession {
     id: u64,
@@ -154,6 +161,10 @@ impl FrontDoorEpochs {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key.clone(), Slot { id, joins });
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&key);
         self.registered.notify_waiters();
         Registration {
             epochs: Arc::clone(self),
@@ -224,6 +235,26 @@ impl FrontDoorEpochs {
                 return false;
             }
         }
+    }
+
+    /// Keep the broker's named refusal of `key`'s epoch (#6406), dropping
+    /// any other binding's that has lapsed.
+    pub fn refuse(&self, key: BindingKey, refusal: codewire_access::Refusal) {
+        let now = tokio::time::Instant::now();
+        let mut refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
+        refused.retain(|_, (_, at)| now.duration_since(*at) < FRONT_DOOR_REFUSAL_LIFETIME);
+        refused.insert(key, (refusal, now));
+    }
+
+    /// `key`'s named refusal, while it is fresh and no epoch has registered
+    /// since.
+    pub fn refusal(&self, key: &BindingKey) -> Option<codewire_access::Refusal> {
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .filter(|(_, at)| at.elapsed() < FRONT_DOOR_REFUSAL_LIFETIME)
+            .map(|(refusal, _)| *refusal)
     }
 
     /// The binding's current epoch, if one is admitted on this process, and

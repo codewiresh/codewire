@@ -1694,7 +1694,7 @@ What applies when, for a running hosted Sandbox:
 |---|---|
 | Rotate or replace material, Reconnect, revoke, delete, an OAuth refresh | The next request |
 | Organization membership or role, organization deletion, rebinding the running environment, personal-credential confirmation, environment state, Pod lineage | Within 60 seconds |
-| The creator leaves or is removed from the organization, or their account is disabled | Within 60 seconds for every request (`credential_owner_departed`, `credential_owner_disabled`); a delivered Codex or Claude login is removed within 2 minutes (the front door's requests after the epoch ends: see "A departed or disabled creator") |
+| The creator leaves or is removed from the organization, or their account is disabled | Within 60 seconds for every request (`credential_owner_departed`, `credential_owner_disabled`); a delivered Codex or Claude login is removed within 2 minutes |
 | Switch to a different profile | Through the restart it already triggers |
 | Edit the selected profile: change, add or clear a slot (approved, not yet shipped; #6339) | The next request; a slot added or a form changed reaches each process at its next launch |
 | SSH key change or revocation | The next signature |
@@ -1720,9 +1720,16 @@ credential at all, the organization's included:
   403 and a login check is a denial, so a delivered login is still removed
   within 2 minutes. It reads any refusal but a 403 one it knows as a plain
   denial.
-- **Not yet built (#6406):** the front door. Its requests on an intercepted
-  host get 503 `credential_unavailable` while no epoch is admitted. Nothing
-  of the creator's is used either way.
+- The relay keeps the same refusal for the binding's front door, for the
+  same 60 seconds, in its own process. A front-door session that finds no
+  epoch to join on that process gets it in place of Open and ends. cw-egress
+  keeps it as the daemon does, and opens the session again within its
+  reopen backoff's cap (`BACKOFF_CAP`, 30 seconds, in
+  `codewire-egress-node`'s `front_door_session.rs`), renewing it. Its
+  requests on an intercepted host get the named 403 too, once its image
+  carries this change (a cw-egress pin bump); until then, and on a process
+  that holds no refusal, they get 503 `credential_unavailable`. Only the
+  refusal's closed value crosses, and its body is the table's sentence.
 - Organization owners and admins keep the Sandbox and its terminal, so they
   can recover work or stop it. Nothing of the creator's is reachable through
   it once the login is removed.

@@ -78,9 +78,10 @@ impl EgressServiceState {
         let place = front_doors
             .take_session(&key.pod_uid, stop.clone(), REPLACE_WAIT)
             .await;
-        let first = session::join(front_doors, &key)
-            .await
-            .map_err(|status| answer(&status))?;
+        let first = match session::join(front_doors, &key).await {
+            Ok(first) => first,
+            Err(status) => return no_session(front_doors, &key, &status),
+        };
         let open = session::open_frame(&key, &first.1.capabilities).ok_or_else(no_epoch)?;
         let frames = requests
             .map(|request| {
@@ -130,6 +131,32 @@ impl EgressServiceState {
             .take_until(tokio::time::sleep_until(caller.expires_at));
         connectrpc::Response::stream_ok(stream)
     }
+}
+
+/// With no epoch to join, the broker's named refusal of the binding's last,
+/// if this process holds one, ends the session as the front door's refusal
+/// (#6406): Attached, then that refusal in place of Open. cw-egress opens the
+/// session again within 30 seconds, renewing it. Otherwise the relay's answer,
+/// as before.
+fn no_session(
+    front_doors: &crate::front_door::FrontDoorEpochs,
+    key: &BindingKey,
+    status: &Status,
+) -> ServiceResult<ServiceStream<FrontDoorSessionResponse>> {
+    let frame = (status.code() == Code::Unavailable)
+        .then(|| front_doors.refusal(key))
+        .flatten()
+        .and_then(|refusal| session::refused_frame(key, refusal))
+        .ok_or_else(|| answer(status))?;
+    let attached = FrontDoorSessionResponse {
+        frame: Some(ResponseFrame::Attached(Box::default())),
+        ..Default::default()
+    };
+    let refused = FrontDoorSessionResponse {
+        frame: Some(ResponseFrame::Bridge(frame)),
+        ..Default::default()
+    };
+    connectrpc::Response::stream_ok(futures::stream::iter([Ok(attached), Ok(refused)]))
 }
 
 /// How long a newer session waits for the older one it replaces to let go

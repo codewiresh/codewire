@@ -624,11 +624,13 @@ fn transport_failure(status: &Status) -> bool {
 }
 
 /// The broker's answer, or why it didn't admit. A named refusal reaches the
-/// daemon first, in place of Open, so it denies logins and answers with it
-/// (#6406); a daemon that stopped reading just misses it.
+/// daemon first, in place of Open, so it denies logins and answers with it,
+/// and the binding's front door is answered with it too (#6406); a daemon
+/// that stopped reading just misses it.
 async fn refused_to_daemon<T>(
     answer: Result<T, Status>,
     prepared: &PreparedHostedCredentialBridge,
+    config: &EpochConfig,
 ) -> Result<T, Option<Unadmitted>> {
     let status = match answer {
         Ok(response) => return Ok(response),
@@ -636,6 +638,14 @@ async fn refused_to_daemon<T>(
     };
     if let Some(refusal) = named_refusal(&status) {
         let _ = prepared.refuse(refusal).await;
+        if let Some(front_doors) = &config.front_doors {
+            let key = BindingKey {
+                environment_id: config.environment_id,
+                pod_uid: config.pod_uid.clone(),
+                generation: config.generation,
+            };
+            front_doors.refuse(key, refusal);
+        }
     }
     Err(Some(Unadmitted::from_broker(&status)))
 }
@@ -847,7 +857,7 @@ async fn run_epoch_on(
                 tokio::time::timeout(BROKER_ADMISSION_TIMEOUT, broker.credential_bridge(request))
                     .await
                     .map_err(|_| Some(Unadmitted::BrokerTimeout))?;
-            let response = refused_to_daemon(response, &prepared).await?;
+            let response = refused_to_daemon(response, &prepared, config).await?;
             // Successful TLS/RPC headers certify the broker's dual TokenReview,
             // live Ready Pods, Running DB state, exact generation and real Ready.
             // They also list the optional operations this broker serves. The

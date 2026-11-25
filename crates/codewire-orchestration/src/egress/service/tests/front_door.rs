@@ -194,6 +194,43 @@ async fn without_an_epoch_for_the_pods_current_binding_cw_egress_retries() {
     }
 }
 
+/// With no epoch, a binding whose last epoch the broker refused by name is
+/// answered with that refusal in place of Open, by its closed value alone,
+/// and the session ends without an error (#6406).
+#[tokio::test]
+async fn without_an_epoch_a_named_refusal_reaches_the_front_door_in_place_of_open() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    front_doors.refuse(key(), codewire_access::Refusal::CredentialOwnerDeparted);
+    let messages = session(
+        app_with(&Cluster::healthy(), Arc::new(Bound), Some(front_doors)),
+        &[open()],
+    )
+    .await;
+    assert!(messages[0].get("attached").is_some(), "{messages:?}");
+    let frame = STANDARD
+        .decode(messages[1]["bridge"].as_str().unwrap())
+        .unwrap();
+    let message =
+        v1::CredentialBridgeHostMessage::decode(crate::front_door::frame_message(&frame).unwrap())
+            .unwrap();
+    let Some(v1::credential_bridge_host_message::Payload::EpochRefused(epoch_refused)) =
+        message.payload
+    else {
+        panic!("a refusal in place of Open: {message:?}");
+    };
+    assert_eq!(
+        epoch_refused.refusal,
+        v1::CredentialBridgeRefusal::CredentialOwnerDeparted as i32
+    );
+    assert_eq!(
+        epoch_refused.environment_id,
+        key().environment_id.to_string()
+    );
+    assert_eq!(epoch_refused.environment_generation, key().generation);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert_eq!(refused(&messages), "none", "{messages:?}");
+}
+
 #[tokio::test]
 async fn an_epochs_refusal_reaches_cw_egress_by_its_code_alone() {
     for (status, code) in [

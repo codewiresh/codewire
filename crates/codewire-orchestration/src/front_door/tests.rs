@@ -164,3 +164,30 @@ async fn a_newer_session_waits_for_the_older_only_so_long() {
         .await;
     assert!(started.elapsed() >= wait);
 }
+
+/// A binding's named refusal is kept for its front door for 60 seconds, for
+/// that binding alone, and a registered epoch clears it (#6406).
+#[tokio::test(start_paused = true)]
+async fn a_named_refusal_holds_until_it_lapses_or_an_epoch_registers() {
+    use codewire_access::Refusal;
+
+    let epochs = Arc::new(FrontDoorEpochs::default());
+    let other = BindingKey {
+        generation: 4,
+        ..key()
+    };
+    epochs.refuse(key(), Refusal::CredentialOwnerDeparted);
+    assert_eq!(
+        epochs.refusal(&key()),
+        Some(Refusal::CredentialOwnerDeparted)
+    );
+    assert_eq!(epochs.refusal(&other), None);
+
+    tokio::time::advance(FRONT_DOOR_REFUSAL_LIFETIME).await;
+    assert_eq!(epochs.refusal(&key()), None);
+
+    epochs.refuse(key(), Refusal::CredentialOwnerDisabled);
+    let (joins, _requests) = mpsc::channel(1);
+    let _registration = epochs.register(key(), joins);
+    assert_eq!(epochs.refusal(&key()), None);
+}

@@ -57,7 +57,9 @@ pub enum FrontDoorSessionError {
 
 /// Serve the guest side of one front-door session on `stream` until either
 /// end closes it. The first frame must be an Open for `bridge`'s identity
-/// that lists [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`].
+/// that lists [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`], or the broker's
+/// named refusal of its epoch, which the bridge keeps (#6406) and the session
+/// then ends.
 pub async fn serve_front_door_session<S>(
     bridge: &CredentialBridge,
     stream: S,
@@ -71,10 +73,17 @@ where
         .await
         .map_err(|_| FrontDoorSessionError::InvalidOpen)??
         .ok_or(FrontDoorSessionError::InvalidOpen)?;
-    let capabilities = admit_open(open, bridge.identity())?;
+    let opened = admit_open(open, bridge.identity())?;
     let (prepared, mut output) = bridge
         .prepare_connection()
         .map_err(|_| FrontDoorSessionError::Refused)?;
+    let capabilities = match opened {
+        Opened::Open(capabilities) => capabilities,
+        Opened::Refused(refusal) => {
+            prepared.refuse(refusal).await;
+            return Ok(());
+        }
+    };
     let input = futures::stream::unfold(reader, |mut reader| async move {
         match reader.next::<v1::CredentialBridgeHostMessage>().await {
             Ok(Some(message)) => Some((Ok(message), reader)),
@@ -105,13 +114,28 @@ where
     }
 }
 
-/// The capabilities of a valid front-door Open for `identity`.
+/// A front-door session's first frame, once checked.
+enum Opened {
+    Open(Vec<String>),
+    Refused(codewire_access::Refusal),
+}
+
+/// The capabilities of a valid front-door Open for `identity`, or the named
+/// refusal that came in its place, for the same identity.
 fn admit_open(
     message: v1::CredentialBridgeHostMessage,
     identity: BridgeIdentity,
-) -> Result<Vec<String>, FrontDoorSessionError> {
-    let Some(v1::credential_bridge_host_message::Payload::Open(open)) = message.payload else {
-        return Err(FrontDoorSessionError::InvalidOpen);
+) -> Result<Opened, FrontDoorSessionError> {
+    let open = match message.payload {
+        Some(v1::credential_bridge_host_message::Payload::Open(open)) => open,
+        Some(v1::credential_bridge_host_message::Payload::EpochRefused(refused))
+            if refused.protocol_version == CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+                && refused.environment_id == identity.environment_id.to_string()
+                && refused.environment_generation == identity.environment_generation =>
+        {
+            return Ok(Opened::Refused(crate::epoch_refusal(refused.refusal)));
+        }
+        _ => return Err(FrontDoorSessionError::InvalidOpen),
     };
     let admitted = open.protocol_version == CREDENTIAL_BRIDGE_PROTOCOL_VERSION
         && open.environment_id == identity.environment_id.to_string()
@@ -128,7 +152,7 @@ fn admit_open(
     if !admitted {
         return Err(FrontDoorSessionError::InvalidOpen);
     }
-    Ok(open.capabilities)
+    Ok(Opened::Open(open.capabilities))
 }
 
 /// The Ready of a binding, unframed: what a relay opens every upstream with,

@@ -89,6 +89,25 @@ pub(super) fn open_frame(key: &BindingKey, capabilities: &[String]) -> Option<Ve
     front_door::framed(&open.encode_to_vec())
 }
 
+/// The broker's named refusal of the binding's epoch, framed, in place of the
+/// front door's Open (#6406): only its closed value crosses.
+pub(super) fn refused_frame(
+    key: &BindingKey,
+    refusal: codewire_access::Refusal,
+) -> Option<Vec<u8>> {
+    let refused = v1::CredentialBridgeHostMessage {
+        payload: Some(v1::credential_bridge_host_message::Payload::EpochRefused(
+            v1::CredentialBridgeEpochRefused {
+                protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: key.environment_id.to_string(),
+                environment_generation: key.generation,
+                refusal: codewire_credential_bridge::wire_refusal(refusal) as i32,
+            },
+        )),
+    };
+    front_door::framed(&refused.encode_to_vec())
+}
+
 fn no_epoch() -> Status {
     Status::unavailable("no credential relay epoch is running for this Pod")
 }
