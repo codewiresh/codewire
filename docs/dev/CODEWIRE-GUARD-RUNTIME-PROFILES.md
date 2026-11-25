@@ -461,6 +461,55 @@ page cache charged to the Pod.
 the runtime's container, outside the VM. The container's log carries the
 daemon's log.
 
+### Building the workspace disk in CI
+
+A `standard` workspace boots its image from a disk built from that image
+(`SANDBOX_STANDARD_IMAGE_DISK`). Dev accepts only a disk CI built and signed,
+or until then a digest the deploy repository's hosted policy waives by name.
+So CI builds, pushes and signs one disk for each workspace image it pins.
+
+- **Where and when.** The disk jobs are in `deploy-dev.yaml`, beside the
+  pod-runtime image: Deploy Dev's publisher identity is the one that holds
+  the runtime signing key, so no other identity gains it. They run only on
+  main's own events, never a pull request's or another branch's. Like
+  pod-runtime, the disk is keyed by a planner fingerprint, of the pinned
+  workspace images (`crates/codewire-workspace-image/src/pin.rs`) and the
+  disk's build inputs. The jobs are skipped when a signed disk already
+  carries that fingerprint's `fp-` tag.
+- **Inputs, prepared on the trusted light runner.** A job there compiles
+  `codewire-local-vmm-smoke` and takes the runtime from the signed pod-runtime
+  image that the source pins (`deployments/k8s/orchestration/pod-runtime-image.digest`),
+  checking main CI's signature first. It packs both in one tar, which keeps
+  the runtime's modes (directories 0700, executables 0500, other files 0400),
+  because a workflow artifact keeps no file mode. Its sha256 is a job output.
+- **The build, on the KVM runner.** `workspace-disk.sh build` runs on
+  `ci-trusted-medium-kvm` (infra `docs/ci/runners.md` section 2.6b), the one
+  CI runner with `/dev/kvm`, whose jobs run on the host kernel. The job holds
+  no credential. It refuses the tar unless its sha256 is the job output,
+  unpacks it with its modes and checks them against the runtime's lock.
+  It pulls the workspace image anonymously from its public GHCR mirror, and
+  refuses one whose digest is not the pinned digest. The `workspace-disk.sh
+  line` value names the platform registry's reference at that digest
+  (`codewire/workspace` or `codewire/workspace-systemd`), as the hosted
+  policy requires; `line` checks only the digest. Its scratch is a
+  dedicated volume on the node, because the build peaks at about 13 GB plus
+  the pulled image, and the scratch parent's path is at most 28 bytes. The
+  job needs `e2fsck`, `resize2fs`, `dumpe2fs`, `setpriv` and `python3` on the
+  runner. Until the volume exists, the job does not run.
+- **Publishing, back on the trusted light runner.** Signing the disk with
+  the runtime key makes that key vouch for bytes computed on a host-kernel
+  runner that boots a VM of the image; a sha256 over the hand-back proves
+  only their transport. The owner accepted that on 2026-11-24 (recorded on
+  #5602): Deploy Dev's publisher signs the disk the KVM runner builds, with
+  the codewire-runtime key, as family `workspace-disk`. Every credential
+  stays off the KVM runner. The job hands the disk directory back as an
+  artifact with its sha256 as a job output, and removes its own copy and
+  scratch at its end, failure included. Deploy Dev's publish job checks the
+  sha256, then pushes `codewire/workspace-disk` with the `fp-` tag and signs
+  it. The pin of `SANDBOX_STANDARD_IMAGE_DISK` to the `line` value comes
+  after that. The hosted policy's check of the disk's signature replaces the
+  waivers in the same change.
+
 ## Managed Runtime Gates
 
 The normal managed sandbox path is allowed to create `commodity` or
