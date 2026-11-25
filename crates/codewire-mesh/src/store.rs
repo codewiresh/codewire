@@ -1435,10 +1435,7 @@ fn task_filter_matches_event(event: &TaskEvent, filter: &TaskFilter) -> bool {
         return false;
     }
     let state = filter.state.trim();
-    if !state.is_empty() && event.state != state {
-        return false;
-    }
-    true
+    state.is_empty() || event.state == state
 }
 
 fn networks_from_state(state: &MemoryState, allowed: Option<&HashSet<&str>>) -> Vec<Network> {
