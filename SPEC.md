@@ -533,7 +533,12 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   and no init container.
 - **Inside the VM** run the user's image, Docker and the same daemon as on
   `commodity`. The daemon binds before it listens, holds the Sandbox's
-  tokens, and serves 7777, 2222 and the tailnet.
+  tokens, and serves 7777, 2222 and the tailnet. The workspace container has
+  the runtime's `cw` read-only at `/codewire/bin/cw`, as a `commodity` Pod
+  does: the daemon starts every process of a sandbox with application
+  secrets through it. The root disk is named by the image build and holds
+  setup's install state, so a stop and start keep it, and setup does not run
+  again; a new image build starts a fresh root.
 - **The supervisor** in the container boots the VM, hands it the Pod's
   settings, keeps the VM's copies of the projected tokens fresh, forwards
   7777 and 2222 from the Pod's address to the daemon, and powers the guest

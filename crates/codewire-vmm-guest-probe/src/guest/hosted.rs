@@ -40,6 +40,10 @@ pub(super) const HOSTED_RUN_PATH: &str = "/run/codewire/hosted/run";
 pub(super) const HOSTED_READY_PATH: &str = "/run/codewire/hosted/run/daemon/ready";
 /// The file name both token directories hold, as the Kata Pod's do.
 const TOKEN_NAME: &str = "token";
+/// Where a Kata Pod's init puts `cw`, and where the daemon's launch
+/// projection runs its helper from, so a sandbox with application secrets can
+/// run commands.
+const CONTAINER_CW_PATH: &str = "/codewire/bin/cw";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the host has sent this boot, and the workspace identity its files
@@ -397,6 +401,15 @@ pub(super) fn container_mounts() -> Vec<serde_json::Value> {
             "options": ["bind", access, "nosuid", "nodev", "noexec"]
         })
     })
+    // A hosted boot always carries the runtime catalog: the Pod's runtime
+    // installs it before every boot, and the daemon itself runs from its
+    // launcher. Without it, this source is missing and the container fails
+    // to start.
+    .chain(std::iter::once(serde_json::json!({
+        "destination": CONTAINER_CW_PATH, "type": "none",
+        "source": format!("{}/cw", crate::cw_runtime_live::LIVE_RUNTIME_VIEW),
+        "options": ["bind", "ro", "nosuid", "nodev", "exec"]
+    })))
     .collect()
 }
 
@@ -569,6 +582,39 @@ mod tests {
         // MODE is unset in a test process: no hosted mode, no device.
         assert_eq!(container_devices(), (Vec::new(), Vec::new()));
         assert_eq!(TUN_DEVICE, ("/dev/net/tun", 10, 200));
+    }
+
+    /// The daemon's launch projection refuses to run without its helper at
+    /// `/codewire/bin/cw` (`codewire-daemon`'s `apply_hosted_projection`), so
+    /// the container gets the runtime's own `cw` there, read-only.
+    #[test]
+    fn the_container_has_cw_where_the_launch_projection_runs_it() {
+        let mounts = container_mounts();
+        let cw: Vec<_> = mounts
+            .iter()
+            .filter(|mount| mount["destination"] == "/codewire/bin/cw")
+            .collect();
+        assert_eq!(cw.len(), 1);
+        assert_eq!(
+            cw[0]["source"],
+            format!("{}/cw", crate::cw_runtime_live::LIVE_RUNTIME_VIEW)
+        );
+        assert_eq!(
+            cw[0]["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "exec"])
+        );
+        // Every other hosted mount stays non-executable.
+        for mount in mounts
+            .iter()
+            .filter(|mount| mount["destination"] != "/codewire/bin/cw")
+        {
+            assert!(
+                mount["options"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("noexec"))
+            );
+        }
     }
 
     #[test]

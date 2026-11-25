@@ -9,16 +9,18 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-24. Written first; every step is not yet observed.
+Updated 2026-11-25. Written first. `standard-stop-start` is observed on Dev;
+the other steps are not yet.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
 | `standard-create` | not yet observed | not yet observed | not yet observed |
 | `standard-exec` | not yet observed | not yet observed | not yet observed |
+| `standard-application-secrets` | not yet observed | not yet observed | not yet observed |
 | `standard-docker` | not yet observed | not yet observed | not yet observed |
 | `standard-network` | not yet observed | not yet observed | not yet observed |
 | `standard-closed-egress` | not yet observed | not yet observed | not yet observed |
-| `standard-stop-start` | not yet observed | not yet observed | not yet observed |
+| `standard-stop-start` | not yet observed | steps 1 to 3, 2026-11-24 | not yet observed |
 | `standard-admission` | not yet observed | not yet observed | not yet observed |
 | `standard-beside-commodity` | not yet observed | not yet observed | not yet observed |
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
@@ -82,6 +84,27 @@ Updated 2026-11-24. Written first; every step is not yet observed.
   user `id` prints over SSH.
 - **Observed:** not yet observed.
 
+## `standard-application-secrets`: a sandbox's application secrets reach its commands and setup
+
+- **Entry points:** `cw --cloud create` with a project that selects
+  application secrets, then `cw exec` and the create's setup steps.
+- **States to exercise:** a setup step that reads a secret; a command after
+  the create; a sandbox with no secrets selected.
+- **Driving it:**
+  1. A project with one application secret whose value's sha256 is known,
+     and a `codewire.yaml` install step that checks the variable is set and
+     its sha256 matches: `cw --cloud create --name std-k` reaches running.
+  2. `cw exec --in std-k -- sh -c 'printf %s "$NAME" | sha256sum'` prints the
+     known hash.
+  3. In `std-a`, which selects none, the variable is unset.
+- **Proof:** the create's setup log with one install run and exit 0, and
+  the hash from step 2.
+- **Gotchas:** the daemon adds the values at launch through
+  `/codewire/bin/cw __environment-launch`; without that file every command
+  in the sandbox is refused, and setup reports "the daemon reported a
+  failure", not an exit code.
+- **Observed:** not yet observed.
+
 ## `standard-docker`: Docker runs in the VM and is not shared
 
 - **Entry points:** `docker` in a shell or a command.
@@ -91,8 +114,10 @@ Updated 2026-11-24. Written first; every step is not yet observed.
   1. `cw exec --in std-a -- docker run --rm busybox echo hello` prints `hello`.
   2. `cw exec --in std-a -- docker images -q` lists the image; the same command
      in `std-b` lists nothing.
-  3. `cw exec --in std-a -- df -h /var/lib/docker` shows Docker's own disk,
-     about half the room the VM's disks have on the sandbox's volume.
+  3. `cw exec --in std-a -- docker run --rm busybox df -h /` shows Docker's own
+     disk, about half the room the VM's disks have on the sandbox's volume.
+     Docker's data root is `/var/lib/docker` in the guest, outside the
+     workspace container, so the workspace itself has no such directory.
 - **Proof:** the image ID present in one sandbox and absent in the other, and
   Docker's data on its own disk.
 - **Observed:** not yet observed.
@@ -131,7 +156,7 @@ Updated 2026-11-24. Written first; every step is not yet observed.
   key, and the create fails rather than finishing.
 - **Observed:** not yet observed.
 
-## `standard-stop-start`: the home and the workspace persist, the root does not
+## `standard-stop-start`: the home, the workspace and the root persist until the image changes
 
 - **Entry points:** `cw stop`, `cw start`, the dashboard's stop and start.
 - **States to exercise:** a stop while a process writes; a start on the same
@@ -140,16 +165,20 @@ Updated 2026-11-24. Written first; every step is not yet observed.
 - **Driving it:**
   1. `cw exec --in std-a -- sh -c 'echo NONCE > ~/keep; echo NONCE > /workspace/keep; sudo sh -c "echo NONCE > /opt/gone"'`.
   2. `cw stop std-a`, then `cw start std-a`.
-  3. `cw exec --in std-a -- cat ~/keep /workspace/keep` prints the nonce twice;
-     `cw exec --in std-a -- cat /opt/gone` fails with "No such file".
+  3. `cw exec --in std-a -- cat ~/keep /workspace/keep /opt/gone` prints the
+     nonce three times. The root disk is named by the image build, and setup's
+     install state and output live on it, so setup does not run again on a
+     start. A create on a new image build starts a fresh root, and `/opt/gone`
+     is gone there.
   4. The Sandbox's `workspace` container has `CODEWIRE_VM_STATE=existing`.
      On a scratch sandbox only: stop it, remove its state disk from the
      volume, start it. Its Pod fails, and no empty workspace binds.
-- **Proof:** the nonce read back from the two kept paths, the missing third
-  file, the Sandbox's `existing`, and the failed Pod with nothing bound.
+- **Proof:** the nonce read back from the three paths, the Sandbox's
+  `existing`, and the failed Pod with nothing bound.
 - **Gotchas:** a stop that takes the whole grace period means the guest did
   not power off when asked; record the stop's duration.
-- **Observed:** not yet observed.
+- **Observed:** steps 1 to 3 on Dev, 2026-11-24 (#5602): stop took 5 s,
+  start 12 s, and all three nonces were kept. Step 4 not yet observed.
 
 ## `standard-admission`: a Pod of the class that breaks the rule is refused
 
