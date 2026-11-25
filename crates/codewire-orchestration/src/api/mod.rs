@@ -54,7 +54,7 @@ pub(crate) mod socket_keepalive;
 pub mod ssh_proxy;
 pub mod terminal;
 #[cfg(test)]
-mod test_state;
+pub(crate) mod test_state;
 pub mod trust_report;
 
 use std::sync::Arc;

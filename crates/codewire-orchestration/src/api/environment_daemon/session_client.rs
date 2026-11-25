@@ -18,7 +18,27 @@ pub(super) async fn session_client_for_target(
     let target = super::super::proxy::resolve_running_target(state, user, org_id, environment_id)
         .await
         .map_err(|(status, message)| huma_error(status, message))?;
-    let (channel, token) = match target {
+    let (channel, token) = daemon_channel(state, target, budget).await?;
+    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
+    // Even a launch-budget channel must prove readiness promptly. Do not let
+    // this pre-dispatch probe inherit the longer process-start deadline.
+    tokio::time::timeout(
+        DAEMON_CONTROL_TIMEOUT,
+        require_ready_daemon(&mut client, &token, required_capabilities),
+    )
+    .await
+    .map_err(|_| AppError::Upstream("environment daemon is unavailable".into()))??;
+    Ok((client, token))
+}
+
+/// A channel to a running environment's daemon, wherever it runs: in a
+/// sandbox, or on a host through its session's tunnel (#3609).
+pub(super) async fn daemon_channel(
+    state: &ApiState,
+    target: super::super::proxy::RunningTarget,
+    budget: DaemonRequestBudget,
+) -> AppResult<(Channel, String)> {
+    Ok(match target {
         super::super::proxy::RunningTarget::Host(target) => {
             super::host_daemon::host_daemon_channel(state.host_tunnels.clone(), target, budget)
                 .await?
@@ -41,15 +61,5 @@ pub(super) async fn session_client_for_target(
             )
             .await?
         }
-    };
-    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
-    // Even a launch-budget channel must prove readiness promptly. Do not let
-    // this pre-dispatch probe inherit the longer process-start deadline.
-    tokio::time::timeout(
-        DAEMON_CONTROL_TIMEOUT,
-        require_ready_daemon(&mut client, &token, required_capabilities),
-    )
-    .await
-    .map_err(|_| AppError::Upstream("environment daemon is unavailable".into()))??;
-    Ok((client, token))
+    })
 }

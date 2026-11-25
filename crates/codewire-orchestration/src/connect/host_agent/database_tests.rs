@@ -1241,3 +1241,48 @@ async fn db_a_tunnel_opened_without_the_hosts_proof_is_refused() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+/// A host environment's daemon status is asked of its host, not of the
+/// sandbox runtime (#6397): with no running report yet it is refused as not
+/// running on its host, where it used to fail as a missing sandbox backend.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_host_environments_daemon_status_is_asked_of_its_host() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, _key) = host(&db, "daemon-status", 1).await?;
+        placed_environment(&db, &id).await?;
+        sqlx::query(
+            "UPDATE environments SET state = 'running', desired_state = 'started' WHERE id = $1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        // No sandbox runtime at all: the sandbox path would fail on that.
+        let state = crate::api::test_state::offline(db.pool.clone()).await;
+        let user = codewire_server_core::auth::AuthUser {
+            user_id: OWNER.into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let error = crate::api::environment_daemon::get_environment_daemon_status_core(
+            &state,
+            &user,
+            ORG,
+            ENVIRONMENT,
+        )
+        .await
+        .err()
+        .context("a status for a VM its host hasn't reported running")?;
+        let text = format!("{error:?}");
+        ensure!(
+            text.contains("environment is not running on its host"),
+            "refused on the host path: {text}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

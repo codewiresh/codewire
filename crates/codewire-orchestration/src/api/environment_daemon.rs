@@ -607,14 +607,18 @@ pub async fn get_environment_daemon_status_core(
     org_id: &str,
     environment_id: &str,
 ) -> AppResult<EnvironmentDaemonStatus> {
-    let target = resolve_target(state, user, org_id, environment_id).await?;
-    daemon_status_for_target(
-        state,
-        &target.namespace,
-        &target.environment_id,
-        &target.pod_name,
-    )
-    .await
+    // Wherever it runs: an environment on a host answers through its host's
+    // tunnel, so a create or start on a host can see it ready (#6397).
+    let target = super::proxy::resolve_running_target(state, user, org_id, environment_id)
+        .await
+        .map_err(|(status, message)| huma_error(status, message))?;
+    let pod_name = match &target {
+        super::proxy::RunningTarget::Sandbox(target) => target.pod_name.clone(),
+        super::proxy::RunningTarget::Host(_) => String::new(),
+    };
+    let (channel, token) =
+        session_client::daemon_channel(state, target, DaemonRequestBudget::Control).await?;
+    query_daemon(channel, token, &pod_name).await
 }
 
 pub async fn get_environment_daemon_logs_core(
@@ -1060,17 +1064,6 @@ async fn resolve_target(
     resolve_running_sandbox_target(state, user, org_id, environment_id)
         .await
         .map_err(|(status, message)| huma_error(status, message))
-}
-
-async fn daemon_status_for_target(
-    state: &ApiState,
-    namespace: &str,
-    environment_id: &str,
-    known_pod_name: &str,
-) -> AppResult<EnvironmentDaemonStatus> {
-    let (channel, token) = daemon_channel_for_target(state, namespace, environment_id).await?;
-
-    query_daemon(channel, token, known_pod_name).await
 }
 
 async fn get_daemon_session(
