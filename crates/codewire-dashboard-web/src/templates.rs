@@ -21,6 +21,8 @@ use crate::view::{
 #[derive(Template)]
 #[template(path = "home.html")]
 pub(crate) struct HomeTemplate {
+    /// Where this deployment is served, for the share tags' absolute URLs.
+    pub(crate) public_origin: String,
     /// The analytics tag (infra#2677), for every visitor where it is
     /// configured: a shared cache gives them all the same homepage.
     pub(crate) analytics: Option<crate::analytics::Analytics>,
@@ -29,6 +31,8 @@ pub(crate) struct HomeTemplate {
 #[derive(Template)]
 #[template(path = "pricing.html")]
 pub(crate) struct PricingTemplate {
+    /// Where this deployment is served, for the share tags' absolute URLs.
+    pub(crate) public_origin: String,
     /// The analytics tag (infra#2677), where it is configured and the
     /// request carries no session: a cache never shares this page.
     pub(crate) analytics: Option<crate::analytics::Analytics>,
@@ -43,6 +47,8 @@ pub(crate) struct PricingTemplate {
 #[derive(Template)]
 #[template(path = "privacy.html")]
 pub(crate) struct PrivacyTemplate {
+    /// Where this deployment is served, for the share tags' absolute URLs.
+    pub(crate) public_origin: String,
     /// The analytics tag (infra#2677), where it is configured and the
     /// request carries no session: a cache never shares this page.
     pub(crate) analytics: Option<crate::analytics::Analytics>,
@@ -51,6 +57,8 @@ pub(crate) struct PrivacyTemplate {
 #[derive(Template)]
 #[template(path = "terms.html")]
 pub(crate) struct TermsTemplate {
+    /// Where this deployment is served, for the share tags' absolute URLs.
+    pub(crate) public_origin: String,
     /// The analytics tag (infra#2677), where it is configured and the
     /// request carries no session: a cache never shares this page.
     pub(crate) analytics: Option<crate::analytics::Analytics>,
@@ -60,6 +68,8 @@ pub(crate) struct TermsTemplate {
 #[derive(Template)]
 #[template(path = "updates.html")]
 pub(crate) struct UpdatesTemplate {
+    /// Where this deployment is served, for the share tags' absolute URLs.
+    pub(crate) public_origin: String,
     /// The analytics tag (infra#2677), where it is configured and the
     /// request carries no session: a cache never shares this page.
     pub(crate) analytics: Option<crate::analytics::Analytics>,

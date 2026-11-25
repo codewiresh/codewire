@@ -1406,6 +1406,7 @@ mod tests {
 
         let render = |signup_credit: Option<&str>| {
             crate::templates::PricingTemplate {
+                public_origin: "https://codewire.sh".into(),
                 analytics: None,
                 signup_credit: signup_credit.map(str::to_owned),
                 rates: Some(crate::public_rates::fixture_rates()),

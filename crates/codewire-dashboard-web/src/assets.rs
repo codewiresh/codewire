@@ -68,6 +68,11 @@ pub(crate) const DESKTOP_VIEWER_SCRIPT_PATH: &str = "/assets/codewire/desktop-vi
 pub(crate) const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
 pub(crate) const BRAND_WORDMARK_PATH: &str = "/assets/codewire/brand-wordmark-v1.svg";
 pub(crate) const BRAND_ICON_PATH: &str = "/assets/codewire/brand-icon-v1.svg";
+/// The images a link to a public page shows when it is shared: the wordmark,
+/// centred, rendered from `logo/share-1200x630.svg` and
+/// `logo/share-1200x1200.svg` with `rsvg-convert`.
+pub(crate) const SHARE_IMAGE_PATH: &str = "/assets/codewire/share-1200x630-v1.png";
+pub(crate) const SHARE_IMAGE_SQUARE_PATH: &str = "/assets/codewire/share-1200x1200-v1.png";
 const REX_ICON_PATH: &str = "/assets/codewire/tools/rex-v1.png";
 pub(crate) const CONSOLE_LOGO_PATH: &str = "/assets/codewire/console-logo-v1.svg";
 pub(crate) const ICONS_PATH: &str = "/assets/codewire/icons-v2.svg";
@@ -153,6 +158,10 @@ const CONSOLE_LOGO: &str =
     include_str!("../../../packages/codewire-design/assets/console-logo.svg");
 const ICONS: &str = include_str!("../../../packages/codewire-design/assets/icons.svg");
 const REX_ICON: &[u8] = include_bytes!("../../../packages/codewire-design/assets/tools/rex.png");
+const SHARE_IMAGE: &[u8] =
+    include_bytes!("../../../packages/codewire-design/assets/share-1200x630.png");
+const SHARE_IMAGE_SQUARE: &[u8] =
+    include_bytes!("../../../packages/codewire-design/assets/share-1200x1200.png");
 const SCHIBSTED_GROTESK_LATIN: &[u8] =
     include_bytes!("../assets/fonts/SchibstedGrotesk-latin-5.3.0.woff2");
 const SCHIBSTED_GROTESK_LATIN_EXT: &[u8] =
@@ -291,6 +300,8 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (CONSOLE_LOGO_PATH, SVG, CONSOLE_LOGO.as_bytes()),
     (ICONS_PATH, SVG, ICONS.as_bytes()),
     (REX_ICON_PATH, "image/png", REX_ICON),
+    (SHARE_IMAGE_PATH, "image/png", SHARE_IMAGE),
+    (SHARE_IMAGE_SQUARE_PATH, "image/png", SHARE_IMAGE_SQUARE),
 ];
 
 const ASSET_PREFIX: &str = "/assets/codewire/";
@@ -445,13 +456,17 @@ mod tests {
         for (fixture, html) in [
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
-                crate::templates::HomeTemplate { analytics: None }
-                    .render()
-                    .unwrap(),
+                crate::templates::HomeTemplate {
+                    public_origin: "https://codewire.sh".into(),
+                    analytics: None,
+                }
+                .render()
+                .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
                 crate::templates::PricingTemplate {
+                    public_origin: "https://codewire.sh".into(),
                     analytics: None,
                     signup_credit: None,
                     rates: Some(crate::public_rates::fixture_rates()),
@@ -464,6 +479,7 @@ mod tests {
                     "../../../packages/codewire-design/reference/fixtures/pricing-unavailable.html"
                 ),
                 crate::templates::PricingTemplate {
+                    public_origin: "https://codewire.sh".into(),
                     analytics: None,
                     signup_credit: None,
                     rates: None,
@@ -473,19 +489,26 @@ mod tests {
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/privacy.html"),
-                crate::templates::PrivacyTemplate { analytics: None }
-                    .render()
-                    .unwrap(),
+                crate::templates::PrivacyTemplate {
+                    public_origin: "https://codewire.sh".into(),
+                    analytics: None,
+                }
+                .render()
+                .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/terms.html"),
-                crate::templates::TermsTemplate { analytics: None }
-                    .render()
-                    .unwrap(),
+                crate::templates::TermsTemplate {
+                    public_origin: "https://codewire.sh".into(),
+                    analytics: None,
+                }
+                .render()
+                .unwrap(),
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/updates.html"),
                 crate::templates::UpdatesTemplate {
+                    public_origin: "https://codewire.sh".into(),
                     analytics: None,
                     posts: Some(std::sync::Arc::new(crate::updates_connect::fixture_posts())),
                 }
@@ -497,6 +520,7 @@ mod tests {
                     "../../../packages/codewire-design/reference/fixtures/updates-unavailable.html"
                 ),
                 crate::templates::UpdatesTemplate {
+                    public_origin: "https://codewire.sh".into(),
                     analytics: None,
                     posts: None,
                 }
@@ -535,6 +559,15 @@ mod tests {
             REX_ICON,
             include_bytes!("../../../apps/docs/zola/static/tools/rex.png")
         );
+        // A PNG's IHDR holds its width and height, big-endian, at bytes 16..24.
+        for (image, width, height) in [(SHARE_IMAGE, 1200, 630), (SHARE_IMAGE_SQUARE, 1200, 1200)] {
+            assert_eq!(&image[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(u32::from_be_bytes(image[16..20].try_into().unwrap()), width);
+            assert_eq!(
+                u32::from_be_bytes(image[20..24].try_into().unwrap()),
+                height
+            );
+        }
         assert_eq!(
             include_str!("../../../packages/codewire-design/assets/tools/orca.svg"),
             include_str!("../../../apps/docs/zola/static/tools/orca.svg")
@@ -707,9 +740,12 @@ mod tests {
         );
         assert_eq!(versioned("<p>No assets here.</p>"), None);
         let home = versioned(
-            &crate::templates::HomeTemplate { analytics: None }
-                .render()
-                .unwrap(),
+            &crate::templates::HomeTemplate {
+                public_origin: "https://codewire.sh".into(),
+                analytics: None,
+            }
+            .render()
+            .unwrap(),
         )
         .unwrap();
         for path in [PUBLIC_STYLE_PATH, PUBLIC_SCRIPT_PATH, THEME_SCRIPT_PATH] {

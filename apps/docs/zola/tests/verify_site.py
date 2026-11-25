@@ -40,6 +40,9 @@ class DocumentParser(HTMLParser):
         self.csp: str | None = None
         self.markdown_alternate: str | None = None
         self.refresh: str | None = None
+        self.title = ""
+        self.in_title = False
+        self.share: dict[str, list[str]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {name: value or "" for name, value in attrs}
@@ -70,6 +73,18 @@ class DocumentParser(HTMLParser):
             self.csp = values.get("content")
         if tag == "meta" and values.get("http-equiv", "").lower() == "refresh":
             self.refresh = values.get("content")
+        if tag == "meta" and (key := values.get("property") or values.get("name", "")).startswith(("og:", "twitter:")):
+            self.share.setdefault(key, []).append(values.get("content", ""))
+        if tag == "title":
+            self.in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title += data
 
 
 def parse_document(path: Path) -> tuple[DocumentParser, str]:
@@ -185,6 +200,24 @@ def verify_routes(site_root: Path, output_root: Path) -> tuple[list[dict[str, st
             fail(f"expected one active navigation item in {route['output']}, found {parser.active_navigation}")
         if not parser.csp or "default-src 'self'" not in parser.csp or "connect-src 'self'" not in parser.csp:
             fail(f"missing restrictive CSP in {route['output']}")
+        # A link to any docs page, shared on LinkedIn, X or Slack, shows that
+        # page's own title and URL and the wordmark images the dashboard serves.
+        share_expected = {
+            "og:type": ["website"],
+            "og:site_name": ["Codewire"],
+            "og:title": [parser.title],
+            "og:url": [expected_canonical],
+            "og:image": [
+                f"{CANONICAL_ORIGIN}/assets/codewire/share-1200x630-v1.png",
+                f"{CANONICAL_ORIGIN}/assets/codewire/share-1200x1200-v1.png",
+            ],
+            "twitter:card": ["summary_large_image"],
+        }
+        for key, values in share_expected.items():
+            if parser.share.get(key) != values:
+                fail(f"wrong {key} in {route['output']}: {parser.share.get(key)!r}")
+        if not parser.title or not parser.share.get("og:description", [""])[0]:
+            fail(f"missing title or og:description in {route['output']}")
         if parser.markdown_alternate != markdown_path(route["canonical"]):
             fail(f"wrong Markdown alternate in {route['output']}: {parser.markdown_alternate!r}")
         for tag, resource in parser.resources:

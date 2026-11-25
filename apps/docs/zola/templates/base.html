@@ -14,6 +14,24 @@
     <meta name="codewire-docs-root" content="{{ browser_docs_root | safe }}">
     <meta name="codewire-docs-search-index" content="{{ get_url(path="search_index.en.json") | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <link rel="canonical" href="{% block canonical_url %}https://codewire.sh/docs{% endblock canonical_url %}">
+    {% if page is defined %}{% set share = page %}{% elif section is defined %}{% set share = section %}{% endif %}
+    {% if share is defined %}
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Codewire">
+    <meta property="og:title" content="{{ share.title }} · Codewire">
+    <meta property="og:description" content="{{ share.description | default(value="Codewire documentation") }}">
+    <meta property="og:url" content="{{ share.permalink | trim_end_matches(pat="/") | safe }}">
+    {% set site_origin = canonical_docs_root | trim_end_matches(pat="/docs") %}
+    <meta property="og:image" content="{{ site_origin | safe }}/assets/codewire/share-1200x630-v1.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Codewire">
+    <meta property="og:image" content="{{ site_origin | safe }}/assets/codewire/share-1200x1200-v1.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="1200">
+    <meta property="og:image:alt" content="Codewire">
+    <meta name="twitter:card" content="summary_large_image">
+    {% endif %}
     <link rel="alternate" type="text/markdown" href="{% if current_path == "/" %}/docs/index.md{% else %}/docs{{ current_path | trim_end_matches(pat="/") | safe }}.md{% endif %}">
     <link rel="icon" href="{{ get_url(path="favicon.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ get_url(path="giallo-dark.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" media="(prefers-color-scheme: dark)">

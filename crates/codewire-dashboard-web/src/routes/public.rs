@@ -29,6 +29,7 @@ pub(super) async fn home(State(state): State<AppState>) -> Response {
     let analytics = state.analytics;
     let mut response = tagged(
         render_page(HomeTemplate {
+            public_origin: state.public_origin.clone(),
             analytics: analytics.clone(),
         }),
         analytics.as_ref(),
@@ -55,6 +56,7 @@ pub(super) async fn pricing(State(state): State<AppState>, headers: HeaderMap) -
     let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
     let credit = crate::billing_connect::signup_credit_nano_eur(&state).await;
     let response = render_page(PricingTemplate {
+        public_origin: state.public_origin.clone(),
         analytics: analytics.clone(),
         signup_credit: crate::billing_connect::signup_credit_text(credit),
         rates: crate::public_rates::public_rates(&state).await,
@@ -67,6 +69,7 @@ pub(super) async fn pricing(State(state): State<AppState>, headers: HeaderMap) -
 pub(super) async fn privacy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
     let response = render_page(PrivacyTemplate {
+        public_origin: state.public_origin.clone(),
         analytics: analytics.clone(),
     });
     tagged(response, analytics.as_ref(), StatusCode::OK)
@@ -77,6 +80,7 @@ pub(super) async fn privacy(State(state): State<AppState>, headers: HeaderMap) -
 pub(super) async fn terms(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let analytics = Analytics::for_visitor(state.analytics.as_ref(), &headers);
     let response = render_page(TermsTemplate {
+        public_origin: state.public_origin.clone(),
         analytics: analytics.clone(),
     });
     tagged(response, analytics.as_ref(), StatusCode::OK)
@@ -100,6 +104,7 @@ pub(super) async fn updates(State(state): State<AppState>, headers: HeaderMap) -
     let response = render_updates_page(
         status,
         UpdatesTemplate {
+            public_origin: state.public_origin.clone(),
             analytics: analytics.clone(),
             posts,
         },
@@ -190,7 +195,10 @@ mod tests {
     use axum::http::{StatusCode, header};
     use codewire_server_core::auth::SESSION_COOKIE_NAME;
 
-    use super::{HOME_CACHE_CONTROL, verified_view};
+    use super::{
+        HOME_CACHE_CONTROL, HomeTemplate, PricingTemplate, PrivacyTemplate, TermsTemplate,
+        UpdatesTemplate, verified_view,
+    };
 
     fn config() -> crate::Config {
         let unused = "http://127.0.0.1:9";
@@ -261,6 +269,127 @@ mod tests {
         assert_eq!(enabled.title, "Email verified");
         assert_eq!(enabled.primary_label, "Sign in");
         assert_eq!(enabled.primary_url, "/login");
+    }
+
+    /// A link to any public page, pasted into LinkedIn, X or Slack, shows
+    /// that page's own title, description and the wordmark, not the first
+    /// heading the crawler finds. Every template on the public sheet is
+    /// checked, so a new public page can't ship without its share tags.
+    #[test]
+    fn every_public_page_names_itself_when_shared() {
+        use askama::Template as _;
+
+        let origin = || "https://app.example.test".to_owned();
+        let pages = [
+            (
+                "home.html",
+                "/",
+                HomeTemplate {
+                    public_origin: origin(),
+                    analytics: None,
+                }
+                .render(),
+            ),
+            (
+                "pricing.html",
+                "/pricing",
+                PricingTemplate {
+                    public_origin: origin(),
+                    analytics: None,
+                    signup_credit: None,
+                    rates: None,
+                }
+                .render(),
+            ),
+            (
+                "privacy.html",
+                "/privacy",
+                PrivacyTemplate {
+                    public_origin: origin(),
+                    analytics: None,
+                }
+                .render(),
+            ),
+            (
+                "terms.html",
+                "/terms",
+                TermsTemplate {
+                    public_origin: origin(),
+                    analytics: None,
+                }
+                .render(),
+            ),
+            (
+                "updates.html",
+                "/updates",
+                UpdatesTemplate {
+                    public_origin: origin(),
+                    analytics: None,
+                    posts: None,
+                }
+                .render(),
+            ),
+        ];
+
+        let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let mut public: Vec<String> = std::fs::read_dir(&templates)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|text| text.contains(crate::assets::PUBLIC_STYLE_PATH))
+            })
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        public.sort();
+        let mut checked: Vec<String> = pages.iter().map(|(name, ..)| (*name).to_owned()).collect();
+        checked.sort();
+        assert_eq!(public, checked, "a public page is missing from this test");
+
+        let content = |html: &str, attribute: &str| {
+            let tag = format!("{attribute} content=\"");
+            let start = html.find(&tag).unwrap_or_else(|| panic!("no {attribute}")) + tag.len();
+            html[start..][..html[start..].find('"').unwrap()].to_owned()
+        };
+        for (name, path, html) in pages {
+            let html = html.unwrap();
+            let title = &html[html.find("<title>").unwrap() + 7..html.find("</title>").unwrap()];
+            assert_eq!(content(&html, "property=\"og:title\""), title, "{name}");
+            assert_eq!(
+                content(&html, "property=\"og:description\""),
+                content(&html, "name=\"description\""),
+                "{name}"
+            );
+            assert_eq!(
+                content(&html, "property=\"og:url\""),
+                format!("{}{path}", origin()),
+                "{name}"
+            );
+            let images: Vec<&str> = html
+                .split("<meta property=\"og:image\" content=\"")
+                .skip(1)
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+                .collect();
+            assert_eq!(
+                images,
+                [
+                    format!("{}{}", origin(), crate::assets::SHARE_IMAGE_PATH),
+                    format!("{}{}", origin(), crate::assets::SHARE_IMAGE_SQUARE_PATH),
+                ],
+                "{name}"
+            );
+            assert_eq!(content(&html, "property=\"og:type\""), "website", "{name}");
+            assert_eq!(
+                content(&html, "property=\"og:site_name\""),
+                "Codewire",
+                "{name}"
+            );
+            assert_eq!(
+                content(&html, "name=\"twitter:card\""),
+                "summary_large_image",
+                "{name}"
+            );
+        }
     }
 
     /// `/privacy` and `/terms` are whole public pages, the same for a visitor
