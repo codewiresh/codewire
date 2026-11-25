@@ -113,10 +113,10 @@ the HTTP status, which is enough for a panic or a malformed request.
 
 Public Connect paths are `/{package}.{Service}/{Method}`. Edge matchers
 do not depend on the HTTP method, because reads marked `NO_SIDE_EFFECTS`
-may use GET. Six files hold the routing rules: `Caddyfile`,
-`Caddyfile.docker`, `deployments/k8s/base/ingress.yaml`, the `ingress.yaml`
-of the `local-kind` and `local-kind-static` overlays, and
-`tests/e2e/kind/ingress.yaml`.
+may use GET. Five files hold the local routing rules: `Caddyfile`,
+`Caddyfile.docker`, the `ingress.yaml` of the `local-kind` and
+`local-kind-static` overlays, and `tests/e2e/kind/ingress.yaml`. Dev's and
+Production's public routes live in infra, as Envoy Gateway routes.
 
 - Services owned by a binary other than orchestration have explicit
   per-service rules. A `/codewire.` prefix fallback sends every other

@@ -111,7 +111,6 @@
   "forbidden_edge_fragments": {
     "Caddyfile": ["@mesh_networks", "/api/v1/networks"],
     "Caddyfile.docker": ["@mesh_networks", "/api/v1/networks"],
-    "deployments/k8s/base/ingress.yaml": ["/api/v1/networks"],
     "deployments/k8s/overlays/local-kind/ingress.yaml": ["/api/v1/networks"],
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": ["/api/v1/networks"],
     "tests/e2e/kind/ingress.yaml": ["/api/v1/networks"]

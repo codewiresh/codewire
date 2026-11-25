@@ -36,15 +36,19 @@ edge:
 publicOrigin: https://codewire.sh
 sandboxNamespace: prod-sandboxes
 
+# The source tree renders no Ingress: Dev's and Production's public routes
+# live in infra (#6250).
 ingress:
-  host: codewire.sh
-  tlsSecret: codewire-tls
-  derp:
-    host: derp.codewire.sh
-    tlsSecret: codewire-derp-tls
-  preview:
-    host: "*.cwpreview.sh"
-    tlsSecret: cwpreview-tls
+  routes:
+    dashboard: false
+    derp: false
+    preview: false
+    coordinatorConnect: false
+    meshCoordinatorGrpc: false
+    environmentSessionGrpc: false
+    idp: false
+    billing: false
+    connect: false
 
 dashboard:
   origins:

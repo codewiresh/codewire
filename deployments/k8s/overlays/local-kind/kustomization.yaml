@@ -120,54 +120,6 @@ patches:
       group: cert-manager.io
       kind: Certificate
       name: codewire-orchestration-udp-relay-allocator-client
-  # Remove base ingress resources; local kind uses a hostless ingress shape
-  # that matches current 127.0.0.1:8080 / 127.0.0.1:8443 workflows.
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: unused
-    target:
-      kind: Ingress
-      name: codewire-dashboard
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: unused
-    target:
-      kind: Ingress
-      name: codewire-derp
-  # Prod coordinator ingress replaced by coordinate paths in local ingress.yaml.
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: unused
-    target:
-      kind: Ingress
-      name: codewire-coordinator
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: unused
-    target:
-      kind: Ingress
-      name: codewire-idp
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: unused
-    target:
-      kind: Ingress
-      name: codewire-billing
   # Warm-pool members on Kind run a diagnostic runtime: runc, or the node
   # default ('') when SANDBOX_RUNTIME_PROFILE is none. The test op pins the
   # variable's position in the base policy.

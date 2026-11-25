@@ -114,18 +114,8 @@ _UDP_RELAY = {
     ("Certificate", "codewire-udp-relay-allocator"),
     ("NetworkPolicy", "codewire-udp-relay"),
 }
-# The public edge's Ingresses that every environment renders, those only the
-# source tree renders, and Kind's own hostless ones.
-_INGRESSES = {
-    ("Ingress", name)
-    for name in (
-        "codewire-connect", "codewire-coordinator-connect", "codewire-environment-session-grpc",
-        "codewire-mesh-coordinator-grpc", "codewire-preview",
-    )
-}
-_SOURCE_INGRESSES = {
-    ("Ingress", name) for name in ("codewire-dashboard", "codewire-derp", "codewire-idp", "codewire-billing")
-}
+# Kind's own hostless Ingresses. The source tree renders none: Dev's and
+# Production's public routes live in infra (#6250).
 _LOCAL_INGRESSES = {
     ("Ingress", name)
     for name in (
@@ -146,7 +136,7 @@ _KIND = {
     ("Deployment", "codewire-dashboard"),
     ("Service", "dashboard"),
     ("RuntimeClass", "runc"),
-} | _SERVICES | _DERP | _INGRESSES | _LOCAL_INGRESSES
+} | _SERVICES | _DERP | _LOCAL_INGRESSES
 # What the chart renders so far, by kind and name, per environment.
 MIGRATED: dict[str, set[tuple[str, str]]] = {
     "source": {
@@ -161,9 +151,7 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
     | _SERVICES
     | _CERTIFICATES
     | _DERP
-    | _UDP_RELAY
-    | _INGRESSES
-    | _SOURCE_INGRESSES,
+    | _UDP_RELAY,
     "local-kind": _KIND,
     "local-kind-static": _KIND,
 }

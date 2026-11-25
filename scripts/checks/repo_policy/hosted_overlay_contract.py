@@ -77,14 +77,6 @@ def container(name: str) -> dict[str, Any]:
     return pinned("/spec/template/spec/containers/0/name", name)
 
 
-def ingress(host: str, secret: str) -> tuple[dict[str, Any], ...]:
-    return (
-        pinned("/spec/tls/0/hosts/0", host),
-        pinned("/spec/tls/0/secretName", secret),
-        pinned("/spec/rules/0/host", host),
-    )
-
-
 def sandbox_role(kind: str, name: str, subject: str | None = None) -> tuple[str, str, tuple[dict[str, Any], ...]]:
     ops = [pinned("/metadata/namespace", "prod-sandboxes")]
     if subject is not None:
@@ -136,9 +128,9 @@ CONFIG_REPLACED_KEYS = (
 # An empty operation list means the overlays select the resource by kind and
 # name only (a strategic merge, generator merge or deletion).
 #
-# The Dev overlay also patches Ingress/codewire-coordinator and
-# Ingress/codewire-orchestration, which no source directory defines; those
-# patches select nothing and are not part of this contract.
+# The Dev overlay also patches the retired nginx Ingresses, which no source
+# directory defines since codewire#6250; those patches select nothing, are not
+# part of this contract, and leave with deploy's last removal step.
 HOSTED_PATCH_CONTRACT: tuple[tuple[str, str, tuple[dict[str, Any], ...]], ...] = (
     # Dev renames the namespace and adds Pod Security labels; Production deletes it.
     ("Namespace", "prod", (
@@ -156,15 +148,6 @@ HOSTED_PATCH_CONTRACT: tuple[tuple[str, str, tuple[dict[str, Any], ...]], ...] =
     ("Deployment", "codewire-derp", (container("derp"), replaced("/spec/replicas"))),
     ("Deployment", "codewire-coordinator", (replaced("/spec/replicas"),)),
     ("PodDisruptionBudget", "codewire-derp", (replaced("/spec/minAvailable"),)),
-    # Dev's public hosts and certificates.
-    ("Ingress", "codewire-dashboard", ingress("codewire.sh", "codewire-tls")),
-    ("Ingress", "codewire-derp", ingress("derp.codewire.sh", "codewire-derp-tls")),
-    ("Ingress", "codewire-preview", ingress("*.cwpreview.sh", "cwpreview-tls")),
-    ("Ingress", "codewire-coordinator-connect", ingress("codewire.sh", "codewire-tls")),
-    ("Ingress", "codewire-environment-session-grpc", ingress("codewire.sh", "codewire-tls")),
-    ("Ingress", "codewire-connect", ingress("codewire.sh", "codewire-tls")),
-    ("Ingress", "codewire-idp", ingress("codewire.sh", "codewire-tls")),
-    ("Ingress", "codewire-billing", ingress("codewire.sh", "codewire-tls")),
     # Strategic merges (images, runtime profile, warm pools, SES sender,
     # Production's terminal debug patch, which names namespace prod) and both
     # overlays' tenant-secret JSON patches.
@@ -385,9 +368,6 @@ SELF_TEST_MUTATIONS = (
     ("renamed container", "Deployment", "codewire-idp",
      "        name: idp\n", "        name: identity\n",
      "Deployment/codewire-idp: a hosted overlay patch no longer applies: testing value /spec/template/spec/containers/0/name"),
-    ("moved public host", "Ingress", "codewire-idp",
-     "  - host: codewire.sh\n", "  - host: id.codewire.sh\n",
-     "Ingress/codewire-idp: a hosted overlay patch no longer applies: testing value /spec/rules/0/host"),
     ("moved binding subject", "RoleBinding", "codewire-orchestration-image-cache",
      "  name: codewire-orchestration\n  namespace: prod", "  name: codewire-orchestration\n  namespace: default",
      "RoleBinding/codewire-orchestration-image-cache: a hosted overlay patch no longer applies: testing value /subjects/0"),

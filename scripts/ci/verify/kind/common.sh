@@ -1058,7 +1058,6 @@ ingress_path_drift_check() {
   )
   local files=(
     tests/e2e/kind/ingress.yaml
-    deployments/k8s/base/ingress.yaml
     deployments/k8s/overlays/local-kind/ingress.yaml
     deployments/k8s/overlays/local-kind-static/ingress.yaml
   )
@@ -1079,10 +1078,6 @@ ingress_path_drift_check() {
     }
   done
 
-  grep -qF 'host: "*.cwpreview.sh"' "$ROOT/deployments/k8s/base/ingress.yaml" || {
-    echo "::error file=deployments/k8s/base/ingress.yaml::preview wildcard host missing"
-    exit 1
-  }
   for file in \
     tests/e2e/kind/ingress.yaml \
     deployments/k8s/overlays/local-kind/ingress.yaml \

@@ -7,13 +7,12 @@ from .shared import *
 
 def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     caddy_files = ["Caddyfile", "Caddyfile.docker"]
-    prod_ingress_files = ["deployments/k8s/base/ingress.yaml"]
     local_ingress_files = [
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
     ]
-    all_files = caddy_files + prod_ingress_files + local_ingress_files
+    all_files = caddy_files + local_ingress_files
     failures: list[str] = []
     fail = failures.append
 
@@ -50,7 +49,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
         if not data["fallback"]:
             fail(f"{file}: missing the /codewire. -> orchestration Connect fallback rule")
 
-    for file in prod_ingress_files + local_ingress_files:
+    for file in local_ingress_files:
         assert_connect_streaming_ingress_shape(file, fail)
 
     for service, owner in owners.items():
@@ -208,7 +207,6 @@ ISOLATED_CREDENTIAL_SERVICES = {
 
 GITHUB_BROWSER_CALLBACK = "/api/v1/github/oauth/callback"
 GITHUB_BROWSER_INGRESSES = {
-    "deployments/k8s/base/ingress.yaml": ("codewire-dashboard", "codewire-dashboard", "name: http"),
     "deployments/k8s/overlays/local-kind/ingress.yaml": ("codewire-local", "dashboard", "number: 5173"),
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": ("codewire-local", "dashboard", "number: 5173"),
     "tests/e2e/kind/ingress.yaml": ("codewire-preview-e2e", "codewire-dashboard", "name: http"),
@@ -379,10 +377,7 @@ def github_browser_callback_edges_self_test() -> None:
             attacks["wrong port"] = original.replace(block, block.replace(port, "number: 8084"))
             attacks["duplicate"] = original.replace(block, block + block)
             attacks["changed fallback"] = original.replace("path: /api\n", "path: /other-api\n")
-            if file == "deployments/k8s/base/ingress.yaml":
-                attacks["wildcard preview rule"] = original.replace("- host: codewire.sh", '- host: "*.codewire.sh"', 1)
-            else:
-                attacks["wildcard preview rule"] = original.replace("    - http:\n", '    - host: "*.codewire-dev.local"\n      http:\n', 1)
+            attacks["wildcard preview rule"] = original.replace("    - http:\n", '    - host: "*.codewire-dev.local"\n      http:\n', 1)
         for attack, changed in attacks.items():
             failures: list[str] = []
             assert_github_browser_callback_edges(failures.append, lambda path: changed if path == file else read_text(path))
@@ -647,7 +642,6 @@ def credential_delegation_edges_self_test(per_file: dict[str, dict[str, Any]]) -
 
 
 MESH_KUBERNETES_BACKENDS = {
-    "deployments/k8s/base/ingress.yaml": "codewire-mesh-http",
     "deployments/k8s/overlays/local-kind/ingress.yaml": "codewire-mesh",
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": "codewire-mesh",
     "tests/e2e/kind/ingress.yaml": "codewire-mesh",
@@ -664,8 +658,7 @@ def assert_mesh_connect_backend_topology(
     expected_backends = ownership.get("mesh_kubernetes_backends")
     if expected_backends != MESH_KUBERNETES_BACKENDS:
         fail(
-            "Mesh Connect ownership fixture must pin the hosted "
-            "codewire-mesh-http Service and every Kind codewire-mesh Service"
+            "Mesh Connect ownership fixture must pin every Kind codewire-mesh Service"
         )
         return
 
@@ -688,7 +681,7 @@ def mesh_connect_backend_topology_self_test(
     owners: dict[str, str],
     per_file: dict[str, dict[str, Any]],
 ) -> None:
-    """Demonstrate rejection of wrong hosted and Kind Connect backends."""
+    """Demonstrate rejection of a wrong Kind Connect backend."""
 
     def expect_rejection(file: str, wrong_backend: str, expected_backend: str) -> None:
         broken = copy.deepcopy(per_file)
@@ -718,11 +711,6 @@ def mesh_connect_backend_topology_self_test(
             )
 
     expect_rejection(
-        "deployments/k8s/base/ingress.yaml",
-        "codewire-mesh",
-        "codewire-mesh-http",
-    )
-    expect_rejection(
         "tests/e2e/kind/ingress.yaml",
         "codewire-mesh-http",
         "codewire-mesh",
@@ -737,7 +725,6 @@ def assert_mesh_primary_origin_rest_edge(
     for file in (
         "Caddyfile",
         "Caddyfile.docker",
-        "deployments/k8s/base/ingress.yaml",
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
@@ -753,7 +740,6 @@ def mesh_primary_origin_rest_edge_self_test() -> None:
         for file in [
             "Caddyfile",
             "Caddyfile.docker",
-            "deployments/k8s/base/ingress.yaml",
             "deployments/k8s/overlays/local-kind/ingress.yaml",
             "deployments/k8s/overlays/local-kind-static/ingress.yaml",
             "tests/e2e/kind/ingress.yaml",
@@ -769,7 +755,7 @@ def mesh_primary_origin_rest_edge_self_test() -> None:
                 f"{file}: Mesh raw-edge guard accepted a restored route: {failures!r}"
             )
 
-    expect_rejection("deployments/k8s/base/ingress.yaml")
+    expect_rejection("deployments/k8s/overlays/local-kind/ingress.yaml")
     expect_rejection("tests/e2e/kind/ingress.yaml")
 
 
@@ -825,7 +811,6 @@ def assert_internal_connect_listener_exemption(
 
 
 DERP_ADMISSION_EDGE_FILES = (
-    "deployments/k8s/base/ingress.yaml",
     "deployments/k8s/overlays/local-kind/ingress.yaml",
     "deployments/k8s/overlays/local-kind-static/ingress.yaml",
     "tests/e2e/kind/ingress.yaml",
@@ -1108,7 +1093,6 @@ def assert_workspace_binding_listener_boundary(
                 fail("only the workspace-binding Service may expose port 8087")
 
     for file in (
-        "deployments/k8s/base/ingress.yaml",
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
@@ -1138,7 +1122,6 @@ def internal_connect_listener_self_test() -> None:
         "deployments/k8s/orchestration/service.yaml",
         "deployments/k8s/overlays/local-kind/orchestration-deployment-patch.yaml",
         "deployments/k8s/overlays/local-kind-static/orchestration-deployment-patch.yaml",
-        "deployments/k8s/base/ingress.yaml",
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
@@ -1534,7 +1517,7 @@ def internal_connect_listener_self_test() -> None:
         "ingress to the workspace-binding Service",
         "no edge may route to the workspace-binding listener",
         replacement=(
-            "deployments/k8s/base/ingress.yaml",
+            "deployments/k8s/overlays/local-kind/ingress.yaml",
             "kind: Ingress",
             "kind: Ingress\n# backend: codewire-orchestration-workspace-binding",
         ),
@@ -2135,8 +2118,7 @@ def isolated_grpc_service_self_test() -> None:
 def assert_rendered_grpc_service(fail: Callable[[str], None]) -> None:
     """The isolated native-gRPC Service, as the orchestration source renders it.
 
-    codewire/deploy's hosted guards check the hosted Dev and Production
-    Ingress identities.
+    codewire/deploy's hosted guards check this Service in the hosted renders.
     """
     label = "deployments/k8s/orchestration (rendered)"
     result = run(["kustomize", "build", "deployments/k8s/orchestration"], check=False)

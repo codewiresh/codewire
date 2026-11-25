@@ -54,7 +54,6 @@
     "codewire.v1.MeshNodeService"
   ],
   "mesh_kubernetes_backends": {
-    "deployments/k8s/base/ingress.yaml": "codewire-mesh-http",
     "deployments/k8s/overlays/local-kind/ingress.yaml": "codewire-mesh",
     "deployments/k8s/overlays/local-kind-static/ingress.yaml": "codewire-mesh",
     "tests/e2e/kind/ingress.yaml": "codewire-mesh"

@@ -278,20 +278,19 @@ derp:
 udpRelay:
   enabled: false
 
-# deployments/k8s/overlays/local-kind: its own hostless routes (ingress.yaml),
-# and of the base routes only those it does not delete. Those keep the source's
-# hosts and TLS Secrets, which nothing resolves on Kind (#5169).
+# deployments/k8s/overlays/local-kind: only its own hostless routes
+# (ingress.yaml). The source tree renders no public route (#6250).
 ingress:
-  host: codewire.sh
-  tlsSecret: codewire-tls
-  preview:
-    host: "*.cwpreview.sh"
-    tlsSecret: cwpreview-tls
   routes:
     dashboard: false
     derp: false
+    preview: false
+    coordinatorConnect: false
+    meshCoordinatorGrpc: false
+    environmentSessionGrpc: false
     idp: false
     billing: false
+    connect: false
   local:
     enabled: true
     previewHost: "*.codewire-dev.local"
