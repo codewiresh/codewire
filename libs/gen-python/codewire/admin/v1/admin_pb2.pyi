@@ -597,6 +597,44 @@ class SetOrganizationDedicatedCpuResponse(_message.Message):
     previous_dedicated_cpu: bool
     def __init__(self, organization_id: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ..., previous_dedicated_cpu: _Optional[bool] = ...) -> None: ...
 
+class ListStandardRuntimeOrganizationsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class StandardRuntimeOrganization(_message.Message):
+    __slots__ = ("organization_id", "slug", "name")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    SLUG_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    slug: str
+    name: str
+    def __init__(self, organization_id: _Optional[str] = ..., slug: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+
+class ListStandardRuntimeOrganizationsResponse(_message.Message):
+    __slots__ = ("organizations",)
+    ORGANIZATIONS_FIELD_NUMBER: _ClassVar[int]
+    organizations: _containers.RepeatedCompositeFieldContainer[StandardRuntimeOrganization]
+    def __init__(self, organizations: _Optional[_Iterable[_Union[StandardRuntimeOrganization, _Mapping]]] = ...) -> None: ...
+
+class SetOrganizationStandardRuntimeRequest(_message.Message):
+    __slots__ = ("organization_id", "enabled")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    enabled: bool
+    def __init__(self, organization_id: _Optional[str] = ..., enabled: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationStandardRuntimeResponse(_message.Message):
+    __slots__ = ("organization_id", "enabled", "previous_enabled")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    enabled: bool
+    previous_enabled: bool
+    def __init__(self, organization_id: _Optional[str] = ..., enabled: _Optional[bool] = ..., previous_enabled: _Optional[bool] = ...) -> None: ...
+
 class AdjustOrganizationCreditRequest(_message.Message):
     __slots__ = ("organization_id", "amount_nano_eur", "reason", "idempotency_key", "confirmed_balance_nano_eur")
     ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]

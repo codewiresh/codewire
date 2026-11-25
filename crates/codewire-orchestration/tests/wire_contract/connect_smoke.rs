@@ -77,6 +77,13 @@ async fn assert_json_connect_routes(harness: &Harness) {
             Some("effective"),
         ),
         (
+            ADMIN_SERVICE,
+            "ListStandardRuntimeOrganizations",
+            json!({}),
+            Auth::GlobalAdmin,
+            None,
+        ),
+        (
             API_KEY_SERVICE,
             "ListApiKeys",
             json!({"orgId": PRIMARY_ORG}),
@@ -268,6 +275,13 @@ async fn assert_auth_boundary(harness: &Harness) {
             "SetOrganizationDedicatedCpu",
             json!({"organizationId": PRIMARY_ORG, "dedicatedCpu": true}),
         ),
+        // Nor move an organization onto `standard`, or list the moved ones
+        // (#5602).
+        (
+            "SetOrganizationStandardRuntime",
+            json!({"organizationId": PRIMARY_ORG, "enabled": true}),
+        ),
+        ("ListStandardRuntimeOrganizations", json!({})),
         (
             "SetOrganizationRateCard",
             json!({"organizationId": PRIMARY_ORG, "rateCard": "unlimited"}),
@@ -295,6 +309,18 @@ async fn assert_auth_boundary(harness: &Harness) {
             .await;
         assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
     }
+
+    // A workload's token is no user credential: the move is refused before
+    // any handler runs (#5602).
+    let workload = harness
+        .connect_json(
+            ADMIN_SERVICE,
+            "SetOrganizationStandardRuntime",
+            json!({"organizationId": PRIMARY_ORG, "enabled": true}),
+            Auth::Bearer(workload_token()),
+        )
+        .await;
+    assert_connect_error(&workload, StatusCode::UNAUTHORIZED, "unauthenticated", "");
 }
 
 async fn assert_resize_contract(harness: &Harness) {
@@ -410,4 +436,14 @@ async fn assert_retired_routes_absent(harness: &Harness) {
         )
         .await
         .assert_status(StatusCode::NOT_FOUND, "retired terminal ticket route");
+}
+
+/// A workload's token as the admin layer sees it: an unsigned JWT with a
+/// service-account subject, built here rather than written out whole.
+fn workload_token() -> &'static str {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
+    let claims =
+        URL_SAFE_NO_PAD.encode(json!({"sub": "system:serviceaccount:sandbox"}).to_string());
+    Box::leak(format!("{header}.{claims}.not-signed").into_boxed_str())
 }

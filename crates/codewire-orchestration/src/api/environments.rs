@@ -775,9 +775,9 @@ pub(crate) struct EnvSummary {
     pub(crate) memory_mb: i32,
     pub(crate) isolation_tier: String,
     /// Recorded at create (docs/dev/SYSTEMD-WORKSPACE.md), with the
-    /// profile a systemd workspace was created on.
+    /// profile the environment was created on (#5602).
     pub(crate) systemd_workspace: bool,
-    pub(crate) systemd_runtime_profile: Option<String>,
+    pub(crate) runtime_profile: String,
     pub(crate) image: String,
 }
 
@@ -794,10 +794,7 @@ pub(crate) async fn require_systemd_bring_up(
         systemd_workspace: env.systemd_workspace,
         image: &env.image,
         isolation_tier: &env.isolation_tier,
-        runtime_profile: crate::sandbox::systemd_workspace::existing_profile(
-            &state.sandbox_cfg.runtime_profile,
-            env.systemd_runtime_profile.as_deref(),
-        ),
+        runtime_profile: &env.runtime_profile,
     };
     crate::sandbox::systemd_workspace::require_bring_up(&state.pool, user, org_id, environment)
         .await
@@ -831,7 +828,7 @@ pub(crate) async fn fetch_env_summary(
 ) -> Result<EnvSummary, AppError> {
     let row = sqlx::query(
         r#"SELECT id, state, protected, type, cpu_millicores, memory_mb, isolation_tier,
-                  systemd_workspace, systemd_runtime_profile,
+                  systemd_workspace, runtime_profile,
                   COALESCE(project_spec->>'image', '') AS image
            FROM environments WHERE id = $1 AND org_id = $2"#,
     )
@@ -857,7 +854,7 @@ pub(crate) async fn fetch_env_summary(
         memory_mb: row.try_get("memory_mb")?,
         isolation_tier: row.try_get("isolation_tier")?,
         systemd_workspace: row.try_get("systemd_workspace")?,
-        systemd_runtime_profile: row.try_get("systemd_runtime_profile")?,
+        runtime_profile: row.try_get("runtime_profile")?,
         image: row.try_get("image")?,
     })
 }
@@ -1488,7 +1485,7 @@ mod tests {
             memory_mb: 8192,
             isolation_tier: tier.into(),
             systemd_workspace: false,
-            systemd_runtime_profile: None,
+            runtime_profile: "commodity".into(),
             image: String::new(),
         };
         let checked = require_bring_up_access(&state, &user, "org-1", &env);

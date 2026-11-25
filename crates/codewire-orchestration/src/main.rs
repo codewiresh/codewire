@@ -683,9 +683,9 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
 
     let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
-    // Hosted egress and the standard runtime, read once and only here
-    // (`egress::startup`, #4000, #6070).
-    let egress_settings = egress::startup::configure(&mut sandbox_cfg, kube.as_ref()).await?;
+    // Hosted egress and the standard runtime, read once here (#4000, #6070, #5602).
+    let egress_settings =
+        egress::startup::configure(&mut sandbox_cfg, kube.as_ref(), &pool).await?;
     let network_policy_flags = network_policy_flags.with_hosted_egress(egress_settings.enabled);
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()

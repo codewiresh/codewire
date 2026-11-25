@@ -61,9 +61,9 @@ pub struct RenderingIntent {
     /// A systemd workspace, as its create recorded it
     /// (docs/dev/SYSTEMD-WORKSPACE.md).
     pub systemd_workspace: bool,
-    /// The profile a systemd workspace was created on, which it renders on
-    /// from then on; `None` for any other environment.
-    pub systemd_runtime_profile: Option<String>,
+    /// The profile its create recorded (`environments.runtime_profile`),
+    /// which it renders on from then on, whatever the deployment's default.
+    pub runtime_profile: String,
     /// Its organization's systemd opt-in, which a systemd workspace needs
     /// on `commodity` only.
     pub systemd_opted_in: bool,

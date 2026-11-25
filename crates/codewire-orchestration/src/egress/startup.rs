@@ -19,6 +19,7 @@ use crate::worker::create::SandboxWorkerCfg;
 pub async fn configure(
     cfg: &mut SandboxWorkerCfg,
     kube: Option<&kube::Client>,
+    pool: &sqlx::PgPool,
 ) -> anyhow::Result<EgressSettings> {
     let startup =
         super::settings::startup(&cfg.derp_host).context("read the hosted egress settings")?;
@@ -26,18 +27,22 @@ pub async fn configure(
         enabled: startup.settings.enabled,
         broker: startup.template,
     };
-    // The standard runtime profile (#5602) runs only with its runtime, its
-    // image disk and hosted egress, its VM's only network.
+    // The standard runtime (#5602), read and validated whenever it is set,
+    // on any profile: a moved organization uses it on a `commodity`
+    // deployment. As the default it needs its runtime, its image disk and
+    // hosted egress, its VM's only network, and every environment's record
+    // must agree with its live Sandbox.
     cfg.standard_runtime = StandardRuntime::from_env()
         .map_err(anyhow::Error::msg)
         .context("read the standard runtime settings")?;
     if cfg.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD {
         anyhow::ensure!(
-            cfg.standard_runtime.is_some() && cfg.hosted_egress.create().is_some(),
+            crate::sandbox::standard_move::available(cfg).is_some(),
             "the standard runtime profile needs {STANDARD_RUNTIME_IMAGE_ENV} and \
              {STANDARD_IMAGE_DISK_ENV}, and hosted egress on; see docs/CONFIGURATION.md",
         );
     }
+    crate::sandbox::standard_move::check_recorded_profiles(cfg, pool, kube).await?;
     // While the broker settings are read, the gateway address they render is
     // held to the gateway Service's ClusterIP; a broker-mode render refuses
     // until it is.

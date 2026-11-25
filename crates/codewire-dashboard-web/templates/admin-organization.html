@@ -32,38 +32,19 @@
               <div class="cw-stat"><dt>CPU</dt><dd>{{ organization.used_cpu }} <small>of {{ organization.effective_quota.cpu_millicores.display }}</small></dd></div>
               <div class="cw-stat"><dt>Memory</dt><dd>{{ organization.used_memory }} <small>of {{ organization.effective_quota.memory_mb.display }}</small></dd></div>
             </dl>
-            <ul class="cw-organization-settings" aria-label="Organization settings">
-              <li>{% match organization.confidential_environments %}{% when Some(enabled) %}<form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/confidential/set">
-                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="organization_id" value="{{ organization.id }}">
-                <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
-                {% if enabled %}<input type="hidden" name="enabled" value="false">
-                <p>Confidential environments <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>
-                <button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>{% else %}<input type="hidden" name="enabled" value="true">
-                <p>Confidential environments <span class="cw-status cw-status--quiet">Not opted in</span></p>
-                <button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>{% endif %}
-              </form>{% when None %}<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
-              <li>{% match organization.systemd_environments %}{% when Some(enabled) %}<form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/systemd/set">
-                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="organization_id" value="{{ organization.id }}">
-                <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
-                {% if enabled %}<input type="hidden" name="enabled" value="false">
-                <p>Systemd workspaces <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>
-                <button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>{% else %}<input type="hidden" name="enabled" value="true">
-                <p>Systemd workspaces <span class="cw-status cw-status--quiet">Not opted in</span></p>
-                <button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>{% endif %}
-              </form>{% when None %}<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
-              <li><form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/dedicated-cpu/set">
-                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="organization_id" value="{{ organization.id }}">
-                {% if organization.dedicated_cpu %}<input type="hidden" name="dedicated_cpu" value="false">
-                <p>CPU reservation <span class="cw-status cw-status--quiet" data-tone="info">Dedicated</span></p>
-                <button class="cw-text-action" type="submit">Return to shared CPU</button>{% else %}<input type="hidden" name="dedicated_cpu" value="true">
-                <p>CPU reservation <span class="cw-status cw-status--quiet">Shared</span></p>
-                <button class="cw-text-action" type="submit">Give dedicated CPU</button>{% endif %}
-              </form></li>
-            </ul>
-            <p class="cw-muted">Each change writes an audit entry. A CPU change applies to new sandboxes; while the deployment shares CPU, dedicated ones start cold.</p>
+            <form method="post" action="/admin/organizations/_actions/features/set" aria-label="Organization settings">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
+              <ul class="cw-organization-settings">
+                <li>{% match organization.confidential_environments %}{% when Some(enabled) %}<input type="hidden" name="confidential_was" value="{{ enabled }}"><label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="confidential" value="on"{% if enabled %} checked{% endif %}> Confidential environments</label>{% when None %}<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
+                <li>{% match organization.systemd_environments %}{% when Some(enabled) %}<input type="hidden" name="systemd_was" value="{{ enabled }}"><label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="systemd" value="on"{% if enabled %} checked{% endif %}> Systemd workspaces</label>{% when None %}<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
+                <li>{% match organization.standard_runtime %}{% when Some(enabled) %}<input type="hidden" name="standard_was" value="{{ enabled }}"><label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="standard" value="on"{% if enabled %} checked{% endif %}> Standard runtime</label>{% when None %}<p>Standard runtime <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}<p class="cw-muted">New sandboxes run on Codewire's own VM runtime instead of Kata.</p></li>
+                <li><input type="hidden" name="dedicated_cpu_was" value="{{ organization.dedicated_cpu }}"><label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="dedicated_cpu" value="on"{% if organization.dedicated_cpu %} checked{% endif %}> Dedicated CPU</label></li>
+              </ul>
+              <p class="cw-muted">Each change writes an audit entry and applies to new sandboxes; while the deployment shares CPU, dedicated ones start cold.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Save settings</button></div>
+            </form>
             <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/quota/set" aria-label="Set this organization's quota">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="organization_id" value="{{ organization.id }}">

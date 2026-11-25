@@ -52,7 +52,7 @@ pub fn environment_rendering_intent(
             .expect("environment isolation tier is validated at creation"),
         dedicated_cpu: env.dedicated_cpu,
         systemd_workspace: env.systemd_workspace,
-        systemd_runtime_profile: env.systemd_runtime_profile.clone(),
+        runtime_profile: env.runtime_profile.clone(),
         // The driver checks it with the profile it renders on.
         systemd_opted_in: env.systemd_environments_enabled,
         shape: WorkspaceShape {

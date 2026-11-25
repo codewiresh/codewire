@@ -34,6 +34,7 @@ mod account_suspension;
 pub(super) use account_suspension::{suspend_account, unsuspend_account};
 pub(super) mod account_list;
 pub(super) mod feedback;
+pub(super) mod organization_features;
 pub(super) mod pricing;
 
 const ADMIN_PATH: &str = "/admin/";
@@ -182,14 +183,6 @@ pub(super) struct RateCardSubmission {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct DedicatedCpuSubmission {
-    #[serde(rename = "_csrf")]
-    csrf: String,
-    organization_id: String,
-    dedicated_cpu: bool,
-}
-
-#[derive(Debug, Deserialize)]
 pub(super) struct QuotaClearSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
@@ -257,15 +250,6 @@ pub(super) struct SettingSubmission {
     csrf: String,
     setting_key: String,
     int_value: i32,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct OrganizationOptInSubmission {
-    #[serde(rename = "_csrf")]
-    csrf: String,
-    organization_id: String,
-    organization_slug: String,
-    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -589,39 +573,6 @@ pub(super) async fn set_organization_rate_card(
     quota_response(result, &path, "rate-card-saved", &headers)
 }
 
-/// Give an organization dedicated CPU, or return it to sharing (#3635).
-pub(super) async fn set_organization_dedicated_cpu(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-    Form(submission): Form<DedicatedCpuSubmission>,
-) -> Response {
-    if !valid_organization_id(&submission.organization_id) {
-        return error_page(WebError::NotFound);
-    }
-    let path = organization_path(&submission.organization_id);
-    let cookie =
-        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
-            .await
-        {
-            Ok((_, cookie)) => cookie,
-            Err(response) => return response,
-        };
-    let result = admin_connect::set_organization_dedicated_cpu(
-        &state,
-        cookie,
-        &submission.organization_id,
-        submission.dedicated_cpu,
-    )
-    .await;
-    let message = if submission.dedicated_cpu {
-        "dedicated-cpu-set"
-    } else {
-        "dedicated-cpu-cleared"
-    };
-    quota_response(result, &path, message, &headers)
-}
-
 pub(super) async fn clear_organization_quota(
     State(state): State<AppState>,
     Query(query): Query<AdminQuery>,
@@ -642,103 +593,6 @@ pub(super) async fn clear_organization_quota(
     let result =
         admin_connect::clear_organization_quota(&state, cookie, &submission.organization_id).await;
     quota_response(result, &path, "quota-cleared", &headers)
-}
-
-/// Opt an organization in to, or out of, confidential environments (#2497),
-/// from its admin page. Global administrators only; the billing service owns
-/// the opt-in, checks the administrator again and writes the audit event.
-pub(super) async fn set_organization_confidential(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-    Form(submission): Form<OrganizationOptInSubmission>,
-) -> Response {
-    if !valid_organization_id(&submission.organization_id) {
-        return error_page(WebError::NotFound);
-    }
-    let path = organization_path(&submission.organization_id);
-    let cookie =
-        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
-            .await
-        {
-            Ok((_, cookie)) => cookie,
-            Err(response) => return response,
-        };
-    let slug = submission.organization_slug;
-    if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
-        return admin_redirect_to(&path, "", "not-found", &headers);
-    }
-    let result =
-        admin_connect::set_confidential_environments(&state, cookie, slug, submission.enabled)
-            .await;
-    match result {
-        Ok(()) => admin_redirect_to(
-            &path,
-            if submission.enabled {
-                "confidential-enabled"
-            } else {
-                "confidential-disabled"
-            },
-            "",
-            &headers,
-        ),
-        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
-        Err(error) => {
-            let code = match mutation_error(&error) {
-                "unavailable" | "conflict" => "confidential-unavailable",
-                code => code,
-            };
-            admin_redirect_to(&path, "", code, &headers)
-        }
-    }
-}
-
-/// Opt an organization in to, or out of, systemd workspaces (#5638), from its
-/// admin page. Global administrators only; the billing service owns the
-/// opt-in, checks the administrator again and writes the audit event.
-pub(super) async fn set_organization_systemd(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-    Form(submission): Form<OrganizationOptInSubmission>,
-) -> Response {
-    if !valid_organization_id(&submission.organization_id) {
-        return error_page(WebError::NotFound);
-    }
-    let path = organization_path(&submission.organization_id);
-    let cookie =
-        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
-            .await
-        {
-            Ok((_, cookie)) => cookie,
-            Err(response) => return response,
-        };
-    let slug = submission.organization_slug;
-    if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
-        return admin_redirect_to(&path, "", "not-found", &headers);
-    }
-    let result =
-        admin_connect::set_systemd_environments(&state, cookie, slug, submission.enabled).await;
-    match result {
-        Ok(()) => admin_redirect_to(
-            &path,
-            if submission.enabled {
-                "systemd-enabled"
-            } else {
-                "systemd-disabled"
-            },
-            "",
-            &headers,
-        ),
-        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
-        Err(error) => {
-            let code = match mutation_error(&error) {
-                "unavailable" | "conflict" => "systemd-unavailable",
-                code => code,
-            };
-            admin_redirect_to(&path, "", code, &headers)
-        }
-    }
 }
 
 pub(super) async fn audit(
@@ -1377,13 +1231,9 @@ fn quota_message(value: &str) -> &'static str {
     match value {
         "quota-saved" => "Environment quota saved.",
         "quota-cleared" => "Environment quota cleared; the defaults apply.",
-        "confidential-enabled" => "Organization opted in to confidential environments.",
-        "confidential-disabled" => "Organization removed from confidential environments.",
-        "systemd-enabled" => "Organization opted in to systemd workspaces.",
-        "systemd-disabled" => "Organization removed from systemd workspaces.",
+        "features-saved" => "Organization settings saved.",
+        "features-unchanged" => "No setting changed.",
         "rate-card-saved" => "Rate card saved.",
-        "dedicated-cpu-set" => "New sandboxes of this organization get dedicated CPU.",
-        "dedicated-cpu-cleared" => "New sandboxes of this organization share CPU.",
         "credit-adjusted" => "Credit adjusted.",
         _ => "",
     }
@@ -1410,6 +1260,10 @@ fn quota_error(value: &str) -> &'static str {
         }
         "confidential-unavailable" => "Confidential environments are temporarily unavailable.",
         "systemd-unavailable" => "Systemd workspaces are temporarily unavailable.",
+        "standard-unavailable" => "The standard runtime setting is temporarily unavailable.",
+        "standard-not-offered" => {
+            "This deployment doesn't offer the standard runtime, so no organization can use it."
+        }
         _ => "",
     }
 }

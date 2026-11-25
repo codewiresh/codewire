@@ -83,6 +83,12 @@ const (
 	// AdminServiceSetOrganizationDedicatedCpuProcedure is the fully-qualified name of the
 	// AdminService's SetOrganizationDedicatedCpu RPC.
 	AdminServiceSetOrganizationDedicatedCpuProcedure = "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu"
+	// AdminServiceListStandardRuntimeOrganizationsProcedure is the fully-qualified name of the
+	// AdminService's ListStandardRuntimeOrganizations RPC.
+	AdminServiceListStandardRuntimeOrganizationsProcedure = "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations"
+	// AdminServiceSetOrganizationStandardRuntimeProcedure is the fully-qualified name of the
+	// AdminService's SetOrganizationStandardRuntime RPC.
+	AdminServiceSetOrganizationStandardRuntimeProcedure = "/codewire.admin.v1.AdminService/SetOrganizationStandardRuntime"
 	// AdminServiceAdjustOrganizationCreditProcedure is the fully-qualified name of the AdminService's
 	// AdjustOrganizationCredit RPC.
 	AdminServiceAdjustOrganizationCreditProcedure = "/codewire.admin.v1.AdminService/AdjustOrganizationCredit"
@@ -156,6 +162,15 @@ type AdminServiceClient interface {
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
 	// the value it already has changes nothing.
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
+	// ListStandardRuntimeOrganizations lists the organizations moved onto the
+	// `standard` runtime profile, by slug.
+	ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error)
+	// SetOrganizationStandardRuntime moves one organization onto the
+	// `standard` runtime profile, or back, and writes an audit entry. Only new
+	// sandboxes follow it. A move onto it is refused while the deployment
+	// doesn't make it available. Setting the value it already has changes
+	// nothing.
+	SetOrganizationStandardRuntime(context.Context, *connect.Request[v1.SetOrganizationStandardRuntimeRequest]) (*connect.Response[v1.SetOrganizationStandardRuntimeResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing. One
@@ -303,6 +318,19 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
 			connect.WithClientOptions(opts...),
 		),
+		listStandardRuntimeOrganizations: connect.NewClient[v1.ListStandardRuntimeOrganizationsRequest, v1.ListStandardRuntimeOrganizationsResponse](
+			httpClient,
+			baseURL+AdminServiceListStandardRuntimeOrganizationsProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("ListStandardRuntimeOrganizations")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		setOrganizationStandardRuntime: connect.NewClient[v1.SetOrganizationStandardRuntimeRequest, v1.SetOrganizationStandardRuntimeResponse](
+			httpClient,
+			baseURL+AdminServiceSetOrganizationStandardRuntimeProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationStandardRuntime")),
+			connect.WithClientOptions(opts...),
+		),
 		adjustOrganizationCredit: connect.NewClient[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse](
 			httpClient,
 			baseURL+AdminServiceAdjustOrganizationCreditProcedure,
@@ -343,6 +371,8 @@ type adminServiceClient struct {
 	setOrganizationRateCard           *connect.Client[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse]
 	getClusterCapacity                *connect.Client[v1.GetClusterCapacityRequest, v1.GetClusterCapacityResponse]
 	setOrganizationDedicatedCpu       *connect.Client[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse]
+	listStandardRuntimeOrganizations  *connect.Client[v1.ListStandardRuntimeOrganizationsRequest, v1.ListStandardRuntimeOrganizationsResponse]
+	setOrganizationStandardRuntime    *connect.Client[v1.SetOrganizationStandardRuntimeRequest, v1.SetOrganizationStandardRuntimeResponse]
 	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
 	suspendAccount                    *connect.Client[v1.SuspendAccountRequest, v1.SuspendAccountResponse]
 	unsuspendAccount                  *connect.Client[v1.UnsuspendAccountRequest, v1.UnsuspendAccountResponse]
@@ -437,6 +467,18 @@ func (c *adminServiceClient) SetOrganizationDedicatedCpu(ctx context.Context, re
 	return c.setOrganizationDedicatedCpu.CallUnary(ctx, req)
 }
 
+// ListStandardRuntimeOrganizations calls
+// codewire.admin.v1.AdminService.ListStandardRuntimeOrganizations.
+func (c *adminServiceClient) ListStandardRuntimeOrganizations(ctx context.Context, req *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error) {
+	return c.listStandardRuntimeOrganizations.CallUnary(ctx, req)
+}
+
+// SetOrganizationStandardRuntime calls
+// codewire.admin.v1.AdminService.SetOrganizationStandardRuntime.
+func (c *adminServiceClient) SetOrganizationStandardRuntime(ctx context.Context, req *connect.Request[v1.SetOrganizationStandardRuntimeRequest]) (*connect.Response[v1.SetOrganizationStandardRuntimeResponse], error) {
+	return c.setOrganizationStandardRuntime.CallUnary(ctx, req)
+}
+
 // AdjustOrganizationCredit calls codewire.admin.v1.AdminService.AdjustOrganizationCredit.
 func (c *adminServiceClient) AdjustOrganizationCredit(ctx context.Context, req *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {
 	return c.adjustOrganizationCredit.CallUnary(ctx, req)
@@ -514,6 +556,15 @@ type AdminServiceHandler interface {
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
 	// the value it already has changes nothing.
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
+	// ListStandardRuntimeOrganizations lists the organizations moved onto the
+	// `standard` runtime profile, by slug.
+	ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error)
+	// SetOrganizationStandardRuntime moves one organization onto the
+	// `standard` runtime profile, or back, and writes an audit entry. Only new
+	// sandboxes follow it. A move onto it is refused while the deployment
+	// doesn't make it available. Setting the value it already has changes
+	// nothing.
+	SetOrganizationStandardRuntime(context.Context, *connect.Request[v1.SetOrganizationStandardRuntimeRequest]) (*connect.Response[v1.SetOrganizationStandardRuntimeResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing. One
@@ -657,6 +708,19 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceListStandardRuntimeOrganizationsHandler := connect.NewUnaryHandler(
+		AdminServiceListStandardRuntimeOrganizationsProcedure,
+		svc.ListStandardRuntimeOrganizations,
+		connect.WithSchema(adminServiceMethods.ByName("ListStandardRuntimeOrganizations")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceSetOrganizationStandardRuntimeHandler := connect.NewUnaryHandler(
+		AdminServiceSetOrganizationStandardRuntimeProcedure,
+		svc.SetOrganizationStandardRuntime,
+		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationStandardRuntime")),
+		connect.WithHandlerOptions(opts...),
+	)
 	adminServiceAdjustOrganizationCreditHandler := connect.NewUnaryHandler(
 		AdminServiceAdjustOrganizationCreditProcedure,
 		svc.AdjustOrganizationCredit,
@@ -711,6 +775,10 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceGetClusterCapacityHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationDedicatedCpuProcedure:
 			adminServiceSetOrganizationDedicatedCpuHandler.ServeHTTP(w, r)
+		case AdminServiceListStandardRuntimeOrganizationsProcedure:
+			adminServiceListStandardRuntimeOrganizationsHandler.ServeHTTP(w, r)
+		case AdminServiceSetOrganizationStandardRuntimeProcedure:
+			adminServiceSetOrganizationStandardRuntimeHandler.ServeHTTP(w, r)
 		case AdminServiceAdjustOrganizationCreditProcedure:
 			adminServiceAdjustOrganizationCreditHandler.ServeHTTP(w, r)
 		case AdminServiceSuspendAccountProcedure:
@@ -792,6 +860,14 @@ func (UnimplementedAdminServiceHandler) GetClusterCapacity(context.Context, *con
 
 func (UnimplementedAdminServiceHandler) SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationDedicatedCpu is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ListStandardRuntimeOrganizations is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetOrganizationStandardRuntime(context.Context, *connect.Request[v1.SetOrganizationStandardRuntimeRequest]) (*connect.Response[v1.SetOrganizationStandardRuntimeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationStandardRuntime is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {

@@ -406,10 +406,24 @@ database_case!(
 );
 
 database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
-    sqlx::query("UPDATE environments SET isolation_tier='confidential' WHERE id=$1")
-        .bind(ENV)
-        .execute(&f.pool)
+    // The fixture's environment made confidential as its create would have
+    // recorded it, tier and profile together; the record is written once, so
+    // its trigger is paused for this fixture change.
+    let mut fixture = f.pool.begin().await?;
+    sqlx::query("ALTER TABLE environments DISABLE TRIGGER environment_systemd_record_immutable")
+        .execute(&mut *fixture)
         .await?;
+    sqlx::query(
+        "UPDATE environments SET isolation_tier='confidential', runtime_profile='confidential' \
+         WHERE id=$1",
+    )
+    .bind(ENV)
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query("ALTER TABLE environments ENABLE TRIGGER environment_systemd_record_immutable")
+        .execute(&mut *fixture)
+        .await?;
+    fixture.commit().await?;
     let facts = read_facts(&f.pool).await?;
     // Not opted in: even a global administrator member is refused.
     sqlx::query("UPDATE users SET is_admin=true WHERE id=$1")

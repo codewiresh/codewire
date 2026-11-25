@@ -50,7 +50,7 @@ async fn environment(
     systemd_workspace: bool,
     image: &str,
 ) -> Result<()> {
-    recorded_environment(pool, id, state, systemd_workspace, image, None).await
+    recorded_environment(pool, id, state, systemd_workspace, image, "commodity").await
 }
 
 async fn recorded_environment(
@@ -59,11 +59,11 @@ async fn recorded_environment(
     state: &str,
     systemd_workspace: bool,
     image: &str,
-    profile: Option<&str>,
+    profile: &str,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO environments (id, org_id, created_by, type, preset_id, state, desired_state, \
-         project_spec, systemd_workspace, systemd_runtime_profile) \
+         project_spec, systemd_workspace, runtime_profile) \
          VALUES ($1, $2, $3, 'sandbox', $2, $4, 'started', jsonb_build_object('image', $5::text), \
          $6, $7)",
     )
@@ -161,7 +161,7 @@ async fn db_after_the_opt_in_goes_off_only_a_bring_up_is_stopped() -> Result<()>
 
         opt_in(pool, true).await?;
         ensure!(
-            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "commodity")
+            crate::worker::systemd_stop::refused_environment_ids(pool, &images)
                 .await?
                 .is_empty()
         );
@@ -169,26 +169,23 @@ async fn db_after_the_opt_in_goes_off_only_a_bring_up_is_stopped() -> Result<()>
         // The flag goes off: a restart or replacement under way is stopped,
         // and the running one keeps running until its next bring-up.
         opt_in(pool, false).await?;
-        let refused =
-            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "commodity")
-                .await?;
+        let refused = crate::worker::systemd_stop::refused_environment_ids(pool, &images).await?;
         ensure!(
             refused == ["systemd-creating", "systemd-starting"],
             "{refused:?}"
         );
 
-        // A `standard` deployment reads each one's recorded profile, never
-        // its current disk: one created on `standard` is not stopped with the
-        // flag off, whatever disk the deployment boots now (a republish); one
-        // created on `commodity`, or before the record (read as `commodity`),
-        // is.
+        // Each one's recorded profile decides, never the deployment's
+        // default or its current disk: one created on `standard` is not
+        // stopped with the flag off, whatever disk the deployment boots now
+        // (a republish); one created on `commodity` is.
         recorded_environment(
             pool,
             "standard-starting",
             "starting",
             true,
             &pinned(),
-            Some("standard"),
+            "standard",
         )
         .await?;
         recorded_environment(
@@ -197,27 +194,12 @@ async fn db_after_the_opt_in_goes_off_only_a_bring_up_is_stopped() -> Result<()>
             "starting",
             true,
             &pinned(),
-            Some("commodity"),
+            "commodity",
         )
         .await?;
-        let refused =
-            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "standard").await?;
+        let refused = crate::worker::systemd_stop::refused_environment_ids(pool, &images).await?;
         ensure!(
             refused == ["commodity-starting", "systemd-creating", "systemd-starting"],
-            "{refused:?}"
-        );
-        // A `commodity` deployment renders every one on `commodity`.
-        let refused =
-            crate::worker::systemd_stop::refused_environment_ids(pool, &images, "commodity")
-                .await?;
-        ensure!(
-            refused
-                == [
-                    "commodity-starting",
-                    "standard-starting",
-                    "systemd-creating",
-                    "systemd-starting"
-                ],
             "{refused:?}"
         );
         sqlx::query(
@@ -228,12 +210,9 @@ async fn db_after_the_opt_in_goes_off_only_a_bring_up_is_stopped() -> Result<()>
 
         // The deployment stops offering it, the flag on: the same.
         opt_in(pool, true).await?;
-        let refused = crate::worker::systemd_stop::refused_environment_ids(
-            pool,
-            &RuntimeImages::example(),
-            "commodity",
-        )
-        .await?;
+        let refused =
+            crate::worker::systemd_stop::refused_environment_ids(pool, &RuntimeImages::example())
+                .await?;
         ensure!(
             refused == ["systemd-creating", "systemd-starting"],
             "{refused:?}"

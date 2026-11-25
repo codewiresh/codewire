@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse, ListOrganizationsRequest, ListOrganizationsResponse, ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse, SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -84,6 +84,12 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_standard_runtime_organizations(self, request: ListStandardRuntimeOrganizationsRequest, ctx: RequestContext[ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse]) -> ListStandardRuntimeOrganizationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_organization_standard_runtime(self, request: SetOrganizationStandardRuntimeRequest, ctx: RequestContext[SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse]) -> SetOrganizationStandardRuntimeResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
@@ -278,6 +284,26 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_organization_dedicated_cpu,
+                ),
+                "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListStandardRuntimeOrganizations",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=ListStandardRuntimeOrganizationsRequest,
+                        output=ListStandardRuntimeOrganizationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_standard_runtime_organizations,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationStandardRuntime": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationStandardRuntime",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationStandardRuntimeRequest,
+                        output=SetOrganizationStandardRuntimeResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_organization_standard_runtime,
                 ),
                 "/codewire.admin.v1.AdminService/AdjustOrganizationCredit": Endpoint.unary(
                     method=MethodInfo(
@@ -711,6 +737,48 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def list_standard_runtime_organizations(
+        self,
+        request: ListStandardRuntimeOrganizationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListStandardRuntimeOrganizationsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListStandardRuntimeOrganizations",
+                service_name="codewire.admin.v1.AdminService",
+                input=ListStandardRuntimeOrganizationsRequest,
+                output=ListStandardRuntimeOrganizationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def set_organization_standard_runtime(
+        self,
+        request: SetOrganizationStandardRuntimeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationStandardRuntimeResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationStandardRuntime",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationStandardRuntimeRequest,
+                output=SetOrganizationStandardRuntimeResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def adjust_organization_credit(
         self,
         request: AdjustOrganizationCreditRequest,
@@ -821,6 +889,12 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_standard_runtime_organizations(self, request: ListStandardRuntimeOrganizationsRequest, ctx: RequestContext[ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse]) -> ListStandardRuntimeOrganizationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_organization_standard_runtime(self, request: SetOrganizationStandardRuntimeRequest, ctx: RequestContext[SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse]) -> SetOrganizationStandardRuntimeResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
@@ -1013,6 +1087,26 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_organization_dedicated_cpu,
+                ),
+                "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListStandardRuntimeOrganizations",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=ListStandardRuntimeOrganizationsRequest,
+                        output=ListStandardRuntimeOrganizationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_standard_runtime_organizations,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationStandardRuntime": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationStandardRuntime",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationStandardRuntimeRequest,
+                        output=SetOrganizationStandardRuntimeResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_organization_standard_runtime,
                 ),
                 "/codewire.admin.v1.AdminService/AdjustOrganizationCredit": EndpointSync.unary(
                     method=MethodInfo(
@@ -1424,6 +1518,46 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=SetOrganizationDedicatedCpuRequest,
                 output=SetOrganizationDedicatedCpuResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def list_standard_runtime_organizations(
+        self,
+        request: ListStandardRuntimeOrganizationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListStandardRuntimeOrganizationsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListStandardRuntimeOrganizations",
+                service_name="codewire.admin.v1.AdminService",
+                input=ListStandardRuntimeOrganizationsRequest,
+                output=ListStandardRuntimeOrganizationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def set_organization_standard_runtime(
+        self,
+        request: SetOrganizationStandardRuntimeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationStandardRuntimeResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationStandardRuntime",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationStandardRuntimeRequest,
+                output=SetOrganizationStandardRuntimeResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

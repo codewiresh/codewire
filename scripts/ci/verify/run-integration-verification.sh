@@ -1264,6 +1264,12 @@ database_lane_orchestration_workspaces() {
       'api::admin::dedicated_cpu_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "organization standard runtime move matrix" organization-standard-runtime-move \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'sandbox::standard_move::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "workspace binding recorder matrix" workspace-binding-recorder \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

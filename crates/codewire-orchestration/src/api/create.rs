@@ -478,29 +478,46 @@ fn create_isolation_tier(
     }
 }
 
-/// The profile a systemd workspace's create records, admitted, or `None` for
-/// a plain environment ([`crate::sandbox::systemd_workspace::admit_create`]).
-async fn admit_systemd_create(
+/// What a create records, written once with the environment (#5602).
+pub(super) struct RecordedRuntime {
+    /// A systemd workspace (docs/dev/SYSTEMD-WORKSPACE.md).
+    pub(super) systemd_workspace: bool,
+    /// The profile its create chose under its organization's move
+    /// ([`crate::sandbox::standard_move::create_profile`]).
+    pub(super) profile: String,
+}
+
+/// The profile the create records, under its organization's move onto
+/// `standard`, and whether it makes a systemd workspace on it, admitted
+/// ([`crate::sandbox::systemd_workspace::admit_create`]).
+async fn admit_runtime_create(
     state: &ApiState,
     user: &AuthUser,
     org_id: &str,
     body: &CreateEnvironmentBody,
     isolation_tier: &str,
-) -> AppResult<Option<String>> {
-    let create = crate::sandbox::systemd_workspace::CreateKind {
-        image: &body.project_spec.image,
+) -> AppResult<RecordedRuntime> {
+    let moved = crate::sandbox::standard_move::organization_moved(&state.pool, org_id).await?;
+    let image = &body.project_spec.image;
+    let profile = crate::sandbox::standard_move::create_profile(
+        &state.sandbox_cfg,
         isolation_tier,
-        runtime_profile: crate::sandbox::template::runtime_profile_of(
-            &state.sandbox_cfg.runtime_profile,
-            state.sandbox_cfg.standard_runtime.as_ref(),
-            &body.project_spec.image,
-        ),
+        image,
+        moved,
+    );
+    let create = crate::sandbox::systemd_workspace::CreateKind {
+        image,
+        isolation_tier,
+        runtime_profile: profile,
         source_snapshot_id: body.source_snapshot_id.as_deref(),
         placed_on_host: body.placement_host.is_some(),
     };
-    let profile =
+    let systemd =
         crate::sandbox::systemd_workspace::admit_create(&state.pool, user, org_id, create);
-    Ok(profile.await?.map(str::to_owned))
+    Ok(RecordedRuntime {
+        systemd_workspace: systemd.await?.is_some(),
+        profile: profile.to_owned(),
+    })
 }
 
 /// Mirrors `worker.ValidAgentType` via the shared agent registry.
@@ -721,9 +738,9 @@ struct InsertEnvironmentParams<'a> {
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     body: &'a CreateEnvironmentBody,
-    /// A systemd workspace's profile, recorded once here with its kind;
-    /// every later Pod renders from them.
-    systemd_runtime_profile: Option<String>,
+    /// The environment's kind and the profile its create chose, recorded
+    /// once here; every later Pod renders from them (#5602).
+    runtime: RecordedRuntime,
     /// The organization's limits, read before the transaction; usage is
     /// counted inside it.
     quota: OrgQuota,
@@ -841,7 +858,7 @@ async fn insert_environment(
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
                  runtime_backend, host_id, create_request_id, idle_stop_seconds,
-                 systemd_workspace, systemd_runtime_profile)
+                 systemd_workspace, runtime_profile)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
                  $12, $13, $14, $15, $16, $17, $18, $19)
@@ -910,8 +927,8 @@ async fn insert_environment(
         .bind(host_id.as_deref())
         .bind(p.body.request_id.as_deref())
         .bind(idle_stop_seconds)
-        .bind(p.systemd_runtime_profile.is_some())
-        .bind(p.systemd_runtime_profile.as_deref())
+        .bind(p.runtime.systemd_workspace)
+        .bind(&p.runtime.profile)
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;
@@ -1260,8 +1277,7 @@ pub(crate) async fn create_environment_core(
     if !body.project_spec.image.is_empty() {
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);
     }
-    let systemd_runtime_profile =
-        admit_systemd_create(state, user, org_id, &body, isolation_tier).await?;
+    let runtime = admit_runtime_create(state, user, org_id, &body, isolation_tier).await?;
 
     take_create_limits(pool, &user.user_id).await?;
 
@@ -1353,7 +1369,7 @@ pub(crate) async fn create_environment_core(
                     isolation_tier,
                     ttl_seconds: ttl,
                     body: &body,
-                    systemd_runtime_profile,
+                    runtime,
                     quota,
                 },
             )
@@ -2846,7 +2862,10 @@ credentials: {profile: user/work}
                     isolation_tier: "standard",
                     ttl_seconds: None,
                     body,
-                    systemd_runtime_profile: None,
+                    runtime: RecordedRuntime {
+                        systemd_workspace: false,
+                        profile: "commodity".into(),
+                    },
                     quota,
                 },
             )

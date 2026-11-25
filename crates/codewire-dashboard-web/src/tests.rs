@@ -876,6 +876,7 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
         has_explicit_quota,
         confidential_environments: Some(false),
         systemd_environments: Some(false),
+        standard_runtime: Some(false),
         effective_quota: QuotaView {
             environments: limit(-1, "Unlimited"),
             sandboxes: limit(200, "200"),
@@ -1085,7 +1086,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             r#"<dt>Credit balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.003385</span></dd>"#
         ));
         assert!(body.contains(r#"action="/admin/organizations/_actions/rate-card/set""#));
-        assert!(body.contains(r#"action="/admin/organizations/_actions/dedicated-cpu/set""#));
+        assert!(body.contains(r#"action="/admin/organizations/_actions/features/set""#));
         assert!(body.contains(
             r#"<select class="cw-select" name="rate_card"><option value="regular">Regular</option><option value="discounted" selected>Discounted</option><option value="unlimited">Unlimited</option></select>"#
         ));
@@ -1108,16 +1109,14 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
     }
 }
 
-/// Dedicated CPU is one button whose verb follows the state, posting the
-/// opposite state (#3635).
+/// The organization's switches are one list of checkboxes saved together
+/// (#5602): each box starts at its setting and carries the value the page
+/// showed, the standard runtime says what it does, and a switch whose state
+/// can't be read shows that and posts nothing.
 #[test]
-fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
+fn admin_organization_switches_are_one_checkbox_list_that_follows_each_setting() {
     let view = admin_view();
-    let render = |dedicated_cpu: bool| {
-        let organization = AdminOrganizationView {
-            dedicated_cpu,
-            ..unsafe_organization(false)
-        };
+    let render = |organization: AdminOrganizationView| {
         AdminOrganizationTemplate {
             view: &view,
             organization: &organization,
@@ -1130,132 +1129,74 @@ fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
         .render()
         .expect("render admin organization page")
     };
-    let shared = render(false);
-    assert!(shared.contains(
-        r#"<p>CPU reservation <span class="cw-status cw-status--quiet">Shared</span></p>"#
-    ));
-    assert!(shared.contains(r#"<input type="hidden" name="dedicated_cpu" value="true">"#));
-    assert!(shared.contains(">Give dedicated CPU</button>"));
-    assert!(!shared.contains(">Return to shared CPU</button>"));
-    let dedicated = render(true);
-    assert!(dedicated.contains(
-        r#"<p>CPU reservation <span class="cw-status cw-status--quiet" data-tone="info">Dedicated</span></p>"#
-    ));
-    assert!(dedicated.contains(r#"<input type="hidden" name="dedicated_cpu" value="false">"#));
-    assert!(dedicated.contains(">Return to shared CPU</button>"));
-    assert!(!dedicated.contains(">Give dedicated CPU</button>"));
-}
-
-/// The systemd opt-in is one button whose verb follows the state, posting the
-/// opposite state with the organization's id and slug; while billing cannot
-/// say, the page says so and offers no button (#5638).
-#[test]
-fn admin_organization_systemd_toggle_follows_the_opt_in() {
-    let view = admin_view();
-    let render = |systemd_environments: Option<bool>| {
-        let organization = AdminOrganizationView {
-            systemd_environments,
-            ..unsafe_organization(false)
-        };
-        AdminOrganizationTemplate {
-            view: &view,
-            organization: &organization,
-            csrf_token: "csrf-safe",
-            credit_key: "credit-key-1",
-            credit_confirmation: None,
-            message: "",
-            error: "",
-        }
-        .render()
-        .expect("render admin organization page")
-    };
-    let action = r#"action="/admin/organizations/_actions/systemd/set""#;
+    let action = r#"action="/admin/organizations/_actions/features/set""#;
     let form = |html: &str| -> String {
-        let start = html.find(action).expect("the systemd form");
+        let start = html.find(action).expect("the settings form");
         html[start..start + html[start..].find("</form>").unwrap()].to_owned()
     };
-
-    let off = form(&render(Some(false)));
-    assert!(off.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#));
-    assert!(off.contains(r#"<input type="hidden" name="organization_slug" value="safe-org">"#));
-    assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
-    assert!(off.contains(
-        r#"<p>Systemd workspaces <span class="cw-status cw-status--quiet">Not opted in</span></p>"#
-    ));
-    assert!(off.contains(
-        r#"<button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>"#
-    ));
-
-    let on = form(&render(Some(true)));
-    assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
-    assert!(on.contains(
-        r#"<p>Systemd workspaces <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>"#
-    ));
-    assert!(on.contains(
-        r#"<button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>"#
-    ));
-
-    let unknown = render(None);
-    assert!(!unknown.contains(action));
-    assert!(unknown.contains(
-        r#"<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>"#
-    ));
-}
-
-/// The confidential opt-in is one button whose verb follows the state, posting
-/// the opposite state with the organization's id and slug; while billing
-/// cannot say, the page says so and offers no button (#2497).
-#[test]
-fn admin_organization_confidential_toggle_follows_the_opt_in() {
-    let view = admin_view();
-    let render = |confidential_environments: Option<bool>| {
-        let organization = AdminOrganizationView {
-            confidential_environments,
-            ..unsafe_organization(false)
-        };
-        AdminOrganizationTemplate {
-            view: &view,
-            organization: &organization,
-            csrf_token: "csrf-safe",
-            credit_key: "credit-key-1",
-            credit_confirmation: None,
-            message: "",
-            error: "",
-        }
-        .render()
-        .expect("render admin organization page")
+    let checkbox = |name: &str, label: &str, checked: bool| {
+        format!(
+            r#"<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="{name}" value="on"{}> {label}</label>"#,
+            if checked { " checked" } else { "" }
+        )
     };
-    let action = r#"action="/admin/organizations/_actions/confidential/set""#;
-    let ids = r#"<input type="hidden" name="organization_id" value="org_safe-1">
-                <input type="hidden" name="organization_slug" value="safe-org">"#;
+    let was = |name: &str, value: bool| {
+        format!(r#"<input type="hidden" name="{name}_was" value="{value}">"#)
+    };
 
-    let off = render(Some(false));
-    assert!(
-        off.contains(r#"<ul class="cw-organization-settings" aria-label="Organization settings">"#)
-    );
-    assert!(!off.contains("confidential-heading"));
-    assert!(off.contains(action) && off.contains(ids));
-    assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
-    assert!(off.contains(
-        r#"<p>Confidential environments <span class="cw-status cw-status--quiet">Not opted in</span></p>"#
-    ));
-    assert!(off.contains(
-        r#"<button class="cw-text-action" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>"#
-    ));
+    for on in [false, true] {
+        let html = form(&render(AdminOrganizationView {
+            confidential_environments: Some(on),
+            systemd_environments: Some(!on),
+            standard_runtime: Some(on),
+            dedicated_cpu: !on,
+            ..unsafe_organization(false)
+        }));
+        assert!(
+            html.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#)
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="organization_slug" value="safe-org">"#)
+        );
+        assert!(html.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
+        for (name, label, value) in [
+            ("confidential", "Confidential environments", on),
+            ("systemd", "Systemd workspaces", !on),
+            ("standard", "Standard runtime", on),
+            ("dedicated_cpu", "Dedicated CPU", !on),
+        ] {
+            assert!(
+                html.contains(&checkbox(name, label, value)),
+                "{name} {value}"
+            );
+            assert!(html.contains(&was(name, value)), "{name} was {value}");
+        }
+        assert!(html.contains(
+            "<p class=\"cw-muted\">New sandboxes run on Codewire's own VM runtime instead of Kata.</p>"
+        ));
+        assert!(html.contains(r#"<button class="cw-button" type="submit">Save settings</button>"#));
+    }
 
-    let on = render(Some(true));
-    assert!(on.contains(action) && on.contains(ids));
-    assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
-    assert!(on.contains(r#"<p>Confidential environments <span class="cw-status cw-status--quiet" data-tone="success">Opted in</span></p>"#));
-    assert!(on.contains(
-        r#"<button class="cw-text-action" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>"#
-    ));
-
-    let unknown = render(None);
-    assert!(!unknown.contains(action));
-    assert!(unknown.contains(
-        r#"<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>"#
-    ));
+    // A switch whose service can't be read says so, with no box and no
+    // value to post; the others are still offered.
+    let html = form(&render(AdminOrganizationView {
+        confidential_environments: None,
+        systemd_environments: None,
+        standard_runtime: None,
+        ..unsafe_organization(false)
+    }));
+    for (name, label) in [
+        ("confidential", "Confidential environments"),
+        ("systemd", "Systemd workspaces"),
+        ("standard", "Standard runtime"),
+    ] {
+        assert!(html.contains(&format!(
+            r#"<p>{label} <span class="cw-muted">cannot be read right now</span></p>"#
+        )));
+        assert!(!html.contains(&format!(r#"name="{name}""#)), "{name}");
+        assert!(!html.contains(&format!(r#"name="{name}_was""#)), "{name}");
+    }
+    assert!(html.contains(r#"name="dedicated_cpu_was""#));
 }
 
 /// An adjustment below zero asks first (#4754): the page shows what it sets

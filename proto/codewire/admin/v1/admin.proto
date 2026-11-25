@@ -125,6 +125,21 @@ service AdminService {
   rpc SetOrganizationDedicatedCpu(SetOrganizationDedicatedCpuRequest)
       returns (SetOrganizationDedicatedCpuResponse);
 
+  // ListStandardRuntimeOrganizations lists the organizations moved onto the
+  // `standard` runtime profile, by slug.
+  rpc ListStandardRuntimeOrganizations(ListStandardRuntimeOrganizationsRequest)
+      returns (ListStandardRuntimeOrganizationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetOrganizationStandardRuntime moves one organization onto the
+  // `standard` runtime profile, or back, and writes an audit entry. Only new
+  // sandboxes follow it. A move onto it is refused while the deployment
+  // doesn't make it available. Setting the value it already has changes
+  // nothing.
+  rpc SetOrganizationStandardRuntime(SetOrganizationStandardRuntimeRequest)
+      returns (SetOrganizationStandardRuntimeResponse);
+
   // AdjustOrganizationCredit adds or removes compute credit with a reason,
   // as a ledger entry naming the administrator, and writes an audit entry.
   // A repeated idempotency key for the organization changes nothing. One
@@ -569,6 +584,29 @@ message SetOrganizationDedicatedCpuResponse {
   string organization_id = 1;
   bool dedicated_cpu = 2;
   bool previous_dedicated_cpu = 3;
+}
+
+message ListStandardRuntimeOrganizationsRequest {}
+
+message StandardRuntimeOrganization {
+  string organization_id = 1;
+  string slug = 2;
+  string name = 3;
+}
+
+message ListStandardRuntimeOrganizationsResponse {
+  repeated StandardRuntimeOrganization organizations = 1;
+}
+
+message SetOrganizationStandardRuntimeRequest {
+  string organization_id = 1;
+  bool enabled = 2;
+}
+
+message SetOrganizationStandardRuntimeResponse {
+  string organization_id = 1;
+  bool enabled = 2;
+  bool previous_enabled = 3;
 }
 
 message AdjustOrganizationCreditRequest {

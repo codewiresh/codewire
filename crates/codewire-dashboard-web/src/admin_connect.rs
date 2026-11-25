@@ -9,11 +9,12 @@ use codewire_admin_proto::codewire::admin::v1::{
     GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
     ListConfidentialOrganizationsRequest, ListFeedbackRequest,
     ListOrganizationSandboxCountsRequest, ListOrganizationsRequest,
-    ListSubscriptionMigrationsRequest, ListSystemdOrganizationsRequest, PlanSpec,
-    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
-    SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
-    SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
-    SetOrganizationRateCardRequest, SetOrganizationSystemdEnvironmentsRequest,
+    ListStandardRuntimeOrganizationsRequest, ListSubscriptionMigrationsRequest,
+    ListSystemdOrganizationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
+    RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
+    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
+    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest,
+    SetOrganizationStandardRuntimeRequest, SetOrganizationSystemdEnvironmentsRequest,
     SetPlanArchivedRequest, SetPriceArchivedRequest, SuspendAccountRequest,
     UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
 };
@@ -328,6 +329,9 @@ pub(crate) struct AdminOrganizationView {
     /// Opted in to systemd workspaces (#5638); `None` while the billing
     /// service that owns the opt-in cannot be read.
     pub(crate) systemd_environments: Option<bool>,
+    /// Moved onto the standard runtime (#5602); `None` while orchestration,
+    /// which owns the move, cannot be read.
+    pub(crate) standard_runtime: Option<bool>,
     pub(crate) active_environments: i64,
     pub(crate) active_sandboxes: i64,
     pub(crate) used_cpu: String,
@@ -867,6 +871,26 @@ async fn systemd_organization_ids(
     )
 }
 
+/// The organizations moved onto the standard runtime (#5602), or `None`
+/// while orchestration cannot say.
+async fn standard_organization_ids(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Option<HashSet<String>> {
+    let response = admin_client(state, cookie)
+        .list_standard_runtime_organizations(ListStandardRuntimeOrganizationsRequest::default())
+        .await
+        .ok()?
+        .into_owned();
+    Some(
+        response
+            .organizations
+            .into_iter()
+            .map(|organization| organization.organization_id)
+            .collect(),
+    )
+}
+
 pub(crate) async fn organizations(
     state: &AppState,
     cookie: HeaderValue,
@@ -922,13 +946,14 @@ pub(crate) async fn organization(
     organization_id: &str,
 ) -> Result<AdminOrganizationView, ConnectError> {
     let admin_rpc = admin_client(state, cookie.clone());
-    let (response, confidential, systemd) = tokio::join!(
+    let (response, confidential, systemd, standard) = tokio::join!(
         admin_rpc.get_organization_overview(GetOrganizationOverviewRequest {
             organization_id: organization_id.to_owned(),
             ..Default::default()
         }),
         confidential_organization_ids(state, cookie.clone()),
-        systemd_organization_ids(state, cookie),
+        systemd_organization_ids(state, cookie.clone()),
+        standard_organization_ids(state, cookie),
     );
     let response = response?.into_owned();
     let organization = response.organization.into_option().unwrap_or_default();
@@ -941,6 +966,7 @@ pub(crate) async fn organization(
             .as_ref()
             .map(|ids| ids.contains(&organization.id)),
         systemd_environments: systemd.as_ref().map(|ids| ids.contains(&organization.id)),
+        standard_runtime: standard.as_ref().map(|ids| ids.contains(&organization.id)),
         id: organization.id,
         name: organization.name,
         slug: organization.slug,
@@ -1070,6 +1096,23 @@ pub(crate) async fn set_organization_dedicated_cpu(
         .set_organization_dedicated_cpu(SetOrganizationDedicatedCpuRequest {
             organization_id: organization_id.to_owned(),
             dedicated_cpu,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// Moves one organization onto the standard runtime, or back (#5602).
+pub(crate) async fn set_standard_runtime(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    enabled: bool,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_organization_standard_runtime(SetOrganizationStandardRuntimeRequest {
+            organization_id: organization_id.to_owned(),
+            enabled,
             ..Default::default()
         })
         .await?;

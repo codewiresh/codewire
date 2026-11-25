@@ -96,9 +96,10 @@ dl.cw-stat-grid { margin: 0; }
 .cw-setting-row .cw-field { flex: 1; }
 .cw-setting-row .cw-input { width: var(--control-width-sm); }
 /* An organization's settings: side by side, each its state and the button that changes it. */
-.cw-organization-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
-.cw-organization-settings > li { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
+.cw-organization-settings { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.cw-organization-settings > li { min-width: 0; }
 .cw-organization-settings > li > p { margin: 0; }
+.cw-organization-settings > li > .cw-choice + p { padding-left: calc(var(--choice-size) + var(--space-2)); }
 .cw-organization-toggle { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .cw-organization-toggle > p { min-width: 0; margin: 0; }
 
@@ -116,7 +117,7 @@ dl.cw-stat-grid { margin: 0; }
   .cw-payment-method { grid-template-columns: minmax(0, 1fr); justify-items: start; }
   /* A saved card keeps its menu on the right, so the menu opens on screen. */
   .cw-payment-method:has(> .cw-menu) { grid-template-columns: minmax(0, 1fr) auto; }
-  .cw-stat-grid, .cw-stat-grid--three, .cw-stat-grid--five, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
+  .cw-stat-grid, .cw-stat-grid--three, .cw-stat-grid--five { grid-template-columns: minmax(0, 1fr); }
   .cw-organization-toggle { flex-wrap: nowrap; }
   .cw-admin-heading, .cw-filter-form, .cw-setting-row { align-items: stretch; flex-direction: column; }
   .cw-admin-heading > .cw-badge { align-self: flex-start; }

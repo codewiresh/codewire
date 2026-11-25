@@ -481,7 +481,7 @@ fn environment() -> EnvironmentRow {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_environments_enabled: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: 2000,
@@ -621,6 +621,17 @@ fn every_environment_renders_as_before() {
         for (env_case, env) in environments() {
             for (image, base) in images() {
                 let case = format!("{cfg_case} / {env_case} / {base}");
+                // The profile its create recorded on this deployment (#5602).
+                let env = EnvironmentRow {
+                    runtime_profile: crate::sandbox::standard_move::create_profile(
+                        &cfg,
+                        &env.isolation_tier,
+                        image,
+                        false,
+                    )
+                    .to_owned(),
+                    ..env.clone()
+                };
                 let before = outcome(before_environment_template_opts(&cfg, image, base, &env, 7));
                 let intent = environment_rendering_intent(image, base, &env, 7);
                 let after = outcome(

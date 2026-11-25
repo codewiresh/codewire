@@ -89,23 +89,6 @@ pub fn deployment_refusal(
     }
 }
 
-/// The profile an existing systemd workspace's Pod renders on, on a
-/// deployment of `deployment_profile`. On a `standard` deployment it is the
-/// one its create recorded (`environments.systemd_runtime_profile`), never
-/// re-derived from the current disk, so a republished disk never moves it;
-/// one created before the record existed has none and is `commodity`, which
-/// needs the opt-in. On any other deployment it is the deployment's own,
-/// which the deployment's checks then judge.
-pub fn existing_profile<'a>(deployment_profile: &'a str, recorded: Option<&str>) -> &'a str {
-    if deployment_profile.trim() != RUNTIME_PROFILE_STANDARD {
-        return deployment_profile;
-    }
-    match recorded {
-        Some(RUNTIME_PROFILE_STANDARD) => RUNTIME_PROFILE_STANDARD,
-        _ => RUNTIME_PROFILE_COMMODITY,
-    }
-}
-
 /// Whether a systemd workspace on `runtime_profile` needs its organization's
 /// opt-in: on `commodity` only, whose Pod is loosened for it. A `standard`
 /// Pod is not loosened, and systemd is that profile's default.
@@ -148,7 +131,7 @@ pub fn kind_at_create(
 
 /// What a create records, admitted: `None` for a plain environment, or the
 /// profile a systemd workspace's Pod renders on (`environments.systemd_workspace`
-/// and `systemd_runtime_profile`). A fork from a snapshot takes its source
+/// and `runtime_profile`). A fork from a snapshot takes its source
 /// environment's kind, so a fork never turns a plain workspace into a systemd
 /// one; any other create takes [`kind_at_create`]. Either way a systemd
 /// workspace then passes [`require_bring_up`] for this caller on that
@@ -202,8 +185,8 @@ pub async fn admit_create<'a>(
 pub struct CreateKind<'a> {
     pub image: &'a str,
     pub isolation_tier: &'a str,
-    /// The profile its Pod renders on, from the deployment's current disk
-    /// ([`super::template::runtime_profile_of`]): only a create derives it.
+    /// The profile the create records and its Pod renders on
+    /// ([`super::standard_move::create_profile`]): only a create derives it.
     pub runtime_profile: &'a str,
     pub source_snapshot_id: Option<&'a str>,
     pub placed_on_host: bool,
@@ -282,8 +265,8 @@ pub struct BringUp<'a> {
     pub image: &'a str,
     pub isolation_tier: &'a str,
     /// The profile its Pod renders on: a create's
-    /// [`CreateKind::runtime_profile`], or an existing environment's
-    /// [`existing_profile`], never derived from the current disk again.
+    /// [`CreateKind::runtime_profile`], or the one an existing environment's
+    /// create recorded (`environments.runtime_profile`), never derived again.
     pub runtime_profile: &'a str,
 }
 
@@ -381,7 +364,7 @@ mod tests {
                         if (target.starts_with("environments")
                             || target.starts_with("public.environments"))
                             && (statement.contains("systemd_workspace")
-                                || statement.contains("systemd_runtime_profile"))
+                                || statement.contains("runtime_profile"))
                         {
                             offenders.push(path.display().to_string());
                         }
@@ -393,27 +376,6 @@ mod tests {
             offenders.is_empty(),
             "the systemd record is rewritten in {offenders:?}"
         );
-    }
-
-    #[test]
-    fn an_existing_systemd_workspace_keeps_the_profile_its_create_recorded() {
-        for (deployment, recorded, expected) in [
-            ("standard", Some("standard"), "standard"),
-            ("standard", Some("commodity"), "commodity"),
-            // Created before the record: `commodity`, which needs the opt-in.
-            ("standard", None, "commodity"),
-            ("standard", Some("Standard"), "commodity"),
-            // Any other deployment renders its own profile, which the
-            // deployment's checks judge.
-            ("commodity", Some("standard"), "commodity"),
-            ("runc", Some("standard"), "runc"),
-        ] {
-            assert_eq!(
-                existing_profile(deployment, recorded),
-                expected,
-                "{deployment} {recorded:?}"
-            );
-        }
     }
 
     #[test]

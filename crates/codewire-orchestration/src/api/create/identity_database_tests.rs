@@ -76,7 +76,10 @@ async fn fork(db: &TestDatabase, actor: &str, snapshot_id: &str, name: &str) -> 
             ttl_seconds: None,
             body: &body,
             quota,
-            systemd_runtime_profile: None,
+            runtime: super::RecordedRuntime {
+                systemd_workspace: false,
+                profile: "commodity".into(),
+            },
         },
     );
     let environment = tokio::time::timeout(std::time::Duration::from_secs(60), create)

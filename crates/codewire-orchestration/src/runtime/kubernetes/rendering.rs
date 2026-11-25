@@ -8,9 +8,10 @@ use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
     HostedEgressTemplate, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_STANDARD, RuntimeProfileSpec, StandardRuntime, TemplateOpts,
-    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, runtime_profile_spec, validate_managed_runtime_profile,
+    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RUNTIME_PROFILE_STANDARD, RuntimeProfileSpec,
+    StandardRuntime, TemplateOpts, WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
+    render_warm_member_bridge, render_workspace_daemon_network_policy, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, canonical_workspace_runtime_image,
@@ -137,27 +138,31 @@ impl KubernetesRenderConfig {
         .runtime_profile_spec()
     }
 
-    /// The runtime `intent` renders on. A systemd workspace renders on the
-    /// profile its create recorded
-    /// ([`crate::sandbox::systemd_workspace::existing_profile`]); any other
-    /// environment on [`Self::image_runtime_spec`].
+    /// The runtime `intent` renders on: the profile its create recorded
+    /// (`environments.runtime_profile`, #5602), never the deployment's
+    /// current default or `standard` disk, so neither moves it on a restart.
     fn intent_runtime_spec(&self, intent: &RenderingIntent) -> RuntimeProfileSpec {
-        if !intent.systemd_workspace {
-            return self.image_runtime_spec(intent.isolation, &intent.image);
-        }
         let spec = self.runtime_spec(intent.isolation);
-        let profile = crate::sandbox::systemd_workspace::existing_profile(
-            &spec.profile,
-            intent.systemd_runtime_profile.as_deref(),
-        );
-        if profile != spec.profile {
-            return runtime_profile_spec(profile, &self.docker_mode, self.dind_enabled);
+        // Confidential stays confidential, as its record says (0056's check).
+        if intent.isolation == Isolation::Confidential {
+            return spec;
         }
-        spec
+        let recorded = intent.runtime_profile.trim();
+        // A local Kind deployment's diagnostic profile has no VM runtime, so
+        // it renders a `commodity` record, as 0056's backfill wrote it, on
+        // its own profile.
+        let diagnostic = matches!(
+            spec.profile.as_str(),
+            RUNTIME_PROFILE_RUNC | RUNTIME_PROFILE_NONE
+        );
+        if recorded == spec.profile || (diagnostic && recorded == RUNTIME_PROFILE_COMMODITY) {
+            return spec;
+        }
+        runtime_profile_spec(recorded, &self.docker_mode, self.dind_enabled)
     }
 
-    /// The runtime an environment of `image` is created on
-    /// ([`crate::sandbox::template::runtime_profile_of`]).
+    /// The runtime a warm pool member of `image` renders on: the
+    /// deployment's own ([`crate::sandbox::template::runtime_profile_of`]).
     fn image_runtime_spec(&self, isolation: Isolation, image: &str) -> RuntimeProfileSpec {
         let spec = self.runtime_spec(isolation);
         let profile = crate::sandbox::template::runtime_profile_of(
@@ -180,6 +185,22 @@ impl KubernetesRenderConfig {
             "selected environment sources require credential runtime trust"
         );
         let runtime_spec = self.intent_runtime_spec(intent);
+        // A record unlike the deployment's own profile renders only a managed
+        // runtime, or a diagnostic one this deployment allows: every write, a
+        // create's or an existing environment's, comes through here. The
+        // deployment's own profile is checked where it is configured.
+        if runtime_spec.profile != self.runtime_spec(intent.isolation).profile {
+            validate_managed_runtime_profile(&runtime_spec, self.allow_diagnostic_runtime)
+                .map_err(anyhow::Error::msg)?;
+        }
+        // An environment created on `standard` keeps it: once the deployment
+        // no longer makes it available, its start is refused, never rendered
+        // onto another profile.
+        anyhow::ensure!(
+            runtime_spec.profile != RUNTIME_PROFILE_STANDARD || self.standard_runtime.is_some(),
+            "this environment was created on the standard runtime, which this deployment no \
+             longer makes available"
+        );
         // A confidential claim is the guest-encrypted raw Block volume of its
         // own class; without one the environment is refused, never given the
         // commodity class.

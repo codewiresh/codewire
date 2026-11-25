@@ -461,6 +461,43 @@ page cache charged to the Pod.
 the runtime's container, outside the VM. The container's log carries the
 daemon's log.
 
+### Moving an organization
+
+A deployment can make `standard` available without making it every
+organization's default (#5602, `private-docs: designs/standard-per-organization.md`).
+`standard` is available when `SANDBOX_STANDARD_RUNTIME_IMAGE` and
+`SANDBOX_STANDARD_IMAGE_DISK` are set and hosted egress is on; orchestration
+reads and validates the two settings whenever they are set, on any profile.
+`SANDBOX_RUNTIME_PROFILE` stays the default for every organization that is not
+moved, and `SANDBOX_RUNTIME_PROFILE=standard` still means every organization.
+
+- **Moving one.** A global administrator sets
+  `organizations.standard_runtime_enabled` with the AdminService call
+  `SetOrganizationStandardRuntime`, or the "Standard runtime" checkbox on the
+  admin organization page. The change and its audit entry
+  (`admin.organization.standard_runtime`: the actor, the organization, the
+  previous and new values) commit together. A move onto `standard` is refused
+  while the deployment doesn't make it available; a move back is always
+  allowed. `ListStandardRuntimeOrganizations` lists the moved ones.
+- **What a create records.** Each create records its profile once
+  (`environments.runtime_profile`): `confidential` on the confidential tier;
+  `standard` when the organization is moved and `standard` is available;
+  otherwise the deployment's default; and `commodity` whenever a `standard` VM
+  would not boot the image. A fork decides afresh under its own
+  organization's move.
+- **Every later render reads the record**, never the organization's flag,
+  the deployment's default or its current disk. So a move, or a republished
+  disk, changes only new creates: an existing environment starts on the
+  profile it was created on. One created on `standard` whose deployment no
+  longer has it is refused at start, never rendered onto another profile.
+  Before this record, a plain environment's profile was derived again on
+  every start, so a republished disk could move it.
+- **Warm pools** serve only the deployment default's profile. A moved
+  organization's creates start cold until pools are kept per profile.
+- **A `standard` default** is refused at startup while any plain environment
+  recorded `commodity` runs on another runtime class in its live Sandbox, and
+  when the Sandboxes can't be read.
+
 ### Building the workspace disk in CI
 
 A `standard` workspace boots its image from a disk built from that image

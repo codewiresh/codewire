@@ -36,7 +36,7 @@ fn intent(isolation: Isolation) -> RenderingIntent {
         dedicated_cpu: true,
         systemd_workspace: false,
         systemd_opted_in: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         shape: WorkspaceShape {
             cpu_millicores: 2000,
             memory_mib: 8192,
@@ -350,11 +350,13 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
         standard_runtime: runtime.clone(),
         ..config()
     };
-    // The disk names its workspace image at another registry than the one
-    // environments name it at; the digest decides.
+    // An environment its create recorded on `standard` (whose choice
+    // `sandbox::standard_move` tests). The disk names its workspace image at
+    // another registry than the one environments name it at.
     let workspace = config
         .environment(&RenderingIntent {
             image: canonical.into(),
+            runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
             ..intent(Isolation::Standard)
         })
         .unwrap();
@@ -369,23 +371,7 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
             .is_ok()
     );
 
-    // A workspace pin moved on without the disk republished: the VM would
-    // boot the old image, so the environment goes to commodity.
-    let stale_disk = KubernetesRenderConfig {
-        standard_runtime: stale_disk_runtime(),
-        ..config.clone()
-    }
-    .environment(&RenderingIntent {
-        image: canonical.into(),
-        ..intent(Isolation::Standard)
-    })
-    .unwrap();
-    assert_eq!(
-        stale_disk.runtime_profile_spec().profile,
-        RUNTIME_PROFILE_COMMODITY
-    );
-    assert_eq!(stale_disk.standard_runtime, None);
-
+    // One recorded on `commodity`, as a create of any other image is.
     let own_image = config.environment(&intent(Isolation::Standard)).unwrap();
     assert_eq!(
         own_image.runtime_profile_spec().profile,
@@ -404,6 +390,7 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
         .environment(&RenderingIntent {
             image: canonical.into(),
             shape,
+            runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
             ..intent(Isolation::Standard)
         })
         .unwrap();
@@ -431,6 +418,7 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
         }
         .environment(&RenderingIntent {
             image: crate::sandbox::canonical_workspace_runtime_image().into(),
+            runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
             ..intent(Isolation::Standard)
         })
         .is_err()
@@ -438,48 +426,138 @@ fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_othe
 }
 
 #[test]
-fn a_systemd_workspace_renders_on_its_recorded_profile_whatever_disk_the_deployment_boots() {
+fn an_environment_renders_on_its_recorded_profile_whatever_disk_or_default_the_deployment_has() {
     // The deployment's disk holds another image, as after a republish.
     let standard = KubernetesRenderConfig {
         runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
         hosted_egress: HostedEgress::on(broker("2")),
-        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
-            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
-             3333333333333333333333333333333333333333333333333333333333333333 \
-             44444444444444444444444444444444 \
-             registry.example.invalid/codewire/workspace-systemd@sha256:5555555555555555555555555555555555555555555555555555555555555555",
-        )
-        .unwrap(),
+        standard_runtime: stale_disk_runtime(),
         ..config()
     };
-    let profile = |config: &KubernetesRenderConfig, systemd_workspace, recorded: Option<&str>| {
+    let profile = |config: &KubernetesRenderConfig, systemd_workspace, recorded: &str| {
         config
             .environment_spec(&RenderingIntent {
-                image: "registry.example.invalid/codewire/workspace-systemd@sha256:7777777777777777777777777777777777777777777777777777777777777777".into(),
+                image: crate::sandbox::canonical_workspace_runtime_image().into(),
                 systemd_workspace,
-                systemd_runtime_profile: recorded.map(Into::into),
+                runtime_profile: recorded.into(),
                 ..intent(Isolation::Standard)
             })
             .profile
     };
-    // Created on `standard`: it stays there, and needs no opt-in.
+    for systemd_workspace in [true, false] {
+        // Created on `standard`: it stays there though the disk no longer
+        // boots its image, and a systemd one needs no opt-in.
+        assert_eq!(
+            profile(&standard, systemd_workspace, "standard"),
+            RUNTIME_PROFILE_STANDARD
+        );
+        // Created on `commodity`: it stays there on a `standard` default.
+        assert_eq!(
+            profile(&standard, systemd_workspace, "commodity"),
+            RUNTIME_PROFILE_COMMODITY
+        );
+        // A moved organization's environment on a `commodity` default
+        // stays on `standard`.
+        assert_eq!(
+            profile(&config(), systemd_workspace, "standard"),
+            RUNTIME_PROFILE_STANDARD
+        );
+    }
+    // Once the deployment no longer has `standard`, its start is refused,
+    // never rendered onto another profile.
+    let refused = config()
+        .environment(&RenderingIntent {
+            image: crate::sandbox::canonical_workspace_runtime_image().into(),
+            runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+            ..intent(Isolation::Standard)
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("no longer makes available"), "{refused}");
+}
+
+#[test]
+fn a_diagnostic_record_on_a_managed_deployment_is_refused_on_every_write() {
+    // A `runc` record on a `commodity` deployment that allows no diagnostic
+    // runtime: a create's write and an existing environment's are refused.
+    let managed = KubernetesRenderConfig {
+        allow_diagnostic_runtime: false,
+        ..config()
+    };
+    let recorded = RenderingIntent {
+        runtime_profile: "runc".into(),
+        ..intent(Isolation::Standard)
+    };
+    for refused in [
+        managed.environment(&recorded),
+        managed.existing(&recorded, None),
+        managed.existing(&recorded, Some(&sandbox_mode(false))),
+    ] {
+        assert!(refused.is_err(), "{refused:?}");
+    }
+    // A diagnostic deployment that allows it still renders it.
+    let diagnostic = KubernetesRenderConfig {
+        runtime_profile: "runc".into(),
+        allow_diagnostic_runtime: true,
+        ..config()
+    };
+    assert!(diagnostic.environment(&recorded).is_ok());
+}
+
+/// A pool claim renders the recorded profile (#5602): the claim compares the
+/// environment's own rendering with the member's revision, so an environment
+/// recorded `standard` never adopts a `commodity` pool's member, and one
+/// recorded `commodity` still does.
+#[test]
+fn a_standard_record_never_adopts_a_commodity_pool_member() {
+    let canonical = crate::sandbox::canonical_workspace_runtime_image();
+    let (_, digest) = canonical.rsplit_once('@').unwrap();
+    let config = KubernetesRenderConfig {
+        hosted_egress: HostedEgress::on(broker("2")),
+        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            &format!(
+                "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+                 3333333333333333333333333333333333333333333333333333333333333333 \
+                 44444444444444444444444444444444 \
+                 registry.example.invalid/codewire/workspace@{digest}"
+            ),
+        )
+        .unwrap(),
+        ..config()
+    };
+    let shape = WorkspaceShape {
+        cpu_millicores: 2000,
+        memory_mib: 4096,
+        disk_gib: 20,
+    };
+    let revision = |opts: &TemplateOpts| {
+        crate::sandbox::warm_pool::pool_revision(
+            &crate::sandbox::template::render_sandbox_template(NAMESPACE, opts)["spec"],
+        )
+    };
+    let member = config.pool(shape).unwrap();
     assert_eq!(
-        profile(&standard, true, Some("standard")),
-        RUNTIME_PROFILE_STANDARD
-    );
-    // Created on `commodity`, or before the record: `commodity`, opt-in and all.
-    assert_eq!(
-        profile(&standard, true, Some("commodity")),
+        member.runtime_profile_spec().profile,
         RUNTIME_PROFILE_COMMODITY
     );
-    assert_eq!(profile(&standard, true, None), RUNTIME_PROFILE_COMMODITY);
-    // A plain environment of that image still follows the disk.
-    assert_eq!(profile(&standard, false, None), RUNTIME_PROFILE_COMMODITY);
-    // On any other deployment, the deployment's own profile.
+    let claim = |recorded: &str| {
+        config
+            .environment(&RenderingIntent {
+                image: canonical.into(),
+                shape,
+                runtime_profile: recorded.into(),
+                ..intent(Isolation::Standard)
+            })
+            .unwrap()
+    };
     assert_eq!(
-        profile(&config(), true, Some("standard")),
-        RUNTIME_PROFILE_COMMODITY
+        revision(&claim(RUNTIME_PROFILE_COMMODITY)),
+        revision(&member)
+    );
+    assert_ne!(
+        revision(&claim(RUNTIME_PROFILE_STANDARD)),
+        revision(&member)
     );
 }
 

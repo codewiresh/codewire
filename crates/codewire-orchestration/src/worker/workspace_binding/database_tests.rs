@@ -2808,7 +2808,7 @@ fn pool_intent() -> crate::runtime::RenderingIntent {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_opted_in: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         shape: wanted_pool().configured.shape,
         identity: crate::runtime::RenderingIdentity {
             environment_id: ENV_A.into(),
@@ -3030,7 +3030,7 @@ fn pool_env() -> EnvironmentRow {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_environments_enabled: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: 1000,

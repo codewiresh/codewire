@@ -216,20 +216,12 @@ fn admin_routes() -> Router<AppState> {
             post(admin::clear_organization_quota),
         )
         .route(
-            "/admin/organizations/_actions/confidential/set",
-            post(admin::set_organization_confidential),
-        )
-        .route(
-            "/admin/organizations/_actions/systemd/set",
-            post(admin::set_organization_systemd),
+            "/admin/organizations/_actions/features/set",
+            post(admin::organization_features::set_organization_features),
         )
         .route(
             "/admin/organizations/_actions/rate-card/set",
             post(admin::set_organization_rate_card),
-        )
-        .route(
-            "/admin/organizations/_actions/dedicated-cpu/set",
-            post(admin::set_organization_dedicated_cpu),
         )
         .route(
             "/admin/organizations/_actions/credit/adjust",

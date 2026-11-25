@@ -57,7 +57,7 @@ fn intent(isolation: Isolation) -> RenderingIntent {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_opted_in: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         shape: WorkspaceShape {
             cpu_millicores: 2000,
             memory_mib: 8192,

@@ -32,7 +32,7 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
            e.isolation_tier, e.ttl_seconds,
            e.project_spec, e.created_by, e.environment_operation_generation,
            (SELECT o.dedicated_cpu FROM organizations AS o WHERE o.id = e.org_id) AS dedicated_cpu,
-           e.systemd_workspace, e.systemd_runtime_profile,
+           e.systemd_workspace, e.runtime_profile,
            (SELECT o.systemd_environments_enabled FROM organizations AS o
              WHERE o.id = e.org_id) AS systemd_environments_enabled,
            b.profile_id, b.profile_revision,

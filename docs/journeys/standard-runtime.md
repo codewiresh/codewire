@@ -215,11 +215,12 @@ the other steps are not yet.
 
 ## `standard-organization-move`: one organization moves, the others don't
 
-Target, not built (#5602): the per-organization selector.
+Built, not yet observed (#5602): the per-organization selector.
 
 - **Entry points:** a global admin's `SetOrganizationStandardRuntime` and
-  `ListStandardRuntimeOrganizations`; `cw --cloud create` in a moved and in an
-  unmoved organization.
+  `ListStandardRuntimeOrganizations`, or the "Standard runtime" checkbox on the
+  admin organization page; `cw --cloud create` in a moved and in an unmoved
+  organization.
 - **States to exercise:**
   - the flag turned on while the deployment offers `standard`, and again while
     it doesn't, which is refused;

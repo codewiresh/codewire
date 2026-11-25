@@ -79,7 +79,8 @@ environments:
 
 It is decided once, at create, and recorded on the environment
 (`environments.systemd_workspace`), with the runtime profile its Pod renders
-on (`environments.systemd_runtime_profile`, `commodity` or `standard`). An
+on (`environments.runtime_profile`, which every environment records; for a
+systemd workspace `commodity` or `standard`). An
 environment is a systemd workspace
 when its create named an image from the configured repository, pinned by
 digest, and passed every check below. Every later Pod is rendered from that
@@ -90,8 +91,8 @@ image: that start is refused instead.
 
 The record is written once, by the create's insert, and nothing changes it
 afterwards: the database refuses an update to either column. A systemd
-workspace created before the profile was recorded has none, and is read as
-`commodity`. A fork from a snapshot takes its source environment's record
+workspace created before the profile was recorded was given `commodity` by
+migration 0056. A fork from a snapshot takes its source environment's record
 instead of deciding from the image it names: a fork never turns a plain
 workspace into a systemd one, and a systemd fork passes every check below
 afresh, for the caller and organization that fork it.

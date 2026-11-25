@@ -2954,7 +2954,7 @@ mod tests {
             dedicated_cpu: false,
             systemd_workspace: false,
             systemd_opted_in: false,
-            systemd_runtime_profile: None,
+            runtime_profile: "commodity".into(),
             shape: crate::runtime::WorkspaceShape {
                 cpu_millicores: 1000,
                 memory_mib: 2048,

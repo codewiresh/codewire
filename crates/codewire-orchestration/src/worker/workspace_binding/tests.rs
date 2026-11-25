@@ -468,7 +468,7 @@ async fn a_running_direct_sandbox_is_never_restarted_for_its_egress() {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_opted_in: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         shape: crate::sandbox::warm_pool::WorkspaceShape {
             cpu_millicores: 1000,
             memory_mib: 4096,

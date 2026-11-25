@@ -13,7 +13,7 @@ use buffa::Message as _;
 use codewire_proto::google::rpc::{BadRequest, ErrorInfo, RetryInfo};
 use connectrpc::client::ClientConfig;
 use connectrpc::{CodecFormat, ConnectError, ErrorCode};
-use reqwest::header::COOKIE;
+use reqwest::header::{AUTHORIZATION, COOKIE};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Map, Value};
 
@@ -38,6 +38,8 @@ pub(super) enum Auth {
     GlobalAdmin,
     Admin,
     User,
+    /// A bearer that is not a user credential, such as a workload's token.
+    Bearer(&'static str),
 }
 
 #[derive(Debug)]
@@ -185,6 +187,7 @@ impl Harness {
             ),
             Auth::Admin => request.header(COOKIE, format!("{SESSION_COOKIE}={}", self.admin_token)),
             Auth::User => request.header(COOKIE, format!("{SESSION_COOKIE}={}", self.user_token)),
+            Auth::Bearer(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
         };
         if let Some(body) = body {
             request = request.json(&body);
@@ -222,6 +225,9 @@ impl Harness {
                     .with_default_header(COOKIE, format!("{SESSION_COOKIE}={}", self.admin_token)),
                 Auth::User => config
                     .with_default_header(COOKIE, format!("{SESSION_COOKIE}={}", self.user_token)),
+                Auth::Bearer(token) => {
+                    config.with_default_header(AUTHORIZATION, format!("Bearer {token}"))
+                }
             };
         config
     }

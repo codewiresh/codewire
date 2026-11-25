@@ -22,9 +22,10 @@ use codewire_admin_proto::codewire::admin::v1::{
     ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
     ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse,
     ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse,
-    ListOrganizationsRequest, ListOrganizationsResponse, NodeCapacity, NodeReservedCapacity,
-    NodeUsedCapacity, Organization as ProtoOrganization,
-    OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
+    ListOrganizationsRequest, ListOrganizationsResponse, ListStandardRuntimeOrganizationsRequest,
+    ListStandardRuntimeOrganizationsResponse, NodeCapacity, NodeReservedCapacity, NodeUsedCapacity,
+    Organization as ProtoOrganization, OrganizationApiKey as ProtoOrganizationApiKey,
+    OrganizationBilling as ProtoOrganizationBilling,
     OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
     OrganizationMember as ProtoOrganizationMember,
     OrganizationSandboxCounts as ProtoOrganizationSandboxCounts,
@@ -32,7 +33,9 @@ use codewire_admin_proto::codewire::admin::v1::{
     SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse,
     SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse,
     SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse,
-    SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary,
+    SetOrganizationRateCardRequest, SetOrganizationRateCardResponse,
+    SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse, ShapeFit,
+    StandardRuntimeOrganization as ProtoStandardRuntimeOrganization, StartupPhaseSummary,
     SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest,
     UnsuspendAccountResponse,
 };
@@ -49,9 +52,9 @@ use crate::api::admin::{
 };
 use crate::api::feedback;
 
-/// Registers the twelve AdminService reads, the three audited quota writes and
-/// the audited rate card, dedicated CPU and credit writes on their generated
-/// Connect routes.
+/// Registers the thirteen AdminService reads, the three audited quota writes and
+/// the audited rate card, dedicated CPU, standard runtime and credit writes on
+/// their generated Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AdminConnectService { state }))
 }
@@ -413,6 +416,55 @@ impl AdminService for AdminConnectService {
             organization_id: organization_id.to_owned(),
             dedicated_cpu: request.dedicated_cpu,
             previous_dedicated_cpu: previous,
+            ..Default::default()
+        })
+    }
+
+    async fn list_standard_runtime_organizations(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListStandardRuntimeOrganizationsRequest>,
+    ) -> ServiceResult<ListStandardRuntimeOrganizationsResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let organizations = crate::sandbox::standard_move::list_core(&self.state.pool, &actor)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListStandardRuntimeOrganizationsResponse {
+            organizations: organizations
+                .into_iter()
+                .map(|organization| ProtoStandardRuntimeOrganization {
+                    organization_id: organization.organization_id,
+                    slug: organization.slug,
+                    name: organization.name,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    async fn set_organization_standard_runtime(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationStandardRuntimeRequest>,
+    ) -> ServiceResult<SetOrganizationStandardRuntimeResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let previous = crate::sandbox::standard_move::set_core(
+            &self.state.pool,
+            &self.state.sandbox_cfg,
+            &actor,
+            organization_id,
+            request.enabled,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationStandardRuntimeResponse {
+            organization_id: organization_id.to_owned(),
+            enabled: request.enabled,
+            previous_enabled: previous,
             ..Default::default()
         })
     }

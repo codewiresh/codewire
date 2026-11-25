@@ -12,6 +12,7 @@ pub mod image_cache;
 pub mod runtime_images;
 pub mod sidecar;
 pub mod snapshots;
+pub mod standard_move;
 pub mod systemd_workspace;
 pub mod template;
 pub mod warm_pool;

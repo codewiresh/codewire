@@ -184,10 +184,12 @@ test.describe.serial("rounded management interface", () => {
     await expect(page.getByRole("heading", { name: "Management Visual", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Environment quota and usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
-    const settings = page.getByRole("list", { name: "Organization settings" });
-    await expect(settings.getByRole("listitem")).toHaveCount(2);
-    await expect(settings.getByRole("button", { name: "Opt in to confidential environments" })).toBeVisible();
-    await expect(settings.getByRole("button", { name: "Give dedicated CPU" })).toBeVisible();
+    // The organization's switches are one list of checkboxes saved together (#5602).
+    const settings = page.getByRole("form", { name: "Organization settings" });
+    await expect(settings.getByRole("listitem")).toHaveCount(4);
+    await expect(settings.getByRole("checkbox", { name: "Confidential environments" })).toBeVisible();
+    await expect(settings.getByRole("checkbox", { name: "Dedicated CPU" })).toBeVisible();
+    await expect(settings.getByRole("button", { name: "Save settings" })).toBeVisible();
     await expect(page.getByLabel("Memory (MiB)")).toBeVisible();
     await expectNoPageOverflow(page);
   });

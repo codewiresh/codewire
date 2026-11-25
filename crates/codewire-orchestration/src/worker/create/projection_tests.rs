@@ -20,7 +20,7 @@ fn environment() -> EnvironmentRow {
         dedicated_cpu: false,
         systemd_workspace: false,
         systemd_environments_enabled: false,
-        systemd_runtime_profile: None,
+        runtime_profile: "commodity".into(),
         never_ran: false,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),

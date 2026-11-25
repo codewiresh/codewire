@@ -11,19 +11,18 @@ use sqlx::PgPool;
 use super::WorkerContext;
 use crate::lifecycle::{PgLifecycleStore, Service, StopReason};
 use crate::sandbox::runtime_images::RuntimeImages;
-use crate::sandbox::systemd_workspace::{bring_up_refusal, existing_profile};
+use crate::sandbox::systemd_workspace::bring_up_refusal;
 
 /// The systemd workspaces to stop: being brought up, and refused now on the
-/// profile each renders on, by the deployment or, where that profile needs
-/// it, by their organization's opt-in.
+/// profile each recorded, by the deployment or, where that profile needs it,
+/// by their organization's opt-in.
 pub async fn refused_environment_ids(
     pool: &PgPool,
     images: &RuntimeImages,
-    deployment_profile: &str,
 ) -> sqlx::Result<Vec<String>> {
-    let rows: Vec<(String, String, String, Option<String>, bool)> = sqlx::query_as(
+    let rows: Vec<(String, String, String, String, bool)> = sqlx::query_as(
         r#"SELECT e.id, COALESCE(e.project_spec->>'image', ''), e.isolation_tier,
-                  e.systemd_runtime_profile, o.systemd_environments_enabled
+                  e.runtime_profile, o.systemd_environments_enabled
              FROM environments e
              JOIN organizations o ON o.id = e.org_id
             WHERE e.systemd_workspace
@@ -36,20 +35,15 @@ pub async fn refused_environment_ids(
     Ok(rows
         .into_iter()
         .filter(|(_, image, isolation_tier, recorded, opted_in)| {
-            let profile = existing_profile(deployment_profile, recorded.as_deref());
-            bring_up_refusal(images, image, isolation_tier, profile, *opted_in).is_some()
+            bring_up_refusal(images, image, isolation_tier, recorded, *opted_in).is_some()
         })
         .map(|(id, ..)| id)
         .collect())
 }
 
 pub(super) async fn stop_refused_systemd_workspaces(ctx: &WorkerContext) {
-    let ids = match refused_environment_ids(
-        &ctx.pool,
-        crate::sandbox::runtime_images::configured(),
-        &ctx.sandbox_cfg.runtime_profile,
-    )
-    .await
+    let ids = match refused_environment_ids(&ctx.pool, crate::sandbox::runtime_images::configured())
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
