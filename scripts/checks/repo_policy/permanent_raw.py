@@ -58,9 +58,10 @@ def check_permanent_raw_surface(args: argparse.Namespace) -> int:
         policy = load_permanent_raw_policy()
         sources = permanent_raw_service_sources()
         client_sources = permanent_raw_client_sources()
-        failures = permanent_raw_surface_failures(sources, policy, client_sources)
+        scan_cache: dict[str, Any] = {}
+        failures = permanent_raw_surface_failures(sources, policy, client_sources, _cache=scan_cache)
         if not failures and args.self_test:
-            permanent_raw_surface_self_test(sources, policy, client_sources)
+            permanent_raw_surface_self_test(sources, policy, client_sources, _cache=scan_cache)
     except Exception as error:  # noqa: BLE001 - repository guard boundary
         failures = [str(error)]
 
@@ -159,22 +160,52 @@ def permanent_raw_client_sources(source_corpus: dict[str, str] | None = None) ->
 
 
 def permanent_raw_surface_failures(
-    sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
+    sources: dict[str, str],
+    policy: dict[str, Any],
+    client_sources: dict[str, str],
+    *,
+    _cache: dict[str, Any] | None = None,
 ) -> list[str]:
     failures: list[str] = []
-    for rel in git_source_files():
+    cache = _cache if _cache is not None else {}
+    tracked = cache.get("tracked_files")
+    if tracked is None:
+        tracked = git_source_files()
+        cache["tracked_files"] = tracked
+    for rel in tracked:
         if any(rel == path or rel.startswith(path) for path in RETIRED_OPENAPI_PATHS):
             failures.append(f"retired OpenAPI source path was restored: {rel}")
     routes = {"/healthz", "/readyz"}
     oidc_non_literal = 0
 
+    sanitized_cache: dict[str, str] = cache.setdefault("sanitized", {})
+    service_scan_cache: dict[tuple[str, str], tuple[list[str], list[tuple[int, str | None]]]] = (
+        cache.setdefault("service_scan", {})
+    )
+    client_scan_cache: dict[tuple[str, str], list[str]] = cache.setdefault("client_scan", {})
+
+    def cached_sanitize(source: str) -> str:
+        result = sanitized_cache.get(source)
+        if result is None:
+            result = sanitize_rust_source(source)
+            sanitized_cache[source] = result
+        return result
+
     for rel, source in sorted(sources.items()):
-        sanitized = sanitize_rust_source(source)
-        for match in re.finditer(r"\.(?:nest|nest_service|route_service)\s*\(", sanitized):
-            failures.append(
+        scan_key = (rel, source)
+        cached = service_scan_cache.get(scan_key)
+        if cached is None:
+            sanitized = cached_sanitize(source)
+            hidden = [
                 f"{rel}:{line_number(source, match.start())} hides a raw route behind {match.group(0)[:-1]}"
-            )
-        for index, path in route_registrations(sanitized):
+                for match in re.finditer(r"\.(?:nest|nest_service|route_service)\s*\(", sanitized)
+            ]
+            regs = list(route_registrations(sanitized))
+            cached = (hidden, regs)
+            service_scan_cache[scan_key] = cached
+        hidden, regs = cached
+        failures.extend(hidden)
+        for index, path in regs:
             if path is None:
                 if rel == PERMANENT_RAW_OIDC_TRANSPORT:
                     oidc_non_literal += 1
@@ -185,7 +216,7 @@ def permanent_raw_surface_failures(
             elif path.startswith("/"):
                 routes.add(path)
 
-    oidc_defaults = endpoint_path_defaults(sanitize_rust_source(sources[PERMANENT_RAW_OIDC_DEFAULTS]))
+    oidc_defaults = endpoint_path_defaults(cached_sanitize(sources[PERMANENT_RAW_OIDC_DEFAULTS]))
     if len(oidc_defaults) != policy["oidc_config_route_count"]:
         failures.append(
             f"{PERMANENT_RAW_OIDC_DEFAULTS} declares {len(oidc_defaults)} OIDC paths; expected "
@@ -206,20 +237,30 @@ def permanent_raw_surface_failures(
     if missing:
         failures.append(f"approved raw routes are no longer mounted: {stable_json(missing)}")
 
+    server_texts: dict[str, str | None] = cache.setdefault("server_texts", {})
     for rel, fragments in policy["required_server_fragments"].items():
-        path = ROOT / rel
-        if not path.is_file():
+        if rel not in server_texts:
+            path = ROOT / rel
+            server_texts[rel] = path.read_text(encoding="utf-8") if path.is_file() else None
+        source = server_texts[rel]
+        if source is None:
             failures.append(f"serving binary source is missing: {rel}")
             continue
-        source = path.read_text(encoding="utf-8")
         for fragment in fragments:
             if fragment not in source:
                 failures.append(f"{rel} lost required serving shape {fragment!r}")
 
     for rel, source in sorted(client_sources.items()):
-        sanitized = sanitize_rust_source(source) if rel.endswith(".rs") else source
-        for match in re.finditer(r"/api/v1/[A-Za-z0-9_./${}?=-]+", sanitized):
-            fragment = match.group(0)
+        client_key = (rel, source)
+        fragments_found = client_scan_cache.get(client_key)
+        if fragments_found is None:
+            sanitized = cached_sanitize(source) if rel.endswith(".rs") else source
+            fragments_found = [
+                match.group(0)
+                for match in re.finditer(r"/api/v1/[A-Za-z0-9_./${}?=-]+", sanitized)
+            ]
+            client_scan_cache[client_key] = fragments_found
+        for fragment in fragments_found:
             if not any(suffix in fragment for suffix in policy["client_raw_v1_suffixes"]):
                 failures.append(f"{rel} formats retired control-plane URL {fragment!r}")
 
@@ -227,8 +268,13 @@ def permanent_raw_surface_failures(
 
 
 def permanent_raw_surface_self_test(
-    sources: dict[str, str], policy: dict[str, Any], client_sources: dict[str, str]
+    sources: dict[str, str],
+    policy: dict[str, Any],
+    client_sources: dict[str, str],
+    *,
+    _cache: dict[str, Any] | None = None,
 ) -> None:
+    cache = _cache if _cache is not None else {}
     # Admit only the browser confirmation transport, never a family of raw
     # credential APIs. Preserve the old-policy failure and sibling rejection.
     preview_route = "/api/v1/preview-auth/authorize"
@@ -238,14 +284,16 @@ def permanent_raw_surface_self_test(
     ]
     if not any(
         failure.startswith("unapproved raw routes:") and preview_route in failure
-        for failure in permanent_raw_surface_failures(sources, prior_preview_policy, client_sources)
+        for failure in permanent_raw_surface_failures(
+            sources, prior_preview_policy, client_sources, _cache=cache
+        )
     ):
         raise RuntimeError("permanent raw guard lost the exact preview-route admission proof")
     unknown_preview = dict(sources)
     unknown_preview["crates/codewire-orchestration/src/unapproved_preview.rs"] = (
         'fn unapproved() { Router::new().route("/api/v1/preview-auth/tokens", get(handler)); }'
     )
-    if not permanent_raw_surface_failures(unknown_preview, policy, client_sources):
+    if not permanent_raw_surface_failures(unknown_preview, policy, client_sources, _cache=cache):
         raise RuntimeError("permanent raw guard accepted an unapproved preview credential API")
 
     # The cookie-owned IdP inventory is an explicit identity boundary, not a
@@ -255,7 +303,9 @@ def permanent_raw_surface_self_test(
     prior_policy["allowed_raw_routes"] = [
         route for route in policy["allowed_raw_routes"] if route not in session_routes
     ]
-    prior_failures = permanent_raw_surface_failures(sources, prior_policy, client_sources)
+    prior_failures = permanent_raw_surface_failures(
+        sources, prior_policy, client_sources, _cache=cache
+    )
     if not any(
         failure.startswith("unapproved raw routes:")
         and all(route in failure for route in session_routes)
@@ -266,7 +316,7 @@ def permanent_raw_surface_self_test(
     unknown_identity["crates/codewire-idp/src/restored_session.rs"] = (
         'fn restored() { Router::new().route("/api/auth/sessions/unapproved", get(handler)); }'
     )
-    if not permanent_raw_surface_failures(unknown_identity, policy, client_sources):
+    if not permanent_raw_surface_failures(unknown_identity, policy, client_sources, _cache=cache):
         raise RuntimeError("permanent raw guard accepted an unapproved identity route")
 
     # Fresh-proof factor changes are exactly three cookie-only IdP routes. The
@@ -283,21 +333,23 @@ def permanent_raw_surface_self_test(
     if not any(
         failure.startswith("unapproved raw routes:")
         and all(route in failure for route in factor_routes)
-        for failure in permanent_raw_surface_failures(sources, prior_factor_policy, client_sources)
+        for failure in permanent_raw_surface_failures(
+            sources, prior_factor_policy, client_sources, _cache=cache
+        )
     ):
         raise RuntimeError("permanent raw guard lost the exact two-factor replacement admission proof")
     unknown_factor = dict(sources)
     unknown_factor["crates/codewire-idp/src/unapproved_factor.rs"] = (
         'fn unapproved() { Router::new().route("/api/auth/two-factor/replace/secret", get(handler)); }'
     )
-    if not permanent_raw_surface_failures(unknown_factor, policy, client_sources):
+    if not permanent_raw_surface_failures(unknown_factor, policy, client_sources, _cache=cache):
         raise RuntimeError("permanent raw guard accepted an unapproved two-factor route")
 
     restored_route = dict(sources)
     restored_route["crates/codewire-orchestration/src/restored_raw.rs"] = (
         'fn restored() { Router::new().route("/api/v1/restored", get(handler)); }'
     )
-    if not permanent_raw_surface_failures(restored_route, policy, client_sources):
+    if not permanent_raw_surface_failures(restored_route, policy, client_sources, _cache=cache):
         raise RuntimeError("permanent raw guard accepted a restored control-plane route")
 
     restored_client = dict(client_sources)
@@ -305,6 +357,6 @@ def permanent_raw_surface_self_test(
         'export const restored = "/api/v1/organizations";\n'
     )
     if not permanent_raw_surface_failures(
-        sources, policy, permanent_raw_client_sources(restored_client)
+        sources, policy, permanent_raw_client_sources(restored_client), _cache=cache
     ):
         raise RuntimeError("permanent raw guard accepted a restored client REST URL")

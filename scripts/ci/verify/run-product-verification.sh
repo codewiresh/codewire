@@ -693,6 +693,10 @@ run_policy_core() {
   # shell has already reaped (wait -n -p failed so when a part ended first).
   mkfifo "$work/ended"
   exec {ended}<>"$work/ended"
+  local planner_separate=0
+  for part in "${parts[@]}"; do
+    [ "$part" != policy-planner-tests ] || planner_separate=1
+  done
   for index in "${!parts[@]}"; do
     part="${parts[$index]}"
     if [ -z "$first" ]; then
@@ -706,9 +710,9 @@ run_policy_core() {
       # Not a condition: the part keeps errexit.
       set +e
       if [ -z "${logs[$index]}" ]; then
-        (set -e; run_policy_part "${parts[$index]}")
+        (set -e; POLICY_PLANNER_TESTS_SEPARATE="$planner_separate" run_policy_part "${parts[$index]}")
       else
-        (set -e; run_policy_part "${parts[$index]}") >"${logs[$index]}" 2>&1
+        (set -e; POLICY_PLANNER_TESTS_SEPARATE="$planner_separate" run_policy_part "${parts[$index]}") >"${logs[$index]}" 2>&1
       fi
       printf '%s %s\n' "$index" "$?" >"$work/ended"
     ) &
@@ -856,11 +860,27 @@ run_ci_script_tests() {
   export "GIT_CONFIG_KEY_$((count + 1))=gc.auto" "GIT_CONFIG_VALUE_$((count + 1))=0"
   export GIT_CONFIG_COUNT=$((count + 2))
   # The slowest tests come first, so the runner's bound never queues them
-  # behind the quick ones.
+  # behind the quick ones (longest-processing-time-first, infra#1534).
   run_side_by_side <<'STEPS'
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/ci/tests/test-select-verification.sh
+  scripts/ci/tests/test-workspace-agent-contract.sh
+  scripts/ci/tests/test-rust-toolchain.sh
+  scripts/ci/tests/test-orchestrator-scripts.sh
+  scripts/ci/tests/test-ci-tests-wired.sh
+  scripts/ci/tests/test-policy-drift.sh
+  scripts/ci/tests/test-kind-device-ownership.sh
+  scripts/ci/tests/test-source-approval-workflow.sh
+  scripts/ci/tests/test-kind-runtime-images.sh
+  scripts/ci/tests/test-kind-stripe-test-keys.sh
+  scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
+  scripts/ci/tests/test-kind-watch-github-app.sh
+  scripts/ci/tests/test-select-protected-rust-cache.sh
+  scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
+  scripts/ci/tests/test-check-workspace-hack.sh
+  scripts/ci/tests/test-select-untrusted-rust-cache.sh
+  scripts/ci/tests/test-package-sdk-rust.sh
   python3 -I -B scripts/ci/tests/test-proto-breaking-base.py ResolverTests
   python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
@@ -907,37 +927,21 @@ run_ci_script_tests() {
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-runner-no-bytecode.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
-  scripts/ci/tests/test-package-sdk-rust.sh
-  scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-ci-tool-downloads.sh
   python3 -B scripts/ci/tests/test-linux-vmm-kernel.py
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-build-dashboard-image.sh
-  scripts/ci/tests/test-workspace-agent-contract.sh
   python3 -I -B scripts/ci/tests/test-cw-image-context.py
   python3 -I -B scripts/ci/tests/test-cw-image-source.py
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
-  scripts/ci/tests/test-kind-stripe-test-keys.sh
-  scripts/ci/tests/test-kind-runtime-images.sh
-  scripts/ci/tests/test-kind-device-ownership.sh
-  scripts/ci/tests/test-kind-watch-github-app.sh
-  scripts/ci/tests/test-source-approval-workflow.sh
-  scripts/ci/tests/test-policy-drift.sh
-  scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
-  scripts/ci/tests/test-select-untrusted-rust-cache.sh
-  scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
-  scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
-  scripts/ci/tests/test-check-workspace-hack.sh
   scripts/ci/tests/test-free-block-probe.sh
   scripts/ci/tests/test-selfhost-vm.sh
-  scripts/ci/tests/test-orchestrator-scripts.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
-  scripts/ci/tests/test-ci-tests-wired.sh
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py

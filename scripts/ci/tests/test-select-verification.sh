@@ -1224,7 +1224,11 @@ run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
   'policy security security_js' .gitea/workflows/desktop-package.yaml
 run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
-defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
+# Skip planner test modules when policy-planner-tests is already running the
+# full scripts/ci/plan/tests/ suite beside this script (infra#1534).
+if [ "${POLICY_PLANNER_TESTS_SEPARATE:-0}" != 1 ]; then
+  defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
+fi
 # The lockfile also pins the compiler the proto crates' build scripts use,
 # so it selects the contracts job that holds its output to the pinned buf's.
 run_paths_case rust_root pull_request refs/pull/5/head false \
@@ -3625,9 +3629,11 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
-# Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
-defer_slow_check python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
+if [ "${POLICY_PLANNER_TESTS_SEPARATE:-0}" != 1 ]; then
+  defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
+  # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
+  defer_slow_check python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
+fi
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-wait-for-dev-delivery-turn.py"
 # A pull request's run stops at its first failed job (infra#1632).
@@ -3640,9 +3646,11 @@ if grep -qF 'selector_version=v2' "$selection_block" \
   exit 1
 fi
 
-defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
-  PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
-  PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
+if [ "${POLICY_PLANNER_TESTS_SEPARATE:-0}" != 1 ]; then
+  defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
+    PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
+    PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
+fi
 
 for legacy_job in rust go-support web sdk-go sdk-ts sdk-python \
     service-integration transport release deploy security; do

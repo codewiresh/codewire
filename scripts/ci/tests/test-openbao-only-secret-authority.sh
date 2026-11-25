@@ -77,13 +77,28 @@ is_allowed() {
 }
 
 violations=0
+scan_files=()
 while IFS= read -r -d '' path; do
   [[ -f "$path" && "$path" != "$SELF" ]] || continue
   is_allowed "$path" && continue
-  if LC_ALL=C rg -n -i --with-filename -- "$PATTERN" "$path"; then
-    violations=1
-  fi
+  scan_files+=("$path")
 done < <(git ls-files -co --exclude-standard -z)
+
+if (( ${#scan_files[@]} > 0 )); then
+  # Scan in fixed-size chunks directly with rg (~10 forks instead of ~5,200)
+  # so rg's own exit codes (0 = violation, 1 = clean, >=2 = error) stay exact
+  # instead of being collapsed by xargs exit 123.
+  chunk=500
+  for (( i = 0; i < ${#scan_files[@]}; i += chunk )); do
+    rg_status=0
+    LC_ALL=C rg -n -i --with-filename -- "$PATTERN" "${scan_files[@]:i:chunk}" || rg_status=$?
+    if (( rg_status == 0 )); then
+      violations=1
+    elif (( rg_status != 1 )); then
+      exit "$rg_status"
+    fi
+  done
+fi
 
 [[ "$violations" == 0 ]] || {
   printf 'active source still references the retired secret provider\n' >&2
