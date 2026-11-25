@@ -468,6 +468,36 @@ async fn the_front_door_stops_when_no_further_session_can_arrive() {
     assert_eq!(rustix::io::read(&running.handoff, &mut byte).unwrap(), 0);
 }
 
+/// A bound host this build has no route for, as after its cw-egress lost the
+/// route (#6421), still has its handshake and is refused by name, and nothing
+/// of it reaches the credential broker: the next request it sees is the
+/// routed one. A front door whose only bound host is unrouted still starts.
+#[tokio::test]
+async fn a_bound_host_with_no_route_is_terminated_and_refused_by_name() {
+    const UNROUTED: &str = "unrouted.example.com";
+    let mut running = Running::start(&[UNROUTED, BOUND]).await;
+    let stream = running.own_stream(UNROUTED);
+    let call = running
+        .start_request_through(stream, UNROUTED, "/v1/messages")
+        .await;
+    let (status, body) = bounded(call).await.unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body,
+        format!("Codewire: requests to {UNROUTED} can't use this environment's credentials yet.\n")
+    );
+    let (seen, status, _) = running.request().await;
+    assert_eq!(seen.intercepted_host, BOUND);
+    assert_eq!(status, StatusCode::OK);
+
+    let mut alone = Running::start(&[UNROUTED]).await;
+    let stream = alone.own_stream(UNROUTED);
+    let call = alone
+        .start_request_through(stream, UNROUTED, "/v1/messages")
+        .await;
+    assert_eq!(bounded(call).await.unwrap().0, StatusCode::FORBIDDEN);
+}
+
 #[test]
 fn a_front_door_needs_bindings_and_serves_only_port_443() {
     let environment_id = Uuid::new_v4();
@@ -673,10 +703,11 @@ async fn a_routed_origin_reaches_the_credential_broker_as_the_agent_sent_it() {
             "routed.chatgpt.com.",
             (StatusCode::MISDIRECTED_REQUEST, "request_not_forwarded"),
         ),
+        // Two labels under a suffix route: no route covers the host at all.
         (
             "a.b.chatgpt.com",
             "a.b.chatgpt.com",
-            (StatusCode::NOT_FOUND, "path_not_served"),
+            (StatusCode::FORBIDDEN, "route_not_served"),
         ),
     ] {
         let call = codex_call(&mut running, name, name, host).await;

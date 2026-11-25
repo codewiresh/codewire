@@ -132,6 +132,13 @@ async fn start_and_serve(
     confine().map_err(|_| startup(FrontDoorStage::Confinement))?;
 
     let leaves = Arc::new(SignedLeaves::generate().map_err(|_| startup(FrontDoorStage::Start))?);
+    // Every line the front door logs while it serves names its environment
+    // and Pod (#6421), never a request.
+    let span = tracing::info_span!(
+        "front_door",
+        environment_id = %bindings.environment_id,
+        %pod_uid
+    );
     let door = EnvironmentFrontDoor::with_leaves(
         bindings.environment_id,
         bindings.generation,
@@ -150,7 +157,7 @@ async fn start_and_serve(
     // the bridge. Either socket ending ends the front door, so a pair whose
     // sessions are gone restarts rather than serving on with none.
     let (successors, later) = tokio::sync::mpsc::channel::<tokio::net::UnixStream>(1);
-    let serve = door.serve(handoff, None, later);
+    let serve = tracing::Instrument::instrument(door.serve(handoff, None, later), span);
     tokio::pin!(serve);
     let follow = async {
         tokio::select! {

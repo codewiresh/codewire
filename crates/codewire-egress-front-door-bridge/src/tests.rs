@@ -200,13 +200,23 @@ async fn refused(
     let response = bounded(backend.forward(bound, request)).await;
     let status = response.status();
     let (reason, sentence) = match status {
-        StatusCode::NOT_FOUND => ("path_not_served", format!("this path on {bound}")),
-        _ => ("request_not_forwarded", format!("this request to {bound}")),
+        StatusCode::NOT_FOUND => (
+            "path_not_served",
+            format!("this path on {bound} isn't one Codewire forwards."),
+        ),
+        StatusCode::FORBIDDEN => (
+            "route_not_served",
+            format!("requests to {bound} can't use this environment's credentials yet."),
+        ),
+        _ => (
+            "request_not_forwarded",
+            format!("this request to {bound} isn't one Codewire forwards."),
+        ),
     };
     assert_eq!(response.headers()["codewire-refusal"], reason, "{uri}");
     assert_eq!(
         body_of(response).await,
-        format!("Codewire: {sentence} isn't one Codewire forwards.\n"),
+        format!("Codewire: {sentence}\n"),
         "{uri}"
     );
     host.assert_untouched();
@@ -464,7 +474,8 @@ fn the_defaults_bind_four_hosts() {
 /// A canonical name exactly one label under the `chatgpt.com` suffix maps
 /// whole to the Codex route, as `chatgpt.com` does; no other name falls to a
 /// suffix route (#6195). The front door hands over only the canonical name,
-/// so any other form is refused here, not normalised.
+/// so any other form is refused here, not normalised: no route covers it, so
+/// it is refused by name (#6421).
 #[test]
 fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
     let defaults = RouteTable::defaults();
@@ -478,7 +489,7 @@ fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
     ] {
         assert_eq!(
             rewrite(&defaults, refused, "/backend-api/codex/responses"),
-            Err(StatusCode::NOT_FOUND),
+            Err(StatusCode::FORBIDDEN),
             "{refused}"
         );
     }
@@ -491,17 +502,17 @@ fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
         (
             "xchatgpt.com",
             "/backend-api/codex/responses",
-            Err(StatusCode::NOT_FOUND),
+            Err(StatusCode::FORBIDDEN),
         ),
         (
             "routed.anthropic.com",
             "/v1/messages",
-            Err(StatusCode::NOT_FOUND),
+            Err(StatusCode::FORBIDDEN),
         ),
         (
             "routed.api.openai.com",
             "/v1/responses",
-            Err(StatusCode::NOT_FOUND),
+            Err(StatusCode::FORBIDDEN),
         ),
     ] {
         assert_eq!(rewrite(&defaults, host, uri), rewritten, "{host}{uri}");
@@ -515,7 +526,7 @@ fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
     );
     assert_eq!(
         rewrite(&exact, "routed.chatgpt.com", "/backend-api/codex/responses"),
-        Err(StatusCode::NOT_FOUND),
+        Err(StatusCode::FORBIDDEN),
         "without the suffix route a subname is unrouted"
     );
 }
@@ -876,8 +887,9 @@ fn the_longest_prefix_at_a_segment_boundary_wins() {
         ("b.example.com", "/v2/x", Err(StatusCode::NOT_FOUND)),
         ("b.example.com", "/", Err(StatusCode::NOT_FOUND)),
         // Exact hosts only: the front door passes the canonical bound host.
-        ("B.example.com", "/v1/x", Err(StatusCode::NOT_FOUND)),
-        ("c.example.com", "/v1/x", Err(StatusCode::NOT_FOUND)),
+        // A host with no route at all is refused by name (#6421).
+        ("B.example.com", "/v1/x", Err(StatusCode::FORBIDDEN)),
+        ("c.example.com", "/v1/x", Err(StatusCode::FORBIDDEN)),
     ];
     for (host, uri, expected) in cases {
         assert_eq!(
@@ -889,14 +901,31 @@ fn the_longest_prefix_at_a_segment_boundary_wins() {
 }
 
 #[tokio::test]
-async fn a_request_no_route_covers_is_404_and_never_reaches_the_bridge() {
+async fn a_path_no_route_of_a_routed_host_covers_is_404_and_never_reaches_the_bridge() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    for (bound, uri) in [
+        ("api.openai.com", "/v2/models"),
+        ("api.openai.com", "/v1x"),
+        ("api.openai.com", "/"),
+    ] {
+        assert_eq!(
+            refused(&mut host, &backend, bound, uri).await,
+            StatusCode::NOT_FOUND,
+            "{bound}{uri}"
+        );
+    }
+}
+
+/// A bound host this table has no route for at all, as after its cw-egress
+/// lost the route (#6421), is refused by name on every path, and nothing of
+/// the request, its placeholder included, reaches the bridge.
+#[tokio::test]
+async fn a_bound_host_with_no_route_is_refused_by_name_and_never_reaches_the_bridge() {
     let mut host = Host::start().await;
     let backend = host.backend(RouteTable::defaults());
     for (bound, uri) in [
         ("other.example.com", "/v1/models"),
-        ("api.openai.com", "/v2/models"),
-        ("api.openai.com", "/v1x"),
-        ("api.openai.com", "/"),
         // Without a Claude sign-in, Claude's token host has no route at all.
         ("platform.claude.com", "/v1/oauth/token"),
         ("platform.claude.com", "/"),
@@ -909,10 +938,36 @@ async fn a_request_no_route_covers_is_404_and_never_reaches_the_bridge() {
     ] {
         assert_eq!(
             refused(&mut host, &backend, bound, uri).await,
-            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
             "{bound}{uri}"
         );
     }
+    // A front door whose every bound host lost its route refuses each too.
+    let backend = host.backend(RouteTable::unrouted());
+    let request = Request::post("/v1/messages")
+        .header(HOST, "api.anthropic.com")
+        .header("x-api-key", "cwp1_placeholder-that-must-stay-here")
+        .body(Full::new(Bytes::from_static(b"a body that must stay here")))
+        .unwrap();
+    let response = bounded(backend.forward("api.anthropic.com", request)).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["codewire-refusal"], "route_not_served");
+    host.assert_untouched();
+    // A WebSocket upgrade takes the same route, so the same refusal.
+    let upgrade = Request::get("/v1/realtime")
+        .header(HOST, "api.anthropic.com")
+        .header(CONNECTION, "upgrade")
+        .header(UPGRADE, "websocket")
+        .header(
+            "authorization",
+            "Bearer cwp1_placeholder-that-must-stay-here",
+        )
+        .body(Full::default())
+        .unwrap();
+    let response = bounded(backend.forward("api.anthropic.com", upgrade)).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["codewire-refusal"], "route_not_served");
+    host.assert_untouched();
 }
 
 /// For a Claude sign-in every path and method of Claude's token host reaches
@@ -1605,7 +1660,7 @@ async fn a_front_door_refusal_names_a_fresh_id() {
         .body(Full::default())
         .unwrap();
     let response = bounded(backend.forward("platform.claude.com", request)).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     named_id(&response);
     host.assert_untouched();
 }

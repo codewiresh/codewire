@@ -25,6 +25,7 @@ pub mod control;
 mod environment;
 pub mod handoff;
 mod refusals;
+mod unrouted;
 pub use refusals::RefusalSink;
 
 pub use codewire_access::ROUTED_SUFFIXES;
@@ -234,6 +235,15 @@ impl RouteTable {
         Self::serving(|name| hosts.iter().any(|host| host.host == name))
     }
 
+    /// No route at all: a front door whose every bound host lost its route
+    /// still starts, and refuses each by name (#6421).
+    pub(crate) fn unrouted() -> Self {
+        Self {
+            routes: Vec::new(),
+            suffixes: Vec::new(),
+        }
+    }
+
     /// The built-in routes of each host `serves` names, with Codex's suffix
     /// routes when `chatgpt.com` is one, or `None` when it names none.
     pub(crate) fn serving(serves: impl Fn(&str) -> bool) -> Option<Self> {
@@ -336,8 +346,13 @@ impl RouteTable {
 
     /// The managed origin-form URI for a request to `host`, its query kept
     /// byte for byte. `Err` is the refusal to answer with instead: a path
-    /// that decoding or resolution could change isn't forwarded (400), and
-    /// one no route of `host` covers isn't served (404).
+    /// that decoding or resolution could change isn't forwarded (400), a
+    /// host this table has no route for at all is refused by name (403
+    /// `route_not_served`), and a path no route of a routed host covers
+    /// isn't served (404). Every host that reaches a front door is bound, so
+    /// a host with no route is one whose cw-egress lost the route after the
+    /// Pod's first bind (#6421): it stays bound, so the request is refused
+    /// here and never leaves for the provider.
     pub fn rewrite(&self, host: &str, uri: &Uri) -> Result<Uri, Refusal> {
         let malformed = Refusal::RequestNotForwarded(Unforwarded::Malformed);
         let path = uri.path();
@@ -359,6 +374,9 @@ impl RouteTable {
         } else {
             Vec::new()
         };
+        if candidates.is_empty() {
+            return Err(Refusal::RouteNotServed);
+        }
         let (route, rest) = candidates
             .into_iter()
             .filter_map(|route| below(path, &route.strip_prefix).map(|rest| (route, rest)))
@@ -383,6 +401,7 @@ pub struct CredentialRouteBackend {
     routes: RouteTable,
     bridge: CredentialBridge,
     refusals: Option<Arc<dyn RefusalSink>>,
+    unrouted: unrouted::UnroutedLog,
 }
 
 impl CredentialRouteBackend {
@@ -391,6 +410,7 @@ impl CredentialRouteBackend {
             routes,
             bridge,
             refusals: None,
+            unrouted: unrouted::UnroutedLog::default(),
         }
     }
 
@@ -451,11 +471,15 @@ impl CredentialRouteBackend {
             .routes
             .rewrite(host, request.uri())
             .inspect_err(|refusal| {
-                tracing::debug!(
-                    host,
-                    outcome = "no_credential_route",
-                    status = refusal.status()
-                );
+                if *refusal == Refusal::RouteNotServed {
+                    self.unrouted.refused(host, std::time::Instant::now());
+                } else {
+                    tracing::debug!(
+                        host,
+                        outcome = "no_credential_route",
+                        status = refusal.status()
+                    );
+                }
             })?;
         let (mut parts, body) = request.into_parts();
         parts.uri = uri;
