@@ -9,7 +9,7 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-23. Written first; every step is not yet observed.
+Updated 2026-11-24. Written first; every step is not yet observed.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
@@ -22,6 +22,7 @@ Updated 2026-11-23. Written first; every step is not yet observed.
 | `standard-admission` | not yet observed | not yet observed | not yet observed |
 | `standard-beside-commodity` | not yet observed | not yet observed | not yet observed |
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
+| `standard-suspend` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -219,3 +220,32 @@ Target, not built (#5602): the per-organization selector.
     but each emits the auth layer's denial log line, naming the caller, the
     method and the reason.
 - **Observed:** not yet observed.
+
+## `standard-suspend`: an idle sandbox's VM pauses in its Pod and any use resumes it
+
+Target, not shipped (#5529). The contract is
+[`docs/dev/IDLE-STOP.md`](../dev/IDLE-STOP.md), "Suspend".
+
+- **Entry points:** `idle_suspend` in `codewire.yaml`, `cw create --idle-suspend`,
+  `cw update NAME --idle-suspend`; waking by `cw exec`, `cw shell`, `ssh`, a preview
+  visit, an agent request or the dashboard's terminal.
+- **States to exercise:**
+  - `idle_suspend` off (the default): an idle sandbox never suspends;
+  - on: it suspends after its timeout, and `cw ls` reads `suspended`;
+  - set on a `commodity` sandbox: refused by name;
+  - each wake path;
+  - a long-lived connection through a pause of 10+ minutes;
+  - the guest clock after a 30-minute pause;
+  - idle stop reached while suspended: the sandbox resumes, then stops cleanly;
+  - from #6367:
+    - after resume, the front door re-admits the Sandbox, its leaves are re-signed, and the first request waits rather than drops (#6267);
+    - the first proxied request after resume refreshes a real token that expired while it slept;
+    - a credential revoked while suspended is refused on the first request after resume;
+    - the no-token-at-rest scan of the suspended image finds placeholders only (for hibernate, when hibernate lands: the memory image).
+- **Driving it:**
+  1. `cw --cloud create --name std-s --idle-suspend 5m`, start a `sleep 3600` in a shell, and leave it idle for 5 minutes. `cw ls` reads `suspended`, and the operator reads the Pod still Ready and its CPU near zero.
+  2. `cw exec --in std-s -- date` answers. The time from the command to the answer is recorded, `date` matches the client's clock, the `sleep` is still listed, and `cw ls` reads `running`.
+  3. Repeat with `ssh`, a preview visit and the dashboard's terminal, each from `suspended`.
+  4. Hold an `ssh` session open across a 10-minute suspend: it survives. A TCP stream through `cw-egress` either survives or resets once, as the contract says.
+  5. `cw update std-s --idle-suspend off`: it no longer suspends. On a `commodity` sandbox, `--idle-suspend 5m` is refused.
+- **Proof:** the state transitions in `cw ls` and the API, the wake times, the `sleep`'s PID unchanged across the pause, the clock difference, the operator's Pod reads (Ready, the same Pod UID, no restart), the billing record's suspended seconds taken from the supervisor's pause record, and #6367's four checks.

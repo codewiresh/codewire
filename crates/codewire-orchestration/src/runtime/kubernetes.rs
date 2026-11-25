@@ -33,7 +33,7 @@ use super::{
     PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess, RuntimeAttestation,
     RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
     RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize,
-    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, ScaledDownRuntime,
     VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
     WorkspaceVolume,
 };
@@ -648,19 +648,19 @@ impl RuntimeLifecycle for KubernetesDriver {
         .await
     }
 
-    async fn suspend(&self, claim: &ClaimRef) -> anyhow::Result<()> {
+    async fn scale_down(&self, claim: &ClaimRef) -> anyhow::Result<()> {
         self.sandbox_client(&claim.placement)
             .suspend_workspace(&suspension::claim_opts(claim), &claim.name, &claim.uid)
             .await
     }
 
-    async fn wait_suspended(
+    async fn wait_scaled_down(
         &self,
         claim: &ClaimRef,
         known_member: &str,
         previous: &[Incarnation],
         timeout: Duration,
-    ) -> anyhow::Result<SuspendedRuntime> {
+    ) -> anyhow::Result<ScaledDownRuntime> {
         suspension::wait_for_workspace_suspension(
             &self.sandbox_client(&claim.placement),
             claim,
@@ -681,10 +681,10 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
-    async fn resume(
+    async fn scale_up(
         &self,
         claim: &ClaimRef,
-        suspended: &SuspendedRuntime,
+        suspended: &ScaledDownRuntime,
         support_image: &str,
     ) -> anyhow::Result<()> {
         self.check_made_before_hosted_egress(&claim.placement, &claim.environment_id)
@@ -763,7 +763,7 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
-    async fn suspend_current(
+    async fn scale_down_current(
         &self,
         placement: &Placement,
         environment_id: &str,
@@ -774,7 +774,7 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
-    async fn resume_current(
+    async fn scale_up_current(
         &self,
         placement: &Placement,
         environment_id: &str,
@@ -865,7 +865,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         claim: &ClaimRef,
         intent: &RenderingIntent,
-        suspended: &SuspendedRuntime,
+        suspended: &ScaledDownRuntime,
         authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
         let rendering = self
@@ -1454,7 +1454,7 @@ mod tests {
             let (driver, requests) = driver_over(sandbox, true);
             let refusals = [
                 driver
-                    .resume_current(&placement, ENV, "img")
+                    .scale_up_current(&placement, ENV, "img")
                     .await
                     .unwrap_err(),
                 driver
@@ -1487,7 +1487,7 @@ mod tests {
         for (broker, on) in [(true, true), (false, false)] {
             let (driver, requests) = driver_over(rendered_sandbox(broker), on);
             let error = driver
-                .resume_current(&placement, ENV, "img")
+                .scale_up_current(&placement, ENV, "img")
                 .await
                 .unwrap_err();
             assert!(
@@ -2074,13 +2074,16 @@ mod tests {
         for (mode, patches) in [
             ("Suspended", {
                 let (driver, patches) = driver_over_patchable_sandbox();
-                driver.suspend_current(&placement, "env-1").await.unwrap();
+                driver
+                    .scale_down_current(&placement, "env-1")
+                    .await
+                    .unwrap();
                 patches
             }),
             ("Running", {
                 let (driver, patches) = driver_over_patchable_sandbox();
                 driver
-                    .resume_current(&placement, "env-1", NEW_SUPPORT_IMAGE)
+                    .scale_up_current(&placement, "env-1", NEW_SUPPORT_IMAGE)
                     .await
                     .unwrap();
                 patches
@@ -2867,7 +2870,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn suspending_acts_only_on_the_claims_placement() {
+    async fn scaling_down_acts_only_on_the_claims_placement() {
         let (driver, requests) = driver_over_empty_cluster();
         let claim = ClaimRef {
             placement: Placement::new("dev-sandboxes"),
@@ -2879,7 +2882,7 @@ mod tests {
         };
 
         // There is no claim to own, so it refuses after reading only.
-        assert!(driver.suspend(&claim).await.is_err());
+        assert!(driver.scale_down(&claim).await.is_err());
 
         let requests = requests.lock().unwrap();
         assert!(!requests.is_empty());

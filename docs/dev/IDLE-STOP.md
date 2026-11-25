@@ -102,11 +102,16 @@ A start sets `environments.last_activity_at` too.
 The orchestration worker checks every 30 seconds, in the reconciler loop that
 also stops Sandboxes that run out of credit.
 
-- **Candidates:** each running Sandbox with idle stop on, desired state
-  `started`, no open agent or runtime request, and `last_activity_at` older
-  than its timeout. A Sandbox with a request in flight is active now, however
+- **Candidates:** each running or `suspended` Sandbox with idle stop on,
+  desired state `started`, no open agent or runtime request, and
+  `last_activity_at` older than its timeout. A suspended Sandbox's
+  `last_activity_at` doesn't move while it sleeps, so its suspended time counts
+  toward idle stop. A Sandbox with a request in flight is active now, however
   long it has waited.
-- **The daemon:** the worker asks each candidate's daemon for its last active
+- **A suspended candidate** is stopped without the daemon call below, since
+  that call would wake it and nothing in the VM can have run: the stop wakes
+  the VM first, so the guest shuts down cleanly, then stops it as usual.
+- **The daemon:** the worker asks each running candidate's daemon for its last active
   minute, under the daemon credential, with a 5-second timeout and a bounded
   number of calls at once, apart from the credit stop. The answer is one
   timestamp; a time in the future counts as now. Only this check reads it. A
@@ -142,6 +147,91 @@ it doesn't enforce it: an environment's `idle_stop_enforced` is false,
 create` and `cw update` with a timeout add "This server doesn't stop idle
 Sandboxes: the timeout is kept, but not enforced." A timeout is never
 refused for it, since `idle_stop` in `codewire.yaml` rides on every create.
+
+## Suspend (`standard` only; target, not shipped, #5529)
+
+A Sandbox on the `standard` runtime profile can **suspend** before it stops:
+its VM pauses inside its Pod, keeping every process, open file and
+connection, and uses no CPU. Any use resumes it in milliseconds. This is not
+the stop above, and not a scale-down: the Pod, its volume, its address and
+its tailnet identity stay. `commodity` and `confidential` (Kata) Sandboxes
+never suspend. **Hibernate** (the VM's memory written to the volume and the
+Pod deleted) comes later, as `idle_hibernate`, at 6 hours.
+
+### The setting
+
+`idle_suspend` works as `idle_stop` does, beside it: a duration from 5
+minutes to 7 days, or `off`. It is off unless someone turns it on (owner,
+2026-11-24: "off by default with idle_suspend and later idle_hibernate after
+6 hours, just like idle_stop"); turned on without a duration, it is 15
+minutes (owner, 2026-11-21, #5484: suspend "after 15 minutes idle"), as
+`idle_stop` turned on is 6 hours.
+- **`codewire.yaml`:** `idle_suspend: 15m`.
+- **`cw create --idle-suspend 15m|on|off`** and
+  **`cw update NAME --idle-suspend 15m|on|off`**.
+- **API:** `CreateEnvironmentRequest.idle_suspend_seconds` and
+  `SetEnvironmentIdleSuspend`, with the same access, range and refusals as
+  the idle stop's. Setting it on a Sandbox whose recorded runtime profile
+  isn't `standard` is refused with `failed_precondition`, naming why.
+- **`cw info`** prints `IdleSuspend: 15m` or `IdleSuspend: off`.
+
+Idle stop keeps its own clock. A suspended Sandbox that reaches its idle
+stop timeout is stopped as above, and the stop resumes the VM first so the
+guest shuts down cleanly.
+
+### The suspend
+
+- **Candidates:** the same check as the stop's, every 30 seconds, for a
+  running `standard` Sandbox with `idle_suspend` on and activity older than
+  its suspend timeout.
+- **The ask:** the worker asks the daemon to suspend, under the daemon
+  credential the activity check uses. The daemon closes its platform
+  connections whose far end sends periodic traffic (the coordinator, the DERP
+  relay, the credential relay's epoch), so that traffic can't wake it,
+  acknowledges, and asks the supervisor over the guest channel. The
+  supervisor freezes the workload and pauses the VM. The acknowledgement
+  moves the Sandbox to `suspended`.
+- **Kubernetes sees no change.** On `standard` the readiness file is the
+  supervisor's, so the Pod stays Ready while the VM is paused.
+- **The wake is the supervisor's, never the guest's.** It resumes the VM on a
+  connection accepted on the Pod's 7777 or 2222, which every orchestration
+  path uses (previews, sessions, agents, the browser terminal, the SSH
+  fallback), on inbound bytes on a platform connection it relays for the
+  daemon, or on an explicit wake from orchestration. The coordinator asks
+  orchestration for one when it authorizes a hello naming a suspended
+  Sandbox. On resume the guest steps its clock, the supervisor delivers any
+  token renewed while paused, and the daemon redials its platform
+  connections and reports the wake, which moves the Sandbox back to
+  `running`.
+- **Billing:** a suspended second costs 0 until the owner sets a suspended
+  rate in the admin panel's prices (#5782). A second counts as suspended only
+  between the supervisor's record of a pause and its record of the resume,
+  each reported from the runtime container; never from the daemon's
+  acknowledgement or anything else the guest says.
+  - Acknowledged but no pause recorded: the Sandbox shows `suspended` and is
+    billed as running.
+  - A wake whose resume was never reported: billing reads the supervisor's
+    record when the Sandbox is next seen, and charges `running` for any time
+    the record doesn't cover.
+
+### Calls that must not wake a suspended Sandbox
+
+One periodic call that reaches the guest keeps every Sandbox awake, so each
+is listed here with how it treats a `suspended` Sandbox. A new periodic call
+into a Sandbox adds its row.
+
+| Call | Where | Reaches the guest? | While suspended |
+|---|---|---|---|
+| Liveness loop, every 5 s | `crates/codewire-orchestration/src/worker/loops.rs` (`SANDBOX_LIVENESS_INTERVAL`), via `RuntimeDriver::probe` → `probe_environment` | No: it reads the Pod and claim from the Kubernetes API | Treats `suspended` with a Ready Pod as healthy |
+| Kubelet startup and readiness probes | `sandbox/template/workspace.rs` (`apply_daemon_ready_probes`: `test -f /codewire/run/daemon/ready`) | No: on `standard` the file is the runtime container's | Unchanged; the file stays |
+| Idle activity check, every 30 s | `worker/idle_stop.rs` (`environment_daemon_activity_for_worker`) | Yes, the daemon over 7777 | Never asks a `suspended` Sandbox's daemon. While suspended, `last_activity_at` doesn't move (nothing runs), so the time counts toward idle stop: a suspended Sandbox is a stop candidate like a running one, and is stopped without the daemon call (see "The stop") |
+| Credential relay epochs, reconcile every 1 s, epoch at most 600 s | `worker/credential_relay.rs` (`daemon_target`, `RECONCILE_INTERVAL`), `credential_relay/epoch.rs` (`EPOCH_MAX_LIFETIME`) | Yes, the daemon over its cluster Service | Opens no epoch for a `suspended` Sandbox; the daemon closed its own before the pause |
+| Coordinator session heartbeat, every 15 s | `crates/codewire-coordinator/src/lib.rs` (`COORDINATE_HEARTBEAT_INTERVAL`), `session.rs` | Yes, over the daemon's coordinator session | The daemon closes that session before the pause; a hello naming the Sandbox wakes it through orchestration |
+| DERP relay traffic to the daemon | `crates/codewire-derp` | Yes, over the daemon's relay connection | The daemon closes it before the pause and redials at the wake |
+| `cw-egress` stream for broker mode | `crates/codewire-egress-node` | Yes, the admitted stream | Kept: `cw-egress` has no keepalive, idle timer or read deadline after the hello, and the stream's TCP peer is the Pod runtime's worker (it dials 8089 from the Pod's namespace), which keeps acknowledging while the VM is paused. Between that socket and the guest, though, the worker's user-space TCP stack (`codewire-netstack`) aborts a connection whose peer answers nothing for `tcp_idle_timeout` (120 s). It sends a keep-alive every 30 s (#6399), so a live but idle guest answers and keeps its connections; a paused guest can't answer, so a pause longer than about 2 minutes ends the stream, and the daemon redials at the wake; open workload connections through egress reset once. A shorter pause resumes on the old stream. The stream also ends on a `cw-egress` drain or an assignment change. The daemon handles both resuming on the old stream and redialing. Before the VM resumes, the supervisor writes the current egress token at the daemon's token path, since a pause of more than about 10 minutes outlives the copy the guest holds and a redial with it fails admission. Each redial counts against `cw-egress`'s start limit (10 per 60 s per Pod IP); a newer admitted stream replaces an older one for the same Pod |
+| Kubelet token rotations | the Pod's projected tokens | No: the supervisor reads them | The supervisor holds each renewed token and delivers it at the wake |
+| Billing sessions, every 60 s | `worker/billing_sessions.rs` | No: database and Kubernetes only | Counts suspended seconds from the supervisor's record |
+| Setup, resize and app-port pushes | `worker/setup.rs`, `worker/resize.rs` | Yes, but only for a person's action or a create | A person's action wakes it, which is intended |
 
 ## What a person sees
 

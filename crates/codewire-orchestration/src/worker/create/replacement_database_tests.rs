@@ -263,7 +263,7 @@ async fn db_a_bootstrap_refresh_carries_its_authorization() -> Result<()> {
         let authority = ActivityAuthority::capture(&db.pool, ENVIRONMENT, GENERATION).await?;
         let intent = measured_rendering(&db).await?.intent;
         let runtime = FakeRuntimeDriver::default();
-        let suspended = crate::runtime::SuspendedRuntime::synthetic("sandbox-a", "sandbox-uid-a");
+        let suspended = crate::runtime::ScaledDownRuntime::synthetic("sandbox-a", "sandbox-uid-a");
         for authorized in [Some([9; 32]), None] {
             refresh_workspace_bootstrap(
                 &runtime,

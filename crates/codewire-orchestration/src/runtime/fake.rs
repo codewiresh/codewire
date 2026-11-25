@@ -16,7 +16,8 @@ use super::{
     Placement, PoolBornClaim, PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess,
     RuntimeClaims, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeProbe,
     RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown,
-    SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
+    ScaledDownRuntime, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool,
+    WantedPools,
 };
 use super::{
     Isolation, MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts, RuntimeAttestation,
@@ -470,17 +471,17 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         }
     }
 
-    async fn suspend(&self, _claim: &ClaimRef) -> anyhow::Result<()> {
+    async fn scale_down(&self, _claim: &ClaimRef) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
     }
 
-    async fn wait_suspended(
+    async fn wait_scaled_down(
         &self,
         _claim: &ClaimRef,
         _known_member: &str,
         _previous: &[Incarnation],
         _timeout: Duration,
-    ) -> anyhow::Result<SuspendedRuntime> {
+    ) -> anyhow::Result<ScaledDownRuntime> {
         anyhow::bail!("not scripted")
     }
 
@@ -488,10 +489,10 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
-    async fn resume(
+    async fn scale_up(
         &self,
         _claim: &ClaimRef,
-        _suspended: &SuspendedRuntime,
+        _suspended: &ScaledDownRuntime,
         _support_image: &str,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
@@ -542,7 +543,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
-    async fn suspend_current(
+    async fn scale_down_current(
         &self,
         _placement: &Placement,
         _environment_id: &str,
@@ -550,7 +551,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
-    async fn resume_current(
+    async fn scale_up_current(
         &self,
         _placement: &Placement,
         _environment_id: &str,
@@ -639,7 +640,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         claim: &ClaimRef,
         _intent: &RenderingIntent,
-        _suspended: &SuspendedRuntime,
+        _suspended: &ScaledDownRuntime,
         authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
         self.placements

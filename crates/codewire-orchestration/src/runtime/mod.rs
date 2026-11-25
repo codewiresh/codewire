@@ -26,7 +26,7 @@ pub use crate::sandbox::client::{
     ProbeResult as RuntimeProbe, WorkspacePodIdentity as Incarnation,
     WorkspacePodReplacement as MemberReplacement, WorkspacePodResizeState as ResizeState,
     WorkspacePvc as WorkspaceVolume, WorkspacePvcAnchor as VolumeRef,
-    WorkspaceSandboxIdentity as SuspendedRuntime, WorkspaceStorage as VolumeIdentity,
+    WorkspaceSandboxIdentity as ScaledDownRuntime, WorkspaceStorage as VolumeIdentity,
     WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
@@ -405,27 +405,30 @@ pub trait RuntimeLifecycle: Send + Sync {
         known_member: &str,
     ) -> anyhow::Result<Vec<Incarnation>>;
 
-    /// Ask for the claim's runtime to suspend. This is not evidence it has.
-    async fn suspend(&self, claim: &ClaimRef) -> anyhow::Result<()>;
+    /// Ask for the claim's runtime to scale down: its Pod goes and its volume
+    /// stays, which is a stop (agent-sandbox's `operatingMode: Suspended`). It is
+    /// not the `suspended` state, where a `standard` VM pauses in its running Pod.
+    /// This is not evidence it has scaled down.
+    async fn scale_down(&self, claim: &ClaimRef) -> anyhow::Result<()>;
 
-    /// Wait until the claim's runtime is suspended and every one of `previous`
-    /// and any replacement is gone. The result is what `resume` requires.
-    async fn wait_suspended(
+    /// Wait until the claim's runtime is scaled down and every one of `previous`
+    /// and any replacement is gone. The result is what `scale_up` requires.
+    async fn wait_scaled_down(
         &self,
         claim: &ClaimRef,
         known_member: &str,
         previous: &[Incarnation],
         timeout: Duration,
-    ) -> anyhow::Result<SuspendedRuntime>;
+    ) -> anyhow::Result<ScaledDownRuntime>;
 
     /// Converge the runtime's identity for the claim's generation.
     async fn reconcile_identity(&self, claim: &ClaimRef) -> anyhow::Result<()>;
 
-    /// Start the exact runtime whose suspension was observed.
-    async fn resume(
+    /// Start the exact runtime whose scale-down was observed.
+    async fn scale_up(
         &self,
         claim: &ClaimRef,
-        suspended: &SuspendedRuntime,
+        suspended: &ScaledDownRuntime,
         support_image: &str,
     ) -> anyhow::Result<()>;
 
@@ -472,11 +475,11 @@ pub trait RuntimeLifecycle: Send + Sync {
         member_name: &str,
     ) -> anyhow::Result<Option<Incarnation>>;
 
-    /// Ask for the environment's runtime to suspend, for a caller that holds
+    /// Ask for the environment's runtime to scale down, for a caller that holds
     /// no claim: the runtime is the one its claim's status names now, so unlike
-    /// [`suspend`](Self::suspend) this doesn't fence on the claim's identity.
-    /// This is not evidence it has suspended.
-    async fn suspend_current(
+    /// [`scale_down`](Self::scale_down) this doesn't fence on the claim's identity.
+    /// This is not evidence it has scaled down.
+    async fn scale_down_current(
         &self,
         placement: &Placement,
         environment_id: &str,
@@ -484,8 +487,8 @@ pub trait RuntimeLifecycle: Send + Sync {
 
     /// Ask for the environment's runtime to run again, re-pinned to
     /// `support_image`. The counterpart of
-    /// [`suspend_current`](Self::suspend_current), found the same way.
-    async fn resume_current(
+    /// [`scale_down_current`](Self::scale_down_current), found the same way.
+    async fn scale_up_current(
         &self,
         placement: &Placement,
         environment_id: &str,
@@ -553,7 +556,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         claim: &ClaimRef,
         intent: &RenderingIntent,
-        suspended: &SuspendedRuntime,
+        suspended: &ScaledDownRuntime,
         authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()>;
 }

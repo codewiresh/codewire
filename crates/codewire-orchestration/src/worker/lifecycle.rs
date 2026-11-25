@@ -347,7 +347,7 @@ pub async fn handle_environment_stop(
         )
         .await?;
     if let Err(e) = authority
-        .run_external_mutation(STOP_MUTATION_STATES, runtime.suspend(&claim))
+        .run_external_mutation(STOP_MUTATION_STATES, runtime.scale_down(&claim))
         .await
     {
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
@@ -356,7 +356,7 @@ pub async fn handle_environment_stop(
     authority
         .run_while_authoritative_for_states(
             STOP_MUTATION_STATES,
-            runtime.wait_suspended(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
+            runtime.wait_scaled_down(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
         )
         .await?;
     // Design §10: the Pod is observed absent, so its binding is released. A
@@ -462,7 +462,7 @@ pub async fn handle_environment_restart_sources(
     .await?;
     await_reconcile_or_cancel(
         &activity_ctx,
-        authority.run_external_mutation(STOP_MUTATION_STATES, runtime.suspend(&claim)),
+        authority.run_external_mutation(STOP_MUTATION_STATES, runtime.scale_down(&claim)),
     )
     .await?;
     // An acknowledged suspend/delete is not evidence of Pod termination. Keep
@@ -473,7 +473,7 @@ pub async fn handle_environment_restart_sources(
         &activity_ctx,
         authority.run_while_authoritative_for_states(
             STOP_MUTATION_STATES,
-            runtime.wait_suspended(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
+            runtime.wait_scaled_down(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
         ),
     )
     .await?;
@@ -546,12 +546,12 @@ pub(super) async fn restart_workspace_bootstrap(
             )
             .await?;
         authority
-            .run_external_mutation(states, runtime.suspend(&claim))
+            .run_external_mutation(states, runtime.scale_down(&claim))
             .await?;
         authority
             .run_while_authoritative_for_states(
                 states,
-                runtime.wait_suspended(
+                runtime.wait_scaled_down(
                     &claim,
                     &backend.pod_name,
                     &previous,
@@ -578,7 +578,7 @@ pub(super) async fn restart_workspace_bootstrap(
         authority,
         intent,
         states,
-        runtime.resume(&claim, &suspended, ctx.sandbox_cfg.support_image()),
+        runtime.scale_up(&claim, &suspended, ctx.sandbox_cfg.support_image()),
     )
     .await
 }

@@ -3003,9 +3003,9 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Request suspension only for the current exact Claim-owned Sandbox.
-    /// This does not certify controller completion or Pod absence; callers
-    /// obtain that separate, opaque identity from the suspension observer.
+    /// Request agent-sandbox's `Suspended` mode (a stop, not a paused VM) only for the current
+    /// exact Claim-owned Sandbox. This does not certify controller completion or Pod absence;
+    /// callers obtain that separate, opaque identity from the suspension observer.
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %claim_opts.environment_id))]
     pub async fn suspend_workspace(
         &self,

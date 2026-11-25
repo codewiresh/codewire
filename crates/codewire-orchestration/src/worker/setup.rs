@@ -1043,7 +1043,7 @@ impl WorkerSetupOps<'_> {
         let guard = self.phase_authority.begin_reap(old_owner).await?;
         let suspend_result = tokio::time::timeout(
             Duration::from_secs(30),
-            runtime.suspend_current(&placement, &input.environment_id),
+            runtime.scale_down_current(&placement, &input.environment_id),
         )
         .await;
         guard.commit().await?;
@@ -1192,7 +1192,7 @@ impl WorkerSetupOps<'_> {
         };
         let resume_result = tokio::time::timeout(
             Duration::from_secs(30),
-            self.runtime()?.resume_current(
+            self.runtime()?.scale_up_current(
                 &Placement::new(&input.namespace),
                 &input.environment_id,
                 self.support_image(),

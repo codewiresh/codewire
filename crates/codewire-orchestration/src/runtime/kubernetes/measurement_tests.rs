@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use super::{KubernetesDriver, KubernetesRenderConfig};
 use crate::runtime::{
     ClaimRef, Isolation, Placement, RenderingIdentity, RenderingIntent, RuntimeDriver,
-    SuspendedRuntime, WorkspaceShape,
+    ScaledDownRuntime, WorkspaceShape,
 };
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
@@ -124,8 +124,8 @@ fn claim() -> ClaimRef {
     }
 }
 
-fn suspended() -> SuspendedRuntime {
-    SuspendedRuntime::synthetic("sandbox-1", "sandbox-uid")
+fn suspended() -> ScaledDownRuntime {
+    ScaledDownRuntime::synthetic("sandbox-1", "sandbox-uid")
 }
 
 async fn publish(
