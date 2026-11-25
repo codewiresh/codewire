@@ -794,6 +794,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_enrollment_heartbeats_alone_show_nothing_and_save_nothing() {
+        let server = MockServer::start().await;
+        let mut body = Vec::new();
+        for _ in 0..3 {
+            body.extend(frame(EnrollCodexResponse {
+                event: Some(enroll_codex_response::Event::Heartbeat(Default::default())),
+                ..Default::default()
+            }));
+        }
+        stream(&server, body).await;
+        let mut shown = 0;
+        let error = client(&server)
+            .enroll_codex(
+                EnrollCodexRequest {
+                    name: "work".into(),
+                    ..Default::default()
+                },
+                |_| {
+                    shown += 1;
+                    true
+                },
+            )
+            .await
+            .unwrap_err();
+        // A heartbeat is neither a challenge to show nor a result.
+        assert_eq!(shown, 0);
+        assert_eq!(error.code(), ErrorCode::Unknown);
+        assert!(error.message().contains("reconcile"));
+    }
+
+    #[tokio::test]
     async fn enrollment_missing_ack_or_callback_cancellation_never_retries() {
         for cancel in [false, true] {
             let server = MockServer::start().await;
