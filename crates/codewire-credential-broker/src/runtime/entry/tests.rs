@@ -2437,6 +2437,52 @@ async fn a_hosted_broker_refuses_every_request_without_our_placeholder() {
     }
 }
 
+/// #5215: the OpenAI API host is bound for a selected OpenAI API key, whose
+/// key is served only by the base URL's loopback route. A hosted broker
+/// refuses every front-door request to it by name before any lease, the
+/// managed stand-in included, and dials nothing; elsewhere it keeps the
+/// answer every front-door request without a swap rule gets.
+#[tokio::test]
+async fn a_hosted_broker_refuses_the_openai_api_host_by_name() {
+    for case in cases()
+        .into_iter()
+        .filter(|case| case.route == "openai-api")
+    {
+        for credential in [
+            Some("Bearer codewire-managed".to_owned()),
+            Some("Bearer sk-users-own-key".to_owned()),
+            None,
+        ] {
+            let mut request = case.request("api.openai.com");
+            if let Some(value) = &credential {
+                request.headers.push(v1::CredentialHttpHeader {
+                    name: "authorization".into(),
+                    value: value.as_bytes().to_vec(),
+                });
+            }
+            let recorded = Recorded::default();
+            let hosted = recorded
+                .broker_without_answer()
+                .with_network_policy_allowing_hosts(EVERY_BOUND_HOST)
+                .with_untouched_forwards_refused();
+            assert!(
+                matches!(
+                    hosted.execute_front_door(request.clone()).await,
+                    Err(BrokerRequestError::SelectedCredentialOnly)
+                ),
+                "{} {credential:?}",
+                case.slot
+            );
+            assert_eq!(recorded.leases(), 0);
+            assert!(recorded.outbound().is_empty(), "nothing is dialled");
+            assert!(matches!(
+                recorded.broker().execute_front_door(request).await,
+                Err(BrokerRequestError::InvalidRequest)
+            ));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Codex's routed origin (#3999 change 11)
 

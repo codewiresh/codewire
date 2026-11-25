@@ -15,6 +15,7 @@ use super::{
 use crate::bridge::BridgeEntry;
 use crate::network::{RouteHost, routed_host};
 use crate::network_policy;
+use url::Url;
 
 impl<P, U> OpenAiBroker<P, U>
 where
@@ -118,10 +119,26 @@ where
         self.network_policy_allows_github = allowed;
         self
     }
+    /// What a front-door request to the OpenAI API host is answered, before
+    /// any lease, grant or credential read: the hosted untouched-forward
+    /// rule's `selected_credential_only`, and elsewhere what any other
+    /// front-door request without a swap rule is answered (#5215).
+    fn openai_api_refusal(&self) -> BrokerRequestError {
+        let target = Url::parse("https://api.openai.com/").expect("a fixed URL");
+        match self.untouched_forward_allowed(&target, false) {
+            Err(BrokerRequestError::SelectedCredentialOnly) => {
+                BrokerRequestError::SelectedCredentialOnly
+            }
+            _ => BrokerRequestError::InvalidRequest,
+        }
+    }
 
     /// A front-door request, under the swap rule. The Anthropic route, Codex
     /// at `chatgpt.com` and GitHub's two hosts have it; any other front-door
     /// request is refused before a lease, never served by always injecting.
+    /// The OpenAI API host is bound for a selected OpenAI API key, whose key
+    /// is served only by the base URL's loopback route: in a hosted Sandbox
+    /// it is refused by name (`selected_credential_only`, #5215).
     /// Claude's token host is answered or forwarded by its own rule
     /// (`claude_token.rs`), Codex's by its own (`codex_token.rs`), and
     /// GitHub's hosts by theirs (`github_front_door.rs`). Only a GitHub
@@ -147,6 +164,7 @@ where
             ("anthropic", _) => self.execute_swap(request).await,
             ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request, session).await,
             ("codex", Some(RouteHost::CodexToken)) => self.execute_codex_token(request).await,
+            ("openai" | "codex", Some(RouteHost::OpenAiApi)) => Err(self.openai_api_refusal()),
             _ => Err(BrokerRequestError::InvalidRequest),
         }
     }

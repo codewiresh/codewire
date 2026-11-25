@@ -1850,7 +1850,10 @@ Issues: #3999, #4001.
     selected credential names, the user's own key and a request with no
     credential are both refused `selected_credential_only` with nothing
     sent, under every policy, and the placeholder is served. Not yet
-    observed;
+    observed. For an OpenAI API key, whose key is served only by
+    `OPENAI_BASE_URL`'s loopback route, `api.openai.com` refuses every
+    request through the front door `selected_credential_only`, the
+    `codewire-managed` stand-in included (#5215);
   - **on a host nothing selected names** (#5215), nothing is bound: inside
     the environment the host's certificate is not issued by the front door's
     CA, and its chain verifies against the public roots with that CA left
