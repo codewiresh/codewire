@@ -41,7 +41,7 @@ separately.
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
-| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke) | no command yet | n/a | n/a |
+| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke), and the first command after a start, 2026-11-25, source 569a5c7a53 (#6123) | no command yet | n/a | n/a |
 | `agent-vm-platform-profile` | #4909 | not yet observed | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | partly observed 2026-11-19, v0.4.24 | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | partly observed 2026-11-19, source 8f3a2d502 | no command yet | no command yet |
@@ -979,6 +979,10 @@ request adds.
     the VM reports started. If it cannot start, or the broker does not
     connect within the limit, the start fails with the reason; it never
     reports started with requests left hanging;
+  - a create or start returns once the guest holds each agent login its
+    profile delivers, waiting at most 10 s, so the first agent command run
+    straight after it finds its login and never says `Not logged in`
+    (#6123);
   - a VM whose credentials come from the platform, on macOS or against an
     authority that does not join the platform's front-door session, starts
     without interception: its recorded state reads interception off, the
@@ -1076,6 +1080,17 @@ request adds.
   - With the switch off: `{"state": "off"}` and nothing under the row.
   - The other three states are proved by unit tests only: credentials from
     the platform, none selected, and an older credential service.
+
+  The first agent command after a start (#6123), Linux local VM (x86_64,
+  KVM), 2026-11-25. The host `cw` was the featured synthetic-sign-in build,
+  and it and the guest runtime were built from `main` at 569a5c7a53. The
+  walk used a scratch `HOME` and the file store, with synthetic Claude and
+  Codex sign-ins in one local profile. The first command, run with no wait
+  after `cw --local create` and after each of two `cw --local start`s (16 s
+  each), found both Claude's and Codex's login files. `claude -p` never said
+  `Not logged in`: it sent its signed-in requests, which the featured
+  build's model fixture refused, since it serves only the smoke's own probe.
+  Not yet observed on macOS.
 
 ## `agent-vm-platform-profile`: a local VM on a platform profile is intercepted through the delegation
 
