@@ -52,7 +52,7 @@ impl KernelFixture {
         let executable = ExecutableIdentity::admit(Path::new("/usr/bin/head")).unwrap();
         let configuration = HelperConfiguration::Fixture;
         let nonce = uuid::Uuid::new_v4().to_string();
-        let mut command = ProcessCommand::new(&executable.path);
+        let mut command = crate::process::command(&executable.path, &[]);
         command
             .arg0(&executable.path)
             .stdin(Stdio::piped())

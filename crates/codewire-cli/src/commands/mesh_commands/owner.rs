@@ -239,7 +239,7 @@ fn spawn_owner(
         .context("the cw executable path is not UTF-8")?;
     let arguments = owner_arguments(text, spec);
     let log = directory.log(LOCAL_MESH_LOG_FILE)?;
-    let mut command = ProcessCommand::new(executable);
+    let mut command = crate::process::command(executable, &[]);
     command
         .arg0(&arguments[0])
         .args(&arguments[1..])
@@ -755,7 +755,7 @@ fn spawn_derp(data_dir: &Path, listen_addr: &str) -> anyhow::Result<std::process
     let directory = StateDir::open(data_dir, false)?.context("local Mesh directory is absent")?;
     let log = directory.log(LOCAL_DERP_LOG_FILE)?;
     let executable = fs::canonicalize(env::current_exe()?)?;
-    let mut command = ProcessCommand::new(&executable);
+    let mut command = crate::process::command(&executable, &[]);
     command
         .arg0(&executable)
         .arg(DERP_ROLE)
@@ -794,7 +794,12 @@ mod tests {
 
     impl Sentinel {
         fn start() -> Self {
-            Self(ProcessCommand::new("sleep").arg("30").spawn().unwrap())
+            Self(
+                crate::process::command("sleep", &[])
+                    .arg("30")
+                    .spawn()
+                    .unwrap(),
+            )
         }
         fn alive(&mut self) -> bool {
             self.0.try_wait().unwrap().is_none()
@@ -875,7 +880,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = paths(root.path());
         StateDir::open(&paths.mesh_data_dir, true).unwrap().unwrap();
-        let mut gone = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let mut gone = crate::process::command("sleep", &[])
+            .arg("30")
+            .spawn()
+            .unwrap();
         let process = ProcessIdentity::capture(gone.id()).unwrap();
         gone.kill().unwrap();
         gone.wait().unwrap();

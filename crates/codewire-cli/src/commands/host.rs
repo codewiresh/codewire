@@ -629,7 +629,7 @@ async fn connect_or_start_host(
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("daemon.log"))?;
-        let mut command = ProcessCommand::new(env::current_exe()?);
+        let mut command = crate::process::command(env::current_exe()?, &[]);
         command
             .arg("_host-daemon")
             .arg("--environment")

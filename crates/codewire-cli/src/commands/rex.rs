@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -469,7 +469,7 @@ fn reload(rex: &Path) -> Option<String> {
 
 /// Runs `rex` with `args`, never starting a server; the error is what it said.
 fn rex_run(rex: &Path, args: &[&str]) -> anyhow::Result<()> {
-    let output = Command::new(rex)
+    let output = crate::process::command(rex, &[])
         .arg("--autostart=false")
         .args(args)
         .stdin(Stdio::null())

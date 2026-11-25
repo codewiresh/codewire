@@ -20,7 +20,7 @@ async fn answering(first: &'static [u8]) -> (u16, tokio::task::JoinHandle<()>) {
 
 /// A stand-in for OpenSSH: its own process group, and it lives until ended.
 fn standing_in(port: u16) -> Forward {
-    let mut command = Command::new("sleep");
+    let mut command = crate::process::tokio_command("sleep", &[]);
     command.arg("600");
     Forward::start(command, port).expect("start the stand-in")
 }
@@ -97,7 +97,8 @@ async fn a_path_that_never_greets_is_not_ready_within_its_bound() {
 #[tokio::test]
 async fn openssh_ending_first_is_told_apart_from_a_slow_desktop() {
     let port = free_loopback_port().await.expect("a free port");
-    let mut forward = Forward::start(Command::new("true"), port).expect("start");
+    let mut forward =
+        Forward::start(crate::process::tokio_command("true", &[]), port).expect("start");
     forward.ssh.wait().await.expect("it ends by itself");
     let refused = forward.ready_within(Duration::from_secs(10)).await;
     assert!(matches!(refused, Err(ForwardError::Ended)), "{refused:?}");
@@ -106,7 +107,10 @@ async fn openssh_ending_first_is_told_apart_from_a_slow_desktop() {
 
 #[tokio::test]
 async fn no_ssh_on_the_computer_is_its_own_refusal() {
-    let refused = Forward::start(Command::new("/nonexistent/cw-desktop-test/ssh"), 1);
+    let refused = Forward::start(
+        crate::process::tokio_command("/nonexistent/cw-desktop-test/ssh", &[]),
+        1,
+    );
     assert!(matches!(refused, Err(ForwardError::NoSsh)));
 }
 
@@ -123,7 +127,7 @@ async fn closing_ends_the_process_and_leaves_nothing_behind() {
 #[tokio::test]
 async fn a_process_that_ignores_the_request_is_killed() {
     let port = free_loopback_port().await.expect("a free port");
-    let mut command = Command::new("sh");
+    let mut command = crate::process::tokio_command("sh", &[]);
     command.args(["-c", "trap '' TERM; sleep 600"]);
     let forward = Forward::start(command, port).expect("start");
     let pid = forward.ssh.id().expect("a running process");

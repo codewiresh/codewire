@@ -285,7 +285,7 @@ fn claude_model_refusals_name_the_model() {
 
 /// A peer that echoes what the driver sends it, one JSON line each.
 fn echo_peer() -> Peer {
-    let mut child = tokio::process::Command::new("cat")
+    let mut child = crate::process::tokio_command("cat", &[])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

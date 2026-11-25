@@ -53,7 +53,7 @@ impl Forward {
     /// through it.
     pub(super) async fn spawn(alias: &str) -> Result<Self, ForwardError> {
         let port = free_loopback_port().await.map_err(ForwardError::Port)?;
-        let mut command = Command::new("ssh");
+        let mut command = crate::process::tokio_command("ssh", &[]);
         command.args(ssh_arguments(alias, port));
         Self::start(command, port)
     }

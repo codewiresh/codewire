@@ -107,6 +107,10 @@ fn main() {
     }
 
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the build script runs the compiler on the build host, not a child of cw (#6242)"
+    )]
     let output = Command::new(&rustc)
         .arg("--version")
         .output()

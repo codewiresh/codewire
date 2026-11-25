@@ -13,12 +13,18 @@ lints fails, and so does a listed file that no longer does. `unwrap_used` is
 also allowed in integration tests, examples and benches, where clippy's
 `allow-unwrap-in-tests` does not reach.
 
-A crate may carry its own clippy.toml (codewire-local-vmm's disallows every
-spawn but its swept constructors, #4806). Clippy then reads that file instead
-of the workspace's, without merging the two, so the crate's file must repeat
-every workspace setting with the same value. And no call site may opt out of
-that crate's spawn lint: `clippy::disallowed_methods` is named only at the
-places DISALLOWED_METHOD_NAMES lists (allow, expect or cfg_attr alike).
+A crate may carry its own clippy.toml (codewire-local-vmm's and
+codewire-cli's disallow every spawn but their swept constructors, #4806 and
+#6242). Clippy then reads that file instead of the workspace's, without
+merging the two, so the crate's file must repeat every workspace setting with
+the same value, and the crates that disallow methods disallow the same list.
+No call site may opt out of the spawn lint: `clippy::disallowed_methods` is
+named only at the places DISALLOWED_METHOD_NAMES lists (allow, expect or
+cfg_attr alike), and in codewire-cli only as an item's
+`#[expect(clippy::disallowed_methods, reason = ...)]`, never on a module or
+as an allow, so a stale exception fails the build. The lint is in clippy's
+`style` group, which `all` includes, so neither group is named in those
+crates nor allowed in `[workspace.lints]` (#6242).
 """
 
 from __future__ import annotations
@@ -61,12 +67,110 @@ DEBT: dict[str, tuple[str, ...]] = {
 
 # Where `clippy::disallowed_methods` may be named, and how often (#4806): the
 # swept constructors, the test helpers and the off-macOS crate-root allow in
-# lib.rs, and the root allow of a Linux-only integration test.
+# codewire-local-vmm's lib.rs, and the root allow of its Linux-only
+# integration test. In codewire-cli (#6242): the one exec, the credential
+# authority's `posix_spawn` with POSIX_SPAWN_CLOEXEC_DEFAULT, and the build
+# script's run of the compiler.
 DISALLOWED_METHOD_NAMES: dict[str, int] = {
+    "crates/codewire-cli/build.rs": 1,
+    "crates/codewire-cli/src/commands/credential_authority/darwin.rs": 1,
+    "crates/codewire-cli/src/process.rs": 1,
     "crates/codewire-local-vmm/src/lib.rs": 6,
     "crates/codewire-local-vmm/tests/network_worker_process.rs": 1,
 }
 DISALLOWED_METHODS = "clippy::disallowed_methods"
+# Crates whose exceptions to the spawn lint are each an item's expect with a
+# reason, never an allow (#6242).
+EXPECT_ONLY_CRATES = ("crates/codewire-cli/",)
+EXPECTED_EXCEPTION = re.compile(r"#\[expect\(\s*clippy::disallowed_methods\s*,\s*reason\s*=")
+# The clippy groups `clippy::disallowed_methods` belongs to (#6242).
+SPAWN_LINT_GROUPS = ("clippy::style", "clippy::all")
+
+
+def attribute_end(text: str, start: int) -> int:
+    """The index just past the attribute starting at `text[start]`, skipping string literals."""
+    depth, index, quoted = 0, start, False
+    while index < len(text):
+        character = text[index]
+        if quoted:
+            if character == "\\":
+                index += 1
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(text)
+
+
+def expect_only_failures(sources: dict[str, str]) -> list[str]:
+    """Each source in EXPECT_ONLY_CRATES naming the spawn lint other than on an item's expect with a reason."""
+    failures: list[str] = []
+    for path, text in sorted(sources.items()):
+        if not path.startswith(EXPECT_ONLY_CRATES) or DISALLOWED_METHODS not in text:
+            continue
+        exceptions = list(EXPECTED_EXCEPTION.finditer(text))
+        if len(exceptions) != text.count(DISALLOWED_METHODS):
+            failures.append(
+                f"{path} names {DISALLOWED_METHODS} other than as `#[expect({DISALLOWED_METHODS}, reason = ...)]`: "
+                "an exception is an item's expect, never an allow or a crate or module attribute (#6242)"
+            )
+            continue
+        for exception in exceptions:
+            item = text[attribute_end(text, exception.start()):]
+            while (attribute := re.match(r"\s*(?:#\[|///|//)", item)) is not None:
+                if attribute.group().strip() == "#[":
+                    item = item[attribute_end(item, attribute.end() - 2):]
+                else:
+                    item = item[item.find("\n") + 1 or len(item):]
+            if re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?mod\b", item):
+                failures.append(f"{path} expects {DISALLOWED_METHODS} on a module: put it on the item that spawns (#6242)")
+    return failures
+
+
+def spawn_lint_group_failures(sources: dict[str, str], configs: dict[str, dict[str, Any]],
+                              workspace_lints: dict[str, Any]) -> list[str]:
+    """A source naming the spawn lint's group in a crate that disallows methods, or the workspace allowing one."""
+    failures: list[str] = []
+    crates = tuple(path.removesuffix("clippy.toml") for path, config in configs.items() if "disallowed-methods" in config)
+    for path, text in sorted(sources.items()):
+        if not path.startswith(crates):
+            continue
+        for group in SPAWN_LINT_GROUPS:
+            if group in text:
+                failures.append(
+                    f"{path} names {group}, which holds {DISALLOWED_METHODS}: name the lint you mean instead (#6242)"
+                )
+    for name in ("style", "all", "disallowed_methods"):
+        level = workspace_lints.get(name)
+        if isinstance(level, dict):
+            level = level.get("level")
+        if level == "allow":
+            failures.append(f"Cargo.toml allows clippy::{name} for the workspace, which silences {DISALLOWED_METHODS} (#6242)")
+    return failures
+
+
+def disallowed_list_failures(configs: dict[str, dict[str, Any]]) -> list[str]:
+    """Each crate clippy.toml whose disallowed-methods paths differ from the first one's."""
+    lists = {
+        path: sorted(entry["path"] if isinstance(entry, dict) else entry for entry in config["disallowed-methods"])
+        for path, config in sorted(configs.items())
+        if "disallowed-methods" in config
+    }
+    if not lists:
+        return []
+    first, wanted = next(iter(lists.items()))
+    return [
+        f"{path} disallows {paths!r}, {first} {wanted!r}: the crates disallow the same list (#6242)"
+        for path, paths in lists.items()
+        if paths != wanted
+    ]
 
 
 def disallowed_method_failures(sources: dict[str, str], listed: dict[str, int]) -> list[str]:
@@ -78,7 +182,7 @@ def disallowed_method_failures(sources: dict[str, str], listed: dict[str, int]) 
         if count > expected:
             failures.append(
                 f"{path} names {DISALLOWED_METHODS} {count} times, {expected} allowed: start the child "
-                "through crate::swept_command instead (#4806)"
+                "through the crate's swept constructors instead (#4806, #6242)"
             )
         elif count < expected:
             failures.append(f"{path} names {DISALLOWED_METHODS} {count} times: lower its count in DISALLOWED_METHOD_NAMES")
@@ -189,11 +293,52 @@ def self_test() -> list[str]:
     for name, text in (("an allow", f"#[allow({DISALLOWED_METHODS})]\n"), ("an expect", f"#[expect({DISALLOWED_METHODS})]\n"),
                        ("a cfg_attr", f"#![cfg_attr(test, allow({DISALLOWED_METHODS}))]\n")):
         expect(f"{name} at a call site", disallowed_method_failures({root: constructor, site: text}, allowed),
-               [f"{site} names {DISALLOWED_METHODS} 1 times, 0 allowed: start the child through crate::swept_command instead (#4806)"])
+               [f"{site} names {DISALLOWED_METHODS} 1 times, 0 allowed: start the child through the crate's swept constructors instead (#4806, #6242)"])
     expect("a second allow in the listed file", disallowed_method_failures({root: constructor * 2}, allowed),
-           [f"{root} names {DISALLOWED_METHODS} 2 times, 1 allowed: start the child through crate::swept_command instead (#4806)"])
+           [f"{root} names {DISALLOWED_METHODS} 2 times, 1 allowed: start the child through the crate's swept constructors instead (#4806, #6242)"])
     expect("a listed allow removed", disallowed_method_failures({root: ""}, allowed),
            [f"{root} names {DISALLOWED_METHODS} 0 times: lower its count in DISALLOWED_METHOD_NAMES"])
+
+    cli = "crates/codewire-cli/src/process.rs"
+    reason = 'reason = "the one exec (#6242)"'
+    exception = f"#[expect(\n    {DISALLOWED_METHODS},\n    {reason}\n)]\n"
+    not_expected = [f"{cli} names {DISALLOWED_METHODS} other than as `#[expect({DISALLOWED_METHODS}, reason = ...)]`: "
+                    "an exception is an item's expect, never an allow or a crate or module attribute (#6242)"]
+    expect("an item's expect with a reason", expect_only_failures({cli: f"{exception}/// Exec.\npub(crate) fn exec() {{}}\n"}), [])
+    expect("an expect in another crate", expect_only_failures({"crates/a/src/x.rs": f"#[allow({DISALLOWED_METHODS})]\n"}), [])
+    for name, text in (("an allow", f"#[allow({DISALLOWED_METHODS})]\nfn exec() {{}}\n"),
+                       ("a crate-level allow", f"#![allow({DISALLOWED_METHODS})]\n"),
+                       ("a crate-level expect", f"#![expect({DISALLOWED_METHODS}, {reason})]\n"),
+                       ("an expect without a reason", f"#[expect({DISALLOWED_METHODS})]\nfn exec() {{}}\n"),
+                       ("a cfg_attr", f"#[cfg_attr(test, expect({DISALLOWED_METHODS}, {reason}))]\nfn exec() {{}}\n")):
+        expect(f"{name} in codewire-cli", expect_only_failures({cli: text}), not_expected)
+    for name, item in (("a module", "mod spawning;\n"), ("a public module after another attribute",
+                                                          '#[cfg(unix)]\n// Spawns.\npub(crate) mod spawning {}\n')):
+        expect(f"an expect on {name}", expect_only_failures({cli: exception + item}),
+               [f"{cli} expects {DISALLOWED_METHODS} on a module: put it on the item that spawns (#6242)"])
+
+    configs = {"clippy.toml": {}, "crates/a/clippy.toml": {"disallowed-methods": [{"path": "libc::fork"}]},
+               "crates/b/clippy.toml": {"allow-unwrap-in-tests": True}}
+    source = "crates/a/src/x.rs"
+    expect("no group named", spawn_lint_group_failures({source: "#[allow(clippy::unwrap_used)]\n"}, configs, {}), [])
+    expect("a group in a crate without the list",
+           spawn_lint_group_failures({"crates/b/src/x.rs": "#![allow(clippy::all)]\n"}, configs, {}), [])
+    for group in SPAWN_LINT_GROUPS:
+        expect(f"{group} allowed in a crate with the list",
+               spawn_lint_group_failures({source: f"#[allow({group})]\nfn spawn() {{}}\n"}, configs, {}),
+               [f"{source} names {group}, which holds {DISALLOWED_METHODS}: name the lint you mean instead (#6242)"])
+    expect("the workspace warning on its lints", spawn_lint_group_failures({}, configs, {"unwrap_used": "warn"}), [])
+    for name, level in (("style", "allow"), ("all", {"level": "allow", "priority": -1}), ("disallowed_methods", "allow")):
+        expect(f"the workspace allowing clippy::{name}", spawn_lint_group_failures({}, configs, {name: level}),
+               [f"Cargo.toml allows clippy::{name} for the workspace, which silences {DISALLOWED_METHODS} (#6242)"])
+
+    fork, execve = {"path": "libc::fork", "reason": "a"}, {"path": "libc::execve", "reason": "b"}
+    same = {"crates/a/clippy.toml": {"disallowed-methods": [fork, execve]},
+            "crates/b/clippy.toml": {"disallowed-methods": [{**execve, "reason": "c"}, fork]}, "clippy.toml": {}}
+    expect("two crates disallowing the same list in their own words", disallowed_list_failures(same), [])
+    expect("a crate dropping one", disallowed_list_failures({**same, "crates/b/clippy.toml": {"disallowed-methods": [fork]}}),
+           ["crates/b/clippy.toml disallows ['libc::fork'], crates/a/clippy.toml ['libc::execve', 'libc::fork']: "
+            "the crates disallow the same list (#6242)"])
     return failures
 
 
@@ -222,6 +367,9 @@ def check_workspace_lints(args: argparse.Namespace) -> int:
         + allow_failures(sources, DEBT)
         + clippy_config_failures(configs)
         + disallowed_method_failures(sources, DISALLOWED_METHOD_NAMES)
+        + expect_only_failures(sources)
+        + spawn_lint_group_failures(sources, configs, manifests["Cargo.toml"].get("workspace", {}).get("lints", {}).get("clippy", {}))
+        + disallowed_list_failures(configs)
     )
     if report("workspace lints", failures):
         return 1

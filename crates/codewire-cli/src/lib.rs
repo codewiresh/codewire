@@ -39,6 +39,7 @@ mod output;
 #[cfg(target_os = "linux")]
 mod platform_cw_runtime;
 mod presentation;
+mod process;
 mod public_fetch;
 mod reworded;
 mod secret_client;

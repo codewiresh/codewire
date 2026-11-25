@@ -67,7 +67,7 @@ async fn hand_over(port: u16, password: &str) -> bool {
     };
     // By absolute path and with an empty environment, so nothing on PATH or
     // in the environment chooses what reads the script.
-    let spawned = tokio::process::Command::new("/usr/bin/osascript")
+    let spawned = crate::process::tokio_command("/usr/bin/osascript", &[])
         .env_clear()
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -113,7 +113,7 @@ const LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// would otherwise hand the address to a browser, or fail without a word.
 #[cfg(all(unix, not(target_os = "macos")))]
 async fn viewer_is_registered() -> bool {
-    let lookup = tokio::process::Command::new("xdg-mime")
+    let lookup = crate::process::tokio_command("xdg-mime", &[])
         .args(["query", "default", "x-scheme-handler/vnc"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

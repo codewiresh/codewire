@@ -10,7 +10,8 @@
 # tests (#3810) and the macOS cw for
 # both Mac targets instead. That cw links Apple frameworks (Security,
 # SystemConfiguration), so only a Mac links it; this compile-only check
-# catches its source errors on Linux.
+# catches its source errors on Linux. First it proves by mutation that the
+# CLI's spawn lint refuses a direct spawn in macOS code (#6242).
 # Its time is the build job's "local-vmm checks" and "cw Darwin cross-check"
 # phases (run-rust-checks.sh).
 set -euo pipefail
@@ -93,9 +94,47 @@ zigbuild_version="$("$zigbuild_bin" --version)" || die 'the cargo-zigbuild versi
 [[ -x /usr/bin/false ]] || die 'missing /usr/bin/false for disabling Python Zig discovery'
 export CARGO_ZIGBUILD_PYTHON_PATH=/usr/bin/false
 export CARGO_ZIGBUILD_ZIG_PATH="$zig_bin"
+# The mutation proof of the CLI's spawn lint (#6242): a probe holding direct
+# spawns under cfg(target_os = "macos"), linted for macOS with
+# crates/codewire-cli/clippy.toml as cargo lints the crate, must fail with
+# each one refused. One file and no dependencies, so it takes about a second.
+# That no call site in the crate opts out is the workspace-lints repo check's.
+cli_spawn_lint_refuses_a_direct_spawn() {
+  local probe output status=0 refused
+  probe="$(mktemp -d)"
+  cat >"$probe/probe.rs" <<'PROBE'
+#[cfg(target_os = "macos")]
+pub fn direct() -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("/usr/bin/true").status()
+}
+
+#[cfg(target_os = "macos")]
+pub fn aliased() -> std::io::Result<std::process::ExitStatus> {
+    use std::process::Command as Spawn;
+    Spawn::new("/usr/bin/true").status()
+}
+
+#[cfg(target_os = "macos")]
+pub fn exec(command: &mut std::process::Command) -> std::io::Error {
+    std::os::unix::process::CommandExt::exec(command)
+}
+PROBE
+  output="$(CLIPPY_CONF_DIR="$ROOT/crates/codewire-cli" "$(rustc --print sysroot)/bin/clippy-driver" \
+    --edition 2024 --crate-type lib --emit metadata --target aarch64-apple-darwin \
+    --out-dir "$probe" "$probe/probe.rs" -D warnings 2>&1)" || status=$?
+  rm -rf -- "$probe"
+  refused="$(grep -c 'use of a disallowed method' <<<"$output" || true)"
+  if [[ "$status" == 0 || "$refused" != 3 ]]; then
+    printf '%s\n' "$output" >&2
+    die "the CLI's spawn lint refused $refused of the probe's 3 direct spawns on macOS (#6242)"
+  fi
+  printf '[darwin-cross] the CLI spawn lint refuses all 3 direct spawns of the mutation probe\n'
+}
+
 if [[ "$mode" == cli ]]; then
   printf '[darwin-cross] Zig %s; cargo-zigbuild %s; macOS cw for aarch64 and x86_64\n' \
     "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
+  cli_spawn_lint_refuses_a_direct_spawn
   # The CLI's macOS-only unit tests too: Linux never compiles them, and a
   # signature change once broke them unnoticed (#2745).
   # Under a shared jobserver (CI's build job, which bounds every compiler),

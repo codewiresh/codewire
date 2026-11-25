@@ -174,7 +174,7 @@ fn start_detached_check() {
     let Ok(cw) = std::env::current_exe() else {
         return;
     };
-    let mut command = std::process::Command::new(cw);
+    let mut command = crate::process::command(cw, &[]);
     command
         .args(["upgrade", "_check"])
         .stdin(std::process::Stdio::null())

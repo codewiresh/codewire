@@ -2129,7 +2129,7 @@ pub(crate) fn login_shell_env() -> BTreeMap<String, String> {
     if term.is_empty() || term == "dumb" {
         return BTreeMap::new();
     }
-    match std::process::Command::new("infocmp")
+    match crate::process::command("infocmp", &[])
         .args(["-x", &term])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -3228,7 +3228,7 @@ mod login_shell_tests {
              infocmp \"$TERM\" >/dev/null 2>&1 && echo known || echo unknown\n",
         )
         .expect("profile");
-        let mut command = std::process::Command::new("/bin/sh");
+        let mut command = crate::process::command("/bin/sh", &[]);
         command
             .args(["-c", LOGIN_SHELL])
             .env_clear()

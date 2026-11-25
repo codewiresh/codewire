@@ -402,7 +402,7 @@ async fn exec_on_host(
         Some(workdir) => folder.join(workdir),
         None => folder.to_owned(),
     };
-    let mut child = tokio::process::Command::new(&args.command[0])
+    let mut child = crate::process::tokio_command(&args.command[0], &[])
         .args(&args.command[1..])
         .current_dir(&dir)
         .envs(env)
@@ -545,7 +545,7 @@ mod tests {
         let env = parse_env_overrides(&args.env, &crate::config::MapEnv::default()).unwrap();
         let line = ssh_line(&args, &env, "/nonexistent-default");
         assert!(line.starts_with("'sh' '-c' "), "{line}");
-        let output = std::process::Command::new("sh")
+        let output = crate::process::command("sh", &[])
             .arg("-c")
             .arg(&line)
             .output()
@@ -565,7 +565,7 @@ mod tests {
         let run = |default_dir: &str| {
             let args = exec_args(&["cw", "exec", "pwd"]);
             let line = ssh_line(&args, &Default::default(), default_dir);
-            let output = std::process::Command::new("sh")
+            let output = crate::process::command("sh", &[])
                 .arg("-c")
                 .arg(&line)
                 .output()

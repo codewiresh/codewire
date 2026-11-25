@@ -286,7 +286,7 @@ mod kernel_tests {
         // a hang into a failure. A 3 s polling guess failed while a loaded CI
         // host stalled I/O (#3231).
         let mut owner = SocketOwner(
-            std::process::Command::new("/usr/bin/python3")
+            crate::process::command("/usr/bin/python3", &[])
                 .args([
                     "-I",
                     "-B",

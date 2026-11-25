@@ -197,15 +197,10 @@ mod darwin {
     /// ssh-agent and ssh-add start holding only their standard descriptors.
     /// The authority is multi-threaded, and Darwin sets close-on-exec in a
     /// second call for some descriptors, so mark every inherited one first.
+    /// codewire-credential-broker builds the command and adds no hook of
+    /// its own, so the sweep is the first.
     pub(super) fn prepare_openssh_child(command: &mut tokio::process::Command) {
-        // SAFETY: the hook runs between fork and exec and makes only
-        // getdtablesize and fcntl calls.
-        unsafe {
-            command.pre_exec(|| {
-                codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
-                Ok(())
-            });
-        }
+        codewire_local_vmm::install_sweep(command, &[]);
     }
 
     /// One owner-only FIFO at exactly `path`; it fails if anything exists.
@@ -303,26 +298,44 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn darwin_openssh_children_inherit_only_standard_descriptors() {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use crate::process::descriptor_report::{REPORT, TEST, planted};
+        use std::os::fd::AsRawFd as _;
 
-        let source = std::fs::File::open("/dev/null").unwrap();
-        // F_DUPFD clears close-on-exec; 64 keeps the probe off any descriptor
-        // a test runner thread might reuse meanwhile.
-        // SAFETY: duplicates a descriptor this test owns.
-        let raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
-        assert!(raw >= 64);
-        // SAFETY: `raw` is a fresh descriptor nothing else owns.
-        let leaked = unsafe { OwnedFd::from_raw_fd(raw) };
-        let probe = |prepare: bool| {
-            let mut command = tokio::process::Command::new("/bin/test");
-            command.args(["-e", &format!("/dev/fd/{}", leaked.as_raw_fd())]);
+        let root = root();
+        let leaked = planted();
+        // ssh-agent and ssh-add both start with codewire-credential-broker's
+        // stdio, then this preparation. The probe's own sweep keeps the
+        // planted descriptor, so only the preparation's, which runs after
+        // it, can close it.
+        let report = |prepare: bool| {
+            let output = root.path().join(format!("descriptors-{prepare}"));
+            let mut command = crate::process::tokio_command(
+                std::env::current_exe().unwrap(),
+                &[leaked.as_raw_fd()],
+            );
+            command
+                .args(["--exact", TEST])
+                .env(REPORT, &output)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0);
             if prepare {
                 darwin::prepare_openssh_child(&mut command);
             }
-            command
+            async move {
+                let run =
+                    tokio::time::timeout(std::time::Duration::from_secs(60), command.output());
+                assert!(run.await.unwrap().unwrap().status.success());
+                std::fs::read_to_string(output).unwrap()
+            }
         };
-        assert!(probe(false).status().await.unwrap().success());
-        assert!(!probe(true).status().await.unwrap().success());
+        assert_eq!(
+            report(false).await,
+            format!("0 1 2 {}", leaked.as_raw_fd()),
+            "without the preparation the planted descriptor reaches the child"
+        );
+        assert_eq!(report(true).await, "0 1 2", "stdio alone");
     }
 
     /// The composed macOS signer signs with Apple's tools through the

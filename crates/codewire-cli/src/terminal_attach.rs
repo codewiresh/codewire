@@ -1,10 +1,10 @@
 use std::io::IsTerminal as _;
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::Stdio;
 
 use anyhow::Context as _;
 
 pub(crate) fn terminal_size() -> anyhow::Result<(u16, u16)> {
-    let output = ProcessCommand::new("stty")
+    let output = crate::process::command("stty", &[])
         .arg("size")
         .stdin(Stdio::inherit())
         .stderr(Stdio::piped())
@@ -320,7 +320,7 @@ impl Drop for RawModeGuard {
 }
 
 fn restore_terminal(state: &str) {
-    let _ = ProcessCommand::new("stty")
+    let _ = crate::process::command("stty", &[])
         .arg(state.trim())
         .stdin(Stdio::inherit())
         .stdout(Stdio::null())
@@ -329,7 +329,7 @@ fn restore_terminal(state: &str) {
 }
 
 fn stty_capture(args: &[&str]) -> anyhow::Result<String> {
-    let output = ProcessCommand::new("stty")
+    let output = crate::process::command("stty", &[])
         .args(args)
         .stdin(Stdio::inherit())
         .stderr(Stdio::piped())
@@ -346,7 +346,7 @@ fn stty_capture(args: &[&str]) -> anyhow::Result<String> {
 }
 
 fn stty_status(args: &[&str]) -> anyhow::Result<()> {
-    let output = ProcessCommand::new("stty")
+    let output = crate::process::command("stty", &[])
         .args(args)
         .stdin(Stdio::inherit())
         .stderr(Stdio::piped())
@@ -472,7 +472,7 @@ mod tests {
         use std::io::Write as _;
         // As in `while read line; do cw run ...; done < file`: the lines
         // after this command belong to the script.
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = crate::process::command(std::env::current_exe().unwrap(), &[])
             .args([
                 "--exact",
                 "terminal_attach::tests::unread_terminal_input_child_process",

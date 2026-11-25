@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 use std::time::Duration;
@@ -522,7 +522,7 @@ fn spawn_authority(
     store: &AuthorityProtectedStore,
 ) -> Result<Child, AuthorityRuntimeError> {
     let allowed_environment = authority_environment(|name| env::var_os(name));
-    let mut command = Command::new(&config.executable);
+    let mut command = crate::process::command(&config.executable, &[]);
     command
         .args(authority_arguments(config, store, None))
         .env_clear()
@@ -606,7 +606,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .ok_or(LocalBrokerSpawnError::InvalidConfiguration)?;
         let parent_pid = unsafe { libc::getpid() };
         let allowed_environment = self.child_environment(|name| env::var_os(name));
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = crate::process::tokio_command(&self.executable, &[]);
         command
             .arg("__local-credential-broker")
             .arg("--authority-fd")
@@ -790,7 +790,7 @@ impl CwLocalCredentialProcessSpawner {
             }
             codewire_local_credentials::LocalRepositoryTransport::Ssh => Vec::new(),
         };
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = crate::process::tokio_command(&self.executable, &[]);
         command
             .arg("__local-git-repository-executor")
             .arg("--transport")
@@ -833,7 +833,7 @@ impl CwLocalCredentialProcessSpawner {
         &self,
         config: &LocalRevocationProcessConfig,
     ) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = crate::process::tokio_command(&self.executable, &[]);
         command
             .arg("__local-provider-revocation-executor")
             .arg("--authority-fd")

@@ -234,7 +234,7 @@ pub(super) fn copy_link(url: &str) -> String {
 /// The desktop's clipboard tool, if this session is on the desktop: over SSH
 /// that clipboard is the remote machine's, so OSC 52 alone serves.
 fn platform_copy(url: &str) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
     if var("SSH_CONNECTION").is_some() || var("SSH_TTY").is_some() {
         return;
@@ -248,7 +248,7 @@ fn platform_copy(url: &str) {
     } else {
         return;
     };
-    let Ok(mut child) = Command::new(tool[0])
+    let Ok(mut child) = crate::process::command(tool[0], &[])
         .args(&tool[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

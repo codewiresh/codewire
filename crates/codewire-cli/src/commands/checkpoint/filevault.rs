@@ -2,7 +2,7 @@
 //! cw-security's condition 11): APFS clones share blocks, so a removed
 //! checkpoint's memory stays on the disk until the blocks are reused.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use super::*;
 
@@ -28,7 +28,7 @@ pub(super) async fn at_first_checkpoint(
 /// The warning, when `fdesetup isactive` says FileVault is off. A state it
 /// cannot tell shows nothing.
 fn warning() -> Option<&'static str> {
-    let output = Command::new("/usr/bin/fdesetup")
+    let output = crate::process::command("/usr/bin/fdesetup", &[])
         .arg("isactive")
         .stdin(Stdio::null())
         .stderr(Stdio::null())

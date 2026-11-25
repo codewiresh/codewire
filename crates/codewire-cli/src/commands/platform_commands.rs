@@ -558,15 +558,15 @@ pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
 
 fn browser_command(url: &str) -> ProcessCommand {
     let mut command = if cfg!(target_os = "macos") {
-        let mut command = ProcessCommand::new("open");
+        let mut command = crate::process::command("open", &[]);
         command.arg(url);
         command
     } else if cfg!(target_os = "windows") {
-        let mut command = ProcessCommand::new("cmd");
+        let mut command = crate::process::command("cmd", &[]);
         command.args(["/C", "start", "", url]);
         command
     } else {
-        let mut command = ProcessCommand::new("xdg-open");
+        let mut command = crate::process::command("xdg-open", &[]);
         command.arg(url);
         command
     };
@@ -2979,7 +2979,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn brew_prefix() -> Option<PathBuf> {
-    let output = std::process::Command::new("brew")
+    let output = crate::process::command("brew", &[])
         .arg("--prefix")
         .output()
         .ok()?;

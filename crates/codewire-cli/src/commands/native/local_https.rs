@@ -474,7 +474,7 @@ mod port_holder {
     //! processes without root.
 
     pub(super) fn describe(port: u16) -> Option<String> {
-        let output = std::process::Command::new("/usr/sbin/lsof")
+        let output = crate::process::command("/usr/sbin/lsof", &[])
             .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
             .output()
             .ok()?;

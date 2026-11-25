@@ -482,7 +482,7 @@ async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
     const ISOLATED: &str = "CODEWIRE_TEST_SIGINT_ISOLATED";
     const NAME: &str = "commands::credential_input::connect::tests::a_ctrl_c_while_nothing_waits_for_it_is_still_seen";
     if std::env::var_os(ISOLATED).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap(), &[])
             .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
             .env(ISOLATED, "1")
             .stdin(std::process::Stdio::null())
@@ -511,7 +511,7 @@ async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
     // failure.
     tokio::time::timeout(Duration::from_secs(120), async {
         while !interrupt.was_pressed() {
-            std::process::Command::new("kill")
+            crate::process::command("kill", &[])
                 .args(["-INT", &pid])
                 .status()
                 .unwrap();

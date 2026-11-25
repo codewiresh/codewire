@@ -4,7 +4,6 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Context as _;
 
@@ -177,7 +176,7 @@ fn ours(path: &Path) -> anyhow::Result<bool> {
 }
 
 fn run(program: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
-    Command::new(program)
+    crate::process::command(program, &[])
         .args(args)
         .output()
         .with_context(|| format!("run {program}"))

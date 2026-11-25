@@ -12,7 +12,7 @@
 //! depend on what else the host runs.
 
 use std::collections::HashSet;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use super::*;
 use codewire_daemon::hosted_state::HostedStatePaths;
@@ -187,7 +187,7 @@ async fn assert_nothing_listens_while_unbound(then: Vec<Answer>) {
     std::fs::write(root.path().join("token"), SYNTHETIC_PROJECTED_TOKEN).unwrap();
     let paths = HostedStatePaths::under(root.path());
     let mut daemon = Daemon(
-        Command::new(std::env::current_exe().unwrap())
+        crate::process::command(std::env::current_exe().unwrap(), &[])
             .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(CHILD_ROOT_ENV, root.path())
             .env(CHILD_URL_ENV, &url)

@@ -327,7 +327,7 @@ fn remove_managed_ssh_section_rejects_incomplete_markers() {
 /// 8.5 or later (KnownHostsCommand); skipped where `ssh` is absent.
 #[test]
 fn openssh_resolves_the_managed_block_first() {
-    if std::process::Command::new("ssh")
+    if crate::process::command("ssh", &[])
         .arg("-V")
         .stderr(std::process::Stdio::null())
         .status()
@@ -352,7 +352,7 @@ fn openssh_resolves_the_managed_block_first() {
     assert_eq!(outcome.change, SshConfigChange::Written);
 
     let resolve = |host: &str| {
-        let output = std::process::Command::new("ssh")
+        let output = crate::process::command("ssh", &[])
             .arg("-G")
             .arg("-F")
             .arg(&config_path)
@@ -1335,7 +1335,7 @@ fn local_mesh_children_receive_only_explicit_startup_and_logging_environment() {
     const AMBIENT_CANARY: &str = "synthetic-ambient-secret-canary";
     if std::env::var_os(CHILD_SENTINEL).is_none() {
         let test_name = std::thread::current().name().unwrap().to_owned();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let status = crate::process::command(std::env::current_exe().unwrap(), &[])
             .args(["--exact", &test_name, "--nocapture"])
             .env(CHILD_SENTINEL, "1")
             .env("UNRELATED_SECRET", AMBIENT_CANARY)
@@ -1376,7 +1376,7 @@ fn local_mesh_children_receive_only_explicit_startup_and_logging_environment() {
     );
     let derp = derp_environment("127.0.0.1:18091");
     for (environment, is_mesh) in [(&mesh, true), (&derp, false)] {
-        let mut command = std::process::Command::new("/usr/bin/env");
+        let mut command = crate::process::command("/usr/bin/env", &[]);
         command.env_clear().envs(environment.iter().cloned());
         let output = command.output().unwrap();
         assert!(output.status.success());

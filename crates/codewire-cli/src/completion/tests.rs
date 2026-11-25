@@ -210,7 +210,7 @@ fn the_watchdog_ends_a_stalled_answer_with_success() {
         return;
     }
     let started = std::time::Instant::now();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let status = crate::process::command(std::env::current_exe().unwrap(), &[])
         .args([
             "--exact",
             "completion::tests::the_watchdog_ends_a_stalled_answer_with_success",

@@ -710,7 +710,7 @@ pub(crate) fn spawn_member(
     )?;
     let log = directory.log("member-helper.log")?;
     let nonce = uuid::Uuid::new_v4().to_string();
-    let mut command = ProcessCommand::new(&executable.path);
+    let mut command = crate::process::command(&executable.path, &[]);
     command
         .arg0(&arguments[0])
         .args(&arguments[1..])

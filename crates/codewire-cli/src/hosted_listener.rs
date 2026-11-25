@@ -154,7 +154,7 @@ mod tests {
         take_from_environment().unwrap();
         assert!(std::env::var_os(HOSTED_DAEMON_LISTENER_FD_ENV).is_none());
         assert!(take().is_some(), "the listener was not taken");
-        let grandchild = std::process::Command::new("/bin/sh")
+        let grandchild = crate::process::command("/bin/sh", &[])
             .args([
                 "-c",
                 &format!(
@@ -187,7 +187,7 @@ mod tests {
             return;
         };
         let source = listener.as_raw_fd();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut child = crate::process::command(std::env::current_exe().unwrap(), &[]);
         child
             .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(CHILD_ENV, "1")

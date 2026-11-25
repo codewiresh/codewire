@@ -7,8 +7,9 @@
 //! mask, passes an empty environment and starts in the authority root. The
 //! authority sets its umask itself before creating any file.
 //!
-//! A broker or repository executor is an owned child of the authority: it
-//! keeps only its authority channel as descriptor 3, gets an empty
+//! A broker or executor is an owned child of the authority: it keeps only
+//! its authority channel as descriptor 3, and a broker a boot's secrets as
+//! descriptor 4 when the boot has them. It gets an empty
 //! environment, a new session, no core files and umask 077, and exits with
 //! the authority (Darwin has no parent-death signal; the child watches its
 //! parent itself). Its stderr is a pipe the authority drains: a broker keeps
@@ -82,6 +83,11 @@ fn c_string(value: &OsStr) -> io::Result<CString> {
     CString::new(value.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "with POSIX_SPAWN_CLOEXEC_DEFAULT the authority gets only what the file actions \
+              hand it, with no window between fork and exec that a sweep after fork has (#6242)"
+)]
 pub(super) fn spawn_detached(
     program: &Path,
     arguments: &[OsString],
@@ -225,20 +231,33 @@ pub(super) struct CwLocalCredentialProcessSpawner {
     pub(super) runtime: Option<(PathBuf, PathBuf)>,
 }
 
-/// Bind the child to this exact authority before exec: a new session (so it
-/// leads its own process group), every descriptor from 3 up marked
-/// close-on-exec (Darwin sets that flag in a second call, so a descriptor
-/// another thread is creating could otherwise reach the child), then the
-/// authority channel moved to fixed descriptor 3, core files disabled and
-/// umask 077.
-/// Bind the child's FD 3 to `authority_fd`, and its FD 4 to a boot's secrets
-/// when `secrets_fd` is given (#3999); every other descriptor is closed on
-/// exec.
-fn bind_child_to_authority(
-    command: &mut tokio::process::Command,
+/// The descriptor each child of the authority holds its authority channel
+/// at.
+const AUTHORITY_FD: RawFd = 3;
+
+/// What a child of the authority keeps through the close-on-exec sweep by
+/// number: nothing. Its hook (`authority_child`) moves the authority channel
+/// to [`AUTHORITY_FD`] and a broker's boot secrets to `BOOT_SECRETS_FD` with
+/// `dup2`, whose copy is inheritable while each source, swept, is closed on
+/// exec, so the child holds exactly stdio and those. Keeping a source would
+/// hand the child that number as well, and keeping 3 or 4 would hand it
+/// whatever the authority holds there when nothing is moved onto it.
+const AUTHORITY_CHILD_KEEPS: &[RawFd] = &[];
+
+/// A child bound to this exact authority before exec. The sweep of
+/// `crate::process::tokio_command` runs first, marking every descriptor
+/// from 3 up close-on-exec (Darwin sets that flag in a second call, so a
+/// descriptor another thread is creating could otherwise reach the child).
+/// Then the child checks its parent, starts a new session (so it leads its
+/// own process group), gets `authority_fd` as [`AUTHORITY_FD`] and, when
+/// `secrets_fd` is given, a boot's secrets as `BOOT_SECRETS_FD` (#3999),
+/// with core files disabled and umask 077.
+fn authority_child(
+    executable: &Path,
     authority_fd: RawFd,
     secrets_fd: Option<RawFd>,
-) {
+) -> tokio::process::Command {
+    let mut command = crate::process::tokio_command(executable, AUTHORITY_CHILD_KEEPS);
     // SAFETY: getpid has no preconditions.
     let parent_pid = unsafe { libc::getpid() };
     // SAFETY: this post-fork hook uses async-signal-safe system calls only.
@@ -250,12 +269,11 @@ fn bind_child_to_authority(
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
-            codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
-            if authority_fd == 3 {
-                if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+            if authority_fd == AUTHORITY_FD {
+                if libc::fcntl(AUTHORITY_FD, libc::F_SETFD, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
-            } else if libc::dup2(authority_fd, 3) < 0 {
+            } else if libc::dup2(authority_fd, AUTHORITY_FD) < 0 {
                 return Err(io::Error::last_os_error());
             }
             // After FD 3: the secrets' descriptor is above FD 4, so the move
@@ -276,6 +294,7 @@ fn bind_child_to_authority(
             Ok(())
         });
     }
+    command
 }
 
 impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
@@ -301,11 +320,11 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         let secrets_fd = boot_secrets.as_ref().map(|secrets| secrets.as_raw_fd());
         let store_arguments = child_store_arguments(&self.store, &self.authority_root)
             .ok_or(LocalBrokerSpawnError::InvalidConfiguration)?;
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = authority_child(&self.executable, authority_fd, secrets_fd);
         command
             .arg("__local-credential-broker")
             .arg("--authority-fd")
-            .arg("3")
+            .arg(AUTHORITY_FD.to_string())
             .arg("--environment-id")
             .arg(config.environment_id.to_string())
             .arg("--environment-generation")
@@ -340,7 +359,6 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
                 .arg("--boot-secrets-fd")
                 .arg(super::BOOT_SECRETS_FD.to_string());
         }
-        bind_child_to_authority(&mut command, authority_fd, secrets_fd);
         let child = command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn);
         // The authority keeps no open end once the child has its own.
         drop(boot_secrets);
@@ -358,7 +376,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = authority_child(&self.executable, authority_fd, None);
         command
             .arg("__local-git-repository-executor")
             .arg("--transport")
@@ -367,7 +385,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
                 LocalRepositoryTransport::Ssh => "ssh",
             })
             .arg("--authority-fd")
-            .arg("3")
+            .arg(AUTHORITY_FD.to_string())
             .arg("--request-id")
             .arg(config.request_id.to_string())
             .arg("--staging-directory")
@@ -413,7 +431,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
                 .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
             command.arg("--ssh-runtime-directory").arg(runtime);
         }
-        bind_child_to_authority(&mut command, authority_fd, None);
         command
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)
@@ -433,11 +450,11 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRevocationSpawnError::InvalidConfiguration);
         }
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = authority_child(&self.executable, authority_fd, None);
         command
             .arg("__local-provider-revocation-executor")
             .arg("--authority-fd")
-            .arg("3")
+            .arg(AUTHORITY_FD.to_string())
             .arg("--request-id")
             .arg(config.request_id.to_string())
             .env_clear()
@@ -446,7 +463,6 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        bind_child_to_authority(&mut command, authority_fd, None);
         command
             .spawn()
             .map_err(|_| LocalRevocationSpawnError::Spawn)
@@ -471,6 +487,57 @@ mod tests {
         )
         .unwrap();
         (child, output)
+    }
+
+    /// Bounds each wait on a child, so a hang fails the test.
+    const CHILD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    use crate::process::descriptor_report::{
+        REPORT as DESCRIPTOR_REPORT, TEST as DESCRIPTOR_REPORT_TEST, planted as planted_descriptor,
+    };
+
+    /// The descriptors the last descriptor report under `root` found.
+    fn reported_descriptors(root: &Path) -> String {
+        std::fs::read_to_string(root.join("descriptors")).unwrap()
+    }
+
+    #[test]
+    fn the_authority_holds_only_the_descriptors_its_file_actions_hand_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let _planted = planted_descriptor();
+        let script = format!(
+            "{DESCRIPTOR_REPORT}=\"$1\"; export {DESCRIPTOR_REPORT}; exec \"$0\" --exact \"$2\""
+        );
+        let mut child = spawn_detached(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                script.into(),
+                std::env::current_exe().unwrap().into_os_string(),
+                root.join("descriptors").into_os_string(),
+                DESCRIPTOR_REPORT_TEST.into(),
+            ],
+            &root,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + CHILD_WAIT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success());
+        assert_eq!(
+            reported_descriptors(&root),
+            "0 1 2",
+            "stdio on /dev/null alone"
+        );
     }
 
     #[test]
@@ -516,19 +583,16 @@ mod tests {
     }
 
     /// A fake child that records its session, environment, limits,
-    /// descriptors, directory and arguments. The probe descriptor is
-    /// duplicated to 64 or above so it can never be descriptor 3 itself.
+    /// descriptors, directory and arguments, then writes a descriptor
+    /// report into `root`. The probe descriptor is planted
+    /// in this process for the child not to inherit.
     fn recording_child(root: &Path) -> (PathBuf, std::os::fd::OwnedFd) {
-        use std::os::fd::{FromRawFd as _, OwnedFd};
         use std::os::unix::fs::PermissionsExt as _;
 
-        let source = std::fs::File::open("/dev/null").unwrap();
-        // F_DUPFD clears close-on-exec.
-        // SAFETY: duplicates a descriptor this test owns.
-        let raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
-        assert!(raw >= 64);
-        // SAFETY: `raw` is a fresh descriptor nothing else owns.
-        let leaked = unsafe { OwnedFd::from_raw_fd(raw) };
+        let leaked = planted_descriptor();
+        let test_binary = std::env::current_exe().unwrap();
+        let test_binary = test_binary.to_str().unwrap();
+        assert!(!test_binary.contains('\''), "quoted in the script below");
         let child = root.join("child");
         std::fs::write(
             &child,
@@ -543,8 +607,13 @@ mod tests {
                     "test -e /dev/fd/{leaked} && echo leaked; ",
                     "test -n \"${{pipe-}}\" && echo \"$pipe\"; ",
                     "pwd; echo \"$@\"; }} > \"$OUTPUT_DIRECTORY/observed\"\n",
+                    "{report}=\"$OUTPUT_DIRECTORY/descriptors\"; export {report}\n",
+                    "exec '{test_binary}' --exact {test}\n",
                 ),
-                leaked = leaked.as_raw_fd()
+                leaked = leaked.as_raw_fd(),
+                report = DESCRIPTOR_REPORT,
+                test_binary = test_binary,
+                test = DESCRIPTOR_REPORT_TEST,
             )
             .replace("$OUTPUT_DIRECTORY", root.to_str().unwrap()),
         )
@@ -595,7 +664,8 @@ mod tests {
             &Default::default(),
         )
         .unwrap();
-        assert!(child.wait().await.unwrap().success());
+        let status = tokio::time::timeout(CHILD_WAIT, child.wait()).await;
+        assert!(status.unwrap().unwrap().success());
         let lines = observed(&root);
         assert_eq!(lines[0], lines[1], "setsid makes the broker a group leader");
         assert_eq!(lines[2], "0", "only the shell's own variables are set");
@@ -618,6 +688,11 @@ mod tests {
             "--protected-store file --protected-store-directory {}/protected-v1 --http-provider openai-api-key --start-whatever-resolves",
             root.display()
         )));
+        assert_eq!(
+            reported_descriptors(&root),
+            "0 1 2 3",
+            "nothing but stdio and the channel"
+        );
 
         // A platform relay names no provider and is marked as a relay. A
         // replacement is told each host it may leave unresolved, here none.
@@ -636,12 +711,103 @@ mod tests {
             &Default::default(),
         )
         .unwrap();
-        assert!(child.wait().await.unwrap().success());
+        let status = tokio::time::timeout(CHILD_WAIT, child.wait()).await;
+        assert!(status.unwrap().unwrap().success());
         let lines = observed(&root);
         assert!(lines[8].ends_with(&format!(
             "--protected-store file --protected-store-directory {}/protected-v1 --platform-delegated",
             root.display()
         )));
+    }
+
+    #[tokio::test]
+    async fn a_broker_of_an_intercepting_boot_holds_exactly_its_channel_and_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (broker, _leaked) = recording_child(&root);
+        let spawner = CwLocalCredentialProcessSpawner {
+            executable: broker,
+            authority_root: root.clone(),
+            runtime: None,
+            store: AuthorityProtectedStore {
+                backend: codewire_protected_store::ProtectedStoreBackend::File,
+                keychain: None,
+            },
+        };
+        let environment = uuid::Uuid::new_v4().to_string();
+        let config = LocalBrokerProcessConfig {
+            environment_id: codewire_access::EnvironmentId::parse(environment.clone()).unwrap(),
+            environment_generation: 1,
+            environment_name: "env".to_owned(),
+            runner_socket: root.join("runners").join(format!("{environment}.sock")),
+            http_providers: [codewire_access::HttpProvider::OpenAiApiKey].into(),
+            platform_delegated: false,
+            network_policy_allows_github: false,
+            network_policy_allowed_hosts: Default::default(),
+        };
+        let secrets = codewire_local_credentials::BrokerBootSecrets::new([(
+            codewire_local_credentials::BootSecretPurpose::FrontDoorPairing,
+            vec![7; codewire_local_credentials::BOOT_SECRET_BYTES],
+        )])
+        .unwrap();
+        let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut child = LocalBrokerProcessSpawner::spawn(
+            &spawner,
+            &config,
+            &ProviderLookup::Available,
+            peer,
+            &secrets,
+        )
+        .unwrap();
+        let status = tokio::time::timeout(CHILD_WAIT, child.wait()).await;
+        assert!(status.unwrap().unwrap().success());
+        assert!(observed(&root)[8].ends_with(" --boot-secrets-fd 4"));
+        assert_eq!(
+            reported_descriptors(&root),
+            "0 1 2 3 4",
+            "stdio, the channel and the boot's secrets, nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revocation_executor_holds_exactly_its_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (executor, _leaked) = recording_child(&root);
+        let spawner = CwLocalCredentialProcessSpawner {
+            executable: executor,
+            authority_root: root.clone(),
+            runtime: None,
+            store: AuthorityProtectedStore {
+                backend: codewire_protected_store::ProtectedStoreBackend::File,
+                keychain: None,
+            },
+        };
+        let request = uuid::Uuid::new_v4();
+        let config = LocalRevocationProcessConfig {
+            request_id: request,
+        };
+        let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut child = LocalRevocationProcessSpawner::spawn(&spawner, &config, peer).unwrap();
+        let status = tokio::time::timeout(CHILD_WAIT, child.wait()).await;
+        assert!(status.unwrap().unwrap().success());
+        let lines = observed(&root);
+        assert_eq!(
+            lines[0], lines[1],
+            "setsid makes the executor a group leader"
+        );
+        assert_eq!(lines[5], "channel", "the authority channel is descriptor 3");
+        // Its stderr is null, so no pipe line comes before the directory.
+        assert_eq!(lines[6], "/", "it starts in the root");
+        assert_eq!(
+            lines[7],
+            format!("__local-provider-revocation-executor --authority-fd 3 --request-id {request}")
+        );
+        assert_eq!(
+            reported_descriptors(&root),
+            "0 1 2 3",
+            "nothing but stdio and the channel"
+        );
     }
 
     #[tokio::test]
@@ -685,10 +851,13 @@ mod tests {
             let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
             let mut child = LocalRepositoryProcessSpawner::spawn(&spawner, &config, peer).unwrap();
             let mut stderr = child.stderr.take().expect("stderr is piped");
-            assert!(child.wait().await.unwrap().success());
+            let status = tokio::time::timeout(CHILD_WAIT, child.wait()).await;
+            assert!(status.unwrap().unwrap().success());
             let mut drained = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut drained)
+            let drain = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut drained);
+            tokio::time::timeout(CHILD_WAIT, drain)
                 .await
+                .unwrap()
                 .unwrap();
             let lines = observed(&root);
             assert_eq!(
@@ -706,9 +875,14 @@ mod tests {
                 "no other descriptor survives"
             );
             assert!(lines[8].starts_with(&format!(
-                "__local-git-repository-executor {expected} --authority-fd 3 --request-id {request} --staging-directory {} --protected-store keychain --keychain /private/tmp/synthetic.keychain-db",
+                "__local-git-repository-executor {expected} --authority-fd 3 --request-id {request} --staging-directory {}",
                 staging.display()
             )));
+            assert_eq!(
+                reported_descriptors(&root),
+                "0 1 2 3",
+                "nothing but stdio and the channel"
+            );
             assert_eq!(
                 lines[8].ends_with(&format!("--ssh-runtime-directory {}", runtime.display())),
                 transport == LocalRepositoryTransport::Ssh

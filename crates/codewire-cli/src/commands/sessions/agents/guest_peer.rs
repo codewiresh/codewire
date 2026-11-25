@@ -748,7 +748,7 @@ pub(super) fn provider_command(
     arguments: &[String],
     lockdown: Option<&[(String, String)]>,
 ) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
+    let mut command = crate::process::command(program, &[]);
     // Native stdin, stdout and stderr are inherited unchanged.
     command.args(arguments);
     if let Some(lockdown) = lockdown {
@@ -1464,7 +1464,7 @@ esac
             "{}::subprocess_role",
             module.split_once("::").map_or(module, |(_, path)| path)
         );
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command = crate::process::command(std::env::current_exe().unwrap(), &[]);
         command
             .args([
                 test.as_str(),
@@ -1850,7 +1850,12 @@ esac
 
     impl Sentinel {
         fn spawn() -> Self {
-            Self(Command::new("sleep").arg("1000").spawn().unwrap())
+            Self(
+                crate::process::command("sleep", &[])
+                    .arg("1000")
+                    .spawn()
+                    .unwrap(),
+            )
         }
 
         fn birth(&self) -> (u32, u64) {
@@ -2245,7 +2250,7 @@ esac
             // Two commands defeat the shell's exec optimization, so the shell
             // stays the guardian's parent.
             let inner = command;
-            command = Command::new("/bin/sh");
+            command = crate::process::command("/bin/sh", &[]);
             command
                 .arg("-c")
                 .arg("\"$@\"; exit $?")
@@ -2503,7 +2508,7 @@ esac
         assert!(signal_guardian(&fixture.dir, &identity).is_err());
         assert!(sentinel.alive(), "a reused guardian PID was signaled");
 
-        let mut exited = Command::new("/bin/true").spawn().unwrap();
+        let mut exited = crate::process::command("/bin/true", &[]).spawn().unwrap();
         let exited_pid = exited.id();
         exited.wait().unwrap();
         receipt.guardian_pid = Some(exited_pid);
@@ -2516,7 +2521,7 @@ esac
         assert!(error.contains("cleanup is unknown"), "{error}");
 
         // An exited but unreaped guardian still accepts signals.
-        let mut zombie = Command::new("/bin/true").spawn().unwrap();
+        let mut zombie = crate::process::command("/bin/true", &[]).spawn().unwrap();
         let zombie_pid = zombie.id();
         // SAFETY: a zeroed siginfo_t is valid writable storage for waitid.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };

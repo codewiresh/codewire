@@ -153,13 +153,25 @@ pub fn swept_tokio_command(
     keep: &[std::os::fd::RawFd],
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
+    install_sweep(&mut command, keep);
+    command
+}
+
+/// [`swept_tokio_command`]'s hook, installed on a command another crate
+/// built and hands its caller to prepare before it spawns: the OpenSSH
+/// children of `codewire-credential-broker` and the git of
+/// `codewire-local-credentials`, which the CLI's credential authority
+/// prepares. The hook runs after any the command already has, so it must be
+/// the first one added.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[doc(hidden)]
+pub fn install_sweep(command: &mut tokio::process::Command, keep: &[std::os::fd::RawFd]) {
     if let Some(hook) = inheritance_hook(keep) {
         // SAFETY: as in `swept_command`.
         unsafe {
             command.pre_exec(hook);
         }
     }
-    command
 }
 
 /// The hook both constructors install: always on macOS, and on Linux only

@@ -8,7 +8,7 @@
 //! widget and prints the outcome.
 
 use std::io::{Read as _, Write as _};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,7 +59,7 @@ fn upgrade() -> Checklist {
 }
 
 fn stty_state() -> String {
-    let output = Command::new("stty")
+    let output = crate::process::command("stty", &[])
         .arg("-g")
         .stdin(Stdio::inherit())
         .output()
@@ -389,7 +389,7 @@ fn help_output(env: &[(&str, &str)], terminal: bool) -> String {
     ];
     let exe = std::env::current_exe().unwrap();
     if !terminal {
-        let mut command = Command::new(exe);
+        let mut command = crate::process::command(exe, &[]);
         command
             .args(args)
             .env(CHILD_ENV, "help")

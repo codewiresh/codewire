@@ -1,0 +1,32 @@
+# This crate's clippy configuration. Clippy reads this file instead of the
+# workspace's, so it repeats every workspace setting below its own
+# (the workspace-lints repo check holds them equal, #4806).
+
+# On macOS a child cw starts must not inherit a descriptor it wasn't meant
+# to: Darwin creates a socket or pipe and only then marks it close-on-exec,
+# so a child started in between inherits it, whether cw waits on that child
+# or not (#6242). Every spawn goes through `crate::process::command` or
+# `tokio_command`, which install codewire-local-vmm's close-on-exec sweep,
+# and every exec through `crate::process::exec`. The list is
+# codewire-local-vmm's (the workspace-lints repo check holds the two equal).
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "start children with crate::process::command (#6242)" },
+  { path = "tokio::process::Command::new", reason = "start children with crate::process::tokio_command (#6242)" },
+  { path = "std::os::unix::process::CommandExt::exec", reason = "exec with crate::process::exec (#6242)" },
+  { path = "libc::fork", reason = "spawn through crate::process::command (#6242)" },
+  { path = "libc::posix_spawn", reason = "spawn through crate::process::command (#6242)" },
+  { path = "libc::posix_spawnp", reason = "spawn through crate::process::command (#6242)" },
+  { path = "libc::execve", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::execv", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::execvp", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::execl", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::execle", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::execlp", reason = "exec through crate::process::exec (#6242)" },
+  { path = "libc::system", reason = "system forks and execs a shell: use crate::process::command (#6242)" },
+  { path = "libc::popen", reason = "popen forks and execs a shell: use crate::process::command (#6242)" },
+]
+# The libc crate offers neither vfork nor fexecve on macOS, so neither can be
+# called there.
+
+# The workspace's settings, repeated (clippy.toml at the repository root).
+allow-unwrap-in-tests = true

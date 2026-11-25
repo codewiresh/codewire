@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use clap::Parser as _;
 use codewire_local_credentials::FILE_STORE_DIRECTORY;
@@ -173,7 +173,7 @@ fn entry() -> ProtectedEntryId {
 /// Re-run one test in a fresh process that installs the profile, so the
 /// irreversible Seatbelt state never reaches the parent test binary.
 fn run_child(test: &str, store: &Path, network: bool) {
-    let status = Command::new(std::env::current_exe().unwrap())
+    let status = crate::process::command(std::env::current_exe().unwrap(), &[])
         .arg("--exact")
         .arg(test)
         .arg("--nocapture")
@@ -202,7 +202,7 @@ fn assert_denied<T: std::fmt::Debug>(result: std::io::Result<T>, what: &str) {
 fn assert_common_denials(network: bool) {
     assert_denied(std::fs::File::open("/etc/hosts"), "unrelated file");
     assert_denied(
-        Command::new("/usr/bin/true").status(),
+        crate::process::command("/usr/bin/true", &[]).status(),
         "unrelated executable",
     );
     assert_denied(
@@ -282,7 +282,7 @@ impl ThrowawayKeychain {
 
 impl Drop for ThrowawayKeychain {
     fn drop(&mut self) {
-        let _ = Command::new(SECURITY_TOOL)
+        let _ = crate::process::command(SECURITY_TOOL, &[])
             .arg("delete-keychain")
             .arg(&self.path)
             .stderr(Stdio::null())
@@ -291,7 +291,7 @@ impl Drop for ThrowawayKeychain {
 }
 
 fn security(arguments: &[&str]) {
-    let status = Command::new(SECURITY_TOOL)
+    let status = crate::process::command(SECURITY_TOOL, &[])
         .args(arguments)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -343,7 +343,7 @@ fn relay_profile_keeps_only_the_descriptors_it_holds() {
         assert_eq!(&frame, b"bridge frame");
         assert_denied(std::fs::File::open("/etc/hosts"), "unrelated file");
         assert_denied(
-            Command::new("/usr/bin/security").status(),
+            crate::process::command("/usr/bin/security", &[]).status(),
             "the keychain tool",
         );
         for port in [443, 80, 22] {
@@ -354,7 +354,7 @@ fn relay_profile_keeps_only_the_descriptors_it_holds() {
         }
         return;
     }
-    let status = Command::new(std::env::current_exe().unwrap())
+    let status = crate::process::command(std::env::current_exe().unwrap(), &[])
         .arg("--exact")
         .arg("commands::credential_broker::darwin::tests::relay_profile_keeps_only_the_descriptors_it_holds")
         .arg("--nocapture")

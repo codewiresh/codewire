@@ -292,34 +292,47 @@ impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
                 "the local VM runtime's git is missing or changed",
             ));
         }
-        let parent_pid = self.parent_pid;
-        // SAFETY: this post-fork hook makes only getppid, getdtablesize,
-        // fcntl and setrlimit calls. It binds every Git subprocess to the
-        // exact isolated executor, keeps every inherited descriptor above
-        // stderr out of Git (Darwin sets close-on-exec in a second call for
-        // some descriptors) and disables core files before exec. Credential
-        // material is supplied later over the executor-owned one-use socket.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::getppid() != parent_pid {
-                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
-                }
-                codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
-                let core_limit = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::setrlimit(libc::RLIMIT_CORE, std::ptr::addr_of!(core_limit)) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        command
-            .env("GIT_EXEC_PATH", &self.git.exec_path)
-            .env("GIT_TEMPLATE_DIR", "");
+        prepare_confined_git(command, self.parent_pid, &self.git.exec_path);
         command.spawn()
     }
+}
+
+/// Git's preparation before every spawn, once the authority has admitted
+/// it: the close-on-exec sweep, a hook binding it to `parent_pid` with core
+/// files disabled, and its exec path.
+#[cfg(target_os = "macos")]
+fn prepare_confined_git(
+    command: &mut tokio::process::Command,
+    parent_pid: libc::pid_t,
+    exec_path: &std::path::Path,
+) {
+    // codewire-local-credentials builds the command, so the sweep is
+    // installed here, first: it keeps every inherited descriptor above
+    // stderr out of Git (Darwin sets close-on-exec in a second call for
+    // some descriptors), and Git inherits only its stdio.
+    codewire_local_vmm::install_sweep(command, &[]);
+    // SAFETY: this post-fork hook makes only getppid and setrlimit
+    // calls. It binds every Git subprocess to the exact isolated executor
+    // and disables core files before exec. Credential material is
+    // supplied later over the executor-owned one-use socket.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::getppid() != parent_pid {
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            let core_limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_CORE, std::ptr::addr_of!(core_limit)) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .env("GIT_EXEC_PATH", exec_path)
+        .env("GIT_TEMPLATE_DIR", "");
 }
 
 pub(crate) fn run_local_git_credential_helper(
@@ -440,4 +453,88 @@ fn verify_common_confinement() -> anyhow::Result<()> {
         "credential-bearing process is not confined"
     );
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::os::fd::AsRawFd as _;
+    use std::path::Path;
+    use std::process::Stdio;
+
+    use crate::process::descriptor_report::{planted, script};
+
+    /// Git, and the credential helper it starts, inherit only stdio from
+    /// the executor (#6242). The probe's own sweep keeps the planted
+    /// descriptor, so only Git's preparation can close it.
+    #[tokio::test]
+    async fn git_and_its_credential_helper_hold_only_stdio() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let leaked = planted();
+        let git = Path::new("/usr/bin/git");
+        let exec_path = crate::process::command(git, &[])
+            .arg("--exec-path")
+            .output()
+            .unwrap();
+        assert!(exec_path.status.success());
+        let exec_path = String::from_utf8(exec_path.stdout).unwrap();
+        let reporter = root.join("reporter");
+        let run = |program: &Path, arguments: &[&str], output: &Path| {
+            script(&reporter, output);
+            let mut command = crate::process::tokio_command(program, &[leaked.as_raw_fd()]);
+            command
+                .args(arguments)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(&root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: getpid has no preconditions.
+            let parent = unsafe { libc::getpid() };
+            super::prepare_confined_git(&mut command, parent, Path::new(exec_path.trim()));
+            command
+        };
+        let finish = |mut child: tokio::process::Child| async move {
+            let mut stdin = child.stdin.take().unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stdin,
+                b"protocol=https\nhost=example.invalid\n\n",
+            )
+            .await
+            .unwrap();
+            drop(stdin);
+            // Git fails once the helper answers nothing; only the report counts.
+            tokio::time::timeout(std::time::Duration::from_secs(60), child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+        };
+
+        let as_git = root.join("as-git");
+        finish(run(&reporter, &[], &as_git).spawn().unwrap()).await;
+        assert_eq!(
+            std::fs::read_to_string(&as_git).unwrap(),
+            "0 1 2",
+            "Git holds stdio alone"
+        );
+
+        let helper = root.join("helper");
+        let helper_config = format!("credential.helper=!{}", reporter.display());
+        finish(
+            run(git, &["-c", &helper_config, "credential", "fill"], &helper)
+                .spawn()
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&helper).unwrap(),
+            "0 1 2",
+            "Git's credential helper holds stdio alone"
+        );
+    }
 }

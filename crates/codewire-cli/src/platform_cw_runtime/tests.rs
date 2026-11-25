@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _, symlink};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -1318,7 +1318,7 @@ struct OwnedChild {
 
 impl OwnedChild {
     fn spawn(f: &Fixture, mode: &'static str) -> Self {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command = crate::process::command(std::env::current_exe().unwrap(), &[]);
         command
             .args([
                 "--ignored",

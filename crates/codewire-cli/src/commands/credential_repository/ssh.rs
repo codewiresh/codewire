@@ -2,7 +2,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -78,10 +77,9 @@ pub(crate) fn run_git_ssh_helper(arguments: Vec<OsString>) -> anyhow::Result<()>
     {
         return Err(std::io::Error::last_os_error().into());
     }
-    // Darwin has no close_range: mark each descriptor >=3 close-on-exec.
-    #[cfg(target_os = "macos")]
-    codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
-    Err(command.exec()).context("start repository SSH")
+    // Darwin has no close_range: `ssh_command`'s sweep, keeping only
+    // `SSH_KEEPS`, runs in this process as exec starts.
+    Err(crate::process::exec(&mut command)).context("start repository SSH")
 }
 
 fn require_parent_session(
@@ -241,12 +239,16 @@ fn valid_upload_pack(operation: &str) -> bool {
     false
 }
 
+/// What stock SSH inherits past stdio, which is Git's transport and the
+/// authority's diagnostic and lifetime pipe: nothing.
+const SSH_KEEPS: &[std::os::fd::RawFd] = &[];
+
 fn ssh_command(
     runtime: &Path,
     host: &RepositorySshHost,
     arguments: &[OsString],
 ) -> std::process::Command {
-    let mut command = std::process::Command::new("/usr/bin/ssh");
+    let mut command = crate::process::command("/usr/bin/ssh", SSH_KEEPS);
     command
         .env_clear()
         .env("LC_ALL", "C")

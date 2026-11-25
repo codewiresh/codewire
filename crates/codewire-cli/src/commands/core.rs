@@ -754,7 +754,7 @@ pub(crate) fn env_create_request_from_init_args(
 }
 
 pub(crate) fn detect_local_repo(dir: &Path) -> anyhow::Result<(String, String)> {
-    let remote = ProcessCommand::new("git")
+    let remote = crate::process::command("git", &[])
         .arg("-C")
         .arg(dir)
         .arg("remote")
@@ -770,7 +770,7 @@ pub(crate) fn detect_local_repo(dir: &Path) -> anyhow::Result<(String, String)> 
     // particular, never return the untrusted remote to a caller that might
     // display or log it before canonical request validation.
     codewire_project::validate_repository_destinations([(repo_url.as_str(), "")])?;
-    let branch = ProcessCommand::new("git")
+    let branch = crate::process::command("git", &[])
         .arg("-C")
         .arg(dir)
         .arg("rev-parse")

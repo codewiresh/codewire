@@ -4,7 +4,7 @@
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::ExitStatusExt as _;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ const FIXTURE: &str =
 const HANG_GUARD: Duration = Duration::from_secs(120);
 
 fn fixture_command(role: &str, runtime: &Path, port: &str) -> Command {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::process::command(std::env::current_exe().unwrap(), &[]);
     command
         .args(["--exact", FIXTURE, "--nocapture"])
         .env_clear()

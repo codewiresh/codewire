@@ -664,7 +664,7 @@ async fn public_release(
 /// user's `cw` may not resolve to. It never fails the update, which has
 /// already succeeded.
 async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs, restart: bool) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     if !cfg!(any(target_os = "linux", target_os = "macos")) || options.store.store.is_some() {
         return;
     }
@@ -678,7 +678,7 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
         None
     };
     let executable = store.version_executable(sha256);
-    let supported = Command::new(&executable)
+    let supported = crate::process::command(&executable, &[])
         .args(["env", "--local", "upgrade", "--help"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -701,7 +701,7 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
         let _ = record;
         return;
     }
-    let mut command = Command::new(&executable);
+    let mut command = crate::process::command(&executable, &[]);
     command.args(["env", "--local", "upgrade", "--after-update"]);
     if restart {
         command.arg("--yes");

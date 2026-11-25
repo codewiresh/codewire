@@ -1761,7 +1761,7 @@ mod tests {
         const SENTINEL: &str = "CODEWIRE_TEST_INVALID_MESH_DIRECTORY";
         if std::env::var_os(SENTINEL).is_none() {
             let name = std::thread::current().name().unwrap().to_owned();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::process::command(std::env::current_exe().unwrap(), &[])
                 .args(["--exact", &name])
                 .env(SENTINEL, "1")
                 .env(

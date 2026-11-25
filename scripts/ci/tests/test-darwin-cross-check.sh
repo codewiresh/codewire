@@ -39,6 +39,12 @@ expected_cli_both = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'c
 jobserver = dict(CARGO_MAKEFLAGS='--jobserver-auth=3,4')
 expected_cli_x86_64 = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
                        '--target', 'x86_64-apple-darwin', '--', '-D', 'warnings']
+# Before them, the mutation proof of the CLI's spawn lint (#6242): one probe
+# file linted for macOS with the CLI's clippy.toml, by the toolchain's
+# clippy-driver (the probe's paths, made fresh each run, left out).
+probe = [dict(tool='rustc', args=['--print', 'sysroot']),
+         dict(tool='clippy-driver', args=['--edition', '2024', '--crate-type', 'lib', '--emit', 'metadata',
+                                          '--target', 'aarch64-apple-darwin', '--out-dir', '-D', 'warnings'])]
 with tempfile.TemporaryDirectory(prefix='codewire-darwin-cross-') as temporary:
     root = Path(temporary)
     binary = root / 'bin'
@@ -49,8 +55,9 @@ import json, os, sys
 from pathlib import Path
 tool = Path(sys.argv[0]).name
 arguments = sys.argv[1:]
+recorded = [a for a in arguments if not a.startswith('/')] if tool == 'clippy-driver' else arguments
 with open(os.environ['DARWIN_FIXTURE_TRACE'], 'a') as output:
-    output.write(json.dumps(dict(tool=tool, args=arguments)) + '\\n')
+    output.write(json.dumps(dict(tool=tool, args=recorded)) + '\\n')
 if tool == 'uname':
     print(os.environ.get('DARWIN_FIXTURE_HOST', 'Linux'))
 elif tool == 'zig':
@@ -66,6 +73,15 @@ elif tool == 'cargo-zigbuild':
     # Model only the selected compiler route; the real compilation is separate.
     os.environ['DARWIN_FIXTURE_PINNED_COMPILER'] = '1'
     os.execv(str(Path(sys.argv[0]).with_name('cargo')), ['cargo', *arguments])
+elif tool == 'rustc':
+    print(Path(sys.argv[0]).parent.parent / 'sysroot')
+elif tool == 'clippy-driver':
+    assert os.environ['CLIPPY_CONF_DIR'] == os.environ['DARWIN_FIXTURE_CLI_CONFIG']
+    probe = Path(arguments[-3])
+    assert probe.name == 'probe.rs' and 'Command::new' in probe.read_text()
+    for _ in range(int(os.environ.get('DARWIN_FIXTURE_REFUSED', '3'))):
+        print('error: use of a disallowed method `std::process::Command::new`', file=sys.stderr)
+    sys.exit(int(os.environ.get('DARWIN_FIXTURE_PROBE_STATUS', '1')))
 elif tool == 'cargo':
     if os.environ.get('DARWIN_FIXTURE_PINNED_COMPILER') != '1':
         print('fixture bare Cargo lacks the Darwin C compiler', file=sys.stderr)
@@ -74,12 +90,14 @@ elif tool == 'cargo':
 else:
     raise AssertionError(tool)
 '''
-    for name in ('uname', 'zig', 'cargo-zigbuild', 'cargo'):
-        tool = binary / name
+    (root / 'sysroot' / 'bin').mkdir(parents=True)
+    for tool in (*(binary / name for name in ('uname', 'zig', 'cargo-zigbuild', 'cargo', 'rustc')),
+                 root / 'sysroot' / 'bin' / 'clippy-driver'):
         tool.write_text(tool_source)
         tool.chmod(0o755)
     environment = dict(PATH=f'{binary}:{os.environ["PATH"]}', HOME=str(root),
-                       DARWIN_FIXTURE_TRACE=str(trace))
+                       DARWIN_FIXTURE_TRACE=str(trace),
+                       DARWIN_FIXTURE_CLI_CONFIG=str(source / 'crates/codewire-cli'))
     cases = 0
 
     def run(extra=None, status=0, arguments=()):
@@ -133,6 +151,7 @@ else:
     assert records == [dict(tool='uname', args=['-s']),
                        dict(tool='zig', args=['version']),
                        dict(tool='cargo-zigbuild', args=['--version']),
+                       *probe,
                        dict(tool='cargo-zigbuild', args=expected_cli_tests),
                        dict(tool='cargo', args=expected_cli_tests),
                        dict(tool='cargo-zigbuild', args=expected_bin_tests),
@@ -148,6 +167,7 @@ else:
         dict(tool='uname', args=['-s']),
         dict(tool='zig', args=['version']),
         dict(tool='cargo-zigbuild', args=['--version']),
+        *probe,
         dict(tool='cargo-zigbuild', args=expected_cli_tests),
         dict(tool='cargo', args=expected_cli_tests),
         dict(tool='cargo-zigbuild', args=expected_bin_tests),
@@ -159,6 +179,13 @@ else:
     chain = [r for r in records if r['args'] not in beside]
     assert chain[-1] == dict(tool='cargo', args=expected_cli_tests), records
     assert all(once(records, args) for args in beside), records
+    # A probe the lint passes, or refuses only in part, fails before any
+    # Cargo check starts.
+    for extra in (dict(DARWIN_FIXTURE_PROBE_STATUS='0'), dict(DARWIN_FIXTURE_REFUSED='2'),
+                  dict(DARWIN_FIXTURE_PROBE_STATUS='0', DARWIN_FIXTURE_REFUSED='0')):
+        records, result = run(extra, status=1, arguments=['--cli'])
+        assert records[-2:] == probe, records
+        assert "the CLI's spawn lint refused" in result.stderr, result.stderr
     run(arguments=['--features', 'synthetic'], status=1)
     run(arguments=['--cli', '--features', 'synthetic'], status=1)
     run(dict(DARWIN_FIXTURE_HOST='Darwin'), status=1, arguments=['--cli'])

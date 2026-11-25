@@ -1394,7 +1394,7 @@ mod tests {
 
     /// A peer that runs `script`: `cat` echoes the commands it is sent.
     fn script_peer(script: &str) -> Peer {
-        let mut child = tokio::process::Command::new("sh")
+        let mut child = crate::process::tokio_command("sh", &[])
             .args(["-c", script])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

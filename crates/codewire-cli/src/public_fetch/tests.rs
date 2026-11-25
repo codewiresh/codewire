@@ -9,7 +9,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,7 @@ impl TestKey {
         // This GnuPG build derives non-default-home sockets under /run/user
         // even with an isolated HOME. Admit and create only its new hashed
         // directory; never use the owner's default socket or start a helper.
-        let derived = Command::new("/usr/bin/gpgconf")
+        let derived = crate::process::command("/usr/bin/gpgconf", &[])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", directory.path())
@@ -97,7 +97,7 @@ impl TestKey {
         #[cfg(target_os = "linux")]
         let parent = std::process::id();
         let diagnostics = File::create(directory.path().join("agent.log")).unwrap();
-        let mut command = Command::new("/usr/bin/python3");
+        let mut command = crate::process::command("/usr/bin/python3", &[]);
         command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",directory.path())
             .env("LISTEN_FDS","1").env("LISTEN_FDNAMES","std")
             .args(["-c", "import os,sys; e=dict(os.environ); e['LISTEN_PID']=str(os.getpid()); os.execve('/usr/bin/gpg-agent',['gpg-agent','--no-options','--homedir',sys.argv[1],'--supervised','--disable-scdaemon'],e)"])
@@ -173,7 +173,7 @@ impl TestKey {
     }
 
     fn run(&self, arguments: &[&str]) -> Vec<u8> {
-        let mut command = Command::new("/usr/bin/gpg");
+        let mut command = crate::process::command("/usr/bin/gpg", &[]);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -778,7 +778,7 @@ async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouche
             Some(0),
         )
         .unwrap();
-    let mut command = Command::new(store.version_executable(&published.sha256));
+    let mut command = crate::process::command(store.version_executable(&published.sha256), &[]);
     // It runs until this test kills it, however long a loaded guest takes;
     // a fixed `sleep 30` exited mid-test on one that took 56 s (#4300). If
     // the test process dies first, the kernel kills it too.
@@ -1134,7 +1134,7 @@ async fn ambient_proxy_is_ignored_in_an_isolated_real_child() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data"))
         .mount(&target)
         .await;
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::process::command(std::env::current_exe().unwrap(), &[]);
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")

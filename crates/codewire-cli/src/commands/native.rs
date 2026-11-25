@@ -6201,7 +6201,7 @@ working_directory: /workspace/github
         let git = Path::new("/usr/bin/git");
         if cfg!(target_os = "linux") && git.exists() {
             let run = |arguments: &[&str]| {
-                let status = std::process::Command::new(git)
+                let status = crate::process::command(git, &[])
                     .args(arguments)
                     .current_dir(&source)
                     .env("GIT_CONFIG_GLOBAL", "/dev/null")

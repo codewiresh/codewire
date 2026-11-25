@@ -2749,7 +2749,7 @@ impl Peer {
             let identity = &guest.identity;
             // Linux resolves this alias to the actual running ELF, including a
             // verified sealed memfd, rather than reopening a mutable pathname.
-            let mut command = tokio::process::Command::new("/proc/self/exe");
+            let mut command = crate::process::tokio_command("/proc/self/exe", &[]);
             command.args([
                 if driver.platform.is_some() {
                     "__platform-agent-peer"
@@ -2781,10 +2781,10 @@ impl Peer {
             command.arg("--");
             command
         } else {
-            tokio::process::Command::new(program)
+            crate::process::tokio_command(program, &[])
         };
         #[cfg(not(target_os = "linux"))]
-        let mut command = tokio::process::Command::new(program);
+        let mut command = crate::process::tokio_command(program, &[]);
         #[cfg(target_os = "linux")]
         if let Some(context) = &driver.platform {
             context.check(&driver.environment, &driver.config)?;

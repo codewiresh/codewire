@@ -79,7 +79,7 @@ impl std::fmt::Display for Store {
 
 impl Store {
     fn certutil(&self) -> Command {
-        Command::new(&self.certutil)
+        crate::process::command(&self.certutil, &[])
     }
 
     fn database(&self) -> String {
@@ -139,7 +139,10 @@ pub(super) fn stores() -> anyhow::Result<Vec<Store>> {
 
 /// Whether `certutil`, NSS's tool, is installed; NSS stores need it.
 pub(super) fn certutil_installed() -> bool {
-    Command::new(CERTUTIL).arg("-H").output().is_ok()
+    crate::process::command(CERTUTIL, &[])
+        .arg("-H")
+        .output()
+        .is_ok()
 }
 
 /// What to install for `certutil`.

@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd};
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -112,7 +112,10 @@ fn spawn(environment_id: Uuid) -> (OwnedFd, FrontDoorChild) {
 /// as its argument.
 fn spawn_with(environment_id: &str, control: OwnedFd) -> FrontDoorChild {
     let source = control.as_raw_fd();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
+    // Swept on macOS, keeping nothing by number: the hook below dup2s the
+    // control socket to its fixed descriptor, and the source stays
+    // close-on-exec, so the child holds stdio and that alone.
+    let mut command = codewire_local_vmm::swept_command(env!("CARGO_BIN_EXE_cw"), &[]);
     command
         .arg("__native-front-door")
         .arg("--environment-id")
@@ -125,13 +128,10 @@ fn spawn_with(environment_id: &str, control: OwnedFd) -> FrontDoorChild {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: only async-signal-safe calls, placing the control socket at
-    // its fixed descriptor without close-on-exec. On macOS the sweep, only
-    // getdtablesize and fcntl, first closes on exec whatever another test's
-    // socket left open in the fork.
+    // its fixed descriptor without close-on-exec, after the sweep has closed
+    // on exec whatever another test's socket left open in the fork.
     unsafe {
         command.pre_exec(move || {
-            #[cfg(target_os = "macos")]
-            codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
             if libc::dup2(source, FRONT_DOOR_CONTROL_FD) == -1
                 || libc::fcntl(FRONT_DOOR_CONTROL_FD, libc::F_SETFD, 0) == -1
             {

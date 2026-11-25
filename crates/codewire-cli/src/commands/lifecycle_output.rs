@@ -596,7 +596,7 @@ mod tests {
         const NAME: &str =
             "commands::lifecycle_output::tests::the_first_ctrl_c_ends_an_interruptible_wait";
         if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap(), &[])
                 .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
                 .env(ISOLATED, "1")
                 .stdin(std::process::Stdio::null())
@@ -625,7 +625,7 @@ mod tests {
         // SIGINT; the bound only turns a hang into a failure.
         let interrupted = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
-                std::process::Command::new("kill")
+                crate::process::command("kill", &[])
                     .args(["-INT", &pid])
                     .status()
                     .unwrap();

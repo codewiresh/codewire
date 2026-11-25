@@ -211,7 +211,7 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Output, Stdio};
+    use std::process::{Output, Stdio};
     use tempfile::TempDir;
 
     // No providers or credentials: this tiny static ELF prints its first argv
@@ -251,7 +251,7 @@ int main(int argc, char **argv) {
         fn new() -> Self {
             let temporary = tempfile::tempdir().unwrap();
             let selected = temporary.path().join("selected");
-            let mut compiler = Command::new("/usr/bin/cc")
+            let mut compiler = crate::process::command("/usr/bin/cc", &[])
                 .args(["-O2", "-static", "-s", "-x", "c", "-o"])
                 .arg(&selected)
                 .arg("-")
@@ -383,7 +383,7 @@ int main(int argc, char **argv) {
     }
 
     fn run(argv: &[String], input: &[u8]) -> Output {
-        let mut child = Command::new(&argv[0])
+        let mut child = crate::process::command(&argv[0], &[])
             .args(&argv[1..])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

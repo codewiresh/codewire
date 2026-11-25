@@ -107,7 +107,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli-bin/tests/local_credential_authority.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli-bin/tests/local_git_credential_helper.rs" = { group = "credentials", count = 7 }
 "crates/codewire-cli-bin/tests/native_egress_broker.rs" = { group = "vm-backend", count = 1 }
-"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 10 }
+"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 9 }
 "crates/codewire-cli-bin/tests/native_mesh_enrollment.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_mesh_transport.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_network_confinement.rs" = { group = "vm-backend", count = 1 }
@@ -126,8 +126,8 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/credential_child_store.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_child_store/tests.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
-"crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 20 }
-"crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 5 }
+"crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 22 }
+"crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 4 }
 "crates/codewire-cli/src/commands/credentials.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/credentials/output/save_refusal.rs" = { group = "credentials", count = 3 }
 "crates/codewire-cli/src/commands/credentials/store_notice.rs" = { group = "credentials", count = 7 }
@@ -167,6 +167,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/hosted_binding/tests.rs" = { group = "hosted", count = 3 }
 "crates/codewire-cli/src/hosted_daemon.rs" = { group = "hosted", count = 32 }
 "crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 51 }
+"crates/codewire-cli/src/process.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/public_fetch.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/http.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/scratch.rs" = { group = "linux-tests", count = 1 }

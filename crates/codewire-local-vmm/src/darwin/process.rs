@@ -726,10 +726,10 @@ pub fn descriptor_bound() -> libc::c_int {
 /// with `close_range(CLOSE_RANGE_CLOEXEC)`. Darwin creates sockets, pipes and
 /// accepted or received descriptors first and marks them close-on-exec in a
 /// second call, so a descriptor another thread is creating can reach a child
-/// spawned in between. It runs between fork and exec, through
-/// `crate::swept_command`, before the flag is cleared on the descriptors the
-/// child is meant to inherit, and makes only fcntl calls: async-signal-safe,
-/// with no allocation, lock or directory read.
+/// spawned in between. It runs between fork and exec, in the hook of
+/// `crate::swept_command` and its siblings, before the flag is cleared on
+/// the descriptors the child is meant to inherit, and makes only fcntl
+/// calls: async-signal-safe, with no allocation, lock or directory read.
 pub fn mark_inherited_descriptors_close_on_exec_below(bound: libc::c_int) {
     // SAFETY: scalar libc calls. A number that is not an open descriptor
     // fails with EBADF and is skipped.
@@ -738,13 +738,6 @@ pub fn mark_inherited_descriptors_close_on_exec_below(bound: libc::c_int) {
             libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
         }
     }
-}
-
-/// [`mark_inherited_descriptors_close_on_exec_below`] the descriptor table's
-/// size, read here between fork and exec, for a caller outside this crate
-/// that installs its own hook (getdtablesize and fcntl only).
-pub fn mark_inherited_descriptors_close_on_exec() {
-    mark_inherited_descriptors_close_on_exec_below(descriptor_bound());
 }
 
 #[derive(Debug, thiserror::Error)]
