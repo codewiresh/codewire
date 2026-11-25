@@ -97,6 +97,12 @@ def parse_lock(data, snapshot):
         require(type(entry["size"]) is int and 0 < entry["size"] <= r2.MAX_OBJECT, f"{path}: bad size")
     for repository in REPOSITORIES:
         require(relative_path(repository, f"{repository}.db") in seen, f"the lock has no {repository}.db")
+    # pacman fetches each package's detached signature from the mirror too, so
+    # a package without one would fail the offline build.
+    for entry in files:
+        if ".pkg.tar." in entry["name"] and not entry["name"].endswith(".sig"):
+            require(relative_path(entry["repository"], entry["name"] + ".sig") in seen,
+                    f"{relative_path(entry['repository'], entry['name'])} has no signature in the lock")
     return files
 
 

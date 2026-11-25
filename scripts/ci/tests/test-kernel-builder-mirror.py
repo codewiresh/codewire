@@ -29,8 +29,10 @@ FILES = {
     ("core", "gcc-16.1.1-1-x86_64.pkg.tar.zst"): b"synthetic gcc package\n",
     ("core", "gcc-16.1.1-1-x86_64.pkg.tar.zst.sig"): b"synthetic gcc signature\n",
     ("core", "archlinux-keyring-20260801-1-any.pkg.tar.zst"): b"synthetic keyring package\n",
+    ("core", "archlinux-keyring-20260801-1-any.pkg.tar.zst.sig"): b"synthetic keyring signature\n",
     # A package with an epoch: the colon an artifact path refuses.
     ("extra", "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst"): b"synthetic fakeroot package\n",
+    ("extra", "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst.sig"): b"synthetic fakeroot signature\n",
 }
 
 
@@ -155,6 +157,19 @@ class MirrorTest(unittest.TestCase):
         lock["files"] = [entry for entry in lock["files"] if entry["name"] != "extra.db"]
         with self.assertRaisesRegex(mirror.MirrorError, "no extra.db"):
             mirror.parse_lock(json.dumps(lock), SNAPSHOT)
+
+    def test_a_package_without_its_signature_is_refused(self):
+        # cli-release 80045's lock had no .sig: pacman asks the file:// mirror
+        # for each one, and the offline build failed on the first.
+        lock = json.loads(self.recorded())
+        lock["files"] = [entry for entry in lock["files"] if not entry["name"].startswith("fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst.sig")]
+        with self.assertRaisesRegex(mirror.MirrorError, "fakeroot-1:1.37.2-3-x86_64.pkg.tar.zst has no signature"):
+            mirror.parse_lock(json.dumps(lock), SNAPSHOT)
+
+    def test_the_collector_keeps_each_package_signature(self):
+        collect = (fx.ROOT / "scripts/ci/release/collect-kernel-builder-packages.sh").read_text()
+        self.assertTrue('cp "$cache/$file" "$cache/$file.sig" ' in collect, "the collector drops the packages' signatures")
+        self.assertTrue('[ -f "$cache/$file.sig" ] ||' in collect, "a package without its signature is collected")
 
     def test_a_lock_path_cannot_leave_the_repository_tree(self):
         lock = json.loads(self.recorded())

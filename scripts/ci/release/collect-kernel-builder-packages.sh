@@ -91,18 +91,23 @@ for db in core extra; do
   mkdir -p "$OUT/$db/os/x86_64"
   cp "/var/lib/pacman/sync/$db.db" "$OUT/$db/os/x86_64/$db.db"
 done
-# Each downloaded package under the repository it came from.
+# Each downloaded package, with the detached signature pacman fetched and
+# checked beside it, under the repository it came from. The build reads its
+# packages from a file:// server, where pacman asks for the same .sig, so a
+# package without one is refused here rather than at the build.
 count=0
 while read -r where; do
   file="${where#*/}"
   [ -f "$cache/$file" ] || continue
-  cp "$cache/$file" "$OUT/${where%%/*}/os/x86_64/$file"
+  [ -f "$cache/$file.sig" ] ||
+    { echo "collect-kernel-builder-packages: $file has no signature beside it" >&2; exit 1; }
+  cp "$cache/$file" "$cache/$file.sig" "$OUT/${where%%/*}/os/x86_64/"
   count=$((count + 1))
 done < <(pacman -Sp --print-format "%r/%f" $(pacman -Qq) 2>/dev/null)
 [ "$(find "$cache" -maxdepth 1 -name "*.pkg.tar.*" ! -name "*.sig" | wc -l)" = "$count" ] ||
   { echo "collect-kernel-builder-packages: a downloaded package is in neither core nor extra" >&2; exit 1; }
 chown -R "$OWNER" "$OUT"
-echo "collect-kernel-builder-packages: $count packages and 2 sync databases for snapshot $SNAPSHOT"
+echo "collect-kernel-builder-packages: $count packages with their signatures and 2 sync databases for snapshot $SNAPSHOT"
 '
 # A CI job's container: mount the job's volume that holds OUT, as the kernel
 # build does (runtime-container.sh).
