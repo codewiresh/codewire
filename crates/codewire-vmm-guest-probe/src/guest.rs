@@ -78,7 +78,7 @@ mod network_check;
 mod network_rekey;
 mod network_status;
 mod network_topology;
-use network_topology::verify_isolated_tun;
+use network_topology::{verify_boot_topology, verify_isolated_tun};
 mod oci_config;
 mod shutdown;
 mod vm_only;
@@ -915,12 +915,7 @@ fn open_and_configure_tun(interface: &str) -> Result<OwnedFd> {
         )?;
     }
     network_agent_startup(
-        verify_isolated_tun(
-            interface,
-            Path::new("/proc/net/dev"),
-            Path::new("/proc/net/route"),
-            Path::new("/proc/net/ipv6_route"),
-        ),
+        verify_boot_topology(interface),
         "workspace-net-topology-failed",
     )?;
     Ok(descriptor)
@@ -6251,7 +6246,44 @@ mod tests {
             "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000 00000001 00000000 80200001 lo\n",
         )
         .unwrap();
-        verify_isolated_tun(NETWORK_INTERFACE, &net_dev, &route, &ipv6_route).unwrap();
+        let gateway = NETWORK_GATEWAY_ADDRESS.parse().unwrap();
+        verify_isolated_tun(NETWORK_INTERFACE, gateway, &net_dev, &route, &ipv6_route).unwrap();
+        // A default route via any other gateway is refused: a broker-mode
+        // guest's 192.0.2.5 passes only when that is the boot's gateway.
+        let broker: std::net::Ipv4Addr =
+            hosted::eth0_addresses_for(crate::hosted_control::HOSTED_BROKER_PARAMETER)
+                .1
+                .parse()
+                .unwrap();
+        assert!(
+            verify_isolated_tun(NETWORK_INTERFACE, broker, &net_dev, &route, &ipv6_route).is_err()
+        );
+        let broker_route = temporary.path().join("broker-route");
+        fs::write(
+            &broker_route,
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+             cw0 00000000 050200C0 0003 0 0 0 00000000 0 0 0\n\
+             cw0 040200C0 00000000 0001 0 0 0 FCFFFFFF 0 0 0\n",
+        )
+        .unwrap();
+        verify_isolated_tun(
+            NETWORK_INTERFACE,
+            broker,
+            &net_dev,
+            &broker_route,
+            &ipv6_route,
+        )
+        .unwrap();
+        assert!(
+            verify_isolated_tun(
+                NETWORK_INTERFACE,
+                gateway,
+                &net_dev,
+                &broker_route,
+                &ipv6_route
+            )
+            .is_err()
+        );
 
         OpenOptions::new()
             .append(true)
@@ -6259,7 +6291,9 @@ mod tests {
             .unwrap()
             .write_all(b"eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
             .unwrap();
-        assert!(verify_isolated_tun(NETWORK_INTERFACE, &net_dev, &route, &ipv6_route).is_err());
+        assert!(
+            verify_isolated_tun(NETWORK_INTERFACE, gateway, &net_dev, &route, &ipv6_route).is_err()
+        );
     }
 
     #[test]

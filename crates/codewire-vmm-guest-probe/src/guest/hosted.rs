@@ -217,7 +217,7 @@ pub(super) fn eth0() -> (&'static str, &'static str) {
     eth0_addresses_for(&fs::read_to_string("/proc/cmdline").unwrap_or_default())
 }
 
-fn eth0_addresses_for(command_line: &str) -> (&'static str, &'static str) {
+pub(super) fn eth0_addresses_for(command_line: &str) -> (&'static str, &'static str) {
     match HostedEgressMode::from_command_line(command_line) {
         Ok(Some(HostedEgressMode::Broker)) => (BROKER_POD_ADDRESS, BROKER_POD_GATEWAY),
         _ => (super::NETWORK_GUEST_ADDRESS, super::NETWORK_GATEWAY_ADDRESS),

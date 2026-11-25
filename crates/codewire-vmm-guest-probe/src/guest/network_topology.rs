@@ -3,12 +3,33 @@
 
 use super::*;
 
+/// The network agent's check of its own namespace, against the gateway its
+/// default route was added through (`hosted::eth0`).
+pub(super) fn verify_boot_topology(interface: &str) -> Result<()> {
+    let gateway = hosted::eth0()
+        .1
+        .parse()
+        .context("parse the guest network gateway")?;
+    verify_isolated_tun(
+        interface,
+        gateway,
+        Path::new("/proc/net/dev"),
+        Path::new("/proc/net/route"),
+        Path::new("/proc/net/ipv6_route"),
+    )
+}
+
+/// `gateway` is the one this boot's network was given: a broker-mode guest's
+/// `eth0` is on the next /30 (`hosted::eth0`), so its gateway differs.
 pub(super) fn verify_isolated_tun(
     interface: &str,
+    gateway: std::net::Ipv4Addr,
     net_dev: &Path,
     route: &Path,
     ipv6_route: &Path,
 ) -> Result<()> {
+    // /proc/net/route prints an address as its in-memory u32 in hex.
+    let gateway = format!("{:08X}", u32::from_ne_bytes(gateway.octets()));
     // An inherited sysfs mount remains associated with the network namespace
     // in which it was mounted. /proc/net is process-namespace aware, so use
     // its bounded interface table to inspect this agent's actual namespace.
@@ -60,7 +81,7 @@ pub(super) fn verify_isolated_tun(
         if fields[1] == "00000000" {
             ensure!(
                 fields[0] == interface
-                    && fields[2].eq_ignore_ascii_case("010200C0")
+                    && fields[2].eq_ignore_ascii_case(&gateway)
                     && fields[7] == "00000000",
                 "guest default route is not bound to the trusted TUN gateway"
             );
