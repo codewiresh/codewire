@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::organization_client::Preset;
 
+/// The host an environment runs on.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentHost {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Environment {
@@ -42,6 +50,10 @@ pub struct Environment {
     /// `node_lost` or `configuration_changed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_cause: Option<String>,
+    /// The enrolled host it runs on (#3609); `None` when the platform runs
+    /// it, or from a server older than the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<EnvironmentHost>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,

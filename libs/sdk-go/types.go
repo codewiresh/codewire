@@ -145,6 +145,9 @@ type EnvironmentData struct {
 	// RestartCause says why, set with RestartedAt: pod_failed,
 	// runtime_replaced, node_lost or configuration_changed.
 	RestartCause *string `json:"restart_cause,omitempty"`
+	// Host is the enrolled host the environment runs on; nil when the
+	// platform runs it. Hosts are a preview.
+	Host *EnvironmentHost `json:"host,omitempty"`
 	// StopReason says why a stopped environment was stopped: user, credit or idle.
 	StopReason          *string                     `json:"stop_reason,omitempty"`
 	SourceSelection     *EnvironmentSourceSelection `json:"source_selection,omitempty"`
@@ -497,4 +500,10 @@ type SetProjectSecretInputBody struct {
 type ListProjectSecretsOutputBody struct {
 	Schema  *string           `json:"$schema,omitempty"`
 	Secrets *[]SecretMetadata `json:"secrets"`
+}
+
+// EnvironmentHost is the host an environment runs on.
+type EnvironmentHost struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
 }

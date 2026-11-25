@@ -34,6 +34,14 @@ pub(super) fn proto_environment(
         idle_stop_enforced: Some(idle_stop.is_on()),
         restarted_at: optional_timestamp(environment.restarted_at)?,
         restart_cause: environment.restart_cause.unwrap_or_default(),
+        host: environment
+            .host
+            .map(|host| proto::EnvironmentHost {
+                id: host.id,
+                name: host.name,
+                ..Default::default()
+            })
+            .into(),
         recoverable: environment.recoverable,
         state_changed_at: Some(proto_timestamp(&environment.state_changed_at)?).into(),
         retry_count: environment.retry_count,

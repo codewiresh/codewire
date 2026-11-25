@@ -105,6 +105,8 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     // Only the platform records an unplanned restart; a local VM reports none (#5997).
     field(43, "restarted_at", ZERO),
     field(44, "restart_cause", ZERO),
+    // A local VM runs on this computer, not on an enrolled host (#3609).
+    field(45, "host", ZERO),
 ];
 
 pub(super) const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[

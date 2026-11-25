@@ -294,6 +294,12 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
             self.cw.environments.create(project_spec={"secrets": {"user": True}})
         self.assertEqual(self.fixture.calls, [])
 
+    def test_a_host_environment_names_its_host(self):
+        placed = _convert.environment_to_dict(
+            pb.Environment(host=pb.EnvironmentHost(id="host-1", name="build-box")))
+        self.assertEqual(placed["host"], {"id": "host-1", "name": "build-box"})
+        self.assertNotIn("host", _convert.environment_to_dict(pb.Environment()))
+
     def test_partial_observed_selections_are_not_returned_as_cas_state(self):
         for selection in (
             pb.EnvironmentSourceSelection(credentials=common.ProjectCredentialBinding(profile=PROFILE)),

@@ -130,6 +130,8 @@ export interface EnvironmentData {
   restarted_at?: string | null;
   /** Why, with `restarted_at`: `pod_failed`, `runtime_replaced`, `node_lost` or `configuration_changed`. */
   restart_cause?: string | null;
+  /** The enrolled host it runs on; absent when the platform runs it. Hosts are a preview. */
+  host?: EnvironmentHost | null;
   retry_count: number;
   setup_complete: boolean;
   setup_error?: string | null;
@@ -513,4 +515,10 @@ export function mapConnectError(error: unknown): unknown {
     violations.length === 0 ? undefined : violations,
     errorInfo?.reason ?? "",
   );
+}
+
+/** The host an environment runs on. */
+export interface EnvironmentHost {
+  id: string;
+  name: string;
 }

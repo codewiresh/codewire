@@ -864,6 +864,12 @@ async function runTests() {
     convertedEnvironment.restarted_at === undefined && convertedEnvironment.restart_cause === undefined,
     "an environment that did not restart reports no restart",
   );
+  const placed = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_placed", EnvironmentState.RUNNING),
+    host: { id: "host-1", name: "build-box" },
+  }));
+  assert(placed.host?.id === "host-1" && placed.host?.name === "build-box", "a host environment names its host");
+  assert(convertedEnvironment.host === undefined, "an environment the platform runs names no host");
 
   const attachedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_attached", EnvironmentState.RUNNING),
@@ -1715,7 +1721,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 201;
+  const expectedAssertions = 203;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

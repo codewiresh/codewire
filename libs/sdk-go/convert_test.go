@@ -388,6 +388,25 @@ func TestEnvironmentUnplannedRestartRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentHostRoundTrips(t *testing.T) {
+	placed, err := fromProtoEnvironment(&codewirev1.Environment{
+		Host: &codewirev1.EnvironmentHost{Id: "host-1", Name: "build-box"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placed.Host == nil || placed.Host.Id != "host-1" || placed.Host.Name != "build-box" {
+		t.Fatalf("host changed: %+v", placed.Host)
+	}
+	platform, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if platform.Host != nil {
+		t.Fatalf("an environment the platform runs names no host: %+v", platform.Host)
+	}
+}
+
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)

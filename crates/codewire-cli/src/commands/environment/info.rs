@@ -5,6 +5,20 @@ use super::*;
 mod restart;
 pub(crate) use restart::UnplannedRestart;
 
+/// `cw info`'s Type line, and the Host line of an environment on a host.
+fn type_lines(environment: &Environment) -> String {
+    let mut lines = format!("{:<14} {}\n", "Type:", env_type_label(environment));
+    if let Some(host) = &environment.host {
+        lines.push_str(&format!(
+            "{:<14} {} ({})\n",
+            "Host:",
+            super::progress::terminal_text(&host.name),
+            host.id
+        ));
+    }
+    lines
+}
+
 pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     format_env_info_text_at(environment, chrono::Utc::now(), &chrono::Local)
 }
@@ -30,11 +44,7 @@ where
             .and_then(trimmed_str)
             .unwrap_or("--")
     ));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "Type:",
-        env_type_label(environment)
-    ));
+    output.push_str(&type_lines(environment));
     output.push_str(&format!(
         "{:<14} {}\n",
         "State:",

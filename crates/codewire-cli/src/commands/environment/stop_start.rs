@@ -13,7 +13,7 @@ pub(super) async fn stop(
     let environment_id =
         resolve_environment_id(environment_client, org_id, &args.environment).await?;
     let caps = crate::commands::lifecycle_output::capabilities(args.output);
-    let name = display_name_for(
+    let shown = display_name_for(
         environment_client,
         org_id,
         &environment_id,
@@ -21,6 +21,7 @@ pub(super) async fn stop(
         &caps,
     )
     .await;
+    let name = shown.name.clone();
     let mut line = StatusLine::new(std::io::stderr(), &caps);
     line.begin(STOPPING_LABEL)?;
     let stopped = Box::pin(super::lifecycle::stop_cloud_environment(
@@ -66,7 +67,9 @@ pub(super) async fn stop(
             };
             print_env_status(&args.environment, &response, args.output)?;
         }
-        OutputFormat::Text => super::lifecycle::stop_result(&name).print(&caps),
+        OutputFormat::Text => {
+            super::lifecycle::stop_result(&name, shown.host.as_deref()).print(&caps)
+        }
     }
     Ok(())
 }

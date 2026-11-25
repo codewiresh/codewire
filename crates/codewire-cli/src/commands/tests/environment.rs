@@ -2869,6 +2869,24 @@ fn a_failed_create_is_kept_only_for_a_caller_that_asks() {
 }
 
 #[test]
+fn format_env_info_text_names_the_host_an_environment_runs_on() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    assert!(!format_env_info_text(&environment).contains("Host:"));
+    environment.host = Some(crate::presentation::EnvironmentHost {
+        id: "00000000-0000-4000-8000-000000000002".into(),
+        name: "build-box".into(),
+    });
+    assert!(
+        format_env_info_text(&environment)
+            .contains("Host:          build-box (00000000-0000-4000-8000-000000000002)\n")
+    );
+}
+
+#[test]
 fn format_env_info_text_uses_go_style_labels() {
     let mut environment = test_environment(
         "12345678-abcd-4000-9000-000000000001",

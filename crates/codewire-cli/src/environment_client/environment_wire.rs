@@ -45,6 +45,13 @@ pub(super) fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<
         idle_stop_enforced: value.idle_stop_enforced,
         restarted_at: value.restarted_at.into_option().map(timestamp_to_rfc3339),
         restart_cause: empty_to_none(value.restart_cause),
+        host: value
+            .host
+            .into_option()
+            .map(|host| crate::presentation::EnvironmentHost {
+                id: host.id,
+                name: host.name,
+            }),
         recoverable: value.recoverable,
         state_changed_at: value
             .state_changed_at

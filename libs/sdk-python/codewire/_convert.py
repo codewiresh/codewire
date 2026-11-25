@@ -26,7 +26,7 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     34: "source_selection", 35: "network_state", 36: "network_failure",
     37: "error_code", 38: "network_policy", 39: "stop_reason",
     40: "idle_stop_seconds", 41: "idle_stop_enforced", 43: "restarted_at",
-    44: "restart_cause",
+    44: "restart_cause", 45: "host",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {

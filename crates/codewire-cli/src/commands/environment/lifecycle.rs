@@ -5,8 +5,8 @@
 use super::*;
 use crate::commands::lifecycle_output::{
     InterruptNotice, ResultBlock, bounded, credential_profile_name, credential_ref,
-    environment_command, exact_reference_id, location_label, next_shell_command, secret_refs,
-    unless_interrupted,
+    environment_command, exact_reference_id, next_shell_command, platform_location_label,
+    secret_refs, unless_interrupted,
 };
 use crate::commands::progress::terminal_text;
 use crate::output::{
@@ -64,6 +64,7 @@ pub(crate) fn cloud_summary(
         outcome,
         name,
         location: VmLocation::Cloud,
+        host: environment.host.as_ref().map(|host| host.name.clone()),
         allocation: Allocation::cloud(
             environment.cpu_millicores,
             environment.memory_mb,
@@ -238,10 +239,10 @@ fn stop_finished(environment: &Environment, name: &str) -> anyhow::Result<bool> 
     Ok(false)
 }
 
-/// What a finished stop says.
-pub(crate) fn stop_result(name: &str) -> ResultBlock {
+/// What a finished stop says. `host` is the host it runs on, if any.
+pub(crate) fn stop_result(name: &str, host: Option<&str>) -> ResultBlock {
     ResultBlock::new(Status::Done, format!("Environment {name} stopped"))
-        .detail(location_label(VmLocation::Cloud))
+        .detail(platform_location_label(host))
         .next(environment_command(VmLocation::Cloud, "start", name))
 }
 
@@ -284,8 +285,8 @@ impl CloudRemoval {
         }
     }
 
-    pub(crate) fn result(&self, name: &str) -> ResultBlock {
-        let cloud = location_label(VmLocation::Cloud);
+    pub(crate) fn result(&self, name: &str, host: Option<&str>) -> ResultBlock {
+        let cloud = platform_location_label(host);
         match self {
             CloudRemoval::Removed => {
                 ResultBlock::new(Status::Done, format!("Environment {name} removed"))
@@ -501,9 +502,34 @@ mod tests {
     #[test]
     fn a_finished_stop_names_the_next_start() {
         assert_eq!(
-            stop_result("app").render(PLAIN),
+            stop_result("app", None).render(PLAIN),
             "✓ Environment app stopped\n  cloud VM\n\n→ cw --cloud start app\n"
         );
+    }
+
+    /// An environment on an enrolled host is named by its host, not the
+    /// cloud, in the create or start header, a stop and a removal (#6397).
+    #[test]
+    fn a_host_environment_names_its_host_not_the_cloud() {
+        assert_eq!(
+            stop_result("app", Some("build-box")).render(PLAIN),
+            "✓ Environment app stopped\n  VM on host build-box\n\n→ cw --cloud start app\n"
+        );
+        assert!(
+            CloudRemoval::Removed
+                .result("app", Some("build-box"))
+                .render(PLAIN)
+                .contains("  VM on host build-box · environment disk removed\n")
+        );
+        let mut placed = environment();
+        placed.host = Some(crate::presentation::EnvironmentHost {
+            id: "00000000-0000-4000-8000-000000000002".into(),
+            name: "build-box".into(),
+        });
+        let header =
+            cloud_summary(&placed, Outcome::Started, &SourceNames::default()).render(PLAIN);
+        assert!(header.contains(" · VM on host build-box\n"), "{header}");
+        assert!(!header.contains("cloud VM"), "{header}");
     }
 
     #[test]
@@ -547,12 +573,12 @@ mod tests {
     #[test]
     fn removal_results_name_the_observed_outcome() {
         assert_eq!(
-            CloudRemoval::Removed.result("app").render(PLAIN),
+            CloudRemoval::Removed.result("app", None).render(PLAIN),
             "✓ Environment app removed\n  cloud VM · environment disk removed\n\n→ cw ls\n"
         );
         assert_eq!(
             CloudRemoval::Scheduled { until: None }
-                .result("app")
+                .result("app", None)
                 .render(PLAIN),
             "✓ Deletion scheduled: app\n  cloud VM · grace period active\n\n→ Undo: cw --cloud cancel-delete app\n"
         );
@@ -560,7 +586,7 @@ mod tests {
             CloudRemoval::Scheduled {
                 until: Some("2026-10-21T12:00:00Z".to_owned())
             }
-            .result("app")
+            .result("app", None)
             .render(PLAIN)
             .contains("grace period until 2026-10-21T12:00:00Z")
         );
@@ -568,12 +594,12 @@ mod tests {
             CloudRemoval::Removing {
                 state: "destroying".to_owned()
             }
-            .result("app")
+            .result("app", None)
             .render(PLAIN),
             "✓ Removal started: app\n  cloud VM · state: destroying\n\n→ cw --cloud ls\n"
         );
         assert_eq!(
-            CloudRemoval::Unconfirmed.result("app").render(PLAIN),
+            CloudRemoval::Unconfirmed.result("app", None).render(PLAIN),
             "✓ Removal requested: app\n  cloud VM · state not confirmed\n\n→ cw --cloud ls\n"
         );
     }
@@ -785,7 +811,7 @@ mod tests {
             let removal = remove(&server).await.unwrap();
             assert_eq!(removal, CloudRemoval::AlreadyRemoved);
             assert_eq!(
-                removal.result("app").render(PLAIN),
+                removal.result("app", None).render(PLAIN),
                 "✓ Environment app was already removed\n  cloud VM · its create failed; it leaves cw ls within a day\n\n→ cw ls\n"
             );
         }

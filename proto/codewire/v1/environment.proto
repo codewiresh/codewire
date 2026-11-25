@@ -198,6 +198,15 @@ message Environment {
   // Why it restarted, set with restarted_at: pod_failed, runtime_replaced,
   // node_lost or configuration_changed. Empty otherwise.
   string restart_cause = 44;
+  // The enrolled host the environment runs on (#3609), or absent when the
+  // platform runs it. Hosts are a preview.
+  EnvironmentHost host = 45;
+}
+
+// The host an environment runs on, as it is now.
+message EnvironmentHost {
+  string id = 1;
+  string name = 2;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network

@@ -85,6 +85,7 @@ pub(super) fn local_summary(
         outcome,
         name: environment.name.clone(),
         location: VmLocation::Local,
+        host: None,
         allocation: Allocation::local(
             environment.vcpus,
             environment.memory_mib,
@@ -937,6 +938,7 @@ impl CreateContext {
             outcome: Outcome::Created,
             name: name.to_owned(),
             location: VmLocation::Local,
+            host: None,
             allocation: Allocation::local(vcpus, memory_mib, disk_bytes),
             credentials: self.credentials.clone(),
             credentials_note: None,

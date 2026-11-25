@@ -365,6 +365,9 @@ pub(crate) struct LifecycleSummary {
     pub(crate) outcome: Outcome,
     pub(crate) name: String,
     pub(crate) location: VmLocation,
+    /// The enrolled host a platform environment runs on (#3609), which the
+    /// header names instead of the cloud.
+    pub(crate) host: Option<String>,
     pub(crate) allocation: Allocation,
     pub(crate) credentials: SourceRef,
     /// What a running local VM's agents hold; none for a cloud environment
@@ -398,10 +401,7 @@ impl LifecycleSummary {
             style.status(self.outcome.status()),
             terminal_text(&self.name),
             self.outcome.verb(),
-            style.paint(
-                Role::Dim,
-                &format!("{}{}", style.separator(), self.location.label())
-            ),
+            style.paint(Role::Dim, &format!("{}{}", style.separator(), self.place())),
         );
         self.push_details(&mut out, style);
         if let Some(next) = &self.next {
@@ -416,14 +416,19 @@ impl LifecycleSummary {
         let mut out = format!(
             "{}{}\n",
             style.paint(Role::Strong, &terminal_text(&self.name)),
-            style.paint(
-                Role::Dim,
-                &format!("{}{}", style.separator(), self.location.label())
-            ),
+            style.paint(Role::Dim, &format!("{}{}", style.separator(), self.place())),
         );
         self.push_details(&mut out, style);
         out.push('\n');
         out
+    }
+
+    /// Where it runs: the host it was placed on, or its location.
+    fn place(&self) -> String {
+        match &self.host {
+            Some(host) => format!("VM on host {}", terminal_text(host)),
+            None => self.location.label().to_owned(),
+        }
     }
 
     fn push_details(&self, out: &mut String, style: Style) {
@@ -523,6 +528,7 @@ mod tests {
             outcome: Outcome::Started,
             name: "app".to_owned(),
             location: VmLocation::Local,
+            host: None,
             allocation: Allocation::local(2, 4096, 40 * GIB),
             credentials: SourceRef::Named {
                 placement: SourcePlacement::Platform,
@@ -638,6 +644,7 @@ mod tests {
         let summary = LifecycleSummary {
             outcome: Outcome::Created,
             location: VmLocation::Cloud,
+            host: None,
             allocation: Allocation::cloud(2000, 4096, 40),
             credentials: SourceRef::None,
             secrets: SourceRef::None,
@@ -771,6 +778,7 @@ mod tests {
         let summary = LifecycleSummary {
             outcome: Outcome::Creating,
             location: VmLocation::Cloud,
+            host: None,
             policy: None,
             next: Some("cw --cloud info app".to_owned()),
             ..summary()

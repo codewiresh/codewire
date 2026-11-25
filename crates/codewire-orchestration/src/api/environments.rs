@@ -27,6 +27,13 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use super::ApiState;
 use crate::confidential_storage::require_confidential_access;
 
+/// The host an environment runs on.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EnvironmentHost {
+    pub id: String,
+    pub name: String,
+}
+
 /// Mirrors `api.Environment` field-for-field (JSON tags included).
 #[derive(Debug, Clone, Serialize)]
 pub struct Environment {
@@ -56,6 +63,10 @@ pub struct Environment {
     pub restarted_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_cause: Option<String>,
+    /// The enrolled host it runs on (#3609); absent when the platform runs
+    /// it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<EnvironmentHost>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
@@ -165,6 +176,7 @@ pub(crate) const ENV_SELECT_COLS: &str = concat!(
     r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
     e.state, e.desired_state, e.error_reason, e.error_code, e.stop_reason,
     e.restarted_at, e.restart_cause, e.recoverable, e.state_changed_at, e.retry_count,
+    e.host_id, h.name AS host_name,
     e.environment_operation_generation,
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
                        'credentials',e.project_spec->'credentials') AS source_spec,
@@ -189,6 +201,7 @@ pub(crate) const ENV_SELECT_COLS: &str = concat!(
 
 pub(crate) const ENV_SELECT_JOINS: &str = concat!(
     r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
+    LEFT JOIN hosts h ON h.id = e.host_id
     LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
     LEFT JOIN platform_environment_access_bindings ab ON ab.environment_id = e.id
     LEFT JOIN environment_mesh_attachments ma ON ma.environment_id = e.id
@@ -230,6 +243,13 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
                 .map(|at| at.naive_utc()),
         ),
         restart_cause: row.try_get("restart_cause")?,
+        host: match (
+            row.try_get::<Option<String>, _>("host_id")?,
+            row.try_get::<Option<String>, _>("host_name")?,
+        ) {
+            (Some(id), Some(name)) => Some(EnvironmentHost { id, name }),
+            _ => None,
+        },
         recoverable: row.try_get("recoverable")?,
         state_changed_at: format_time(row.try_get("state_changed_at")?),
         retry_count: row.try_get("retry_count")?,
@@ -1666,6 +1686,7 @@ mod tests {
             idle_stop_seconds: 0,
             restarted_at: None,
             restart_cause: None,
+            host: None,
             recoverable: true,
             state_changed_at: "2026-06-12T00:00:00Z".into(),
             retry_count: 0,

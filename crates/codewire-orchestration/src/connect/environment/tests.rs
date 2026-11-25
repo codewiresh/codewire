@@ -669,6 +669,7 @@ fn test_environment(state: &str, setup_complete: bool) -> Environment {
         idle_stop_seconds: 0,
         restarted_at: None,
         restart_cause: None,
+        host: None,
         recoverable: false,
         state_changed_at: "2026-07-18T12:34:56Z".into(),
         retry_count: 0,

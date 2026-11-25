@@ -22,6 +22,7 @@ import {
   mapConnectError,
   type CreatePortRequest,
   type EnvironmentData,
+  type EnvironmentHost,
   type EnvironmentPort,
   type EnvironmentResizeOperation,
   type EnvironmentResizePlan,
@@ -50,6 +51,7 @@ export class Environment implements EnvironmentData {
   readonly stop_reason: string | undefined;
   readonly restarted_at: string | undefined;
   readonly restart_cause: string | undefined;
+  readonly host: EnvironmentHost | undefined;
   readonly idle_stop_seconds: number;
   readonly error_reason: string | undefined;
   readonly isolation_tier: IsolationTier;
@@ -101,6 +103,7 @@ export class Environment implements EnvironmentData {
     this.stop_reason = data.stop_reason ?? undefined;
     this.restarted_at = data.restarted_at ?? undefined;
     this.restart_cause = data.restart_cause ?? undefined;
+    this.host = data.host ?? undefined;
     this.idle_stop_seconds = data.idle_stop_seconds ?? 0;
     this.error_reason = data.error_reason ?? undefined;
     this.isolation_tier = data.isolation_tier;

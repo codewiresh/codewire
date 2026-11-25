@@ -436,6 +436,18 @@ pub(crate) async fn unless_interrupted<T>(
     }
 }
 
+/// Where a platform environment runs, as a result's detail line says it:
+/// on an enrolled host (#3609), or in the cloud.
+pub(crate) fn platform_location_label(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!(
+            "VM on host {}",
+            crate::commands::progress::terminal_text(host)
+        ),
+        None => location_label(VmLocation::Cloud).to_owned(),
+    }
+}
+
 /// The location word a result's detail line starts with.
 pub(crate) fn location_label(location: VmLocation) -> &'static str {
     match location {

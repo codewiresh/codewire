@@ -12,12 +12,15 @@ pub(crate) mod lifecycle;
 mod platform_create;
 mod policy_notice;
 pub(crate) mod progress;
+mod remove;
 mod runtime;
 mod server_errors;
+mod shown;
 mod sources;
 mod stop_start;
 mod transfer;
 mod update;
+
 use cp::handle_unified_environment_cp;
 pub(crate) use cpu::{local_vm_vcpus, local_vm_vcpus_from_millicores, parse_resize_cpu};
 #[cfg(test)]
@@ -29,6 +32,7 @@ use platform_create::handle_platform_env_create;
 pub(crate) use policy_notice::policy_selection_notice;
 pub(crate) use policy_notice::{open_widening_notice, report_policy_selection};
 pub(crate) use server_errors::map_env_delete_error;
+use shown::display_name_for;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
@@ -41,25 +45,6 @@ use crate::environment_client::{
 };
 use crate::output::{Outcome, StatusLine, VmLocation};
 use codewire_client::environment_setup::{self as setup, DaemonObservation, DaemonWaitError};
-
-/// The environment's name for a text result, read once; scripts (machine
-/// output) and a failed read keep the reference they gave.
-async fn display_name_for(
-    client: &EnvironmentClient,
-    org_id: &str,
-    environment_id: &str,
-    environment_ref: &str,
-    caps: &crate::output::Capabilities,
-) -> String {
-    if caps.is_machine() {
-        return environment_ref.to_owned();
-    }
-    client
-        .get_environment(org_id, environment_id)
-        .await
-        .map(|environment| lifecycle::display_name(&environment))
-        .unwrap_or_else(|_| environment_ref.to_owned())
-}
 
 /// The hosted Mesh network a new cloud environment asks to join. A cloud
 /// environment's resolver is pinned to its platform's hosted Mesh.
@@ -678,71 +663,7 @@ async fn handle_platform_env_command_with_created(
         EnvCommand::RefreshSkills(_) => {
             anyhow::bail!("refresh-skills is supported only for local environments");
         }
-        EnvCommand::Rm(args) => {
-            let environment_id =
-                resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
-            let caps = super::lifecycle_output::capabilities(args.output);
-            let name = display_name_for(
-                &environment_client,
-                &org_id,
-                &environment_id,
-                &args.environment,
-                &caps,
-            )
-            .await;
-            // Machine output names the environment by its ID; a refusal names
-            // it as people do.
-            let asked = if caps.is_machine() && !args.yes {
-                display_name_for(
-                    &environment_client,
-                    &org_id,
-                    &environment_id,
-                    &args.environment,
-                    &super::lifecycle_output::capabilities(OutputFormat::Text),
-                )
-                .await
-            } else {
-                name.clone()
-            };
-            if !crate::commands::confirm_removal(&asked, "cloud VM", args.yes, args.output)? {
-                return Ok(None);
-            }
-            let mut line = StatusLine::new(std::io::stderr(), &caps);
-            line.begin(REMOVING_LABEL)?;
-            let Some(removal) = Box::pin(lifecycle::tick_while(
-                &mut line,
-                !caps.is_machine(),
-                lifecycle::remove_cloud_environment(
-                    &environment_client,
-                    &org_id,
-                    &environment_id,
-                    &name,
-                ),
-            ))
-            .await
-            else {
-                line.clear()?;
-                return Err(InterruptNotice::new(VmLocation::Cloud, "removal", &name).error(false));
-            };
-            let removal = match removal {
-                Ok(removal) => {
-                    line.clear()?;
-                    removal
-                }
-                Err(error) => {
-                    line.fail(REMOVING_LABEL)?;
-                    return Err(error);
-                }
-            };
-            match args.output {
-                OutputFormat::Json => print_env_delete_result(
-                    &args.environment,
-                    &environment_id,
-                    !matches!(removal, lifecycle::CloudRemoval::Scheduled { .. }),
-                )?,
-                OutputFormat::Text => removal.result(&name).print(&caps),
-            }
-        }
+        EnvCommand::Rm(args) => remove::remove(&environment_client, &org_id, args).await?,
         EnvCommand::Prune(args) => {
             let environments = environment_client
                 .list_environments(&org_id, false)
