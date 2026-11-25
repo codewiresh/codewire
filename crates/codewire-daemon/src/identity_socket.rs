@@ -7,7 +7,8 @@
 //! socket forwards refuse.
 //!
 //! It keeps one token per audience until half its lifetime, so a token
-//! issued before a kill switch keeps being served from here until then. The
+//! issued before a kill switch keeps being served from here until then. That
+//! cache is an [`IdentityTokens`], which other holders in the daemon share. The
 //! daemon is no boundary: every rule is orchestration's, and any process
 //! here can call the RPC itself. Logs name the audience, never the token.
 
@@ -100,13 +101,69 @@ pub trait IdentityTokenSource: Send + Sync + 'static {
 
 struct Cached {
     token: Zeroizing<String>,
+    expires_at: i64,
     stale_at: i64,
 }
 
-struct Shared<S> {
+/// A token from [`IdentityTokens::token`]: freshly issued or cached.
+pub struct IdentityToken {
+    pub token: Zeroizing<String>,
+    /// Unix seconds.
+    pub expires_at: i64,
+    /// Unix seconds: half the lifetime it had left when it was issued. From
+    /// then on [`IdentityTokens::token`] asks the source again.
+    pub stale_at: i64,
+}
+
+/// The token source and the one cache of its tokens, keyed by audience. The
+/// socket and the token files hold the same one, so a file's audience asked
+/// at the socket costs no second mint.
+pub struct IdentityTokens<S> {
     source: S,
     cache: Mutex<HashMap<String, Cached>>,
     now: fn() -> i64,
+}
+
+/// The name the socket's tests know the cache by.
+#[cfg(test)]
+type Shared<S> = IdentityTokens<S>;
+
+impl<S: IdentityTokenSource> IdentityTokens<S> {
+    pub fn new(source: S) -> Self {
+        Self::with_clock(source, unix_now)
+    }
+
+    /// [`Self::new`] on a clock of Unix seconds other than the system's.
+    pub fn with_clock(source: S, now: fn() -> i64) -> Self {
+        Self {
+            source,
+            cache: Mutex::new(HashMap::new()),
+            now,
+        }
+    }
+
+    /// Unix seconds on this cache's clock.
+    pub fn now(&self) -> i64 {
+        (self.now)()
+    }
+
+    /// The token for the canonical `audience`: the cached one until half
+    /// its lifetime, otherwise one issued by the source and kept. A refusal
+    /// is never cached.
+    pub async fn token(&self, audience: &str) -> Result<IdentityToken, IdentityRefusal> {
+        let now = self.now();
+        if let Some(token) = self.cached(audience, now) {
+            return Ok(token);
+        }
+        let issued = self.source.issue(audience).await?;
+        let token = IdentityToken {
+            token: issued.token.clone(),
+            expires_at: issued.expires_at,
+            stale_at: stale_at(&issued, now),
+        };
+        self.keep(audience.to_owned(), issued, now);
+        Ok(token)
+    }
 }
 
 /// Bind the socket at `path`, mode 0600, replacing a socket a previous
@@ -127,22 +184,23 @@ pub fn bind(path: &Path) -> io::Result<(UnixListener, PlatformSocket)> {
 /// Serve the socket until `shutdown` resolves.
 pub async fn serve<S: IdentityTokenSource>(
     listener: UnixListener,
-    source: S,
+    tokens: Arc<IdentityTokens<S>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    axum::serve(listener, router(source, unix_now))
+    axum::serve(listener, router_for(tokens))
         .with_graceful_shutdown(shutdown)
         .await
 }
 
+#[cfg(test)]
 fn router<S: IdentityTokenSource>(source: S, now: fn() -> i64) -> Router {
+    router_for(Arc::new(IdentityTokens::with_clock(source, now)))
+}
+
+fn router_for<S: IdentityTokenSource>(tokens: Arc<IdentityTokens<S>>) -> Router {
     Router::new()
         .route("/token", get(token::<S>))
-        .with_state(Arc::new(Shared {
-            source,
-            cache: Mutex::new(HashMap::new()),
-            now,
-        }))
+        .with_state(tokens)
 }
 
 #[derive(Deserialize)]
@@ -151,7 +209,7 @@ struct TokenQuery {
 }
 
 async fn token<S: IdentityTokenSource>(
-    State(shared): State<Arc<Shared<S>>>,
+    State(shared): State<Arc<IdentityTokens<S>>>,
     query: Result<Query<TokenQuery>, QueryRejection>,
 ) -> Response {
     let Some(resource) = query
@@ -164,16 +222,8 @@ async fn token<S: IdentityTokenSource>(
     else {
         return refusal(IdentityRefusal::InvalidTarget);
     };
-    let now = (shared.now)();
-    if let Some(token) = shared.cached(&resource, now) {
-        return text(token);
-    }
-    match shared.source.issue(&resource).await {
-        Ok(issued) => {
-            let token = issued.token.clone();
-            shared.keep(resource, issued, now);
-            text(token)
-        }
+    match shared.token(&resource).await {
+        Ok(issued) => text(issued.token),
         Err(refused) => {
             tracing::info!(
                 audience = %resource,
@@ -185,19 +235,23 @@ async fn token<S: IdentityTokenSource>(
     }
 }
 
-impl<S> Shared<S> {
-    fn cached(&self, resource: &str, now: i64) -> Option<Zeroizing<String>> {
+impl<S> IdentityTokens<S> {
+    fn cached(&self, resource: &str, now: i64) -> Option<IdentityToken> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache
             .get(resource)
             .filter(|cached| now < cached.stale_at)
-            .map(|cached| cached.token.clone())
+            .map(|cached| IdentityToken {
+                token: cached.token.clone(),
+                expires_at: cached.expires_at,
+                stale_at: cached.stale_at,
+            })
     }
 
     /// Keep `issued` until half the lifetime it has left now. A full cache
     /// drops its stale tokens, then the one that goes stale soonest.
     fn keep(&self, resource: String, issued: IssuedIdentityToken, now: i64) {
-        let stale_at = now.saturating_add(issued.expires_at.saturating_sub(now) / 2);
+        let stale_at = stale_at(&issued, now);
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if !cache.contains_key(&resource) && cache.len() >= MAX_CACHED_AUDIENCES {
             cache.retain(|_, cached| cached.stale_at > now);
@@ -214,10 +268,16 @@ impl<S> Shared<S> {
             resource,
             Cached {
                 token: issued.token,
+                expires_at: issued.expires_at,
                 stale_at,
             },
         );
     }
+}
+
+/// Half the lifetime `issued` has left at `now`.
+fn stale_at(issued: &IssuedIdentityToken, now: i64) -> i64 {
+    now.saturating_add(issued.expires_at.saturating_sub(now) / 2)
 }
 
 fn text(token: Zeroizing<String>) -> Response {

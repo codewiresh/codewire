@@ -207,3 +207,42 @@ fn a_resource_is_query_encoded() {
         "https%3A%2F%2Fk8s.walk.example%3A443%2Fa%20b%3Fc"
     );
 }
+
+#[tokio::test]
+async fn two_holders_of_one_cache_share_its_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.sock");
+    let (listener, _record) = bind(&path).unwrap();
+    let source = Source::default();
+    let tokens = Arc::new(IdentityTokens::with_clock(source.clone(), test_now));
+    let app = router_for(Arc::clone(&tokens));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    // The other holder mints first; the socket then serves that token.
+    let held = tokio::time::timeout(STEP, tokens.token(AUDIENCE))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.token.as_str(), TOKEN);
+    assert_eq!(held.expires_at, test_now() + 600);
+    assert_eq!(held.stale_at, test_now() + 300);
+    let served = tokio::time::timeout(STEP, fetch(&path, AUDIENCE))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(served.as_str(), TOKEN);
+
+    // And the other way round, for an audience the socket asked first.
+    let other = "https://other.walk.example";
+    tokio::time::timeout(STEP, fetch(&path, other))
+        .await
+        .unwrap()
+        .unwrap();
+    let again = tokio::time::timeout(STEP, tokens.token(other))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.stale_at, held.stale_at);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*source.seen.lock().unwrap(), [AUDIENCE, other]);
+}

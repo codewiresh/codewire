@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use codewire_daemon::identity_socket::{
-    self, IdentityRefusal, IdentityTokenSource, IssuedIdentityToken,
+    self, IdentityRefusal, IdentityTokenSource, IdentityTokens, IssuedIdentityToken,
 };
 
 use crate::hosted_binding::BindingClient;
@@ -28,9 +28,8 @@ pub(crate) fn spawn(path: &Path, client: Arc<BindingClient>) {
             tokio::spawn(async move {
                 // Recorded while served, so SSH socket forwards refuse it.
                 let _platform = platform;
-                let served =
-                    identity_socket::serve(listener, BindingTokens(client), std::future::pending())
-                        .await;
+                let tokens = Arc::new(IdentityTokens::new(BindingTokens(client)));
+                let served = identity_socket::serve(listener, tokens, std::future::pending()).await;
                 if let Err(error) = served {
                     tracing::warn!(error = %error, "sandbox identity socket stopped");
                 }
