@@ -1983,12 +1983,13 @@ mod tests {
         };
         let failed = row("00000000-0000-4000-8000-000000000005");
         assert!(failed.contains(
-            "<span class=\"cw-status cw-status--pill cw-credential-status\" data-tone=\"warning\">Reconnect needed</span>"
+            "<span class=\"cw-status cw-status--quiet cw-credential-status\" data-tone=\"warning\">Reconnect needed</span>"
         ));
-        // Outside the ⋯ menu, opening the existing exact Reconnect dialog.
-        let action = failed.split("</details>").nth(1).unwrap();
-        assert!(action.contains(
-            "<button class=\"cw-button cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-00000000-0000-4000-8000-000000000005-reconnect\" aria-haspopup=\"dialog\" aria-controls=\"credential-00000000-0000-4000-8000-000000000005-reconnect\"><span>Reconnect</span><span class=\"cw-sr-only\"> Work Codex</span></button>"
+        // Under the credential's name, outside the ⋯ menu, opening the existing
+        // exact Reconnect dialog.
+        let identity = failed.split("<details").next().unwrap();
+        assert!(identity.contains(
+            "<button class=\"cw-text-action cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-00000000-0000-4000-8000-000000000005-reconnect\" aria-haspopup=\"dialog\" aria-controls=\"credential-00000000-0000-4000-8000-000000000005-reconnect\"><span>Reconnect</span><span class=\"cw-sr-only\"> Work Codex</span></button>"
         ));
         assert!(html.contains("id=\"credential-00000000-0000-4000-8000-000000000005-reconnect\""));
         let active = row("00000000-0000-4000-8000-000000000001");
@@ -2174,8 +2175,8 @@ mod tests {
             .split("<dialog")
             .next()
             .unwrap();
-        assert!(row.split("</details>").nth(1).unwrap().contains(&format!(
-            "<button class=\"cw-button cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-{id}-replace\" aria-haspopup=\"dialog\" aria-controls=\"credential-{id}-replace\"><span>Replace token</span><span class=\"cw-sr-only\"> Claude Max</span></button>"
+        assert!(row.split("<details").next().unwrap().contains(&format!(
+            "<button class=\"cw-text-action cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-{id}-replace\" aria-haspopup=\"dialog\" aria-controls=\"credential-{id}-replace\"><span>Replace token</span><span class=\"cw-sr-only\"> Claude Max</span></button>"
         )));
         assert!(!row.contains(&format!("credential-{id}-reconnect")));
 

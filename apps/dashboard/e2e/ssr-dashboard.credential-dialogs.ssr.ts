@@ -267,7 +267,7 @@ test("a Claude subscription token reads its expiry and is replaced by paste from
   await expect(row.locator(".cw-credential-status")).toHaveText("Expires soon");
   await expect(row.locator(".cw-credential-status")).toHaveAttribute("data-tone", "warning");
   // Expiring soon still works, so its actions stay in the menu.
-  await expect(row.locator(":scope > form > .cw-credential-reconnect")).toHaveCount(0);
+  await expect(row.locator(".cw-credential-identity .cw-credential-reconnect")).toHaveCount(0);
   const menu = await rowMenu(row);
   await expect(menuItems(menu)).toHaveText(["Rename", "Replace token", "Revoke"]);
   await action(menu, "Replace token").click();
@@ -303,8 +303,8 @@ test("a credential whose refresh failed says Reconnect needed and reconnects fro
   const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Work Codex"]') });
   await expect(row.locator(".cw-credential-status")).toHaveText("Reconnect needed");
   await expect(row.locator(".cw-credential-status")).toHaveAttribute("data-tone", "warning");
-  // The action is on the row itself, not only inside the ⋯ menu.
-  const reconnect = row.locator(":scope > form > .cw-credential-reconnect");
+  // The action is under the credential's name, not only inside the ⋯ menu.
+  const reconnect = row.locator(".cw-credential-identity .cw-credential-reconnect");
   await expect(reconnect).toBeVisible();
   await expect(reconnect).toHaveAccessibleName("Reconnect Work Codex");
   // Active rows keep their actions in the menu alone.
@@ -671,4 +671,58 @@ test("device sign-in moves focus into each view it shows", async ({ page }) => {
   await expect(again).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(confirm).toBeFocused();
+});
+
+// Settings sections are drawn with space and type, never a box (#6350): no
+// border, fill or radius around a section, its actions or a row's status.
+// Separators stay: a hairline divides each section's header from its content.
+// A dialog keeps its box and everything in it, because the box is the dialog.
+const boxless = async (owner: Locator) => {
+  const boxes = await owner.evaluateAll((nodes) => nodes.map((node) => {
+    const style = getComputedStyle(node);
+    return {
+      text: node.textContent?.trim().slice(0, 40),
+      border: ["Top", "Right", "Bottom", "Left"].some((side) => parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)) > 0 && !(node.matches(".cw-row-list") && (side === "Top" || side === "Bottom"))),
+      fill: style.backgroundColor !== "rgba(0, 0, 0, 0)",
+      radius: parseFloat(style.borderTopLeftRadius) > 0,
+    };
+  }));
+  expect(boxes.filter((box) => box.border || box.fill || box.radius)).toEqual([]);
+  return boxes.length;
+};
+
+test("credentials sections, their actions and row statuses draw no box", { tag: "@mobile" }, async ({ page }) => {
+  const content = page.locator(".cw-settings-content");
+  expect(await boxless(content.locator(":scope > .cw-section"))).toBe(3);
+  expect(await boxless(content.locator(".cw-section > .cw-row-list"))).toBe(2);
+  expect(await boxless(content.locator(".cw-text-action"))).toBe(5);
+  expect(await boxless(content.locator(".cw-credential-status:not(dialog *)"))).toBeGreaterThan(0);
+  const rules = await content.locator(":scope > .cw-section > .cw-section-header").evaluateAll((nodes) =>
+    nodes.map((node) => parseFloat(getComputedStyle(node).borderBottomWidth)));
+  expect(rules).toEqual([1, 1, 1]);
+  await expect(content.locator(".cw-card")).toHaveCount(0);
+  await fits(page, content);
+});
+
+test("an empty credentials page keeps both add actions and says what to do", async ({ page }) => {
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-empty.html`);
+  const credentials = page.getByRole("region", { name: "Credentials", exact: true });
+  const profiles = page.getByRole("region", { name: "Profiles", exact: true });
+  await expect(credentials).toContainText("No credentials yet. Add a provider account, API key or SSH identity to get started.");
+  await expect(profiles).toContainText("No profiles yet. Create a profile from your credentials, then select it for a Sandbox.");
+  await expect(action(credentials, "Add credential")).toBeVisible();
+  await expect(action(profiles, "Create profile")).toBeVisible();
+  expect(await boxless(page.locator(".cw-settings-content > .cw-section"))).toBe(3);
+});
+
+test("Add credential is a dialog, so its providers keep their tiles", { tag: "@mobile" }, async ({ page }) => {
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-add-credential.html`);
+  const add = dialog(page, "Add credential");
+  await expect(add).toBeVisible();
+  const tiles = await add.locator(".cw-credential-choice").evaluateAll((nodes) => nodes.map((node) => {
+    const style = getComputedStyle(node);
+    return parseFloat(style.borderTopWidth) > 0 && parseFloat(style.borderTopLeftRadius) > 0;
+  }));
+  expect(tiles).toEqual(Array(7).fill(true));
+  await fits(page, add);
 });

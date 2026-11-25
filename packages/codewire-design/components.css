@@ -844,7 +844,8 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 
 /* Section: a titled part of a page set with space and type instead of a
    box. The header holds the title, its description and at most one text
-   action; a row list under it is ruled by hairlines, top and bottom. */
+   action. A hairline under the header divides it from its content, as a
+   card's header did; only the box goes. A row list under it ends on one. */
 .cw-section {
   display: grid;
   gap: var(--space-4);
@@ -857,6 +858,8 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   align-items: start;
   justify-content: space-between;
   gap: var(--space-4);
+  padding-bottom: var(--space-4);
+  border-bottom: var(--border-width) solid var(--border-subtle);
 }
 
 .cw-section-header > :first-child { min-width: 0; }
@@ -877,12 +880,19 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   line-height: var(--leading-body);
 }
 
+/* The section's gap spaces its paragraphs; their own margins would double it. */
+.cw-section > p { margin: 0; }
+
 .cw-section > .cw-row-list {
   border-block: var(--border-width) solid var(--border-subtle);
 }
 
 .cw-section > .cw-row-list > li:first-child { padding-top: var(--space-4); }
 .cw-section > .cw-row-list > li:last-child { padding-bottom: var(--space-4); }
+
+/* Under a header the header's hairline is the list's top line. */
+.cw-section > .cw-section-header + .cw-row-list { border-top: 0; }
+.cw-section > .cw-section-header + .cw-row-list > li:first-child { padding-top: 0; }
 
 /* Text action: an action set in type, for a section or a row, where a
    filled or outlined button would draw a box. */
@@ -911,6 +921,23 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 }
 
 .cw-text-action .cw-icon { width: var(--icon-size); height: var(--icon-size); }
+
+.cw-text-action:is(:disabled, [aria-disabled="true"]) {
+  color: var(--fg-disabled);
+  text-decoration: none;
+  cursor: not-allowed;
+}
+
+/* A text action centres its capitals as a button does (styles.css). */
+@supports (text-box: trim-both cap alphabetic) {
+  .cw-text-action:not(:has(> *)) {
+    display: inline-block;
+    align-content: center;
+    text-box: trim-both cap alphabetic;
+  }
+
+  .cw-text-action > span:not(.cw-sr-only, :has(> *)) { text-box: trim-both cap alphabetic; }
+}
 
 /* Field row: fields side by side with a trailing action, such as a remove
    button. Every label shares the first line and every control the second, so
