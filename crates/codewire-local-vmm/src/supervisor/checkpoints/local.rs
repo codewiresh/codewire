@@ -14,9 +14,14 @@ use host::{CLONING_FILESYSTEMS, pinned_vmm, require_same_host, synced_store_warn
 pub(in crate::supervisor) use host::{host_identity, read_vmm_files, vmm_files_match};
 pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
 
-/// The seed bindings a runner reports for the boot it captured; an empty
-/// field is unset.
-fn boot_bindings(boot: &v1::CheckpointBootBindings) -> BootBindings {
+/// The seed bindings a runner reports for the boot it captured, an empty
+/// field unset, with whether the VM's state disk is recorded as cleared now
+/// (#6277).
+fn boot_bindings(
+    config: &NativeRuntimeConfig,
+    environment_id: Uuid,
+    boot: &v1::CheckpointBootBindings,
+) -> BootBindings {
     let optional = |value: &str| (!value.is_empty()).then(|| value.to_owned());
     BootBindings {
         skill_snapshot_sha256: optional(&boot.skill_snapshot_sha256),
@@ -26,6 +31,10 @@ fn boot_bindings(boot: &v1::CheckpointBootBindings) -> BootBindings {
         cw_runtime_catalog_generation: optional(&boot.cw_runtime_catalog_generation),
         daemon_vsock_port: boot.daemon_vsock_port,
         intercept: boot.intercept,
+        state_disk_cleared: Some(super::super::state_disk_clear::state_disk_cleared(
+            config,
+            environment_id,
+        )),
     }
 }
 
@@ -212,7 +221,7 @@ pub(super) async fn capture(
             config_sha256: admitted.config_sha256,
             state_sha256: admitted.state_sha256,
             setup_disk_bytes: (captured.setup_disk_bytes != 0).then_some(captured.setup_disk_bytes),
-            boot: boot_bindings(boot),
+            boot: boot_bindings(&supervisor.config, environment.id, boot),
             timings: Timings {
                 guest_freeze_us: timings.guest_freeze_us,
                 workload_frozen_us: timings.workload_frozen_us,
@@ -552,11 +561,16 @@ pub(super) async fn restore(
         .generation
         .checked_add(1)
         .ok_or_else(|| Status::internal("local generation overflow"))?;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "name": name,
         "generation": generation,
         "checkpoint": row.id.to_string(),
     });
+    if request.start_with_uncleared_disk
+        && let Some(fields) = payload.as_object_mut()
+    {
+        fields.insert(super::START_WITH_UNCLEARED_DISK.to_owned(), true.into());
+    }
     // Bind the lookup first: a `match` on `core()` would hold the core
     // lock through its arms, and `None` takes it again.
     let recorded = supervisor

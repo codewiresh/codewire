@@ -20,6 +20,9 @@ pub use crate::uds::{ArgumentDifference, SupervisorRefusal, UdsError};
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
 use std::sync::Arc;
 
+mod cleared_disk;
+pub use cleared_disk::*;
+
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a failed create waits for its rollback delete to remove the
 /// environment before it reports the environment as kept (#3329).
@@ -218,11 +221,10 @@ impl NativeSupervisorClient {
     ) -> Result<v1::Environment, Status> {
         Ok(self
             .inner
-            .select_environment(v1::EnvironmentSelector {
-                name: name.to_owned(),
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment_id.to_owned(),
-            })
+            .select_environment(identified_selector(
+                name.to_owned(),
+                environment_id.to_owned(),
+            ))
             .await?
             .into_inner())
     }
@@ -330,20 +332,26 @@ impl NativeSupervisorClient {
     }
 
     pub async fn start(&mut self, name: &str) -> Result<v1::Environment, Status> {
-        self.start_observed(name, &mut |_| {})
+        self.start_observed(name, false, &mut |_| {})
             .await
             .map(|(environment, _)| environment)
     }
 
-    /// Start, reporting the lifecycle operation's progress to `observe`.
+    /// Start, reporting the lifecycle operation's progress to `observe`;
+    /// once, with `start_with_uncleared_disk`, although the VM's state disk
+    /// could not be cleared of an earlier sign-in (#6277).
     pub async fn start_observed(
         &mut self,
         name: &str,
+        start_with_uncleared_disk: bool,
         observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<(v1::Environment, v1::Operation), Status> {
         let operation = self
             .inner
-            .start_environment(mutation_selector(name))
+            .start_environment(v1::EnvironmentSelector {
+                start_with_uncleared_disk,
+                ..mutation_selector(name)
+            })
             .await?
             .into_inner();
         // The completed operation carries the start's result, such as a
@@ -369,11 +377,10 @@ impl NativeSupervisorClient {
     ) -> Result<v1::Environment, Status> {
         let operation = self
             .inner
-            .restart_environment(v1::EnvironmentSelector {
-                name: name.to_owned(),
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment_id.to_owned(),
-            })
+            .restart_environment(identified_selector(
+                name.to_owned(),
+                environment_id.to_owned(),
+            ))
             .await?
             .into_inner();
         self.follow_environment_operation(operation, name, &mut |_| {})
@@ -711,7 +718,7 @@ impl NativeSupervisorClient {
             .get_managed_runtime(v1::EnvironmentSelector {
                 name: name.to_owned(),
                 environment_id: environment_id.to_owned(),
-                request_id: String::new(),
+                ..Default::default()
             })
             .await?
             .into_inner())
@@ -925,6 +932,7 @@ impl NativeSupervisorClient {
         checkpoint: &str,
         source: &str,
         account: Option<v1::PlatformAccount>,
+        start_with_uncleared_disk: bool,
         observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Environment, Status> {
         let operation = self
@@ -934,6 +942,7 @@ impl NativeSupervisorClient {
                 checkpoint: checkpoint.to_owned(),
                 account,
                 request_id: Uuid::new_v4().to_string(),
+                start_with_uncleared_disk,
             })
             .await?
             .into_inner();
@@ -1384,8 +1393,7 @@ pub enum EgressRefusalsRead {
 pub(crate) fn read_selector(name: &str) -> v1::EnvironmentSelector {
     v1::EnvironmentSelector {
         name: name.to_owned(),
-        request_id: String::new(),
-        environment_id: String::new(),
+        ..Default::default()
     }
 }
 
@@ -1393,7 +1401,18 @@ fn mutation_selector(name: &str) -> v1::EnvironmentSelector {
     v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: Uuid::new_v4().to_string(),
-        environment_id: String::new(),
+        ..Default::default()
+    }
+}
+
+/// A mutation's selector of one environment by name and stable id, as a
+/// public adapter sends it.
+pub(crate) fn identified_selector(name: String, environment_id: String) -> v1::EnvironmentSelector {
+    v1::EnvironmentSelector {
+        name,
+        request_id: Uuid::new_v4().to_string(),
+        environment_id,
+        ..Default::default()
     }
 }
 

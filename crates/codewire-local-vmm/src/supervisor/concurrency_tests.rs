@@ -129,6 +129,7 @@ fn selector(service: &SupervisorRpc, name: &str) -> v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: Uuid::new_v4().to_string(),
         environment_id: service.supervisor.environment(name).unwrap().id.to_string(),
+        start_with_uncleared_disk: false,
     }
 }
 

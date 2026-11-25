@@ -57,11 +57,15 @@ impl Supervisor {
         }
     }
 
+    /// What the boot that `operation_id` applies enforces and intercepts,
+    /// once its VM's state disk is settled for it (#6277).
     pub(super) async fn boot_egress(
         &self,
-        environment_id: Uuid,
+        operation_id: Uuid,
         broker: &super::CredentialBrokerEnsureRequest,
     ) -> Result<BootEgress, SupervisorError> {
+        let environment_id = Uuid::parse_str(&broker.environment_id.to_string())
+            .map_err(|_| SupervisorError::InvalidState)?;
         let authority = self.authority_serves().await;
         let network_policy = self
             .core()
@@ -78,14 +82,17 @@ impl Supervisor {
         };
         let interception =
             egress_intercept::for_boot(&self.config.root, self.log.as_deref(), broker, authority);
-        Ok(BootEgress {
+        let egress = BootEgress {
             network_policy_label: crate::runner_service::policy_label(&network_policy),
             network_policy,
             network_policy_document,
             intercept: interception.state == v1::InterceptionState::Intercepted as i32,
             interception,
             platform: broker.platform.clone(),
-        })
+        };
+        self.settle_state_disk_for_boot(operation_id, environment_id, &egress)
+            .await?;
+        Ok(egress)
     }
 }
 

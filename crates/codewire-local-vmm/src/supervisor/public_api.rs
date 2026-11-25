@@ -1556,11 +1556,10 @@ impl proto::EnvironmentService for SupervisorRpc {
             .await?;
         LocalSupervisorService::delete_environment(
             self,
-            TonicRequest::new(v1::EnvironmentSelector {
-                name: environment.name,
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment.id,
-            }),
+            TonicRequest::new(crate::supervisor_client::identified_selector(
+                environment.name,
+                environment.id,
+            )),
         )
         .await
         .map_err(local_status)?;
@@ -1578,11 +1577,10 @@ impl proto::EnvironmentService for SupervisorRpc {
             .await?;
         LocalSupervisorService::stop_environment(
             self,
-            TonicRequest::new(v1::EnvironmentSelector {
-                name: environment.name,
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment.id,
-            }),
+            TonicRequest::new(crate::supervisor_client::identified_selector(
+                environment.name,
+                environment.id,
+            )),
         )
         .await
         .map_err(local_status)?;
@@ -1604,11 +1602,10 @@ impl proto::EnvironmentService for SupervisorRpc {
         let retried = private_environment_state(environment.state)? == v1::EnvironmentState::Error;
         LocalSupervisorService::start_environment(
             self,
-            TonicRequest::new(v1::EnvironmentSelector {
-                name: environment.name,
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment.id,
-            }),
+            TonicRequest::new(crate::supervisor_client::identified_selector(
+                environment.name,
+                environment.id,
+            )),
         )
         .await
         .map_err(local_status)?;
@@ -1927,11 +1924,10 @@ impl proto::EnvironmentService for SupervisorRpc {
             .await?;
         let operation = LocalSupervisorService::restart_environment(
             self,
-            TonicRequest::new(v1::EnvironmentSelector {
-                name: environment.name,
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment.id,
-            }),
+            TonicRequest::new(crate::supervisor_client::identified_selector(
+                environment.name,
+                environment.id,
+            )),
         )
         .await
         .map(tonic::Response::into_inner)

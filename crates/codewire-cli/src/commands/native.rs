@@ -39,6 +39,7 @@ mod local_https;
 mod policy_view;
 mod ports;
 mod profile;
+mod snapshot_restore;
 mod sources;
 pub(crate) use profile::require_native_agent_profile;
 
@@ -815,7 +816,7 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
             .get_checkpoint(selector)
             .await
             .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
-        super::checkpoint::refuse_unrestorable(&checkpoint, "forked")?;
+        super::checkpoint::admit_fork(&client, &checkpoint, &args)?;
         checkpoint
             .snapshot
             .context("the supervisor described no VM checkpoint source")?
@@ -978,13 +979,12 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
             platform_source_authority: selected.platform.clone(),
             implicit_vm_only: snapshot.implicit_vm_only.clone(),
             network_policy: network_policy.clone(),
-            snapshot: Some(v1::SnapshotRestore {
-                snapshot_id: snapshot.id.clone(),
-                vcpus,
-                memory_mib,
-                share_mounts: args.share_mounts,
-                account: account.clone(),
-            }),
+            snapshot: Some(snapshot_restore::request(
+                &args,
+                &snapshot.id,
+                (vcpus, memory_mib),
+                &account,
+            )),
         });
     }
     if matches!(args.output, OutputFormat::Text) {
@@ -1905,7 +1905,7 @@ async fn start_native_environment_with(
 ) -> anyhow::Result<v1::Environment> {
     prepare_native_start(&mut client, name).await?;
     let progress = NativeProgress::new(&super::environment::progress::text_progress_capabilities());
-    lifecycle::run_native_start(client, name, &progress)
+    lifecycle::run_native_start(client, name, false, &progress)
         .await?
         .map(|(environment, _)| environment)
         .map_err(|(stage, error)| match stage {

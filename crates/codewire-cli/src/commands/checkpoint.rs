@@ -65,6 +65,11 @@ pub(crate) struct CheckpointRestoreArgs {
         help = "Stop the running environment without asking; its running state and disk changes since the checkpoint are discarded"
     )]
     pub(crate) yes: bool,
+    #[arg(
+        long,
+        help = "Restore it once although its disk may hold a sign-in from before the VM's disk was cleared (sign the provider out first); not for a VM on a platform profile"
+    )]
+    pub(crate) start_with_uncleared_disk: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
@@ -169,12 +174,7 @@ async fn handle_local_checkpoint_command(
     globals: &Globals,
     command: CheckpointCommand,
 ) -> anyhow::Result<()> {
-    let status = |action: &'static str| {
-        move |status: tonic::Status| {
-            let error = anyhow::anyhow!("couldn't {action}: {}", status.message());
-            interception::with_switch_step(error, &status)
-        }
-    };
+    let status = refused;
     // Taken before the restore looks at, asks about or stops anything, so a
     // refusal after an upgrade changes nothing (#5243).
     let mut client = if command.boots_a_vm() {
@@ -224,73 +224,7 @@ async fn handle_local_checkpoint_command(
                 }
             }
         }
-        CheckpointCommand::Restore(args) => {
-            let checkpoint = client
-                .get_checkpoint(&args.checkpoint)
-                .await
-                .map_err(status("restore the VM checkpoint"))?;
-            // Refused before the source is stopped.
-            refuse_unrestorable(&checkpoint, "restored")?;
-            let source = checkpoint.source_name.clone();
-            let started = std::time::Instant::now();
-            let environment = client
-                .get(&source)
-                .await
-                .map_err(status("restore the VM checkpoint"))?;
-            let mut stopped = None;
-            if environment.state != v1::EnvironmentState::Stopped as i32 {
-                if !confirm_restore(&source, &checkpoint.name, args.yes)? {
-                    anyhow::bail!("restore cancelled; {source} is unchanged");
-                }
-                let stopping = std::time::Instant::now();
-                // The restore discards the running state, so the source stops
-                // without a graceful guest poweroff, once the supervisor has
-                // checked the checkpoint as the restore will (#3046).
-                client
-                    .stop_for_restore_observed(
-                        &checkpoint.name,
-                        &source,
-                        native_signed_in_account(globals),
-                        &mut |_| {},
-                    )
-                    .await
-                    .map_err(status("stop the VM for the restore"))?;
-                stopped = Some(stopping.elapsed());
-            }
-            let restoring = std::time::Instant::now();
-            let account = native_signed_in_account(globals);
-            let environment = client
-                .restore_checkpoint_observed(&checkpoint.name, &source, account, &mut |_| {})
-                .await
-                .map_err(|error| {
-                    locked_restore_failure(&source, &error)
-                        .unwrap_or_else(|| status("restore the VM checkpoint")(error))
-                })?;
-            let restored = restoring.elapsed();
-            match args.output {
-                OutputFormat::Json => print_json(&serde_json::json!({
-                    "checkpoint": CheckpointView::from(&checkpoint),
-                    "environment": environment.name,
-                    "generation": environment.generation,
-                    "stop_ms": stopped.map(|elapsed| elapsed.as_millis() as u64),
-                    "restore_ms": restored.as_millis() as u64,
-                    "total_ms": started.elapsed().as_millis() as u64,
-                })),
-                OutputFormat::Text => {
-                    println!(
-                        "{}",
-                        restored_line(
-                            &environment.name,
-                            &checkpoint.name,
-                            stopped,
-                            restored,
-                            started.elapsed()
-                        )
-                    );
-                    Ok(())
-                }
-            }
-        }
+        CheckpointCommand::Restore(args) => restore(&mut client, globals, args).await,
         CheckpointCommand::Rm(args) => {
             let checkpoint = client
                 .delete_checkpoint(&args.checkpoint)
@@ -307,8 +241,111 @@ async fn handle_local_checkpoint_command(
     }
 }
 
+/// A supervisor's refusal of `action`, with the interception switch's step
+/// where it applies.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn refused(action: &'static str) -> impl Fn(tonic::Status) -> anyhow::Error {
+    move |status: tonic::Status| {
+        let error = anyhow::anyhow!("couldn't {action}: {}", status.message());
+        interception::with_switch_step(error, &status)
+    }
+}
+
+/// `cw checkpoint restore`: refused before the source is stopped when the
+/// checkpoint can't be restored here, or may intercept through a supervisor
+/// too old to clear the VM's disk first (#6277).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn restore(
+    client: &mut codewire_local_vmm::supervisor::NativeSupervisorClient,
+    globals: &Globals,
+    args: CheckpointRestoreArgs,
+) -> anyhow::Result<()> {
+    let status = refused;
+    let checkpoint = client
+        .get_checkpoint(&args.checkpoint)
+        .await
+        .map_err(status("restore the VM checkpoint"))?;
+    // Refused before the source is stopped.
+    refuse_unrestorable(&checkpoint, "restored")?;
+    admit_checkpoint_boot(
+        client,
+        &checkpoint,
+        UnclearedBootKind::Restore,
+        args.start_with_uncleared_disk,
+    )?;
+    let source = checkpoint.source_name.clone();
+    let started = std::time::Instant::now();
+    let environment = client
+        .get(&source)
+        .await
+        .map_err(status("restore the VM checkpoint"))?;
+    let mut stopped = None;
+    if environment.state != v1::EnvironmentState::Stopped as i32 {
+        if !confirm_restore(&source, &checkpoint.name, args.yes)? {
+            anyhow::bail!("restore cancelled; {source} is unchanged");
+        }
+        let stopping = std::time::Instant::now();
+        // The restore discards the running state, so the source stops
+        // without a graceful guest poweroff, once the supervisor has
+        // checked the checkpoint as the restore will (#3046).
+        client
+            .stop_for_restore_observed(
+                &checkpoint.name,
+                &source,
+                native_signed_in_account(globals),
+                &mut |_| {},
+            )
+            .await
+            .map_err(status("stop the VM for the restore"))?;
+        stopped = Some(stopping.elapsed());
+    }
+    let restoring = std::time::Instant::now();
+    let account = native_signed_in_account(globals);
+    let environment = client
+        .restore_checkpoint_observed(
+            &checkpoint.name,
+            &source,
+            account,
+            args.start_with_uncleared_disk,
+            &mut |_| {},
+        )
+        .await
+        .map_err(|error| {
+            locked_restore_failure(&source, &error)
+                .unwrap_or_else(|| status("restore the VM checkpoint")(error))
+        })?;
+    let restored = restoring.elapsed();
+    match args.output {
+        OutputFormat::Json => print_json(&serde_json::json!({
+            "checkpoint": CheckpointView::from(&checkpoint),
+            "environment": environment.name,
+            "generation": environment.generation,
+            "stop_ms": stopped.map(|elapsed| elapsed.as_millis() as u64),
+            "restore_ms": restored.as_millis() as u64,
+            "total_ms": started.elapsed().as_millis() as u64,
+        })),
+        OutputFormat::Text => {
+            println!(
+                "{}",
+                restored_line(
+                    &environment.name,
+                    &checkpoint.name,
+                    stopped,
+                    restored,
+                    started.elapsed()
+                )
+            );
+            Ok(())
+        }
+    }
+}
+
 use crate::commands::progress::terminal_text;
 use codewire_local_vmm::control::v1;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use codewire_local_vmm::supervisor_client::{
+    UnclearedBoot, UnclearedBootAdmission, UnclearedBootKind,
+};
 
 fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
@@ -355,6 +392,78 @@ fn confirm_restore(source: &str, checkpoint: &str, yes: bool) -> anyhow::Result<
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+/// A fork of `checkpoint` that `args` asks for: refused when the checkpoint
+/// can't be restored here, or may intercept through a supervisor too old to
+/// clear the VM's disk first (#6277).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn admit_fork(
+    client: &codewire_local_vmm::supervisor::NativeSupervisorClient,
+    checkpoint: &v1::Checkpoint,
+    args: &EnvCreateArgs,
+) -> anyhow::Result<()> {
+    refuse_unrestorable(checkpoint, "forked")?;
+    admit_checkpoint_boot(
+        client,
+        checkpoint,
+        UnclearedBootKind::Fork,
+        args.start_with_uncleared_disk,
+    )
+}
+
+/// [`admit_uncleared_boot`] for a restore or fork of `checkpoint`, which may
+/// intercept when its VM had a credential profile or project secrets, as a
+/// start counts them; a source project this cw can't read counts as one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn admit_checkpoint_boot(
+    client: &codewire_local_vmm::supervisor::NativeSupervisorClient,
+    checkpoint: &v1::Checkpoint,
+    kind: UnclearedBootKind,
+    start_with_uncleared_disk: bool,
+) -> anyhow::Result<()> {
+    let source = checkpoint.snapshot.as_ref();
+    let platform = source.is_some_and(|source| source.platform_source_authority.is_some());
+    admit_uncleared_boot(
+        client,
+        UnclearedBoot {
+            kind,
+            may_intercept: platform || source.is_none_or(source_may_intercept),
+            platform,
+            start_with_uncleared_disk,
+        },
+    )
+}
+
+/// Whether a checkpoint's source has a credential profile or project
+/// secrets, so a broker, so its restore or fork may intercept.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn source_may_intercept(source: &v1::Snapshot) -> bool {
+    !source.access_profile_reference.is_empty()
+        || serde_json::from_slice::<codewire_project::ProjectSpec>(&source.project_spec_json)
+            .map_or(true, |spec| {
+                spec.credentials.is_some() || !spec.secrets.is_empty()
+            })
+}
+
+/// Refuse a boot that may intercept through a local VM supervisor below
+/// protocol 27, which doesn't clear the VM's disk of earlier sign-ins first
+/// (#6277), unless this one command passed the override; then say so.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn admit_uncleared_boot(
+    client: &codewire_local_vmm::supervisor::NativeSupervisorClient,
+    boot: UnclearedBoot,
+) -> anyhow::Result<()> {
+    match client.admit_uncleared_boot(boot) {
+        Ok(UnclearedBootAdmission::Admitted) => Ok(()),
+        Ok(UnclearedBootAdmission::Overridden { protocol }) => {
+            eprintln!(
+                "Note: going ahead without clearing the VM's disk of earlier sign-ins, through an older local VM supervisor (protocol {protocol})."
+            );
+            Ok(())
+        }
+        Err(refusal) => Err(anyhow::Error::new(refusal)),
+    }
 }
 
 /// Refuses a VM checkpoint this cw cannot restore, such as one taken under an
@@ -457,10 +566,12 @@ fn list_text(checkpoints: &[v1::Checkpoint]) -> String {
                         .iter()
                         .map(|disk| disk.allocated_bytes)
                         .sum::<u64>()),
-                if checkpoint.unrestorable_reason.is_empty() {
-                    "ready".to_owned()
-                } else {
+                if !checkpoint.unrestorable_reason.is_empty() {
                     "unrestorable".to_owned()
+                } else if checkpoint.may_hold_sign_in {
+                    "uncleared".to_owned()
+                } else {
+                    "ready".to_owned()
                 },
             ]
         })
@@ -487,10 +598,20 @@ fn list_text(checkpoints: &[v1::Checkpoint]) -> String {
             .trim_end()
             .to_owned()
     };
-    std::iter::once(line(header.iter().map(|cell| (*cell).to_owned()).collect()))
+    let table = std::iter::once(line(header.iter().map(|cell| (*cell).to_owned()).collect()))
         .chain(rows.into_iter().map(|row| line(row.to_vec())))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    if checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.may_hold_sign_in)
+    {
+        format!(
+            "{table}\n\nAn uncleared checkpoint may hold an earlier sign-in on its disk; remove it with `cw checkpoint rm NAME`."
+        )
+    } else {
+        table
+    }
 }
 
 fn inspect_text(checkpoint: &v1::Checkpoint) -> String {
@@ -587,6 +708,7 @@ struct CheckpointView {
     timings: TimingsView,
     #[serde(skip_serializing_if = "String::is_empty")]
     unrestorable_reason: String,
+    may_hold_sign_in: bool,
     warnings: Vec<String>,
 }
 
@@ -651,6 +773,7 @@ impl From<&v1::Checkpoint> for CheckpointView {
                 total_us: timings.total_us,
             },
             unrestorable_reason: checkpoint.unrestorable_reason.clone(),
+            may_hold_sign_in: checkpoint.may_hold_sign_in,
             warnings: checkpoint.warnings.clone(),
         }
     }
@@ -658,6 +781,30 @@ impl From<&v1::Checkpoint> for CheckpointView {
 
 #[cfg(test)]
 mod tests {
+    /// A restore or fork counts a source's project secrets as a start does
+    /// (#6277): secrets alone give the VM a broker, so it may intercept.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_checkpoint_source_with_secrets_or_a_profile_may_intercept() {
+        let source = |profile: &str, spec: &codewire_project::ProjectSpec| super::v1::Snapshot {
+            access_profile_reference: profile.into(),
+            project_spec_json: serde_json::to_vec(spec).unwrap(),
+            ..Default::default()
+        };
+        let plain = codewire_project::ProjectSpec::default();
+        assert!(!super::source_may_intercept(&source("", &plain)));
+        assert!(super::source_may_intercept(&source("local:work", &plain)));
+        let mut with_secrets = plain.clone();
+        with_secrets.secrets.project = "app".into();
+        assert!(super::source_may_intercept(&source("", &with_secrets)));
+        // A source project this cw can't read counts as one that may.
+        let unreadable = super::v1::Snapshot {
+            project_spec_json: b"not json".to_vec(),
+            ..Default::default()
+        };
+        assert!(super::source_may_intercept(&unreadable));
+    }
+
     #[test]
     fn an_unrestorable_checkpoint_is_refused_with_its_removal() {
         let mut checkpoint = v1::Checkpoint {
@@ -797,6 +944,12 @@ mod tests {
         unrestorable.unrestorable_reason = "it was taken on another CPU".to_owned();
         assert!(list_text(&[unrestorable.clone()]).contains("unrestorable"));
         assert!(inspect_text(&unrestorable).contains("another CPU"));
+        assert!(!listing.contains("uncleared"));
+        let mut uncleared = checkpoint();
+        uncleared.may_hold_sign_in = true;
+        let flagged = list_text(&[uncleared]);
+        assert!(flagged.contains("uncleared"), "{flagged}");
+        assert!(flagged.contains("cw checkpoint rm"), "{flagged}");
         assert!(inspect_text(&checkpoint()).contains("paired"));
     }
 

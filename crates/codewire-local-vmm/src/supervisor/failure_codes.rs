@@ -33,6 +33,7 @@ pub(super) fn create_failure_code(error: &SupervisorError) -> &'static str {
                 "create_platform_placeholders_unavailable"
             }
         },
+        SupervisorError::UnclearedDisk(refusal) => refusal.create_code(),
         SupervisorError::EnvironmentAccessBindingRejected(code) => match code {
             tonic::Code::InvalidArgument => "create_access_binding_invalid",
             tonic::Code::NotFound => "create_access_binding_not_found",
@@ -109,6 +110,7 @@ pub(super) fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         }
         SupervisorError::EnvironmentAccessUnavailable => "access_unavailable",
         SupervisorError::PlatformPlaceholders(refusal) => refusal.code(),
+        SupervisorError::UnclearedDisk(refusal) => refusal.code(),
         SupervisorError::EnvironmentAccessBindingRejected(code) => match code {
             tonic::Code::InvalidArgument => "access_binding_invalid",
             tonic::Code::NotFound => "access_binding_not_found",

@@ -2,6 +2,7 @@
 //! working context, stop and remove outcomes, and failures that name the
 //! stage that stopped.
 
+use codewire_local_vmm::supervisor_client::{UnclearedBoot, UnclearedBootKind};
 use codewire_project::{ProjectSpec, StoragePlacement};
 
 use super::*;
@@ -332,12 +333,24 @@ pub(super) async fn environment_for_boot(
     Ok(environment)
 }
 
+/// A start of `environment`, which may intercept when it has a credential
+/// profile or secrets (#6277).
+fn uncleared_boot(environment: &v1::Environment, start_with_uncleared_disk: bool) -> UnclearedBoot {
+    UnclearedBoot {
+        kind: UnclearedBootKind::Start,
+        may_intercept: environment.requires_credential_authority,
+        platform: environment.platform_source_authority.is_some(),
+        start_with_uncleared_disk,
+    }
+}
+
 /// `cw start` on a local environment.
 pub(crate) async fn start_native_environment(
     globals: &Globals,
     name: &str,
-    output: OutputFormat,
+    args: &EnvStartArgs,
 ) -> anyhow::Result<()> {
+    let output = args.output;
     host_support::require_local_vm_host()?;
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_boot_client().await?;
@@ -345,6 +358,10 @@ pub(crate) async fn start_native_environment(
     if environment.state == v1::EnvironmentState::Running as i32 {
         return print_already(&environment, Already::Running, output);
     }
+    admit_uncleared_boot(
+        &client,
+        uncleared_boot(&environment, args.start_with_uncleared_disk),
+    )?;
     let secrets = if caps.is_machine() {
         SourceRef::None
     } else {
@@ -358,7 +375,13 @@ pub(crate) async fn start_native_environment(
         &caps,
         InterruptNotice::new(VmLocation::Local, "start", &environment.name),
     );
-    let started = run_native_start(client, &environment.name, &progress).await?;
+    let started = run_native_start(
+        client,
+        &environment.name,
+        args.start_with_uncleared_disk,
+        &progress,
+    )
+    .await?;
     let (started, moved) = match started {
         Ok(started) => started,
         Err((stage, error)) => {
@@ -404,11 +427,12 @@ pub(super) type NativeStart =
 pub(super) async fn run_native_start(
     mut client: NativeSupervisorClient,
     name: &str,
+    start_with_uncleared_disk: bool,
     progress: &NativeProgress,
 ) -> anyhow::Result<NativeStart> {
     let mut observe = |operation: &v1::Operation| progress.observe(operation);
     let started = match progress
-        .tick_while(client.start_observed(name, &mut observe))
+        .tick_while(client.start_observed(name, start_with_uncleared_disk, &mut observe))
         .await?
     {
         Err(lost) if codewire_local_vmm::supervisor_client::operation_watch_lost_contact(&lost) => {
@@ -514,6 +538,13 @@ pub(crate) async fn restart_native_environment(
     let mut client = native_boot_client().await?;
     ensure_pinned_runtime().await?;
     let environment = environment_for_boot(&mut client, name).await?;
+    admit_uncleared_boot(
+        &client,
+        UnclearedBoot {
+            kind: UnclearedBootKind::Restart,
+            ..uncleared_boot(&environment, false)
+        },
+    )?;
     let secrets = if caps.is_machine() {
         SourceRef::None
     } else {

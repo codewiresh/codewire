@@ -2007,6 +2007,16 @@ fn env_lifecycle_parsers_accept_targets_and_output() {
     };
     assert_eq!(args.environment, "builder");
     assert!(matches!(args.output, OutputFormat::Json));
+    assert!(!args.start_with_uncleared_disk);
+    let cli = Cli::try_parse_from(["cw", "start", "builder", "--start-with-uncleared-disk"]).unwrap();
+    let (_, _, EnvCommand::Start(args)) = env_operation(cli) else {
+        panic!("expected env start command");
+    };
+    assert!(args.start_with_uncleared_disk);
+    // A fork's override needs a checkpoint to fork.
+    assert!(
+        Cli::try_parse_from(["cw", "create", "--local", "--start-with-uncleared-disk"]).is_err()
+    );
 
     // Without --session, stop and restart name a whole environment.
     for (argv, expected) in [

@@ -58,6 +58,21 @@ pub(in crate::supervisor) struct BootBindings {
     /// before the switch existed has none: off.
     #[serde(default)]
     pub(in crate::supervisor) intercept: bool,
+    /// The VM's state disk was recorded as cleared when it was taken (#6277):
+    /// absent on a checkpoint taken before the record existed, false after a
+    /// start with the override. Absent or false flags the checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::supervisor) state_disk_cleared: Option<bool>,
+}
+
+impl BootBindings {
+    /// What a restore or fork's state disk settling reads of it.
+    pub(in crate::supervisor) fn disk(&self) -> super::state_disk_clear::CheckpointDisk {
+        super::state_disk_clear::CheckpointDisk {
+            intercepted: self.intercept,
+            cleared: self.state_disk_cleared == Some(true),
+        }
+    }
 }
 
 /// How long each part of the capture took, in microseconds.
@@ -323,11 +338,40 @@ pub(super) async fn place_in_place(
 
 /// A restoring Start's StartVm request: the checkpoint to restore, and its
 /// vsock CID, which the restored guest cached at probe.
-pub(super) fn attach_boot(
+/// The key a Start or a checkpoint restore journals, only when set, for the
+/// one-start override of an uncleared state disk (#6277).
+pub(super) const START_WITH_UNCLEARED_DISK: &str = "start_with_uncleared_disk";
+
+/// Whether a journaled Start's payload carries the override: absent, or
+/// exactly `true`.
+pub(super) fn start_payload_override(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<bool, SupervisorError> {
+    match fields.get(START_WITH_UNCLEARED_DISK) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(true)) => Ok(true),
+        Some(_) => Err(SupervisorError::InvalidState),
+    }
+}
+
+/// What a boot's state disk starts from (#6277).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BootOrigin {
+    /// The VM's disk as its last boot left it.
+    Existing,
+    /// A create's new disk, or one placed from a disk snapshot, which
+    /// capture cleared.
+    New,
+    /// A restore or fork of this VM checkpoint.
+    Checkpoint(Uuid),
+}
+
+/// What a boot starts from, and whether its operation passed the override
+/// of an uncleared state disk.
+pub(super) fn boot_source(
     supervisor: &Supervisor,
     operation_id: Uuid,
-    request: v1::StartVmRequest,
-) -> Result<v1::StartVmRequest, SupervisorError> {
+) -> Result<(BootOrigin, bool), SupervisorError> {
     // The Start being applied is pending until it completes.
     let operation = supervisor
         .core()
@@ -340,22 +384,52 @@ pub(super) fn attach_boot(
         .payload
         .as_object()
         .ok_or(SupervisorError::InvalidState)?;
-    let checkpoint_id = match operation.kind {
-        OperationKind::Start => start_payload_checkpoint(fields)?,
+    Ok(match operation.kind {
+        OperationKind::Start => (
+            start_payload_checkpoint(fields)?.map_or(BootOrigin::Existing, BootOrigin::Checkpoint),
+            start_payload_override(fields)?,
+        ),
         // A create from a VM checkpoint's id is a live fork; one from a disk
         // snapshot boots.
         OperationKind::Create => match super::snapshots::from_payload(fields)? {
-            Some(restore) => super::snapshots::canonical_id(&restore.snapshot_id).filter(|id| {
-                super::snapshots::store(&supervisor.config)
-                    .ok()
-                    .and_then(|store| store.find(&id.to_string()).ok().flatten())
-                    .is_some_and(|row| row.kind.is_checkpoint())
-            }),
-            None => None,
+            Some(restore) => (
+                super::snapshots::canonical_id(&restore.snapshot_id)
+                    .filter(|id| {
+                        super::snapshots::store(&supervisor.config)
+                            .ok()
+                            .and_then(|store| store.find(&id.to_string()).ok().flatten())
+                            .is_some_and(|row| row.kind.is_checkpoint())
+                    })
+                    .map_or(BootOrigin::New, BootOrigin::Checkpoint),
+                restore.start_with_uncleared_disk,
+            ),
+            None => (BootOrigin::New, false),
         },
-        _ => None,
-    };
-    let Some(checkpoint_id) = checkpoint_id else {
+        _ => (BootOrigin::Existing, false),
+    })
+}
+
+/// What the VM checkpoint `checkpoint_id` recorded about its state disk.
+pub(super) fn checkpoint_disk(
+    supervisor: &Supervisor,
+    checkpoint_id: Uuid,
+) -> Result<super::state_disk_clear::CheckpointDisk, SupervisorError> {
+    let (_, manifest) =
+        super::snapshots::find_ready(&supervisor.config, &checkpoint_id.to_string(), true)
+            .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
+    manifest
+        .checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.boot.disk())
+        .ok_or(SupervisorError::InvalidState)
+}
+
+pub(super) fn attach_boot(
+    supervisor: &Supervisor,
+    operation_id: Uuid,
+    request: v1::StartVmRequest,
+) -> Result<v1::StartVmRequest, SupervisorError> {
+    let (BootOrigin::Checkpoint(checkpoint_id), _) = boot_source(supervisor, operation_id)? else {
         return Ok(request);
     };
     let mut request = request;

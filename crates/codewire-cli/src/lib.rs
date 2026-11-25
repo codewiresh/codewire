@@ -680,7 +680,7 @@ enum Command {
         about = "Start an environment",
         long_about = "Start a stopped environment, or recover one in error:\n  cw start ENV\n\nIn error, a local VM's failed VM is stopped first, as `cw stop` would, and a cloud environment retries its create, which replaces a failed Pod. A cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
     )]
-    Start(EnvTargetArgs),
+    Start(EnvStartArgs),
     #[command(
         about = "Run a cloud Sandbox's failed setup again",
         long_about = "Run a cloud Sandbox's failed setup again, from the step it failed at, and follow it to its end:\n  cw retry ENV\n\nFix what failed first, in `cw shell ENV`. Steps that completed don't run again. A retry from the clone step clones the repositories again, which deletes their directories and any edits made there; it asks first, and --yes confirms it without asking. Ctrl-C ends only the wait."

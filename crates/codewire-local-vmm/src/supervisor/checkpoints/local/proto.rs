@@ -29,6 +29,10 @@ pub(in crate::supervisor) fn checkpoint_proto(
         "a VM checkpoint holds everything the VM's memory held, delivered sign-ins included, until they expire; it stays on this host and is never exported".to_owned(),
     ];
     warnings.extend(super::host::host_warning(&checkpoint.host));
+    let may_hold_sign_in = checkpoint.boot.disk().may_hold_sign_in();
+    if may_hold_sign_in {
+        warnings.push("this checkpoint may hold an earlier sign-in on its disk, from a boot without agent interception or from before its VM's disk was cleared; `cw checkpoint rm` removes it".to_owned());
+    }
     Ok(v1::Checkpoint {
         id: snapshot.id,
         name: snapshot.name,
@@ -55,6 +59,7 @@ pub(in crate::supervisor) fn checkpoint_proto(
         account: snapshot.account,
         source_generation: checkpoint.source_generation,
         snapshot: Some(described),
+        may_hold_sign_in,
     })
 }
 

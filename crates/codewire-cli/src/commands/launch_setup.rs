@@ -319,10 +319,13 @@ pub(crate) async fn choose_run_environment(
                 Box::pin(handle_env_command(
                     &located,
                     Some(placement),
-                    EnvCommand::Start(EnvTargetArgs {
-                        environment: chosen.id().to_owned(),
-                        output: OutputFormat::Text,
-                    }),
+                    EnvCommand::Start(
+                        EnvTargetArgs {
+                            environment: chosen.id().to_owned(),
+                            output: OutputFormat::Text,
+                        }
+                        .into(),
+                    ),
                 ))
                 .await?;
             }

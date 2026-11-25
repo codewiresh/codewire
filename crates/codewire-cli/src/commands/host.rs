@@ -895,7 +895,7 @@ pub(crate) async fn handle_host_environment_command(
     let requested = match command {
         EnvCommand::Info(a) => Some(a.environment.as_str()),
         EnvCommand::Report(a) => Some(a.environment.as_str()),
-        EnvCommand::Start(a)
+        EnvCommand::Start(EnvStartArgs { target: a, .. })
         | EnvCommand::Stop(a)
         | EnvCommand::Restart(a)
         | EnvCommand::RefreshSkills(a) => Some(a.environment.as_str()),

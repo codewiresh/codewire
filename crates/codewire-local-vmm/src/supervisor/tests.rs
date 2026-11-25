@@ -2225,6 +2225,7 @@ async fn skill_refresh_replay_uses_current_intent_after_a_source_only_change() {
             name: "dev".to_owned(),
             request_id: request_id.to_string(),
             environment_id: environment_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap()
@@ -3557,6 +3558,7 @@ async fn native_start_journals_admitted_mixed_sources_before_runtime_authority()
             name: "dev".to_owned(),
             request_id: request_id.to_string(),
             environment_id: environment_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap()
@@ -5725,6 +5727,7 @@ async fn select_environment_persists_the_new_current_environment() {
             name: "selected".to_owned(),
             request_id: Uuid::new_v4().to_string(),
             environment_id: selected_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap()
@@ -5748,6 +5751,7 @@ async fn select_environment_rejects_a_recreated_identity_without_changing_curren
             name: "dev".to_owned(),
             request_id: Uuid::new_v4().to_string(),
             environment_id: Uuid::new_v4().to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();
@@ -5766,6 +5770,7 @@ async fn lifecycle_rpc_commits_before_the_detached_worker_completes() {
             name: "dev".to_owned(),
             request_id: Uuid::new_v4().to_string(),
             environment_id: String::new(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap()
@@ -7008,6 +7013,7 @@ async fn a_new_mutation_cannot_terminalize_an_authority_deferred_recovery() {
             name: "dev".to_owned(),
             request_id: new_request_id.to_string(),
             environment_id: environment_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();
@@ -7398,6 +7404,7 @@ async fn delete_replay_preserves_the_stable_environment_precondition() {
             name: "dev".to_owned(),
             request_id: request_id.to_string(),
             environment_id: Uuid::new_v4().to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();
@@ -7437,6 +7444,7 @@ async fn start_replay_cannot_cross_a_recreated_environment_identity() {
             name: "dev".to_owned(),
             request_id: request_id.to_string(),
             environment_id: current_environment_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();

@@ -670,7 +670,7 @@ async fn handle_platform_env_command_with_created(
         }
         EnvCommand::Stop(args) => stop_start::stop(&environment_client, &org_id, args).await?,
         EnvCommand::Start(args) => {
-            stop_start::start(&platform, &environment_client, &org_id, args).await?;
+            stop_start::start(&platform, &environment_client, &org_id, args.target).await?;
         }
         EnvCommand::Restart(_) => {
             anyhow::bail!("restart is supported only for local environments");
@@ -894,7 +894,7 @@ async fn handle_platform_env_command_with_created(
 
 #[derive(Debug)]
 enum UnifiedEnvironmentLifecycle {
-    Start(EnvTargetArgs),
+    Start(EnvStartArgs),
     Stop(EnvTargetArgs),
     Restart(EnvTargetArgs),
     Remove(EnvDeleteArgs),
@@ -903,7 +903,8 @@ enum UnifiedEnvironmentLifecycle {
 impl UnifiedEnvironmentLifecycle {
     fn environment(&self) -> &str {
         match self {
-            Self::Start(args) | Self::Stop(args) | Self::Restart(args) => &args.environment,
+            Self::Start(args) => &args.environment,
+            Self::Stop(args) | Self::Restart(args) => &args.environment,
             Self::Remove(args) => &args.environment,
         }
     }
@@ -1772,7 +1773,7 @@ async fn handle_unified_environment_lifecycle(
     match (target, command) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Start(args)) => {
-            Box::pin(start_native_environment(globals, &name, args.output)).await
+            Box::pin(start_native_environment(globals, &name, &args)).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Stop(args)) => {
@@ -1789,14 +1790,7 @@ async fn handle_unified_environment_lifecycle(
             UnifiedEnvironmentLifecycle::Remove(args),
         ) => Box::pin(remove_native_environment(&name, args.yes, args.output)).await,
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
-            handle_platform_env_command(
-                globals,
-                EnvCommand::Start(EnvTargetArgs {
-                    environment: id,
-                    output: args.output,
-                }),
-            )
-            .await
+            handle_platform_env_command(globals, EnvCommand::Start(args.of(id))).await
         }
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Stop(args)) => {
             handle_platform_env_command(

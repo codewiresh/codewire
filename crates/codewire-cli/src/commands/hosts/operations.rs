@@ -488,6 +488,7 @@ async fn apply(
         name: operation.vm.clone(),
         request_id: operation.id.to_string(),
         environment_id: environment.id.clone(),
+        start_with_uncleared_disk: false,
     };
     client.change(lifecycle, selector).await.map_err(ended)
 }

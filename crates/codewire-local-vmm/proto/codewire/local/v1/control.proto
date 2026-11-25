@@ -437,6 +437,9 @@ message RestoreCheckpointRequest {
   // checkpoint captured under another account is refused.
   PlatformAccount account = 2;
   string request_id = 3;
+  // Restore once although the checkpoint's disk may hold an earlier sign-in
+  // (#6277). Refused for a VM on a platform profile.
+  bool start_with_uncleared_disk = 4;
 }
 
 message CreateCheckpointRequest {
@@ -514,6 +517,10 @@ message Checkpoint {
   // What a fork recreates the source's request from: the checkpoint's disk
   // half, described as a disk snapshot is. Its ID is the checkpoint's.
   Snapshot snapshot = 25;
+  // It may hold an earlier real sign-in (#6277): taken without interception,
+  // or from a state disk not recorded as cleared. While interception is on,
+  // its restore and fork are refused.
+  bool may_hold_sign_in = 26;
 }
 
 service EnvironmentRunnerService {
@@ -834,6 +841,9 @@ message SnapshotRestore {
   // The platform account the restoring cw is signed in to, or absent. A
   // snapshot captured under another account is refused.
   PlatformAccount account = 5;
+  // A fork of a VM checkpoint only: fork once although the checkpoint's disk
+  // may hold an earlier sign-in (#6277). Refused on a platform profile.
+  bool start_with_uncleared_disk = 6;
 }
 
 // A signed-in platform account: its server, organization and user.
@@ -931,6 +941,10 @@ message EnvironmentSelector {
   // Optional stable identity precondition. Public adapters set this so a
   // delete-and-recreate race can never redirect a mutation by name.
   string environment_id = 3;
+  // StartEnvironment only: start once although the VM's state disk could not
+  // be cleared of an earlier sign-in (#6277). Refused for a VM on a platform
+  // profile; every other RPC ignores it.
+  bool start_with_uncleared_disk = 4;
 }
 
 message UpdateHostPortsRequest {

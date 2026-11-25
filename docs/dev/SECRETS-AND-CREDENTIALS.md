@@ -3802,6 +3802,15 @@ as the current file until the journal is replayed (measured on #6277).
   clears again. It is refused for a VM on a platform profile, whose
   credentials are not the user's to accept that risk for: only a successful
   clearing or a new VM starts it.
+- **An older supervisor.** One below protocol 27 never clears and ignores the
+  override, and a `cw` update replaces it only once none of its VMs runs.
+  So `cw` refuses a start, restart, restore or fork that may intercept (the
+  VM, or a checkpoint's source, has a credential profile or secrets)
+  through one, naming its protocol and the way out: stop the local VMs it
+  serves so `cw` replaces it, then run the command again. The same
+  one-command override goes ahead with a note, except on a platform profile.
+  A boot the supervisor starts by itself, such as a session's start, isn't
+  guarded until the supervisor is replaced.
 - **The host's limit.** Clearing changes only this VM's image. A VM
   checkpoint that shares its blocks by reflink keeps its own copy (below).
   Host blocks the punching frees keep their data until reused, protected only

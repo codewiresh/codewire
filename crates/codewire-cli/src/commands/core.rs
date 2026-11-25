@@ -736,6 +736,7 @@ pub(crate) fn env_create_request_from_init_args(
         save_preset: None,
         snapshot: None,
         checkpoint: None,
+        start_with_uncleared_disk: false,
         count: 1,
         name_prefix: None,
         share_mounts: false,

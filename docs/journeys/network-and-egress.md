@@ -2018,7 +2018,9 @@ Issue: #6277.
     `--start-with-uncleared-disk` on a local profile, and the override
     refused on a platform profile;
   - checkpoints taken before this build, with interception on and off, one
-    taken after a start with the override, and one taken after the clearing.
+    taken after a start with the override, and one taken after the clearing;
+  - this build's `cw` against an older supervisor (protocol 26) that still
+    serves a running VM: a start of another VM with a profile.
 - **Driving it:** on Linux and on a Mac, with synthetic canary sign-ins
   only. Boot with the switch off, so the canary logins are delivered and
   rewritten at least once, and stop. Then switch on, start, take a
@@ -2040,6 +2042,9 @@ Issue: #6277.
     before this build, or after the override start, and not the one taken
     after the clearing; restoring or forking a flagged one with interception
     on is refused by name;
+  - through the older supervisor, the start is refused, naming its protocol
+    and the way out (stop its VMs so `cw` replaces it); with the override
+    it starts with a note, and a platform-profile VM refuses the override;
   - the time the clearing took on a state disk with 20 GiB in use is
     recorded.
 - **Gotchas:** clearing changes only the VM's own image. A checkpoint that

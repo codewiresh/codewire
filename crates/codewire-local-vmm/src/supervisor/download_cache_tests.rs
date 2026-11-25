@@ -65,6 +65,7 @@ async fn a_requested_delete_frees_only_its_own_download_cache() {
             name: "dev".to_owned(),
             request_id: Uuid::new_v4().to_string(),
             environment_id: environment_id.to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap();

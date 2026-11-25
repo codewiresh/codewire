@@ -35,8 +35,10 @@ mod snapshots;
 mod sources;
 mod ssh;
 mod staging;
+mod start_environment;
 mod start_failure;
 mod start_state;
+mod state_disk_clear;
 #[cfg(test)]
 pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
 pub(crate) use crate::supervisor_metadata::{
@@ -4446,7 +4448,7 @@ impl Supervisor {
             .credential_broker_request_for_environment(&projection_environment, generation)?;
         let environment_projection_sha256 =
             sources::projection_sha256_for_boot(&broker_request, &projection_environment)?;
-        let egress = self.boot_egress(environment.id, &broker_request).await?;
+        let egress = self.boot_egress(operation_id, &broker_request).await?;
         let credential_placeholders = self
             .seed_placeholders(
                 &egress,
@@ -6099,70 +6101,7 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        self.start_drains()?;
-        let lease = self
-            .supervisor
-            .quiet_lease(&name)
-            .await
-            .map_err(Status::from)?;
-        self.supervisor
-            .reconcile(&name)
-            .await
-            .map_err(Status::from)?;
-        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
-        require_expected_environment(&environment, expected_environment_id)?;
-        reject_environment_workload_secrets(&environment).map_err(Status::from)?;
-        let existing = self
-            .supervisor
-            .core()
-            .store
-            .operation_by_request(request_id)
-            .map_err(SupervisorError::from)
-            .map_err(Status::from)?;
-        let operation = if let Some(operation) = existing {
-            if operation.kind != OperationKind::Start
-                || operation.environment_id != Some(environment.id)
-                || operation
-                    .payload
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(name.as_str())
-            {
-                return Err(Status::aborted("local lifecycle request ID collision"));
-            }
-            operation
-        } else {
-            let generation = if environment.state == StoredEnvironmentState::Running {
-                environment.generation
-            } else {
-                environment
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| Status::internal("local generation overflow"))?
-            };
-            let payload = serde_json::json!({"name": name, "generation": generation});
-            self.supervisor
-                .core()
-                .store
-                .begin_operation(
-                    request_id,
-                    Some(environment.id),
-                    OperationKind::Start,
-                    &payload,
-                )
-                .map_err(SupervisorError::from)
-                .map_err(Status::from)?
-        };
-        let response = operation_proto(&operation)?;
-        if !operation.phase.terminal() {
-            self.supervisor.admit(&operation);
-        }
-        drop(lease);
-        if !operation.phase.terminal() {
-            self.spawn_drain(&name);
-        }
-        Ok(Response::new(response))
+        self.begin_start(request.into_inner()).await
     }
 
     async fn stop_environment(
@@ -9032,8 +8971,12 @@ fn start_operation_generation(operation: &OperationRecord) -> Result<u64, Superv
         .payload
         .as_object()
         .filter(|fields| {
-            fields.len() == 2
-                || (fields.len() == 3
+            let optional = usize::from(matches!(
+                checkpoints::start_payload_override(fields),
+                Ok(true)
+            ));
+            fields.len() == 2 + optional
+                || (fields.len() == 3 + optional
                     && checkpoints::start_payload_checkpoint(fields).is_ok_and(|id| id.is_some()))
         })
         .ok_or(SupervisorError::InvalidState)?;
@@ -9660,6 +9603,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::RunnerProtocolUnsupported
             | SupervisorError::EnvironmentAccessUnavailable
             | SupervisorError::PlatformPlaceholders(_)
+            | SupervisorError::UnclearedDisk(_)
             | SupervisorError::EnvironmentAccessBindingRejected(_)
             | SupervisorError::WorkloadSecretDeliveryUnavailable
             | SupervisorError::UnownedWorkspaceStaging(_) => {
@@ -9803,6 +9747,8 @@ pub enum SupervisorError {
     EnvironmentAccessUnavailable,
     #[error("{0}")]
     PlatformPlaceholders(seed_placeholders::PlatformPlaceholdersRefusal),
+    #[error("{0}")]
+    UnclearedDisk(state_disk_clear::UnclearedDisk),
     #[error("local credential profile binding was rejected ({0})")]
     EnvironmentAccessBindingRejected(tonic::Code),
     #[error("local environment {0:?} was not found")]

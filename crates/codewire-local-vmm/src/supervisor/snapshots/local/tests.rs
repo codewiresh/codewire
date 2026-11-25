@@ -790,6 +790,7 @@ fn restore_request(manifest: &Manifest) -> v1::CreateEnvironmentRequest {
             memory_mib: 4096,
             share_mounts: false,
             account: None,
+            start_with_uncleared_disk: false,
         }),
         ..Default::default()
     }
@@ -917,6 +918,7 @@ fn a_restore_selection_round_trips_through_the_journaled_payload() {
             memory_mib: 8192,
             share_mounts: true,
             account: Some(account("user-a")),
+            start_with_uncleared_disk: false,
         }),
         ..Default::default()
     };
@@ -1923,6 +1925,7 @@ async fn publish_checkpoint_with_catalog(
             cw_runtime_catalog_generation,
             daemon_vsock_port: 7777,
             intercept: false,
+            state_disk_cleared: None,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     });
@@ -2155,6 +2158,7 @@ async fn a_restore_after_a_stop_for_it_that_fails_leaves_the_stopped_source_on_i
             checkpoint: "c1".to_owned(),
             account: None,
             request_id: Uuid::new_v4().to_string(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();
@@ -2237,6 +2241,7 @@ fn a_checkpoint_manifest_must_name_its_own_kind_and_memory() {
             cw_runtime_catalog_generation: None,
             daemon_vsock_port: 7777,
             intercept: false,
+            state_disk_cleared: None,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     };
@@ -2260,4 +2265,164 @@ fn a_checkpoint_manifest_must_name_its_own_kind_and_memory() {
     }
     checkpoint.setup_disk_bytes = Some(MIB);
     checkpoint.validate(512).unwrap();
+}
+
+/// Run one debugfs session of `requests` on `image` unconfined, as a test's
+/// own setup.
+fn debugfs_script(image: &Path, scratch: &Path, requests: &str) {
+    let script = scratch.join(Uuid::new_v4().simple().to_string());
+    fs::write(&script, requests).unwrap();
+    let status = crate::test_command(tool("debugfs"))
+        .arg("-w")
+        .arg("-f")
+        .arg(&script)
+        .arg(image)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("PAGER", "__none__")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    fs::remove_file(script).unwrap();
+}
+
+/// Clearing a VM's own state disk in place (#6277) leaves no copy of a
+/// delivered sign-in: not in a current login file, not in a block an earlier
+/// rewrite freed, and not behind an unreplayed journal, where a reader that
+/// doesn't replay it sees the old login as the current file, as a disk copied
+/// while its guest runs shows it. A clone that shares the image's blocks
+/// keeps its own copy, and the guest's cw runtime selection stays.
+#[tokio::test]
+async fn clearing_a_vms_own_disk_leaves_no_earlier_sign_in_anywhere() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("state.raw");
+    ext4_image(&image, 64 * MIB);
+    let token = |place: &str| format!("cw-clear-test-{place}-{}", Uuid::new_v4().simple());
+    let (freed, journaled, current, replacement) = (
+        token("freed"),
+        token("journaled"),
+        token("current"),
+        token("replacement"),
+    );
+    for directory in ["home", "home/.claude", "agent-homes", "agent-homes/codex"] {
+        debugfs_setup(&image, &format!("mkdir {directory}"));
+    }
+    debugfs_setup(&image, "mkdir codewire");
+    debugfs_setup(&image, "mkdir codewire/cw-runtime");
+    plant(
+        &image,
+        scratch.path(),
+        "codewire/cw-runtime/selection",
+        b"kept",
+    );
+    plant(
+        &image,
+        scratch.path(),
+        "home/.claude/.credentials.json",
+        &claude_login(&journaled),
+    );
+    plant(
+        &image,
+        scratch.path(),
+        "agent-homes/codex/auth.json",
+        &codex_login(&current),
+    );
+    // Blocks an earlier rewrite freed: several, since the rewrite below may
+    // reuse the first.
+    plant(
+        &image,
+        scratch.path(),
+        "home/.claude/earlier",
+        format!("{freed}\n").repeat(4096).as_bytes(),
+    );
+    debugfs_setup(&image, "rm home/.claude/earlier");
+    // The guest's rewrite of Claude's login, as the writer makes it: a new
+    // file renamed over the old one. It reaches only the journal, so the
+    // image's own metadata still names the old login.
+    let rewritten = scratch.path().join("rewritten.raw");
+    fs::copy(&image, &rewritten).unwrap();
+    let new_login = scratch.path().join("new-login");
+    fs::write(&new_login, claude_login(&replacement)).unwrap();
+    debugfs_script(
+        &rewritten,
+        scratch.path(),
+        &format!(
+            "cd home/.claude\nwrite {} next\nrm .credentials.json\nln next .credentials.json\nunlink next\n",
+            new_login.display()
+        ),
+    );
+    let (before, after) = (fs::read(&image).unwrap(), fs::read(&rewritten).unwrap());
+    let changed = (0..before.len() / 4096)
+        .filter(|block| before[block * 4096..][..4096] != after[block * 4096..][..4096])
+        .collect::<Vec<_>>();
+    // As ext4's default ordered mode does: the new file's data is written in
+    // place, and only the metadata goes through the journal.
+    let (data, blocks): (Vec<usize>, Vec<usize>) = changed
+        .into_iter()
+        .partition(|block| contains(&after[block * 4096..][..4096], replacement.as_bytes()));
+    assert_eq!(data.len(), 1);
+    assert!(!blocks.is_empty());
+    {
+        use std::os::unix::fs::FileExt as _;
+        let file = OpenOptions::new().write(true).open(&image).unwrap();
+        for block in &data {
+            file.write_all_at(&after[block * 4096..][..4096], (block * 4096) as u64)
+                .unwrap();
+        }
+    }
+    let journal_blocks = scratch.path().join("journal-blocks");
+    fs::write(
+        &journal_blocks,
+        blocks
+            .iter()
+            .flat_map(|block| after[block * 4096..][..4096].to_vec())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let list = blocks
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    debugfs_script(
+        &image,
+        scratch.path(),
+        &format!("jo\njw -b {list} {}\njc\n", journal_blocks.display()),
+    );
+    let unreplayed = debugfs_setup(&image, "cat home/.claude/.credentials.json");
+    assert!(contains(&unreplayed, journaled.as_bytes()));
+    let planted = fs::read(&image).unwrap();
+    for value in [&freed, &journaled, &current, &replacement] {
+        assert!(
+            contains(&planted, value.as_bytes()),
+            "{value} was not planted"
+        );
+    }
+    let clone = scratch.path().join("clone.raw");
+    let (_clone, _) =
+        crate::fs_clone::clone_or_copy(&File::open(&image).unwrap(), &clone, |_| Ok(())).unwrap();
+
+    let removed = scrub(&image, ScrubTarget::OwnDisk).await.unwrap();
+
+    assert_eq!(removed, 2);
+    let cleared = fs::read(&image).unwrap();
+    for (place, value) in [
+        ("freed block", &freed),
+        ("unreplayed journal", &journaled),
+        ("current login", &current),
+        ("rewritten login", &replacement),
+    ] {
+        assert!(
+            !contains(&cleared, value.as_bytes()),
+            "the {place} kept its token"
+        );
+    }
+    assert_eq!(
+        debugfs_setup(&image, "cat codewire/cw-runtime/selection"),
+        b"kept"
+    );
+    // The clone keeps its own copy: a VM checkpoint's disk is the user's,
+    // flagged rather than cleared.
+    assert!(contains(&fs::read(&clone).unwrap(), freed.as_bytes()));
 }

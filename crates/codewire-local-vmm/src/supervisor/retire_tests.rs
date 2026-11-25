@@ -308,6 +308,7 @@ async fn a_supervisor_retires_only_for_its_protocol_or_newer_and_with_no_vm() {
             name: "dev".to_owned(),
             request_id: Uuid::new_v4().to_string(),
             environment_id: String::new(),
+            start_with_uncleared_disk: false,
         }))
         .await
         .unwrap_err();

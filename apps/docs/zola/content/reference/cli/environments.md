@@ -156,6 +156,12 @@ environment passes `--yes`.
 VM's failed VM is stopped first, as `cw stop` would, and a cloud environment
 retries its create, which replaces a failed Pod.
 
+A local VM that last ran without agent interception, such as one made by an
+earlier `cw`, may hold an earlier sign-in on its disk. Its next start clears
+the disk first, and refuses to start if that fails. After signing the provider
+out, `cw start ENV --start-with-uncleared-disk` starts it once anyway; a VM on a
+platform profile can't.
+
 A cloud `start` returns once the environment is usable: its Git identity is
 set and its startup script has finished, as after `create`. A long startup
 script makes the start as long, so a startup script starts its servers in
@@ -436,9 +442,9 @@ the same command again after an interruption resumes it. See
 cw checkpoint create ENV --name NAME
 cw checkpoint ls
 cw checkpoint inspect NAME
-cw checkpoint restore NAME [--yes]
+cw checkpoint restore NAME [--yes] [--start-with-uncleared-disk]
 cw checkpoint rm NAME
-cw create --local --checkpoint NAME [--name NEW]
+cw create --local --checkpoint NAME [--name NEW] [--start-with-uncleared-disk]
 ```
 
 A VM checkpoint saves a running local VM's memory, device state and disks at
@@ -450,6 +456,13 @@ running; it stands still for the moment its memory is written.
 running processes and every disk change since are discarded, after asking
 unless `--yes` is given. To keep the environment and run the checkpoint beside
 it, fork it with `cw create --local --checkpoint NAME`.
+
+`cw checkpoint ls` marks a checkpoint `uncleared` when its disk may hold an
+earlier sign-in: one taken without agent interception, or before its VM's disk
+was cleared. A restore can't clear it, so restoring or forking it is refused.
+One taken before the clearing, with interception on, can be restored or forked
+once with `--start-with-uncleared-disk` after signing the provider out, except
+on a platform profile. `cw checkpoint rm` removes it.
 
 VM checkpoints run on a Linux host and on a Mac. On a Mac, the checkpoint
 store is kept out of Time Machine backups, a local VM state root inside
