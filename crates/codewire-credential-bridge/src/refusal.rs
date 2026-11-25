@@ -86,5 +86,44 @@ pub(crate) fn from_failure(reason: i32, refusal: i32, retry_after_seconds: u32) 
     })
 }
 
+/// A refusal as the bridge protocol carries it. `denied` is left unspecified:
+/// a failure frame's reason already says it, as every guest reads it.
+pub fn to_wire(refusal: Refusal) -> v1::CredentialBridgeRefusal {
+    use v1::CredentialBridgeRefusal as Wire;
+    match refusal {
+        Refusal::CredentialRevoked => Wire::CredentialRevoked,
+        Refusal::CredentialExpired => Wire::CredentialExpired,
+        Refusal::CredentialNeedsReconnect => Wire::CredentialNeedsReconnect,
+        Refusal::NoCredentialSelected => Wire::NoCredentialSelected,
+        Refusal::CredentialUnavailable => Wire::CredentialUnavailable,
+        Refusal::CredentialRefreshRateLimited { .. } => Wire::CredentialRefreshRateLimited,
+        Refusal::CredentialConflict => Wire::CredentialConflict,
+        Refusal::PathNotServed => Wire::PathNotServed,
+        Refusal::WebsocketNotServed => Wire::WebsocketNotServed,
+        Refusal::RouteNotServed => Wire::RouteNotServed,
+        Refusal::RequestNotForwarded(_) => Wire::RequestNotForwarded,
+        Refusal::BodyTooLarge => Wire::BodyTooLarge,
+        Refusal::Busy => Wire::Busy,
+        Refusal::UpstreamFailed(_) => Wire::UpstreamFailed,
+        Refusal::NameNotAllowed => Wire::NameNotAllowed,
+        Refusal::SelectedCredentialOnly => Wire::SelectedCredentialOnly,
+        Refusal::Unavailable => Wire::Unavailable,
+        Refusal::Denied => Wire::Unspecified,
+        Refusal::CredentialOwnerDeparted => Wire::CredentialOwnerDeparted,
+        Refusal::CredentialOwnerDisabled => Wire::CredentialOwnerDisabled,
+    }
+}
+
+/// What a guest keeps of an epoch's refused admission (#6406): a 403 refusal
+/// as itself, and anything else, a value it doesn't know included, as a
+/// plain denial. A refused epoch never reads as one worth retrying with
+/// material, so a guest that keeps it answers nothing of the epoch's.
+pub fn epoch_refusal(refusal: i32) -> Refusal {
+    match from_failure(v1::CredentialBridgeFailureReason::Denied as i32, refusal, 0) {
+        Some(refusal) if refusal.status() == 403 => refusal,
+        _ => Refusal::Denied,
+    }
+}
+
 #[cfg(test)]
 mod tests;

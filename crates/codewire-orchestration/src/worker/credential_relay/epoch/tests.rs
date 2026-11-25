@@ -3,6 +3,7 @@
 mod budgets;
 mod front_door;
 mod front_door_join;
+mod named_refusal;
 mod placeholders;
 mod relay;
 mod ssh_deadlines;

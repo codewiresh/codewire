@@ -1347,14 +1347,15 @@ credentials are its creator's own computer's.
     request is 403 with `credential_owner_departed`, or
     `credential_owner_disabled` for the disable, and the body's one
     sentence. None reaches the provider. Once the Sandbox's epoch ends,
-    within 10 minutes, they turn to 503 `credential_unavailable` until
-    #6406's second step.
+    within 10 minutes, a request through the front door turns to 503
+    `credential_unavailable` until #6406's last step; one through the
+    Sandbox's own loopback keeps the named 403.
   - Within 2 minutes, `claudeAiOauth` is gone from the file, and the
     daemon's log records the login cleared after a denial.
   - The owner's terminal stays open throughout.
   - After the re-invite or the enable, requests are served again within 10
-    minutes, at the Sandbox's next credential epoch, and the login is
-    delivered again at the next check after it.
-  - The stopped Sandbox, started by the owner, never has the login written.
-    Until #6406's second step, its requests get 503
-    `credential_unavailable`, not the named refusal.
+    minutes, at the Sandbox's next credential epoch (before it, a plain 403
+    `denied`), and the login is delivered again at the next check after it.
+  - The stopped Sandbox, started by the owner, never has the login written;
+    its loopback requests get the named 403, and its front-door requests 503
+    `credential_unavailable` until #6406's last step.

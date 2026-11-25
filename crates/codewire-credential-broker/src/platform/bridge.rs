@@ -112,6 +112,10 @@ pub enum PlatformBridgeAuthenticationError {
     Unauthenticated,
     #[error("platform credential bridge authority denied the session")]
     Denied,
+    /// A denial the relay passes to the daemon by name (#6406): a Sandbox
+    /// whose creator left its organization or was disabled.
+    #[error("platform credential bridge authority denied the session")]
+    Refused(codewire_access::Refusal),
     #[error("platform credential bridge authority is unavailable")]
     Unavailable,
 }
@@ -121,6 +125,17 @@ impl PlatformBridgeAuthenticationError {
         match self {
             Self::Unauthenticated => Status::unauthenticated(self.to_string()),
             Self::Denied => Status::permission_denied(self.to_string()),
+            Self::Refused(refusal) => {
+                let mut status = Status::permission_denied(self.to_string());
+                let value = (codewire_credential_bridge::wire_refusal(refusal) as i32).to_string();
+                if let Ok(value) = value.parse() {
+                    status.metadata_mut().insert(
+                        codewire_daemon_proto::CREDENTIAL_BRIDGE_REFUSAL_HEADER,
+                        value,
+                    );
+                }
+                status
+            }
             Self::Unavailable => Status::unavailable(self.to_string()),
         }
     }
@@ -1247,9 +1262,15 @@ fn unavailable() -> Status {
 
 fn runtime_status(error: PlatformRuntimeError) -> Status {
     match error {
-        PlatformRuntimeError::Denied
-        | PlatformRuntimeError::CreatorDeparted
-        | PlatformRuntimeError::CreatorDisabled => denied(),
+        PlatformRuntimeError::Denied => denied(),
+        PlatformRuntimeError::CreatorDeparted => PlatformBridgeAuthenticationError::Refused(
+            codewire_access::Refusal::CredentialOwnerDeparted,
+        )
+        .status(),
+        PlatformRuntimeError::CreatorDisabled => PlatformBridgeAuthenticationError::Refused(
+            codewire_access::Refusal::CredentialOwnerDisabled,
+        )
+        .status(),
         PlatformRuntimeError::Unavailable => unavailable(),
     }
 }

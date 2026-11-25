@@ -174,6 +174,29 @@ impl PreparedHostedCredentialBridge {
             _hosted_lifetime: Some(self.hosted_lifetime),
         })
     }
+
+    /// Call instead of [`Self::activate`] when the broker refused this
+    /// stream's admission for a named reason (#6406): the daemon keeps the
+    /// refusal, so it answers with it, and denies logins, until an epoch is
+    /// admitted again. Only the refusal's closed code crosses.
+    pub async fn refuse(
+        &self,
+        refusal: codewire_access::Refusal,
+    ) -> Result<(), SessionClientError> {
+        self.input
+            .send(v1::CredentialBridgeHostMessage {
+                payload: Some(v1::credential_bridge_host_message::Payload::EpochRefused(
+                    v1::CredentialBridgeEpochRefused {
+                        protocol_version: self.ready.protocol_version,
+                        environment_id: self.ready.environment_id.clone(),
+                        environment_generation: self.ready.environment_generation,
+                        refusal: codewire_credential_bridge::wire_refusal(refusal) as i32,
+                    },
+                )),
+            })
+            .await
+            .map_err(|_| SessionClientError::RequestClosed)
+    }
 }
 
 #[cfg(test)]

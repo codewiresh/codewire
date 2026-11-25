@@ -182,7 +182,10 @@ impl CredentialBridge {
         self.wait_for_active_epoch(deadline).await;
         let (epoch, output) = {
             let state = self.inner.lock().await;
-            let active = state.active.as_ref().ok_or(LoginFailure::Unavailable)?;
+            let active = state
+                .active
+                .as_ref()
+                .ok_or_else(|| state.no_epoch_login_failure())?;
             if !active.logins.serves(kind) {
                 return Err(LoginFailure::Unsupported);
             }

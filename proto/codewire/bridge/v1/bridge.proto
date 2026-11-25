@@ -191,7 +191,25 @@ message CredentialBridgeHostMessage {
     // Credit for a streamed request body; sent only on an epoch whose Open
     // lists "request-body-stream".
     CredentialBridgeRequestCredit request_credit = 15;
+    // In place of Open: the broker refused this epoch's admission for a
+    // named reason (#6406). An older daemon refuses a first frame that is not
+    // Open, which ends this unadmitted epoch either way.
+    CredentialBridgeEpochRefused epoch_refused = 16;
   }
+}
+
+// Why the broker refused to admit an epoch, sent by orchestration's
+// credential relay on the prepared stream instead of Open. The daemon keeps
+// it for at most 60 seconds, renewed by each refused retry and cleared by the
+// next admitted epoch; while it does, a request without an epoch is answered
+// with this refusal and a login is denied. Only a 403 refusal is kept as
+// itself: any other value, or one the daemon doesn't know, reads as a plain
+// denial. It confers nothing and carries no detail beyond the refusal.
+message CredentialBridgeEpochRefused {
+  uint32 protocol_version = 1;
+  string environment_id = 2;
+  uint64 environment_generation = 3;
+  CredentialBridgeRefusal refusal = 4;
 }
 
 message CredentialBridgeReady {

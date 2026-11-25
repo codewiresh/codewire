@@ -326,7 +326,14 @@ impl CredentialBridge {
             Some(tokio::select! {
                 biased;
                 _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
-                result = read_open(&mut input, identity, deadline, self.intercepted) => result?,
+                result = read_open(&mut input, identity, deadline, self.intercepted, false) => match result? {
+                    Opening::Open(capabilities, placeholders) => (capabilities, placeholders),
+                    Opening::Refused(_) => {
+                        return Err(Status::invalid_argument(
+                            "credential bridge must begin with open",
+                        ));
+                    }
+                },
             })
         };
         let (prepared, output) = self.shared()?.prepare_connection()?;
@@ -368,10 +375,15 @@ impl CredentialBridge {
             let admitted = tokio::select! {
                 biased;
                 _ = owner.shutdown.cancelled() => return,
-                result = read_open(&mut input, identity, deadline, intercepted) => result,
+                result = read_open(&mut input, identity, deadline, intercepted, true) => result,
             };
-            let Ok((capabilities, placeholders)) = admitted else {
-                return;
+            let (capabilities, placeholders) = match admitted {
+                Ok(Opening::Open(capabilities, placeholders)) => (capabilities, placeholders),
+                Ok(Opening::Refused(refusal)) => {
+                    prepared.refuse(refusal).await;
+                    return;
+                }
+                Err(_) => return,
             };
             let accepting = owner.accepting.lock().await;
             if !*accepting || owner.shutdown.is_cancelled() {
@@ -496,17 +508,27 @@ fn bind_hosted_loopback(address: std::net::SocketAddr) -> io::Result<TcpListener
     Ok(listener)
 }
 
+/// A host's first frame: an Open, or the broker's named refusal of the epoch
+/// (#6406), which only a hosted relay sends.
+enum Opening {
+    Open(Vec<String>, codewire_access::ProjectedPlaceholders),
+    Refused(codewire_access::Refusal),
+}
+
 /// Read and check the host's Open, returning the optional operations it
 /// lists for this epoch and the placeholders it gives the Sandbox to
 /// project. A malformed capability list refuses the epoch, and so do
 /// placeholders on a daemon that is not `intercepted` or any but a whole,
-/// well-formed set (#4001). No placeholder is ever logged.
+/// well-formed set (#4001). No placeholder is ever logged. A hosted daemon
+/// also takes a refusal in its place, for the same identity; its value reads
+/// as a plain denial unless it is a 403 refusal this daemon knows.
 async fn read_open<S>(
     input: &mut S,
     identity: BridgeIdentity,
     deadline: tokio::time::Instant,
     intercepted: bool,
-) -> Result<(Vec<String>, codewire_access::ProjectedPlaceholders), Status>
+    hosted: bool,
+) -> Result<Opening, Status>
 where
     S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Unpin,
 {
@@ -514,10 +536,26 @@ where
         .await
         .map_err(|_| Status::deadline_exceeded("credential bridge open timed out"))?
         .ok_or_else(|| Status::invalid_argument("credential bridge open is missing"))??;
-    let Some(v1::credential_bridge_host_message::Payload::Open(open)) = first.payload else {
-        return Err(Status::invalid_argument(
-            "credential bridge must begin with open",
-        ));
+    let open = match first.payload {
+        Some(v1::credential_bridge_host_message::Payload::Open(open)) => open,
+        Some(v1::credential_bridge_host_message::Payload::EpochRefused(refused)) if hosted => {
+            if refused.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+                || refused.environment_id != identity.environment_id.to_string()
+                || refused.environment_generation != identity.environment_generation
+            {
+                return Err(Status::failed_precondition(
+                    "credential bridge identity is invalid",
+                ));
+            }
+            return Ok(Opening::Refused(codewire_credential_bridge::epoch_refusal(
+                refused.refusal,
+            )));
+        }
+        _ => {
+            return Err(Status::invalid_argument(
+                "credential bridge must begin with open",
+            ));
+        }
     };
     if open.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
         || open.environment_id != identity.environment_id.to_string()
@@ -548,7 +586,7 @@ where
             .map(|entry| (entry.capability_slot.as_str(), entry.placeholder.as_str())),
     )
     .map_err(|_| Status::invalid_argument("credential bridge placeholders are invalid"))?;
-    Ok((open.capabilities, placeholders))
+    Ok(Opening::Open(open.capabilities, placeholders))
 }
 
 impl CredentialIngress {
@@ -859,6 +897,10 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 #[path = "credential_bridge/ingress_tests.rs"]
 mod ingress_tests;
+
+#[cfg(test)]
+#[path = "credential_bridge/open_tests.rs"]
+mod open_tests;
 
 #[cfg(test)]
 mod tests {

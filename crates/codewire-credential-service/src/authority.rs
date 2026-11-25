@@ -919,11 +919,15 @@ fn authentication_error(error: PodIdentityError) -> PlatformBridgeAuthentication
 
 fn runtime_auth_error(error: Error) -> PlatformBridgeAuthenticationError {
     match error {
-        // An epoch refused for its creator carries no reason yet (#6406's
-        // second step); its streams answer as for any unadmitted epoch.
-        Error::Denied | Error::CreatorDeparted | Error::CreatorDisabled => {
-            PlatformBridgeAuthenticationError::Denied
-        }
+        // An epoch refused for its creator carries its reason to the daemon
+        // (#6406).
+        Error::Denied => PlatformBridgeAuthenticationError::Denied,
+        Error::CreatorDeparted => PlatformBridgeAuthenticationError::Refused(
+            codewire_access::Refusal::CredentialOwnerDeparted,
+        ),
+        Error::CreatorDisabled => PlatformBridgeAuthenticationError::Refused(
+            codewire_access::Refusal::CredentialOwnerDisabled,
+        ),
         Error::Unavailable => PlatformBridgeAuthenticationError::Unavailable,
     }
 }

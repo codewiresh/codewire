@@ -171,3 +171,29 @@ async fn a_departed_or_disabled_creator_answers_its_own_403() {
         assert_eq!(body, sentence.as_bytes());
     }
 }
+
+/// An epoch's refusal keeps a 403 refusal as itself; any other value, one
+/// this guest doesn't know included, is a plain denial, never one to retry
+/// with material (#6406).
+#[test]
+fn an_epoch_refusal_is_a_403_refusal_or_a_plain_denial() {
+    for refusal in [
+        Refusal::CredentialOwnerDeparted,
+        Refusal::CredentialOwnerDisabled,
+    ] {
+        assert_eq!(epoch_refusal(to_wire(refusal) as i32), refusal);
+    }
+    for wire in [
+        Wire::Unspecified as i32,
+        Wire::CredentialUnavailable as i32,
+        Wire::Unavailable as i32,
+        Wire::UpstreamFailed as i32,
+        Wire::Busy as i32,
+        Wire::CredentialRefreshRateLimited as i32,
+        Wire::CredentialConflict as i32,
+        1_000,
+        -1,
+    ] {
+        assert_eq!(epoch_refusal(wire), Refusal::Denied, "{wire}");
+    }
+}

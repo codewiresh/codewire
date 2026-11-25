@@ -53,13 +53,14 @@ pub use http_ingress::{
     ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
     classify_http_request, classify_intercepted_request, intercepted_host_route,
 };
+mod epoch_refusal;
 mod login;
 pub use login::{LOGIN_REQUEST_LIFETIME, LoginFailure};
 use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
 mod refusal;
-pub use refusal::{AnsweredRefusal, refusal_response};
+pub use refusal::{AnsweredRefusal, epoch_refusal, refusal_response, to_wire as wire_refusal};
 mod request_body;
 mod request_id;
 use request_id::request_id_of;
@@ -157,6 +158,8 @@ struct BridgeState {
     sockets: upgrade::Sockets,
     /// The response bytes accepted for a request whose body did not stream.
     whole_body_response_limit: usize,
+    /// The broker's refusal of the last epoch, and when (`epoch_refusal`).
+    refused: Option<(Refusal, tokio::time::Instant)>,
 }
 
 impl BridgeState {
@@ -372,6 +375,7 @@ impl CredentialBridge {
                 logins: BTreeMap::new(),
                 sockets: upgrade::Sockets::default(),
                 whole_body_response_limit: CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
+                refused: None,
             })),
             host_admitted: Arc::new(Notify::new()),
         })
@@ -655,9 +659,8 @@ impl CredentialBridge {
                 | Payload::StreamCredit(_)
                 | Payload::StreamClose(_)),
             ) => self.apply_socket_frame(epoch, payload).await,
-            Some(Payload::Open(_) | Payload::InterceptionHint(_)) | None => {
-                Err(invalid_host_frame())
-            }
+            Some(Payload::Open(_) | Payload::EpochRefused(_) | Payload::InterceptionHint(_))
+            | None => Err(invalid_host_frame()),
         }
     }
 
@@ -701,7 +704,10 @@ impl CredentialBridge {
         request.streamed_body = streamed;
         let (epoch, output) = {
             let mut state = self.inner.lock().await;
-            let active = state.active.as_ref().ok_or(BridgeFailure::Unavailable)?;
+            let active = state
+                .active
+                .as_ref()
+                .ok_or_else(|| state.no_epoch_failure())?;
             // The epoch was replaced by one whose host cannot take the body.
             if body.is_some() && !active.streams_request_body {
                 return Err(BridgeFailure::Unavailable);
@@ -1110,6 +1116,7 @@ impl PreparedBridgeConnection {
                 .checked_add(1)
                 .ok_or_else(|| Status::resource_exhausted("credential bridge epoch exhausted"))?;
             let epoch = state.next_epoch;
+            state.refused = None;
             let replaced = state.active.replace(ActiveHost {
                 epoch,
                 output: self.output.clone(),

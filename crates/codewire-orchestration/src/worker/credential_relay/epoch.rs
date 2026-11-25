@@ -10,7 +10,10 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::ProjectedPlaceholders;
-use codewire_daemon::client::{CredentialBridgeResponseSender, SessionClient, SessionClientError};
+use codewire_daemon::client::{
+    CredentialBridgeResponseSender, PreparedHostedCredentialBridge, SessionClient,
+    SessionClientError,
+};
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
 use codewire_daemon_proto::codewire::bridge::v1;
@@ -620,6 +623,41 @@ fn transport_failure(status: &Status) -> bool {
     std::error::Error::source(status).is_some()
 }
 
+/// The broker's answer, or why it didn't admit. A named refusal reaches the
+/// daemon first, in place of Open, so it denies logins and answers with it
+/// (#6406); a daemon that stopped reading just misses it.
+async fn refused_to_daemon<T>(
+    answer: Result<T, Status>,
+    prepared: &PreparedHostedCredentialBridge,
+) -> Result<T, Option<Unadmitted>> {
+    let status = match answer {
+        Ok(response) => return Ok(response),
+        Err(status) => status,
+    };
+    if let Some(refusal) = named_refusal(&status) {
+        let _ = prepared.refuse(refusal).await;
+    }
+    Err(Some(Unadmitted::from_broker(&status)))
+}
+
+/// The broker's named refusal of an admission (#6406), only from a
+/// PermissionDenied it answered: one bounded decimal value, which reads as a
+/// plain denial unless it is a 403 refusal this relay knows.
+fn named_refusal(status: &Status) -> Option<codewire_access::Refusal> {
+    if status.code() != tonic::Code::PermissionDenied || transport_failure(status) {
+        return None;
+    }
+    let value = status
+        .metadata()
+        .get(codewire_daemon_proto::CREDENTIAL_BRIDGE_REFUSAL_HEADER)?
+        .to_str()
+        .ok()
+        .filter(|value| (1..=4).contains(&value.len()))?;
+    Some(codewire_credential_bridge::epoch_refusal(
+        value.parse().ok()?,
+    ))
+}
+
 impl Unadmitted {
     fn from_daemon(error: &SessionClientError) -> Self {
         match error {
@@ -808,8 +846,8 @@ async fn run_epoch_on(
             let response =
                 tokio::time::timeout(BROKER_ADMISSION_TIMEOUT, broker.credential_bridge(request))
                     .await
-                    .map_err(|_| Some(Unadmitted::BrokerTimeout))?
-                    .map_err(|status| Some(Unadmitted::from_broker(&status)))?;
+                    .map_err(|_| Some(Unadmitted::BrokerTimeout))?;
+            let response = refused_to_daemon(response, &prepared).await?;
             // Successful TLS/RPC headers certify the broker's dual TokenReview,
             // live Ready Pods, Running DB state, exact generation and real Ready.
             // They also list the optional operations this broker serves. The
@@ -1156,7 +1194,9 @@ async fn forward_host(
             | Payload::StreamData(_)
             | Payload::StreamCredit(_)
             | Payload::StreamClose(_)
-            | Payload::InterceptionHint(_),
+            | Payload::InterceptionHint(_)
+            // Only the relay sends a refusal, and only in place of Open.
+            | Payload::EpochRefused(_),
         )
         | None => {
             return Err(Status::unavailable("credential relay frame is invalid"));

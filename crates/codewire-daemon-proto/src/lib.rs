@@ -462,6 +462,12 @@ pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bri
 /// authorization, to join that epoch. It grants nothing alone, lives only as
 /// long as its epoch, and the relay never passes it to the daemon or guest.
 pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER: &str = "x-codewire-credential-bridge-epoch-bin";
+/// Trailer on the broker's PermissionDenied for a `CredentialBridge` stream it
+/// refused for a named reason (#6406): one `CredentialBridgeRefusal` value in
+/// decimal. The relay passes it to the daemon in `CredentialBridgeEpochRefused`
+/// and reads nothing else from it; a value the daemon doesn't know, or none,
+/// is a plain denial.
+pub const CREDENTIAL_BRIDGE_REFUSAL_HEADER: &str = "x-codewire-credential-bridge-refusal";
 /// Request header on the relay's `CredentialBridge` stream: whether the
 /// epoch's Pod is intercepted (#4001), exactly `true` or `false`, as its
 /// first bind stored it. The credential service lets front-door sessions join

@@ -505,24 +505,26 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
 /// A Sandbox's credential authority is its creator's: once they leave its
 /// organization, or their account is disabled, the session is refused by name
 /// (#6406), and the same membership restored admits it again. A new epoch is
-/// refused without a reason until #6406's second step.
+/// refused by the same name, which the relay passes to the daemon.
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
 async fn live_revalidation_refuses_a_departed_or_disabled_creator_by_name() -> Result<()> {
     let fixture = Fixture::create().await?;
     let result = async {
         let authority = fixture.admitted().await?;
-        for (change, restore, refused) in [
+        for (change, restore, refused, named) in [
             (
                 "DELETE FROM org_members WHERE id='synthetic-membership'",
                 "INSERT INTO org_members(id,org_id,user_id,role) \
                  VALUES ('synthetic-membership','synthetic-org','synthetic-creator','member')",
                 PlatformRuntimeError::CreatorDeparted,
+                codewire_access::Refusal::CredentialOwnerDeparted,
             ),
             (
                 "UPDATE users SET enabled=false WHERE id='synthetic-creator'",
                 "UPDATE users SET enabled=true WHERE id='synthetic-creator'",
                 PlatformRuntimeError::CreatorDisabled,
+                codewire_access::Refusal::CredentialOwnerDisabled,
             ),
         ] {
             sqlx::query(change).execute(&fixture.db.pool).await?;
@@ -531,13 +533,12 @@ async fn live_revalidation_refuses_a_departed_or_disabled_creator_by_name() -> R
                 "{refused:?}"
             );
             ensure!(
-                matches!(
-                    fixture
-                        .authenticator()
-                        .authenticate(&headers(unix_now()? + 600))
-                        .await,
-                    Err(PlatformBridgeAuthenticationError::Denied)
-                ),
+                fixture
+                    .authenticator()
+                    .authenticate(&headers(unix_now()? + 600))
+                    .await
+                    .err()
+                    == Some(PlatformBridgeAuthenticationError::Refused(named)),
                 "{refused:?} at admission"
             );
             sqlx::query(restore).execute(&fixture.db.pool).await?;

@@ -8,6 +8,7 @@ mod front_door;
 mod front_door_delegation;
 mod front_door_hosted;
 mod interception_rpcs;
+mod named_refusal;
 mod rotation;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
