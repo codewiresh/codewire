@@ -34,16 +34,16 @@ check emails myself."); the last two need a person, as a real inbox does:
 
 ## Where the walk stands
 
-Updated 2026-11-14. On Production, step 10, parts of step 9 and the sending
-of step 5's invitation are observed, step 8 is reported working, and nothing
-else is.
+Updated 2026-11-25. On Production, steps 3, 4 and 10, parts of step 9 and the
+sending of step 5's invitation are observed, step 8 is reported working, and
+nothing else is.
 
 | Step | ID | Detail | Dev | Production |
 | --- | --- | --- | --- | --- |
 | 1 | `launch-signup` | below, and [signup-and-verification.md](signup-and-verification.md) | failure paths observed 2026-11-11 (#4062); a sign-up not yet observed | the owner's provider pass observed 2026-11-21 on v0.4.26, except the admin delete, which found #5767 |
 | 2 | `launch-agent-push` | below | not yet observed; the fix (#4303) is released in `v0.4.17` | not yet observed |
-| 3 | `launch-preview` | [previews-and-ports.md](previews-and-ports.md) | not yet observed | not yet observed |
-| 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394), which are tagged `v0.4.18`; not yet observed with it | not yet observed |
+| 3 | `launch-preview` | [previews-and-ports.md](previews-and-ports.md) | not yet observed | a loopback server's preview observed 2026-11-25 on v0.4.32 (#4370); the signed-out `creator` state not yet observed |
+| 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394), which are tagged `v0.4.18`; not yet observed with it | upload, resume and download observed 2026-11-25 on v0.4.32 (#4370) |
 | 5 | `launch-invite` | [invitations.md](invitations.md) | invite, email, accept and remove observed 2026-11-13 (#3847, #3840) | the invitation and its email's send observed 2026-11-14 on `v0.4.18` (#3847); arrival, accept and remove not yet observed |
 | 6 | `launch-buy-credit` | [billing-and-credits.md](billing-and-credits.md) | card, top-up, costs and refusal observed (#3381, #3954); Add credit and the receipt not yet observed | a first €5 purchase with a new card, and Stripe's receipt, observed 2026-11-21 (#4816); costs not yet observed |
 | 7 | `launch-idle-wake` | out of the launch | out of the launch (owner, 2026-11-13) | out of the launch |
@@ -275,9 +275,15 @@ step.
 The launch adds one state to that journey: a signed-out browser that opens a
 `creator` preview is asked to sign in and is then returned to the page.
 
-- **Observed:** not yet observed on Dev or Production. The signed-out state
-  is not yet observed either. The Ports dialog is covered on Kind by
-  `apps/dashboard/e2e/ssr-dashboard.preview-ports.ssr.ts`.
+- **Observed:**
+  - Production, 2026-11-25, v0.4.32, as the Production smoke identity
+    (#4370 comment 142767): `python3 -m http.server 8000 --bind 127.0.0.1`
+    in a detached session; `cw ports --publish 8000 --access public` gave a
+    preview URL whose first fetch returned the page with HTTP 200, and after
+    `--unpublish` the same URL answered 404.
+  - Dev: not yet observed. The signed-out state is not yet observed. The
+    Ports dialog is covered on Kind by
+    `apps/dashboard/e2e/ssr-dashboard.preview-ports.ssr.ts`.
 
 ## 4. `launch-cp`: copy a file over 4 MiB in and out, and resume an upload
 
@@ -299,7 +305,11 @@ running the same command again.
 - **Observed:**
   - Dev: all three are observed with builds of the fixes, on 2026-11-12 and
     2026-11-13. The evidence is in the file above.
-  - With `v0.4.18`, and on Production: not yet observed.
+  - Production, 2026-11-25, v0.4.32, as the Production smoke identity
+    (#4370 comment 142767): an 8 MiB file up in 2.0 s and down in 4.5 s
+    with equal SHA-256; a 1 GiB upload cut at 8 s left no file, and the
+    same command again printed "Resuming the upload at 49283072 of
+    1073741824 bytes" and finished in 3 min 27 s with an equal SHA-256.
 
 ## 5. `launch-invite`: invite a teammate, who accepts and can be removed
 

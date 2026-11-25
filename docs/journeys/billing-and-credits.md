@@ -335,6 +335,21 @@ Issue: #4754.
     (`FailedPrecondition`), so no client can skip the question;
   - after a confirmed negative result with top-up on, the card is charged
     within seconds (#4777), and the Billing page shows the charge.
+- **Observed:** Kind, 2026-11-25, main `867dabfdba` with Dev's Stripe test
+  keys (#4754 comment 143367):
+  - a €5 grant applied at once with one ledger and one audit entry;
+  - a removal past €0 with top-up on and no card asked, naming no charge,
+    and Go back wrote nothing;
+  - the API without a confirmed balance answered `FailedPrecondition`
+    (`NEGATIVE_BALANCE_UNCONFIRMED`) and wrote nothing;
+  - a grant that landed between the question and Confirm made Confirm ask
+    again with the new result, and the second Confirm applied it once;
+  - with card 4242 and top-up on, the question named "Visa •••• 4242 is
+    charged €20.00 within seconds" (#5094), and Stripe test mode charged it
+    about 5 s after Confirm.
+  - Not seen on Kind: the charge under **Invoices**, which needs Stripe's
+    webhooks. On Unlimited the question still names a charge that never
+    comes (#6503).
 
 ## 10. `billing-banner`: every page says where credit stands
 
@@ -369,7 +384,19 @@ Issue: #4754. Design: private-docs `designs/billing-compute-credits.md`,
     and the refusal.
 - **Gotchas:** where credit isn't enforced (`CODEWIRE_CREDIT_ENFORCEMENT`
   unset), there is no banner at all: nothing would be refused or charged.
-- **Observed:** not yet observed.
+- **Observed:** Kind, 2026-11-25, main `867dabfdba`, as owner and member,
+  credit enforced, Dev's Stripe test keys (#4754 comments 143367 and
+  143585):
+  - every state above reads as the design says, with the card for the owner
+    and "the saved card" and no action for a member;
+  - with a Sandbox running, the low states add "about 14 hours at current
+    use", and out of credit names when running Sandboxes stop, in #6505's
+    sentences;
+  - the charging banner appeared 0.7 s after an admin's adjustment and
+    cleared 5.6 s later when the charge settled, without a reload;
+  - Create Sandbox's drawer, once settled, said why at €0 with top-up off,
+    with the owner's and the member's own next step.
+  - Dev and Production: not yet observed.
 
 ## 12. `billing-admin-prices`: an administrator sets the prices
 
