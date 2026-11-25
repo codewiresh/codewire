@@ -1058,7 +1058,10 @@ run_tooling() {
     run_side_by_side <<<'run_tooling_family policy-shell' || return
   fi
   ordered=''
-  for family in edge deploy release security dev-smoke-script-tests workspace-agents \
+  # Longest-first so the 3-family Tooling window starts dev-smoke-script-tests
+  # (~200 s on main) immediately instead of queuing it behind four shorter
+  # families (infra#1534).
+  for family in dev-smoke-script-tests edge deploy release security workspace-agents \
       confidential-script-tests; do
     if grep -qx "$family" <<<"$parts"; then
       ordered+="run_tooling_family $family"$'\n'
@@ -1374,7 +1377,7 @@ DOCKERFILE
 # families read (main run 23934: Contracts ran alone first for about 175 s).
 standard_families() {
   local family token
-  for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \
+  for family in go-support:go_support sdk-go:sdk_go sdk-ts:sdk_ts \
       sdk-python:sdk_python ios:ios; do
     token="${family#*:}"
     if selected "$token"; then printf '%s\n' "${family%%:*}"; fi
@@ -1413,6 +1416,10 @@ run_standard() {
   local -a others=() lanes=()
   mapfile -t others < <(standard_families)
   if selected web; then lanes+=('run_standard_in_order web'); fi
+  # Docs builds the Zola stage (~230 s on main); running it beside Web and the
+  # Go/SDK lane keeps Standard near the longest single family instead of
+  # serializing Docs behind go-support and ahead of the SDKs (infra#1534).
+  if selected docs; then lanes+=('run_standard_in_order docs'); fi
   if [ "${#others[@]}" -gt 0 ]; then lanes+=("run_standard_in_order ${others[*]}"); fi
   if [ "${#lanes[@]}" -eq 0 ]; then
     echo 'Standard: no family is selected (Contracts runs in its own job)'
@@ -1488,7 +1495,24 @@ run_confidential_script_tests() {
 # dependencies are installed; run_side_by_side runs them side by side.
 run_dev_smoke_script_tests() {
   install_bun_dependencies
+  # Longest-first so 50-200 s suites start immediately instead of creating a
+  # straggler tail under run_side_by_side (infra#1534).
   run_side_by_side <<'STEPS'
+  scripts/runtime/tests/test-smoke-dev-commodity.sh
+  python3 -B scripts/runtime/tests/test-hosted-checkout-fixture.py
+  scripts/runtime/tests/test-local-platform-sources-smoke.sh
+  scripts/runtime/tests/test-vm-death-recovery-proof.sh
+  scripts/runtime/tests/test-sandbox-capacity-load.sh
+  scripts/runtime/tests/test-private-checkout-smoke.sh
+  scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
+  scripts/runtime/tests/test-provision-prod-smoke-user.sh
+  scripts/runtime/tests/test-provider-github-smoke.sh
+  scripts/runtime/tests/test-provider-openai-smoke.sh
+  scripts/runtime/tests/test-hosted-interception-walk.sh
+  scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh
+  scripts/runtime/tests/test-provider-anthropic-smoke.sh
+  python3 -B scripts/runtime/tests/test-provider-anthropic-workload.py
+  python3 -B scripts/runtime/tests/test-provider-github-workload.py
   bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   bun test apps/dashboard/scripts/dev-ux-ownership.test.ts
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
@@ -1496,35 +1520,20 @@ run_dev_smoke_script_tests() {
   scripts/runtime/tests/test-provision-dev-personal-walk-user.sh
   scripts/runtime/tests/test-personal-credentials-walk.sh
   scripts/runtime/tests/test-hosted-interception-gate.sh
-  scripts/runtime/tests/test-hosted-interception-walk.sh
   scripts/runtime/tests/test-provision-dev-scratch-account.sh
   scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh
   scripts/runtime/tests/test-grant-dev-walk-org-credit.sh
-  scripts/runtime/tests/test-provision-prod-smoke-user.sh
   scripts/runtime/tests/test-smoke-prod.sh
-  scripts/runtime/tests/test-smoke-dev-commodity.sh
-  scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
   scripts/runtime/tests/test-ensure-continuity-sandbox.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
-  scripts/runtime/tests/test-vm-death-recovery-proof.sh
-  scripts/runtime/tests/test-sandbox-capacity-load.sh
   scripts/runtime/tests/test-runtime-memory-fill-proof.sh
   scripts/runtime/tests/test-kill-test-overhead-matrix.sh
   scripts/runtime/tests/test-kill-test-round.sh
-  scripts/runtime/tests/test-local-platform-sources-smoke.sh
-  scripts/runtime/tests/test-private-checkout-smoke.sh
   scripts/runtime/tests/test-dev-initial-private-checkout.sh
-  python3 -B scripts/runtime/tests/test-hosted-checkout-fixture.py
   scripts/runtime/tests/test-provider-codex-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-codex-workload.py
-  scripts/runtime/tests/test-provider-github-smoke.sh
-  python3 -B scripts/runtime/tests/test-provider-github-workload.py
-  scripts/runtime/tests/test-provider-anthropic-smoke.sh
-  python3 -B scripts/runtime/tests/test-provider-anthropic-workload.py
-  scripts/runtime/tests/test-provider-openai-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-openai-workload.py
-  scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh
   scripts/runtime/tests/test-run-sdk-go-e2e.sh
   scripts/runtime/tests/test-run-sdk-rust-e2e.sh
   python3 -B scripts/runtime/tests/test-native-mesh-listener.py

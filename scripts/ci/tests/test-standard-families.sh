@@ -129,13 +129,14 @@ run_standard_family() {
 }
 at() { sed -n "s/^$1 $2 //p" "$work/order"; }
 : > "$work/order"
-SELECTION='|valid:v3|contracts|contracts_proto|web|go_support|sdk_go|sdk_python|complete|'
+SELECTION='|valid:v3|contracts|contracts_proto|web|docs|go_support|sdk_go|sdk_python|complete|'
 FAMILY_SECONDS=1 run_standard > "$work/out" 2>&1 || fail "run_standard failed: $(cat "$work/out")"
-for family in web go-support sdk-go sdk-python; do
+for family in web docs go-support sdk-go sdk-python; do
   [ -n "$(at "$family" end)" ] || fail "$family did not run"
 done
 [ -z "$(at contracts start)" ] || fail 'Contracts ran in Standard'
 [ "$(at web start)" -lt "$(at go-support end)" ] || fail 'Web did not run beside the other families'
+[ "$(at docs start)" -lt "$(at go-support end)" ] || fail 'Docs did not run beside the other families'
 [ "$(at go-support end)" -le "$(at sdk-go start)" ] && [ "$(at sdk-go end)" -le "$(at sdk-python start)" ] ||
   fail 'the other families did not run in order'
 CASES=$((CASES + 1))
