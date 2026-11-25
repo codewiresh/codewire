@@ -3369,7 +3369,7 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   base URL, and the form's variable holding the placeholder of the active
   epoch. Every process the daemon starts for a user gets this projection
   from one path, whatever started it: a session (`cw run`), `cw exec`, a
-  PTY, and the shell SSH serves (#6179, not yet observed). A launch waits for an active epoch, the first or the next after
+  PTY, and the shell SSH serves (#6179; observed on Dev, 2026-11-25). A launch waits for an active epoch, the first or the next after
   one was lost, as long as it waits for its host, so a launch in that gap
   is delayed, never started without its placeholder. Every epoch of one binding gives the same placeholder,
   since no epoch is a derivation input; a rebind to another credential or
@@ -3465,9 +3465,9 @@ idle end (#5125), `cw-egress` asking for its front doors' leaves (#5669), and
 the Open's placeholders with the daemon's projection of them (#5530), one
 per-client host selection for local and hosted (#5463), and orchestration's
 egress service reading each binding's stored decision, and orchestration
-asking for those leaves through the Pod's relay epoch. Still open: the
-Anthropic placeholder in `cw exec` and PTY sessions, which today get none
-(#6179), and the placeholder's form (#5159). `cw-egress` keeps each front door's session open
+asking for those leaves through the Pod's relay epoch, and the Anthropic
+placeholder in `cw exec` and every PTY as in a session (#6179). Still
+open: the placeholder's form (#5159). `cw-egress` keeps each front door's session open
 and reopens it (**The client** above). The switch's gates are #4001's
 switch-on checklist. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.

@@ -2145,8 +2145,11 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - each row of the table above holds;
   - `cw run`, `cw exec`, `cw shell` and SSH each name the same Anthropic
     placeholder, and a `claude -p` turn answers from each; before #6179,
-    `cw exec` named none and Claude Code said it was not logged in (#4001,
-    not yet observed);
+    `cw exec` named none and Claude Code said it was not logged in. The
+    same placeholder in all four was observed on Dev, 2026-11-25, with a
+    synthetic Claude token: each leg's turn went through the front door,
+    which named its request ids, and got the provider's 401. A turn that
+    answers waits for #4001's owner walk;
   - a Sandbox's front door delivers no real Claude or Codex login: an epoch
     that serves the front door delivers placeholder logins or none;
   - with the switch off, the Sandbox's logins, variables and requests are
