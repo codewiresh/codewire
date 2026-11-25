@@ -472,10 +472,12 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
   disableCoreDumps();
   const options = parseOptions(argv);
   // Do not expand the enclosing protected container's 25-minute budget. UX
-  // including login gets five minutes plus two-minute resource cleanup, leaving
-  // over seventeen minutes for the original all-scope journey. Slow cold starts
-  // fail closed; cleanup never borrows an expired action deadline.
-  const deadline = Date.now() + Math.min(totalTimeoutMs, options.uxWalkthrough ? 300_000 : TOTAL_TIMEOUT_MS);
+  // including login gets eight minutes plus two-minute resource cleanup,
+  // leaving fifteen minutes for the original all-scope journey, which passes in
+  // about five. Eight, not five, because the walk shares its CI host with pull
+  // request builds and once ran 334 s there. Slow cold starts fail closed;
+  // cleanup never borrows an expired action deadline.
+  const deadline = Date.now() + Math.min(totalTimeoutMs, options.uxWalkthrough ? 480_000 : TOTAL_TIMEOUT_MS);
   if (basename(options.cwBin) !== "cw") fail("invalid-cw-binary");
   await requireExecutable(options.cwBin, "invalid-cw-binary");
   await requireExecutable(options.chromiumExecutable, "invalid-browser-binary");
