@@ -29,11 +29,14 @@
       <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "billing" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main">
         <header class="cw-context-page-header"><h1>Billing</h1><p>Compute credit, usage, invoices, and recent billing activity.</p></header>
+        {% if !billing.message.is_empty() %}<p class="cw-toast" role="status">{{ billing.message }}</p>{% endif %}
+        {% if !billing.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ billing.error }}</div>{% endif %}
         {% include "organization-billing-stack.html" %}
         {% if billing.billing_enabled && billing.can_manage %}<dialog class="cw-dialog" id="add-card-dialog" data-dialog aria-labelledby="add-card-title">
           <form class="cw-card-form" method="dialog" data-card-form data-card-dialog>
             <header class="cw-dialog-header"><h2 id="add-card-title">Add card</h2></header>
             <div class="cw-dialog-body">
+              <p class="cw-alert cw-alert--warning" role="alert" data-card-declined hidden></p>
               <div class="cw-card-element" data-card-element></div>
               <p class="cw-field-error" role="alert" data-card-error hidden></p>
               {% if !billing.unmetered %}<div class="cw-top-up-line">

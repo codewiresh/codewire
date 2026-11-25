@@ -195,7 +195,7 @@ pub(crate) fn billing_banner(
                 stop_time(exhausted_at.saturating_add(STOP_AFTER_SECONDS), now)
             )
         } else {
-            "Out of compute credit: new Sandboxes and starts are refused.".to_owned()
+            "Out of compute credit. New Sandboxes and starts are refused.".to_owned()
         };
         return Some(BillingBannerView {
             tone: "danger",
@@ -338,7 +338,7 @@ mod tests {
     /// 2026-11-10 08:00 UTC.
     const NOW: i64 = 1_794_297_600;
     const BILLING: &str = "/example-org/billing/";
-    const OUT: &str = "Out of compute credit: new Sandboxes and starts are refused.";
+    const OUT: &str = "Out of compute credit. New Sandboxes and starts are refused.";
     /// The regular rate card, enforced: 2 vCPU, 8 GiB and 10 GiB cost about
     /// €0.20 an hour. No card yet.
     fn facts() -> CreditFacts {

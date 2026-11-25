@@ -80,6 +80,7 @@
         region, owner,
         element: region.querySelector("[data-card-element]"),
         error: region.querySelector("[data-card-error]"),
+        declined: region.querySelector("[data-card-declined]"),
         status: region.querySelector("[data-card-status]"),
         topUp: region.querySelector("[data-card-top-up]"),
         amount: region.querySelector("[data-card-top-up-amount]"),
@@ -110,7 +111,7 @@
   // The dialog's button names the charge saving makes: with no credit left
   // and top-up on, saving charges the top-up at once (owner, 2026-11-14).
   const syncDialog = (form) => {
-    if (!form.topUp || !form.amount) return;
+    if (!form.topUp || !form.amount || form.done) return;
     form.amount.disabled = !form.topUp.checked;
     const euros = `€${form.amount.value}`;
     form.region.querySelectorAll("[data-card-top-up-euros]").forEach((node) => { node.textContent = euros; });
@@ -236,6 +237,23 @@
       const answer = await post(setup.dataset.cardFinish, { setup_intent: form.confirmed });
       const next = safeLocation(answer.location);
       if (!next) throw new Error(UNAVAILABLE);
+      if (typeof answer.declined === "string" && answer.declined && form.submit && !form.owner) {
+        // The card is saved but its charge was declined (#6502): the dialog
+        // stays open to say so, and Done goes on to Billing.
+        say(form, "");
+        if (form.declined) {
+          form.declined.textContent = answer.declined;
+          form.declined.hidden = false;
+        } else {
+          fail(form, answer.declined);
+        }
+        form.confirmed = "";
+        form.done = next;
+        if (form.cancel) form.cancel.hidden = true;
+        form.submit.removeAttribute("data-card-pays");
+        form.submit.textContent = "Done";
+        return;
+      }
       window.location.assign(next);
     } catch (error) {
       say(form, "");
@@ -294,7 +312,8 @@
     dialogForm.addEventListener("change", () => syncDialog(form));
     dialogForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      save(form);
+      if (form.done) window.location.assign(form.done);
+      else save(form);
     });
   }
 

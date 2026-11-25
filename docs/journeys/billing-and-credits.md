@@ -55,9 +55,10 @@ the first Production release after codewire/deploy#245.
   --cloud` prints at €0.
 - **States to exercise:** no card yet; a card added at an empty balance; a
   second card, made the default from its menu; removing the default; a card
-  that declines (`4000 0000 0000 0002`); a bank that asks to confirm
-  (`4000 0025 0000 3155`); too many tries (#4874); a return link the page
-  didn't start.
+  that declines (`4000 0000 0000 0002`); a card that saves but declines
+  the charge saving makes (`4000 0000 0000 0341`, #6502); a bank that asks
+  to confirm (`4000 0025 0000 3155`); too many tries (#4874); a return link
+  the page didn't start.
 - **Driving it** (design v4, #4750; the card form stays in the page):
   1. At €0 with no card, choose **Add card**. A dialog opens with Stripe's
      card field, and **Automatic top-up** on at €20 beside it. Its button
@@ -74,6 +75,17 @@ the first Production release after codewire/deploy#245.
   or a cancelled bank check says so at the field, and nothing is saved or
   charged. One paid invoice appears under **Invoices**,
   and the balance moves by the amount paid.
+- **Saved, but its charge declined** (#6502): at an empty balance with
+  top-up on, or with credit chosen under Add credit, a card can save and
+  then decline the charge. The dialog stays open and says so: "Your card is
+  saved, but its automatic top-up was declined, so no credit was added. Try
+  another card." (for a purchase: "…but the payment was declined…", or
+  "…declined for insufficient funds…"). Its button becomes **Done**, which
+  goes to Billing. There the card is listed as the default, the notice says
+  the top-up was declined, and the banner says the organization is out of
+  credit. The notice and any error sit outside the part of the page that
+  refreshes on a credit change, so the refresh that follows the declined
+  charge no longer erases them, as it did before. Not yet observed.
 - **Too many tries** (#4874, against card testing): an organization starts at
   most 10 card setups an hour, and a user at most 20 a day across all their
   organizations. One client address starts at most 60 an hour, across every

@@ -87,6 +87,10 @@ pub(super) struct CardSetupAnswer {
     location: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     error: String,
+    /// The card is saved but its charge was declined: the dialog stays open
+    /// and says so, and Done goes to `location` (#6502).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    declined: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,9 +342,33 @@ pub(super) async fn finish_card_setup(
     };
     Json(CardSetupAnswer {
         location: card_saved_location(&path, &done),
+        declined: card_declined(&done).to_owned(),
         ..Default::default()
     })
     .into_response()
+}
+
+/// What the dialog says when the card is saved but the charge saving made was
+/// declined: the credit chosen with it, or the automatic top-up. Empty when
+/// nothing was declined.
+fn card_declined(done: &billing_connect::CardSetupDone) -> &'static str {
+    if let Some(credit) = &done.credit {
+        if credit.outcome.as_known() != Some(AddCreditOutcome::Refused) {
+            return "";
+        }
+        return match credit_decline(&credit.decline_code) {
+            "credit-insufficient-funds" => {
+                "Your card is saved, but the payment was declined for insufficient funds, so no credit was added. Try another card."
+            }
+            _ => {
+                "Your card is saved, but the payment was declined, so no credit was added. Try another card."
+            }
+        };
+    }
+    if matches!(done.settlement, CardSetupSettlement::OutOfCredit) && done.auto_top_up_enabled {
+        return "Your card is saved, but its automatic top-up was declined, so no credit was added. Try another card.";
+    }
+    ""
 }
 
 /// Where the page goes once a card is saved: Billing, saying what saving it
@@ -867,6 +895,53 @@ mod tests {
             "invalid-credit",
         ] {
             assert!(!billing_error(code).is_empty(), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_saved_card_whose_charge_was_declined_says_so_in_the_dialog() {
+        let done = |settlement, auto_top_up_enabled, credit| billing_connect::CardSetupDone {
+            settlement,
+            credit,
+            auto_top_up_enabled,
+        };
+        let credit = |outcome: AddCreditOutcome, decline_code: &str| AddCreditResponse {
+            outcome: outcome.into(),
+            decline_code: decline_code.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            card_declined(&done(CardSetupSettlement::OutOfCredit, true, None)),
+            "Your card is saved, but its automatic top-up was declined, so no credit was added. Try another card."
+        );
+        assert_eq!(
+            card_declined(&done(
+                CardSetupSettlement::Unspecified,
+                false,
+                Some(credit(AddCreditOutcome::Refused, "insufficient_funds"))
+            )),
+            "Your card is saved, but the payment was declined for insufficient funds, so no credit was added. Try another card."
+        );
+        assert_eq!(
+            card_declined(&done(
+                CardSetupSettlement::Unspecified,
+                false,
+                Some(credit(AddCreditOutcome::Refused, "card_declined"))
+            )),
+            "Your card is saved, but the payment was declined, so no credit was added. Try another card."
+        );
+        // Nothing declined: the dialog closes as before.
+        for nothing in [
+            done(CardSetupSettlement::ToppedUp, true, None),
+            done(CardSetupSettlement::Pending, true, None),
+            done(CardSetupSettlement::OutOfCredit, false, None),
+            done(
+                CardSetupSettlement::Unspecified,
+                false,
+                Some(credit(AddCreditOutcome::Paid, "")),
+            ),
+        ] {
+            assert_eq!(card_declined(&nothing), "");
         }
     }
 }

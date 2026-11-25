@@ -306,7 +306,7 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     .await;
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit: new Sandboxes and starts are refused.</p></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit. New Sandboxes and starts are refused.</p></aside>"
     );
 }
 

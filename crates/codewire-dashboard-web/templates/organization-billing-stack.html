@@ -1,6 +1,4 @@
 <div class="cw-billing-stack" id="billing-stack" hx-get="/{{ organization.slug }}/_fragments/billing" hx-trigger="codewire:live:credit from:body, codewire:live:resync from:body" hx-swap="outerHTML">
-          {% if !billing.message.is_empty() %}<p class="cw-toast" role="status">{{ billing.message }}</p>{% endif %}
-          {% if !billing.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ billing.error }}</div>{% endif %}
           {% if !billing.billing_enabled %}
           <section class="cw-section" aria-label="Billing"><div class="cw-state"><p>Billing is not configured. Sandboxes run freely in dev mode.</p></div></section>
           {% else if billing.unmetered %}
