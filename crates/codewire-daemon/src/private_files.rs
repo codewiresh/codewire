@@ -271,6 +271,25 @@ mod at {
             }))
         }
 
+        /// Set this directory's own mode through its descriptor.
+        pub(crate) fn set_mode(&self, mode: u32) -> io::Result<()> {
+            Ok(rustix::fs::fchmod(
+                &self.descriptor,
+                Mode::from_raw_mode(mode),
+            )?)
+        }
+
+        /// Whether this directory is on tmpfs, asked of the descriptor
+        /// rather than of a path.
+        #[allow(
+            clippy::useless_conversion,
+            reason = "f_type and the magic number are i64 on 64-bit Linux, narrower elsewhere"
+        )]
+        pub(crate) fn is_in_memory(&self) -> io::Result<bool> {
+            let kind = i64::try_from(rustix::fs::fstatfs(&self.descriptor)?.f_type).ok();
+            Ok(kind.is_some() && kind == i64::try_from(libc::TMPFS_MAGIC).ok())
+        }
+
         /// Make entries created, renamed or removed here durable.
         pub(crate) fn sync(&self) -> io::Result<()> {
             Ok(rustix::fs::fsync(&self.descriptor)?)

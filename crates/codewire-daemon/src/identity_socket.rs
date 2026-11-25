@@ -50,6 +50,11 @@ pub enum IdentityRefusal {
     ResourceExhausted,
     IdentityUnavailable,
     KeyNotYetPublished,
+    /// A refusal orchestration named that this daemon doesn't know: one
+    /// added later. The socket answers it as `identity_unavailable`, and a
+    /// token file treats it as every refusal but the passing ones: the file
+    /// is deleted.
+    Unrecognized,
 }
 
 impl IdentityRefusal {
@@ -70,6 +75,7 @@ impl IdentityRefusal {
             Self::ResourceExhausted => "resource_exhausted",
             Self::IdentityUnavailable => "identity_unavailable",
             Self::KeyNotYetPublished => "key_not_yet_published",
+            Self::Unrecognized => "unrecognized",
         }
     }
 
@@ -84,9 +90,18 @@ impl IdentityRefusal {
             Self::InvalidTarget => StatusCode::BAD_REQUEST,
             Self::IdentityStopped => StatusCode::FORBIDDEN,
             Self::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
-            Self::NotRunning | Self::IdentityUnavailable | Self::KeyNotYetPublished => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::NotRunning
+            | Self::IdentityUnavailable
+            | Self::KeyNotYetPublished
+            | Self::Unrecognized => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    /// The refusal the socket answers: a name the contract has.
+    fn answered(self) -> Self {
+        match self {
+            Self::Unrecognized => Self::IdentityUnavailable,
+            named => named,
         }
     }
 }
@@ -292,6 +307,7 @@ fn text(token: Zeroizing<String>) -> Response {
 }
 
 fn refusal(refusal: IdentityRefusal) -> Response {
+    let refusal = refusal.answered();
     (
         refusal.status(),
         [(header::CONTENT_TYPE, "text/plain")],

@@ -38,6 +38,7 @@ fn grant(token: &str, lifetime_seconds: i64, generation: i64) -> WorkspaceAccess
             peer_relay_endpoints: &[],
             app_ports: &[],
             mesh: None,
+            identity_files: None,
         },
         now,
     )
@@ -555,6 +556,7 @@ fn grant_for(origin: &str) -> WorkspaceAccessGrant {
             peer_relay_endpoints: &[],
             app_ports: &[],
             mesh: None,
+            identity_files: None,
         },
         now,
     )

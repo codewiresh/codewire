@@ -1019,3 +1019,64 @@ async fn an_identity_token_comes_back_and_a_refusal_keeps_its_name() {
             .all(|resource| resource == "https://k8s.walk.example")
     );
 }
+
+/// A refusal added to orchestration later is never taken for a passing
+/// outage, which would keep a token file past it; a deadline, an outage and
+/// authentication still are.
+#[test]
+fn an_identity_refusal_this_daemon_does_not_know_is_unrecognized() {
+    for (code, message, refusal) in [
+        (
+            ErrorCode::FailedPrecondition,
+            "identity_audience_removed",
+            IdentityRefusal::Unrecognized,
+        ),
+        (
+            ErrorCode::PermissionDenied,
+            "identity_paused2",
+            IdentityRefusal::Unrecognized,
+        ),
+        (
+            ErrorCode::Unavailable,
+            "signer_draining",
+            IdentityRefusal::Unrecognized,
+        ),
+        (
+            ErrorCode::DeadlineExceeded,
+            "deadline_exceeded",
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            ErrorCode::Unauthenticated,
+            "token_expired",
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            ErrorCode::Unavailable,
+            "connection refused",
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            ErrorCode::ResourceExhausted,
+            "org_limit",
+            IdentityRefusal::ResourceExhausted,
+        ),
+        // A known name under another code is not a new refusal.
+        (
+            ErrorCode::InvalidArgument,
+            "identity_stopped",
+            IdentityRefusal::IdentityUnavailable,
+        ),
+        (
+            ErrorCode::FailedPrecondition,
+            "Not_running",
+            IdentityRefusal::IdentityUnavailable,
+        ),
+    ] {
+        assert_eq!(
+            identity_refusal(&ConnectError::new(code, message)),
+            refusal,
+            "{code:?} {message}"
+        );
+    }
+}

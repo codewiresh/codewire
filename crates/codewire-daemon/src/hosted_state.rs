@@ -26,6 +26,8 @@ pub struct HostedStatePaths {
     pub access_ready_file: std::path::PathBuf,
     /// The sandbox identity socket, beside the state directory.
     pub identity_socket: std::path::PathBuf,
+    /// The sandbox identity token files' directory, beside it too.
+    pub identity_files: std::path::PathBuf,
 }
 
 impl Default for HostedStatePaths {
@@ -36,6 +38,7 @@ impl Default for HostedStatePaths {
             credential_file: HOSTED_DAEMON_CREDENTIAL_FILE.into(),
             access_ready_file: HOSTED_DAEMON_ACCESS_READY_FILE.into(),
             identity_socket: codewire_daemon_proto::HOSTED_DAEMON_IDENTITY_SOCKET.into(),
+            identity_files: codewire_daemon_proto::HOSTED_DAEMON_IDENTITY_FILES_DIRECTORY.into(),
         }
     }
 }
@@ -49,6 +52,7 @@ impl HostedStatePaths {
             credential_file: state_directory.join("credential"),
             access_ready_file: state_directory.join("access-ready"),
             identity_socket: root.join("identity.sock"),
+            identity_files: root.join("identity"),
             state_directory,
         }
     }

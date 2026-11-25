@@ -489,8 +489,11 @@ const MAX_IDENTITY_TOKEN_BYTES: usize = 16 * 1024;
 #[cfg(any(target_os = "linux", test))]
 const IDENTITY_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The refusal a Connect error names. A refusal's message is its name; any
-/// other failure, authentication's included, is `identity_unavailable`.
+/// The refusal a Connect error names. A refusal's message is its name. A
+/// refusal-shaped name the daemon doesn't know is one added later,
+/// [`IdentityRefusal::Unrecognized`], so a token file never keeps a token
+/// past it. A deadline and every other failure, authentication's included,
+/// is `identity_unavailable`.
 #[cfg(any(target_os = "linux", test))]
 fn identity_refusal(error: &ConnectError) -> IdentityRefusal {
     let named = error
@@ -505,9 +508,26 @@ fn identity_refusal(error: &ConnectError) -> IdentityRefusal {
             IdentityRefusal::IdentityUnavailable | IdentityRefusal::KeyNotYetPublished => {
                 error.code == ErrorCode::Unavailable
             }
+            IdentityRefusal::Unrecognized => false,
         });
-    named.unwrap_or(match error.code {
+    let added_later = || {
+        error.message.as_deref().is_some_and(|message| {
+            IdentityRefusal::from_name(message).is_none()
+                && (1..=64).contains(&message.len())
+                && message.starts_with(|first: char| first.is_ascii_lowercase())
+                && message
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+    };
+    named.unwrap_or_else(|| match error.code {
         ErrorCode::ResourceExhausted => IdentityRefusal::ResourceExhausted,
+        // A deadline is the call's own; authentication names nothing of
+        // identity's.
+        ErrorCode::DeadlineExceeded | ErrorCode::Unauthenticated => {
+            IdentityRefusal::IdentityUnavailable
+        }
+        _ if added_later() => IdentityRefusal::Unrecognized,
         _ => IdentityRefusal::IdentityUnavailable,
     })
 }
@@ -528,6 +548,9 @@ fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, Att
                 network_id: &mesh.network_id,
                 node_name: &mesh.node_name,
             }),
+            // set from WorkspaceAccess.identity_files in piece 5 of #4664, once
+            // the protocol carries it; until then a grant keeps the files.
+            identity_files: None,
         },
         SystemTime::now(),
     )

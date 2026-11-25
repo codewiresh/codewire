@@ -35,6 +35,7 @@ fn grant(network: Option<&str>) -> WorkspaceAccessGrant {
                 network_id,
                 node_name: "app-1",
             }),
+            identity_files: None,
         },
         now,
     )

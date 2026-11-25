@@ -3,9 +3,9 @@
 //! `BindWorkspace` and `RefreshAccess` return a `WorkspaceAccess` for the
 //! binding's environment: a short-lived peer token for the public
 //! coordinator, its expiry and operation generation, the coordinator origin
-//! the environment's public UDP endpoints and its exposed application ports.
-//! The daemon accepts a grant only after validating every field, and never
-//! logs the peer token.
+//! the environment's public UDP endpoints, its exposed application ports and
+//! the organization's identity file audiences. The daemon accepts a grant
+//! only after validating every field, and never logs the peer token.
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use crate::app_ports::{AppPorts, app_ports};
+use crate::identity_files::IdentityFiles;
 
 /// Longest peer token the daemon accepts; a compact signed token is far
 /// shorter.
@@ -31,6 +32,17 @@ pub struct AccessFields<'a> {
     pub app_ports: &'a [i32],
     /// The hosted Mesh network the environment joins, if any (#3350).
     pub mesh: Option<MeshFields<'a>>,
+    /// The organization's audiences registered with a file (#4664). `None`
+    /// from a server that doesn't send the list: the daemon keeps the files
+    /// it has.
+    pub identity_files: Option<Vec<IdentityFileFields<'a>>>,
+}
+
+/// The raw `IdentityFile` fields, before validation.
+#[derive(Clone, Copy)]
+pub struct IdentityFileFields<'a> {
+    pub audience: &'a str,
+    pub file_name: &'a str,
 }
 
 /// The raw `WorkspaceMeshAttachment` fields, before validation.
@@ -125,6 +137,7 @@ pub struct WorkspaceAccessGrant {
     peer_relay_endpoints: Vec<String>,
     app_ports: AppPorts,
     mesh: Option<MeshTarget>,
+    identity_files: Option<IdentityFiles>,
 }
 
 /// An access grant the daemon refused. Value-blind.
@@ -180,7 +193,18 @@ impl WorkspaceAccessGrant {
                 Some(mesh) => Some(MeshTarget::validate(mesh).ok_or(invalid)?),
                 None => None,
             },
+            // A malformed entry is dropped and logged; the rest of the list,
+            // and of the grant, stands.
+            identity_files: fields
+                .identity_files
+                .as_deref()
+                .map(IdentityFiles::from_fields),
         })
+    }
+
+    /// The identity files the daemon keeps, when the grant lists them.
+    pub fn identity_files(&self) -> Option<&IdentityFiles> {
+        self.identity_files.as_ref()
     }
 
     /// The hosted Mesh network the environment joins, if any.
@@ -279,6 +303,7 @@ mod tests {
             peer_relay_endpoints: relay,
             app_ports: &[5173, 3000],
             mesh: None,
+            identity_files: None,
         }
     }
 

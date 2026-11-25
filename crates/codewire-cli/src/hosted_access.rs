@@ -134,6 +134,8 @@ pub(crate) struct BoundAccess {
     /// A broker-mode daemon's platform path (#4000): the coordinator, Mesh
     /// and DERP at configured addresses by the Pod interface.
     pub platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
+    /// The token cache the identity socket shares with the token files.
+    pub identity_tokens: crate::hosted_identity::SandboxTokens,
 }
 
 /// Serve workspace access for the accepted binding until `shutdown`.
@@ -200,6 +202,14 @@ pub(crate) async fn serve(
                 app_ports.clone(),
                 shutdown.clone(),
             ));
+            // The sandbox identity token files follow each grant's list
+            // (#4664), minting through the socket's cache.
+            tokio::spawn(codewire_daemon::identity_files::serve(
+                paths.identity_files.clone(),
+                grants.subscribe(),
+                bound.identity_tokens.clone(),
+                shutdown.clone(),
+            ));
             let reserved_ports = unserved_application_ports(&platform);
             // The environment's node in its hosted Mesh network, when the
             // grant names one (#3350): separate keys, socket and coordinator.
@@ -218,26 +228,12 @@ pub(crate) async fn serve(
                 current_membership,
                 shutdown.clone(),
             ));
-            // `cw network connect` in the workspace reaches other members
-            // through this owner-only socket.
-            match bind_mesh_socket(&paths) {
-                Ok((listener, platform)) => {
-                    let serve = daemon_mesh::serve_connect(
-                        listener,
-                        membership,
-                        mesh_timing.connect_rejoin_wait,
-                        shutdown.clone(),
-                    );
-                    // Recorded while served, so SSH socket forwards refuse it.
-                    tokio::spawn(async move {
-                        let _platform = platform;
-                        serve.await
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "workspace Mesh connect socket unavailable");
-                }
-            }
+            spawn_mesh_connect_socket(
+                &paths,
+                membership,
+                mesh_timing.connect_rejoin_wait,
+                shutdown.clone(),
+            );
             let tailnet = daemon_tailnet::run(
                 DaemonTailnetConfig {
                     environment_id: bound.environment_id,
@@ -250,17 +246,7 @@ pub(crate) async fn serve(
                 },
                 grants.clone(),
                 plane.clone(),
-                Arc::new({
-                    let coordinator = if bound.measured {
-                        PublicCoordinator::webpki_only()
-                    } else {
-                        PublicCoordinator::new()
-                    };
-                    match &bound.platform {
-                        Some(platform) => coordinator.on_platform(platform),
-                        None => coordinator,
-                    }
-                }),
+                Arc::new(tailnet_coordinator(bound.measured, bound.platform.as_ref())),
                 TailnetSsh {
                     config: ssh_config,
                     runners,
@@ -324,6 +310,46 @@ async fn record_host_key_then_start(
     .is_ok();
     start();
     recorded
+}
+
+/// Serve `cw network connect` in the workspace, which reaches other members
+/// through this owner-only socket.
+fn spawn_mesh_connect_socket(
+    paths: &HostedStatePaths,
+    membership: watch::Receiver<MeshConnectState>,
+    rejoin_wait: Duration,
+    shutdown: watch::Receiver<bool>,
+) {
+    match bind_mesh_socket(paths) {
+        Ok((listener, platform)) => {
+            let serve = daemon_mesh::serve_connect(listener, membership, rejoin_wait, shutdown);
+            // Recorded while served, so SSH socket forwards refuse it.
+            tokio::spawn(async move {
+                let _platform = platform;
+                serve.await
+            });
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "workspace Mesh connect socket unavailable");
+        }
+    }
+}
+
+/// The tailnet's coordinator: web PKI roots only in a measured Sandbox, and
+/// through the platform's path when the binding names one.
+fn tailnet_coordinator(
+    measured: bool,
+    platform: Option<&codewire_workspace_access::platform::DaemonPlatform>,
+) -> PublicCoordinator {
+    let coordinator = if measured {
+        PublicCoordinator::webpki_only()
+    } else {
+        PublicCoordinator::new()
+    };
+    match platform {
+        Some(platform) => coordinator.on_platform(platform),
+        None => coordinator,
+    }
 }
 
 /// Bind the Mesh connect socket in the owner-only state directory, owner

@@ -181,6 +181,10 @@ pub const HOSTED_DAEMON_MESH_SOCKET: &str = "/codewire/run/daemon/mesh.sock";
 /// the Sandbox"): `GET /token?resource=URI` answers a token for that
 /// audience. Mode 0600, and SSH socket forwards refuse it.
 pub const HOSTED_DAEMON_IDENTITY_SOCKET: &str = "/codewire/run/identity.sock";
+/// The directory of the sandbox identity token files, `NAME.jwt`, 0700 on
+/// the Pod's memory-backed `/codewire/run` (`docs/dev/SANDBOX-IDENTITY.md`,
+/// "In the Sandbox", Files).
+pub const HOSTED_DAEMON_IDENTITY_FILES_DIRECTORY: &str = "/codewire/run/identity";
 /// The longest `resource` an identity token request names, in bytes: the
 /// daemon refuses a longer one, and orchestration's body limit for the
 /// method fits one this long.

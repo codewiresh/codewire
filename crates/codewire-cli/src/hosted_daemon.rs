@@ -274,6 +274,8 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
             .parse::<std::net::SocketAddr>()
             .map(|address| address.port())
             .ok();
+        // One token cache for the identity socket and the token files.
+        let identity_tokens = crate::hosted_identity::tokens(client.clone());
         let access = hosted_access::serve(
             paths.clone(),
             hosted_access::BoundAccess {
@@ -285,6 +287,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
                 exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
                 measured,
                 platform,
+                identity_tokens: identity_tokens.clone(),
             },
             connector,
             client.clone(),
@@ -299,7 +302,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
                 tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
             }
         });
-        crate::hosted_identity::spawn(&paths.identity_socket, client.clone());
+        crate::hosted_identity::spawn(&paths.identity_socket, identity_tokens);
     }
     // Only the Linux access server uses the connector, paths and client.
     #[cfg(not(target_os = "linux"))]

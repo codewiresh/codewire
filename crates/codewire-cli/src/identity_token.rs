@@ -73,7 +73,10 @@ async fn token_at(socket: &Path, resource: &str) -> anyhow::Result<zeroize::Zero
                     "identity tokens are stopped for this Sandbox or its organization"
                 }
                 IdentityRefusal::ResourceExhausted => "too many token requests; try again shortly",
-                IdentityRefusal::IdentityUnavailable => "identity tokens are unavailable right now",
+                // The socket answers no refusal it doesn't know by name.
+                IdentityRefusal::IdentityUnavailable | IdentityRefusal::Unrecognized => {
+                    "identity tokens are unavailable right now"
+                }
                 IdentityRefusal::KeyNotYetPublished => {
                     "the signing key is not published yet; tokens start within a day"
                 }

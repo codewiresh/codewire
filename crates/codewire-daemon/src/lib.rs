@@ -30,6 +30,7 @@ pub mod host_control;
 mod host_process;
 #[cfg(unix)]
 pub mod hosted_state;
+pub mod identity_files;
 #[cfg(unix)]
 pub mod identity_socket;
 mod launch;
