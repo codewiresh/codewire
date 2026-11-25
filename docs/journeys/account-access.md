@@ -16,7 +16,7 @@ Updated 2026-11-25.
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80); the terminal's sign-out leg and its revoked wording observed on Dev 2026-11-24, source 3e020c3405 | not yet observed |
-| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); observed on Dev 2026-11-25, source 569a5c7a53, except that its tailnet sessions ran until the Sandbox went, about 46 s (#6422), and the new-stream tries but `cw exec` and the preview pages were not walked | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); observed on Dev 2026-11-25, source 569a5c7a53, except that its tailnet sessions, which carried nothing once it started, ended only about 46 s later (#6422), and the new-stream tries but `cw exec` and the preview pages were not walked | not yet observed |
 | `access-org-removal` | a removal and a leave observed on Dev 2026-11-24, source 569a5c7a53, before a departure ended grants, and another organization's streams on Dev 2026-11-25, source 569a5c7a53; the desktop viewer and the re-invite without the old grant not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
@@ -392,10 +392,15 @@ comment 123530). Not yet observed.
     `✗ Organization is being deleted`; both browsers' sockets closed at
     00:38:34.18 to .22 with 1008 "organization is being deleted", and their
     footers showed this journey's line with no Reconnect.
-  - The owner's `cw exec`, over the tailnet, ran until 00:39:18.200 and the
-    member's tailnet shell until 00:39:19.234, about 46 s, ending only when
-    the Sandbox went (#6422), though `stream.revoked` rows of the
-    `organization` kind for both were written at 00:38:33.16.
+  - The owner's `cw exec`, over the tailnet, ended at 00:39:18.200 and the
+    member's tailnet shell at 00:39:19.234, about 46 s in, though
+    `stream.revoked` rows of the `organization` kind for both were written
+    at 00:38:33.16 (#6422). Walked again at source 24766483d2, they carried
+    nothing once the deletion started: each printed its last line in that
+    second, the coordinator removed both peers at once, and the client gave
+    up on the silent tunnel only at its 45 s silence limit, with
+    `✗ Organization not found`, because it took the deletion's end for a
+    break and joined again.
   - A new `cw exec` 1 s in was refused for both with
     `✗ Organization is being deleted`; the walk's other new-stream tries did
     not run.

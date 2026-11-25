@@ -42,6 +42,11 @@ const MAX_DERP_MAP_BYTES: usize = 256 * 1024;
 const MAX_RESOLVED_COORDINATOR_ADDRESSES: usize = 16;
 /// Maximum transport and hello-first setup time for a coordinator stream.
 pub const COORDINATOR_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The reason the coordinator ends and refuses a peer's session with once
+/// its organization's deletion started (`codewire-server-core`'s
+/// `revocation::ended_error`): failed precondition, "organization is being
+/// deleted".
+const ORGANIZATION_DELETING: &str = "ORGANIZATION_DELETING";
 
 /// Callbacks supplied by the tailnet data-plane owner.
 pub struct Handlers<P, D>
@@ -126,19 +131,25 @@ pub enum Error {
 }
 
 impl Error {
-    /// The coordinator refused this peer: its access was revoked or its
-    /// credential is not accepted. Joining again would be refused the same
-    /// way, so the caller stops rather than retrying.
+    /// The coordinator refused this peer: its access was revoked, its
+    /// credential is not accepted, or its organization's deletion started.
+    /// Joining again would be refused the same way, so the caller stops
+    /// rather than retrying.
     pub fn is_refusal(&self) -> bool {
-        let code = match self {
-            Self::Connect(error) => error.code,
-            Self::Credential(error) => error.code(),
-            _ => return false,
+        let refused = |error: &crate::ClientError| match error.code() {
+            connectrpc::ErrorCode::PermissionDenied | connectrpc::ErrorCode::Unauthenticated => {
+                true
+            }
+            connectrpc::ErrorCode::FailedPrecondition => error.error_info().is_some_and(|info| {
+                info.domain() == "codewire.sh" && info.reason() == ORGANIZATION_DELETING
+            }),
+            _ => false,
         };
-        matches!(
-            code,
-            connectrpc::ErrorCode::PermissionDenied | connectrpc::ErrorCode::Unauthenticated
-        )
+        match self {
+            Self::Connect(error) => refused(&error.clone().into()),
+            Self::Credential(error) => refused(error),
+            _ => false,
+        }
     }
 
     /// The server's refusal, as the API's own errors carry it, for the
@@ -1493,6 +1504,29 @@ mod tests {
         tokio::time::timeout(TEST_WALL_BOUND, future)
             .await
             .unwrap_or_else(|_| panic!("{label} exceeded the {TEST_WALL_BOUND:?} test bound"))
+    }
+
+    #[test]
+    fn only_codewires_deletion_reason_is_a_refusal() {
+        let ended = |domain: &str| {
+            let info = codewire_proto::google::rpc::ErrorInfo {
+                reason: ORGANIZATION_DELETING.into(),
+                domain: domain.into(),
+                ..Default::default()
+            };
+            Error::Connect(
+                connectrpc::ConnectError::failed_precondition("organization is being deleted")
+                    .with_detail(connectrpc::ErrorDetail::from_message(
+                        "google.rpc.ErrorInfo",
+                        &info,
+                    )),
+            )
+        };
+        assert!(ended("codewire.sh").is_refusal());
+        assert!(
+            !ended("example.com").is_refusal(),
+            "another domain's reason"
+        );
     }
 
     fn sample_node(id: Uuid, derp: i32) -> Node {

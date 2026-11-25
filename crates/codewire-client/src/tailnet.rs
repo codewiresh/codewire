@@ -1597,6 +1597,25 @@ mod tests {
             PingThenEnd,
             /// Refuse the session, as for a revoked client.
             Refuse,
+            /// Send the DERP map, then end the stream as the coordinator
+            /// does once the organization's deletion started.
+            DeletingAfterSetup,
+            /// Refuse the session as not running: a precondition that isn't
+            /// the deletion's.
+            NotRunning,
+        }
+
+        /// The coordinator's end of a session in an organization being
+        /// deleted: failed precondition, with the reason the API carries.
+        fn deleting() -> ConnectError {
+            let info = codewire_proto::google::rpc::ErrorInfo {
+                reason: "ORGANIZATION_DELETING".into(),
+                domain: "codewire.sh".into(),
+                ..Default::default()
+            };
+            ConnectError::failed_precondition("organization is being deleted").with_detail(
+                connectrpc::ErrorDetail::from_message("google.rpc.ErrorInfo", &info),
+            )
         }
 
         #[derive(Clone)]
@@ -1620,10 +1639,18 @@ mod tests {
                     .unwrap()
                     .pop_front()
                     .unwrap_or(Session::Refuse);
-                if matches!(session, Session::Refuse) {
-                    return Err(ConnectError::permission_denied(
-                        "environment access revoked",
-                    ));
+                match session {
+                    Session::Refuse => {
+                        return Err(ConnectError::permission_denied(
+                            "environment access revoked",
+                        ));
+                    }
+                    Session::NotRunning => {
+                        return Err(ConnectError::failed_precondition(
+                            "environment must be running",
+                        ));
+                    }
+                    _ => {}
                 }
                 let (responses, response_rx) = mpsc::channel(4);
                 let derp_map = CoordinateResponse {
@@ -1642,7 +1669,12 @@ mod tests {
                     // Drain the client's pings so its sends never block.
                     let drain = async { while requests.next().await.is_some() {} };
                     match session {
-                        Session::EndAfterSetup | Session::Refuse => drop(responses),
+                        Session::EndAfterSetup | Session::Refuse | Session::NotRunning => {
+                            drop(responses);
+                        }
+                        Session::DeletingAfterSetup => {
+                            let _ = responses.send(Err(deleting())).await;
+                        }
                         Session::Silent => {
                             drain.await;
                             drop(responses);
@@ -1726,6 +1758,44 @@ mod tests {
                 refusal.into_refusal().is_some(),
                 "the loop returns its refusal"
             );
+            assert_eq!(coordinator.sessions.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn the_organizations_deletion_ends_the_session_at_once() {
+            let (coordinator, address) = serve(&[Session::DeletingAfterSetup]).await;
+            let first = dial(address).await.expect("first session");
+            let refusal = tokio::time::timeout(
+                HANG_GUARD,
+                keep_coordinator_sessions(first, || dial(address), run),
+            )
+            .await
+            .expect("the deletion's end is a refusal")
+            .into_refusal()
+            .expect("the loop returns the server's refusal");
+            assert_eq!(refusal.message(), "organization is being deleted");
+            assert_eq!(refusal.reason(), Some("ORGANIZATION_DELETING"));
+            assert_eq!(
+                coordinator.sessions.load(Ordering::SeqCst),
+                1,
+                "never joined again"
+            );
+        }
+
+        #[tokio::test]
+        async fn another_precondition_is_joined_again() {
+            let (coordinator, address) =
+                serve(&[Session::EndAfterSetup, Session::NotRunning, Session::Refuse]).await;
+            let first = dial(address).await.expect("first session");
+            let refusal = tokio::time::timeout(
+                HANG_GUARD,
+                keep_coordinator_sessions(first, || dial(address), run),
+            )
+            .await
+            .expect("a refusal ends the rejoin loop")
+            .into_refusal()
+            .expect("the loop returns its refusal");
+            assert_eq!(refusal.message(), "environment access revoked");
             assert_eq!(coordinator.sessions.load(Ordering::SeqCst), 3);
         }
 

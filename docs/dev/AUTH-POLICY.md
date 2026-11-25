@@ -675,7 +675,12 @@ connection, and it ends in the same four cases (#3586):
   revoked", writes `stream.revoked` with the surface `tailnet`, and removes the
   client from the environment's peers. From then on no packet passes between
   them, and `cw` ends the shell or exec with "Access revoked". The removal
-  happens within seconds normally and within 30 seconds at most.
+  happens within seconds normally and within 30 seconds at most. The
+  `organization` kind ends it instead with the refusal a new stream gets,
+  `failed_precondition` with the reason `ORGANIZATION_DELETING`, and `cw`
+  ends with "Organization is being deleted" (#6422). `cw` takes only these
+  ends, and `unauthenticated`, as final; any other end of the session is
+  joined again.
 - **The environment's replica:** the coordinator replica that serves the
   environment enforces the removal itself. The client's node, published to the
   other replicas over NATS, carries its admission's ids and hashes, never a
