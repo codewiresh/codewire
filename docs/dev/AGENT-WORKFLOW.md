@@ -139,6 +139,17 @@ virtualenv installed from `scripts/dev/requirements-cli-guided-launch.txt`.
 `--evidence-dir` retains the observations in a new
 chosen directory; otherwise it prints its temporary evidence directory.
 
+The native local smoke's managed credential-broker modes
+(`scripts/ci/verify/smoke-native-local-environment.sh --managed-credential-broker`,
+with `--egress-interception` and the others) need a featured `cw`, the smoke
+binaries, a runtime and a verified workspace image, all from one clean commit.
+`scripts/dev/native-managed-smoke.sh` builds that set and runs the smoke with it:
+
+```sh
+codewire-cpu build -- scripts/dev/native-managed-smoke.sh build --out DIR </dev/null
+sh -c 'codewire-cpu run $$ && exec scripts/dev/native-managed-smoke.sh run --out DIR -- --egress-interception' </dev/null
+```
+
 For a clean Linux machine, such as the box a self-hosted install goes on or a
 host to enroll, `scripts/dev/selfhost-vm.sh create STATE_DIR` boots a
 disposable Debian 12 VM with Docker Engine and the Compose plugin, under QEMU
