@@ -348,6 +348,10 @@ pub async fn mutate(
     captured.recheck(&state, &user).await?;
     let metadata = ManagedMutation::from_private(&private_request)?;
     let journal = journal(&state);
+    // A fenced process admits no request: the abandoned-leases sweep may
+    // already count it gone (#4523). The owner below watches the fence it
+    // was admitted under, so it sees any fence raised from here on.
+    let fenced = state.lease_owner.admit()?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // Detach before the first journal COMMIT. A lost HTTP waiter cannot discard
     // the only fresh owner or acquire a replacement issue permit.
@@ -378,31 +382,21 @@ pub async fn mutate(
                             .reject_before_issue(owner, "platform-agent-preissue-refused")
                             .await?
                     } else {
-                        let issued = journal.issue(&owner, &user).await?;
-                        let result = captured
-                            .daemon()
-                            .mutate_platform_managed_session(private_request)
-                            .await;
-                        match result
-                            .ok()
-                            .and_then(|receipt| ManagedReceipt::from_private(&receipt).ok())
-                        {
-                            Some(receipt)
-                                if matches!(
-                                    receipt.phase,
-                                    ManagedPhase::Completed
-                                        | ManagedPhase::Rejected
-                                        | ManagedPhase::Unknown
-                                ) =>
-                            {
-                                journal.settle(issued, receipt).await?
-                            }
-                            _ => {
-                                journal
-                                    .mark_unknown(issued, "platform-agent-dispatch-unknown")
-                                    .await?
-                            }
-                        }
+                        let daemon = captured.daemon();
+                        issue_and_dispatch(
+                            &journal,
+                            owner,
+                            &user,
+                            Box::pin(fenced),
+                            || async move {
+                                daemon
+                                    .mutate_platform_managed_session(private_request)
+                                    .await
+                                    .ok()
+                                    .and_then(|receipt| ManagedReceipt::from_private(&receipt).ok())
+                            },
+                        )
+                        .await?
                     }
                 }
             };
@@ -418,6 +412,50 @@ pub async fn mutate(
         let _ = sender.send(result);
     });
     receiver.await.map_err(|_| unavailable())?
+}
+
+/// The owner's issue and dispatch of one admitted request (#4523). `fenced`
+/// was taken before the request was admitted, so no fence since is missed. A
+/// process fenced by now rejects the request before issuing it. One that
+/// fences while the dispatch is out stops waiting, and the request ends
+/// unknown, as a lost receipt does; a known-clean Stop then resolves it.
+pub(crate) async fn issue_and_dispatch<F, D>(
+    journal: &ManagedJournal,
+    owner: journal::RequestOwner,
+    user: &AuthUser,
+    mut fenced: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    dispatch: F,
+) -> AppResult<ManagedRequest>
+where
+    F: FnOnce() -> D,
+    D: std::future::Future<Output = Option<ManagedReceipt>>,
+{
+    if futures::FutureExt::now_or_never(fenced.as_mut()).is_some() {
+        return journal
+            .reject_before_issue(owner, "platform-agent-cancelled-before-dispatch")
+            .await;
+    }
+    let issued = journal.issue(&owner, user).await?;
+    let receipt = tokio::select! {
+        biased;
+        () = &mut fenced => None,
+        receipt = dispatch() => receipt,
+    };
+    match receipt {
+        Some(receipt)
+            if matches!(
+                receipt.phase,
+                ManagedPhase::Completed | ManagedPhase::Rejected | ManagedPhase::Unknown
+            ) =>
+        {
+            journal.settle(issued, receipt).await
+        }
+        _ => {
+            journal
+                .mark_unknown(issued, "platform-agent-dispatch-unknown")
+                .await
+        }
+    }
 }
 
 pub async fn observe(

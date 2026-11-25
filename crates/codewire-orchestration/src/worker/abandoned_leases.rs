@@ -22,6 +22,7 @@ use sqlx::PgPool;
 use super::WorkerContext;
 use super::loops::Leadership;
 use crate::api::cw_runtime::owner::RuntimeJournal;
+use crate::api::platform_agents::journal::ManagedJournal;
 use crate::confidential_storage::FeatureFlags;
 use crate::lease_owner::INCARNATION_GRACE;
 
@@ -43,12 +44,13 @@ pub trait AbandonedLeases: Send + Sync {
 pub(super) async fn abandoned_leases_loop(ctx: Arc<WorkerContext>, leadership: Arc<Leadership>) {
     // Settling authorizes nothing; with confidential storage disabled here,
     // anything that did consult it would refuse.
-    let kinds: [Box<dyn AbandonedLeases>; 2] = [
+    let kinds: [Box<dyn AbandonedLeases>; 3] = [
         Box::new(RuntimeJournal::new(
             ctx.pool.clone(),
             FeatureFlags { enabled: false },
         )),
         Box::new(OwnerlessLeases::new(ctx.pool.clone(), INCARNATION_GRACE)),
+        Box::new(ManagedAgentLeases::new(ctx.pool.clone(), INCARNATION_GRACE)),
     ];
     let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
     ticker.tick().await;
@@ -155,6 +157,56 @@ impl AbandonedLeases for OwnerlessLeases {
         .execute(&self.pool)
         .await
         .map_err(AppError::from)?;
+        Ok(settled)
+    }
+}
+
+/// How long a request whose settlement failed is passed over, so a few that
+/// always fail cannot take every pass's turn from the rest.
+const FAILED_PASSED_OVER: Duration = Duration::from_secs(10 * 60);
+
+/// Managed platform agents' open requests whose owner is gone, by
+/// [`OWNER_GONE`], settled through their own journal (#4523). It remembers
+/// only which settlements failed lately, to pass over them for a while; the
+/// decision itself is the database's.
+pub(crate) struct ManagedAgentLeases {
+    journal: ManagedJournal,
+    grace: Duration,
+    failed: std::sync::Mutex<std::collections::HashMap<uuid::Uuid, std::time::Instant>>,
+}
+
+impl ManagedAgentLeases {
+    pub(crate) fn new(pool: PgPool, grace: Duration) -> Self {
+        Self {
+            // Settling authorizes nothing, as for the cw runtime journal.
+            journal: ManagedJournal::new(pool, FeatureFlags { enabled: false }),
+            grace,
+            failed: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl AbandonedLeases for ManagedAgentLeases {
+    fn kind(&self) -> &'static str {
+        "managed_agent"
+    }
+
+    async fn sweep(&self, limit: i64) -> AppResult<usize> {
+        let skip: Vec<uuid::Uuid> = {
+            let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+            failed.retain(|_, at| at.elapsed() < FAILED_PASSED_OVER);
+            failed.keys().copied().collect()
+        };
+        let (settled, failed) = self
+            .journal
+            .settle_abandoned(self.grace, limit, &skip)
+            .await?;
+        let now = std::time::Instant::now();
+        let mut passed_over = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        for request in failed {
+            passed_over.insert(request, now);
+        }
         Ok(settled)
     }
 }

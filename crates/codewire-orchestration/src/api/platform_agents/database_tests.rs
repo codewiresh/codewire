@@ -2194,3 +2194,172 @@ database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {
         .admit_resume(facts2.clone(), &f.user, resume(&m, POD, 1), predecessor)
         .await?)?;
 });
+
+/// Records `owner` on `request`'s lease, as admission by a process with an
+/// incarnation does (#4523), and moves the lease ten minutes into the past,
+/// older than the grace.
+async fn own_lease(f: &Fixture, request: Uuid, owner: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE organization_mutation_leases SET owner_incarnation=$2, \
+           admitted_at=admitted_at - interval '10 minutes', \
+           deadline_at=deadline_at - interval '10 minutes' WHERE id=\
+         (SELECT mutation_lease_id FROM environment_platform_agent_requests WHERE request_id=$1)",
+    )
+    .bind(request)
+    .bind(owner)
+    .execute(&f.pool)
+    .await?;
+    Ok(())
+}
+
+/// A request's runtime lease, as the sweep leaves it.
+#[derive(sqlx::FromRow, Debug, PartialEq, Eq)]
+struct LeaseState {
+    state: String,
+    recovery_code: Option<String>,
+}
+
+impl LeaseState {
+    fn of(state: &str, recovery_code: Option<&str>) -> Self {
+        Self {
+            state: state.into(),
+            recovery_code: recovery_code.map(Into::into),
+        }
+    }
+}
+
+async fn lease_state(f: &Fixture, request: Uuid) -> Result<LeaseState> {
+    Ok(sqlx::query_as(
+        "SELECT l.state,l.recovery_code FROM organization_mutation_leases l \
+         JOIN environment_platform_agent_requests r ON r.mutation_lease_id=l.id \
+         WHERE r.request_id=$1",
+    )
+    .bind(request)
+    .fetch_one(&f.pool)
+    .await?)
+}
+
+const GONE_OWNER: i64 = 0x4523_0a6e;
+
+fn sweep(f: &Fixture) -> crate::worker::abandoned_leases::ManagedAgentLeases {
+    crate::worker::abandoned_leases::ManagedAgentLeases::new(
+        f.pool.clone(),
+        crate::lease_owner::INCARNATION_GRACE,
+    )
+}
+
+database_case!(
+    db_an_abandoned_admitted_request_is_rejected_before_dispatch,
+    f,
+    {
+        use crate::worker::abandoned_leases::AbandonedLeases as _;
+        let m = launch(Uuid::new_v4());
+        let (_, owner) = f.admit(m.clone()).await?;
+        own_lease(&f, m.request_id, GONE_OWNER).await?;
+        ensure!(sweep(&f).sweep(32).await? == 1);
+        let settled = f.observe(m.request_id).await?;
+        ensure!(settled.phase == ManagedPhase::Rejected);
+        ensure!(lease_state(&f, m.request_id).await? == LeaseState::of("released", None));
+        // The abandoned owner can issue nothing now.
+        ensure!(f.journal.issue(&owner, &f.user).await.is_err());
+    }
+);
+
+database_case!(
+    db_an_abandoned_issued_request_ends_unknown_as_its_stop_recovery_expects,
+    f,
+    {
+        use crate::worker::abandoned_leases::AbandonedLeases as _;
+        let m = launch(Uuid::new_v4());
+        let (_, owner) = f.admit(m.clone()).await?;
+        f.journal.issue(&owner, &f.user).await?;
+        own_lease(&f, m.request_id, GONE_OWNER).await?;
+        ensure!(sweep(&f).sweep(32).await? == 1);
+        ensure!(f.observe(m.request_id).await?.phase == ManagedPhase::Unknown);
+        // Exactly the state a later known-clean Stop resolves.
+        ensure!(
+            lease_state(&f, m.request_id).await?
+                == LeaseState::of("resolution_required", Some("cw_runtime_dispatch_unknown"))
+        );
+        ensure!(sweep(&f).sweep(32).await? == 0);
+    }
+);
+
+database_case!(
+    db_a_request_whose_owner_keeps_writing_heartbeats_is_left_open,
+    f,
+    {
+        use crate::worker::abandoned_leases::AbandonedLeases as _;
+        let m = launch(Uuid::new_v4());
+        f.admit(m.clone()).await?;
+        own_lease(&f, m.request_id, GONE_OWNER).await?;
+        sqlx::query(crate::lease_owner::WRITE_HEARTBEAT)
+            .bind(GONE_OWNER)
+            .execute(&f.pool)
+            .await?;
+        ensure!(sweep(&f).sweep(32).await? == 0);
+        ensure!(f.observe(m.request_id).await?.phase == ManagedPhase::Admitted);
+        ensure!(lease_state(&f, m.request_id).await?.state == "active");
+    }
+);
+
+/// A daemon that never answers a dispatch.
+async fn unanswered() -> Option<ManagedReceipt> {
+    std::future::pending().await
+}
+
+database_case!(
+    db_a_fence_after_admission_rejects_before_issue_without_waiting,
+    f,
+    {
+        let (lease_owner, switch) = crate::lease_owner::LeaseOwner::switchable();
+        let m = launch(Uuid::new_v4());
+        // Taken before admission, as the handler takes it.
+        let fenced = Box::pin(lease_owner.admit()?);
+        let (_, owner) = f.admit(m.clone()).await?;
+        // The process fences while the owner is still before issue.
+        switch.fence();
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::api::platform_agents::issue_and_dispatch(
+                &f.journal, owner, &f.user, fenced, unanswered,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("the owner waited on the daemon past the fence"))??;
+        ensure!(settled.phase == ManagedPhase::Rejected);
+        ensure!(lease_state(&f, m.request_id).await? == LeaseState::of("released", None));
+    }
+);
+
+database_case!(
+    db_a_fence_while_the_dispatch_is_out_ends_unknown_without_waiting,
+    f,
+    {
+        let (lease_owner, switch) = crate::lease_owner::LeaseOwner::switchable();
+        let m = launch(Uuid::new_v4());
+        let fenced = Box::pin(lease_owner.admit()?);
+        let (_, owner) = f.admit(m.clone()).await?;
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::api::platform_agents::issue_and_dispatch(
+                &f.journal,
+                owner,
+                &f.user,
+                fenced,
+                move || async move {
+                    // Issued and sent; the process fences before any answer.
+                    switch.fence();
+                    unanswered().await
+                },
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("the owner waited on the daemon past the fence"))??;
+        ensure!(settled.phase == ManagedPhase::Unknown);
+        ensure!(
+            lease_state(&f, m.request_id).await?
+                == LeaseState::of("resolution_required", Some("cw_runtime_dispatch_unknown"))
+        );
+    }
+);

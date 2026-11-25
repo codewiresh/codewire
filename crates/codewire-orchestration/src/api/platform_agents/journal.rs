@@ -678,6 +678,100 @@ impl ManagedJournal {
         self.finish(issued.owner, None, ManagedPhase::Unknown, reason, true)
             .await
     }
+    /// Settles at most `limit` open requests whose owner process is gone:
+    /// it has written no heartbeat for `grace`, by the abandoned-leases rule
+    /// (#4523). An admitted request was never dispatched and is rejected as
+    /// cancelled before dispatch. An issued one may have been, and ends
+    /// unknown, as a lost receipt does. Both are this journal's own states,
+    /// reached through [`Self::finish`], so a later known-clean Stop resolves an
+    /// unknown one's lease exactly as before. Requests in `skip` are passed
+    /// over; the ones that could not be settled are returned, so a caller can
+    /// pass over them for a while instead of picking them first every time.
+    pub(crate) async fn settle_abandoned(
+        &self,
+        grace: Duration,
+        limit: i64,
+        skip: &[Uuid],
+    ) -> AppResult<(usize, Vec<Uuid>)> {
+        let open: Vec<Uuid> = sqlx::query_scalar(&format!(
+            "SELECT r.request_id FROM environment_platform_agent_requests r \
+             JOIN organization_mutation_leases l ON l.id=r.mutation_lease_id \
+             LEFT JOIN lease_owner_heartbeats o ON o.incarnation = l.owner_incarnation \
+             WHERE r.phase IN ('admitted','issued') AND l.state='active' \
+               AND l.owner_incarnation IS NOT NULL AND {} \
+               AND NOT (r.request_id = ANY($3)) \
+             ORDER BY r.admitted_at, r.request_id LIMIT $2",
+            crate::worker::abandoned_leases::OWNER_GONE
+        ))
+        .bind(grace.as_secs_f64())
+        .bind(limit)
+        .bind(skip)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| unavailable())?;
+        let (mut settled, mut failed) = (0, Vec::new());
+        for request_id in open {
+            // A plain read: `finish` locks and checks the row again. One that
+            // fails is passed over like a failed settlement, not the pass.
+            let saved: Option<Saved> = match sqlx::query_as(
+                "SELECT * FROM environment_platform_agent_requests WHERE request_id=$1",
+            )
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await
+            {
+                Ok(saved) => saved,
+                Err(error) => {
+                    tracing::warn!(
+                        %request_id,
+                        error = %error,
+                        "managed agents: an abandoned request could not be read"
+                    );
+                    failed.push(request_id);
+                    continue;
+                }
+            };
+            let Some(saved) = saved else { continue };
+            let result = match saved.decode().map(|request| request.phase) {
+                Ok(ManagedPhase::Issued) => {
+                    self.finish(
+                        saved.owner(),
+                        None,
+                        ManagedPhase::Unknown,
+                        "platform-agent-dispatch-unknown",
+                        true,
+                    )
+                    .await
+                }
+                Ok(ManagedPhase::Admitted) => {
+                    self.finish(
+                        saved.owner(),
+                        None,
+                        ManagedPhase::Rejected,
+                        "platform-agent-cancelled-before-dispatch",
+                        false,
+                    )
+                    .await
+                }
+                // Settled meanwhile by its owner, which wins.
+                Ok(_) => continue,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(_) => settled += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        %request_id,
+                        error = %error,
+                        "managed agents: an abandoned request could not be settled"
+                    );
+                    failed.push(request_id);
+                }
+            }
+        }
+        Ok((settled, failed))
+    }
+
     pub async fn reject_before_issue(
         &self,
         owner: RequestOwner,

@@ -255,5 +255,18 @@ alive.
   deleted.
 - **Not covered here.** A lease admitted before owners were recorded carries
   none, and is left to organization deletion as before. The cw runtime journal
-  settles its own leases, above. Managed platform agents' journal settles its
-  own, in a later change.
+  settles its own leases, above.
+- **Managed platform agents.** Their journal holds its own leases, so the
+  sweep applies the same rule to the leases of their open requests, an owner
+  with no heartbeat for the grace, and settles each through the journal's own
+  states: an admitted request is
+  rejected as cancelled before dispatch, its lease released; an issued one
+  ends unknown with its lease `resolution_required`, which a later known-clean
+  Stop resolves exactly as it resolves a lost receipt. A fenced process
+  admits no agent request. Its owner takes the fence before admission, so a
+  fence raised before issue rejects the request as cancelled before dispatch,
+  and one raised while the dispatch is out ends it unknown without waiting
+  for the daemon. A request whose settlement keeps failing is passed over for
+  ten minutes at a time, so it cannot take every pass's turn from the rest.
+- **Every holder takes its fence before its admission check,** so a fence
+  raised after the check is seen, and one raised before it is refused by it.
