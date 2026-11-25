@@ -54,6 +54,11 @@ fn table() -> Vec<(Refusal, u16, String)> {
             "Codewire: requests to api.anthropic.com can't use this environment's credentials yet.\n".to_owned(),
         ),
         (
+            Refusal::RouteLost,
+            403,
+            "Codewire: requests to api.anthropic.com can't use this environment's credentials until it restarts.\n".to_owned(),
+        ),
+        (
             Refusal::RequestNotForwarded(Unforwarded::Malformed),
             400,
             "Codewire: this request to api.anthropic.com isn't one Codewire forwards.\n".to_owned(),

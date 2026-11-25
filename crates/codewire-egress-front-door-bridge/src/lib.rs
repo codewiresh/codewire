@@ -375,7 +375,7 @@ impl RouteTable {
             Vec::new()
         };
         if candidates.is_empty() {
-            return Err(Refusal::RouteNotServed);
+            return Err(Refusal::RouteLost);
         }
         let (route, rest) = candidates
             .into_iter()
@@ -471,7 +471,7 @@ impl CredentialRouteBackend {
             .routes
             .rewrite(host, request.uri())
             .inspect_err(|refusal| {
-                if *refusal == Refusal::RouteNotServed {
+                if *refusal == Refusal::RouteLost {
                     self.unrouted.refused(host, std::time::Instant::now());
                 } else {
                     tracing::debug!(

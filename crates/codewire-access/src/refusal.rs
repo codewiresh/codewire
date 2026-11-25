@@ -26,6 +26,10 @@ pub enum Refusal {
     PathNotServed,
     WebsocketNotServed,
     RouteNotServed,
+    /// A bound host this front door has no route for, because its cw-egress
+    /// lost the route after the Pod's first bind (#6421): `route_not_served`
+    /// on the wire, in its own sentence, which says a restart is the way out.
+    RouteLost,
     RequestNotForwarded(Unforwarded),
     BodyTooLarge,
     Busy,
@@ -150,6 +154,7 @@ impl Refusal {
             | Self::NoCredentialSelected
             | Self::WebsocketNotServed
             | Self::RouteNotServed
+            | Self::RouteLost
             | Self::RequestNotForwarded(Unforwarded::Refused)
             | Self::NameNotAllowed
             | Self::SelectedCredentialOnly
@@ -237,6 +242,10 @@ impl Refusal {
             Self::WebsocketNotServed => (format!("WebSockets{to_host} aren't carried yet."), None),
             Self::RouteNotServed => (
                 format!("requests{to_host} can't use this environment's credentials yet."),
+                None,
+            ),
+            Self::RouteLost => (
+                format!("requests{to_host} can't use this environment's credentials until it restarts."),
                 None,
             ),
             Self::RequestNotForwarded(_) => (

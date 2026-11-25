@@ -138,7 +138,7 @@ impl Refusal {
             Self::CredentialConflict => RefusalCode::CredentialConflict,
             Self::PathNotServed => RefusalCode::PathNotServed,
             Self::WebsocketNotServed => RefusalCode::WebsocketNotServed,
-            Self::RouteNotServed => RefusalCode::RouteNotServed,
+            Self::RouteNotServed | Self::RouteLost => RefusalCode::RouteNotServed,
             Self::RequestNotForwarded(_) => RefusalCode::RequestNotForwarded,
             Self::BodyTooLarge => RefusalCode::BodyTooLarge,
             Self::Busy => RefusalCode::Busy,

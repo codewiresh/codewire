@@ -206,7 +206,9 @@ async fn refused(
         ),
         StatusCode::FORBIDDEN => (
             "route_not_served",
-            format!("requests to {bound} can't use this environment's credentials yet."),
+            format!(
+                "requests to {bound} can't use this environment's credentials until it restarts."
+            ),
         ),
         _ => (
             "request_not_forwarded",

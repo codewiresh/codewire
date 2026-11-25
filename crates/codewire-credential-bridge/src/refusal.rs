@@ -100,7 +100,7 @@ pub fn to_wire(refusal: Refusal) -> v1::CredentialBridgeRefusal {
         Refusal::CredentialConflict => Wire::CredentialConflict,
         Refusal::PathNotServed => Wire::PathNotServed,
         Refusal::WebsocketNotServed => Wire::WebsocketNotServed,
-        Refusal::RouteNotServed => Wire::RouteNotServed,
+        Refusal::RouteNotServed | Refusal::RouteLost => Wire::RouteNotServed,
         Refusal::RequestNotForwarded(_) => Wire::RequestNotForwarded,
         Refusal::BodyTooLarge => Wire::BodyTooLarge,
         Refusal::Busy => Wire::Busy,

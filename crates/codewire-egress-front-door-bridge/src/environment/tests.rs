@@ -484,7 +484,9 @@ async fn a_bound_host_with_no_route_is_terminated_and_refused_by_name() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
         body,
-        format!("Codewire: requests to {UNROUTED} can't use this environment's credentials yet.\n")
+        format!(
+            "Codewire: requests to {UNROUTED} can't use this environment's credentials until it restarts.\n"
+        )
     );
     let (seen, status, _) = running.request().await;
     assert_eq!(seen.intercepted_host, BOUND);
