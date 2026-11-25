@@ -16,14 +16,12 @@ Updated 2026-11-25. Slice 1's CLI and agent are observed on Dev: enroll with
 either key store, the agent's connection directly and through a proxy, the
 user service across logout and reboot, and leave. The Hosts page waits for
 the owner's browser walk. Slice 2's lifecycle is observed on Dev on a Linux
-host: stop, delete, a stop across an agent restart and a delete on a
-revoked host, and create and start in part: the environment runs, but the
-CLI's create never returns and its start exits 1 (#6397). The host's
-generation, the platform's own refusals (offline, not granted, out of
-capacity, a request the host can't take) and the 25-minute bound are not
-yet observed. `host-attach` has its tunnel (#6403) and is not yet walked,
-and slice 3 is not shipped. Nothing is
-observed on Production.
+host: create, `cw run` and `cw attach` over the API tunnel, stop, start and
+delete, each returning with exit 0 (#6397), a stop across an agent restart
+and a delete on a revoked host. The host's generation, the platform's own
+refusals (offline, not granted, out of capacity, a request the host can't
+take) and the 25-minute bound are not yet observed. Slice 3 is not shipped.
+Nothing is observed on Production.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -33,11 +31,11 @@ observed on Production.
 | `host-service` | observed 2026-11-13 on 37ea121f5 and 154d23a40 (#3609, #4432) | not yet observed |
 | `host-leave` | observed 2026-11-13 on 37ea121f5 and 154d23a40 (#3609, #4432) | not yet observed |
 | `host-page` | not yet observed | not yet observed |
-| `host-create` | partly observed 2026-11-24 on 013f98d865 to 4d9d003f3: runs on the host, but `cw create` never returns; the generation, the platform's refusals and the 25-minute bound are not yet observed (#3609, #6397) | not yet observed |
-| `host-attach` | not yet observed | not yet observed |
-| `host-stop` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
-| `host-start` | partly observed 2026-11-24 on 013f98d865 to 4d9d003f3: runs again with its workspace kept, but `cw start` exits 1 (#3609, #6397) | not yet observed |
-| `host-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
+| `host-create` | observed 2026-11-25 on 3541c5c3e8 for an online host; the generation, the platform's refusals and the 25-minute bound are not yet observed (#3609, #6397) | not yet observed |
+| `host-attach` | observed 2026-11-25 on 3541c5c3e8, without `--agent` (#3609, #6397) | not yet observed |
+| `host-stop` | observed 2026-11-25 on 3541c5c3e8 (#3609, #6397) | not yet observed |
+| `host-start` | observed 2026-11-25 on 3541c5c3e8, its workspace kept on 2026-11-24 (#3609, #6397) | not yet observed |
+| `host-delete` | observed 2026-11-25 on 3541c5c3e8 (#3609, #6397) | not yet observed |
 | `host-agent-restart` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
 | `host-revoked-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
 | `host-direct` | not yet observed | not yet observed |
@@ -222,11 +220,14 @@ source.
   host's report shows the same environment and generation. A refused create
   names its reason, and nothing is created on the platform or another host.
 - **Gotchas:** the host refuses every operation while any directory above its
-  native state root is not mode 0700, retrying every 5 s until it is. Today
-  `cw create --on host:NAME` prints `Reconcile requested` and never returns,
-  because it waits for a daemon readiness the platform can't give a host
-  environment (#6397); read `cw info` instead.
+  native state root is not mode 0700, retrying every 5 s until it is.
 - **Observed:**
+  - Dev, 2026-11-25, on 3541c5c3e8 with `cw` built from the same commit, on
+    the Linux host `cw-hosts-h4` providing one VM. Two creates returned with
+    exit 0 after 97 s and 88 s, each ending `Running on its host`, then
+    `Workspace daemon ready` and `Environment … created - VM on host
+    cw-hosts-h4`; `cw info` read `Host: cw-hosts-h4` and `State: running`
+    (#6397). The host's generation was not read.
   - Dev, 2026-11-24, the first slice-2 walk (above). Online, `cw host provide
     --max-vms 1`. The environment read `State: running` with `StartedAt`
     21:56:40Z, 2 min 50 s after the create, the same second the host's
@@ -247,7 +248,17 @@ source.
 - **States to exercise:** attach, disconnect, reconnect with the result kept.
 - **Proof:** `cw run --agent …` runs in the host's VM; after a disconnect,
   `cw attach` shows the same session and its result.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-25, the walk under `host-create`, with plain commands, not
+    `--agent`. `cw run --in ENV -- sh -c …` printed its output and exited 0,
+    before a stop and after the next start; its line read `Started session
+    ENV/sh · VM on host cw-hosts-h4`, and no hint carried `--cloud`. In a
+    terminal, `cw attach` to a running session streamed it, Ctrl-B d detached
+    it with `it keeps running`, and a second `cw attach` showed the same
+    session, its output replayed from the start and still counting. A
+    session that had ended read `Exited` in `cw ls ENV`, and `cw attach` and
+    `cw logs ENV --session NAME` both showed its output. Until slice 3 each
+    command notes `tailnet unavailable` and goes through the API (#6397).
 
 ### `host-stop`: an environment on a host stops
 
@@ -257,23 +268,25 @@ source.
 - **Observed:**
   - Dev, 2026-11-24, the first slice-2 walk (above). Three stops, each
     `Environment h2-env stopped` in about 4 s, `StopReason: user`, and the
-    host's VM stopped. The CLI still says `cloud VM` and suggests `cw --cloud
-    start` (#6397).
+    host's VM stopped.
+  - Dev, 2026-11-25, the walk under `host-create`. `cw stop` exited 0 after
+    4 s with `VM on host cw-hosts-h4` and the hint `cw start h5-env` (#6397).
 
 ### `host-start`: a stopped environment on a host starts again
 
 - **Entry points:** `cw start ENV`.
 - **Proof:** the environment reads running on the same host, with its
   workspace kept.
-- **Gotchas:** `cw start` exits 1 after about 3 minutes with `daemon to become
-  ready: sandbox backend not found`, though the environment is running
-  (#6397).
 - **Observed:**
   - Dev, 2026-11-24, the first slice-2 walk (above). Two starts: each read
-    running 14 to 19 s later on the same host, while `cw start` exited 1 after
-    3 min 14 s and 3 min 19 s (#6397). A file written into `/workspace` before
-    a stop, through the host's own `cw exec --local`, read back the same after
-    the next start.
+    running 14 to 19 s later on the same host. A file written into
+    `/workspace` before a stop, through the host's own `cw exec --local`, read
+    back the same after the next start. `cw start` itself exited 1 then
+    (#6397).
+  - Dev, 2026-11-25, the walk under `host-create`. `cw start` exited 0 after
+    11 s, ending `Running on its host`, `Workspace daemon ready` and
+    `Environment h5-env started - VM on host cw-hosts-h4`, and `cw run` worked
+    after it (#6397).
 
 ### `host-delete`: an environment on a host is deleted
 
@@ -285,6 +298,10 @@ source.
     at once; within 5 s the host's `cw ls --local` listed no environments and
     its native state shrank from 9.4 GB to 2.4 GB, the VM's disk gone.
     Deleting the environment whose create had failed worked the same way.
+  - Dev, 2026-11-25, the walk under `host-create`. Two `cw rm --yes` exited 0
+    at once with `VM on host cw-hosts-h4 · state: destroying` and the hint
+    `cw ls`. The host's `cw ls --local` listed no environments 20 s after the
+    first and within 50 s of the second (#6397).
 
 ### `host-agent-restart`: a lost reply resolves the original operation
 
