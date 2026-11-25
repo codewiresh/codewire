@@ -27,12 +27,11 @@
           <div class="cw-settings-content">
         <header class="cw-page-header"><div><h1 class="cw-page-title">Invitations</h1><p class="cw-page-description">Organizations that invited {{ page.email }}.</p></div></header>
         {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
-        <section class="cw-card cw-settings-card" aria-labelledby="invitations-title">
-          <header class="cw-card-header"><h2 id="invitations-title" class="cw-card-title">Pending invitations</h2><p class="cw-card-description">Accepting one makes you a member of that organization with the role it names.</p></header>
-          <div class="cw-card-content">
+        <section class="cw-section" aria-labelledby="invitations-title">
+          <header class="cw-section-header"><div><h2 id="invitations-title" class="cw-section-title">Pending invitations</h2><p class="cw-section-description">Accepting one makes you a member of that organization with the role it names.</p></div></header>
           {% if !page.email_verified %}
             <p class="cw-alert cw-alert--warning" role="status">Verify your email address to see the invitations sent to it.</p>
-            <form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Send verification email</button></form>
+            <form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><button class="cw-text-action" type="submit">Send verification email</button></form>
           {% else if let Some(invitations) = page.invitations %}
             {% if invitations.is_empty() %}
             <p class="cw-settings-muted">No pending invitations. When an organization invites {{ page.email }}, it appears here.</p>
@@ -46,7 +45,6 @@
           {% else %}
             <p class="cw-alert cw-alert--warning" role="status">Your invitations are unavailable right now. Reload to try again.</p>
           {% endif %}
-          </div>
         </section>
           </div>
         </div>

@@ -17,9 +17,8 @@
 </nav></aside>
   <div class="cw-settings-content cw-account-page">
     <header class="cw-page-header"><div><h1 class="cw-page-title">Delete account</h1><p class="cw-page-description">Deleting your account cannot be undone.</p></div></header>
-    <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
-      <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete your account</h2><p class="cw-card-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to owner@example.test when the deletion is done, and you can sign up again with this address later.</p></header>
-      <div class="cw-card-content">
+    <section id="delete-account" class="cw-section cw-section--danger" aria-labelledby="delete-account-title">
+      <header class="cw-section-header"><div><h2 id="delete-account-title" class="cw-section-title">Delete your account</h2><p class="cw-section-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to owner@example.test when the deletion is done, and you can sign up again with this address later.</p></div></header>
         <h3 class="cw-section-label">Deleted with your account</h3>
         <ul class="cw-row-list"><li><strong>Owner's sandbox lab</strong><p class="cw-muted">2 environments deleted with it</p></li></ul>
         <h3 class="cw-section-label">You leave</h3>
@@ -29,7 +28,6 @@
           <div class="cw-field"><label class="cw-label" for="delete-account-email">Type <strong>owner@example.test</strong> to confirm</label><input class="cw-input" id="delete-account-email" name="confirm_email" type="email" required pattern="owner@example\.test" maxlength="320" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
           <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="settings-account.html">Cancel</a><button class="cw-button cw-danger-button" type="submit">Delete account</button></div>
         </form>
-      </div>
     </section>
   </div>
 </div></div></main>

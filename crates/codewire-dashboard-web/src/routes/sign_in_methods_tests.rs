@@ -223,19 +223,17 @@ async fn the_card_lists_the_password_and_each_configured_provider() {
         "{policy}"
     );
     let card = card(&page.body);
-    assert!(
-        card.contains(
-            "<h2 id=\"sign-in-methods-title\" class=\"cw-card-title\">Sign-in methods</h2>"
-        )
-    );
+    assert!(card.contains(
+        "<h2 id=\"sign-in-methods-title\" class=\"cw-section-title\">Sign-in methods</h2>"
+    ));
     // Each row: the name with its state, the description under it.
     assert!(
         card.contains(
-            "<h3>Password <span class=\"cw-badge\" data-tone=\"success\">Set</span></h3>"
+            "<h3>Password <span class=\"cw-status cw-status--quiet\" data-tone=\"success\">Set</span></h3>"
         )
     );
     assert!(card.contains(
-        "<h3>GitHub <span class=\"cw-badge\" data-tone=\"success\">Connected</span></h3>"
+        "<h3>GitHub <span class=\"cw-status cw-status--quiet\" data-tone=\"success\">Connected</span></h3>"
     ));
     assert!(card.contains("<h3>Google</h3><p>Not connected.</p>"));
     assert!(card.contains("href=\"/forgot-password\">Reset password</a>"));
@@ -273,7 +271,11 @@ async fn the_last_way_in_cannot_be_disconnected_and_unconfigured_providers_hide(
     let page = account_page(answers, "").await;
     let card = card(&page.body);
     assert!(card.contains("No password is set. You sign in with a connected provider."));
-    assert!(card.contains("<h3>Password <span class=\"cw-badge\">Not set</span></h3>"));
+    assert!(
+        card.contains(
+            "<h3>Password <span class=\"cw-status cw-status--quiet\">Not set</span></h3>"
+        )
+    );
     assert!(!card.contains("Reset password"));
     assert!(
         !card.contains("sign-in-method-google"),

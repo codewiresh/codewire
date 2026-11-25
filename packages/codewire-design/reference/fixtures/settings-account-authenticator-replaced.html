@@ -17,33 +17,33 @@
 </nav></aside>
   <div class="cw-settings-content cw-account-page">
     <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, organizations, security, sign-in methods and browser sessions.</p></div></header>
-    <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
-      <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
-      <div class="cw-card-content"><dl class="cw-settings-details"><div><dt>Name</dt><dd>Codewire Owner</dd></div><div><dt>Email</dt><dd class="cw-settings-email"><span>owner@example.test</span><span class="cw-badge" data-tone="success">Verified</span></dd></div><div><dt>Created</dt><dd>Sep 9, 2026, 17:00 UTC</dd></div></dl></div>
+    <section id="account-details" class="cw-section" aria-labelledby="account-title">
+      <header class="cw-section-header"><div><h2 id="account-title" class="cw-section-title">Account details</h2><p class="cw-section-description">Your Codewire account identity. GitHub connections do not change it.</p></div></header>
+      <dl class="cw-settings-details"><div><dt>Name</dt><dd>Codewire Owner</dd></div><div><dt>Email</dt><dd class="cw-settings-email"><span>owner@example.test</span><span class="cw-status cw-status--quiet" data-tone="success">Verified</span></dd></div><div><dt>Created</dt><dd>Sep 9, 2026, 17:00 UTC</dd></div></dl>
     </section>
-    <section id="organizations" class="cw-card cw-settings-card" aria-labelledby="organizations-title">
-      <header class="cw-card-header"><h2 id="organizations-title" class="cw-card-title">Organizations</h2><p class="cw-card-description">The organizations you belong to, and your role in each.</p></header>
-      <div class="cw-card-content"><ul class="cw-row-list cw-account-organizations">
-        <li class="cw-account-organization"><header><h3><a href="/acme/">Acme</a></h3><p>Member · Joined Nov 13, 2026</p></header><button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="leave-organization-acme" aria-haspopup="dialog" aria-controls="leave-organization-acme"><span>Leave</span><span class="cw-sr-only"> Acme</span></button>
+    <section id="organizations" class="cw-section" aria-labelledby="organizations-title">
+      <header class="cw-section-header"><div><h2 id="organizations-title" class="cw-section-title">Organizations</h2><p class="cw-section-description">The organizations you belong to, and your role in each.</p></div></header>
+      <ul class="cw-row-list cw-account-organizations">
+        <li class="cw-account-organization"><header><h3><a href="/acme/">Acme</a></h3><p>Member · Joined Nov 13, 2026</p></header><button class="cw-text-action" type="button" data-dialog-open="leave-organization-acme" aria-haspopup="dialog" aria-controls="leave-organization-acme"><span>Leave</span><span class="cw-sr-only"> Acme</span></button>
           <dialog class="cw-dialog" data-dialog id="leave-organization-acme" aria-labelledby="leave-title-acme"><header class="cw-dialog-header"><h2 id="leave-title-acme">Leave Acme?</h2></header><div class="cw-dialog-body"><p>You lose access to its sandboxes, secrets and billing at once. An owner or admin can invite you again.</p></div><form method="post" action="/settings/_actions/organizations/leave"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="org_id" value="org-acme"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Leave organization</button></footer></form></dialog></li>
-        <li class="cw-account-organization"><header><h3><a href="/codewire-owner/">Codewire Owner's team</a></h3><p>Owner · Joined Nov 1, 2026</p><p id="leave-organization-codewire-owner-help">You're its only owner. Make someone else an owner first, or delete the organization.</p></header><button class="cw-button cw-button--outline cw-button--small" type="button" disabled aria-describedby="leave-organization-codewire-owner-help"><span>Leave</span><span class="cw-sr-only"> Codewire Owner's team</span></button></li>
-      </ul></div>
+        <li class="cw-account-organization"><header><h3><a href="/codewire-owner/">Codewire Owner's team</a></h3><p>Owner · Joined Nov 1, 2026</p><p id="leave-organization-codewire-owner-help">You're its only owner. Make someone else an owner first, or delete the organization.</p></header><button class="cw-text-action" type="button" disabled aria-describedby="leave-organization-codewire-owner-help"><span>Leave</span><span class="cw-sr-only"> Codewire Owner's team</span></button></li>
+      </ul>
     </section>
-    <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
-      <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
-      <div class="cw-card-content"><ul class="cw-row-list">
-        <li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--pill" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#replace-authenticator"><input type="hidden" name="dialog" value="replace-authenticator"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="replace-authenticator" aria-haspopup="dialog" aria-controls="replace-authenticator">Replace authenticator</button></form><form class="cw-dialog-launcher" method="get" action="settings-account.html#regenerate-recovery-codes"><input type="hidden" name="dialog" value="regenerate-recovery-codes"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="regenerate-recovery-codes" aria-haspopup="dialog" aria-controls="regenerate-recovery-codes">Regenerate recovery codes</button></form></div></li>
-      </ul></div>
+    <section id="security" class="cw-section" aria-labelledby="security-title">
+      <header class="cw-section-header"><div><h2 id="security-title" class="cw-section-title">Security</h2></div></header>
+      <ul class="cw-row-list">
+        <li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--quiet" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#replace-authenticator"><input type="hidden" name="dialog" value="replace-authenticator"><button class="cw-text-action" type="submit" data-dialog-open="replace-authenticator" aria-haspopup="dialog" aria-controls="replace-authenticator">Replace authenticator</button></form><form class="cw-dialog-launcher" method="get" action="settings-account.html#regenerate-recovery-codes"><input type="hidden" name="dialog" value="regenerate-recovery-codes"><button class="cw-text-action" type="submit" data-dialog-open="regenerate-recovery-codes" aria-haspopup="dialog" aria-controls="regenerate-recovery-codes">Regenerate recovery codes</button></form></div></li>
+      </ul>
     </section>
-    <section id="sign-in-methods" class="cw-card cw-settings-card cw-sign-in-methods" aria-labelledby="sign-in-methods-title">
-      <header class="cw-card-header"><h2 id="sign-in-methods-title" class="cw-card-title">Sign-in methods</h2><p class="cw-card-description">The ways you can sign in to this account. Two-factor authentication applies to each.</p></header>
-      <div class="cw-card-content"><ul class="cw-row-list">
-        <li class="cw-security-row"><h3>Password <span class="cw-badge" data-tone="success">Set</span></h3><p>Sign in with your email and password. Get a reset link by email to change it.</p><div class="cw-security-actions"><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></div></li>
-        <li class="cw-security-row" id="sign-in-method-github"><h3>GitHub <span class="cw-badge" data-tone="success">Connected</span></h3><p>Connected as <strong>octocat</strong> · Nov 12, 2026, 09:30 UTC</p>
-          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/disconnect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="github"><button class="cw-button cw-button--outline cw-button--small" type="submit"><span>Disconnect</span><span class="cw-sr-only"> GitHub</span></button></form></div></li>
+    <section id="sign-in-methods" class="cw-section cw-sign-in-methods" aria-labelledby="sign-in-methods-title">
+      <header class="cw-section-header"><div><h2 id="sign-in-methods-title" class="cw-section-title">Sign-in methods</h2><p class="cw-section-description">The ways you can sign in to this account. Two-factor authentication applies to each.</p></div></header>
+      <ul class="cw-row-list">
+        <li class="cw-security-row"><h3>Password <span class="cw-status cw-status--quiet" data-tone="success">Set</span></h3><p>Sign in with your email and password. Get a reset link by email to change it.</p><div class="cw-security-actions"><a class="cw-text-action" href="/forgot-password">Reset password</a></div></li>
+        <li class="cw-security-row" id="sign-in-method-github"><h3>GitHub <span class="cw-status cw-status--quiet" data-tone="success">Connected</span></h3><p>Connected as <strong>octocat</strong> · Nov 12, 2026, 09:30 UTC</p>
+          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/disconnect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="github"><button class="cw-text-action" type="submit"><span>Disconnect</span><span class="cw-sr-only"> GitHub</span></button></form></div></li>
         <li class="cw-security-row" id="sign-in-method-google"><h3>Google</h3><p>Not connected.</p>
-          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/connect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="google"><button class="cw-button cw-button--outline cw-button--small" type="submit"><span>Connect</span><span class="cw-sr-only"> Google</span></button></form></div></li>
-      </ul></div>
+          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/connect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="google"><button class="cw-text-action" type="submit"><span>Connect</span><span class="cw-sr-only"> Google</span></button></form></div></li>
+      </ul>
     </section>
     <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator" aria-labelledby="replace-authenticator-title">
       <header class="cw-dialog-header"><h2 id="replace-authenticator-title">Replace authenticator</h2></header>
@@ -69,12 +69,10 @@
         </form></div>
       <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="regenerate-recovery-codes-form">Regenerate codes</button></footer>
     </dialog>
-    <section id="sessions" class="cw-card cw-settings-card" aria-labelledby="sessions-title">
-      <header class="cw-card-header"><h2 id="sessions-title" class="cw-card-title">Active sessions</h2></header>
-      <div class="cw-card-content">
+    <section id="sessions" class="cw-section" aria-labelledby="sessions-title">
+      <header class="cw-section-header"><div><h2 id="sessions-title" class="cw-section-title">Active sessions</h2></div></header>
         <p class="cw-alert cw-alert--success" role="status">Your other browsers were signed out, and this browser has a new session. <a href="settings-account.html#sessions">Reload sessions</a></p>
-        <form id="sign-out"><button class="cw-button cw-button--outline" type="button">Sign out of this browser</button></form>
-      </div>
+        <form id="sign-out"><button class="cw-text-action" type="button">Sign out of this browser</button></form>
     </section>
   </div>
 </div></div></main>

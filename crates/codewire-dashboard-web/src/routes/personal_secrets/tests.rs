@@ -677,8 +677,9 @@ async fn native_draft_pages_revalidate_org_and_preserve_paging_reload_and_nonmut
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let rendered = response.text().await.unwrap();
     assert!(rendered.contains(&format!(
-        "href=\"/allowed/new/?creation_draft={DRAFT}\">Return to Create Sandbox</a>"
+        "<a class=\"cw-text-action\" href=\"/allowed/new/?creation_draft={DRAFT}\"><svg class=\"cw-icon\" aria-hidden=\"true\">"
     )));
+    assert!(rendered.contains("<span>Return to Create Sandbox</span></a>"));
     assert!(rendered.contains(&format!(
         "href=\"{PATH}?creation_draft={DRAFT}\">First page</a>"
     )));
@@ -692,7 +693,9 @@ async fn native_draft_pages_revalidate_org_and_preserve_paging_reload_and_nonmut
     // usable without submitting any form, including with JavaScript disabled.
     assert!(rendered.contains("type=\"button\" data-dialog-close>Cancel</button>"));
     assert!(
-        rendered.find("Return to Create Sandbox</a>").unwrap()
+        rendered
+            .find("Return to Create Sandbox</span></a>")
+            .unwrap()
             < rendered.find("<noscript>").unwrap()
     );
     for rpc in ["/SetUserSecret", "/RenameUserSecret", "/DeleteUserSecret"] {

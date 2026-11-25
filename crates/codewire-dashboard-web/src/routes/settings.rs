@@ -1514,11 +1514,13 @@ mod tests {
         settings.email_verified = false;
         settings.csrf_token = "csrf".into();
         let body = render(&settings);
-        assert!(body.contains(r#"<span class="cw-badge" data-tone="warning">Not verified</span><form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="csrf"><button class="cw-button cw-button--outline cw-button--small" type="submit">Send verification email</button></form>"#));
+        assert!(body.contains(r#"<span class="cw-status cw-status--quiet" data-tone="warning">Not verified</span><form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="csrf"><button class="cw-text-action" type="submit">Send verification email</button></form>"#));
 
         settings.email_verified = true;
         let body = render(&settings);
-        assert!(body.contains(r#"<span class="cw-badge" data-tone="success">Verified</span>"#));
+        assert!(body.contains(
+            r#"<span class="cw-status cw-status--quiet" data-tone="success">Verified</span>"#
+        ));
         assert!(!body.contains("send-verification"));
 
         // The outcome shows in Account details, not with the sessions.
@@ -1537,8 +1539,8 @@ mod tests {
     #[test]
     fn a_security_row_puts_its_status_with_the_title_and_the_text_under_it() {
         let body = render(&enrolled_settings());
-        assert!(body.contains(r#"<li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--pill" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher""#));
-        assert!(body.contains(r#"<li class="cw-security-row"><h3>Password</h3><p>Get a reset link by email.</p><div class="cw-security-actions"><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></div></li>"#));
+        assert!(body.contains(r#"<li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--quiet" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher""#));
+        assert!(body.contains(r#"<li class="cw-security-row"><h3>Password</h3><p>Get a reset link by email.</p><div class="cw-security-actions"><a class="cw-text-action" href="/forgot-password">Reset password</a></div></li>"#));
     }
 
     #[test]
@@ -1699,7 +1701,9 @@ mod tests {
         }
         .render()
         .expect("render account settings");
-        let card = body.find("cw-card cw-card--danger").expect("danger card");
+        let card = body
+            .find("cw-section cw-section--danger")
+            .expect("danger section");
         assert!(card > body.find("id=\"sessions\"").expect("sessions card"));
         assert!(body.contains("href=\"/settings/delete-account/\""));
     }

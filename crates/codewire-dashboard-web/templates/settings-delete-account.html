@@ -29,9 +29,8 @@
         <header class="cw-page-header"><div><h1 class="cw-page-title">Delete account</h1><p class="cw-page-description">Deleting your account cannot be undone.</p></div></header>
         {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
         {% if page.blocking.is_empty() %}
-        <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
-          <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete your account</h2><p class="cw-card-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to {{ page.email }} when the deletion is done, and you can sign up again with this address later.</p></header>
-          <div class="cw-card-content">
+        <section id="delete-account" class="cw-section cw-section--danger" aria-labelledby="delete-account-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-title" class="cw-section-title">Delete your account</h2><p class="cw-section-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to {{ page.email }} when the deletion is done, and you can sign up again with this address later.</p></div></header>
             <h3 class="cw-section-label">Deleted with your account</h3>
             {% if page.personal.is_empty() %}<p class="cw-muted">No organizations. Only your own account data is deleted.</p>{% else %}<ul class="cw-row-list">{% for organization in page.personal %}<li><strong>{{ organization.name }}</strong><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>{% endif %}
             {% if !page.shared.is_empty() %}<h3 class="cw-section-label">You leave</h3>
@@ -41,15 +40,12 @@
               <div class="cw-field"><label class="cw-label" for="delete-account-email">Type <strong>{{ page.email }}</strong> to confirm</label><input class="cw-input" id="delete-account-email" name="confirm_email" type="email" required pattern="{{ page.email_pattern }}" maxlength="320" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
               <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/settings/">Cancel</a><button class="cw-button cw-danger-button" type="submit">Delete account</button></div>
             </form>
-          </div>
         </section>
         {% else %}
-        <section id="delete-account" class="cw-card cw-settings-card" aria-labelledby="delete-account-blocked-title">
-          <header class="cw-card-header"><h2 id="delete-account-blocked-title" class="cw-card-title">Transfer or delete these organizations first</h2><p class="cw-card-description">You are the only owner of these organizations and others are members. Make another member an owner, or delete the organization, then come back.</p></header>
-          <div class="cw-card-content">
+        <section id="delete-account" class="cw-section" aria-labelledby="delete-account-blocked-title">
+          <header class="cw-section-header"><div><h2 id="delete-account-blocked-title" class="cw-section-title">Transfer or delete these organizations first</h2><p class="cw-section-description">You are the only owner of these organizations and others are members. Make another member an owner, or delete the organization, then come back.</p></div></header>
             <ul class="cw-row-list">{% for organization in page.blocking %}<li><a href="{{ organization.url }}">{{ organization.name }}</a><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>
-            <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/settings/">Back to account</a></div>
-          </div>
+            <div class="cw-form-actions"><a class="cw-text-action" href="/settings/">Back to account</a></div>
         </section>
         {% endif %}
           </div>

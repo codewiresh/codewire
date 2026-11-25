@@ -364,7 +364,7 @@ async fn the_page_has_an_empty_an_unverified_and_an_unavailable_state() {
         page.body
             .contains("Verify your email address to see the invitations sent to it.")
     );
-    assert!(page.body.contains(&format!("<form method=\"post\" action=\"/settings/_actions/send-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button class=\"cw-button cw-button--outline cw-button--small\" type=\"submit\">Send verification email</button></form>")));
+    assert!(page.body.contains(&format!("<form method=\"post\" action=\"/settings/_actions/send-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button class=\"cw-text-action\" type=\"submit\">Send verification email</button></form>")));
     assert!(!page.body.contains("No pending invitations"));
 
     let (_services, dashboard, _) = start(Scenario {

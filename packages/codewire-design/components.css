@@ -78,6 +78,14 @@
 /* A table whose rows open menus lets them overflow. It fits phones by hiding
    secondary columns and tightening cell insets instead of scrolling sideways. */
 .cw-table-shell--menus { overflow: visible; }
+
+/* A table set with space and type, for pages without boxes: no frame or
+   fill, its first and last columns on the page's lines, hairlines between
+   rows. */
+.cw-table-shell--plain { border: 0; border-radius: 0; background: none; }
+.cw-table-shell--plain .cw-table thead th { background: none; }
+.cw-table-shell--plain .cw-table :is(th, td):first-child { padding-inline-start: 0; }
+.cw-table-shell--plain .cw-table :is(th, td):last-child { padding-inline-end: 0; }
 .cw-table-shell--menus .cw-table-actions { width: var(--space-12); text-align: right; }
 
 @media (max-width: 48rem) {
@@ -883,6 +891,10 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 /* The section's gap spaces its paragraphs; their own margins would double it. */
 .cw-section > p { margin: 0; }
 
+/* A section whose action cannot be undone, such as deleting an account: its
+   title takes the destructive colour, as the danger card's did. */
+.cw-section--danger > .cw-section-header .cw-section-title { color: var(--destructive); }
+
 .cw-section > .cw-row-list {
   border-block: var(--border-width) solid var(--border-subtle);
 }
@@ -921,6 +933,8 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 }
 
 .cw-text-action .cw-icon { width: var(--icon-size); height: var(--icon-size); }
+
+.cw-text-action--danger { color: var(--destructive); }
 
 .cw-text-action:is(:disabled, [aria-disabled="true"]) {
   color: var(--fg-disabled);
