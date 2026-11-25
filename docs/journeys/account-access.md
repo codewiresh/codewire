@@ -16,8 +16,8 @@ Updated 2026-11-25.
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, and since #5946 the line holds until the page reaches sign-in (Kind 2026-11-23, main 4b20950d80); the terminal's sign-out leg and its revoked wording observed on Dev 2026-11-24, source 3e020c3405 | not yet observed |
-| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); not on Dev | not yet observed |
-| `access-org-removal` | a removal and a leave observed on Dev 2026-11-24, source 4d9d003f35, before a departure ended grants; the desktop viewer and another organization's streams not yet observed | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd and an open terminal's Refresh sessions, reconnect check and return to the page (#5944) on Kind 2026-11-23, main 4b20950d80 (the preview pages not walkable on Kind); observed on Dev 2026-11-25, source 569a5c7a53, except that its tailnet sessions ran until the Sandbox went, about 46 s (#6422), and the new-stream tries but `cw exec` and the preview pages were not walked | not yet observed |
+| `access-org-removal` | a removal and a leave observed on Dev 2026-11-24, source 569a5c7a53, before a departure ended grants, and another organization's streams on Dev 2026-11-25, source 569a5c7a53; the desktop viewer and the re-invite without the old grant not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -378,6 +378,30 @@ comment 123530). Not yet observed.
   them. An organization API key read the preview before the deletion and got
   401 during it, so a Bearer request never reached the deleting check.
 
+- **Observed on Dev:** 2026-11-25, source 569a5c7a53 (live images checked at
+  00:37:26Z), with cw built from 013f98d865; recorded on #3586. The synthetic
+  invitee created and owned `w3586-del-1`, bounded by
+  `grant-dev-walk-org-credit.sh` (EUR 2, one Sandbox, auto top-up off), with
+  the personal-walk identity as a plain member holding `operator` on the
+  owner's Sandbox. The owner kept a `cw exec` loop and a browser terminal
+  open; the member a browser terminal, both `cw shell`s and
+  `cw logs --session tick --follow`.
+  - `cw org delete w3586-del-1 --yes` started at 00:38:32.639 and printed
+    "Organization deleted." at 00:39:07.864.
+  - The member's logs and WebSocket shell ended at 00:38:33.19 and .21 with
+    `✗ Organization is being deleted`; both browsers' sockets closed at
+    00:38:34.18 to .22 with 1008 "organization is being deleted", and their
+    footers showed this journey's line with no Reconnect.
+  - The owner's `cw exec`, over the tailnet, ran until 00:39:18.200 and the
+    member's tailnet shell until 00:39:19.234, about 46 s, ending only when
+    the Sandbox went (#6422), though `stream.revoked` rows of the
+    `organization` kind for both were written at 00:38:33.16.
+  - A new `cw exec` 1 s in was refused for both with
+    `✗ Organization is being deleted`; the walk's other new-stream tries did
+    not run.
+  - Afterwards the organization, its memberships and the Sandbox were gone
+    from the database.
+
 ## `access-org-removal`: a member removed from an organization
 
 Issue: #3586, the `membership` kind.
@@ -414,9 +438,10 @@ Issue: #3586, the `membership` kind.
   before this kind, because a removal disables the member's keys for that
   organization; walk with a browser session and `cw login` to see the new
   kind.
-- **Observed:** on Dev, 2026-11-24, source 4d9d003f35 (live images checked),
-  with cw built from 013f98d865 (it differs only in the credentials
-  commands); recorded on #3586. The smoke identity owned the organization,
+- **Observed:** on Dev, 2026-11-24, source 569a5c7a53, whose rollout ended at
+  23:10:50Z, before both runs, with cw built from 013f98d865 (it differs in
+  the credentials commands and a foreground `cw run` fix, #6355, neither of
+  which the walk used); recorded on #3586. The smoke identity owned the organization,
   made the Sandbox and granted the synthetic invitee `operator`; the invitee
   opened a browser terminal, both `cw shell`s, a `cw exec` loop and
   `cw logs --session tick --follow`; the smoke identity kept its own exec
@@ -434,9 +459,15 @@ Issue: #3586, the `membership` kind.
     exec ran at once.
   - `cw org leave` in a second run ended the same streams 0.26–1.54 s after
     it, with the same lines and audit rows.
-  - Before this change the old `operator` grant was still listed after the
+  - Before #6411 the old `operator` grant was still listed after the
     re-invite and applied again; the re-invite state above is not yet
     observed.
+  - Another organization, on Dev 2026-11-25, source 569a5c7a53, in the
+    deletion walk above: the invitee, with a `cw exec` loop and a browser
+    terminal open in its own organization, was removed from
+    `codewire-dev-smoke` by exact user id at 00:38:17.626; both kept running
+    (the exec's lines went from 19 to 36 in the next 15 s, the browser stayed
+    "Connected").
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 
