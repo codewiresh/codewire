@@ -159,7 +159,7 @@
 .cw-port-list { display: grid; margin: 0 0 var(--space-4); padding: 0; list-style: none; }
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
-.cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); }
+.cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); font-size: var(--text-small); }
 /* The add-port form is a .cw-field-row: Add port sits on the input line. */
 .cw-port-form { grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; column-gap: var(--space-3); }
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }

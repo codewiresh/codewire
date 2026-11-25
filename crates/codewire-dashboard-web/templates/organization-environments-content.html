@@ -32,9 +32,8 @@
   </dialog>
 
   {% match page.resize_confirmation %}{% when Some with (resize) %}
-  <section class="cw-card" aria-labelledby="resize-confirmation-title">
-    <div class="cw-card-header"><div><h2 id="resize-confirmation-title" class="cw-card-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-card-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Cancel</a></div>
-    <div class="cw-card-content">
+  <section class="cw-section" aria-labelledby="resize-confirmation-title">
+    <div class="cw-section-header"><div><h2 id="resize-confirmation-title" class="cw-section-title">Confirm resize · {{ resize.environment_name }}</h2><p class="cw-section-description">{{ resize.previous_resources }} → {{ resize.desired_resources }}</p></div><a class="cw-text-action" href="{{ organization.environments_url }}">Cancel</a></div>
       {% if let Some(detail_url) = resize.detail_url(organization.slug) %}<p><a href="{{ detail_url }}">Back to Sandbox</a></p>{% endif %}
       <p><strong>Planned application:</strong> {{ resize.execution_mode }}.</p>
       {% if !resize.reason.is_empty() %}<p>{{ resize.reason }}</p>{% endif %}
@@ -46,25 +45,22 @@
         {% if resize.active_sessions_will_be_terminated %}<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="force" value="true" required> I understand {{ resize.active_session_count }} active session(s) will be terminated.</label>{% endif %}
         <button class="cw-button" type="submit">Apply resize</button>
       </form>
-    </div>
   </section>
   {% when None %}{% endmatch %}
 
   {% match page.resize_operation %}{% when Some with (operation) %}{% include "environment-resize-operation.html" %}{% when None %}{% endmatch %}
 
   {% match page.port_panel %}{% when Some with (panel) %}
-  <section class="cw-card cw-port-panel" aria-labelledby="port-panel-title">
-    <div class="cw-card-header"><div><h2 id="port-panel-title" class="cw-card-title">Ports · {{ panel.environment_name }}</h2><p class="cw-card-description">Expose a port to yourself, the organization, or the public.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div>
-    <div class="cw-card-content">
+  <section class="cw-section cw-port-panel" aria-labelledby="port-panel-title">
+    <div class="cw-section-header"><div><h2 id="port-panel-title" class="cw-section-title">Ports · {{ panel.environment_name }}</h2><p class="cw-section-description">Expose a port to yourself, the organization, or the public.</p></div><a class="cw-text-action" href="{{ organization.environments_url }}">Close</a></div>
       {% let csrf_token = page.create_form.csrf_token %}
       {% let in_dialog = false %}
       {% let message = "" %}
       {% include "environment-ports.html" %}
-    </div>
   </section>
   {% when None %}{% endmatch %}
 
   {% match page.trust_summary %}{% when Some with (trust) %}
-  <section class="cw-card"><div class="cw-card-header"><div><h2 class="cw-card-title">Trust · {{ trust.environment_name }}</h2><p class="cw-card-description">Product-level attestation summary.</p></div><a class="cw-button cw-button--outline cw-button--small" href="{{ organization.environments_url }}">Close</a></div><div class="cw-card-content"><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</div></section>
+  <section class="cw-section"><div class="cw-section-header"><div><h2 class="cw-section-title">Trust · {{ trust.environment_name }}</h2><p class="cw-section-description">Product-level attestation summary.</p></div><a class="cw-text-action" href="{{ organization.environments_url }}">Close</a></div><p><strong>Trust level:</strong> {{ trust.trust_level }}</p><p><strong>Production verified:</strong> {% if trust.production_verified %}yes{% else %}no{% endif %}</p><p><strong>Attestation:</strong> {{ trust.attestation_status }}{% if !trust.tee.is_empty() %} ({{ trust.tee }}){% endif %}</p>{% if !trust.warnings.is_empty() %}<div class="cw-alert cw-alert--warning" role="status">{% for warning in trust.warnings %}{{ warning }}{% if !loop.last %}; {% endif %}{% endfor %}</div>{% endif %}</section>
   {% when None %}{% endmatch %}
 </section>
