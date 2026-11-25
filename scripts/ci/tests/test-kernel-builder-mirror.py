@@ -167,6 +167,13 @@ class MirrorTest(unittest.TestCase):
         with self.assertRaisesRegex(mirror.MirrorError, "unknown repository"):
             mirror.parse_lock(json.dumps(lock), SNAPSHOT)
 
+    def test_the_collector_outlasts_an_archive_stall_with_bounded_retries(self):
+        collect = (fx.ROOT / "scripts/ci/release/collect-kernel-builder-packages.sh").read_text()
+        self.assertTrue("DisableDownloadTimeout" in collect, "pacman's own 10 s stall abort is still on")
+        self.assertTrue('for try in 1 2 3; do' in collect and "timeout -s INT -k 30 900 pacman " in collect,
+                        "a collector pacman call is not bounded and retried")
+        self.assertTrue('--cachedir "$cache"' in collect, "a retry would fetch again what it already has")
+
     def test_the_lock_matches_the_pinned_snapshot_once_it_exists(self):
         # Until the first refresh there is no lock; once there is, it must
         # be the pinned snapshot's.

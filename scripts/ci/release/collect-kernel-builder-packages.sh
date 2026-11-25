@@ -58,8 +58,25 @@ grep -Eq "^SigLevel *= *Required" /etc/pacman.conf ||
 printf "Server = https://archive.archlinux.org/repos/%s/\$repo/os/\$arch\n" "$SNAPSHOT" > /etc/pacman.d/mirrorlist
 cache=/collect-cache
 mkdir -p "$cache"
+# The archive can stall for minutes (cli-release 79495: "Operation too slow.
+# Less than 1 bytes/sec transferred the last 10 seconds"). pacman gives up
+# after 10 s of that, so its own stall abort is off and each call is bounded
+# here instead, and retried. Files already fetched stay in the cache, so a
+# retry fetches only what is missing; pacman still checks every signature.
+sed -i "/^\[options\]/a DisableDownloadTimeout" /etc/pacman.conf
+grep -qx DisableDownloadTimeout /etc/pacman.conf
+# SIGINT, not the default SIGTERM of timeout: pacman removes its db.lck on INT
+# but leaves it on TERM. A lock left anyway is stale: nothing else here runs
+# pacman.
 fetch() {
-  pacman "$@" --cachedir "$cache" --noconfirm --noprogressbar >/dev/null
+  local try
+  for try in 1 2 3; do
+    rm -f /var/lib/pacman/db.lck
+    timeout -s INT -k 30 900 pacman "$@" --cachedir "$cache" --noconfirm --noprogressbar >/dev/null && return 0
+    echo "collect-kernel-builder-packages: pacman $1 failed (try $try of 3)" >&2
+    [ "$try" = 3 ] || sleep $((try * 20))
+  done
+  return 1
 }
 pacman-key --init >/dev/null 2>&1
 fetch -Syuu
