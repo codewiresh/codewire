@@ -84,6 +84,14 @@
       "reason": "Informational unmaintained notice, not a vulnerability. This compile-time macro has no runtime attack surface and no fixed release is required.",
       "owner": "noel",
       "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0600",
+      "package": "kube-client",
+      "reason": "Not reachable: the flaw is only in kube's openssl-tls connector, which trusted OpenSSL's default CA store beside the configured cluster CA. Codewire builds kube and kube-client with rustls-tls only (default-features = false; features client, rustls-tls, ws, jsonpatch, including the workspace-hack's entries). kube-client 3.1.0 resolves against hyper-rustls and rustls with no openssl or hyper-openssl dependency, and no code calls the openssl connector methods. rustls-tls trusts only the configured CA. No 3.x release is patched (fixed in 4.2.1 and 5.2.0), so the move to kube 4.2.1 or later is tracked on #6488. The guard scripts/checks/repo_policy/kube_tls_backend.py narrows this exception, and fails on its own once the exception has expired.",
+      "owner": "noel",
+      "expires": "2026-12-15"
     }
   ],
   "lockfiles": [
