@@ -49,3 +49,31 @@ require_info_interception() {
     die "$label: cw info has a note under Credentials: $under"
   fi
 }
+
+require_refusal_logged() {
+  # cw --local policy log (#5058) shows the refusal just sent: a row for the
+  # route's bound host, api.anthropic.com, port 443, with REASON from SOURCE,
+  # and nothing of the request: not the placeholder, the key or the path. A
+  # credential row names no policy. The front door reports at most once a
+  # second, so the log is read for up to 5 s.
+  local label="$1" source="$2" reason="$3" placeholder="$4" row
+  # shellcheck disable=SC2016 # jq variables.
+  row='.refusals[] | select(.destination == "api.anthropic.com" and .port == 443 and
+    .protocol == "tcp" and .reason == $reason and .source == $source and .count >= 1)'
+  for _attempt in {1..25}; do
+    run_cw --local policy log "$NAME" --output json
+    jq -e --arg source "$source" --arg reason "$reason" "[$row] | length == 1" \
+      "$LAST_STDOUT" >/dev/null && break
+    sleep 0.2
+  done
+  jq -e --arg source "$source" --arg reason "$reason" "[$row] | length == 1" "$LAST_STDOUT" >/dev/null ||
+    die "$label: the refusal log has no $reason row from $source for api.anthropic.com: $(head -c 600 "$LAST_STDOUT")"
+  [[ "$source" != credentials ]] ||
+    jq -e --arg source "$source" --arg reason "$reason" "[$row | .policy == null] == [true]" \
+      "$LAST_STDOUT" >/dev/null ||
+    die "$label: the refusal log's credential row names a policy"
+  jq -e '.rejected == 0' "$LAST_STDOUT" >/dev/null ||
+    die "$label: the runner rejected reports from the front door: $(jq -c '.rejected' "$LAST_STDOUT")"
+  ! grep -Fq -e "$placeholder" -e "$ANTHROPIC_CREDENTIAL_CANARY" -e count_tokens "$LAST_STDOUT" ||
+    die "$label: the refusal log holds the placeholder, the key or the request's path"
+}

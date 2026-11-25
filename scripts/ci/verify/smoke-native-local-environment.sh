@@ -268,11 +268,14 @@ open under it; the guest holds only the environment's placeholder and trusts
 the boot's certificate authority; a guest request to api.anthropic.com
 carrying the placeholder is served, which the
 synthetic provider does only for the stored key, and its reply comes back
-redacted; the placeholder beside another credential is refused; the key is in
+redacted; the placeholder beside another credential is refused, and
+`cw --local policy log --output json` shows it as a credential_conflict row
+for api.anthropic.com with nothing of the request in it (#5058); the key is in
 the memory of none of the runner, the packet worker, the egress broker and the
 front door (the credential broker holds it, by design); killing the front door
 ends that request at once with a closed connection while the VM keeps running,
-and a stop and start restores it with the same placeholder; and the request is
+and the refusal log shows an intercept_unavailable row for it, and a stop and
+start restores it with the same placeholder; and the request is
 still served after the credential broker's renewal, once by default and COUNT
 times (1 to 3) with --egress-interception-renewals, each about one broker
 lifetime. Nothing dials the provider: an intercepted connection is handed to
@@ -1469,6 +1472,8 @@ run_egress_interception_smoke() {
   jq -e '.status == 400 and .body == "Codewire: this request carries the Codewire placeholder and another credential; send only one.\n"' \
     "$LAST_STDOUT" >/dev/null ||
     die "a placeholder beside another credential was not refused: $(head -c 600 "$LAST_STDOUT")"
+  require_refusal_logged 'placeholder beside another credential' credentials credential_conflict \
+    "$placeholder"
 
   scan_serving_processes_for_credential_canaries
 
@@ -1489,6 +1494,7 @@ run_egress_interception_smoke() {
     die 'a front door was running when the request was refused'
   require_info_interception 'front door killed' lost \
     "! agents can't reach their providers; restart the VM"
+  require_refusal_logged 'front door killed' network intercept_unavailable "$placeholder"
 
   log 'interception: a stop and start brings it back with the same placeholder and its login'
   restart_failed_environment 'front door' login
