@@ -13,24 +13,23 @@ discovery. The work is #4661; the configuration is in
 
 Updated 2026-11-24. Dev serves the issuer at `https://identity.codewire-dev.sh`,
 from its own signing key in OpenBao (#4662), and runs groups, audiences and
-minting (#4663, #4664). Minting on Dev waits for its key version 2, made by an
-emergency rotation rehearsal on 2026-11-23, to reach 24 hours. Production
-serves nothing yet (#4667), and no release has these. The contract is
+minting (#4663, #4664). Dev signs with its key version 2. Production serves
+nothing yet (#4667), and no release has these. The contract is
 [dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md).
 
 | ID | Slice | Dev | Production |
 | --- | --- | --- | --- |
-| `identity-groups` | #4664 | not yet observed | not yet observed |
-| `identity-per-org-issuer` | #4664 | not yet observed | not yet observed |
-| `identity-audiences` | #4663 | partly observed (2026-11-24) | not yet observed |
+| `identity-groups` | #4664 | observed (2026-11-24) | not yet observed |
+| `identity-per-org-issuer` | #4664 | observed (2026-11-24) | not yet observed |
+| `identity-audiences` | #4663 | observed (2026-11-24) | not yet observed |
 | `identity-groups-stay-put` | #4663 | not yet observed | not yet observed |
 | `identity-changes-apply` | #4663, #4664 | partly observed (2026-11-24) | not yet observed |
 | `identity-limits` | #4664 | partly observed (2026-11-24) | not yet observed |
 | `identity-discovery` | #4662 | observed (2026-11-23) | not yet observed |
 | `identity-custody` | #4662 | observed; a drifted key by test (2026-11-23) | not yet observed |
-| `identity-own-openbao` | #4666 | the route's refusals observed (2026-11-24); the login not yet | not yet built |
+| `identity-own-openbao` | #4666 | observed (2026-11-24) | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
-| `identity-audit` | #4663, #4664 | partly observed (2026-11-24) | not yet observed |
+| `identity-audit` | #4663, #4664 | observed (2026-11-24) | not yet observed |
 | `identity-files` | #4664 | not yet built | not yet built |
 
 ## Before the walk
@@ -44,7 +43,10 @@ serves nothing yet (#4667), and no release has these. The contract is
   `$ISSUER_BASE/orgs/$ORG` through structured authentication, with
   `claimMappings.groups` from `groups` and the audience `https://k8s.walk.example`
   registered for `ORG` (`cw identity audience add https://k8s.walk.example`).
-  `KIND` below is that cluster's API URL, reachable from the Sandbox.
+  `KIND` below is that cluster's API URL, reachable from the Sandbox. Kind
+  runs inside the Sandbox itself, but a Sandbox has no `/dev/kmsg`, which the
+  kubelet opens at start: mount an empty file there through the node's
+  `extraMounts`.
 - Run the steps from inside a cloud Sandbox (`cw ssh NAME`) unless a step
   says otherwise. An admin of `ORG` sets groups; `MEMBER` is a member who is
   not an admin.
@@ -67,7 +69,10 @@ serves nothing yet (#4667), and no release has these. The contract is
      `$ORG:all`.
 - **Proof:** the decoded `groups` claim of each token, and each command's
   result.
-- **Observed:** not yet observed.
+- **Observed:** on Dev on 2026-11-24 (#4664), with Kind inside `A`. `A`'s
+  token carries `$ORG:all` and `$ORG:data-readers`, and lists the Pods. `B`'s
+  carries only `$ORG:all`; it authenticates, and the same command is
+  Forbidden.
 
 ## 2. `identity-per-org-issuer`: another organization's token is refused
 
@@ -80,7 +85,10 @@ serves nothing yet (#4667), and no release has these. The contract is
      `$ISSUER_BASE/orgs/$ORG2`, which the cluster doesn't trust.
   3. Remove the cluster's `org_id` claim rule and repeat: still 401.
 - **Proof:** the two `iss` values, and the 401.
-- **Observed:** not yet observed.
+- **Observed:** on Dev on 2026-11-24 (#4664), the other way round: the
+  cluster trusted another organization's issuer, and `A`'s token was refused
+  with 401, with the `org_id` rule and without it. Trusting `ORG` again, the
+  same token authenticated.
 
 ## 3. `identity-audiences`: only canonical, registered audiences
 
@@ -99,7 +107,7 @@ serves nothing yet (#4667), and no release has these. The contract is
   `invalid_target`. Driving 2 refuses all six, naming the rule: "can't be
   codewire-dev.sh or a host under it" for both deployment hosts, "the
   in-cluster Kubernetes API", "an IP address", "uses https" and "has no
-  query". Driving 3 waits for the key to sign.
+  query". Driving 3 gives `aud` `https://k8s.walk.example`.
 
 ## 4. `identity-groups-stay-put`: groups don't spread
 
@@ -117,21 +125,27 @@ serves nothing yet (#4667), and no release has these. The contract is
 ## 5. `identity-changes-apply`: a change takes effect within 10 minutes
 
 - **Driving it:**
-  1. The admin removes `A`'s group. The next `cw identity token` carries only
-     `$ORG:all`, and step 1's command is Forbidden once the old token expires,
-     within 10 minutes.
-  2. `cw identity stop A`: the next token request in `A` fails with
-     `identity_stopped`, even within a cached token's half-life.
+  1. The admin removes `A`'s group. `A`'s daemon keeps the token it has until
+     half its lifetime, so `cw identity token` in `A` carries only `$ORG:all`
+     within 5 minutes. Step 1's command is Forbidden with the new token, and
+     with the old one once it expires, within 10 minutes.
+  2. `cw identity stop A`: `A`'s daemon serves the token it has until half its
+     lifetime; then the request fails with `identity_stopped`.
      `cw identity resume A` restores it.
   3. Stop `A`; once it is stopped, orchestration issues no token for it.
   4. On Dev, set `CODEWIRE_IDENTITY_MINTING=off`: every Sandbox's request fails
      with `identity_unavailable`. Set it back.
 - **Proof:** each refusal, with its time against the last token's `exp`.
-- **Observed:** partly, on Dev on 2026-11-24 (#4664). After
-  `cw identity stop A`, a token request in `A` exits 1 with
-  `identity_stopped`, before any key check, and `cw identity resume A`
-  restores it. The cached-token part, and driving 1, 3 and 4, wait for the
-  key to sign.
+- **Observed:** partly, on Dev on 2026-11-24 (#4664).
+  - Driving 1: after the group was cleared, `A` was served its cached token
+    until half its lifetime. The renewed token carried only `$ORG:all`, and
+    step 1's command was Forbidden. The old token listed the Pods until its
+    `exp`, then got 401.
+  - Driving 2: after the stop, `A` was served its cached token until half its
+    lifetime, then got `identity_stopped`. After the resume, a fresh token.
+  - Driving 3: no mint row for `A` while it was stopped, and a fresh token
+    after it started.
+  - Driving 4 needs a change to Dev's orchestration environment, and waits.
 
 ## 6. `identity-limits`: a flood stays in its own Sandbox
 
@@ -329,12 +343,13 @@ serves nothing yet (#4667), and no release has these. The contract is
     before and after;
   - one `identity_mints` row per signature, not per cache hit, with `jti` and
     `kid`, and no column holding a token.
-- **Observed:** partly, on Dev on 2026-11-24 (#4664). `audit_logs` held exactly
+- **Observed:** on Dev on 2026-11-24 (#4664). `audit_logs` held exactly
   one row per action, each with its actor: `identity.audience.registered`,
   `identity.groups.changed` (before `[]`, after `["data-readers"]`),
   `identity.stopped` and `identity.resumed`. The six refused registrations
-  wrote none. `identity_mints` has no column holding a token, and no row yet,
-  because nothing has been signed.
+  wrote none. `identity_mints` held one row per signature and none for a
+  cache hit, each with its `kid` and groups version, and no column holds a
+  token.
 
 ## 12. `identity-files`: a projected token stays current, in memory, and nowhere else
 
@@ -369,4 +384,6 @@ serves nothing yet (#4667), and no release has these. The contract is
 
 Step 9, Codewire's own OpenBao trusting the Dev issuer, is written with #4666.
 Its proxy is a route on the in-cluster `codewire-sandbox` gateway, so it runs
-only from broker-mode Sandboxes.
+only from broker-mode Sandboxes. On Dev on 2026-11-24 (#4666), a trusted
+Sandbox's token logged in and read only its own path, and another
+organization's token was refused at the route.

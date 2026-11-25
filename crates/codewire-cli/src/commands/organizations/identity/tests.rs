@@ -189,7 +189,7 @@ fn setting_groups_says_who_can_run_code_and_so_use_them() {
          carol@example.com · organization owner or admin\n  \
          and every process running in app.\n\
          \n\
-         The next token has the change. Tokens already issued keep their groups until they expire, within 10 minutes.\n"
+         The Sandbox gets the change within 5 minutes, when it renews its token. Tokens already issued keep their groups until they expire, within 10 minutes.\n"
     );
     assert!(!text.contains("id-"), "text names no user ID");
 
@@ -282,7 +282,7 @@ fn audiences_show_their_groups_lifetime_and_file() {
 fn stopping_says_issued_tokens_run_out() {
     assert_eq!(
         minting_text(Switch::Stop, "app", true, PLAIN),
-        "✓ Minting stopped for app.\nTokens already issued stay valid until they expire, within 10 minutes.\n"
+        "✓ Minting stopped for app.\nSandboxes stop getting tokens within 5 minutes, when they renew. Tokens already issued stay valid until they expire, within 10 minutes.\n"
     );
     assert_eq!(
         minting_text(Switch::Stop, "app", false, PLAIN),

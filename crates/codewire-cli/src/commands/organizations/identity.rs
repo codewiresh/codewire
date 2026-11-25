@@ -395,7 +395,7 @@ fn set_groups_text(
     }
     if changed {
         text.push_str(
-            "\nThe next token has the change. Tokens already issued keep their groups until they expire, within 10 minutes.\n",
+            "\nThe Sandbox gets the change within 5 minutes, when it renews its token. Tokens already issued keep their groups until they expire, within 10 minutes.\n",
         );
     }
     text
@@ -657,7 +657,7 @@ fn minting_text(switch: Switch, target: &str, changed: bool, style: Style) -> St
     let done = style.status(Status::Done);
     match (switch, changed) {
         (Switch::Stop, true) => format!(
-            "{done} Minting stopped for {target}.\nTokens already issued stay valid until they expire, within 10 minutes.\n"
+            "{done} Minting stopped for {target}.\nSandboxes stop getting tokens within 5 minutes, when they renew. Tokens already issued stay valid until they expire, within 10 minutes.\n"
         ),
         (Switch::Stop, false) => format!("Minting was already stopped for {target}.\n"),
         (Switch::Resume, true) => format!("{done} Minting resumed for {target}.\n"),
