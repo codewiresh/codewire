@@ -24,11 +24,54 @@ the reason it ended, and the vCPU, memory and disk allocated to it.
   gone, at the time below. A session never ends before its last
   observation.
 
+## A suspended stretch (`standard`, #5529)
+
+**Target, not built.** A `standard` Sandbox whose VM is paused inside its
+Pod ([IDLE-STOP.md](IDLE-STOP.md), "Suspend") is charged as suspended,
+only for the seconds between its runtime's own record of a pause and its
+record of the resume. Nothing the guest says moves a second between rates.
+
+- **A session has a kind,** `running` or `paused`. The loop reads each
+  `standard` Sandbox's new pause records at every poll, through its Pod's
+  log, and splits its session at each one: a `paused` record closes the
+  running session at the record's time, with `end_reason` `vm_paused`, and
+  opens a `paused` one at the same instant and size; a `resumed` record
+  closes it (`vm_resumed`) and opens a running one. A split never ends a
+  session before its last observation.
+- **Where the loop is:** each session carries the last pause record's
+  generation and sequence the loop applied, carried over at each split, so
+  a record is never applied twice. A poll that can't read the records
+  doesn't move a `standard` session's last observation, so no second past
+  an unread record is drawn at either rate.
+- **A paused session draws only its disk,** at the rate card's storage
+  rate, which is 0 until an administrator sets one ("Prices"). Its vCPU and
+  memory draw nothing.
+- **A gap** (IDLE-STOP.md, "A gap"): one of 60 seconds or less is billed as
+  paused. A longer one closes the paused session at the last state record
+  before it, with `end_reason` `pause_records_gap`, and opens a running
+  session there marked for review; a record that says paused again after
+  it opens a paused session from that record. A gap while the session is
+  running changes nothing: it stays running. The loop logs the Sandbox, the
+  generation and the missing sequence numbers, and counts it in
+  `codewire_billing_pause_record_gaps_total`. An operator reviews every
+  marked session and refunds it when the Sandbox was in fact paused.
+- **A stop** wakes a suspended Sandbox and reads its last lines first, so
+  its last record says running and the running session ends as any does.
+- **A boot that ends paused** (an eviction or a lost node, not
+  orchestration's stop) is paused only up to the Pod's end: its runtime
+  container's termination, or the Pod's deletion when that comes first. The
+  time from the last record seen to that end is a gap, settled as above. A
+  Sandbox that carries on in a new Pod turns running at the old Pod's end,
+  with `end_reason` `vm_boot_ended`, and the new boot's records, a new
+  generation, split it from there.
+
 ## When it ends, and why
 
-The billing loop reads Sandbox objects, never Pods or VMs. So the charge
-ends when the product stops or deletes the Sandbox, not when its Pod or VM
-finally goes.
+A session opens and ends from the Sandbox object, never from its Pod or
+VM. So the charge ends when the product stops or deletes the Sandbox, not
+when its Pod or VM finally goes. Only a `standard` Sandbox's split between
+running and paused comes from its runtime's Pod log ("A suspended
+stretch").
 
 | `end_reason` | What happened | `ended_at` |
 | --- | --- | --- |
@@ -55,7 +98,8 @@ charged past them; a closed one is drawn through its end. An organization
 on the Unlimited card is never charged.
 
 A stopped Sandbox has no open session and draws nothing, its kept disk
-included. A start opens a new session.
+included. A start opens a new session. A paused session draws only its
+disk, at the storage rate ("A suspended stretch").
 
 ## Prices
 
