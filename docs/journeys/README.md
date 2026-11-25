@@ -26,6 +26,7 @@ runs the same commands and holds the result to the same standard.
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [email.md](email.md) | Every email Codewire sends (#4553): one plain layout and a text part, from `Codewire <hello@codewire.sh>`, and which have been seen arriving |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
+| [interruptions.md](interruptions.md) | Every way a running cloud Sandbox is restarted, stopped, cut off or disconnected (#6084): what the user sees for each, the journey that proves it, and the issue for each gap |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
 | [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |
 | [previews-and-ports.md](previews-and-ports.md) | Reaching a server in an environment: `cw ports` on a local VM (#4347), cloud previews of loopback servers (#4357), local HTTPS hostnames (#4316), and Unix sockets forwarded over SSH (#5608) |
