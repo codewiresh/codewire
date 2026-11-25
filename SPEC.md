@@ -648,9 +648,11 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
     refused at start, never moved.
 - **Suspend** (target, not shipped, #5529): a `standard` Sandbox with
   `idle_suspend` on pauses its VM inside its Pod after that much idle time,
-  keeping its processes, and resumes on any connection or request. Off by
-  default, set like `idle_stop`; a suspended second is billed only from the
-  supervisor's record, at a rate that is 0 until set. Kata profiles never
+  keeping its processes. A connection on the Pod's published ports, or a
+  stop, resumes it; the guest can only ask to be paused. Off by default, set
+  like `idle_stop`; a suspended second is billed only from the runtime's own
+  pause record, never from anything the guest says, at a rate that is 0
+  until set. Kata profiles never
   suspend, and hibernate comes later. The contract, including every
   periodic call that must not wake a suspended Sandbox, is
   [docs/dev/IDLE-STOP.md](docs/dev/IDLE-STOP.md), "Suspend". Internally,

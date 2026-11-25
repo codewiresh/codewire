@@ -106,7 +106,7 @@ mod front_door;
 #[cfg(target_os = "linux")]
 mod hosted;
 #[cfg(target_os = "linux")]
-pub use hosted::HostedSendError;
+pub use hosted::{HostedSendError, SuspendControl};
 #[cfg(target_os = "linux")]
 mod image_builder;
 mod intercept;

@@ -15,6 +15,7 @@
 use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_egress_policy::CompiledPolicy;
@@ -35,6 +36,7 @@ use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError};
 
 mod guest_log;
 mod hosted;
+mod suspend;
 use codewire_vmm_guest_probe::image_disk::BuildId;
 pub use hosted::HostedPaths;
 
@@ -483,7 +485,7 @@ async fn boot_and_wait(
     );
     // Read before the boot, so a Pod missing its settings fails at once.
     let hosted_settings = hosted::read_settings(|name| std::env::var(name).ok(), &paths.hosted)?;
-    let mut tokens = hosted::read_tokens(&paths.hosted, settings.egress_mode)?;
+    let tokens = hosted::read_tokens(&paths.hosted, settings.egress_mode)?;
     let booting = std::time::Instant::now();
     let prepared = runner
         .prepare_hosted(request, settings.egress_mode.hosted())
@@ -492,11 +494,25 @@ async fn boot_and_wait(
     // The guest waits for these before it starts the workspace, network
     // readiness included, so they go before the network worker's wait.
     hosted::hand_over(&running, hosted_settings, tokens.clone()).await?;
+    // Suspend (#5529): its pauses and wakes, and from here on every token
+    // delivery, which it holds while the VM is paused.
+    let suspender = Arc::new(suspend::Suspender::new(
+        running.suspend_control(),
+        running.generation(),
+        tokens,
+        {
+            let hosted = paths.hosted.clone();
+            let mode = settings.egress_mode;
+            Box::new(move || hosted::read_tokens(&hosted, mode))
+        },
+        Box::new(|record| eprintln!("{}", record.line())),
+    ));
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     running
         .start_network_worker(&executable, BOOT_TIMEOUT)
         .await?;
-    let _channels = hosted::open_guest_channels(&running.paths().vsock_socket).await?;
+    let _channels =
+        hosted::open_guest_channels(&running.paths().vsock_socket, Arc::clone(&suspender)).await?;
     let stage = running
         .authenticated_guest_terminal_stage(BOOT_TIMEOUT)
         .await?;
@@ -516,18 +532,20 @@ async fn boot_and_wait(
         tokio::select! {
             () = &mut stop => {
                 eprintln!("standard runtime: stopping the VM");
-                break tokio::time::timeout(STOP_TIMEOUT, running.stop())
-                    .await
-                    .unwrap_or(Ok(ExitClass::StillRunning))?;
+                // A paused VM is woken first, so the guest shuts down cleanly.
+                break suspend::stop_awake(
+                    &suspender,
+                    tokio::time::timeout(STOP_TIMEOUT, running.stop()),
+                )
+                .await
+                .unwrap_or(Ok(ExitClass::StillRunning))?;
             }
             () = tokio::time::sleep(EXIT_POLL) => {
                 let exit = running.try_exit()?;
                 if exit != ExitClass::StillRunning {
                     break exit;
                 }
-                tokens =
-                    hosted::refresh_tokens(&running, &paths.hosted, settings.egress_mode, tokens)
-                        .await?;
+                suspender.refresh().await?;
             }
         }
     };

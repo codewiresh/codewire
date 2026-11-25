@@ -10,8 +10,11 @@ use codewire_vmm_guest_probe::hosted_control::{
     HOSTED_INGRESS_CONNECT, HOSTED_INGRESS_IDLE, HOSTED_INGRESS_MAX_JOINS,
     HOSTED_SSH_INGRESS_VSOCK_PORT, HostedMessage, HostedSettings, HostedTokens, join_until_idle,
 };
+use std::sync::Arc;
+
 use tokio::net::TcpListener;
 
+use super::suspend::{PausableVm, Suspender};
 use super::*;
 use crate::runner::RunningVm;
 
@@ -216,75 +219,69 @@ pub(super) async fn hand_over(
     Ok(())
 }
 
-/// Resends the tokens when the kubelet has replaced one since `last`, and
-/// returns the tokens the guest now has. An error ends the Pod: a daemon
-/// whose token can no longer be renewed is about to lose its bind anyway.
-pub(super) async fn refresh_tokens(
-    running: &RunningVm,
-    paths: &HostedPaths,
-    mode: EgressMode,
-    last: HostedTokens,
-) -> Result<HostedTokens, PodRuntimeError> {
-    let current = read_tokens(paths, mode)?;
-    if current == last {
-        return Ok(last);
-    }
-    running
-        .send_hosted(&HostedMessage::Tokens(current.clone()))
-        .await?;
-    Ok(current)
-}
-
-/// The guest's channels on the host: the Pod's two published ports in, and
-/// the hosted workload's output out to this container's log
-/// ([`super::guest_log`]).
-pub(super) async fn open_guest_channels(
+/// The guest's channels on the host: the Pod's two published ports in, each
+/// connection waking a suspended VM first; the guest's suspend requests
+/// ([`super::suspend`]); and the hosted workload's output out to this
+/// container's log ([`super::guest_log`]).
+pub(super) async fn open_guest_channels<V: PausableVm>(
     vsock_socket: &Path,
-) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
-    let mut tasks = publish_ports(vsock_socket).await?;
-    tasks.push(super::guest_log::forward(vsock_socket)?);
-    Ok(tasks)
-}
-
-/// Listens on the Pod's two published ports and joins each connection, byte
-/// for byte, to the guest's ingress port for it over the VM's hybrid vsock
-/// socket: at most [`HOSTED_INGRESS_MAX_JOINS`] at once per port, refused
-/// over that, each closed after [`HOSTED_INGRESS_IDLE`] without a byte.
-async fn publish_ports(
-    vsock_socket: &Path,
+    suspender: Arc<Suspender<V>>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
     let mut tasks = Vec::new();
     for (published, ingress) in PUBLISHED_PORTS {
         let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, published)).await?;
-        let socket = vsock_socket.to_owned();
-        let joins = std::sync::Arc::new(tokio::sync::Semaphore::new(HOSTED_INGRESS_MAX_JOINS));
-        tasks.push(tokio::spawn(async move {
-            loop {
-                let Ok((inbound, _)) = listener.accept().await else {
-                    continue;
-                };
-                // Over the cap the connection is refused, never queued.
-                let Ok(permit) = std::sync::Arc::clone(&joins).try_acquire_owned() else {
-                    continue;
-                };
-                let socket = socket.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let Ok(Ok(guest)) = tokio::time::timeout(
-                        HOSTED_INGRESS_CONNECT,
-                        crate::hybrid_vsock::connect_hybrid_vsock(&socket, ingress),
-                    )
-                    .await
-                    else {
-                        return;
-                    };
-                    // Either side closing, or an idle join, ends it.
-                    let _ = join_until_idle(inbound, guest, HOSTED_INGRESS_IDLE).await;
-                });
-            }
-        }));
+        tasks.push(tokio::spawn(serve_published(
+            listener,
+            vsock_socket.to_owned(),
+            ingress,
+            Arc::clone(&suspender),
+        )));
     }
+    tasks.push(super::suspend::listen(vsock_socket, suspender)?);
+    tasks.push(super::guest_log::forward(vsock_socket)?);
     Ok(tasks)
+}
+
+/// Joins each connection on one of the Pod's published ports, byte for byte,
+/// to the guest's ingress port for it over the VM's hybrid vsock socket: at
+/// most [`HOSTED_INGRESS_MAX_JOINS`] at once, refused over that, each closed
+/// after [`HOSTED_INGRESS_IDLE`] without a byte. A connection to a suspended
+/// VM wakes it first and reaches the guest only once it runs again.
+pub(super) async fn serve_published<V: PausableVm>(
+    listener: TcpListener,
+    socket: PathBuf,
+    ingress: u32,
+    suspender: Arc<Suspender<V>>,
+) {
+    let joins = Arc::new(tokio::sync::Semaphore::new(HOSTED_INGRESS_MAX_JOINS));
+    loop {
+        let Ok((inbound, _)) = listener.accept().await else {
+            continue;
+        };
+        // Over the cap the connection is refused, never queued.
+        let Ok(permit) = Arc::clone(&joins).try_acquire_owned() else {
+            continue;
+        };
+        let socket = socket.clone();
+        let suspender = Arc::clone(&suspender);
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = suspender.wake().await {
+                eprintln!("standard runtime: a connection could not wake the VM: {error}");
+                return;
+            }
+            let Ok(Ok(guest)) = tokio::time::timeout(
+                HOSTED_INGRESS_CONNECT,
+                crate::hybrid_vsock::connect_hybrid_vsock(&socket, ingress),
+            )
+            .await
+            else {
+                return;
+            };
+            // Either side closing, or an idle join, ends it.
+            let _ = join_until_idle(inbound, guest, HOSTED_INGRESS_IDLE).await;
+        });
+    }
 }
 
 #[cfg(test)]

@@ -188,26 +188,57 @@ guest shuts down cleanly.
   credential the activity check uses. The daemon closes its platform
   connections whose far end sends periodic traffic (the coordinator, the DERP
   relay, the credential relay's epoch), so that traffic can't wake it,
-  acknowledges, and asks the supervisor over the guest channel. The
-  supervisor freezes the workload and pauses the VM. The acknowledgement
-  moves the Sandbox to `suspended`.
+  acknowledges, and asks the supervisor on host vsock port 7784
+  (`suspend\n`, answered `ok\n` or `no\n`). The supervisor answers, then
+  freezes the workload through PID 1's checkpoint hook and pauses the VM; a
+  VM already paused answers `no`, and a freeze that fails leaves it running.
+  The acknowledgement moves the Sandbox to `suspended`.
 - **Kubernetes sees no change.** On `standard` the readiness file is the
   supervisor's, so the Pod stays Ready while the VM is paused.
-- **The wake is the supervisor's, never the guest's.** It resumes the VM on a
-  connection accepted on the Pod's 7777 or 2222, which every orchestration
-  path uses (previews, sessions, agents, the browser terminal, the SSH
-  fallback), on inbound bytes on a platform connection it relays for the
-  daemon, or on an explicit wake from orchestration. The coordinator asks
-  orchestration for one when it authorizes a hello naming a suspended
-  Sandbox. On resume the guest steps its clock, the supervisor delivers any
-  token renewed while paused, and the daemon redials its platform
-  connections and reports the wake, which moves the Sandbox back to
-  `running`.
+- **The wake is the supervisor's, never the guest's.** Nothing the guest
+  sends resumes it. It wakes on:
+  - **A connection accepted on the Pod's 7777 or 2222**, which every
+    orchestration path uses (previews, sessions, agents, the browser
+    terminal, the SSH fallback). It is also orchestration's explicit wake: a
+    connection to the Pod's 7777. The coordinator asks orchestration for one
+    when it authorizes a hello naming a suspended Sandbox. The connection
+    reaches the guest only once the VM runs again.
+  - **A stop.** SIGTERM, including idle stop's, wakes a paused VM first, so
+    the guest shuts down cleanly.
+  - **Inbound bytes on a platform connection the network worker relays:**
+    not yet built. It is a worker protocol change, its own change. The
+    daemon closes every platform connection whose far end sends periodic
+    traffic before the pause (the table below), so what's left is
+    `cw-egress` return data, which the netstack's 120 s idle timeout bounds.
+- **On resume,** in order:
+  1. **The vCPUs resume** while the workload is still frozen.
+  2. **The tokens the kubelet renewed during the pause are delivered,** as
+     the first exchange after the resume: a paused guest can't receive them.
+     The hosted daemon runs outside the frozen workload, so in the
+     milliseconds before they land it could redial `cw-egress` with its old
+     token. `cw-egress` then refuses that one Admit, and the daemon retries
+     with the token file it rereads, within `cw-egress`'s start limit (10 per
+     60 s per Pod IP).
+  3. **The workload thaws.** A Linux guest keeps time through a pause on
+     kvm-clock (observed right to the second after 150 s), so the supervisor
+     doesn't step it; only a macOS guest's thaw carries the host's clock.
+  4. **The waking connection goes through,** and the daemon redials its
+     platform connections and reports the wake, which moves the Sandbox back
+     to `running`.
 - **Billing:** a suspended second costs 0 until the owner sets a suspended
   rate in the admin panel's prices (#5782). A second counts as suspended only
   between the supervisor's record of a pause and its record of the resume,
-  each reported from the runtime container; never from the daemon's
-  acknowledgement or anything else the guest says.
+  never from the daemon's acknowledgement or anything else the guest says.
+  - **The record** is the runtime's own Pod log line, one per pause or
+    resume:
+    `standard runtime: vm-pause-record {"event":"paused"|"resumed","generation":G,"sequence":N,"at_unix_ms":T}`.
+    The generation is the boot, and the sequence counts that boot's records
+    from 1, so a missing record shows. The guest can't forge one: guest
+    output reaches the Pod log only escaped and prefixed `guest-daemon: `, so
+    no guest byte can start a line with the record's marker.
+  - **Orchestration reads it in part 3,** through the Kubernetes API, which
+    needs `pods/log` read for `standard` Pods. A record lost to the kubelet's
+    log rotation is billed as running.
   - Acknowledged but no pause recorded: the Sandbox shows `suspended` and is
     billed as running.
   - A wake whose resume was never reported: billing reads the supervisor's

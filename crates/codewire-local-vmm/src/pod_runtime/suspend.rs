@@ -1,0 +1,293 @@
+//! Suspend (#5529, `docs/dev/IDLE-STOP.md`, "Suspend"): a standard Pod's VM
+//! pauses inside its Pod, keeping every process, and resumes on use.
+//!
+//! The guest may ask for a pause on [`HOSTED_SUSPEND_VSOCK_PORT`]; only this
+//! runtime resumes it, for a connection on one of the Pod's published ports
+//! or for a stop. Nothing the guest sends resumes it. While the VM is paused
+//! the readiness file stays, so the Pod stays Ready, and the kubelet's token
+//! renewals are held. A wake resumes the vCPUs, delivers the tokens renewed
+//! meanwhile while the workload is still frozen, then thaws it, and only then
+//! does the waking connection reach the guest. Each pause and resume this
+//! runtime performs is recorded on its own line ([`PauseRecord`]), which
+//! billing reads.
+
+use std::future::Future;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use codewire_vmm_guest_probe::hosted_control::{
+    HOSTED_SUSPEND_ACCEPTED, HOSTED_SUSPEND_EXCHANGE, HOSTED_SUSPEND_REFUSED,
+    HOSTED_SUSPEND_REQUEST, HOSTED_SUSPEND_VSOCK_PORT, HostedMessage, HostedTokens,
+};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::net::UnixListener;
+use uuid::Uuid;
+
+use super::PodRuntimeError;
+
+/// What starts this runtime's record of a pause or resume. Guest output
+/// reaches the Pod log only escaped and prefixed with
+/// [`super::guest_log::PREFIX`], so a line starting with this was written
+/// here and nowhere else.
+pub(super) const RECORD_MARKER: &str = "standard runtime: vm-pause-record ";
+
+/// The VM a [`Suspender`] pauses and wakes. Production's is the boot's
+/// [`crate::runner::SuspendControl`]; a test's records what was asked.
+pub(super) trait PausableVm: Send + Sync + 'static {
+    fn freeze_and_pause(
+        &self,
+        operation: Uuid,
+    ) -> impl Future<Output = Result<(), PodRuntimeError>> + Send;
+    fn resume(&self) -> impl Future<Output = Result<(), PodRuntimeError>> + Send;
+    fn thaw(&self, operation: Uuid) -> impl Future<Output = Result<(), PodRuntimeError>> + Send;
+    fn deliver_tokens(
+        &self,
+        tokens: &HostedTokens,
+    ) -> impl Future<Output = Result<(), PodRuntimeError>> + Send;
+}
+
+impl PausableVm for crate::runner::SuspendControl {
+    async fn freeze_and_pause(&self, operation: Uuid) -> Result<(), PodRuntimeError> {
+        Ok(Self::freeze_and_pause(self, operation).await?)
+    }
+
+    async fn resume(&self) -> Result<(), PodRuntimeError> {
+        Ok(Self::resume(self).await?)
+    }
+
+    async fn thaw(&self, operation: Uuid) -> Result<(), PodRuntimeError> {
+        Ok(Self::thaw(self, operation).await?)
+    }
+
+    async fn deliver_tokens(&self, tokens: &HostedTokens) -> Result<(), PodRuntimeError> {
+        Ok(self
+            .send_hosted(&HostedMessage::Tokens(tokens.clone()))
+            .await?)
+    }
+}
+
+/// One pause or resume, as this runtime performed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PauseRecord {
+    pub(super) event: PauseEvent,
+    /// The boot the VM is: a new Pod starts a new generation.
+    pub(super) generation: u64,
+    /// Counts this boot's records from 1, so a missing one shows.
+    pub(super) sequence: u64,
+    pub(super) at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PauseEvent {
+    Paused,
+    Resumed,
+}
+
+impl PauseRecord {
+    /// The record's line: the marker, then one JSON object.
+    pub(super) fn line(&self) -> String {
+        let event = match self.event {
+            PauseEvent::Paused => "paused",
+            PauseEvent::Resumed => "resumed",
+        };
+        format!(
+            "{RECORD_MARKER}{{\"event\":\"{event}\",\"generation\":{},\"sequence\":{},\"at_unix_ms\":{}}}",
+            self.generation, self.sequence, self.at_unix_ms
+        )
+    }
+}
+
+type ReadTokens = Box<dyn Fn() -> Result<HostedTokens, PodRuntimeError> + Send + Sync>;
+type RecordSink = Box<dyn Fn(&PauseRecord) + Send + Sync>;
+
+/// A boot's suspend state. One lock serializes every pause, wake and token
+/// delivery, so a wake can't come between a pause's answer and the pause.
+pub(super) struct Suspender<V> {
+    vm: V,
+    generation: u64,
+    read_tokens: ReadTokens,
+    record: RecordSink,
+    state: tokio::sync::Mutex<State>,
+}
+
+struct State {
+    /// The operation of the pause in force, while the VM is paused.
+    paused: Option<Uuid>,
+    /// The tokens the guest last applied.
+    delivered: HostedTokens,
+    sequence: u64,
+}
+
+impl<V: PausableVm> Suspender<V> {
+    pub(super) fn new(
+        vm: V,
+        generation: u64,
+        delivered: HostedTokens,
+        read_tokens: ReadTokens,
+        record: RecordSink,
+    ) -> Self {
+        Self {
+            vm,
+            generation,
+            read_tokens,
+            record,
+            state: tokio::sync::Mutex::new(State {
+                paused: None,
+                delivered,
+                sequence: 0,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn is_paused(&self) -> bool {
+        self.state.lock().await.paused.is_some()
+    }
+
+    /// Answers a guest's suspend request with `answer(accepted)`, then, when
+    /// accepted, freezes the workload and pauses the VM. A VM already paused
+    /// refuses. Returns whether it paused.
+    pub(super) async fn suspend<F>(
+        &self,
+        answer: impl FnOnce(bool) -> F,
+    ) -> Result<bool, PodRuntimeError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut state = self.state.lock().await;
+        let accepted = state.paused.is_none();
+        answer(accepted).await;
+        if !accepted {
+            return Ok(false);
+        }
+        let operation = Uuid::new_v4();
+        self.vm.freeze_and_pause(operation).await?;
+        state.paused = Some(operation);
+        self.note(&mut state, PauseEvent::Paused);
+        Ok(true)
+    }
+
+    /// Wakes a paused VM: resumes its vCPUs, delivers any token renewed since
+    /// the pause while the workload is still frozen, then thaws it. A VM that
+    /// isn't paused is left alone. Returns whether it woke.
+    pub(super) async fn wake(&self) -> Result<bool, PodRuntimeError> {
+        let mut state = self.state.lock().await;
+        let Some(operation) = state.paused else {
+            return Ok(false);
+        };
+        self.vm.resume().await?;
+        state.paused = None;
+        self.note(&mut state, PauseEvent::Resumed);
+        // The workload thaws whatever the delivery did; a failed delivery is
+        // this wake's error, as a failed refresh is the running loop's.
+        let delivered = self.deliver_if_renewed(&mut state).await;
+        self.vm.thaw(operation).await?;
+        delivered.map(|()| true)
+    }
+
+    /// Delivers the tokens when the kubelet has renewed one, as the running
+    /// loop does every tick; while paused they are held for the wake.
+    pub(super) async fn refresh(&self) -> Result<(), PodRuntimeError> {
+        let mut state = self.state.lock().await;
+        if state.paused.is_some() {
+            return Ok(());
+        }
+        self.deliver_if_renewed(&mut state).await
+    }
+
+    async fn deliver_if_renewed(&self, state: &mut State) -> Result<(), PodRuntimeError> {
+        let current = (self.read_tokens)()?;
+        if current != state.delivered {
+            self.vm.deliver_tokens(&current).await?;
+            state.delivered = current;
+        }
+        Ok(())
+    }
+
+    fn note(&self, state: &mut State, event: PauseEvent) {
+        state.sequence += 1;
+        (self.record)(&PauseRecord {
+            event,
+            generation: self.generation,
+            sequence: state.sequence,
+            at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis()),
+        });
+    }
+}
+
+/// A stop of a paused VM wakes it first, so the guest shuts down cleanly
+/// rather than being killed paused at the stop's timeout. `stop` runs either
+/// way.
+pub(super) async fn stop_awake<V: PausableVm, T>(
+    suspender: &Suspender<V>,
+    stop: impl Future<Output = T>,
+) -> T {
+    if let Err(error) = suspender.wake().await {
+        eprintln!("standard runtime: the stop could not wake the paused VM: {error}");
+    }
+    stop.await
+}
+
+/// Listens for the guest's suspend requests until the Pod ends.
+pub(super) fn listen<V: PausableVm>(
+    vsock_socket: &Path,
+    suspender: Arc<Suspender<V>>,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let path = super::guest_log::host_socket(vsock_socket, HOSTED_SUSPEND_VSOCK_PORT);
+    // A socket left by this Pod's last boot would refuse the bind.
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let listener = UnixListener::bind(&path)?;
+    Ok(tokio::spawn(serve(listener, suspender)))
+}
+
+/// One request at a time: a second waits for the first to be answered.
+async fn serve<V: PausableVm>(listener: UnixListener, suspender: Arc<Suspender<V>>) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            // An accept error such as EMFILE would otherwise spin.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if let Err(error) = answer(stream, &suspender).await {
+            eprintln!("standard runtime: the guest's suspend request failed: {error}");
+        }
+    }
+}
+
+/// Reads one request; anything but exactly [`HOSTED_SUSPEND_REQUEST`] is
+/// closed unanswered. The answer leaves before the VM pauses.
+async fn answer<V, S>(mut stream: S, suspender: &Suspender<V>) -> Result<(), PodRuntimeError>
+where
+    V: PausableVm,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut request = [0_u8; HOSTED_SUSPEND_REQUEST.len()];
+    match tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, stream.read_exact(&mut request)).await {
+        Ok(Ok(_)) if &request == HOSTED_SUSPEND_REQUEST => {}
+        _ => return Ok(()),
+    }
+    suspender
+        .suspend(|accepted| async move {
+            let reply = if accepted {
+                HOSTED_SUSPEND_ACCEPTED
+            } else {
+                HOSTED_SUSPEND_REFUSED
+            };
+            let sent = async {
+                stream.write_all(reply).await?;
+                stream.shutdown().await
+            };
+            let _ = tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, sent).await;
+        })
+        .await
+        .map(drop)
+}
+
+#[cfg(test)]
+mod tests;

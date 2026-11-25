@@ -52,6 +52,42 @@ pub const HOSTED_LOG_VSOCK_PORT: u32 = 7_783;
 /// The longest line, in bytes, either side keeps; the rest of a longer line
 /// is dropped and the line marked truncated.
 pub const HOSTED_LOG_MAX_LINE: usize = 4_096;
+/// A suspend asked for by the guest (#5529, `docs/dev/IDLE-STOP.md`,
+/// "Suspend"): the guest connects to this host port and writes
+/// [`HOSTED_SUSPEND_REQUEST`]; the Pod's runtime answers
+/// [`HOSTED_SUSPEND_ACCEPTED`] or [`HOSTED_SUSPEND_REFUSED`] and, having
+/// accepted, freezes the workload and pauses the VM. The guest can only ask
+/// to be paused: nothing it sends resumes it.
+pub const HOSTED_SUSPEND_VSOCK_PORT: u32 = 7_784;
+pub const HOSTED_SUSPEND_REQUEST: &[u8; 8] = b"suspend\n";
+pub const HOSTED_SUSPEND_ACCEPTED: &[u8; 3] = b"ok\n";
+pub const HOSTED_SUSPEND_REFUSED: &[u8; 3] = b"no\n";
+/// How long either side waits for the other's part of a suspend request.
+pub const HOSTED_SUSPEND_EXCHANGE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The guest's side of a suspend: asks the Pod's runtime to pause this VM,
+/// and returns whether it accepted. On `true` the VM pauses straight after
+/// the answer; the caller has already closed the connections whose far end
+/// sends periodic traffic, so that traffic can't wake it.
+#[cfg(target_os = "linux")]
+pub async fn request_suspend() -> std::io::Result<bool> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let exchange = async {
+        let mut host = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(
+            tokio_vsock::VMADDR_CID_HOST,
+            HOSTED_SUSPEND_VSOCK_PORT,
+        ))
+        .await?;
+        host.write_all(HOSTED_SUSPEND_REQUEST).await?;
+        host.flush().await?;
+        let mut answer = [0_u8; 3];
+        host.read_exact(&mut answer).await?;
+        Ok(&answer == HOSTED_SUSPEND_ACCEPTED)
+    };
+    tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, exchange)
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+}
 
 /// Joins two streams byte for byte until both directions have ended, or
 /// until neither has carried a byte for `idle`. The ingress on both sides of
