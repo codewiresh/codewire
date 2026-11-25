@@ -4,17 +4,21 @@
 //! [`open_session`], and the leader's `audit-log` loop keeps the partitions,
 //! moves what is finished and expires what is old.
 
+pub mod allowed_since;
 mod event;
+pub mod read;
 mod store;
 
 pub use event::{
-    Actor, Credentials, Kind, Lifecycle, PlatformReason, Policy, Protocol, Refusal, RefusalSource,
-    Role, Size, Surface, What,
+    Actor, Credentials, Kind, Lifecycle, PlatformReason, Policy, Protocol, Refusal,
+    RefusalOverflow, RefusalSource, Role, Size, Surface, What,
 };
 pub use store::{AuditError, Event, OpenSession, close_session, open_session, record};
 
 #[cfg(test)]
 mod event_tests;
+#[cfg(test)]
+mod read_database_tests;
 #[cfg(test)]
 mod store_database_tests;
 

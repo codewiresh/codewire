@@ -28,6 +28,7 @@ type Client struct {
 	AccessProfiles  *AccessProfileService
 	NetworkPolicies *NetworkPolicyService
 	SandboxIdentity *SandboxIdentityService
+	Audit           *AuditService
 	Credentials     *CredentialService
 
 	baseURL    string
@@ -51,6 +52,7 @@ type Client struct {
 	accessProfiles        codewirev1connect.AccessProfileServiceClient
 	networkPolicies       codewirev1connect.NetworkPolicyServiceClient
 	sandboxIdentity       codewirev1connect.SandboxIdentityServiceClient
+	audit                 codewirev1connect.AuditServiceClient
 	credentials           codewirev1connect.CredentialServiceClient
 	credentialMutations   codewirev1connect.CredentialMutationServiceClient
 	githubRepositories    codewirev1connect.GithubRepositoryServiceClient
@@ -139,6 +141,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.accessProfiles = codewirev1connect.NewAccessProfileServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.networkPolicies = codewirev1connect.NewNetworkPolicyServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.sandboxIdentity = codewirev1connect.NewSandboxIdentityServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.audit = codewirev1connect.NewAuditServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentials = codewirev1connect.NewCredentialServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentialMutations = codewirev1connect.NewCredentialMutationServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.githubRepositories = codewirev1connect.NewGithubRepositoryServiceClient(c.httpClient, c.baseURL, connectOptions)
@@ -156,6 +159,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.AccessProfiles = &AccessProfileService{c}
 	c.NetworkPolicies = &NetworkPolicyService{c}
 	c.SandboxIdentity = &SandboxIdentityService{c}
+	c.Audit = &AuditService{c}
 	c.Credentials = &CredentialService{c}
 	return c
 }

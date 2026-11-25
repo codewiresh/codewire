@@ -223,6 +223,18 @@ pub const OPERATOR_PURCHASE_NOTICE: Limit = Limit {
 };
 
 /// Every named limit, in the order an admin sees them.
+/// Grouped reads of a Sandbox's audit log per user (#6189): every API key may
+/// read the log, so the read that sums a range by subject is bounded per
+/// person, a key counting against its creator. Not in [`LIMITS`]: it bounds
+/// the database's work, so no setting raises it.
+pub const AUDIT_GROUPED_READ: Limit = Limit {
+    name: "audit_grouped_read",
+    key_prefix: "audit_grouped_read",
+    window_secs: 60,
+    default_max: 30,
+    per_user: true,
+};
+
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,
     SANDBOX_CREATE_HOURLY,

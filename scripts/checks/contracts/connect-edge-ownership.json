@@ -12,6 +12,7 @@
     "codewire.testing.v1.PingService": "testing",
     "codewire.v1.AccessProfileService": "orchestration",
     "codewire.v1.ApiKeyService": "orchestration",
+    "codewire.v1.AuditService": "orchestration",
     "codewire.v1.CredentialDelegationService": "credential-service",
     "codewire.v1.CredentialMutationService": "credential-service",
     "codewire.v1.CredentialService": "orchestration",

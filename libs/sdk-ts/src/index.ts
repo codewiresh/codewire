@@ -6,6 +6,7 @@ import { SecretProjects } from "./secret-projects.js";
 import { AccessProfiles } from "./access-profiles.js";
 import { NetworkPolicies } from "./network-policies.js";
 import { SandboxIdentity } from "./sandbox-identity.js";
+import { Audit } from "./audit.js";
 import { Credentials } from "./credentials.js";
 import { createCodewireClients } from "./transport.js";
 import { reportOnce, resolveSettings } from "./settings.js";
@@ -20,6 +21,7 @@ export class Codewire {
   readonly accessProfiles: AccessProfiles;
   readonly networkPolicies: NetworkPolicies;
   readonly sandboxIdentity: SandboxIdentity;
+  readonly audit: Audit;
   readonly credentials: Credentials;
 
   /**
@@ -47,6 +49,7 @@ export class Codewire {
     this.accessProfiles = new AccessProfiles(clients.accessProfiles);
     this.networkPolicies = new NetworkPolicies(clients.networkPolicies, orgId);
     this.sandboxIdentity = new SandboxIdentity(clients.sandboxIdentity, orgId);
+    this.audit = new Audit(clients.audit, orgId);
     this.credentials = new Credentials(clients.credentials, clients.credentialMutations, clients.githubRepositories);
   }
 }
@@ -89,6 +92,25 @@ export type {
   RegisterIdentityAudienceOptions,
   SetEnvironmentIdentityGroupsResult,
 } from "./sandbox-identity.js";
+export { Audit } from "./audit.js";
+export type {
+  AuditAccess,
+  AuditActor,
+  AuditApiKey,
+  AuditCredentials,
+  AuditEnvironment,
+  AuditEvent,
+  AuditEventKindName,
+  AuditEventPage,
+  AuditLifecycle,
+  AuditPolicyChange,
+  AuditPolicyRevision,
+  AuditRefusal,
+  AuditRefusalOverflow,
+  AuditSize,
+  AuditUser,
+  ListAuditEventsOptions,
+} from "./audit.js";
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {
   Credential,

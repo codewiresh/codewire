@@ -544,6 +544,32 @@ fn sandbox_identity_router(
     codewire_orchestration::connect::sandbox_identity::router(api_state.pool.clone(), denylist)
 }
 
+/// The routes of what a Sandbox may reach and do, and what it did: platform
+/// network policies (#4000), behind their deployment switch, access
+/// profiles, and the Sandbox audit log's read (#6189).
+fn with_policy_routes(
+    app: AppBuilder,
+    pool: &sqlx::PgPool,
+    network_policy_flags: NetworkPolicyFlags,
+    connect_auth: &codewire_server_core::connect::ConnectAuthLayer,
+) -> AppBuilder {
+    app.with_unary_connect_routes_auth(
+        codewire_orchestration::connect::network_policies::router(
+            pool.clone(),
+            network_policy_flags,
+        ),
+        connect_auth.clone(),
+    )
+    .with_unary_connect_routes_auth(
+        codewire_orchestration::connect::access_profiles::router(pool.clone()),
+        connect_auth.clone(),
+    )
+    .with_unary_connect_routes_auth(
+        codewire_orchestration::connect::audit::router(pool.clone()),
+        connect_auth.clone(),
+    )
+}
+
 /// The issuer's discovery router and the binding listener's minting, both
 /// `None` unless identity is enabled.
 fn identity_serving(
@@ -1043,19 +1069,8 @@ async fn main() -> anyhow::Result<()> {
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::hosts::router(api_state.pool.clone()),
             connect_auth.clone(),
-        )
-        // Platform network policies (#4000), behind their deployment switch.
-        .with_unary_connect_routes_auth(
-            codewire_orchestration::connect::network_policies::router(
-                api_state.pool.clone(),
-                network_policy_flags,
-            ),
-            connect_auth.clone(),
-        )
-        .with_unary_connect_routes_auth(
-            codewire_orchestration::connect::access_profiles::router(api_state.pool.clone()),
-            connect_auth.clone(),
-        )
+        );
+    let app = with_policy_routes(app, &api_state.pool, network_policy_flags, &connect_auth)
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::credentials::router(api_state.pool.clone()),
             connect_auth.clone(),

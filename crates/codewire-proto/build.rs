@@ -24,6 +24,7 @@ fn main() {
         "codewire/internal/v1/workspace_binding.proto",
         "codewire/v1/access_profile.proto",
         "codewire/v1/api_key.proto",
+        "codewire/v1/audit.proto",
         "codewire/v1/common.proto",
         "codewire/v1/credential.proto",
         "codewire/v1/credential_delegation.proto",

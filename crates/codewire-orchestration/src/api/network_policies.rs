@@ -873,7 +873,7 @@ pub(crate) async fn select_in(
 }
 
 /// `environment_id`'s selection, as the environment read reports it.
-async fn environment_policy_in(
+pub(crate) async fn environment_policy_in(
     connection: &mut PgConnection,
     environment_id: &str,
 ) -> AppResult<EnvironmentPolicyView> {

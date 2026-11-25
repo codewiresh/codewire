@@ -1,0 +1,291 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// AuditService reads a hosted Sandbox's audit log (SPEC.md "Sandbox audit
+// log", #6189): what happened to it and through it, kept 90 days. It is
+// behind `cw audit ENV`, `cw --cloud policy log ENV`, `cw info`'s
+// `Refused:` line and the dashboard's Audit log page.
+//
+// Only a person's own sign-in reads it: a browser session, an API key, or an
+// access token issued to Codewire's own apps. A token of any other OAuth
+// client, and every credential issued to or for a Sandbox's workload, is
+// refused. Organization owners and admins read
+// every Sandbox's events, a deleted Sandbox's included. A member reads the
+// events of each Sandbox they can open now. Anyone else is told the
+// environment does not exist. Every reader sees the same events with the
+// same fields.
+//
+// A platform without this read answers UNIMPLEMENTED. Each read runs under a
+// 5-second statement timeout and answers DEADLINE_EXCEEDED past it. A
+// grouped read takes a per-user rate limit, 30 a minute with an API key
+// counting against its creator, and answers RESOURCE_EXHAUSTED with reason
+// `rate_limited` past it.
+service AuditService {
+  // ListAuditEvents returns one environment's events, newest first by when
+  // each began, a page at a time.
+  rpc ListAuditEvents(ListAuditEventsRequest) returns (ListAuditEventsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+enum AuditEventKind {
+  AUDIT_EVENT_KIND_UNSPECIFIED = 0;
+  // A terminal, SSH, exec, desktop or preview session.
+  AUDIT_EVENT_KIND_ACCESS = 1;
+  AUDIT_EVENT_KIND_LIFECYCLE = 2;
+  AUDIT_EVENT_KIND_POLICY = 3;
+  AUDIT_EVENT_KIND_REFUSED = 4;
+  AUDIT_EVENT_KIND_CREDENTIALS = 5;
+}
+
+message ListAuditEventsRequest {
+  string org_id = 1;
+  oneof environment {
+    // An environment's ID; the only way to name a deleted one.
+    string environment_id = 2;
+    string environment_name = 3;
+  }
+  // Only these kinds; none means every kind.
+  repeated AuditEventKind kinds = 4;
+  // Events that began at or after `since`; unset means 7 days ago. At most
+  // 90 days ago.
+  google.protobuf.Timestamp since = 5;
+  // Events that began before `until`; unset means now.
+  google.protobuf.Timestamp until = 6;
+  // At most this many events; 0 means 100, and more than 1,000 is refused.
+  uint32 limit = 7;
+  // The previous answer's `next_cursor`, to continue from it.
+  string cursor = 8;
+  // One event per kind and subject for the whole range: its count is the
+  // sum, `first` the earliest and `last` the latest. At most 1,000 subjects,
+  // the most recently seen; `left_out` counts the rest. No cursor.
+  bool group_by_subject = 9;
+}
+
+message ListAuditEventsResponse {
+  AuditEnvironment environment = 1;
+  // The environment's selected network policy at its current revision;
+  // unset when it selects none.
+  AuditPolicyRevision policy = 2;
+  repeated AuditEvent events = 3;
+  // Empty when nothing is older.
+  string next_cursor = 4;
+  // A grouped answer's subjects past its 1,000, and those an hour's overflow
+  // event counted.
+  uint64 left_out = 5;
+}
+
+message AuditEnvironment {
+  string id = 1;
+  string name = 2;
+  bool deleted = 3;
+}
+
+message AuditPolicyRevision {
+  string name = 1;
+  uint32 revision = 2;
+}
+
+message AuditEvent {
+  string id = 1;
+  AuditEventKind kind = 2;
+  // When it began.
+  google.protobuf.Timestamp first = 3;
+  // When it ended; unset while a session is open.
+  google.protobuf.Timestamp last = 4;
+  // How many times it happened between `first` and `last`; a folded exec
+  // or preview event counts sessions.
+  uint64 count = 5;
+  AuditActor actor = 6;
+  oneof detail {
+    AuditAccess access = 10;
+    AuditLifecycle lifecycle = 11;
+    AuditPolicyChange policy = 12;
+    AuditRefusal refused = 13;
+    AuditCredentials credentials = 14;
+    // An hour's refusals past its 1,000 subjects, counted together; the
+    // event's count is the refusals.
+    AuditRefusalOverflow refused_overflow = 15;
+  }
+}
+
+// Who did it, as they were when it happened.
+message AuditActor {
+  oneof actor {
+    AuditUser user = 1;
+    AuditApiKey api_key = 2;
+    // The platform's own action.
+    AuditPlatform platform = 3;
+    // What the Sandbox's workload caused: a refusal or a credential use.
+    AuditSandbox sandbox = 4;
+  }
+}
+
+enum AuditRole {
+  AUDIT_ROLE_UNSPECIFIED = 0;
+  AUDIT_ROLE_OWNER = 1;
+  AUDIT_ROLE_ADMIN = 2;
+  AUDIT_ROLE_MEMBER = 3;
+  // A person at Codewire or an operator of the platform.
+  AUDIT_ROLE_STAFF = 4;
+}
+
+message AuditUser {
+  string id = 1;
+  string email = 2;
+  AuditRole role = 3;
+}
+
+message AuditApiKey {
+  string id = 1;
+  string name = 2;
+}
+
+message AuditPlatform {}
+
+message AuditSandbox {}
+
+enum AuditSurface {
+  AUDIT_SURFACE_UNSPECIFIED = 0;
+  AUDIT_SURFACE_TERMINAL = 1;
+  AUDIT_SURFACE_SSH = 2;
+  AUDIT_SURFACE_EXEC = 3;
+  AUDIT_SURFACE_DESKTOP = 4;
+  AUDIT_SURFACE_PREVIEW = 5;
+}
+
+message AuditAccess {
+  AuditSurface surface = 1;
+  // The address of the request that opened the session, as Codewire's
+  // trusted proxies report it.
+  string client_ip = 2;
+}
+
+enum AuditPlatformReason {
+  AUDIT_PLATFORM_REASON_UNSPECIFIED = 0;
+  AUDIT_PLATFORM_REASON_IDLE = 1;
+  AUDIT_PLATFORM_REASON_OUT_OF_CREDIT = 2;
+  AUDIT_PLATFORM_REASON_SUSPENDED = 3;
+  AUDIT_PLATFORM_REASON_SYSTEMD_REFUSED = 4;
+  AUDIT_PLATFORM_REASON_POD_FAILED = 5;
+  AUDIT_PLATFORM_REASON_RUNTIME_REPLACED = 6;
+  AUDIT_PLATFORM_REASON_NODE_LOST = 7;
+  AUDIT_PLATFORM_REASON_CONFIGURATION_CHANGED = 8;
+  AUDIT_PLATFORM_REASON_SOURCES_CHANGED = 9;
+  AUDIT_PLATFORM_REASON_EXPIRED = 10;
+}
+
+message AuditSize {
+  uint32 vcpu = 1;
+  uint64 memory_mib = 2;
+}
+
+message AuditLifecycle {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_CREATED = 1;
+    ACTION_STARTED = 2;
+    ACTION_STOPPED = 3;
+    ACTION_RESTARTED = 4;
+    ACTION_RESIZED = 5;
+    ACTION_SNAPSHOT_TAKEN = 6;
+    ACTION_DELETED = 7;
+  }
+  Action action = 1;
+  // Why the platform did it; unspecified when a person did.
+  AuditPlatformReason reason = 2;
+  // Created: the preset, and the snapshot it was restored from.
+  string preset = 3;
+  string from_snapshot = 4;
+  // Resized.
+  AuditSize from = 5;
+  AuditSize to = 6;
+  // Snapshot taken.
+  string snapshot = 7;
+  // Stopped for being idle: the idle timeout the Sandbox had then, in
+  // seconds; 0 when not known.
+  uint32 idle_stop_seconds = 8;
+}
+
+message AuditPolicyChange {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    // The environment selected another policy.
+    ACTION_SELECTED = 1;
+    // The selected policy got a new revision.
+    ACTION_EDITED = 2;
+    // cw-egress reports it enforces this revision.
+    ACTION_ENFORCING = 3;
+    // cw-egress reports it failed closed: no outbound traffic.
+    ACTION_FAILED_CLOSED = 4;
+  }
+  Action action = 1;
+  // Selected.
+  string from = 2;
+  string to = 3;
+  // Edited and enforcing.
+  string policy = 4;
+  uint32 from_revision = 5;
+  uint32 to_revision = 6;
+  repeated string added = 7;
+  repeated string removed = 8;
+  uint32 revision = 9;
+  // Failed closed.
+  string failure_code = 10;
+}
+
+enum AuditProtocol {
+  AUDIT_PROTOCOL_UNSPECIFIED = 0;
+  AUDIT_PROTOCOL_DNS = 1;
+  AUDIT_PROTOCOL_TCP = 2;
+  AUDIT_PROTOCOL_UDP = 3;
+}
+
+// An egress refusal, with the fields of a `cw --local policy log` row.
+message AuditRefusal {
+  // A checked name or an address; empty when withheld.
+  string destination = 1;
+  // The name failed the host check and is never shown.
+  bool withheld = 2;
+  // The latest address; empty when none.
+  string address = 3;
+  // Unset for DNS.
+  optional uint32 port = 4;
+  AuditProtocol protocol = 5;
+  // A refusal reason code, such as `name_not_allowed`.
+  string reason = 6;
+  string source = 7;
+  // The policy and revision it was refused under; empty and 0 when none.
+  string policy = 8;
+  uint32 revision = 9;
+  // The first revision of the selected policy that allows it, when its
+  // current revision does; unset otherwise. Set by the server.
+  optional uint32 allowed_since_revision = 10;
+}
+
+message AuditRefusalOverflow {
+  // How many more subjects were refused that hour.
+  uint64 subjects = 1;
+  // There were at least `subjects`; past 1,000 more they aren't counted
+  // exactly.
+  bool at_least = 2;
+}
+
+message AuditCredentials {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_ATTACHED = 1;
+    ACTION_DETACHED = 2;
+    ACTION_USED = 3;
+  }
+  Action action = 1;
+  string provider = 2;
+  // The credential's name: attached, detached and used.
+  string name = 3;
+  // Used: the host it was used for; empty when withheld.
+  string host = 4;
+  bool withheld = 5;
+}

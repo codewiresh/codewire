@@ -37,6 +37,7 @@ import { CodewireError } from "./types.js";
 import { runAccessProfileTests } from "./access-profiles.test.js";
 import { runNetworkPolicyTests } from "./network-policies.test.js";
 import { runSandboxIdentityTests } from "./sandbox-identity.test.js";
+import { runAuditTests } from "./audit.test.js";
 import { runCredentialTests } from "./credentials.test.js";
 import { runSettingsTests } from "./settings.test.js";
 import {
@@ -1734,6 +1735,7 @@ async function runTests() {
   await runAccessProfileTests();
   await runNetworkPolicyTests();
   await runSandboxIdentityTests();
+  await runAuditTests();
   await runCredentialTests();
   await runSettingsTests();
 }

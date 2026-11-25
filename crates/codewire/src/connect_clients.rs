@@ -27,6 +27,7 @@ impl CodewireClient {
         let access_profile_config = config.connect_config()?;
         let network_policy_config = config.connect_config()?;
         let sandbox_identity_config = config.connect_config()?;
+        let audit_config = config.connect_config()?;
         let credential_config = config.connect_config()?;
         let credential_mutation_config = config.connect_config()?;
         let github_repository_config = config.connect_config()?;
@@ -59,6 +60,7 @@ impl CodewireClient {
                 transport.clone(),
                 sandbox_identity_config,
             ),
+            audit: AuditServiceClient::new(transport.clone(), audit_config),
             credentials: CredentialServiceClient::new(transport.clone(), credential_config),
             credential_mutations: CredentialMutationServiceClient::new(
                 transport.clone(),

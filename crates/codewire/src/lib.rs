@@ -30,6 +30,7 @@
 //! (sign-in, tailnet, hosted shell) is `codewire-client`, which builds on it.
 
 mod access_profiles;
+pub mod audit;
 mod auth;
 mod config;
 mod connect_clients;
@@ -53,12 +54,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_proto::codewire::v1::{
-    AccessProfileServiceClient, ApiKeyServiceClient, CredentialMutationServiceClient,
-    CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
-    ExecServiceClient, FileServiceClient, GithubRepositoryServiceClient, MeshInviteServiceClient,
-    MeshNetworkServiceClient, MeshNodeServiceClient, NetworkPolicyServiceClient,
-    OrganizationServiceClient, PortServiceClient, PresetServiceClient,
-    SandboxIdentityServiceClient, SecretServiceClient, SnapshotServiceClient,
+    AccessProfileServiceClient, ApiKeyServiceClient, AuditServiceClient,
+    CredentialMutationServiceClient, CredentialServiceClient, EnvironmentServiceClient,
+    EnvironmentSessionServiceClient, ExecServiceClient, FileServiceClient,
+    GithubRepositoryServiceClient, MeshInviteServiceClient, MeshNetworkServiceClient,
+    MeshNodeServiceClient, NetworkPolicyServiceClient, OrganizationServiceClient,
+    PortServiceClient, PresetServiceClient, SandboxIdentityServiceClient, SecretServiceClient,
+    SnapshotServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{CallOptions, ClientTransport};
@@ -228,6 +230,7 @@ pub struct CodewireClient {
     access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
     network_policies: NetworkPolicyServiceClient<ReqwestConnectTransport>,
     sandbox_identity: SandboxIdentityServiceClient<ReqwestConnectTransport>,
+    audit: AuditServiceClient<ReqwestConnectTransport>,
     credentials: CredentialServiceClient<ReqwestConnectTransport>,
     credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
     github_repositories: GithubRepositoryServiceClient<ReqwestConnectTransport>,

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from test_access_profiles import AccessProfilesTestCase
 from test_network_policies import NetworkPoliciesTestCase
 from test_sandbox_identity import SandboxIdentityTestCase
+from test_audit import AuditTestCase
 from test_credentials import CredentialsTestCase
 from test_environment_sources import EnvironmentSourcesTestCase
 from test_settings import SettingsTestCase

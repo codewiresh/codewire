@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::event::{
     Columns, Credentials, Kind, Lifecycle, PlatformReason, Policy, Protocol, Refusal,
-    RefusalSource, Size, Surface, What,
+    RefusalOverflow, RefusalSource, Size, Surface, What,
 };
 
 fn columns(what: &What) -> Columns {
@@ -18,6 +18,7 @@ fn columns(what: &What) -> Columns {
 fn a_platform_stop_names_its_reason_and_does_not_fold() {
     let stored = columns(&What::Lifecycle(Lifecycle::Stopped {
         reason: Some(PlatformReason::Idle),
+        idle_stop_seconds: Some(1800),
     }));
     assert_eq!(
         stored,
@@ -26,10 +27,13 @@ fn a_platform_stop_names_its_reason_and_does_not_fold() {
             action: "stopped".into(),
             subject: "stopped".into(),
             folds: false,
-            detail: json!({"reason": "idle"}),
+            detail: json!({"reason": "idle", "idle_stop_seconds": 1800}),
         }
     );
-    let by_hand = columns(&What::Lifecycle(Lifecycle::Stopped { reason: None }));
+    let by_hand = columns(&What::Lifecycle(Lifecycle::Stopped {
+        reason: None,
+        idle_stop_seconds: None,
+    }));
     assert_eq!(by_hand.detail, json!({}));
 }
 
@@ -106,14 +110,15 @@ fn a_refusal_folds_by_everything_a_local_row_is_keyed_by() {
 fn a_credential_use_folds_by_provider_and_host_and_an_attach_does_not() {
     let used = columns(&What::Credentials(Credentials::Used {
         provider: "github".into(),
+        name: "work".into(),
         host: "api.github.com".into(),
         withheld: false,
     }));
     assert_eq!((used.action.as_str(), used.folds), ("used", true));
-    assert_eq!(used.subject, "github|api.github.com");
+    assert_eq!(used.subject, "github|work|api.github.com");
     assert_eq!(
         used.detail,
-        json!({"provider": "github", "host": "api.github.com"})
+        json!({"provider": "github", "name": "work", "host": "api.github.com"})
     );
     let attached = columns(&What::Credentials(Credentials::Attached {
         provider: "github".into(),
@@ -173,14 +178,15 @@ fn a_name_the_workload_chose_passes_the_host_check_before_it_is_stored() {
 
     let used = columns(&What::Credentials(Credentials::Used {
         provider: "github".into(),
+        name: "work".into(),
         host: "api.github.com\u{7}".into(),
         withheld: false,
     }));
     assert_eq!(
         used.detail,
-        json!({"provider": "github", "host": "", "withheld": true})
+        json!({"provider": "github", "name": "work", "host": "", "withheld": true})
     );
-    assert_eq!(used.subject, "github|");
+    assert_eq!(used.subject, "github|work|");
 }
 
 #[test]
@@ -202,4 +208,55 @@ fn a_refusals_reason_is_only_the_engines_own_code() {
     forged["reason"] = json!("\u{1b}]0;owned\u{7}");
     assert!(serde_json::from_value::<Refusal>(forged).is_err());
     assert!(serde_json::from_value::<Refusal>(stored.detail).is_ok());
+}
+
+#[test]
+fn every_kind_reads_back_as_it_was_stored() {
+    for what in [
+        What::Access(Surface::Desktop),
+        What::Lifecycle(Lifecycle::Stopped {
+            reason: Some(PlatformReason::Idle),
+            idle_stop_seconds: Some(1800),
+        }),
+        What::Lifecycle(Lifecycle::Started),
+        What::Policy(Policy::Selected {
+            from: "open".into(),
+            to: "walk-docs".into(),
+        }),
+        What::Refused(Refusal {
+            destination: Some("pypi.org".into()),
+            withheld: false,
+            address: Some("192.0.2.91".into()),
+            port: Some(443),
+            protocol: Protocol::Tcp,
+            reason: RefusalReason::NameNotAllowed,
+            source: RefusalSource::Network,
+            policy: Some("walk-docs".into()),
+            revision: Some(2),
+        }),
+        What::Credentials(Credentials::Used {
+            provider: "github".into(),
+            name: "work".into(),
+            host: "api.github.com".into(),
+            withheld: false,
+        }),
+    ] {
+        let stored = columns(&what);
+        let read = What::from_stored(stored.kind.as_str(), &stored.action, &stored.detail)
+            .expect("a stored event reads back");
+        assert_eq!(read, what);
+    }
+    assert!(What::from_stored("lifecycle", "exploded", &json!({})).is_err());
+}
+
+#[test]
+fn an_overflow_reads_back_without_the_subjects_the_writer_keeps() {
+    let detail = json!({"subjects": 1000, "at_least": true, "seen": ["9f86d081884c7d65"]});
+    assert_eq!(
+        What::from_stored("refused", "overflow", &detail).expect("an overflow reads"),
+        What::RefusedOverflow(RefusalOverflow {
+            subjects: 1000,
+            at_least: true,
+        })
+    );
 }

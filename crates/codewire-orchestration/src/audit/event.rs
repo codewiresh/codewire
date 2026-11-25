@@ -148,6 +148,9 @@ pub enum Lifecycle {
     Stopped {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<PlatformReason>,
+        /// An idle stop's timeout, in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_stop_seconds: Option<u32>,
     },
     Restarted {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,13 +270,27 @@ pub enum Credentials {
         provider: String,
         name: String,
     },
+    /// One credential's use at one host, so two credentials of one provider
+    /// stay apart.
     Used {
         provider: String,
+        #[serde(default)]
+        name: String,
         /// Empty when withheld.
         host: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         withheld: bool,
     },
+}
+
+/// An hour's refusals past its 1,000 subjects (SPEC "Bounds"), as the read
+/// returns them. The refusal writer keeps the subjects it has counted beside
+/// these fields; no reader sees them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalOverflow {
+    pub subjects: u64,
+    #[serde(default)]
+    pub at_least: bool,
 }
 
 /// What happened, by kind.
@@ -283,6 +300,7 @@ pub enum What {
     Lifecycle(Lifecycle),
     Policy(Policy),
     Refused(Refusal),
+    RefusedOverflow(RefusalOverflow),
     Credentials(Credentials),
 }
 
@@ -303,7 +321,7 @@ impl What {
             Self::Access(_) => Kind::Access,
             Self::Lifecycle(_) => Kind::Lifecycle,
             Self::Policy(_) => Kind::Policy,
-            Self::Refused(_) => Kind::Refused,
+            Self::Refused(_) | Self::RefusedOverflow(_) => Kind::Refused,
             Self::Credentials(_) => Kind::Credentials,
         }
     }
@@ -335,12 +353,14 @@ impl What {
             }
             Self::Credentials(Credentials::Used {
                 provider,
+                name: credential,
                 host,
                 withheld,
             }) => {
                 let checked = name(host);
                 Self::Credentials(Credentials::Used {
                     provider: provider.clone(),
+                    name: credential.clone(),
                     withheld: *withheld || checked.is_none(),
                     host: checked.unwrap_or_default(),
                 })
@@ -363,6 +383,12 @@ impl What {
             ),
             Self::Lifecycle(lifecycle) => single(serde_json::to_value(lifecycle)?)?,
             Self::Policy(policy) => single(serde_json::to_value(policy)?)?,
+            Self::RefusedOverflow(overflow) => (
+                "overflow".to_owned(),
+                true,
+                "overflow".to_owned(),
+                serde_json::to_value(overflow)?,
+            ),
             Self::Refused(refusal) => {
                 let detail = serde_json::to_value(refusal)?;
                 let subject = format!(
@@ -380,9 +406,16 @@ impl What {
                 );
                 ("refused".to_owned(), true, subject, detail)
             }
-            Self::Credentials(credentials @ Credentials::Used { provider, host, .. }) => {
+            Self::Credentials(
+                credentials @ Credentials::Used {
+                    provider,
+                    name,
+                    host,
+                    ..
+                },
+            ) => {
                 let (action, _, _, detail) = single(serde_json::to_value(credentials)?)?;
-                (action, true, format!("{provider}|{host}"), detail)
+                (action, true, format!("{provider}|{name}|{host}"), detail)
             }
             Self::Credentials(credentials) => single(serde_json::to_value(credentials)?)?,
         };
@@ -393,6 +426,36 @@ impl What {
             folds,
             detail,
         })
+    }
+}
+
+impl What {
+    /// An event as [`Self::columns`] stored it: its kind, its action and its
+    /// fields.
+    pub fn from_stored(
+        kind: &str,
+        action: &str,
+        detail: &serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
+        let tagged = || {
+            let mut fields = detail.clone();
+            if let Some(object) = fields.as_object_mut() {
+                object.insert("action".into(), action.into());
+            }
+            fields
+        };
+        match kind {
+            "access" => serde_json::from_value(action.into()).map(Self::Access),
+            "lifecycle" => serde_json::from_value(tagged()).map(Self::Lifecycle),
+            "policy" => serde_json::from_value(tagged()).map(Self::Policy),
+            "refused" if action == "overflow" => {
+                serde_json::from_value(detail.clone()).map(Self::RefusedOverflow)
+            }
+            "refused" => serde_json::from_value(detail.clone()).map(Self::Refused),
+            "credentials" => serde_json::from_value(tagged()).map(Self::Credentials),
+            other => Err(serde_json::Error::custom(format!("unknown kind {other:?}"))),
+        }
     }
 }
 

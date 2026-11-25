@@ -281,6 +281,7 @@ database_case!(db_expiry_removes_what_began_before_the_retention, pool, {
         ago(100 * 24 * 3600),
         What::Lifecycle(Lifecycle::Stopped {
             reason: Some(PlatformReason::Idle),
+            idle_stop_seconds: Some(1800),
         }),
     );
     record(pool, &old).await?;

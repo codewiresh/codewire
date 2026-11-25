@@ -1918,7 +1918,7 @@ refusals are in `cw --local policy log` ("Networking and egress").
     and the policy and revision it was refused under.
   - `credentials`: a credential or application secret attached to or
     detached from the Sandbox, by name and provider; and a credential's use
-    through the broker, by provider and host.
+    through the broker, by provider, credential name and host.
 - **Every event carries** the organization, the environment, when it
   began, the actor, the kind, the subject and a closed set of fields for
   its kind.
@@ -1935,7 +1935,7 @@ refusals are in `cw --local policy log` ("Networking and egress").
   subject is:
   - for `refused`, the destination, protocol, port, reason, policy and
     revision;
-  - for a credential use, the provider and the host;
+  - for a credential use, the provider, the credential's name and the host;
   - for exec and preview access, the actor and the client IP.
 
   Every other event is one event. A fold never spans two hours.
@@ -2015,10 +2015,17 @@ refusals are in `cw --local policy log` ("Networking and egress").
     whatever its permissions (#5688). A key a user puts inside their
     Sandbox is that user's choice, and reads as its creator.
   - Nothing is readable from inside the Sandbox. The read authorizes only a
-    user's session or an API key. It refuses every credential issued to or
-    for a Sandbox's workload: its binding token, its daemon credential, its
-    identity tokens, and any environment-scoped or delegated session a
-    hosted `cw` inside it uses.
+    person's own sign-in: a browser session, an API key, or an access token
+    issued to Codewire's own apps (`cw`, the desktop app and the iOS app).
+    It refuses a token issued to any other OAuth client, every credential
+    issued to or for a Sandbox's workload (its binding token, its daemon
+    credential, its identity tokens), and any environment-scoped or
+    delegated session a hosted `cw` inside it uses. No platform path issues
+    or delivers an access token into a Sandbox: the identity provider
+    issues one only through a person's own grant (device code,
+    authorization code or refresh, `crates/codewire-oidc/src/flow.rs`), and
+    a Sandbox's own credentials are of other kinds. A person who signs `cw`
+    in inside their own Sandbox has made that choice, as with an API key.
   - Every reader of a Sandbox sees the same events with the same fields,
     the platform's actions and the client IPs included.
 - **An admin's access.** When an admin opens a member's Sandbox, the event

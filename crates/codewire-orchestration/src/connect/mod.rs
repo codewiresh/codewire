@@ -12,6 +12,7 @@ pub mod access_profiles;
 pub mod account;
 pub mod admin;
 pub mod api_keys;
+pub mod audit;
 pub mod credentials;
 pub mod environment;
 pub mod environment_agent;

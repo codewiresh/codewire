@@ -8,6 +8,7 @@ from codewire._context import ConnectContext
 from codewire._settings import DEFAULT_API_URL, report_once, resolve_settings
 from codewire._transport import ConnectTransport
 from codewire.api_keys import APIKeys
+from codewire.audit import Audit
 from codewire.access_profiles import AccessProfiles
 from codewire.credentials import Credentials
 from codewire.environments import Environments
@@ -81,6 +82,7 @@ class Codewire:
         self.access_profiles = AccessProfiles(self._context)
         self.network_policies = NetworkPolicies(self._context)
         self.sandbox_identity = SandboxIdentity(self._context)
+        self.audit = Audit(self._context)
         self.credentials = Credentials(self._context)
 
     def __repr__(self) -> str:
@@ -96,6 +98,7 @@ class Codewire:
         self.access_profiles.close()
         self.network_policies.close()
         self.sandbox_identity.close()
+        self.audit.close()
         self.credentials.close()
 
     def __enter__(self) -> Codewire:
