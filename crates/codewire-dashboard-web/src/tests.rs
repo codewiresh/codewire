@@ -1213,6 +1213,7 @@ fn admin_organization_asks_before_a_negative_balance() {
         confirmed_balance_nano_eur: -1_140_000_000,
         question: crate::admin_connect::negative_balance_question(
             -1_140_000_000,
+            false,
             true,
             2000,
             Some(Some("Visa •••• 4242")),
@@ -1253,24 +1254,41 @@ fn a_negative_balance_question_says_what_top_up_sets_off() {
     use crate::admin_connect::negative_balance_question;
     let refused = "This leaves the balance at -€1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept.";
     assert_eq!(
-        negative_balance_question(-1_140_000_000, true, 2000, Some(Some("Visa •••• 4242"))),
+        negative_balance_question(
+            -1_140_000_000,
+            false,
+            true,
+            2000,
+            Some(Some("Visa •••• 4242"))
+        ),
         "This leaves the balance at -€1.14. Automatic top-up is on, so Visa •••• 4242 is charged €20.00 within seconds."
     );
     // No card, or top-up off: nothing is charged, so work is refused.
     assert_eq!(
-        negative_balance_question(-1_140_000_000, true, 2000, Some(None)),
+        negative_balance_question(-1_140_000_000, false, true, 2000, Some(None)),
         refused
     );
     for card in [Some(Some("Visa •••• 4242")), Some(None), None] {
         assert_eq!(
-            negative_balance_question(-1_140_000_000, false, 2000, card),
+            negative_balance_question(-1_140_000_000, false, false, 2000, card),
             refused
         );
     }
     // Billing can't say: both outcomes.
-    assert!(negative_balance_question(-1, true, 5000, None).ends_with(
+    assert!(negative_balance_question(-1, false, true, 5000, None).ends_with(
         "Automatic top-up is on at €50.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
     ));
+    // Unlimited is never charged or refused, whatever top-up and the card say (#6503).
+    for (top_up, card) in [
+        (true, Some(Some("Visa •••• 0341"))),
+        (true, None),
+        (false, Some(None)),
+    ] {
+        assert_eq!(
+            negative_balance_question(-11_000_000_000, true, top_up, 2000, card),
+            "This leaves the balance at -€11.00. The organization is on Unlimited, so nothing is charged or refused."
+        );
+    }
 }
 
 #[test]

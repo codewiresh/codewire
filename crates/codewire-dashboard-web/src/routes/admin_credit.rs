@@ -137,6 +137,10 @@ async fn ask(
         confirmed_balance_nano_eur: balance,
         question: admin_connect::negative_balance_question(
             balance,
+            organization
+                .rate_cards
+                .iter()
+                .any(|card| card.selected && card.value == "unlimited"),
             organization.auto_top_up_enabled,
             organization.auto_top_up_cents,
             card.as_ref().map(Option::as_deref),

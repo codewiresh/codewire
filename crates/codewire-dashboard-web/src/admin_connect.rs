@@ -1283,15 +1283,22 @@ pub(crate) async fn default_card(
 /// What confirming an adjustment that leaves `balance_nano_eur`, below zero,
 /// sets off: a top-up charge to the card it names, or refused work (#4754,
 /// #5094, journey `billing-admin-adjust`). `card` is [`default_card`]'s
-/// answer; when billing can't say, the question names both outcomes.
+/// answer; when billing can't say, the question names both outcomes. On
+/// Unlimited nothing is charged or refused, whatever top-up says (#6503).
 pub(crate) fn negative_balance_question(
     balance_nano_eur: i64,
+    unlimited: bool,
     auto_top_up_enabled: bool,
     auto_top_up_cents: i32,
     card: Option<Option<&str>>,
 ) -> String {
     let balance = euro_text(balance_nano_eur);
     let top_up = euro_text(i64::from(auto_top_up_cents) * (NANO_EUR_PER_EURO / 100));
+    if unlimited {
+        return format!(
+            "This leaves the balance at {balance}. The organization is on Unlimited, so nothing is charged or refused."
+        );
+    }
     match (auto_top_up_enabled, card) {
         (true, Some(Some(card))) => format!(
             "This leaves the balance at {balance}. Automatic top-up is on, so {card} is charged {top_up} within seconds."

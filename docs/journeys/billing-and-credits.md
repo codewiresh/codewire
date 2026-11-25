@@ -321,6 +321,10 @@ Issue: #4754.
   - billing can't say whether there is a card: the question names both
     outcomes, "…Automatic top-up is on at €20.00, so a saved card is charged
     within seconds; without one, new Sandboxes and starts are refused.";
+  - on Unlimited, which is never charged or refused, the question names no
+    charge and no refusal (#6503): "This leaves the balance at -€11.00. The
+    organization is on Unlimited, so nothing is charged or refused." Not yet
+    observed;
   - confirming applies it, once; going back changes nothing;
   - the balance moving between the question and the answer: the answer
     confirms the result it was shown, and a different result asks again.
