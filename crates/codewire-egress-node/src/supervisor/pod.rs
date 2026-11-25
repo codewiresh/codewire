@@ -256,7 +256,19 @@ async fn report_end(
             tracing::info!(%pod_uid, %pod_name, "a draining cw-egress cut a Pod's pair at its deadline");
             Outcome::CutAtDeadline
         }
-        End::Told | End::Pair | End::Lost => Outcome::Other,
+        End::Told | End::Pair | End::Lost => {
+            // Neither moved idle nor cut: a drain names how, so a Pod whose
+            // open connections ended early is found by its log (#6483).
+            if draining {
+                let how = match end {
+                    End::Told => "told",
+                    End::Pair => "its pair ended",
+                    _ => "lost",
+                };
+                tracing::info!(%pod_uid, %pod_name, how, "a draining cw-egress ended a Pod's pair before it moved");
+            }
+            Outcome::Other
+        }
     };
     // However a pair ends in a drain, its guest redials onto another
     // cw-egress. Nothing is listening when the reporter is gone.

@@ -234,6 +234,101 @@ async fn a_drained_session_waits_for_a_lookup_in_flight_and_still_answers_it() {
     assert_eq!(ended, Ok(()));
 }
 
+/// Admits every TCP flow and keeps the far end of each upstream it dials, so
+/// a bridged connection stays open, and quiet, until the test drops it.
+#[derive(Default)]
+struct HeldBroker {
+    far: std::sync::Mutex<Vec<DuplexStream>>,
+}
+
+#[async_trait]
+impl EgressBroker for HeldBroker {
+    async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+        let (upstream, far) = duplex(1024);
+        self.far.lock().unwrap().push(far);
+        Ok(Box::pin(upstream))
+    }
+
+    async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+        Err(denied())
+    }
+}
+
+/// #6483: a drain must not end a session that holds an open connection,
+/// even one that carries nothing; it waits for the connection, or the
+/// supervisor's deadline.
+#[tokio::test]
+async fn a_drained_session_keeps_an_open_quiet_connection() {
+    let broker = Arc::new(HeldBroker::default());
+    let Hosted {
+        mut guest,
+        mut codec,
+        checked,
+        drain,
+        mut session,
+        ..
+    } = passed_guest(Arc::clone(&broker)).await;
+    assert_eq!(checked.await.unwrap(), SelfCheck::Passed);
+    let server = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 80), 443);
+    write_guest_packet(
+        &mut guest,
+        &mut codec,
+        &tcp_packet(40_000, server, 1, 0, 0x02),
+    )
+    .await
+    .unwrap();
+    let syn_ack = tokio::time::timeout(HANG_GUARD, read_guest_packet(&mut guest, &mut codec))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tcp_flags(&syn_ack), 0x12, "expected the stack's SYN-ACK");
+    let server_seq = u32::from_be_bytes(syn_ack[24..28].try_into().unwrap());
+    write_guest_packet(
+        &mut guest,
+        &mut codec,
+        &tcp_packet(40_000, server, 2, server_seq.wrapping_add(1), 0x10),
+    )
+    .await
+    .unwrap();
+    // The upstream's bytes reach the guest, so the connection is bridged.
+    let mut far = tokio::time::timeout(HANG_GUARD, async {
+        loop {
+            if let Some(far) = broker.far.lock().unwrap().pop() {
+                return far;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    far.write_all(b"hello").await.unwrap();
+    let data = tokio::time::timeout(HANG_GUARD, async {
+        loop {
+            let packet = read_guest_packet(&mut guest, &mut codec).await.unwrap();
+            if packet[9] == 6 && packet.len() > 40 {
+                return packet;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(data.ends_with(b"hello"));
+
+    drain.send(()).unwrap();
+    // Longer than the drain's recheck: the open connection keeps it running.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), &mut session)
+            .await
+            .is_err(),
+        "a drained session ended while a connection was open"
+    );
+    session.abort();
+}
+
 #[tokio::test]
 async fn without_a_drain_an_idle_session_keeps_running() {
     let hosted = passed_guest(Arc::new(DenyBroker)).await;
