@@ -226,9 +226,10 @@ class ImageBundleTests(unittest.TestCase):
             )
 
     def test_buildx_metadata_emits_the_other_side_image_candidates(self) -> None:
-        # The pod-runtime image (#5602) and the /dev/kvm device plugin (#6202)
-        # are built, signed and pinned outside the runtime bundle, as cw-egress is.
-        for family in ("pod-runtime", "kvm-device-plugin"):
+        # The pod-runtime image and workspace disk (#5602) and the /dev/kvm
+        # device plugin (#6202) are built, signed and pinned outside the runtime
+        # bundle, as cw-egress is.
+        for family in ("pod-runtime", "workspace-disk", "kvm-device-plugin"):
             with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
                 metadata = Path(directory) / "metadata.json"
                 digest = "sha256:" + "e" * 64

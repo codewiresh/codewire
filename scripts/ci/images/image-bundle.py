@@ -18,9 +18,9 @@ KIND = "ImageBundle"
 SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "daemon", "services", "mesh")
 # Published by digest but never part of the runtime bundle: cw-egress, the
-# standard pod-runtime image (#5602) and the /dev/kvm device plugin (#6202)
-# are built and signed by Dev delivery and each pinned on its own, and the
-# systemd workspace is an opt-in image a deployment names (#5638).
+# standard pod-runtime image and workspace disk (#5602) and the /dev/kvm device
+# plugin (#6202) are built and signed by Dev delivery and each pinned on its
+# own, and the systemd workspace is an opt-in image a deployment names (#5638).
 PUBLICATION_FAMILIES = FAMILIES + (
     "base",
     "workspace",
@@ -28,6 +28,7 @@ PUBLICATION_FAMILIES = FAMILIES + (
     "egress",
     "kvm-device-plugin",
     "pod-runtime",
+    "workspace-disk",
     "workspace-systemd",
 )
 ENVIRONMENTS = ("dev", "prod")
