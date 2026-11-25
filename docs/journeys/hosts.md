@@ -11,10 +11,16 @@ in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-21. Slice 1's CLI and agent are observed on Dev: enroll with
+Updated 2026-11-24. Slice 1's CLI and agent are observed on Dev: enroll with
 either key store, the agent's connection directly and through a proxy, the
 user service across logout and reboot, and leave. The Hosts page waits for
-the owner's browser walk. Slice 2 is not yet observed anywhere, and nothing is
+the owner's browser walk. Slice 2's lifecycle is observed on Dev on a Linux
+host: stop, delete, a stop across an agent restart and a delete on a
+revoked host, and create and start in part: the environment runs, but the
+CLI's create never returns and its start exits 1 (#6397). The host's
+generation, the platform's own refusals (offline, not granted, out of
+capacity, a request the host can't take) and the 25-minute bound are not
+yet observed, and `host-attach` waits for the API tunnel. Nothing is
 observed on Production.
 
 | ID | Dev | Production |
@@ -25,13 +31,13 @@ observed on Production.
 | `host-service` | observed 2026-11-13 on 37ea121f5 and 154d23a40 (#3609, #4432) | not yet observed |
 | `host-leave` | observed 2026-11-13 on 37ea121f5 and 154d23a40 (#3609, #4432) | not yet observed |
 | `host-page` | not yet observed | not yet observed |
-| `host-create` | not yet observed | not yet observed |
+| `host-create` | partly observed 2026-11-24 on 013f98d865 to 4d9d003f3: runs on the host, but `cw create` never returns; the generation, the platform's refusals and the 25-minute bound are not yet observed (#3609, #6397) | not yet observed |
 | `host-attach` | not yet observed | not yet observed |
-| `host-stop` | not yet observed | not yet observed |
-| `host-start` | not yet observed | not yet observed |
-| `host-delete` | not yet observed | not yet observed |
-| `host-agent-restart` | not yet observed | not yet observed |
-| `host-revoked-delete` | not yet observed | not yet observed |
+| `host-stop` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
+| `host-start` | partly observed 2026-11-24 on 013f98d865 to 4d9d003f3: runs again with its workspace kept, but `cw start` exits 1 (#3609, #6397) | not yet observed |
+| `host-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
+| `host-agent-restart` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
+| `host-revoked-delete` | observed 2026-11-24 on 013f98d865 to 4d9d003f3 (#3609, #6397) | not yet observed |
 
 ## Before the walk
 
@@ -189,6 +195,15 @@ the platform-profile credential relay are later steps (#3609). Placement is
 commands. Reaching the environment (`cw run`, `cw attach`, `cw shell`) needs
 the API tunnel, which is not merged yet.
 
+The first slice-2 walk ran on Dev on 2026-11-24, 21:40–22:38Z, as the Dev
+smoke identity. Dev was at 013f98d865 and was promoted to 2b3298196 (22:06Z),
+54dfbe967 (22:22Z) and 4d9d003f3 (22:33Z) during the walk; when each rollout
+ended is not recorded. The agent's session ended twice during the walk, and
+each time it attached again within seconds. The host was a Linux x86_64 KVM
+workstation, enrolled with a scratch HOME and its key in a file, providing one
+VM, with `cw` built from main d54f96c69d and a local runtime from the same
+source.
+
 ### `host-create`: an environment created on a host
 
 - **Entry points:** `cw create --on host:NAME` (NAME is a host's name or ID).
@@ -200,7 +215,24 @@ the API tunnel, which is not merged yet.
 - **Proof:** the environment reaches running on the named host, and the
   host's report shows the same environment and generation. A refused create
   names its reason, and nothing is created on the platform or another host.
-- **Observed:** not yet observed.
+- **Gotchas:** the host refuses every operation while any directory above its
+  native state root is not mode 0700, retrying every 5 s until it is. Today
+  `cw create --on host:NAME` prints `Reconcile requested` and never returns,
+  because it waits for a daemon readiness the platform can't give a host
+  environment (#6397); read `cw info` instead.
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). Online, `cw host provide
+    --max-vms 1`. The environment read `State: running` with `StartedAt`
+    21:56:40Z, 2 min 50 s after the create, the same second the host's
+    supervisor logged `record_running`; on the host, `cw ls --local` showed
+    one running VM named after the platform's environment ID, its daemon
+    ready. A second create, from cached layers, ran after 1 min 40 s. Both `cw
+    create` commands were still waiting when the walk stopped them, at 30 and
+    5 minutes (#6397). The host's generation was not read. An earlier create
+    failed `create_registry_transport` because the walk's firewall blocked the
+    registry; the platform showed the host's own reason, `this host's VM
+    supervisor refused the operation (create_registry_transport)`, and the
+    environment in error (#3609).
 
 ### `host-attach`: `cw run` and `cw attach` over the API tunnel
 
@@ -215,21 +247,37 @@ the API tunnel, which is not merged yet.
 - **Entry points:** `cw stop ENV`.
 - **Proof:** the environment reads stopped and the host's VM is no longer
   running.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). Three stops, each
+    `Environment h2-env stopped` in about 4 s, `StopReason: user`, and the
+    host's VM stopped. The CLI still says `cloud VM` and suggests `cw --cloud
+    start` (#6397).
 
 ### `host-start`: a stopped environment on a host starts again
 
 - **Entry points:** `cw start ENV`.
 - **Proof:** the environment reads running on the same host, with its
   workspace kept.
-- **Observed:** not yet observed.
+- **Gotchas:** `cw start` exits 1 after about 3 minutes with `daemon to become
+  ready: sandbox backend not found`, though the environment is running
+  (#6397).
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). Two starts: each read
+    running 14 to 19 s later on the same host, while `cw start` exited 1 after
+    3 min 14 s and 3 min 19 s (#6397). A file written into `/workspace` before
+    a stop, through the host's own `cw exec --local`, read back the same after
+    the next start.
 
 ### `host-delete`: an environment on a host is deleted
 
 - **Entry points:** `cw rm ENV`.
 - **Proof:** the environment is gone from the list, and the host reports it
   absent with its disk removed.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). `cw info` said not found
+    at once; within 5 s the host's `cw ls --local` listed no environments and
+    its native state shrank from 9.4 GB to 2.4 GB, the VM's disk gone.
+    Deleting the environment whose create had failed worked the same way.
 
 ### `host-agent-restart`: a lost reply resolves the original operation
 
@@ -239,7 +287,13 @@ the API tunnel, which is not merged yet.
   create or stop is in flight.
 - **Proof:** after the agent attaches again, the operation completes once
   with its first result, and the host has no second VM.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). A stop, with the agent
+    sent Ctrl-C 1.5 s after `cw stop` started and run again 6 s later: the
+    host's supervisor stopped the VM once, under one operation ID, 0.8 s after
+    the agent ended; the agent attached again at 22:31:55Z, and the
+    environment read stopped at 22:31:56Z, `cw stop` exiting 0. The host kept
+    one VM. A create across a restart is not yet observed.
 
 ### `host-revoked-delete`: an environment on a revoked host is deleted
 
@@ -251,4 +305,12 @@ the API tunnel, which is not merged yet.
   owner's to remove (`cw host leave` on that computer).
 - **Gotchas:** the control plane cannot reach a revoked host, so it does not
   claim the VM is gone from that computer.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-24, the first slice-2 walk (above). Revoked while idle with
+    one running environment: `cw rm` returned at once and `cw info` said not
+    found within 1 s. The host's agent printed `this host was revoked; the
+    agent stops` and exited; its VM kept running until `cw rm --local` removed
+    it, and then `cw host leave --yes` said "Host `cw-hosts-h2` was revoked,
+    so its record stays; this computer is no longer enrolled." `cw hosts`
+    still showed the revoked host as providing `1 VMs` (#6397). Revoked
+    mid-operation is not yet observed.
