@@ -13,9 +13,10 @@ fail() { echo "[test-scan-runtime-image-os] ERROR: $*" >&2; exit 1; }
 mkdir "$work/bin" "$work/temp"
 cat >"$work/bin/supplychain" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$1" == version ]]; then echo "supplychain ${STUB_VERSION}"; exit 0; fi
+# Like the job image's selector: the default unless EXPECTED_SUPPLYCHAIN names a revision.
+if [[ "$1" == version ]]; then echo "supplychain ${STUB_VERSION:-${EXPECTED_SUPPLYCHAIN:-ee0abebcd79661e59b02a22688d929dffa4b9506}}"; exit 0; fi
 printf '%s\n' "$*" >"$STUB_CALL"
-env | grep '^GRYPE_' | sort >"$STUB_ENV"
+env | grep -E '^(GRYPE_|EXPECTED_SUPPLYCHAIN=)' | sort >"$STUB_ENV"
 exit "${STUB_EXIT:-0}"
 STUB
 chmod +x "$work/bin/supplychain"
@@ -24,7 +25,7 @@ pinned="$(sed -nE 's/^readonly EXPECTED_SUPPLYCHAIN=([0-9a-f]{40})$/\1/p' "$SCAN
 digest="registry.example.com/codewire/dashboard@sha256:$(printf '%064d' 1)"
 scan() {
   PATH="$work/bin:$PATH" RUNNER_TEMP="$work/temp" STUB_CALL="$work/call" STUB_ENV="$work/env" \
-    STUB_VERSION="${version:-$pinned}" "$SCAN" "$@"
+    env ${version:+STUB_VERSION="$version"} "$SCAN" "$@"
 }
 
 scan dashboard "$digest" >/dev/null
@@ -32,6 +33,7 @@ scan dashboard "$digest" >/dev/null
   fail "the scan call is not the fixable-High scan of the digest: $(<"$work/call")"
 grep -qx 'GRYPE_DB_REQUIRE_UPDATE_CHECK=true' "$work/env" && grep -qx 'GRYPE_DB_AUTO_UPDATE=true' "$work/env" &&
   grep -qx 'GRYPE_DB_MAX_ALLOWED_BUILT_AGE=120h' "$work/env" || fail "the database freshness checks are not set"
+grep -qx "EXPECTED_SUPPLYCHAIN=$pinned" "$work/env" || fail "the scanner does not run the pinned sealed version"
 
 if STUB_EXIT=1 scan dashboard "$digest" >/dev/null 2>&1; then fail "a failing scan passed"; fi
 rm -f "$work/call"

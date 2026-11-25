@@ -12,7 +12,11 @@
 # DOCKER_CONFIG (image-scan-login.sh).
 set -euo pipefail
 
+# The job image's supplychain is a selector over sealed versions: unset, it
+# runs the default; set, exactly that revision or nothing (the supply-chain
+# scan pins it the same way).
 readonly EXPECTED_SUPPLYCHAIN=47a53e3035dbbd040f3249bd2ac858617a7c8fd7
+export EXPECTED_SUPPLYCHAIN
 
 fail() {
   printf '[scan-runtime-image-os] ERROR: %s\n' "$*" >&2
