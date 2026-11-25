@@ -14,7 +14,7 @@ observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
 | --- | --- | --- | --- |
-| `cred-github` | partly observed, 2026-11-24: Use under interception (#4001 comment 139398) and a failed check's log on a build of #6323 at b216d9758, under the default and `locked` policies (#5737 comment 139451); enrol, remove and the rest not yet observed | not yet observed | partly observed on Dev, 2026-11-24: Use under interception (#4001 comment 139127) and a failed check's log at source 694706e71 and under `locked` (#5737 comments 139909 and 140296); enrol, remove and the rest not yet observed |
+| `cred-github` | partly observed, 2026-11-24: Use under interception (#4001 comment 139398) and a failed check's log on a build of #6323 at b216d9758, under the default and `locked` policies (#5737 comment 139451); enrol, remove and the rest not yet observed | partly observed, 2026-11-24: enrol, and a failed check's log with `cw` from main at 7a380f3f9, under the default and `locked` policies (#5737 comment 140347); the rest not yet observed | partly observed on Dev, 2026-11-24: Use under interception (#4001 comment 139127) and a failed check's log at source 694706e71 and under `locked` (#5737 comments 139909 and 140296); enrol, remove and the rest not yet observed |
 | `cred-codex-sign-in` | not yet observed | not yet observed | not yet observed |
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
@@ -292,7 +292,9 @@ only what differs.
     the credential service's log (#5737 comment 139909). Under the `locked`
     line's policy, `example.com` and the log host didn't resolve inside the
     Sandbox while the log still came back (#5737 comment 140296).
-  - Not yet observed: a Mac local VM.
+  - Mac local VM (M3), `cw` from main at 7a380f3f9: the log, the `locked`
+    line, the 48-character `cwp1_` placeholder and the rerun's
+    `placeholder_outside_route` (#5737 comment 140347).
   - Not walked: the state before an installation's owner accepts `actions`:
     read. The test installation has already accepted it.
 - **Remove:**
