@@ -288,6 +288,7 @@ jobs:
       # through this run's job outputs. Publication confirms that each
       # source-SHA tag names that digest; it never takes a digest from a tag.
       - name: Publish the complete runtime set to Harbor without rebuilding
+        id: publish
         if: ${{ steps.verdict.outputs.verified == 'true' }}
         run: |
           set -euo pipefail
@@ -373,6 +374,67 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
+
+      # The OS-package scan of each published runtime digest (codewire#5402,
+      # step 1: scan only). It runs after the rollout is dispatched, so it
+      # delays nothing, and it blocks nothing yet: a finding or a failure is
+      # read from the run and reported on the issue. The job image's own
+      # supplychain (scan-runtime-image-os.sh) reads the pushed digest from
+      # Harbor with this job's pull-only identity, written to a private
+      # registry config for these steps and shredded after them.
+      - name: Prepare the image scan's Harbor pull login
+        id: scan-auth
+        if: ${{ steps.dispatch.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          SERVICES_REF: ${{ steps.publish.outputs.services_harbor_ref }}
+        run: scripts/ci/images/image-scan-login.sh prepare "$SERVICES_REF"
+
+      - name: Scan the dashboard image's OS packages (report only)
+        if: ${{ steps.scan-auth.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+          IMAGE: ${{ steps.publish.outputs.dashboard_harbor_ref }}
+        run: scripts/ci/images/scan-runtime-image-os.sh dashboard "$IMAGE"
+
+      - name: Scan the derp image's OS packages (report only)
+        if: ${{ steps.scan-auth.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+          IMAGE: ${{ steps.publish.outputs.derp_harbor_ref }}
+        run: scripts/ci/images/scan-runtime-image-os.sh derp "$IMAGE"
+
+      - name: Scan the daemon image's OS packages (report only)
+        if: ${{ steps.scan-auth.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+          IMAGE: ${{ steps.publish.outputs.daemon_harbor_ref }}
+        run: scripts/ci/images/scan-runtime-image-os.sh daemon "$IMAGE"
+
+      - name: Scan the services image's OS packages (report only)
+        if: ${{ steps.scan-auth.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+          IMAGE: ${{ steps.publish.outputs.services_harbor_ref }}
+        run: scripts/ci/images/scan-runtime-image-os.sh services "$IMAGE"
+
+      - name: Scan the mesh image's OS packages (report only)
+        if: ${{ steps.scan-auth.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+          IMAGE: ${{ steps.publish.outputs.mesh_harbor_ref }}
+        run: scripts/ci/images/scan-runtime-image-os.sh mesh "$IMAGE"
+
+      - name: Remove the image scan's Harbor pull login
+        if: ${{ always() && steps.scan-auth.outputs.docker_config != '' }}
+        env:
+          SCAN_DOCKER_CONFIG: ${{ steps.scan-auth.outputs.docker_config }}
+        run: scripts/ci/images/image-scan-login.sh remove "$SCAN_DOCKER_CONFIG"
 
   # cw-egress is built and signed here but never delivered: only a merged pin
   # in deployments/k8s/egress decides what runs (private-docs

@@ -2742,6 +2742,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/images/publish-image-to-harbor.sh|\
+      scripts/ci/images/image-scan-login.sh|\
+      scripts/ci/images/scan-runtime-image-os.sh|\
       scripts/ci/deploy/dispatch-deploy-dev.sh|scripts/ci/deploy/dispatch-deploy-prod.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
@@ -2807,6 +2809,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
       scripts/ci/tests/test-publish-image-to-harbor.sh|\
+      scripts/ci/tests/test-image-scan-login.sh|\
+      scripts/ci/tests/test-scan-runtime-image-os.sh|\
       scripts/ci/tests/test-alias-support-pair.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-run-skopeo-container.sh|\

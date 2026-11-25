@@ -494,8 +494,21 @@ mirror_steps="$(awk '
   fail "a GHCR mirror step can fail delivery"
 # Never piped into `grep -q`: its early exit would kill the writer, and pipefail
 # would then pass the violation it just found.
-if grep -q 'continue-on-error' <<<"$(awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$publish_job")"; then
-  fail "a delivery step outside the GHCR mirror continues on error"
+# The OS-package scan reports and blocks nothing yet (codewire#5402, step 1):
+# its login and scan steps continue on error, and all of them follow the
+# dispatch, so neither a finding nor a scanner fault can delay or fail delivery.
+scan_steps="$(awk '
+  /^      - name: / { capture = ($0 ~ /image scan|OS packages \(report only\)/) }
+  capture { print }
+' <<<"$publish_job")"
+scan_best_effort="$(grep -cE '^      - name: (Prepare the image scan|Scan the )' <<<"$scan_steps")"
+[[ "$scan_best_effort" -eq 6 && "$scan_best_effort" -eq "$(grep -c '^        continue-on-error: true$' <<<"$scan_steps")" ]] ||
+  fail "an image scan step can fail delivery"
+[[ "$(grep -n '^      - name: Dispatch only the canonical source SHA$' <<<"$publish_job" | cut -d: -f1)" -lt \
+   "$(grep -n '^      - name: Prepare the image scan' <<<"$publish_job" | cut -d: -f1)" ]] ||
+  fail "the image scan runs before the delivery is dispatched"
+if grep -q 'continue-on-error' <<<"$(awk '/^      - name: / { capture = ($0 !~ /GHCR|image scan|OS packages \(report only\)/) } capture' <<<"$publish_job")"; then
+  fail "a delivery step outside the GHCR mirror and the image scan continues on error"
 fi
 # shellcheck disable=SC2016
 grep -Fq '"${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"' <<<"$publish_job" ||

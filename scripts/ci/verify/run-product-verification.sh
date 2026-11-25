@@ -1857,6 +1857,8 @@ run_release() {
   scripts/ci/tests/test-dispatch-deploy-prod.sh
   scripts/ci/tests/test-publish-image-to-ghcr.sh
   scripts/ci/tests/test-publish-image-to-harbor.sh
+  scripts/ci/tests/test-image-scan-login.sh
+  scripts/ci/tests/test-scan-runtime-image-os.sh
   scripts/ci/tests/test-alias-support-pair.sh
   scripts/ci/tests/test-sign-runtime-image-set.sh
   scripts/ci/tests/test-egress-image-tag.sh
