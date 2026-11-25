@@ -46,6 +46,12 @@ pub enum Refusal {
     /// An older broker's refusal that carries no reason. It keeps a
     /// denial's 403, so an agent doesn't retry it.
     Denied,
+    /// A hosted Sandbox whose creator left its organization uses none of
+    /// its credentials (#6406).
+    CredentialOwnerDeparted,
+    /// A hosted Sandbox whose creator's account is disabled uses none of its
+    /// credentials (#6406).
+    CredentialOwnerDisabled,
 }
 
 /// Why a request isn't forwarded as it is; each keeps the status it had
@@ -147,7 +153,9 @@ impl Refusal {
             | Self::RequestNotForwarded(Unforwarded::Refused)
             | Self::NameNotAllowed
             | Self::SelectedCredentialOnly
-            | Self::Denied => 403,
+            | Self::Denied
+            | Self::CredentialOwnerDeparted
+            | Self::CredentialOwnerDisabled => 403,
             Self::CredentialUnavailable | Self::Busy | Self::Unavailable => 503,
             Self::CredentialConflict | Self::RequestNotForwarded(Unforwarded::Malformed) => 400,
             Self::PathNotServed => 404,
@@ -196,6 +204,16 @@ impl Refusal {
             Self::CredentialUnavailable => {
                 (format!("{credential} can't be used right now; try again."), None)
             }
+            Self::CredentialOwnerDeparted => (
+                "this Sandbox's creator is no longer in its organization, so its credentials aren't used."
+                    .to_owned(),
+                None,
+            ),
+            Self::CredentialOwnerDisabled => (
+                "this Sandbox's creator's account is disabled, so its credentials aren't used."
+                    .to_owned(),
+                None,
+            ),
             Self::CredentialRefreshRateLimited {
                 retry_after_seconds,
             } => (

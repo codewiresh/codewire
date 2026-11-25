@@ -23,8 +23,11 @@ use login_admission::{DeliveryPredicate, claude_login_admissible, codex_login_ad
 pub mod keepalive;
 mod placeholders;
 mod refresh_errors;
+mod runtime_errors;
 use crate::RateLimitClose;
 use refresh_errors::{refresh_lease_error, refresh_store_error};
+pub use runtime_errors::PlatformRuntimeError;
+use runtime_errors::runtime_error;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 
@@ -272,16 +275,6 @@ impl PlatformRuntimeSession {
     }
 }
 
-/// Closed failures: authenticators must discard Kubernetes, SQL, transport and
-/// token parser text rather than retaining upstream messages or error sources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PlatformRuntimeError {
-    #[error("platform runtime authority denied the session")]
-    Denied,
-    #[error("platform runtime authority is unavailable")]
-    Unavailable,
-}
-
 /// Trusted runtime authority, not an adapter for guest-provided coordinates.
 /// Revalidate live Pod UIDs/deletion, environment generation, owner/policy and
 /// the verified identity's deadline on every call. No implementation is supplied
@@ -511,7 +504,9 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         &self,
         result: Result<T, BrokerLeaseError>,
     ) -> Result<T, BrokerLeaseError> {
-        if let (Err(BrokerLeaseError::Denied), Some(material)) = (&result, &self.material) {
+        if let (Err(error), Some(material)) = (&result, &self.material)
+            && error.is_denial()
+        {
             material.clear();
         }
         result
@@ -764,10 +759,18 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             .lease_checked_once(slot.clone(), permission.clone(), admissible)
             .await
         {
+            // A second move is a denial; a departed or disabled creator keeps
+            // its name (#6406).
             Err(Checked::Moved) => self
                 .lease_checked_once(slot, permission, admissible)
                 .await
-                .map_err(|_| BrokerLeaseError::Denied),
+                .map_err(|checked| match checked {
+                    Checked::Refused(
+                        error @ (BrokerLeaseError::CreatorDeparted
+                        | BrokerLeaseError::CreatorDisabled),
+                    ) => error,
+                    _ => BrokerLeaseError::Denied,
+                }),
             leased => leased.map_err(Checked::refused),
         }
     }
@@ -1422,13 +1425,6 @@ fn unix_now() -> Result<u64, PlatformRuntimeError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| PlatformRuntimeError::Unavailable)
-}
-
-fn runtime_error(error: PlatformRuntimeError) -> BrokerLeaseError {
-    match error {
-        PlatformRuntimeError::Denied => BrokerLeaseError::Denied,
-        PlatformRuntimeError::Unavailable => BrokerLeaseError::Unavailable,
-    }
 }
 
 fn credential_error(error: PlatformCredentialError) -> BrokerLeaseError {

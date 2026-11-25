@@ -9,6 +9,8 @@ pub(super) fn refresh_lease_error(error: BrokerLeaseError) -> BrokerRefreshError
         BrokerLeaseError::InvalidRequest => BrokerRefreshError::InvalidRequest,
         // A credential needing Reconnect is never refreshed again automatically.
         BrokerLeaseError::Denied
+        | BrokerLeaseError::CreatorDeparted
+        | BrokerLeaseError::CreatorDisabled
         | BrokerLeaseError::ReconnectRequired(_)
         | BrokerLeaseError::NotSelected => BrokerRefreshError::Denied,
         BrokerLeaseError::Unavailable => BrokerRefreshError::Unavailable,

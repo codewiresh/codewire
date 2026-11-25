@@ -24,11 +24,13 @@ pub enum RefusalCode {
     CredentialRefreshRateLimited,
     Unavailable,
     Denied,
+    CredentialOwnerDeparted,
+    CredentialOwnerDisabled,
 }
 
 impl RefusalCode {
     /// Every code, in a fixed order a wire may index.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::CredentialRevoked,
         Self::CredentialExpired,
         Self::CredentialNeedsReconnect,
@@ -47,6 +49,9 @@ impl RefusalCode {
         Self::CredentialRefreshRateLimited,
         Self::Unavailable,
         Self::Denied,
+        // Appended: a wire indexes this order.
+        Self::CredentialOwnerDeparted,
+        Self::CredentialOwnerDisabled,
     ];
 
     /// The `Codewire-Refusal` value.
@@ -70,6 +75,8 @@ impl RefusalCode {
             Self::CredentialRefreshRateLimited => "credential_refresh_rate_limited",
             Self::Unavailable => "unavailable",
             Self::Denied => "denied",
+            Self::CredentialOwnerDeparted => "credential_owner_departed",
+            Self::CredentialOwnerDisabled => "credential_owner_disabled",
         }
     }
 
@@ -94,6 +101,8 @@ impl RefusalCode {
             Self::CredentialRefreshRateLimited => "refresh rate-limited",
             Self::Unavailable => "unavailable",
             Self::Denied => "denied",
+            Self::CredentialOwnerDeparted => "creator left the organization",
+            Self::CredentialOwnerDisabled => "creator's account disabled",
         }
     }
 
@@ -139,6 +148,8 @@ impl Refusal {
             Self::CredentialRefreshRateLimited { .. } => RefusalCode::CredentialRefreshRateLimited,
             Self::Unavailable => RefusalCode::Unavailable,
             Self::Denied => RefusalCode::Denied,
+            Self::CredentialOwnerDeparted => RefusalCode::CredentialOwnerDeparted,
+            Self::CredentialOwnerDisabled => RefusalCode::CredentialOwnerDisabled,
         }
     }
 }

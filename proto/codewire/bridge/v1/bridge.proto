@@ -101,6 +101,11 @@ enum CredentialBridgeRefusal {
   // token has expired (#4975). Sent with `retry_after_seconds`; an older
   // guest reads it as unavailable.
   CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REFRESH_RATE_LIMITED = 17;
+  // A hosted Sandbox whose creator left its organization, or whose creator's
+  // account is disabled, uses none of its credentials (#6406). Sent with the
+  // DENIED reason; an older guest reads them as unavailable.
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_OWNER_DEPARTED = 18;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_OWNER_DISABLED = 19;
 }
 
 message CredentialBridgeResponseFailure {

@@ -136,3 +136,38 @@ async fn a_rate_limited_refresh_answers_429_with_retry_after() {
     assert!(body.contains("the Anthropic credential"), "{body}");
     assert!(body.contains("240 seconds"), "{body}");
 }
+
+/// A Sandbox whose creator left its organization, or whose creator's account
+/// is disabled, answers every credential request with its own 403 and the
+/// spec's one sentence (#6406).
+#[tokio::test]
+async fn a_departed_or_disabled_creator_answers_its_own_403() {
+    for (wire, refusal, code, sentence) in [
+        (
+            Wire::CredentialOwnerDeparted,
+            Refusal::CredentialOwnerDeparted,
+            "credential_owner_departed",
+            "Codewire: this Sandbox's creator is no longer in its organization, so its credentials aren't used.\n",
+        ),
+        (
+            Wire::CredentialOwnerDisabled,
+            Refusal::CredentialOwnerDisabled,
+            "credential_owner_disabled",
+            "Codewire: this Sandbox's creator's account is disabled, so its credentials aren't used.\n",
+        ),
+    ] {
+        assert_eq!(
+            from_failure(Reason::Denied as i32, wire as i32, 0),
+            Some(refusal)
+        );
+        let response = refusal_response(
+            refusal,
+            Some(RefusalProvider::Anthropic),
+            Some("api.anthropic.com"),
+        );
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()[REFUSAL_HEADER], code);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(body, sentence.as_bytes());
+    }
+}

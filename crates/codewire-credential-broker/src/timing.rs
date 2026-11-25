@@ -307,6 +307,8 @@ fn error_label(error: BrokerRequestError) -> &'static str {
     match error {
         BrokerRequestError::InvalidRequest => "invalid_request",
         BrokerRequestError::Denied => "denied",
+        BrokerRequestError::CreatorDeparted => "creator_departed",
+        BrokerRequestError::CreatorDisabled => "creator_disabled",
         BrokerRequestError::AuthorityUnavailable => "authority_unavailable",
         BrokerRequestError::RefreshRateLimited { .. } => "refresh_rate_limited",
         BrokerRequestError::UpstreamFailed => "upstream_failed",

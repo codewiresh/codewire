@@ -73,6 +73,8 @@ mod entry;
 mod forced_refresh;
 mod github_front_door;
 mod guest_request;
+mod lease_error;
+pub use lease_error::BrokerLeaseError;
 mod refresh_outcome;
 mod token_exchange;
 mod token_host;
@@ -301,27 +303,6 @@ pub trait BrokerLeaseProvider: Send + Sync {
     /// stopped admitting requests and aborted the remaining request futures,
     /// before their authority channel is allowed to close.
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError>;
-}
-
-/// Stable lease failures that never retain authority or protected-store
-/// diagnostics.
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub enum BrokerLeaseError {
-    #[error("credential broker lease request is invalid")]
-    InvalidRequest,
-    #[error("credential broker lease was denied")]
-    Denied,
-    #[error("credential broker lease authority is unavailable")]
-    Unavailable,
-    #[error("credential broker lease authority returned invalid metadata")]
-    InvalidResponse,
-    /// The selected capability's credential needs Reconnect (its refresh
-    /// failed, or it was revoked or expired). Only this capability is withheld.
-    #[error("credential broker lease needs the selected credential reconnected")]
-    ReconnectRequired(WithheldReason),
-    /// The bound profile fills no credential for the requested slot.
-    #[error("credential broker lease names a slot the profile does not fill")]
-    NotSelected,
 }
 
 /// How a rate-limited attempt was closed.
@@ -984,6 +965,12 @@ pub enum BrokerRequestError {
     InvalidRequest,
     #[error("credential broker request was denied")]
     Denied,
+    /// Denied because the Sandbox's creator left its organization (#6406).
+    #[error("credential broker request was denied: the Sandbox's creator left its organization")]
+    CreatorDeparted,
+    /// Denied because the Sandbox's creator's account is disabled (#6406).
+    #[error("credential broker request was denied: the Sandbox's creator's account is disabled")]
+    CreatorDisabled,
     #[error("credential broker lease authority is unavailable")]
     AuthorityUnavailable,
     #[error("credential broker upstream request failed")]
@@ -1017,6 +1004,8 @@ impl BrokerRequestError {
     pub fn refusal(&self) -> Refusal {
         match self {
             Self::InvalidRequest | Self::Denied => Refusal::Denied,
+            Self::CreatorDeparted => Refusal::CredentialOwnerDeparted,
+            Self::CreatorDisabled => Refusal::CredentialOwnerDisabled,
             Self::AuthorityUnavailable => Refusal::CredentialUnavailable,
             Self::UpstreamFailed | Self::ResponseTooLarge => {
                 Refusal::UpstreamFailed(UpstreamFailure::Failed)
@@ -2193,6 +2182,8 @@ impl Stream for BrokerRedactedBody {
 fn map_lease_error(error: BrokerLeaseError) -> BrokerRequestError {
     match error {
         BrokerLeaseError::InvalidRequest | BrokerLeaseError::Denied => BrokerRequestError::Denied,
+        BrokerLeaseError::CreatorDeparted => BrokerRequestError::CreatorDeparted,
+        BrokerLeaseError::CreatorDisabled => BrokerRequestError::CreatorDisabled,
         BrokerLeaseError::ReconnectRequired(reason) => {
             BrokerRequestError::ReconnectRequired(reason)
         }

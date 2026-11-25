@@ -1247,7 +1247,9 @@ fn unavailable() -> Status {
 
 fn runtime_status(error: PlatformRuntimeError) -> Status {
     match error {
-        PlatformRuntimeError::Denied => denied(),
+        PlatformRuntimeError::Denied
+        | PlatformRuntimeError::CreatorDeparted
+        | PlatformRuntimeError::CreatorDisabled => denied(),
         PlatformRuntimeError::Unavailable => unavailable(),
     }
 }
@@ -1255,6 +1257,8 @@ fn runtime_status(error: PlatformRuntimeError) -> Status {
 fn lease_status(error: BrokerLeaseError) -> Status {
     match error {
         BrokerLeaseError::Denied
+        | BrokerLeaseError::CreatorDeparted
+        | BrokerLeaseError::CreatorDisabled
         | BrokerLeaseError::InvalidRequest
         | BrokerLeaseError::ReconnectRequired(_)
         | BrokerLeaseError::NotSelected => denied(),

@@ -412,8 +412,10 @@ pub(crate) struct Scope {
     pub(crate) projection_selection_sha256: Option<String>,
     /// `pod` (claim-time binding) or `environment` (a pre-binding Pod).
     pub(crate) credential_scope: String,
+    /// Empty when the creator is no longer a member of the organization.
     pub(crate) member_id: String,
     pub(crate) member_role: String,
+    pub(crate) creator_enabled: bool,
     pub(crate) profile_id: Option<String>,
     pub(crate) profile_revision: Option<i64>,
     pub(crate) confirmed_by: Option<String>,
@@ -441,7 +443,15 @@ impl Scope {
     }
 
     fn context(&self) -> Result<GrantContext, Error> {
-        if self.generation <= 0 || self.member_id.is_empty() || self.member_role.is_empty() {
+        // The Sandbox's credential authority is its creator's: none of its
+        // credentials is used once they are disabled or leave (#6406).
+        if !self.creator_enabled {
+            return Err(Error::CreatorDisabled);
+        }
+        if self.member_id.is_empty() || self.member_role.is_empty() {
+            return Err(Error::CreatorDeparted);
+        }
+        if self.generation <= 0 {
             return Err(Error::Denied);
         }
         Ok(GrantContext {
@@ -528,7 +538,9 @@ impl Resolved {
 }
 
 // The exact same scope query is used inside projection capture/final locks.
-// Membership remains mandatory even for the creator. Optional provider binding
+// Membership remains mandatory even for the creator: it is read with a LEFT
+// JOIN, and with the creator's `enabled`, only so that `Scope::context` can
+// refuse a departed or disabled creator by name (#6406). Optional provider binding
 // does not relax environment state, generation or backend/Pod identity.
 // The workspace is authorized by its claim-time binding: the backend pointer
 // names the bound Pod UID, and only that environment's live binding of that
@@ -542,13 +554,13 @@ macro_rules! scope_query {
      s.sandbox_claim_uid AS claim_uid,s.pod_name,s.pod_uid, \
      w.claim_uid AS binding_claim_uid,w.sandbox_uid AS binding_sandbox_uid, \
      w.managed_credential_clients,w.projection_selection_sha256,w.credential_scope, \
-     m.id AS member_id,m.role AS member_role, \
+     COALESCE(m.id,'') AS member_id,COALESCE(m.role,'') AS member_role,u.enabled AS creator_enabled, \
      b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by, \
      p.user_id AS profile_user,p.organization_id AS profile_organization \
      FROM public.environments e \
      JOIN public.users u ON u.id=e.created_by \
      JOIN public.organizations o ON o.id=e.org_id AND o.deletion_state='active' \
-     JOIN public.org_members m ON m.org_id=e.org_id AND m.user_id=e.created_by \
+     LEFT JOIN public.org_members m ON m.org_id=e.org_id AND m.user_id=e.created_by \
      JOIN public.sandbox_environment_backend s ON s.environment_id=e.id \
      JOIN public.sandbox_workspace_bindings w ON w.environment_id=e.id AND w.pod_uid=s.pod_uid \
      AND w.released_at IS NULL \
@@ -575,9 +587,10 @@ const BOUND_ENVIRONMENT_QUERY: &str = "SELECT w.environment_id FROM public.sandb
 /// reads when nothing commits between them.
 ///
 /// `OFFSET 0` keeps PostgreSQL from flattening the scope subquery, so the
-/// metadata function runs only for a complete scope row, after the
-/// membership, backend and binding joins have matched, and never for an
-/// environment row that one of them rejects.
+/// metadata function runs only for a complete scope row, after the backend
+/// and binding joins have matched, and never for an environment row that one
+/// of them rejects. Membership is a LEFT JOIN there, so it also runs for a
+/// departed creator's row, which `Scope::context` then refuses.
 ///
 /// Residual difference, which fails closed: for a scope row, the metadata is
 /// now read before the namespace, `context()` and `owner()` checks, where the
@@ -588,7 +601,8 @@ const SCOPE_AND_METADATA_QUERY: &str = concat!(
     "SELECT scope.environment_id, scope.creator, scope.organization, scope.generation, \
      scope.namespace, scope.claim_name, scope.claim_uid, scope.pod_name, scope.pod_uid, \
      scope.binding_claim_uid, scope.binding_sandbox_uid, scope.managed_credential_clients, \
-     scope.projection_selection_sha256, scope.credential_scope, scope.member_id, scope.member_role, scope.profile_id, \
+     scope.projection_selection_sha256, scope.credential_scope, scope.member_id, scope.member_role, \
+     scope.creator_enabled, scope.profile_id, \
      scope.profile_revision, scope.confirmed_by, scope.profile_user, scope.profile_organization, \
      metadata.organization_selected, metadata.user_placement, metadata.project_reference, \
      metadata.credential_reference, metadata.ordinary_keys, metadata.selection_valid \
@@ -620,8 +634,9 @@ impl AuthoritySource {
 
     /// The scope and its projection metadata, read together.
     async fn scope_and_metadata(&self, environment: &str) -> Result<ScopeAndMetadata, Error> {
-        // Membership is an INNER JOIN, never the public environment API's
-        // creator shortcut. Incomplete backend or consent never infers scope.
+        // Membership is required, never the public environment API's creator
+        // shortcut: `Scope::context` refuses a row without it. Incomplete
+        // backend or consent never infers scope.
         sqlx::query_as(SCOPE_AND_METADATA_QUERY)
             .bind(environment)
             .fetch_optional(&self.pool)
@@ -904,7 +919,11 @@ fn authentication_error(error: PodIdentityError) -> PlatformBridgeAuthentication
 
 fn runtime_auth_error(error: Error) -> PlatformBridgeAuthenticationError {
     match error {
-        Error::Denied => PlatformBridgeAuthenticationError::Denied,
+        // An epoch refused for its creator carries no reason yet (#6406's
+        // second step); its streams answer as for any unadmitted epoch.
+        Error::Denied | Error::CreatorDeparted | Error::CreatorDisabled => {
+            PlatformBridgeAuthenticationError::Denied
+        }
         Error::Unavailable => PlatformBridgeAuthenticationError::Unavailable,
     }
 }

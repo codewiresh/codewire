@@ -24,6 +24,8 @@ pub(super) fn failure_reason(error: BrokerRequestError) -> v1::CredentialBridgeF
     match error {
         BrokerRequestError::InvalidRequest
         | BrokerRequestError::Denied
+        | BrokerRequestError::CreatorDeparted
+        | BrokerRequestError::CreatorDisabled
         | BrokerRequestError::ReconnectRequired(_)
         | BrokerRequestError::NotSelected
         | BrokerRequestError::NameNotAllowed
@@ -60,6 +62,8 @@ pub(super) fn wire_refusal(refusal: Refusal) -> v1::CredentialBridgeRefusal {
         Refusal::SelectedCredentialOnly => Wire::SelectedCredentialOnly,
         Refusal::Unavailable => Wire::Unavailable,
         Refusal::Denied => Wire::Unspecified,
+        Refusal::CredentialOwnerDeparted => Wire::CredentialOwnerDeparted,
+        Refusal::CredentialOwnerDisabled => Wire::CredentialOwnerDisabled,
     }
 }
 
@@ -86,5 +90,30 @@ mod tests {
         assert_eq!(frame.retry_after_seconds, 120);
         let other = failure_frame("request".into(), BrokerRequestError::AuthorityUnavailable);
         assert_eq!(other.retry_after_seconds, 0);
+    }
+
+    /// A departed or disabled creator's refusal is a denial with its name
+    /// (#6406), so an older guest still reads the frame's reason as one.
+    #[test]
+    fn a_departed_or_disabled_creator_is_a_named_denial() {
+        for (error, refusal) in [
+            (
+                BrokerRequestError::CreatorDeparted,
+                v1::CredentialBridgeRefusal::CredentialOwnerDeparted,
+            ),
+            (
+                BrokerRequestError::CreatorDisabled,
+                v1::CredentialBridgeRefusal::CredentialOwnerDisabled,
+            ),
+        ] {
+            let frame = failure_frame("request".into(), error);
+            assert_eq!(frame.refusal, refusal as i32, "{error:?}");
+            assert_eq!(
+                frame.reason,
+                v1::CredentialBridgeFailureReason::Denied as i32,
+                "{error:?}"
+            );
+            assert_eq!(frame.retry_after_seconds, 0);
+        }
     }
 }

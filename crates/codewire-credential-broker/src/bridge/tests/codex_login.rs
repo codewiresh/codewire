@@ -139,6 +139,9 @@ async fn login_answers_are_a_bounded_login_denied_or_unavailable() {
         (Ok(Vec::new()), denied()),
         (Ok(vec![5; maximum + 1]), denied()),
         (Err(BrokerRequestError::Denied), denied()),
+        // A departed or disabled creator: the daemon removes the login (#6406).
+        (Err(BrokerRequestError::CreatorDeparted), denied()),
+        (Err(BrokerRequestError::CreatorDisabled), denied()),
         (Err(BrokerRequestError::InvalidRequest), denied()),
         (
             Err(BrokerRequestError::ReconnectRequired(

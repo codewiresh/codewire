@@ -172,6 +172,8 @@ impl Fixture {
                 "SELECT (id,user_id,organization_id,provider,authentication_kind,status,expires_at_unix) ON public.platform_credentials",
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
+                // As the deployed role: the creator's account must be enabled (#6406).
+                "SELECT (id,enabled) ON public.users",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at) ON public.sandbox_environment_backend",
                 "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at) ON public.sandbox_workspace_bindings",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
@@ -438,9 +440,9 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
     let fixture = Fixture::create().await?;
     let result=async {
         let authority=fixture.admitted().await?;
+        // The creator's membership and account are refused by name, in
+        // `live_revalidation_refuses_a_departed_or_disabled_creator_by_name`.
         for (change,restore) in [
-            ("DELETE FROM org_members WHERE id='synthetic-membership'",
-             "INSERT INTO org_members(id,org_id,user_id,role) VALUES ('synthetic-membership','synthetic-org','synthetic-creator','member')"),
             ("UPDATE environments SET desired_state='stopped'","UPDATE environments SET desired_state='started'"),
             ("UPDATE environments SET environment_operation_generation=8","UPDATE environments SET environment_operation_generation=7"),
             ("UPDATE sandbox_environment_backend SET sandbox_claim_uid='fcb6ac9e-65c3-4d61-9bac-11d55dfd70dc'",
@@ -497,6 +499,61 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
             Err(PlatformBridgeAuthenticationError::Denied)));
         Ok(())
     }.await;
+    fixture.finish(result).await
+}
+
+/// A Sandbox's credential authority is its creator's: once they leave its
+/// organization, or their account is disabled, the session is refused by name
+/// (#6406), and the same membership restored admits it again. A new epoch is
+/// refused without a reason until #6406's second step.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn live_revalidation_refuses_a_departed_or_disabled_creator_by_name() -> Result<()> {
+    let fixture = Fixture::create().await?;
+    let result = async {
+        let authority = fixture.admitted().await?;
+        for (change, restore, refused) in [
+            (
+                "DELETE FROM org_members WHERE id='synthetic-membership'",
+                "INSERT INTO org_members(id,org_id,user_id,role) \
+                 VALUES ('synthetic-membership','synthetic-org','synthetic-creator','member')",
+                PlatformRuntimeError::CreatorDeparted,
+            ),
+            (
+                "UPDATE users SET enabled=false WHERE id='synthetic-creator'",
+                "UPDATE users SET enabled=true WHERE id='synthetic-creator'",
+                PlatformRuntimeError::CreatorDisabled,
+            ),
+        ] {
+            sqlx::query(change).execute(&fixture.db.pool).await?;
+            ensure!(
+                authority.current_session().await == Err(refused),
+                "{refused:?}"
+            );
+            ensure!(
+                matches!(
+                    fixture
+                        .authenticator()
+                        .authenticate(&headers(unix_now()? + 600))
+                        .await,
+                    Err(PlatformBridgeAuthenticationError::Denied)
+                ),
+                "{refused:?} at admission"
+            );
+            sqlx::query(restore).execute(&fixture.db.pool).await?;
+            authority.current_session().await?;
+        }
+        // A disabled creator who also left is refused as disabled.
+        sqlx::query("UPDATE users SET enabled=false WHERE id='synthetic-creator'")
+            .execute(&fixture.db.pool)
+            .await?;
+        sqlx::query("DELETE FROM org_members WHERE id='synthetic-membership'")
+            .execute(&fixture.db.pool)
+            .await?;
+        ensure!(authority.current_session().await == Err(PlatformRuntimeError::CreatorDisabled));
+        Ok(())
+    }
+    .await;
     fixture.finish(result).await
 }
 
@@ -682,7 +739,7 @@ async fn merged_resolve_reads_decide_each_condition_alone() -> Result<()> {
              '{{\"profile\":\"platform:id:{}\"}}')",
             fixture.profile.id
         );
-        for (case, change, restore) in [
+        for (case, change, restore, refused) in [
             // The scope half.
             (
                 "membership",
@@ -690,6 +747,7 @@ async fn merged_resolve_reads_decide_each_condition_alone() -> Result<()> {
                 "INSERT INTO org_members(id,org_id,user_id,role) \
                  VALUES ('synthetic-membership','synthetic-org','synthetic-creator','member')"
                     .to_string(),
+                PlatformRuntimeError::CreatorDeparted,
             ),
             // The metadata half.
             (
@@ -700,6 +758,7 @@ async fn merged_resolve_reads_decide_each_condition_alone() -> Result<()> {
                     Uuid::new_v4()
                 ),
                 selected.clone(),
+                PlatformRuntimeError::Denied,
             ),
             (
                 "secret source",
@@ -707,17 +766,19 @@ async fn merged_resolve_reads_decide_each_condition_alone() -> Result<()> {
                  jsonb_set(project_spec,'{secrets}','{\"user\":\"local\"}')"
                     .to_string(),
                 "UPDATE environments SET project_spec=project_spec-'secrets'".to_string(),
+                PlatformRuntimeError::Denied,
             ),
             // The ownership half of the GitHub and ownership read.
             (
                 "credential owner",
                 format!("UPDATE platform_credentials SET user_id='synthetic-other' WHERE id='{credential}'"),
                 format!("UPDATE platform_credentials SET user_id='synthetic-creator' WHERE id='{credential}'"),
+                PlatformRuntimeError::Denied,
             ),
         ] {
             sqlx::query(&change).execute(&fixture.db.pool).await?;
             ensure!(
-                matches!(authority.current_session().await, Err(PlatformRuntimeError::Denied)),
+                authority.current_session().await == Err(refused),
                 "{case}"
             );
             sqlx::query(&restore).execute(&fixture.db.pool).await?;

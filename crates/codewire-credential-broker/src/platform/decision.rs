@@ -124,7 +124,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         match evaluated {
             Ok(decision) => Ok(Arc::clone(current.insert(Arc::new(decision)))),
             Err(error) => {
-                if error == BrokerLeaseError::Denied {
+                if error.is_denial() {
                     *current = None;
                     if let Some(material) = &self.material {
                         material.clear();

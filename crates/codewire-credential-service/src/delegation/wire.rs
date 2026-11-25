@@ -521,7 +521,9 @@ fn front_door_refused(status: &Status) {
 
 fn authority_error(error: PlatformRuntimeError) -> PlatformBridgeAuthenticationError {
     match error {
-        PlatformRuntimeError::Denied => PlatformBridgeAuthenticationError::Denied,
+        PlatformRuntimeError::Denied
+        | PlatformRuntimeError::CreatorDeparted
+        | PlatformRuntimeError::CreatorDisabled => PlatformBridgeAuthenticationError::Denied,
         PlatformRuntimeError::Unavailable => PlatformBridgeAuthenticationError::Unavailable,
     }
 }

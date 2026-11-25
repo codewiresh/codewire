@@ -113,6 +113,16 @@ fn table() -> Vec<(Refusal, u16, String)> {
             403,
             "Codewire: this request was refused.\n".to_owned(),
         ),
+        (
+            Refusal::CredentialOwnerDeparted,
+            403,
+            "Codewire: this Sandbox's creator is no longer in its organization, so its credentials aren't used.\n".to_owned(),
+        ),
+        (
+            Refusal::CredentialOwnerDisabled,
+            403,
+            "Codewire: this Sandbox's creator's account is disabled, so its credentials aren't used.\n".to_owned(),
+        ),
     ]
 }
 
@@ -230,5 +240,5 @@ fn each_refusal_has_the_code_its_header_names() {
         assert!(!code.description().contains('_'), "{code:?}");
     }
     assert_eq!(RefusalCode::from_code("Path_Not_Served"), None);
-    assert_eq!(RefusalCode::at(18), None);
+    assert_eq!(RefusalCode::at(20), None);
 }

@@ -327,6 +327,8 @@ pub(super) fn managed_failure(
     match error {
         BrokerRequestError::ReconnectRequired(_)
         | BrokerRequestError::Denied
+        | BrokerRequestError::CreatorDeparted
+        | BrokerRequestError::CreatorDisabled
         | BrokerRequestError::NotSelected => Ok(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
@@ -355,6 +357,8 @@ pub(super) fn forward_failure(
     tracing::debug!(outcome = outcomes.forward_failed, error = %error);
     match error {
         BrokerRequestError::Denied
+        | BrokerRequestError::CreatorDeparted
+        | BrokerRequestError::CreatorDisabled
         | BrokerRequestError::InvalidRequest
         | BrokerRequestError::NotSelected
         | BrokerRequestError::NameNotAllowed

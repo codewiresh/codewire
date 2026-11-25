@@ -73,6 +73,7 @@ pub(crate) fn scope() -> Scope {
         credential_scope: "pod".into(),
         member_id: "synthetic-membership".into(),
         member_role: "member".into(),
+        creator_enabled: true,
         profile_id: Some(Uuid::new_v4().to_string()),
         profile_revision: Some(1),
         confirmed_by: Some("synthetic-creator".into()),

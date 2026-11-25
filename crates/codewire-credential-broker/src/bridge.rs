@@ -29,11 +29,13 @@ use crate::{
 
 pub(crate) mod delegated_front_door;
 mod front_door;
+mod projection_answer;
 mod relay;
 mod request_body;
 mod ssh;
 mod websocket;
 mod wire_refusal;
+use projection_answer::send_projection_response;
 
 #[cfg(test)]
 pub(crate) use front_door::FrontDoorExecutor;
@@ -933,44 +935,11 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-async fn send_projection_response<S: CredentialBridgeResponseSink>(
-    sender: &S,
-    request_id: String,
-    response: Result<Vec<u8>, BrokerRequestError>,
-) -> Result<(), ()> {
-    use v1::environment_projection_response::Result as ProjectionResult;
-    let result = match response {
-        Ok(sealed)
-            if !sealed.is_empty() && sealed.len() <= MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES =>
-        {
-            ProjectionResult::SealedProjection(sealed)
-        }
-        Ok(_) => {
-            ProjectionResult::Failure(v1::CredentialBridgeFailureReason::ResponseTooLarge as i32)
-        }
-        Err(BrokerRequestError::InvalidRequest | BrokerRequestError::Denied) => {
-            ProjectionResult::Failure(v1::CredentialBridgeFailureReason::Denied as i32)
-        }
-        Err(_) => ProjectionResult::Failure(v1::CredentialBridgeFailureReason::Unavailable as i32),
-    };
-    sender
-        .send(
-            v1::credential_bridge_host_message::Payload::EnvironmentProjection(
-                v1::EnvironmentProjectionResponse {
-                    request_id,
-                    result: Some(result),
-                },
-            ),
-        )
-        .await
-        .map_err(|_| ())
-}
-
 /// Only a bounded sealed login, DENIED or UNAVAILABLE. DENIED means no login
 /// is deliverable now (another credential form, a credential needing
 /// Reconnect, a revoked, organization-owned or another user's credential, the
-/// agent not selected), so the daemon removes the one it wrote; UNAVAILABLE
-/// changes nothing.
+/// agent not selected, or the Sandbox's creator departed or disabled, #6406),
+/// so the daemon removes the one it wrote; UNAVAILABLE changes nothing.
 ///
 /// Unlike an HTTP request's `AuthorityUnavailable` (`request_failure_ends_epoch`),
 /// neither answer ends the epoch. That is safe only because the platform
@@ -997,6 +966,8 @@ async fn send_login_response<S: CredentialBridgeResponseSink>(
         | Err(
             BrokerRequestError::InvalidRequest
             | BrokerRequestError::Denied
+            | BrokerRequestError::CreatorDeparted
+            | BrokerRequestError::CreatorDisabled
             | BrokerRequestError::ReconnectRequired(_)
             | BrokerRequestError::NotSelected
             | BrokerRequestError::NameNotAllowed

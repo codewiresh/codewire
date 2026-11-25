@@ -124,7 +124,11 @@ fn a_malformed_report_is_rejected_whole() {
     assert_eq!(corrupt(host_at, 0x1b), Err(MalformedReport::Host));
     assert_eq!(corrupt(host_at, b'A'), Err(MalformedReport::Host));
     assert_eq!(corrupt(host_at, b' '), Err(MalformedReport::Host));
-    assert_eq!(corrupt(code_at, 18), Err(MalformedReport::Field));
+    let past_the_codes = u8::try_from(RefusalCode::ALL.len()).unwrap();
+    assert_eq!(
+        corrupt(code_at, past_the_codes),
+        Err(MalformedReport::Field)
+    );
     let mut no_port = word.clone();
     no_port[port_at..port_at + 2].copy_from_slice(&[0, 0]);
     assert_eq!(decode_report(&no_port), Err(MalformedReport::Field));

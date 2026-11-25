@@ -26,6 +26,7 @@ observed**.
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `profile-edit-live` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
+| `cred-creator-departed` | not applicable | not applicable | not yet observed |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20, and main 8880d56e7, 2026-11-21 (a local VM from a `file` root is served a lease on both routes; a new `file` root keeps its key in `protected-v1` alone, 0700 and 0600; a root with nothing set uses Secret Service and says so first; the upgraded root, the 0644 refusal and a due refresh not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked); step 6 with a running VM holding the credential, `main` at 569a5c7a53, 2026-11-25 (#6128) | not yet observed (#4928) | not yet observed (#4928) |
@@ -1314,3 +1315,46 @@ Approved, not yet shipped (#6339). Written first.
   form, so it reaches each process only at its next launch. Walk that
   separately.
 - **Observed:** not yet observed.
+
+## 18. `cred-creator-departed`: a Sandbox whose creator left, was removed or was disabled
+
+Approved, not yet shipped (#6406). Written first. The rules are in
+[`docs/dev/SECRETS-AND-CREDENTIALS.md`](../dev/SECRETS-AND-CREDENTIALS.md),
+"A departed or disabled creator". Hosted Sandboxes only: a local VM's
+credentials are its creator's own computer's.
+
+- **Entry points:** `cw org member rm USER --org ORG` and the dashboard's
+  Members page, as an owner; `cw org leave`, as the creator; Admin → Account
+  Access, as an administrator, for a disable.
+- **States to exercise:**
+  - a running Sandbox whose creator selected a personal profile with an
+    Anthropic API key and a Claude sign-in, with the sign-in delivered; the
+    creator is removed while an owner's terminal in it sends a request with
+    the Anthropic placeholder every second;
+  - the same with the creator leaving;
+  - the same with the creator's account disabled while they stay a member;
+  - the creator invited back, and the disabled account enabled again;
+  - a stopped Sandbox of a departed creator, started by an owner.
+- **Driving it:** a walk organization owned by one test account, with a
+  second test account as a member that creates the Sandbox and selects its
+  own personal profile. The owner opens the terminal, logs each request's
+  status and `Codewire-Refusal` header with a timestamp, and checks every
+  10 s whether `~/.claude/.credentials.json` still holds `claudeAiOauth`.
+  Delete the Sandbox, the organization and the profile by exact name or id
+  afterwards.
+- **Proof:**
+  - Within 60 seconds of the removal, the leave or the disable, every
+    request is 403 with `credential_owner_departed`, or
+    `credential_owner_disabled` for the disable, and the body's one
+    sentence. None reaches the provider. Once the Sandbox's epoch ends,
+    within 10 minutes, they turn to 503 `credential_unavailable` until
+    #6406's second step.
+  - Within 2 minutes, `claudeAiOauth` is gone from the file, and the
+    daemon's log records the login cleared after a denial.
+  - The owner's terminal stays open throughout.
+  - After the re-invite or the enable, requests are served again within 10
+    minutes, at the Sandbox's next credential epoch, and the login is
+    delivered again at the next check after it.
+  - The stopped Sandbox, started by the owner, never has the login written.
+    Until #6406's second step, its requests get 503
+    `credential_unavailable`, not the named refusal.
