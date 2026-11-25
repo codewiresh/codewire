@@ -3835,8 +3835,10 @@ as the current file until the journal is replayed (measured on #6277).
 
   Only then is the marker written, and the boot goes on. A crash part-way
   leaves no marker, so the next start clears again.
-- **A clearing that fails refuses the boot** with `state_disk_not_cleared`,
-  naming the step that failed. Its message gives the ways out: start again;
+- **A clearing that fails refuses the boot** with `state_disk_not_cleared`.
+  The supervisor's log records the step that failed (`state_disk_clear
+  outcome=failed step=…`), and the message points to that log. It gives the
+  ways out: start again;
   sign the provider out (`cw credentials`, or the provider's own page), then
   start once with `--start-with-uncleared-disk`; or recreate the VM. That
   override applies to one start, is logged as `state_disk_clear

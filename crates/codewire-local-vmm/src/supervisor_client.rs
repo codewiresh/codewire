@@ -1225,7 +1225,9 @@ pub(crate) fn operation_terminal(operation: &v1::Operation) -> Result<bool, Stat
 /// terminal operation; nothing reads it from the wire.
 const OPERATION_ERROR_CODE_METADATA: &str = "codewire-operation-error-code";
 
-pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operation, Status> {
+/// A terminal operation, or the status its failure reaches `cw` as: its code
+/// and the hint for it.
+pub fn operation_outcome(operation: v1::Operation) -> Result<v1::Operation, Status> {
     match v1::OperationPhase::try_from(operation.phase) {
         Ok(v1::OperationPhase::Completed) => Ok(operation),
         Ok(v1::OperationPhase::Failed | v1::OperationPhase::Interrupted) => {
@@ -1333,6 +1335,12 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         }
         "create_restore_interception_switched_off" | "start_restore_interception_switched_off" => {
             " (this VM checkpoint was taken with agent interception on, and no egress-intercept file in the local VM state root switches it on now; the file applies on a stop and start, never a restore)"
+        }
+        "create_state_disk_not_cleared" | "start_state_disk_not_cleared" => {
+            " (this VM's state disk may still hold a sign-in from a boot without agent interception, and clearing it failed at the step logs/supervisor.log in the local VM state root names; start it again, or sign the provider out and pass --start-with-uncleared-disk once, which a platform profile refuses, or recreate it)"
+        }
+        "create_checkpoint_disk_uncleared" | "start_checkpoint_disk_uncleared" => {
+            " (this VM checkpoint may hold an earlier sign-in on its disk, which a restore can't clear; sign the provider out and pass --start-with-uncleared-disk once, which a platform profile refuses, or remove it with `cw checkpoint rm`)"
         }
         "host_port_unavailable" => {
             " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"

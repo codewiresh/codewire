@@ -417,7 +417,7 @@ impl NativeSupervisorClient {
                 if fs::symlink_metadata(&socket).is_err() {
                     return Err(SupervisorError::SupervisorNotReachable {
                         socket,
-                        log: config.root.join("logs").join("supervisor.log"),
+                        log: config.supervisor_log(),
                     });
                 }
                 exited_at = Some(tokio::time::Instant::now());

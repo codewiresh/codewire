@@ -2042,15 +2042,18 @@ Issue: #6277.
   checkpoint, and stop. Scan the stopped state disk and the checkpoint's
   disk with the canary scan and the shape scan (`no-token-at-rest`).
 - **Proof:**
-  - the start after the switch is turned back on logs `state_disk_clear
-    outcome=cleared`, then `egress_intercept` with no `skipped`;
+  - the start after the switch is turned back on logs `egress_intercept
+    switch=on` with no `skipped`, then `state_disk_clear outcome=cleared`,
+    before the runner starts;
   - neither scan finds a canary or a provider shape in the stopped state
     disk or in the new checkpoint's disk, read with and without a journal
     replay;
   - the next start logs no clearing, because the marker is there;
   - an upgraded VM's first start on this build clears its disk the same way;
-  - a failed clearing refuses the start with `state_disk_not_cleared`, its
-    step, and the three ways out. The override starts a local-profile VM,
+  - a failed clearing refuses the start with `state_disk_not_cleared` and
+    the three ways out, pointing to `logs/supervisor.log`, whose
+    `state_disk_clear outcome=failed` line names the step. The override
+    starts a local-profile VM,
     is logged as `outcome=overridden`, and clears again at the next start.
     A platform-profile VM refuses the override;
   - `cw checkpoint ls` flags the checkpoints taken without interception,

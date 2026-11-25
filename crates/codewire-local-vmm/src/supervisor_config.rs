@@ -207,6 +207,14 @@ impl NativeRuntimeConfig {
         self.root.join(EGRESS_INTERCEPT_SWITCH)
     }
 
+    /// The supervisor's diagnostic log, which names why a boot was refused
+    /// where its error code alone can't (#6277).
+    pub fn supervisor_log(&self) -> PathBuf {
+        self.root
+            .join("logs")
+            .join(crate::diagnostic_log::SUPERVISOR_LOG)
+    }
+
     /// Bind a retained supervisor without changing any other configuration input.
     /// The caller admits this executable from the live kernel peer first.
     pub(crate) fn with_supervisor_executable(

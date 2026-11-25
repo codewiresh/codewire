@@ -263,7 +263,7 @@ pub(super) fn wait_failure(
     let error = native_status(status.clone());
     (
         stage,
-        crate::commands::checkpoint::interception::with_switch_step(error, &status),
+        crate::commands::checkpoint::interception::with_refusal_step(error, &status),
     )
 }
 

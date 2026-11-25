@@ -1168,6 +1168,36 @@ fn interception_refusals_name_the_switch_file() {
 }
 
 #[test]
+fn uncleared_disk_refusals_name_the_ways_out() {
+    for code in [
+        "create_state_disk_not_cleared",
+        "start_state_disk_not_cleared",
+        "create_checkpoint_disk_uncleared",
+        "start_checkpoint_disk_uncleared",
+    ] {
+        let hint = operation_error_hint(code);
+        assert!(
+            hint.contains("--start-with-uncleared-disk once"),
+            "{code}: {hint}"
+        );
+        assert!(
+            hint.contains("a platform profile refuses"),
+            "{code}: {hint}"
+        );
+    }
+    // A failed clear points to the log line that names its step.
+    for code in [
+        "create_state_disk_not_cleared",
+        "start_state_disk_not_cleared",
+    ] {
+        let hint = operation_error_hint(code);
+        assert!(hint.contains("logs/supervisor.log"), "{code}: {hint}");
+        assert!(hint.contains("recreate it"), "{code}: {hint}");
+    }
+    assert!(operation_error_hint("start_checkpoint_disk_uncleared").contains("cw checkpoint rm"));
+}
+
+#[test]
 fn a_failed_operation_status_carries_its_error_code() {
     let mut failed = operation(v1::OperationPhase::Failed);
     failed.error_code = "start_direct_share_changed".to_owned();

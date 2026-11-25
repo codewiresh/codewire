@@ -241,13 +241,13 @@ async fn handle_local_checkpoint_command(
     }
 }
 
-/// A supervisor's refusal of `action`, with the interception switch's step
+/// A supervisor's refusal of `action`, with the refusal's next step
 /// where it applies.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn refused(action: &'static str) -> impl Fn(tonic::Status) -> anyhow::Error {
     move |status: tonic::Status| {
         let error = anyhow::anyhow!("couldn't {action}: {}", status.message());
-        interception::with_switch_step(error, &status)
+        interception::with_refusal_step(error, &status)
     }
 }
 
