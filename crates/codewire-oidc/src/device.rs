@@ -220,7 +220,14 @@ impl Provider {
                     ));
                 };
                 let tokens = self
-                    .issue_tokens(&client, subject, scopes, None, auth_time)
+                    .issue_tokens(
+                        &client,
+                        subject,
+                        scopes,
+                        None,
+                        auth_time,
+                        token::mint_sign_in_id(),
+                    )
                     .await?;
                 Ok(tokens)
             }

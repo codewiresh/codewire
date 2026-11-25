@@ -529,7 +529,12 @@ in six cases:
   sign-out, signing out one session, a password reset or a 2FA replacement;
 - the OAuth access token that admitted it is deleted before it expired, by
   revocation or a password reset, or refresh-token reuse revokes its grant
-  (the user and the client);
+  (the user and the client). Revoking any token of a sign-in deletes them
+  all: each access and refresh token carries the sign-in it came from, from
+  the `cw login` (or other code or device exchange) through every refresh, so
+  revoking one ends the sign-in, as `cw logout` means (#5688). A token issued
+  before tokens carried their sign-in ends alone, and its next refresh starts
+  one;
 - the API key that admitted it is disabled or deleted;
 - its user leaves, or is removed from, the organization its environment
   belongs to: the `membership` kind;

@@ -433,7 +433,28 @@ async fn native_clients_full_flow(pool: PgPool) {
     assert_eq!(claims["email"], "e2e@example.com");
     assert!(claims.get("org_id").is_none());
 
-    // 5. introspection active -> revoke -> inactive.
+    // 5. refresh rotation works against the DB.
+    let rt = tokens.refresh_token.unwrap();
+    assert!(
+        p.introspect(CLIENT, None, &rt, Some("refresh_token"))
+            .await
+            .unwrap()
+            .active,
+        "refresh-token introspection must resolve a live grant"
+    );
+    let refreshed = p
+        .exchange_refresh_token(CLIENT, None, &rt, None)
+        .await
+        .unwrap();
+    assert!(refreshed.id_token.is_some());
+    assert!(
+        p.exchange_refresh_token(CLIENT, None, &rt, None)
+            .await
+            .is_err(),
+        "old RT dead"
+    );
+
+    // 6. introspection active -> revoke -> inactive.
     assert!(
         p.introspect(CLIENT, None, &tokens.access_token, None)
             .await
@@ -453,27 +474,6 @@ async fn native_clients_full_flow(pool: PgPool) {
     assert_eq!(
         p.userinfo(&tokens.access_token).await.unwrap_err().code,
         codewire_oidc::ErrorCode::InvalidToken
-    );
-
-    // 6. refresh rotation works against the DB.
-    let rt = tokens.refresh_token.unwrap();
-    assert!(
-        p.introspect(CLIENT, None, &rt, Some("refresh_token"))
-            .await
-            .unwrap()
-            .active,
-        "refresh-token introspection must resolve a live grant"
-    );
-    let refreshed = p
-        .exchange_refresh_token(CLIENT, None, &rt, None)
-        .await
-        .unwrap();
-    assert!(refreshed.id_token.is_some());
-    assert!(
-        p.exchange_refresh_token(CLIENT, None, &rt, None)
-            .await
-            .is_err(),
-        "old RT dead"
     );
 
     // 7. The iOS public client accepts only its exact custom callback and
@@ -6822,35 +6822,18 @@ async fn expired_oidc_rows(pool: PgPool) {
         .execute(&pool).await.unwrap();
     }
     let tokens = PgTokenStore::new(pool.clone());
-    let grant = || {
-        (
-            Subject("u_expired_rows_a".into()),
-            CLIENT.to_string(),
-            Scopes(vec!["openid".into()]),
-        )
-    };
-    let (subject, client_id, scopes) = grant();
     tokens
         .store_access(
             "expired-rows-new-access",
-            AccessGrant {
-                subject,
-                client_id,
-                scopes,
-            },
+            access_grant("u_expired_rows_a", CLIENT),
             3600,
         )
         .await
         .unwrap();
-    let (subject, client_id, scopes) = grant();
     tokens
         .store_refresh(
             "expired-rows-new-refresh",
-            RefreshGrant {
-                subject,
-                client_id,
-                scopes,
-            },
+            refresh_grant("u_expired_rows_a", CLIENT),
             3600,
         )
         .await
@@ -6888,6 +6871,26 @@ async fn expired_oidc_rows(pool: PgPool) {
     }
 }
 
+/// `user`'s access grant for `client`, openid only, with no sign-in.
+fn access_grant(user: &str, client: &str) -> AccessGrant {
+    AccessGrant {
+        subject: Subject(user.into()),
+        client_id: client.into(),
+        scopes: Scopes(vec!["openid".into()]),
+        sign_in: None,
+    }
+}
+
+/// `user`'s refresh grant for `client`, openid only, with no sign-in.
+fn refresh_grant(user: &str, client: &str) -> RefreshGrant {
+    RefreshGrant {
+        subject: Subject(user.into()),
+        client_id: client.into(),
+        scopes: Scopes(vec!["openid".into()]),
+        sign_in: None,
+    }
+}
+
 /// A rotated refresh token presented again is refused. With revocation on,
 /// it also revokes every token that user holds for that client, and only for
 /// that client; an expired token is refused without revoking anything. Each
@@ -6906,16 +6909,8 @@ async fn refresh_reuse(pool: PgPool) {
     codewire_idp::provisioning::ensure_ios_client(&pool)
         .await
         .expect("provision iOS public client");
-    let refresh = |client: &str| RefreshGrant {
-        subject: Subject(USER.into()),
-        client_id: client.into(),
-        scopes: Scopes(vec!["openid".into()]),
-    };
-    let access = |client: &str| AccessGrant {
-        subject: Subject(USER.into()),
-        client_id: client.into(),
-        scopes: Scopes(vec!["openid".into()]),
-    };
+    let refresh = |client: &str| refresh_grant(USER, client);
+    let access = |client: &str| access_grant(USER, client);
     // With revocation off (the default), a replay is refused and nothing else
     // changes.
     let detecting = PgTokenStore::new(pool.clone());
@@ -7108,6 +7103,143 @@ async fn refresh_reuse(pool: PgPool) {
     refresh_grants_counted(&pool).await;
 }
 
+/// Revoking any token of a sign-in ends the whole sign-in (#5688): its
+/// access and refresh tokens go in one transaction, and each access token's
+/// streams are fenced. Another sign-in of the same user and client stays.
+/// A token from before sign-ins were kept ends alone, and its refresh
+/// starts a sign-in.
+#[tokio::test]
+async fn revoking_a_token_ends_its_whole_sign_in() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping sign-in revocation test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_sign_in_revoke", sign_in_revoke).await;
+}
+
+async fn sign_in_revoke(pool: PgPool) {
+    seed(&pool).await;
+    let tokens = PgTokenStore::new(pool.clone());
+    let grant = |sign_in: Option<&str>| {
+        let sign_in = sign_in.map(str::to_owned);
+        (
+            AccessGrant {
+                sign_in: sign_in.clone(),
+                ..access_grant(USER, CLIENT)
+            },
+            RefreshGrant {
+                sign_in,
+                ..refresh_grant(USER, CLIENT)
+            },
+        )
+    };
+    const ONE: &str = "00000000000000000000000000000001";
+    const TWO: &str = "00000000000000000000000000000002";
+    for (suffix, sign_in) in [("one", Some(ONE)), ("two", Some(TWO)), ("old", None)] {
+        let (access, refresh) = grant(sign_in);
+        tokens
+            .store_access(&format!("sign-in-access-{suffix}"), access, 3600)
+            .await
+            .unwrap();
+        tokens
+            .store_refresh(&format!("sign-in-refresh-{suffix}"), refresh, 3600)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        tokens
+            .get_access("sign-in-access-one")
+            .await
+            .unwrap()
+            .and_then(|grant| grant.sign_in)
+            .as_deref(),
+        Some(ONE),
+        "an access token names its sign-in"
+    );
+
+    // A rotation hands the consumed token's sign-in on, and the new refresh
+    // token is stored under it.
+    let consumed = tokens
+        .consume_refresh("sign-in-refresh-one")
+        .await
+        .unwrap()
+        .expect("live refresh token");
+    assert_eq!(consumed.sign_in.as_deref(), Some(ONE));
+    tokens
+        .store_refresh("sign-in-refresh-one-rotated", consumed, 3600)
+        .await
+        .unwrap();
+
+    let fenced = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM credential_revocations WHERE kind = 'oauth_token' \
+             AND credential_id = $1",
+        )
+        .bind(codewire_server_core::auth::hash_oauth_token(
+            "sign-in-access-one",
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(fenced(pool.clone()).await, 0);
+
+    // `cw logout` revokes the refresh token: the sign-in's access token goes
+    // with it, and its streams are fenced.
+    tokens.revoke("sign-in-refresh-one-rotated").await.unwrap();
+    assert!(
+        tokens
+            .get_refresh("sign-in-refresh-one-rotated")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tokens
+            .get_access("sign-in-access-one")
+            .await
+            .unwrap()
+            .is_none(),
+        "the sign-in's access token ends with it"
+    );
+    assert_eq!(fenced(pool.clone()).await, 1, "its streams are fenced");
+    assert!(
+        tokens
+            .get_access("sign-in-access-two")
+            .await
+            .unwrap()
+            .is_some()
+            && tokens
+                .get_refresh("sign-in-refresh-two")
+                .await
+                .unwrap()
+                .is_some(),
+        "another sign-in of the same user and client stays"
+    );
+
+    // Revoking the access token of a sign-in ends its refresh token too.
+    tokens.revoke("sign-in-access-two").await.unwrap();
+    assert!(
+        tokens
+            .get_refresh("sign-in-refresh-two")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A token from before sign-ins were kept ends alone.
+    tokens.revoke("sign-in-access-old").await.unwrap();
+    let old = tokens
+        .consume_refresh("sign-in-refresh-old")
+        .await
+        .unwrap()
+        .expect("a token from before keeps its refresh token");
+    assert_eq!(
+        old.sign_in, None,
+        "and names no sign-in until a refresh starts one"
+    );
+}
+
 fn refresh_config(revoke_reused_refresh_tokens: bool) -> IdpConfig {
     IdpConfig {
         issuer: "https://idp.codewire.test".into(),
@@ -7142,6 +7274,7 @@ async fn refresh_grants_counted(pool: &PgPool) {
                         subject: Subject(USER.into()),
                         client_id: IOS.into(),
                         scopes: Scopes(vec!["openid".into()]),
+                        sign_in: None,
                     },
                     3600,
                 )
@@ -7242,6 +7375,7 @@ async fn refresh_grants_counted(pool: &PgPool) {
                 subject: Subject(USER.into()),
                 client_id: SCRATCH_CLIENT.into(),
                 scopes: Scopes(vec!["openid".into()]),
+                sign_in: None,
             },
             3600,
         )

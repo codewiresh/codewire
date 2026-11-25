@@ -332,6 +332,7 @@ impl Provider {
             grant.scopes,
             grant.nonce,
             grant.auth_time,
+            token::mint_sign_in_id(),
         )
         .await
     }
@@ -391,8 +392,10 @@ impl Provider {
         };
 
         // No nonce on a refresh-issued id_token (OIDC §12.2); auth_time is
-        // not re-asserted on refresh.
-        self.issue_tokens(&client, grant.subject, scopes, None, None)
+        // not re-asserted on refresh. The sign-in carries over; a token from
+        // before sign-ins were kept starts one here.
+        let sign_in = grant.sign_in.unwrap_or_else(token::mint_sign_in_id);
+        self.issue_tokens(&client, grant.subject, scopes, None, None, sign_in)
             .await
     }
 
@@ -423,7 +426,8 @@ impl Provider {
     }
 
     /// Mint the access token, sign the id_token, and (when allowed) issue a
-    /// refresh token. Shared by the code, refresh, and device grants.
+    /// refresh token, all belonging to `sign_in`. Shared by the code,
+    /// refresh, and device grants.
     pub(crate) async fn issue_tokens(
         &self,
         client: &Client,
@@ -431,6 +435,7 @@ impl Provider {
         scopes: Scopes,
         nonce: Option<String>,
         auth_time: Option<i64>,
+        sign_in: String,
     ) -> Result<TokenResponse, OAuthError> {
         let now = Utc::now().timestamp();
         // Per-client clock-skew tolerance, applied to the id_token's validity
@@ -448,6 +453,7 @@ impl Provider {
                     subject: subject.clone(),
                     client_id: client.id.clone(),
                     scopes: scopes.clone(),
+                    sign_in: Some(sign_in.clone()),
                 },
                 client.access_token_lifetime_secs,
             )
@@ -495,6 +501,7 @@ impl Provider {
                             subject,
                             client_id: client.id.clone(),
                             scopes: scopes.clone(),
+                            sign_in: Some(sign_in),
                         },
                         ttl,
                     )

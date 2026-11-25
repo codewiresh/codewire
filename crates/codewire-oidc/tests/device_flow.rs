@@ -188,6 +188,11 @@ fn dev_client(id: &str, grants: Vec<GrantType>) -> Client {
 }
 
 fn provider(with_device: bool) -> Provider {
+    provider_and_store(with_device).0
+}
+
+/// The provider and its token store, for a test that reads what was stored.
+fn provider_and_store(with_device: bool) -> (Provider, Mem) {
     let mem = Mem::default();
     let signer = Ed25519SigningKey::from_bytes(&[5u8; 32]);
     let key = SigningKey {
@@ -213,14 +218,14 @@ fn provider(with_device: bool) -> Provider {
     .keys(Arc::new(Keys(key)))
     .authenticator(Arc::new(NoAuth));
     if with_device {
-        b = b.device_store(Arc::new(mem));
+        b = b.device_store(Arc::new(mem.clone()));
     }
-    b.build().unwrap()
+    (b.build().unwrap(), mem)
 }
 
 #[tokio::test]
 async fn device_flow_happy_path() {
-    let p = provider(true);
+    let (p, mem) = provider_and_store(true);
     // 1. Device starts the flow. (Like our relay: no refresh grant, so no
     //    offline_access — the device re-runs the flow rather than refreshing.)
     let auth = p
@@ -259,6 +264,12 @@ async fn device_flow_happy_path() {
     assert!(tokens.id_token.is_some()); // openid was granted
     assert!(tokens.refresh_token.is_none()); // client lacks the refresh grant
     assert_eq!(tokens.scope, "openid groups");
+    // A device code exchange starts a sign-in, as a code exchange does.
+    let sign_in = mem.0.lock().unwrap().access[&tokens.access_token]
+        .sign_in
+        .clone()
+        .unwrap();
+    assert!(sign_in.len() == 32 && sign_in.bytes().all(|b| b.is_ascii_hexdigit()));
 
     // 5. The device_code is single-use: a further poll is now expired/unknown.
     let err = p

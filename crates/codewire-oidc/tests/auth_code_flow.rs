@@ -184,6 +184,11 @@ fn signing_key() -> SigningKey {
 }
 
 fn provider(auth: Auth) -> Provider {
+    provider_and_store(auth).0
+}
+
+/// The provider and its token store, for a test that reads what was stored.
+fn provider_and_store(auth: Auth) -> (Provider, Mem) {
     let mem = Mem::default();
     let clients = Clients {
         public: client("pub", AuthMethod::None, ApplicationType::UserAgent),
@@ -196,18 +201,19 @@ fn provider(auth: Auth) -> Provider {
         },
         confidential_secret: "s3cr3t".into(),
     };
-    Provider::builder(ProviderConfig {
+    let provider = Provider::builder(ProviderConfig {
         issuer: Issuer("https://idp.example".into()),
         paths: Default::default(),
         scopes_supported: vec!["openid".into(), "profile".into(), "email".into()],
     })
     .auth_requests(Arc::new(mem.clone()))
-    .tokens(Arc::new(mem))
+    .tokens(Arc::new(mem.clone()))
     .clients(Arc::new(clients))
     .keys(Arc::new(Keys(signing_key())))
     .authenticator(Arc::new(auth))
     .build()
-    .unwrap()
+    .unwrap();
+    (provider, mem)
 }
 
 // PKCE pair from RFC 7636 Appendix B.
@@ -559,6 +565,42 @@ async fn refresh_token_rotates_and_old_one_is_dead() {
             .await
             .is_ok()
     );
+}
+
+/// One code exchange starts one sign-in: its access and refresh tokens name
+/// the same new id, a refresh keeps it, and the next exchange starts another.
+#[tokio::test]
+async fn a_code_exchange_starts_a_sign_in_that_refresh_keeps() {
+    let (p, mem) = provider_and_store(Auth::Ok("user_alice"));
+    let sign_in = |access: &str, refresh: &str| {
+        let inner = mem.0.lock().unwrap();
+        (
+            inner.access[access].sign_in.clone().unwrap(),
+            inner.refresh[refresh].sign_in.clone().unwrap(),
+        )
+    };
+    let first = issue_via_code(&p).await;
+    let (access, refresh) = sign_in(&first.access_token, first.refresh_token.as_deref().unwrap());
+    assert_eq!(access, refresh, "one exchange, one sign-in");
+    assert_eq!(access.len(), 32, "128 random bits, hex");
+    assert!(access.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    let second = p
+        .exchange_refresh_token("pub", None, first.refresh_token.as_deref().unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sign_in(
+            &second.access_token,
+            second.refresh_token.as_deref().unwrap()
+        ),
+        (access.clone(), access.clone()),
+        "a refresh keeps the sign-in"
+    );
+
+    let other = issue_via_code(&p).await;
+    let (another, _) = sign_in(&other.access_token, other.refresh_token.as_deref().unwrap());
+    assert_ne!(another, access, "the next exchange starts another sign-in");
 }
 
 #[tokio::test]

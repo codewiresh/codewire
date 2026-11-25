@@ -953,9 +953,10 @@ impl OAuthClient {
     }
 
     /// Revoke a persisted sign-in without exposing its tokens to the caller.
-    /// The server revokes exactly the token it is given, so the refresh token
-    /// and the access token are each revoked; the sign-in has ended only when
-    /// both succeed (#4016).
+    /// The server ends the whole sign-in from either token (#5688), but one
+    /// from before that revokes exactly the token it is given, so the refresh
+    /// token and the access token are each revoked; the sign-in has ended
+    /// only when both succeed (#4016).
     pub async fn revoke_credentials(
         &self,
         credentials: &OAuthCredentials,

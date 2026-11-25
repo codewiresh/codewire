@@ -232,6 +232,11 @@ pub struct AccessGrant {
     pub client_id: String,
     /// Token scopes.
     pub scopes: Scopes,
+    /// The sign-in this token belongs to: minted when a code or device code
+    /// is exchanged and carried through every refresh, so revoking one of
+    /// its tokens can end all of them. `None` from a store that keeps none,
+    /// or for a token issued before stores kept one.
+    pub sign_in: Option<String>,
 }
 
 /// An issued refresh token's backing record (rotated on use).
@@ -243,6 +248,11 @@ pub struct RefreshGrant {
     pub client_id: String,
     /// Scopes (may be down-scoped on refresh).
     pub scopes: Scopes,
+    /// The sign-in this token belongs to: minted when a code or device code
+    /// is exchanged and carried through every refresh, so revoking one of
+    /// its tokens can end all of them. `None` from a store that keeps none,
+    /// or for a token issued before stores kept one.
+    pub sign_in: Option<String>,
 }
 
 /// The state of a device-authorization grant (RFC 8628).

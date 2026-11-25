@@ -22,7 +22,8 @@
 //! only the SHA-256 hex digest ([`hash_oauth_token`]) of the raw opaque
 //! token, so plaintext credentials never persist. The raw value exists
 //! only in memory and in the one-time token response; every lookup hashes
-//! the presented token first. `revoke` clears both tables by digest.
+//! the presented token first. `revoke` clears both tables by digest, then
+//! every other token of the same sign-in (`sign_in_id`, #5688).
 
 use crate::refresh_metrics::{RefreshOutcome, refresh_grant};
 use async_trait::async_trait;
@@ -178,8 +179,9 @@ impl TokenStore for PgTokenStore {
             .map_err(StoreError::new)?;
         sqlx::query(
             r#"
-            INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at)
-            VALUES ($1, $2, $3, $4, NOW() + ($5::bigint * interval '1 second'))
+            INSERT INTO oidc_access_tokens
+                (token_hash, client_id, user_id, scopes, expires_at, sign_in_id)
+            VALUES ($1, $2, $3, $4, NOW() + ($5::bigint * interval '1 second'), $6)
             "#,
         )
         .bind(hash_oauth_token(token))
@@ -187,6 +189,7 @@ impl TokenStore for PgTokenStore {
         .bind(&grant.subject.0)
         .bind(&grant.scopes.0)
         .bind(expires_in_secs as i64)
+        .bind(&grant.sign_in)
         .execute(&self.pool)
         .await
         .map_err(StoreError::new)?;
@@ -194,9 +197,9 @@ impl TokenStore for PgTokenStore {
     }
 
     async fn get_access(&self, token: &str) -> StoreResult<Option<AccessGrant>> {
-        let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
+        let row: Option<(String, String, Vec<String>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT token.client_id, token.user_id, token.scopes
+            SELECT token.client_id, token.user_id, token.scopes, token.sign_in_id
             FROM oidc_access_tokens AS token
             JOIN users AS user_account ON user_account.id = token.user_id
             WHERE token.token_hash = $1
@@ -208,11 +211,14 @@ impl TokenStore for PgTokenStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(StoreError::new)?;
-        Ok(row.map(|(client_id, user_id, scopes)| AccessGrant {
-            subject: Subject(user_id),
-            client_id,
-            scopes: Scopes(scopes),
-        }))
+        Ok(
+            row.map(|(client_id, user_id, scopes, sign_in)| AccessGrant {
+                subject: Subject(user_id),
+                client_id,
+                scopes: Scopes(scopes),
+                sign_in,
+            }),
+        )
     }
 
     async fn store_refresh(
@@ -230,9 +236,9 @@ impl TokenStore for PgTokenStore {
         sqlx::query(
             r#"
             INSERT INTO oidc_refresh_tokens
-                (id, token_hash, client_id, user_id, scopes, auth_time, expires_at)
+                (id, token_hash, client_id, user_id, scopes, auth_time, expires_at, sign_in_id)
             VALUES ($1, $2, $3, $4, $5, NOW(),
-                    NOW() + ($6::bigint * interval '1 second'))
+                    NOW() + ($6::bigint * interval '1 second'), $7)
             "#,
         )
         .bind(hex_id())
@@ -241,6 +247,7 @@ impl TokenStore for PgTokenStore {
         .bind(&grant.subject.0)
         .bind(&grant.scopes.0)
         .bind(expires_in_secs as i64)
+        .bind(&grant.sign_in)
         .execute(&self.pool)
         .await
         .map_err(StoreError::new)?;
@@ -251,7 +258,14 @@ impl TokenStore for PgTokenStore {
         let token_hash = hash_oauth_token(token);
         let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
         // Rotation: atomic single-use delete-and-return of a still-valid token.
-        let row: Option<(String, String, Vec<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        #[allow(clippy::type_complexity)]
+        let row: Option<(
+            String,
+            String,
+            Vec<String>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+        )> = sqlx::query_as(
             r#"
             DELETE FROM oidc_refresh_tokens AS token
             USING users AS user_account
@@ -259,14 +273,15 @@ impl TokenStore for PgTokenStore {
               AND (token.expires_at IS NULL OR token.expires_at > NOW())
               AND token.user_id = user_account.id
               AND user_account.enabled
-            RETURNING token.client_id, token.user_id, token.scopes, token.expires_at
+            RETURNING token.client_id, token.user_id, token.scopes, token.expires_at,
+                      token.sign_in_id
             "#,
         )
         .bind(&token_hash)
         .fetch_optional(&mut *tx)
         .await
         .map_err(StoreError::new)?;
-        if let Some((client_id, user_id, scopes, expires_at)) = row {
+        if let Some((client_id, user_id, scopes, expires_at, sign_in)) = row {
             // Remembered until the token would have expired; one with no
             // expiry, as long as the native clients' refresh lifetime.
             sqlx::query(
@@ -291,6 +306,7 @@ impl TokenStore for PgTokenStore {
                 subject: Subject(user_id),
                 client_id,
                 scopes: Scopes(scopes),
+                sign_in,
             }));
         }
         // Not a live token. If it was rotated before, this is a copy of it.
@@ -348,9 +364,9 @@ impl TokenStore for PgTokenStore {
     }
 
     async fn get_refresh(&self, token: &str) -> StoreResult<Option<RefreshGrant>> {
-        let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
+        let row: Option<(String, String, Vec<String>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT token.client_id, token.user_id, token.scopes
+            SELECT token.client_id, token.user_id, token.scopes, token.sign_in_id
             FROM oidc_refresh_tokens AS token
             JOIN users AS user_account ON user_account.id = token.user_id
             WHERE token.token_hash = $1
@@ -362,28 +378,49 @@ impl TokenStore for PgTokenStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(StoreError::new)?;
-        Ok(row.map(|(client_id, user_id, scopes)| RefreshGrant {
-            subject: Subject(user_id),
-            client_id,
-            scopes: Scopes(scopes),
-        }))
+        Ok(
+            row.map(|(client_id, user_id, scopes, sign_in)| RefreshGrant {
+                subject: Subject(user_id),
+                client_id,
+                scopes: Scopes(scopes),
+                sign_in,
+            }),
+        )
     }
 
     async fn revoke(&self, token: &str) -> StoreResult<()> {
         // The token could be an access token or a refresh token; clear
-        // both by digest (no-op if absent). Sessions are untouched —
-        // OAuth tokens never live there.
+        // both by digest (no-op if absent), then every other token of the
+        // sign-in it belonged to, so `cw logout` ends the whole sign-in
+        // (#5688). A token from before sign-ins were kept ends alone. One
+        // transaction, so the delete triggers fence the sign-in's streams
+        // together. Sessions are untouched — OAuth tokens never live there.
         let hash = hash_oauth_token(token);
         let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
+        let mut sign_ins: Vec<String> = Vec::new();
         for sql in [
-            "DELETE FROM oidc_access_tokens WHERE token_hash = $1",
-            "DELETE FROM oidc_refresh_tokens WHERE token_hash = $1",
+            "DELETE FROM oidc_access_tokens WHERE token_hash = $1 RETURNING sign_in_id",
+            "DELETE FROM oidc_refresh_tokens WHERE token_hash = $1 RETURNING sign_in_id",
         ] {
-            sqlx::query(sql)
+            let ended: Option<Option<String>> = sqlx::query_scalar(sql)
                 .bind(&hash)
-                .execute(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(StoreError::new)?;
+            sign_ins.extend(ended.flatten());
+        }
+        sign_ins.dedup();
+        for sign_in in &sign_ins {
+            for sql in [
+                "DELETE FROM oidc_access_tokens WHERE sign_in_id = $1",
+                "DELETE FROM oidc_refresh_tokens WHERE sign_in_id = $1",
+            ] {
+                sqlx::query(sql)
+                    .bind(sign_in)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(StoreError::new)?;
+            }
         }
         tx.commit().await.map_err(StoreError::new)?;
         Ok(())

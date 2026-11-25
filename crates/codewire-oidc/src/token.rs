@@ -27,6 +27,14 @@ pub fn mint_opaque_token() -> String {
     B64.encode(bytes)
 }
 
+/// A new sign-in's id: 16 random bytes, hex. Not a credential; it names the
+/// tokens one code or device code exchange started.
+pub fn mint_sign_in_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The `at_hash` claim (OIDC Core §3.1.3.6): base64url of the left-most half
 /// of the SHA-256 of the ASCII access-token, binding the id_token to the
 /// access token it was issued with.
