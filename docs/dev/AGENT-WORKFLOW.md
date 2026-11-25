@@ -120,6 +120,15 @@ and the pull request records that run. A check never seen failing proves
 nothing. Moving or renaming a test needs no such run (owner, 2026-11-12; cited
 on #3013).
 
+A test, smoke or script never calls the host's Secret Service, not even to
+read. A run of short-lived D-Bus reads of its items can crash the host's
+gnome-keyring-daemon, which then restarts with the login keyring locked, so
+every credential prompt on the host waits for the owner (#5256). A check that
+needs a Secret Service starts its own: a private session bus and
+gnome-keyring-daemon, with their own HOME and runtime directory, as
+`scripts/ci/verify/lib/local-smoke-isolation.sh` and
+`scripts/ci/tests/test-child-store-secret-service.sh` do.
+
 Use additional gates only for their failure class:
 
 - database/migration: `scripts/ci/verify/run-integration-verification.sh database`
