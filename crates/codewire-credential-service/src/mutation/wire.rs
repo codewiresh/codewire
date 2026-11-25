@@ -548,6 +548,10 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
             ConnectCode::FailedPrecondition,
             "credential enrollment did not reach publication; no platform credential was stored",
         ),
+        Error::EnrollmentExpired => (
+            ConnectCode::DeadlineExceeded,
+            "the device approval timed out; no platform credential was stored",
+        ),
         Error::GitHubInstallationRequired => (
             ConnectCode::FailedPrecondition,
             "install the GitHub App for this account before connecting",
@@ -585,6 +589,7 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
         Error::EnrollmentFailed => "CREDENTIAL_ENROLLMENT_FAILED",
         Error::EnrollmentUnsupported => "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
         Error::EnrollmentNotPublished => "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
+        Error::EnrollmentExpired => "CREDENTIAL_ENROLLMENT_EXPIRED",
         Error::GitHubInstallationRequired => "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
         Error::GitHubAlreadyConnected => "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
         Error::GitHubAppNotConfigured => "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",

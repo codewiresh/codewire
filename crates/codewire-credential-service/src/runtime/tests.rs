@@ -132,6 +132,7 @@ impl Addresses {
             public_origin: http::HeaderValue::from_static("https://codewire.example"),
             private: self.private.local_addr()?,
             tls,
+            drain: config::DEFAULT_SHUTDOWN_DRAIN,
         })
     }
 }
@@ -338,6 +339,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
             public_origin: http::HeaderValue::from_static("https://codewire.example"),
             private,
             tls: identity.files()?,
+            drain: config::DEFAULT_SHUTDOWN_DRAIN,
         };
         drop(addresses.public);
         let occupied = private_occupied.then_some(addresses.private);
@@ -781,7 +783,7 @@ async fn shutdown_drains_issued_enrollment_commit_and_real_refresh_past_transpor
         ensure!(query == "COMMIT", "enrollment barrier did not observe issued COMMIT");
 
         runtime.stop.cancel();
-        h.wait_shutdown_started().await?;
+        h.wait_drain_started().await?;
         h.assert_admission_closed().await?;
         bridge_closed(&bridge).await?;
         runtime.stays_pending(Duration::from_millis(50)).await?;

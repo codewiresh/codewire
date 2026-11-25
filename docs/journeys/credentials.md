@@ -269,6 +269,17 @@ only what differs.
   heartbeats keep the stream open (#6384). Before them, an approval after
   about two minutes ended "GitHub enrollment acknowledgement is unknown" with
   nothing saved. Not yet observed.
+- **A service roll during the approval:** in the cloud, a credential-service
+  roll that starts after the code is shown doesn't end the connect. The
+  stopping service lets the approval finish for as long as its drain allows,
+  and approving the code still connects (#6535). The drain is
+  `CREDENTIAL_SHUTDOWN_DRAIN_SECONDS`: 270 s by default, and 930 s, the whole
+  15-minute code, where the deployment also gives the Pod a 960 s grace.
+  Before this, the roll ended it with "GitHub enrollment acknowledgement is
+  unknown" and nothing saved. Not yet observed.
+- **An unapproved code:** when the code expires before it is approved, the
+  connect says "GitHub was not approved in time; no platform credential was
+  stored; connect again for a new code" (#6535). Not yet observed.
 - **Profile:** every profile includes the one GitHub connection; `set github`
   is refused.
 - **Use:** `git clone` of a private repository the connection can read, inside
@@ -338,6 +349,9 @@ only what differs.
   Not yet observed.
 - **A slow approval:** as for GitHub (section 1), five minutes in the cloud
   still connects (#6384). Not yet observed.
+- **A service roll during the approval:** as for GitHub (section 1), a
+  credential-service roll after the code is shown still connects (#6535). Not
+  yet observed.
 - **Profile:** `set codex NAME`.
 - **Stopped mid-refresh:** as for a Claude sign-in (section 6), #5177. Not
   yet observed.

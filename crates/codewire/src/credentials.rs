@@ -209,7 +209,7 @@ impl CodewireClient {
         while let Some(message) = stream
             .message::<EnrollCodexResponse>()
             .await
-            .map_err(|_| enrollment_unknown())?
+            .map_err(|error| codex_enrollment_terminal_error(error, challenged))?
         {
             match message.to_owned_message().event {
                 Some(enroll_codex_response::Event::Challenge(challenge)) if !challenged => {
@@ -425,6 +425,10 @@ fn github_enrollment_terminal_error(error: connectrpc::ConnectError) -> ClientEr
                 "GitHub enrollment did not reach platform publication; no platform credential was stored",
             )
         }
+        (ErrorCode::DeadlineExceeded, Some("CREDENTIAL_ENROLLMENT_EXPIRED")) => ClientError::new(
+            ErrorCode::FailedPrecondition,
+            "GitHub was not approved in time; no platform credential was stored; connect again for a new code",
+        ),
         (ErrorCode::FailedPrecondition, Some("CREDENTIAL_GITHUB_INSTALLATION_REQUIRED")) => {
             let install_url = error
                 .error_info()
@@ -448,6 +452,30 @@ fn valid_challenge(challenge: &CodexDeviceChallenge) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         && challenge.expires_at_unix > 0
+}
+
+/// After a verified challenge, the two reasons that prove nothing was stored
+/// render with our own fixed text (#6535). Every other close stays uncertain.
+fn codex_enrollment_terminal_error(
+    error: connectrpc::ConnectError,
+    challenged: bool,
+) -> ClientError {
+    let error = ClientError::from(error);
+    match (challenged, error.code(), codewire_reason(&error)) {
+        (true, ErrorCode::FailedPrecondition, Some("CREDENTIAL_ENROLLMENT_NOT_PUBLISHED")) => {
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                "Codex enrollment did not reach platform publication; no platform credential was stored",
+            )
+        }
+        (true, ErrorCode::DeadlineExceeded, Some("CREDENTIAL_ENROLLMENT_EXPIRED")) => {
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                "Codex was not approved in time; no platform credential was stored; connect again for a new code",
+            )
+        }
+        _ => enrollment_unknown(),
+    }
 }
 
 fn enrollment_unknown() -> ClientError {
@@ -822,6 +850,60 @@ mod tests {
         assert_eq!(shown, 0);
         assert_eq!(error.code(), ErrorCode::Unknown);
         assert!(error.message().contains("reconcile"));
+    }
+
+    /// After the challenge, a stopped or timed-out enrollment that stored
+    /// nothing says so; before it, the same reasons stay uncertain (#6535).
+    #[tokio::test]
+    async fn codex_enrollment_names_a_definite_unpublished_or_expired_end() {
+        for (code, reason, expected) in [
+            (
+                "failed_precondition",
+                "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
+                "Codex enrollment did not reach platform publication; no platform credential was stored",
+            ),
+            (
+                "deadline_exceeded",
+                "CREDENTIAL_ENROLLMENT_EXPIRED",
+                "Codex was not approved in time; no platform credential was stored; connect again for a new code",
+            ),
+        ] {
+            for challenged in [false, true] {
+                let server = MockServer::start().await;
+                let mut body = if challenged {
+                    frame(challenge())
+                } else {
+                    Vec::new()
+                };
+                let terminal = github_terminal_error(code, reason, "codewire.sh");
+                stream_at_terminal(
+                    &server,
+                    "/codewire.v1.CredentialMutationService/EnrollCodex",
+                    &mut body,
+                    &terminal,
+                )
+                .await;
+                let error = client(&server)
+                    .enroll_codex(
+                        EnrollCodexRequest {
+                            name: "work".into(),
+                            ..Default::default()
+                        },
+                        |_| true,
+                    )
+                    .await
+                    .unwrap_err();
+                if challenged {
+                    assert_eq!(
+                        (error.code(), error.message()),
+                        (ErrorCode::FailedPrecondition, expected)
+                    );
+                } else {
+                    assert_eq!(error.code(), ErrorCode::Unknown, "{reason}");
+                }
+                assert!(error.reason().is_none());
+            }
+        }
     }
 
     #[tokio::test]
@@ -1364,6 +1446,14 @@ mod tests {
                 Some((
                     ErrorCode::FailedPrecondition,
                     "GitHub enrollment did not reach platform publication; no platform credential was stored",
+                )),
+            ),
+            (
+                "CREDENTIAL_ENROLLMENT_EXPIRED",
+                UNKNOWN,
+                Some((
+                    ErrorCode::FailedPrecondition,
+                    "GitHub was not approved in time; no platform credential was stored; connect again for a new code",
                 )),
             ),
             (

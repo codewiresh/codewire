@@ -25,11 +25,13 @@ use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId,
     reserves_provider_prefix,
 };
-use codewire_credential_broker::GitHubAppAuthorizationOwner;
 use codewire_credential_broker::provider_oauth::DeviceLoginError;
 use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
+use codewire_credential_broker::{
+    CodexOAuthImport, GitHubAppAuthorizationImport, GitHubAppAuthorizationOwner,
+};
 use codewire_platform_credentials::{
     CredentialRecord, CredentialRegistration, PlatformCredentialError, PlatformCredentialStore,
 };
@@ -46,6 +48,9 @@ const MAX_OPERATIONS: usize = 8;
 pub(crate) use codewire_access::CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
 const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest drain worth waiting for: a whole device enrollment and a
+/// margin for its publication (#6535).
+pub const LONGEST_DRAIN: Duration = Duration::from_secs(15 * 60 + 30);
 
 /// Closed service failures. No raw provider/SQL error or source is retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +68,9 @@ pub enum CredentialMutationError {
     EnrollmentFailed,
     EnrollmentUnsupported,
     EnrollmentNotPublished,
+    /// The device code or the enrollment's deadline ran out before approval;
+    /// nothing was stored (#6535).
+    EnrollmentExpired,
     GitHubInstallationRequired,
     GitHubAlreadyConnected,
     GitHubAppNotConfigured,
@@ -177,12 +185,31 @@ impl CredentialMutationOwner {
     /// Stop admission and cancel drivers synchronously. No issued mutation
     /// task is aborted; the caller must still await `shutdown` to prove drain.
     pub fn start_shutdown(&self) {
+        self.start_drain();
+        self.stop.cancel();
+    }
+
+    /// Stop admission without cancelling what was admitted: a pending device
+    /// approval can still be given and published (#6535).
+    pub fn start_drain(&self) {
+        let mut accepting = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
+        *accepting = false;
+        self.workers.close();
+    }
+
+    /// A process stopping for a roll: admit nothing new, let every admitted
+    /// mutation reach its own deadline, and cancel whatever is left after
+    /// `limit`, as `shutdown` does. The runtime sets `limit` to fit inside
+    /// the Pod's termination grace.
+    pub async fn drain(&self, limit: Duration) -> Result<(), Error> {
+        self.start_drain();
+        if tokio::time::timeout(limit, self.workers.wait())
+            .await
+            .is_err()
         {
-            let mut accepting = self.accepting.lock().unwrap_or_else(|p| p.into_inner());
-            *accepting = false;
-            self.workers.close();
-            self.stop.cancel();
+            tracing::warn!("credential mutations outlived the drain; cancelling them");
         }
+        self.shutdown().await
     }
 
     /// Signal cancellation and await every disposition. Runtime owners may
@@ -472,8 +499,35 @@ async fn run_enrollment(
     replacement: Option<(CredentialId, u64)>,
     sender: &mpsc::Sender<Result<EnrollCodexResponse, Error>>,
 ) -> Result<(), Error> {
+    let (target, import) = codex_approved(&shared, scope, name, replacement, sender)
+        .await
+        .map_err(enrollment::before_publication)?;
+    let mut completed = enrollment::Completed::Codex(Some(import));
+    let result = publication::enroll(&shared, scope, &mut completed, target).await;
+    let credential = result.result?;
+    scope
+        .wait(sender.send(Ok(EnrollCodexResponse {
+            event: Some(enroll_codex_response::Event::Credential(Box::new(
+                wire::credential(credential),
+            ))),
+            ..Default::default()
+        })))
+        .await?
+        .map_err(|_| Error::PublicationUnknown)?;
+    Ok(())
+}
+
+/// Everything before publication: the target, the challenge and the person's
+/// approval. Nothing is stored yet.
+async fn codex_approved(
+    shared: &Shared,
+    scope: &Scope,
+    name: String,
+    replacement: Option<(CredentialId, u64)>,
+    sender: &mpsc::Sender<Result<EnrollCodexResponse, Error>>,
+) -> Result<(EnrollmentTarget, CodexOAuthImport), Error> {
     let target = enrollment_target(
-        &shared,
+        shared,
         scope,
         "openai",
         CredentialAuthKind::OAuth,
@@ -501,24 +555,11 @@ async fn run_enrollment(
         .wait(sender.send(Ok(response)))
         .await?
         .map_err(|_| Error::Cancelled)?;
-    let mut completed = enrollment::Completed::Codex(Some(
-        scope
-            .wait(shared.codex_login.complete(pending))
-            .await?
-            .map_err(device_login_error)?,
-    ));
-    let result = publication::enroll(&shared, scope, &mut completed, target).await;
-    let credential = result.result?;
-    scope
-        .wait(sender.send(Ok(EnrollCodexResponse {
-            event: Some(enroll_codex_response::Event::Credential(Box::new(
-                wire::credential(credential),
-            ))),
-            ..Default::default()
-        })))
+    let import = scope
+        .wait(shared.codex_login.complete(pending))
         .await?
-        .map_err(|_| Error::PublicationUnknown)?;
-    Ok(())
+        .map_err(device_login_error)?;
+    Ok((target, import))
 }
 
 async fn enrollment_target(

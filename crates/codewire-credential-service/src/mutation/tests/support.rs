@@ -43,6 +43,8 @@ pub struct DeviceProvider {
     hold: AtomicBool,
     released: tokio::sync::Notify,
     approved: AtomicBool,
+    /// GitHub answers that the device code expired unapproved.
+    expired: AtomicBool,
     started: AtomicUsize,
     suffix: Mutex<String>,
     claude_exchanges: AtomicUsize,
@@ -65,6 +67,7 @@ impl DeviceProvider {
         }
         let suffix = self.suffix.lock().unwrap().clone();
         let approved = self.approved.load(Ordering::SeqCst);
+        let expired = self.expired.load(Ordering::SeqCst);
         Some(match target {
             "https://auth.openai.com/api/accounts/deviceauth/usercode" => (
                 http::StatusCode::OK,
@@ -100,6 +103,9 @@ impl DeviceProvider {
                 http::StatusCode::OK,
                 json!({"access_token":GITHUB_TOKEN,"token_type":"bearer"}),
             ),
+            "https://github.com/login/oauth/access_token" if expired => {
+                (http::StatusCode::OK, json!({"error":"expired_token"}))
+            }
             "https://github.com/login/oauth/access_token" => (
                 http::StatusCode::OK,
                 json!({"error":"authorization_pending"}),
@@ -749,6 +755,23 @@ impl Harness {
         Ok(())
     }
 
+    /// Let the GitHub device code expire unapproved: the next poll ends it.
+    pub fn expire(&self) {
+        self.device.expired.store(true, Ordering::SeqCst);
+    }
+
+    /// Shutdown has closed admission, whether it drains or cancels.
+    pub async fn wait_drain_started(&self) -> Result<()> {
+        tokio::time::timeout(HANG_GUARD, async {
+            while !self.owner.workers.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("mutation admission did not close")?;
+        Ok(())
+    }
+
     /// Hold every device login at its first provider request.
     pub fn hold_challenge(&self) -> Result<()> {
         self.device.hold.store(true, Ordering::SeqCst);
@@ -820,11 +843,6 @@ impl Harness {
                 .enroll(authority, "closed-runtime".into(), None, None),
             Err(Error::Unavailable)
         ));
-        Ok(())
-    }
-
-    pub async fn wait_shutdown_started(&self) -> Result<()> {
-        tokio::time::timeout(HANG_GUARD, self.owner.stop.cancelled()).await?;
         Ok(())
     }
 

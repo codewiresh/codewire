@@ -6,7 +6,7 @@ use codewire_proto::codewire::v1::{
     EnrollGithubResponse, GithubDeviceChallenge, enroll_github_response,
 };
 
-use super::enrollment::{Completed, Outcome};
+use super::enrollment::{Completed, before_publication, unpublished_terminal_error};
 use super::github_app::{pending_permissions, reconnect_account_matches};
 use super::*;
 
@@ -52,12 +52,43 @@ async fn run(
     replacement: Option<(CredentialId, u64)>,
     sender: &mpsc::Sender<Result<EnrollGithubResponse, Error>>,
 ) -> Result<(), Error> {
+    let (target, import) = approved(&shared, scope, name, replacement, sender)
+        .await
+        .map_err(before_publication)?;
+    let pending = pending_permissions(import.reach());
+    let mut completed = Completed::GithubApp(import);
+    let publication = publication::enroll(&shared, scope, &mut completed, target).await;
+    let metadata = publication
+        .result
+        .map_err(|error| unpublished_terminal_error(publication.outcome, error))?;
+    scope
+        .wait(sender.send(Ok(EnrollGithubResponse {
+            event: Some(enroll_github_response::Event::Credential(Box::new(
+                wire::credential(metadata),
+            ))),
+            pending_permissions: pending,
+            ..Default::default()
+        })))
+        .await?
+        .map_err(|_| Error::PublicationUnknown)?;
+    Ok(())
+}
+
+/// Everything before publication: the target, the challenge and the person's
+/// approval. Nothing is stored yet.
+async fn approved(
+    shared: &Shared,
+    scope: &Scope,
+    name: String,
+    replacement: Option<(CredentialId, u64)>,
+    sender: &mpsc::Sender<Result<EnrollGithubResponse, Error>>,
+) -> Result<(EnrollmentTarget, GitHubAppAuthorizationImport), Error> {
     let target = if name.is_empty() && replacement.is_none() {
         scope.check()?;
         EnrollmentTarget::CreateGithubAccount
     } else {
         enrollment_target(
-            &shared,
+            shared,
             scope,
             "github",
             CredentialAuthKind::OAuth,
@@ -67,7 +98,7 @@ async fn run(
         .await?
     };
     if !matches!(target, EnrollmentTarget::Reconnect(_)) {
-        ensure_github_unconnected(&shared, scope).await?;
+        ensure_github_unconnected(shared, scope).await?;
     }
     let login = shared
         .github_login
@@ -105,73 +136,5 @@ async fn run(
     {
         return Err(Error::EnrollmentFailed);
     }
-    let pending = pending_permissions(import.reach());
-    let mut completed = Completed::GithubApp(import);
-    let publication = publication::enroll(&shared, scope, &mut completed, target).await;
-    let metadata = publication
-        .result
-        .map_err(|error| unpublished_terminal_error(publication.outcome, error))?;
-    scope
-        .wait(sender.send(Ok(EnrollGithubResponse {
-            event: Some(enroll_github_response::Event::Credential(Box::new(
-                wire::credential(metadata),
-            ))),
-            pending_permissions: pending,
-            ..Default::default()
-        })))
-        .await?
-        .map_err(|_| Error::PublicationUnknown)?;
-    Ok(())
-}
-
-/// Preserve uncertainty once a COMMIT may have been issued.  `NotPublished`
-/// is different: publication establishes it only on paths that did not issue
-/// the database COMMIT, and cleanup above has completed before this response is
-/// rendered.
-fn unpublished_terminal_error(outcome: Outcome, error: Error) -> Error {
-    if matches!(outcome, Outcome::NotPublished)
-        && matches!(
-            error,
-            Error::Unavailable | Error::Denied | Error::Cancelled | Error::Expired
-        )
-    {
-        Error::EnrollmentNotPublished
-    } else {
-        error
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unpublished_github_terminal_preserves_commit_uncertainty_and_other_failures() {
-        for error in [
-            Error::Unavailable,
-            Error::Denied,
-            Error::Cancelled,
-            Error::Expired,
-        ] {
-            assert_eq!(
-                unpublished_terminal_error(Outcome::NotPublished, error),
-                Error::EnrollmentNotPublished
-            );
-        }
-        for error in [
-            Error::EnrollmentFailed,
-            Error::EnrollmentUnsupported,
-            Error::CleanupFailed,
-            Error::PublicationUnknown,
-        ] {
-            assert_eq!(
-                unpublished_terminal_error(Outcome::NotPublished, error),
-                error
-            );
-        }
-        assert_eq!(
-            unpublished_terminal_error(Outcome::Unknown, Error::Unavailable),
-            Error::Unavailable
-        );
-    }
+    Ok((target, import))
 }

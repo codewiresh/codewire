@@ -37,6 +37,9 @@ mod status;
 use status::{credential_status, credential_status_at};
 mod live_check;
 pub(crate) use live_check::live_check_allowed;
+mod enrollment_failure;
+pub(crate) use enrollment_failure::github_authorization_feedback;
+use enrollment_failure::{failed, failed_error};
 
 const PAGE_SIZE: i32 = 100;
 const MAX_PAGES: usize = 10;
@@ -99,71 +102,6 @@ pub(crate) enum OAuthEnrollmentFailure {
     Expired,
     Cancelled,
     UnexpectedResponse,
-}
-
-fn failed(uncertain: bool) -> OAuthEnrollmentEvent {
-    OAuthEnrollmentEvent::Failed {
-        reason: OAuthEnrollmentFailure::UnexpectedResponse,
-        uncertain,
-    }
-}
-
-fn failed_error(error: &ConnectError, uncertain: bool) -> OAuthEnrollmentEvent {
-    use OAuthEnrollmentFailure as Failure;
-    // Do not render or retain an upstream message, detail metadata, provider
-    // output or challenge. Only these closed reasons cross into the view.
-    let trusted_reason = match codewire_reason(error) {
-        Ok(reason) => reason,
-        Err(()) => return failed(uncertain),
-    };
-    let reason = match (trusted_reason.as_deref(), error.code) {
-        (Some("CREDENTIAL_REVISION_CHANGED"), ErrorCode::FailedPrecondition) => Failure::Changed,
-        (Some("CREDENTIAL_ENROLLMENT_FAILED"), ErrorCode::FailedPrecondition) => {
-            Failure::NotCompleted
-        }
-        (Some("CREDENTIAL_ENROLLMENT_UNSUPPORTED"), ErrorCode::FailedPrecondition) => {
-            Failure::Unsupported
-        }
-        (Some("CREDENTIAL_ENROLLMENT_CLEANUP_FAILED"), ErrorCode::Unavailable)
-        | (Some("CREDENTIAL_MUTATION_UNCERTAIN"), ErrorCode::Unknown) => {
-            return failed(true);
-        }
-        (Some(_), _) => return failed(uncertain),
-        (None, _) => match error.code {
-            ErrorCode::Unauthenticated | ErrorCode::PermissionDenied => Failure::SignInRequired,
-            ErrorCode::Unavailable | ErrorCode::ResourceExhausted => Failure::Unavailable,
-            ErrorCode::AlreadyExists => Failure::AlreadyExists,
-            ErrorCode::Aborted | ErrorCode::NotFound => Failure::Changed,
-            ErrorCode::InvalidArgument => Failure::Invalid,
-            ErrorCode::DeadlineExceeded => Failure::Expired,
-            ErrorCode::Canceled => Failure::Cancelled,
-            _ => Failure::UnexpectedResponse,
-        },
-    };
-    // These failures are proven before publication. Other failures after a
-    // challenge can leave publication uncertain, so preserve reconciliation.
-    let uncertain = uncertain
-        && !matches!(
-            reason,
-            Failure::AlreadyExists
-                | Failure::Changed
-                | Failure::Unsupported
-                | Failure::NotCompleted
-        );
-    OAuthEnrollmentEvent::Failed { reason, uncertain }
-}
-
-pub(crate) fn github_authorization_feedback(error: &ConnectError) -> Option<&'static str> {
-    if error.code != ErrorCode::FailedPrecondition {
-        return None;
-    }
-    match codewire_reason(error).ok()?.as_deref()? {
-        "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED" => Some("github-app-unavailable"),
-        "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED" => Some("github-installation-required"),
-        "CREDENTIAL_ENROLLMENT_FAILED" => Some("github-app-failed"),
-        "CREDENTIAL_ENROLLMENT_UNSUPPORTED" => Some("github-app-response-invalid"),
-        _ => None,
-    }
 }
 
 pub(crate) struct CredentialSettingsData {
@@ -2463,6 +2401,18 @@ mod tests {
                 ErrorCode::FailedPrecondition,
                 "CREDENTIAL_ENROLLMENT_FAILED",
                 Failure::NotCompleted,
+                false,
+            ),
+            (
+                ErrorCode::FailedPrecondition,
+                "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
+                Failure::NotCompleted,
+                false,
+            ),
+            (
+                ErrorCode::DeadlineExceeded,
+                "CREDENTIAL_ENROLLMENT_EXPIRED",
+                Failure::Expired,
                 false,
             ),
             (ErrorCode::DeadlineExceeded, "", Failure::Expired, true),

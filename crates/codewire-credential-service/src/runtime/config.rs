@@ -71,6 +71,9 @@ pub struct CredentialServiceConfig {
     pub(super) sandbox_namespace: Option<String>,
     /// The database pool's cap ([`DATABASE_MAX_CONNECTIONS`]).
     pub(super) database_max_connections: u32,
+    /// How long a stopping process lets admitted mutations finish
+    /// ([`SHUTDOWN_DRAIN_SECONDS`]).
+    pub(super) shutdown_drain: Duration,
 }
 
 /// Where the credential-service's key-encryption keys come from.
@@ -205,6 +208,7 @@ impl CredentialServiceConfig {
             relay_namespace,
             sandbox_namespace: sandbox_namespace(&lookup)?,
             database_max_connections: database_max_connections(&lookup)?,
+            shutdown_drain: shutdown_drain(&lookup)?,
         };
         // Hosted placeholders serve intercepted Sandboxes, whose admission
         // needs the interception CAs; without them every intercepted
@@ -274,6 +278,30 @@ fn database_max_connections(
         .transpose()?;
     codewire_server_core::db::max_connections(value.as_deref(), DEFAULT_DATABASE_MAX_CONNECTIONS)
         .map_err(|_| invalid)
+}
+
+const SHUTDOWN_DRAIN_SECONDS: &str = "CREDENTIAL_SHUTDOWN_DRAIN_SECONDS";
+
+/// The drain when [`SHUTDOWN_DRAIN_SECONDS`] is unset. It fits the base
+/// Deployment's 300-second termination grace with room for the transport grace
+/// and the cancellation that follows.
+pub(super) const DEFAULT_SHUTDOWN_DRAIN: Duration = Duration::from_secs(270);
+
+/// How long a stopping process waits for pending device approvals (#6535). An
+/// overlay that lengthens the Pod's termination grace sets this beside it, so
+/// the kubelet never kills the process before the drain's own cancellation.
+fn shutdown_drain(lookup: &impl Fn(&str) -> Option<OsString>) -> Result<Duration, RuntimeError> {
+    let Some(value) = lookup(SHUTDOWN_DRAIN_SECONDS) else {
+        return Ok(DEFAULT_SHUTDOWN_DRAIN);
+    };
+    value
+        .into_string()
+        .ok()
+        .filter(|value| !value.starts_with('+'))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .filter(|drain| !drain.is_zero() && *drain <= crate::mutation::LONGEST_DRAIN)
+        .ok_or(RuntimeError::Configuration(SHUTDOWN_DRAIN_SECONDS))
 }
 
 const KEEPALIVE_ENABLED: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED";
@@ -534,6 +562,29 @@ mod tests {
                 CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).err(),
                 Some(RuntimeError::Configuration(DATABASE_MAX_CONNECTIONS)),
                 "pool cap {malformed:?} was accepted"
+            );
+        }
+    }
+
+    /// The drain defaults inside the base termination grace; a set drain is
+    /// whole seconds, above zero and no longer than a device enrollment's
+    /// (#6535).
+    #[test]
+    fn the_shutdown_drain_is_optional_and_bounded() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert_eq!(config.shutdown_drain, Duration::from_secs(270));
+        let mut values = inputs();
+        values.insert(SHUTDOWN_DRAIN_SECONDS, "930".into());
+        let config =
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        assert_eq!(config.shutdown_drain, Duration::from_secs(930));
+        for malformed in ["", "0", "931", "+60", "-60", "1.5", "ten"] {
+            values.insert(SHUTDOWN_DRAIN_SECONDS, malformed.into());
+            assert_eq!(
+                CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).err(),
+                Some(RuntimeError::Configuration(SHUTDOWN_DRAIN_SECONDS)),
+                "drain {malformed:?} was accepted"
             );
         }
     }

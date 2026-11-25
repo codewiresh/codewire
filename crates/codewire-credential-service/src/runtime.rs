@@ -185,15 +185,12 @@ fn database_pool_options_reproving_after(reprove_after_idle: Duration) -> PgPool
         })
 }
 
-async fn run_connected(
-    config: CredentialServiceConfig,
-    pool: PgPool,
-    shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
-) -> Result<(), RuntimeError> {
-    // Explicit in-cluster configuration never searches the user's kubeconfig.
-    let kube_config = kube::Config::incluster().map_err(|_| RuntimeError::Kubernetes)?;
-    let client = kube::Client::try_from(kube_config).map_err(|_| RuntimeError::Kubernetes)?;
-    let authorities = match config.keks {
+/// The credential and application KEK authorities the configuration names.
+async fn kek_authorities(
+    keks: config::KekAuthorityConfig,
+    client: &kube::Client,
+) -> Result<crate::authority::RuntimeKekAuthorities, RuntimeError> {
+    Ok(match keks {
         config::KekAuthorityConfig::OpenBao {
             credential,
             application,
@@ -229,7 +226,18 @@ async fn run_connected(
             let test = Arc::new(codewire_protected_store::secret_envelope::TestKekProvider);
             crate::authority::RuntimeKekAuthorities::new(test.clone(), test)
         }
-    };
+    })
+}
+
+async fn run_connected(
+    config: CredentialServiceConfig,
+    pool: PgPool,
+    shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
+) -> Result<(), RuntimeError> {
+    // Explicit in-cluster configuration never searches the user's kubeconfig.
+    let kube_config = kube::Config::incluster().map_err(|_| RuntimeError::Kubernetes)?;
+    let client = kube::Client::try_from(kube_config).map_err(|_| RuntimeError::Kubernetes)?;
+    let authorities = kek_authorities(config.keks, &client).await?;
     // The platform process serves many environments. Resolve the finite product
     // destination families; each operation still requires its exact profile lease.
     // This long-lived process is the only broker that keeps provider
@@ -386,6 +394,7 @@ async fn run_connected(
             public_origin: config.public_origin,
             private: config.private_listen,
             tls: config.private_tls,
+            drain: config.shutdown_drain,
         },
         pool,
         authorities.delegation_provider(),
@@ -421,6 +430,9 @@ struct Listeners {
     public_origin: http::HeaderValue,
     private: std::net::SocketAddr,
     tls: ServerTlsFiles,
+    /// How long the public listener keeps admitted mutations' responses open
+    /// after shutdown begins (#6535).
+    drain: Duration,
 }
 
 // Generic dependency composition stays private. Synthetic tests can exercise
@@ -443,6 +455,7 @@ where
     U: BrokerUpstreamTransport + Clone + 'static,
 {
     let ready = Arc::new(AtomicBool::new(false));
+    let drain = listeners.drain;
     let stop = CancellationToken::new();
     let mut servers = JoinSet::new();
     let result = async {
@@ -527,7 +540,9 @@ where
     ready.store(false, Ordering::Release);
     // Close all admission owners synchronously before allowing transport
     // grace. Then join every owner, including active blocking refresh tasks.
-    mutation.start_shutdown();
+    // Mutations already admitted, such as a device enrollment waiting for its
+    // approval, drain instead of being cancelled (#6535).
+    mutation.start_drain();
     repositories.start_shutdown();
     bridge.start_shutdown();
     if let Some(keepalive) = &keepalive {
@@ -537,8 +552,21 @@ where
         sweep.start_shutdown();
     }
     stop.cancel();
-    let (mutation_result, (), bridge_result, (), ()) = tokio::join!(
-        mutation.shutdown(),
+    let (mutation_result, (), bridge_result, ()) = tokio::join!(
+        async {
+            // The public listener's graceful shutdown keeps the drained
+            // mutations' open responses; its grace starts once they end.
+            let drained = mutation.drain(drain).await;
+            if tokio::time::timeout(TRANSPORT_GRACE, async {
+                while servers.join_next().await.is_some() {}
+            })
+            .await
+            .is_err()
+            {
+                servers.shutdown().await;
+            }
+            drained
+        },
         repositories.shutdown(),
         bridge.shutdown(),
         async {
@@ -550,16 +578,6 @@ where
                 sweep.shutdown().await;
             }
         },
-        async {
-            if tokio::time::timeout(TRANSPORT_GRACE, async {
-                while servers.join_next().await.is_some() {}
-            })
-            .await
-            .is_err()
-            {
-                servers.shutdown().await;
-            }
-        }
     );
     result
         .and(mutation_result.map_err(|_| RuntimeError::Cleanup))

@@ -92,6 +92,7 @@ impl Config {
                 })?,
                 private: ([0, 0, 0, 0], 9443).into(),
                 tls,
+                drain: super::super::config::DEFAULT_SHUTDOWN_DRAIN,
             },
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             oauth_keepalive: super::super::config::oauth_keepalive_config(&|name| {

@@ -24,6 +24,7 @@ pub(crate) const HANG_GUARD: Duration = Duration::from_secs(120);
 
 mod additions;
 mod claude;
+mod drain;
 mod github;
 mod lifecycle;
 mod names;

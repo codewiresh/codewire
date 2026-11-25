@@ -59,3 +59,85 @@ impl Completed {
         Ok((material, hint))
     }
 }
+
+/// Preserve uncertainty once a COMMIT may have been issued.  `NotPublished`
+/// is different: publication establishes it only on paths that did not issue
+/// the database COMMIT, and cleanup above has completed before this response is
+/// rendered.
+pub(super) fn unpublished_terminal_error(outcome: Outcome, error: Error) -> Error {
+    if matches!(outcome, Outcome::NotPublished)
+        && matches!(
+            error,
+            Error::Unavailable | Error::Denied | Error::Cancelled | Error::Expired
+        )
+    {
+        Error::EnrollmentNotPublished
+    } else {
+        error
+    }
+}
+
+/// Nothing is stored before publication begins, so an enrollment cancelled
+/// there, by the drain's limit or a lost client, or one whose device code or
+/// deadline ran out, ends with a definite reason rather than an uncertain one
+/// (#6535).
+pub(super) fn before_publication(error: Error) -> Error {
+    match error {
+        Error::Cancelled => Error::EnrollmentNotPublished,
+        Error::Expired => Error::EnrollmentExpired,
+        error => error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpublished_terminal_preserves_commit_uncertainty_and_other_failures() {
+        for error in [
+            Error::Unavailable,
+            Error::Denied,
+            Error::Cancelled,
+            Error::Expired,
+        ] {
+            assert_eq!(
+                unpublished_terminal_error(Outcome::NotPublished, error),
+                Error::EnrollmentNotPublished
+            );
+        }
+        for error in [
+            Error::EnrollmentFailed,
+            Error::EnrollmentUnsupported,
+            Error::CleanupFailed,
+            Error::PublicationUnknown,
+        ] {
+            assert_eq!(
+                unpublished_terminal_error(Outcome::NotPublished, error),
+                error
+            );
+        }
+        assert_eq!(
+            unpublished_terminal_error(Outcome::Unknown, Error::Unavailable),
+            Error::Unavailable
+        );
+    }
+
+    #[test]
+    fn before_publication_a_cancelled_or_expired_enrollment_is_definite() {
+        assert_eq!(
+            before_publication(Error::Cancelled),
+            Error::EnrollmentNotPublished
+        );
+        assert_eq!(before_publication(Error::Expired), Error::EnrollmentExpired);
+        for error in [
+            Error::Unavailable,
+            Error::Denied,
+            Error::EnrollmentFailed,
+            Error::GitHubInstallationRequired,
+            Error::StaleRevision,
+        ] {
+            assert_eq!(before_publication(error), error);
+        }
+    }
+}
