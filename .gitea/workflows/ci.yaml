@@ -560,6 +560,7 @@ jobs:
     if: ${{ needs.verification-selection.outputs.contracts_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -611,6 +612,7 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           VERIFICATION_PUSH_BEFORE_SHA: ${{ needs.verification-selection.outputs.push_base }}
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/verify/run-product-verification.sh contracts
 
       - name: Report and clean Rust cache
@@ -688,6 +690,7 @@ jobs:
     if: ${{ needs.verification-selection.outputs.standard_expected == 'true' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -728,13 +731,25 @@ jobs:
 
       - name: Install pinned protoc for Rust-backed standard checks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: |
           set -euo pipefail
-          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
-            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+          protoc_sha=6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7
+          mkdir -p "$CODEWIRE_TOOL_CACHE"
+          cached_protoc="$CODEWIRE_TOOL_CACHE/protoc-$protoc_sha.zip"
+          protoc_zip=/tmp/protoc.zip
+          if [ -f "$cached_protoc" ] && [ "$(sha256sum "$cached_protoc" | cut -d' ' -f1)" = "$protoc_sha" ]; then
+            protoc_zip="$cached_protoc"
+          else
+            scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+              6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+            cp -f -- /tmp/protoc.zip "$cached_protoc.partial.$$"
+            mv -f -- "$cached_protoc.partial.$$" "$cached_protoc"
+          fi
           rm -rf "$HOME/.proto-tools/protoc"
           mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          unzip -o -q "$protoc_zip" -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
@@ -760,6 +775,7 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           VERIFICATION_PUSH_BEFORE_SHA: ${{ needs.verification-selection.outputs.push_base }}
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/verify/run-product-verification.sh standard
 
       - name: Upload design-fixture diagnostics on failure

@@ -1082,35 +1082,100 @@ run_policy() {
 readonly BUF_VERSION='1.50.0'
 readonly BUF_URL="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64"
 readonly BUF_SHA256='154ea883ce098eac4fa106ff9ee4e4964bb97f809dd8ec9c34a432b466ce1494'
+readonly PROTOC_SHA256='6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7'
+readonly PROTOC_GEN_GO_VERSION='v1.36.5'
+readonly PROTOC_GEN_CONNECT_GO_VERSION='v1.18.1'
 
 install_contract_toolchain() {
   [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || {
     echo '::error::the pinned buf is the x86_64 Linux build' >&2
     return 1
   }
+  local cache="${CODEWIRE_TOOL_CACHE:-}"
   mkdir -p "$HOME/.proto-tools/bin"
-  "$ROOT/scripts/ci/release/fetch-pinned.sh" "$BUF_URL" "$BUF_SHA256" "$HOME/.proto-tools/bin/buf.partial"
-  chmod 0755 "$HOME/.proto-tools/bin/buf.partial"
-  mv -f -- "$HOME/.proto-tools/bin/buf.partial" "$HOME/.proto-tools/bin/buf"
+  [ -z "$cache" ] || mkdir -p "$cache"
+
+  local cached_buf="${cache:+$cache/buf-$BUF_SHA256}"
+  if [ -n "$cached_buf" ] && [ -f "$cached_buf" ] \
+      && [ "$(sha256sum "$cached_buf" | cut -d' ' -f1)" = "$BUF_SHA256" ]; then
+    install -m 0755 "$cached_buf" "$HOME/.proto-tools/bin/buf"
+  else
+    "$ROOT/scripts/ci/release/fetch-pinned.sh" "$BUF_URL" "$BUF_SHA256" "$HOME/.proto-tools/bin/buf.partial"
+    chmod 0755 "$HOME/.proto-tools/bin/buf.partial"
+    mv -f -- "$HOME/.proto-tools/bin/buf.partial" "$HOME/.proto-tools/bin/buf"
+    if [ -n "$cached_buf" ]; then
+      cp -f -- "$HOME/.proto-tools/bin/buf" "$cached_buf.partial.$$"
+      mv -f -- "$cached_buf.partial.$$" "$cached_buf"
+    fi
+  fi
   [ "$("$HOME/.proto-tools/bin/buf" --version)" = "$BUF_VERSION" ] || {
     echo "::error::the installed buf is not $BUF_VERSION" >&2
     return 1
   }
+
   # The two plugins publish no checksummed Linux binary (connect-go none at
   # all); go install checks their module sums against the checksum database.
-  go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
-  go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
-  scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
-    6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+  # Keep the built plugins under CODEWIRE_TOOL_CACHE keyed by Go version and
+  # module pins so warm seats skip re-downloading and rebuilding them.
+  local go_ver plugin_key cached_plugins
+  go_ver="$(go version | awk '{print $3}')"
+  plugin_key="go-proto-plugins-${go_ver}-${PROTOC_GEN_GO_VERSION}-${PROTOC_GEN_CONNECT_GO_VERSION}"
+  cached_plugins="${cache:+$cache/$plugin_key}"
+  if [ -n "$cached_plugins" ] && [ -f "$cached_plugins/.ready" ] \
+      && [ -x "$cached_plugins/protoc-gen-go" ] \
+      && [ -x "$cached_plugins/protoc-gen-connect-go" ]; then
+    install -m 0755 "$cached_plugins/protoc-gen-go" "$HOME/.proto-tools/bin/protoc-gen-go"
+    install -m 0755 "$cached_plugins/protoc-gen-connect-go" "$HOME/.proto-tools/bin/protoc-gen-connect-go"
+  else
+    GOBIN="$HOME/.proto-tools/bin" go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}"
+    GOBIN="$HOME/.proto-tools/bin" go install "connectrpc.com/connect/cmd/protoc-gen-connect-go@${PROTOC_GEN_CONNECT_GO_VERSION}"
+    if [ -n "$cached_plugins" ]; then
+      rm -rf -- "$cached_plugins"
+      mkdir -p "$cached_plugins"
+      install -m 0755 "$HOME/.proto-tools/bin/protoc-gen-go" "$cached_plugins/protoc-gen-go"
+      install -m 0755 "$HOME/.proto-tools/bin/protoc-gen-connect-go" "$cached_plugins/protoc-gen-connect-go"
+      printf '%s\n' "$plugin_key" > "$cached_plugins/.ready"
+    fi
+  fi
+
+  local cached_protoc="${cache:+$cache/protoc-$PROTOC_SHA256.zip}" protoc_zip=/tmp/protoc.zip
+  if [ -n "$cached_protoc" ] && [ -f "$cached_protoc" ] \
+      && [ "$(sha256sum "$cached_protoc" | cut -d' ' -f1)" = "$PROTOC_SHA256" ]; then
+    protoc_zip="$cached_protoc"
+  else
+    scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+      6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+    if [ -n "$cached_protoc" ]; then
+      cp -f -- /tmp/protoc.zip "$cached_protoc.partial.$$"
+      mv -f -- "$cached_protoc.partial.$$" "$cached_protoc"
+    fi
+  fi
   rm -rf "$HOME/.proto-tools/protoc"
   mkdir -p "$HOME/.proto-tools/protoc"
-  unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+  unzip -o -q "$protoc_zip" -d "$HOME/.proto-tools/protoc"
+
   local go_bin
   go_bin="$(go env GOPATH)/bin"
   export PATH="$HOME/.proto-tools/protoc/bin:$HOME/.proto-tools/bin:$go_bin:$PATH"
-  python3 -m venv .venv-proto
-  .venv-proto/bin/python -m pip install --quiet --require-hashes \
-    -r proto/python-tools.lock
+
+  if [ -n "$cache" ]; then
+    local py_key cached_venv
+    py_key="$( (python3 --version; sha256sum proto/python-tools.lock) | sha256sum | cut -c1-24 )"
+    cached_venv="$cache/venv-proto-$py_key"
+    if [ ! -f "$cached_venv/.ready" ] || [ ! -x "$cached_venv/bin/protoc-gen-connectrpc" ]; then
+      rm -rf -- "$cached_venv"
+      python3 -m venv "$cached_venv"
+      "$cached_venv/bin/python" -m pip install --quiet --require-hashes \
+        -r proto/python-tools.lock
+      printf '%s\n' "$py_key" > "$cached_venv/.ready"
+    fi
+    rm -rf -- .venv-proto
+    ln -s "$cached_venv" .venv-proto
+  else
+    python3 -m venv .venv-proto
+    .venv-proto/bin/python -m pip install --quiet --require-hashes \
+      -r proto/python-tools.lock
+  fi
 }
 
 run_contracts_proto() {
@@ -1162,7 +1227,7 @@ run_contracts_proto() {
       proto_packages+=(-p "$package")
     fi
   done
-  [ "${#proto_packages[@]}" -eq 0 ] || cargo test --locked "${proto_packages[@]}"
+  [ "${#proto_packages[@]}" -eq 0 ] || CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked "${proto_packages[@]}"
 
   # The Rust descriptor sets are compiled from proto/ by the proto crates'
   # build scripts, not by buf (#4950). This holds them to the pinned buf's:
@@ -1171,6 +1236,7 @@ run_contracts_proto() {
   buf_descriptor_set="$(mktemp "${TMPDIR:-/tmp}/codewire-buf-descriptor-set.XXXXXX")"
   (cd proto && buf build --as-file-descriptor-set -o "$buf_descriptor_set")
   CODEWIRE_BUF_DESCRIPTOR_SET="$buf_descriptor_set" \
+    CARGO_PROFILE_DEV_DEBUG=0 \
     cargo test --locked -p codewire-admin-proto --test descriptor_parity -- --ignored
   rm -f "$buf_descriptor_set"
 
@@ -1208,7 +1274,8 @@ run_go_support() {
     scripts/ci/verify/tailnet-parity.sh
   fi
   if selected go_consumer_interop; then
-    cargo test --locked -p codewire-server-core \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+      cargo test --locked -p codewire-server-core \
       --test go_consumer_interop generated_go_client_consumes_rust_connect \
       -- --exact --ignored --nocapture
   fi
@@ -1219,7 +1286,8 @@ run_web() {
   if rust_packages_shard_covers codewire-dashboard-web; then
     echo "Web: codewire-dashboard-web's tests run in the Rust / transport packages shard of this run"
   else
-    cargo test --locked -p codewire-dashboard-web --lib
+    CARGO_PROFILE_DEV_DEBUG=0 \
+      cargo test --locked -p codewire-dashboard-web --lib
   fi
   bun run --cwd apps/dashboard typecheck
   bun run --cwd apps/dashboard test:fixtures
@@ -1375,15 +1443,17 @@ run_sdk_python() {
   make test-sdk-examples-python
   local package_work sdist wheel
   package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-python-package.XXXXXX")"
+  local -a pip_cache_args=()
+  [ -z "${CODEWIRE_TOOL_CACHE:-}" ] || pip_cache_args=(--cache-dir "$CODEWIRE_TOOL_CACHE/pip-cache")
   python3 -m venv .venv-sdk
-  .venv-sdk/bin/python -m pip install --require-hashes \
+  .venv-sdk/bin/python -m pip install "${pip_cache_args[@]}" --require-hashes \
     -r libs/sdk-python/requirements-pip.lock
   scripts/ci/release/package-sdk-python.sh "$package_work/dist"
   sdist="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
   wheel="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
   [ -n "$sdist" ]
   [ -n "$wheel" ]
-  .venv-sdk/bin/python -m pip install --require-hashes \
+  .venv-sdk/bin/python -m pip install "${pip_cache_args[@]}" --require-hashes \
     -r libs/sdk-python/requirements.lock
   .venv-sdk/bin/python -m pip install --force-reinstall --no-deps "$wheel"
   local sdk_site_packages forbidden_package
