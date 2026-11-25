@@ -93,7 +93,7 @@ const WARM_UP_POLL: Duration = Duration::from_secs(2);
 pub(crate) struct RenderedPools {
     pub pools: Vec<DesiredPool>,
     pub max_node_percent: u8,
-    pub image_cache_enabled: bool,
+    pub image_cache_namespace: Option<String>,
     pub draining: bool,
 }
 
@@ -137,7 +137,7 @@ pub(crate) fn render(
             .map(|pool| render_pool(config, namespace, pool))
             .collect::<anyhow::Result<_>>()?,
         max_node_percent: wanted.max_host_percent,
-        image_cache_enabled: wanted.image_cache_enabled,
+        image_cache_namespace: wanted.image_cache_namespace.clone(),
         draining: wanted.draining,
     })
 }
@@ -468,7 +468,7 @@ pub(super) async fn reconcile_once(
         // every environment destroyed) bootstrap one empty pool.
         if all_pools.is_empty() {
             let templates = by_name(templates_api.list(&pool_selector).await?.items);
-            let cache_warm = image_cache_gate(client, namespace, wanted).await?;
+            let cache_warm = image_cache_gate(client, wanted).await?;
             for write in bootstrap_writes(&wanted.pools, &templates, cache_warm) {
                 match execute(&templates_api, &pools_api, &sandboxes_api, &write).await {
                     Ok(()) => log_write(&write),
@@ -518,7 +518,7 @@ pub(super) async fn reconcile_once(
             })
             .collect();
 
-    let cache_warm = image_cache_gate(client, namespace, wanted).await?;
+    let cache_warm = image_cache_gate(client, wanted).await?;
 
     let NodeCap {
         budget,
@@ -677,16 +677,13 @@ pub(super) async fn reconcile_once(
     Ok(result)
 }
 
-/// A2b's gate: whether every cacheable pool image is held and rolled out.
-/// With the cache disabled (Kind) it is open without a read.
-async fn image_cache_gate(
-    client: &kube::Client,
-    namespace: &str,
-    wanted: &RenderedPools,
-) -> anyhow::Result<bool> {
-    if !wanted.image_cache_enabled {
+/// A2b's gate: whether every cacheable pool image is held and rolled out,
+/// read where the cache's writer writes it. With the cache disabled (Kind)
+/// it is open without a read.
+async fn image_cache_gate(client: &kube::Client, wanted: &RenderedPools) -> anyhow::Result<bool> {
+    let Some(namespace) = wanted.image_cache_namespace.as_deref() else {
         return Ok(true);
-    }
+    };
     let daemon_set = dynamic_daemon_sets(client, namespace)
         .get_opt(IMAGE_CACHE_NAME)
         .await?

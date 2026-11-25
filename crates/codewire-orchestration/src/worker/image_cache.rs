@@ -11,9 +11,11 @@
 //! separate read-only Role. Without it the release is 0 and sets fall back
 //! to arrival order.
 //!
-//! Orchestration's DaemonSet grant is a Role in the sandbox namespace that
-//! can create DaemonSets and get, update or patch only `cw-image-cache`; the
-//! `codewire-orchestration-image-cache` admission policy bounds the shape.
+//! The DaemonSet lives in `SANDBOX_IMAGE_CACHE_NAMESPACE`, or the sandbox
+//! namespace when that is unset. Orchestration's DaemonSet grant is a Role
+//! there that can create DaemonSets and get, update or patch only
+//! `cw-image-cache`; the `codewire-orchestration-image-cache` admission policy
+//! bounds the shape. The warm-pool gate reads the same namespace.
 //!
 //! Slice 1 does not hold this Pod's readiness on the cache;
 //! `codewire_image_cache_warm` reports whether it would.
@@ -32,7 +34,8 @@ use serde_json::Value;
 use super::WorkerContext;
 use super::create::SandboxWorkerCfg;
 use crate::sandbox::image_cache::{
-    CacheState, DesiredSet, IMAGE_CACHE_ENV, IMAGE_CACHE_NAME, Plan, RenderConfig, plan, rollout,
+    CacheState, DesiredSet, IMAGE_CACHE_ENV, IMAGE_CACHE_NAME, IMAGE_CACHE_NAMESPACE_ENV, Plan,
+    RenderConfig, plan, rollout,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -50,16 +53,27 @@ impl ImageCacheConfig {
     /// `Ok(None)` when `SANDBOX_IMAGE_CACHE=disabled`. Disabling stops
     /// reconciling; an operator deletes the DaemonSet.
     pub fn from_env(sandbox: &SandboxWorkerCfg) -> anyhow::Result<Option<Self>> {
-        Self::from_values(std::env::var(IMAGE_CACHE_ENV).ok().as_deref(), sandbox)
+        Self::from_values(
+            std::env::var(IMAGE_CACHE_ENV).ok().as_deref(),
+            std::env::var(IMAGE_CACHE_NAMESPACE_ENV).ok().as_deref(),
+            sandbox,
+        )
     }
 
-    fn from_values(mode: Option<&str>, sandbox: &SandboxWorkerCfg) -> anyhow::Result<Option<Self>> {
+    fn from_values(
+        mode: Option<&str>,
+        namespace: Option<&str>,
+        sandbox: &SandboxWorkerCfg,
+    ) -> anyhow::Result<Option<Self>> {
         match mode.map(str::trim).unwrap_or_default() {
             "" | "enabled" => {}
             "disabled" => return Ok(None),
             other => anyhow::bail!("{IMAGE_CACHE_ENV}={other:?} must be enabled or disabled"),
         }
-        let namespace = sandbox.sandbox_namespace.trim();
+        let namespace = namespace
+            .map(str::trim)
+            .filter(|namespace| !namespace.is_empty())
+            .unwrap_or_else(|| sandbox.sandbox_namespace.trim());
         anyhow::ensure!(!namespace.is_empty(), "sandbox namespace is not configured");
         Ok(Some(Self {
             render: RenderConfig {
@@ -437,7 +451,7 @@ mod tests {
 
     #[test]
     fn config_defaults_to_enabled_in_the_sandbox_namespace() {
-        let config = ImageCacheConfig::from_values(None, &sandbox_cfg())
+        let config = ImageCacheConfig::from_values(None, None, &sandbox_cfg())
             .unwrap()
             .unwrap();
         assert_eq!(config.render.namespace, "dev-sandboxes");
@@ -446,20 +460,33 @@ mod tests {
     }
 
     #[test]
+    fn a_deployment_names_the_cache_its_own_namespace() {
+        let config =
+            ImageCacheConfig::from_values(None, Some(" codewire-image-cache "), &sandbox_cfg())
+                .unwrap()
+                .unwrap();
+        assert_eq!(config.render.namespace, "codewire-image-cache");
+        let blank = ImageCacheConfig::from_values(None, Some(" "), &sandbox_cfg())
+            .unwrap()
+            .unwrap();
+        assert_eq!(blank.render.namespace, "dev-sandboxes");
+    }
+
+    #[test]
     fn config_can_be_disabled_and_rejects_typos() {
         assert!(
-            ImageCacheConfig::from_values(Some("disabled"), &sandbox_cfg())
+            ImageCacheConfig::from_values(Some("disabled"), None, &sandbox_cfg())
                 .unwrap()
                 .is_none()
         );
         assert!(
-            ImageCacheConfig::from_values(Some("enabled"), &sandbox_cfg())
+            ImageCacheConfig::from_values(Some("enabled"), None, &sandbox_cfg())
                 .unwrap()
                 .is_some()
         );
-        assert!(ImageCacheConfig::from_values(Some("on"), &sandbox_cfg()).is_err());
+        assert!(ImageCacheConfig::from_values(Some("on"), None, &sandbox_cfg()).is_err());
         let mut no_namespace = sandbox_cfg();
         no_namespace.sandbox_namespace.clear();
-        assert!(ImageCacheConfig::from_values(None, &no_namespace).is_err());
+        assert!(ImageCacheConfig::from_values(None, None, &no_namespace).is_err());
     }
 }

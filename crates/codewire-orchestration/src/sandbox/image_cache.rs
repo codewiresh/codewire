@@ -64,6 +64,10 @@ pub const IMAGE_CACHE_PULL_SECRET: &str = "harbor-registry";
 /// JSON [`CacheState`] recorded on the DaemonSet.
 pub const IMAGE_CACHE_STATE_ANNOTATION: &str = "codewire.sh/image-cache-state";
 pub const IMAGE_CACHE_ENV: &str = "SANDBOX_IMAGE_CACHE";
+/// The namespace the DaemonSet lives in; unset, the Sandbox namespace. A
+/// hosted deployment names its own, so the cache never sits among Sandboxes
+/// (#5002): there, the Sandboxes' cluster-wide allows would select it.
+pub const IMAGE_CACHE_NAMESPACE_ENV: &str = "SANDBOX_IMAGE_CACHE_NAMESPACE";
 /// The commodity RuntimeClass's scheduling selector: every node that can run
 /// a sandbox. The admission policy requires exactly this selector.
 pub const IMAGE_CACHE_NODE_SELECTOR: [(&str, &str); 2] = [

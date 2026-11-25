@@ -32,9 +32,9 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
 #[test]
 fn no_configured_shape_keeps_the_reconciler_inert() {
     for unset in ["", "   ", "\n"] {
-        for cache in [true, false] {
+        for cache in [Some(NAMESPACE.to_owned()), None] {
             assert!(
-                WarmPoolConfig::from_cfg(&dev_cfg(unset), cache)
+                WarmPoolConfig::from_cfg(&dev_cfg(unset), cache.clone())
                     .unwrap()
                     .is_none(),
                 "{unset:?} configures no pool"
@@ -44,13 +44,16 @@ fn no_configured_shape_keeps_the_reconciler_inert() {
     // The default configuration carries no shape.
     assert!(SandboxWorkerCfg::default().warm_pool_shapes.is_empty());
     assert!(
-        WarmPoolConfig::from_cfg(&SandboxWorkerCfg::default(), true)
+        WarmPoolConfig::from_cfg(&SandboxWorkerCfg::default(), Some(NAMESPACE.into()))
             .unwrap()
             .is_none()
     );
     let mut cfg = dev_cfg("");
     cfg.warm_pool_max_node_percent = "invalid".into();
-    assert!(matches!(startup(&cfg, Ok(true)), Startup::Inert));
+    assert!(matches!(
+        startup(&cfg, Ok(Some(NAMESPACE.into()))),
+        Startup::Inert
+    ));
 }
 
 #[test]
@@ -59,7 +62,7 @@ fn the_node_reservation_percentage_defaults_and_refuses_invalid_configuration() 
     for (value, expected) in [("1", 1), ("25", 25), ("50", 50), ("100", 100)] {
         let mut cfg = dev_cfg("2000m/16384Mi/80Gi=1");
         cfg.warm_pool_max_node_percent = value.into();
-        let config = WarmPoolConfig::from_cfg(&cfg, false).unwrap().unwrap();
+        let config = WarmPoolConfig::from_cfg(&cfg, None).unwrap().unwrap();
         assert_eq!(config.wanted.max_host_percent, expected);
     }
     for value in [
@@ -67,10 +70,10 @@ fn the_node_reservation_percentage_defaults_and_refuses_invalid_configuration() 
     ] {
         let mut cfg = dev_cfg("2000m/16384Mi/80Gi=1");
         cfg.warm_pool_max_node_percent = value.into();
-        assert!(WarmPoolConfig::from_cfg(&cfg, false).is_err(), "{value}");
+        assert!(WarmPoolConfig::from_cfg(&cfg, None).is_err(), "{value}");
         assert!(
             matches!(
-                startup(&cfg, Ok(false)),
+                startup(&cfg, Ok(None)),
                 Startup::Reconcile(WarmPoolConfig { wanted: WantedPools { draining: true, pools, .. }, .. }) if pools.is_empty()
             ),
             "{value} must drain existing pools"
@@ -80,10 +83,12 @@ fn the_node_reservation_percentage_defaults_and_refuses_invalid_configuration() 
 
 #[test]
 fn configured_shapes_render_through_the_identity_free_pool_renderer() {
-    let config =
-        WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=1"), true)
-            .unwrap()
-            .unwrap();
+    let config = WarmPoolConfig::from_cfg(
+        &dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=1"),
+        Some(NAMESPACE.into()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(config.placement, Placement::new(NAMESPACE));
     assert_eq!(config.wanted.pools.len(), 2);
     let rendered = render(&(&dev_cfg("")).into(), NAMESPACE, &config.wanted).unwrap();
@@ -99,7 +104,7 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     // A 32 GiB pool renders its memory tier's class, listed once.
     let tiers = WarmPoolConfig::from_cfg(
         &dev_cfg("1000m/4096Mi/10Gi=1,8000m/32768Mi/10Gi=1,16000m/32768Mi/10Gi=1"),
-        true,
+        Some(NAMESPACE.into()),
     )
     .unwrap()
     .unwrap();
@@ -109,32 +114,37 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     );
 
     // Every renderer refusal refuses the whole configuration.
-    assert!(WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi"), true).is_err());
+    assert!(
+        WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi"), Some(NAMESPACE.into())).is_err()
+    );
     let mut unbindable = dev_cfg("1000m/4096Mi/10Gi=1");
     unbindable.pod_namespace.clear();
-    assert!(WarmPoolConfig::from_cfg(&unbindable, true).is_err());
+    assert!(WarmPoolConfig::from_cfg(&unbindable, Some(NAMESPACE.into())).is_err());
     let mut confidential = dev_cfg("1000m/4096Mi/10Gi=1");
     confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
-    assert!(WarmPoolConfig::from_cfg(&confidential, true).is_err());
+    assert!(WarmPoolConfig::from_cfg(&confidential, Some(NAMESPACE.into())).is_err());
     let mut unpinned = dev_cfg("1000m/4096Mi/10Gi=1");
     unpinned.daemon_image = "registry.example.invalid/codewire/daemon:main".into();
-    assert!(WarmPoolConfig::from_cfg(&unpinned, true).is_err());
+    assert!(WarmPoolConfig::from_cfg(&unpinned, Some(NAMESPACE.into())).is_err());
     let mut no_namespace = dev_cfg("1000m/4096Mi/10Gi=1");
     no_namespace.sandbox_namespace.clear();
-    assert!(WarmPoolConfig::from_cfg(&no_namespace, true).is_err());
+    assert!(WarmPoolConfig::from_cfg(&no_namespace, Some(NAMESPACE.into())).is_err());
 }
 
 /// Review L7: an invalid configuration drains existing pools instead of
 /// leaving them unmanaged; no configuration stays inert.
 #[test]
 fn an_invalid_configuration_drains_and_none_is_inert() {
-    assert!(matches!(startup(&dev_cfg(""), Ok(true)), Startup::Inert));
+    assert!(matches!(
+        startup(&dev_cfg(""), Ok(Some(NAMESPACE.into()))),
+        Startup::Inert
+    ));
     assert!(matches!(
         startup(&dev_cfg(" "), Err(anyhow::anyhow!("bad cache"))),
         Startup::Inert
     ));
     for (shapes, cache) in [
-        ("not-a-shape", Ok(true)),
+        ("not-a-shape", Ok(Some(NAMESPACE.into()))),
         ("1000m/4096Mi/10Gi=2", Err(anyhow::anyhow!("bad cache"))),
     ] {
         match startup(&dev_cfg(shapes), cache) {
@@ -151,13 +161,13 @@ fn an_invalid_configuration_drains_and_none_is_inert() {
     let mut unbindable = dev_cfg("1000m/4096Mi/10Gi=2");
     unbindable.pod_namespace.clear();
     assert!(matches!(
-        startup(&unbindable, Ok(false)),
+        startup(&unbindable, Ok(None)),
         Startup::Reconcile(WarmPoolConfig {
             wanted: WantedPools { draining: true, .. },
             ..
         })
     ));
-    match startup(&dev_cfg("1000m/4096Mi/10Gi=2"), Ok(true)) {
+    match startup(&dev_cfg("1000m/4096Mi/10Gi=2"), Ok(Some(NAMESPACE.into()))) {
         Startup::Reconcile(config) => {
             assert!(!config.wanted.draining && config.wanted.pools.len() == 1)
         }
@@ -306,7 +316,7 @@ async fn only_a_rotating_start_holds_the_temporal_worker() {
 async fn only_the_leader_keeps_pools_and_every_other_tick_forgets() {
     use crate::runtime::fake::FakeRuntimeDriver;
 
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let runtime = FakeRuntimeDriver::default();
@@ -342,7 +352,7 @@ async fn only_the_leader_keeps_pools_and_every_other_tick_forgets() {
 async fn no_pool_member_is_kept_in_a_namespace_the_sandbox_policies_dont_select() {
     use crate::runtime::fake::FakeRuntimeDriver;
 
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let runtime = FakeRuntimeDriver::default();
@@ -395,7 +405,7 @@ fn the_loops_metric_names_and_labels_are_unchanged() {
 async fn a_rotation_warms_no_pool_in_a_namespace_the_sandbox_policies_dont_select() {
     use crate::runtime::fake::FakeRuntimeDriver;
 
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let runtime = FakeRuntimeDriver::default();
@@ -431,4 +441,27 @@ async fn a_rotation_warms_no_pool_in_a_namespace_the_sandbox_policies_dont_selec
         *runtime.placements.lock().unwrap(),
         vec![Placement::new(NAMESPACE); 2]
     );
+}
+
+/// The gate reads the cache where its writer writes it (#5002): a deployment
+/// that names the cache its own namespace carries that namespace to the
+/// rendered pools, and a disabled cache carries none.
+#[test]
+fn the_pools_wait_on_the_cache_in_its_own_namespace() {
+    let cfg = dev_cfg("1000m/4096Mi/10Gi=2");
+    let config = WarmPoolConfig::from_cfg(&cfg, Some("codewire-image-cache".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.placement, Placement::new(NAMESPACE));
+    assert_eq!(
+        config.wanted.image_cache_namespace.as_deref(),
+        Some("codewire-image-cache")
+    );
+    let rendered = render(&(&cfg).into(), NAMESPACE, &config.wanted).unwrap();
+    assert_eq!(
+        rendered.image_cache_namespace.as_deref(),
+        Some("codewire-image-cache")
+    );
+    let disabled = WarmPoolConfig::from_cfg(&cfg, None).unwrap().unwrap();
+    assert_eq!(disabled.wanted.image_cache_namespace, None);
 }

@@ -163,7 +163,7 @@ async fn a_pass_creates_the_template_then_the_pool_under_the_node_cap() {
         ..Cluster::default()
     }));
     let client = api(Arc::clone(&cluster));
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let mut state = LoopState::default();
@@ -234,7 +234,7 @@ async fn the_configured_percentage_controls_how_many_members_the_reconciler_crea
         let client = api(Arc::clone(&cluster));
         let mut cfg = dev_cfg("2000m/16384Mi/80Gi=3");
         cfg.warm_pool_max_node_percent = percent.into();
-        let config = WarmPoolConfig::from_cfg(&cfg, false).unwrap().unwrap();
+        let config = WarmPoolConfig::from_cfg(&cfg, None).unwrap().unwrap();
         let mut state = LoopState::default();
         for _ in 0..2 {
             assert_eq!(
@@ -258,7 +258,7 @@ async fn an_enabled_image_cache_without_its_daemon_set_writes_nothing() {
         ..Cluster::default()
     }));
     let client = api(Arc::clone(&cluster));
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), Some(NAMESPACE.into()))
         .unwrap()
         .unwrap();
     let mut state = LoopState::default();
@@ -284,7 +284,7 @@ async fn an_enabled_image_cache_without_its_daemon_set_writes_nothing() {
 async fn pools_are_held_until_the_controller_shows_claim_safety() {
     let mut legacy_shadow = reconciled_shadow();
     legacy_shadow["status"] = json!({ "replicas": 0, "readyReplicas": 0 });
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let mut empty_pool = rendered(&config).pools[0].objects.pool.clone();
@@ -295,7 +295,7 @@ async fn pools_are_held_until_the_controller_shows_claim_safety() {
             ..Cluster::default()
         }));
         let client = api(Arc::clone(&cluster));
-        let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+        let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
             .unwrap()
             .unwrap();
         let mut state = LoopState::default();
@@ -324,7 +324,7 @@ async fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
     let cluster = Arc::new(Mutex::new(Cluster::default()));
     let client = api(Arc::clone(&cluster));
     let config =
-        WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2"), false)
+        WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2"), None)
             .unwrap()
             .unwrap();
     let mut state = LoopState::default();
@@ -368,7 +368,7 @@ async fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
 async fn a_cold_image_cache_blocks_the_bootstrap() {
     let cluster = Arc::new(Mutex::new(Cluster::default()));
     let client = api(Arc::clone(&cluster));
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), Some(NAMESPACE.into()))
         .unwrap()
         .unwrap();
     let mut state = LoopState::default();
@@ -394,7 +394,7 @@ async fn a_cold_image_cache_blocks_the_bootstrap() {
 fn only_a_rotating_shape_holds_readiness() {
     let shapes = "1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2";
     let current = rendered(
-        &WarmPoolConfig::from_cfg(&dev_cfg(shapes), true)
+        &WarmPoolConfig::from_cfg(&dev_cfg(shapes), Some(NAMESPACE.into()))
             .unwrap()
             .unwrap(),
     )
@@ -403,7 +403,7 @@ fn only_a_rotating_shape_holds_readiness() {
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
     let previous = rendered_with(
         &previous_cfg,
-        &WarmPoolConfig::from_cfg(&previous_cfg, true)
+        &WarmPoolConfig::from_cfg(&previous_cfg, Some(NAMESPACE.into()))
             .unwrap()
             .unwrap(),
     )
@@ -464,7 +464,7 @@ async fn the_driver_remembers_passes_by_placement_until_told_to_forget() {
         ..Cluster::default()
     }));
     let driver = KubernetesDriver::new(api(Arc::clone(&cluster)), (&dev_cfg("")).into());
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), None)
         .unwrap()
         .unwrap();
     let placement = crate::runtime::Placement::new(NAMESPACE);
@@ -539,14 +539,14 @@ fn pool_metric_names_and_labels_are_unchanged() {
 #[tokio::test]
 async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draining() {
     let shapes = "1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=0";
-    let config = WarmPoolConfig::from_cfg(&dev_cfg(shapes), false)
+    let config = WarmPoolConfig::from_cfg(&dev_cfg(shapes), None)
         .unwrap()
         .unwrap();
     let mut previous_cfg = dev_cfg(shapes);
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
     let previous = rendered_with(
         &previous_cfg,
-        &WarmPoolConfig::from_cfg(&previous_cfg, false)
+        &WarmPoolConfig::from_cfg(&previous_cfg, None)
             .unwrap()
             .unwrap(),
     )

@@ -77,11 +77,11 @@ pub enum Startup {
 /// unmanaged: the reconciler runs with no desired pool, so each existing one
 /// is drained and removed once unreferenced (review L7), still only on a
 /// capable controller.
-pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>) -> Startup {
+pub fn startup(cfg: &SandboxWorkerCfg, image_cache: anyhow::Result<Option<String>>) -> Startup {
     if cfg.warm_pool_shapes.trim().is_empty() {
         return Startup::Inert;
     }
-    match image_cache_enabled.and_then(|enabled| WarmPoolConfig::from_cfg(cfg, enabled)) {
+    match image_cache.and_then(|namespace| WarmPoolConfig::from_cfg(cfg, namespace)) {
         Ok(Some(config)) => Startup::Reconcile(config),
         Ok(None) => Startup::Inert,
         Err(error) => {
@@ -96,7 +96,7 @@ pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>
                 wanted: WantedPools {
                     pools: Vec::new(),
                     max_host_percent: DEFAULT_MAX_NODE_PERCENT,
-                    image_cache_enabled: false,
+                    image_cache_namespace: None,
                     draining: true,
                 },
             })
@@ -111,7 +111,7 @@ impl WarmPoolConfig {
     /// diagnostic cluster refuses the whole configuration.
     pub fn from_cfg(
         cfg: &SandboxWorkerCfg,
-        image_cache_enabled: bool,
+        image_cache_namespace: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
         let configured = parse_warm_pool_shapes(&cfg.warm_pool_shapes)?;
         if configured.is_empty() {
@@ -137,7 +137,7 @@ impl WarmPoolConfig {
             wanted: WantedPools {
                 pools,
                 max_host_percent: max_node_percent,
-                image_cache_enabled,
+                image_cache_namespace,
                 draining: false,
             },
         }))
@@ -146,9 +146,9 @@ impl WarmPoolConfig {
 
 /// Leader-gated; runs until the process exits. Inert without configuration.
 pub(crate) async fn warm_pool_loop(ctx: Arc<WorkerContext>, leadership: Arc<Leadership>) {
-    let image_cache_enabled =
-        ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
-    let config = match startup(&ctx.sandbox_cfg, image_cache_enabled) {
+    let image_cache = ImageCacheConfig::from_env(&ctx.sandbox_cfg)
+        .map(|config| config.map(|config| config.render.namespace));
+    let config = match startup(&ctx.sandbox_cfg, image_cache) {
         Startup::Reconcile(config) => config,
         Startup::Inert => {
             tracing::info!("warm pools: no shapes configured; the reconciler is inert");
@@ -168,7 +168,7 @@ pub(crate) async fn warm_pool_loop(ctx: Arc<WorkerContext>, leadership: Arc<Lead
         namespace = %config.placement.namespace,
         pools = config.wanted.pools.len(),
         max_node_percent = config.wanted.max_host_percent,
-        image_cache = config.wanted.image_cache_enabled,
+        image_cache = config.wanted.image_cache_namespace.as_deref().unwrap_or("disabled"),
         draining = config.wanted.draining,
         "warm pools: reconciling configured shapes"
     );
@@ -295,9 +295,9 @@ struct Rotation {
 
 /// `None` when there is nothing to warm.
 async fn rotation(ctx: &WorkerContext) -> anyhow::Result<Option<Rotation>> {
-    let image_cache_enabled =
-        ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
-    let Startup::Reconcile(config) = startup(&ctx.sandbox_cfg, image_cache_enabled) else {
+    let image_cache = ImageCacheConfig::from_env(&ctx.sandbox_cfg)
+        .map(|config| config.map(|config| config.render.namespace));
+    let Startup::Reconcile(config) = startup(&ctx.sandbox_cfg, image_cache) else {
         return Ok(None);
     };
     let Some(runtime) = ctx.runtime.as_deref() else {

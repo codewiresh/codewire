@@ -224,9 +224,10 @@ pub struct WantedPools {
     /// that every pool together may reserve. Drivers without shared hosts
     /// bound pools by their own limits.
     pub max_host_percent: u8,
-    /// `false` when nothing is cached ahead of the pools, so nothing waits for
-    /// a cache.
-    pub image_cache_enabled: bool,
+    /// Where the image cache's DaemonSet lives, the namespace its writer
+    /// writes it in, or `None` when nothing is cached ahead of the pools, so
+    /// nothing waits for a cache.
+    pub image_cache_namespace: Option<String>,
     /// The configuration was invalid: no pool is wanted, so every existing
     /// one drains (review L7).
     pub draining: bool,
