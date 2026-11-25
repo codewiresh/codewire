@@ -11,9 +11,9 @@ discovery. The work is #4661; the configuration is in
 
 ## Where it stands
 
-Updated 2026-11-24. Dev serves the issuer at `https://identity.codewire-dev.sh`,
-from its own signing key in OpenBao (#4662), and runs groups, audiences and
-minting (#4663, #4664). Dev signs with its key version 2. Production serves
+Updated 2026-11-25. Dev serves the issuer at `https://identity.codewire-dev.sh`,
+from its own signing key in OpenBao (#4662), and runs groups, audiences,
+minting and the token files (#4663, #4664). Dev signs with its key version 2. Production serves
 nothing yet (#4667), and no release has these. The contract is
 [dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md).
 
@@ -30,7 +30,7 @@ nothing yet (#4667), and no release has these. The contract is
 | `identity-own-openbao` | #4666 | observed (2026-11-24) | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
 | `identity-audit` | #4663, #4664 | observed (2026-11-24) | not yet observed |
-| `identity-files` | #4664 | not yet built | not yet built |
+| `identity-files` | #4664 | observed, except the dashboard's files view (2026-11-25) | not yet observed |
 
 ## Before the walk
 
@@ -378,7 +378,26 @@ nothing yet (#4667), and no release has these. The contract is
 - **Proof:** the `stat` lines, the refusals, the file's times against the
   token's `iat` and `exp`, and the daemon log naming the audience and file,
   never the token.
-- **Observed:** not yet built.
+- **Observed:** on Dev on 2026-11-25, at source 261c5378e9 with `cw` from
+  main 101be8d766 (#4664, comment 144450), in a Sandbox made from a template
+  rendered after the change.
+  - Step 0 was observed earlier (#6310, #6351).
+  - 1: `700` and `600`, on `tmpfs`.
+  - 2: with the Sandbox in `data-readers`, the file's token lists the Pods.
+  - 3: the file was rewritten 300 seconds after its token's `iat`, with a new
+    `iat`: half of the 600-second lifetime.
+  - 4: after `cw identity stop`, the file was gone at the next renewal.
+    After `resume` it was back in 3 seconds.
+  - 5: after the audience was removed, the file was gone 3 min 42 s later, at
+    an access refresh before the next renewal.
+  - 6: `cw cp` is refused, directly and through a `/workspace` link into
+    `/codewire/run`. sftp finds no such file either way, and scp finds none
+    at the file's own path; scp through the link was not tried.
+  - 7: the ninth file audience is refused with "this organization already has
+    8 audiences with a file".
+  - The daemon log names the audience and file at each change, and holds no
+    token.
+  - The dashboard's files view is not yet observed.
 
 ## The other steps
 
