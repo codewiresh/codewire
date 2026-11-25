@@ -14,7 +14,7 @@ lands. Every step reads "not yet observed" until it is walked.
 
 ## Where the journey stands
 
-Updated 2026-11-23. The CLI and the dashboard viewer are announced together,
+Updated 2026-11-25. The CLI and the dashboard viewer are announced together,
 when both have been observed.
 
 The 2026-11-22 walks ran `cw` built from a4a20f9d16e9 (#5853) against Dev at
@@ -26,20 +26,31 @@ was walked on Kind the same day, before review, at `43f5c10850`; that walk
 is recorded on #3223 in its Kind walk comment. On Dev, the delivery walk
 observed the panel's steps 1 to 3, all but "Release keyboard", in promote-dev
 run 73498 at source 0b68dec2aa69 on 2026-11-23, recorded on #3223 in its Dev
-panel comment.
+panel comment, and again in run 5541 at source 4d9d003f352e, the source of
+release v0.4.32, on 2026-11-24.
+
+Production was walked on 2026-11-25 with release v0.4.32 (source
+4d9d003f352e), as the Production smoke identity, on its own new Sandbox,
+created with `--ttl` and removed at the end. `cw` was release v0.4.31, the
+newest published. The Sandbox ran on the pool template carrying the pinned
+workspace image `sha256:6ea688069b33`. The walk is recorded on #3223 in the
+Production walk comment. The Desktop panel is not walked in Production: the
+smoke identity signs in with an API key, and the dashboard takes only a
+browser sign-in. Production serves the same dashboard image
+(`sha256:922419841c66`) that Dev's delivery walk observed at that source.
 
 | ID | Kind | Local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
-| `desktop-image-inert` | not yet observed | observed on Linux | observed | not yet observed |
-| `desktop-cli` | not yet observed | observed on Linux; macOS not yet observed | observed from Linux and macOS | not yet observed |
-| `desktop-agent` | not yet observed | partly, on Linux | partly | not yet observed |
-| `desktop-look` | not yet observed | partly, on Linux | partly | not yet observed |
+| `desktop-image-inert` | not yet observed | observed on Linux | observed | observed |
+| `desktop-cli` | not yet observed | observed on Linux; macOS not yet observed | observed from Linux and macOS | observed from Linux |
+| `desktop-agent` | not yet observed | partly, on Linux | partly | partly |
+| `desktop-look` | not yet observed | partly, on Linux | partly | partly |
 | `desktop-browser` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-lifetime` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-cli-refusals` | not yet observed | partly, on Linux | partly | not yet observed |
-| `desktop-loopback-only` | not yet observed | partly, on Linux | partly | not yet observed |
+| `desktop-cli-refusals` | not yet observed | partly, on Linux | partly | partly |
+| `desktop-loopback-only` | not yet observed | partly, on Linux | partly | partly |
 | `desktop-access` | not yet observed | does not apply: one owner | not yet observed | not yet observed |
-| `desktop-dashboard` | partly | does not apply: no dashboard | partly | not yet observed |
+| `desktop-dashboard` | partly | does not apply: no dashboard | partly | not yet observed: no Production browser sign-in |
 | `desktop-dashboard-ends` | partly | does not apply: no dashboard | not yet observed | not yet observed |
 
 ## Before the walk
@@ -85,7 +96,8 @@ panel comment.
   previous image and proves nothing here; check its digest first.
 - **Observed:** in the 2026-11-22 walks on Dev and a Linux local VM: the five
   programs resolve; no desktop process runs; nothing listens on 5901 or 6001;
-  no session is listed; `DISPLAY` is unset.
+  no session is listed; `DISPLAY` is unset. The same in Production on
+  2026-11-25.
 
 ## `desktop-cli`: `cw desktop` shows the desktop
 
@@ -170,8 +182,13 @@ panel comment.
   name Screen Sharing saved was the environment's host. The password was
   not in about 369,000 sampled lines of `ps -eo args`, the unified log,
   files written during the open, Screen Sharing's saved connections or a
-  keychain password item for 127.0.0.1. A Linux viewer opened by `cw desktop` itself, and typing through
-  the Mac's viewer, are not yet observed.
+  keychain password item for 127.0.0.1. In Production on 2026-11-25, from
+  Linux, the same proofs as on Dev: the first start took 0.5 s and the
+  forward's first bytes were `RFB 003.008`; a wrong password was refused; a
+  line typed through the viewer ran in the desktop's terminal; the password
+  was in none of the places above, about 464,000 sampled lines of `ps -eo
+  args` included. A Linux viewer opened by `cw desktop` itself, and typing
+  through the Mac's viewer, are not yet observed.
 
 ## `desktop-agent`: an agent draws on the desktop and reads it
 
@@ -222,7 +239,10 @@ panel comment.
   the copied-out one shows the window. On Dev on 2026-11-23 (#6161 has the
   walk): a shell opened with `cw shell` before the desktop started printed
   `DISPLAY` unset before the start, after it and at the end, while a command
-  started after the start printed `:1`. An agent driving it is not yet
+  started after the start printed `:1`. In Production on 2026-11-25:
+  `DISPLAY=:1`, and `:7` when the request set it; the `desk-mark` window's
+  keys wrote `drawn`; the two pictures differ and the copied-out one shows
+  the window. An agent driving it is not yet
   observed: it needs an agent signed in, which the smoke identity has not.
 
 ## `desktop-look`: a started desktop looks like Codewire
@@ -273,7 +293,10 @@ panel comment.
   and 2560x1080. At 1024x768 the default terminal window covers all of it,
   and at 1280x800 part of it; with the window minimized it shows whole.
   Every size was set inside the environment with
-  `xrandr`; a resize made by a viewer is not yet observed.
+  `xrandr`; a resize made by a viewer is not yet observed. In Production on
+  2026-11-25, a first start from that image: the wordmark whole at
+  1600x1000 on the dark background, the dark panel along the top, and the
+  terminal titled "Terminal" in `/workspace`.
 
 ## `desktop-browser`: Chromium runs sandboxed, and an agent can drive it
 
@@ -397,7 +420,7 @@ panel comment.
   10 s saying the desktop ended; port 5901 held, with `--status` saying
   stopped; a stopped environment, naming its start command. The previous image
   and a server, `cw` or local runtime too old for the desktop are not yet
-  observed.
+  observed. In Production on 2026-11-25, the same five.
 
 ## `desktop-loopback-only`: nothing new is reachable
 
@@ -443,7 +466,9 @@ panel comment.
   listener on TCP; `cw ports` lists nothing; publishing 5901 is refused with
   the desktop running and stopped, with Dev's wording from before #5853 and
   the local VM's naming `cw desktop`; 5902 publishes and is removed; on the
-  computer the only new listener is `127.0.0.1:PORT`, gone after the end. The
+  computer the only new listener is `127.0.0.1:PORT`, gone after the end. In
+  Production on 2026-11-25 the same, with publishing 5901 refused naming
+  `cw desktop` and the SSH local forward. The
   check from another Pod, the project file with 5901 and the preview URL are
   not yet observed.
 
@@ -547,7 +572,10 @@ panel comment.
   reload; typed keys and the pasted text reached the desktop's terminal, and
   Copy from desktop brought the terminal's printed line to the page; tabs 2
   to 4 connected and the fifth was refused with the limit of four named; Stop
-  desktop left the panel stopped. Dev ran one orchestration replica.
+  desktop left the panel stopped. Dev ran one orchestration replica. All
+  five held again in run 5541, at source 4d9d003f352e, the source of release
+  v0.4.32, on 2026-11-24. In Production the panel is not yet observed: the
+  Production smoke identity signs in only with an API key.
   Not yet observed: step 4, `--status` and its start time, typing seen in a
   second tab, and, on Dev, "Release keyboard" and steps 4 to 6. The viewer's
   following of the Sandbox's readiness and of the tab's visibility came in
