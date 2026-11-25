@@ -2554,11 +2554,12 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
-      scripts/ci/images/buildx-builder.sh|\
+      scripts/ci/images/buildx-builder.sh|scripts/dev/builder-owner.sh|\
       scripts/ci/tests/test-buildx-builder.sh)
         # The owned BuildKit builder removal is shared by the workspace
         # verification (workspace-cache.sh: policy, security) and the Kind image
         # build (build-kind-images.sh: Kind, release, deploy), so it selects both.
+        # Its builder-owner record (builder-owner.sh) is tested beside it.
         select_token policy
         select_token security
         select_token edge_kind

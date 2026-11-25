@@ -81,6 +81,10 @@ buildx_builder_remove() {
 # acts only when codewire/root bin/heavy started the build (CODEWIRE_CPU_SLICE)
 # and codewire-cpu is installed; CI and tests never set the variable.
 buildx_builder_cap() {
+  # Who made it, for `codewire-cpu status` (scripts/dev/builder-owner.sh).
+  # shellcheck source=scripts/dev/builder-owner.sh
+  { . "$(dirname "${BASH_SOURCE[0]}")/../../dev/builder-owner.sh" &&
+    builder_owner_record buildx "$1"; } 2>/dev/null || true
   [ -n "${CODEWIRE_CPU_SLICE:-}" ] || return 0
   command -v codewire-cpu >/dev/null 2>&1 || return 0
   codewire-cpu apply >/dev/null 2>&1 ||

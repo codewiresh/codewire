@@ -791,8 +791,11 @@ run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell security security_js' scripts/dev/kind/sync-local-secrets.sh
+# test-buildx-builder.sh reads workstation-cpu.sh's builder_owner from the
+# tree, so the families that run that test run too.
 run_paths_case workstation_cpu_helper pull_request refs/pull/20016/head false \
-  'policy policy_shell security security_js' scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
+  'confidential_script_tests deploy go_consumer_interop go_support policy policy_shell release security security_js' \
+  scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
 run_paths_case orchestrator_helpers pull_request refs/pull/20017/head false \
   'policy policy_shell security security_js' scripts/dev/orchestrator/merge-queue.sh \
   scripts/ci/tests/test-orchestrator-scripts.sh scripts/dev/orchestrator/github-repository-protection.py \
@@ -839,6 +842,9 @@ run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head t
 run_paths_case buildx_builder_removal pull_request refs/pull/3072/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/images/buildx-builder.sh scripts/ci/tests/test-buildx-builder.sh
+run_paths_case buildx_builder_owner_record pull_request refs/pull/3072/head false \
+  'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
+  scripts/dev/builder-owner.sh
 run_paths_case buildx_builder_removal_kind pull_request refs/pull/3073/head true \
   'deploy edge_kind go_consumer_interop go_support kind policy release confidential_script_tests security security_js' \
   scripts/ci/images/buildx-builder.sh scripts/ci/tests/test-buildx-builder.sh

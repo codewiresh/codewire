@@ -465,6 +465,25 @@ themselves, and a command started from inside a slot runs in that slot.
 that runs outside one. Each job's wait and run time is logged in
 `~/.cache/codewire-build-slots/times.tsv`.
 
+`codewire-cpu status` also lists every buildx daemon and Kind node container
+with its age, its CPU over the sample, its memory and its owner. A buildx
+daemon under 1% of a core is idle. A Kind node is never idle by CPU, because
+its control plane runs Kubernetes, so judge it by its age. Remove only your
+own idle builders, and never another session's:
+
+```sh
+docker buildx rm BUILDER
+kind delete cluster --name CLUSTER
+```
+
+The owner comes from a record made when the builder was created
+(`scripts/dev/builder-owner.sh`, in `~/.cache/codewire-builders/`): the
+worktree and its task, and the first line of the session's `OWNER` file when
+`TMPDIR` sits under its `~/.cache/cwt-<task>`. Builders made before the record
+existed show `not recorded`. After pulling this change, reinstall the
+root-owned copy so `status` shows them:
+`sudo install -m 0755 scripts/dev/workstation-cpu.sh /usr/local/bin/codewire-cpu`.
+
 A local VM run or a dev server that lives for hours joins the slice without a
 slot, so it never holds up a compile:
 

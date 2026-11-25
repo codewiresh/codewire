@@ -143,4 +143,38 @@ fi
 grep -A1 -- 'buildx inspect "$builder" --bootstrap' "$ROOT/scripts/ci/images/workspace-cache.sh" |
   grep -qx '  buildx_builder_cap "$builder"' || fail 'the workspace cache build does not cap its builder'
 
-echo 'buildx builder removal: success, confirmed-absent, waited deletion, persisting, unknown, hung, unsafe-name and CPU-cap cases passed'
+# Owner records (scripts/dev/builder-owner.sh), read by `codewire-cpu status`
+# through workstation-cpu.sh's builder_owner: a session's OWNER is found from
+# its TMPDIR, the longest builder name wins, CI records nothing, and a
+# recording failure never fails the caller.
+owners="$work/owners"
+mkdir -p "$owners/home/.cache/cwt-demo/tmp" "$owners/checkout"
+printf 'cw-demo session\n' >"$owners/home/.cache/cwt-demo/OWNER"
+eval "$(awk '/^builder_owner\(\) \{/,/^}/' "$ROOT/scripts/dev/workstation-cpu.sh")"
+declare -F builder_owner >/dev/null || fail 'workstation-cpu.sh has no builder_owner'
+(
+  # shellcheck source=scripts/dev/builder-owner.sh
+  . "$ROOT/scripts/dev/builder-owner.sh"
+  unset GITHUB_ACTIONS CI
+  cd "$owners/checkout"
+  HOME="$owners/home" TMPDIR="$owners/home/.cache/cwt-demo/tmp" builder_owner_record kind cwt-demo
+  HOME="$owners/home" TMPDIR="$owners/home/.cache/cwt-demo/tmp" builder_owner_record buildx codewire-kind-images-aa292bed
+  HOME="$owners/home" TMPDIR=/tmp builder_owner_record buildx codewire-kind
+  GITHUB_ACTIONS=true HOME="$owners/home" builder_owner_record buildx ci-only
+  HOME="$owners/home" builder_owner_record buildx '../escape'
+  HOME=/nonexistent/home builder_owner_record buildx unwritable
+) || fail 'recording an owner failed its caller'
+records="$owners/home/.cache/codewire-builders"
+[[ "$(cd "$records" && echo *)" == 'codewire-kind codewire-kind-images-aa292bed cwt-demo' ]] ||
+  fail "owner records are $(cd "$records" && echo *)"
+[[ "$(builder_owner "$records" kind cwt-demo)" == 'cw-demo session (checkout)' ]] ||
+  fail 'a Kind cluster does not name its owner'
+[[ "$(builder_owner "$records" buildx codewire-kind-images-aa292bed-node)" == 'cw-demo session (checkout)' ]] ||
+  fail 'a buildx daemon does not name its owner'
+[[ "$(builder_owner "$records" buildx codewire-kind-other0)" == 'task checkout' ]] ||
+  fail 'an owner without an OWNER file is not named by its task'
+[[ -z "$(builder_owner "$records" buildx unrelated0)" ]] || fail 'an unrecorded builder was given an owner'
+grep -qF 'builder_owner_record buildx "$1"' "$ROOT/scripts/ci/images/buildx-builder.sh" ||
+  fail 'buildx_builder_cap no longer records the builder owner'
+
+echo 'buildx builder removal: success, confirmed-absent, waited deletion, persisting, unknown, hung, unsafe-name, CPU-cap and owner-record cases passed'

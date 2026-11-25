@@ -425,6 +425,42 @@ outside_slots() {
 }
 
 # ceiling prints a cgroup's cpu.max as a share of one core, or "none".
+# Every running buildx daemon and Kind node container, one per line:
+# ID<TAB>buildx|kind<TAB>KEY<TAB>NAME<TAB>UP, where KEY is what its owner
+# record is named by: the Kind cluster, or the buildx daemon's name.
+builder_containers() {
+  command -v docker >/dev/null || return 0
+  docker ps --no-trunc \
+    --format '{{.ID}}	{{.Names}}	{{.RunningFor}}	{{.Label "io.x-k8s.kind.cluster"}}' 2>/dev/null |
+    while IFS=$'\t' read -r id name up cluster; do
+      if [ -n "$cluster" ]; then
+        printf '%s\tkind\t%s\t%s\t%s\n' "$id" "$cluster" "$name" "${up% ago}"
+      elif [[ "$name" == buildx_buildkit_* ]]; then
+        printf '%s\tbuildx\t%s\t%s\t%s\n' "$id" "${name#buildx_buildkit_}" "$name" "${up% ago}"
+      fi
+    done
+}
+
+# The owner record (scripts/dev/builder-owner.sh) for KIND KEY in DIR: a Kind
+# cluster's by its name; a buildx daemon's by the longest builder name its
+# node name starts with (buildx names the node BUILDER0, or BUILDER-node).
+builder_owner() {
+  local dir="$1" kind="$2" key="$3" file best='' base
+  [ -d "$dir" ] || return 0
+  if [ "$kind" = kind ]; then
+    best="$dir/$key"
+  else
+    for file in "$dir"/*; do
+      base="${file##*/}"
+      [ -f "$file" ] && [[ "$key" == "$base"* ]] && [ "${#base}" -gt "${#best}" ] && best="$base"
+    done
+    [ -n "$best" ] && best="$dir/$best"
+  fi
+  [ -n "$best" ] && [ -f "$best" ] || return 0
+  awk -F= '$1 == "owner" && $2 != "" {o=$2} $1 == "task" {t=$2}
+    END {if (o != "") printf "%s (%s)", o, t; else if (t != "") printf "task %s", t}' "$best"
+}
+
 ceiling() {
   local quota period
   read -r quota period <"$1/cpu.max" 2>/dev/null || { echo -; return; }
@@ -448,10 +484,17 @@ status() {
   add "$user/user@$uid.service/session.slice" session.slice "audio and portals"
   while read -r unit label; do add "$user/$unit" "$unit" "$label session"; done < <(sessions "$uid")
   while read -r unit label; do add "$cg/system.slice/$unit" "docker-${unit:7:12}.scope" "builder $label"; done < <(builders)
+  local -a b_rows=() b_used=()
+  local row
+  while IFS= read -r row; do b_rows+=("$row"); done < <(builder_containers)
   start=$(date +%s%N)
   for i in "${!paths[@]}"; do before[i]=$(usage_usec "${paths[$i]}"); done
+  for i in "${!b_rows[@]}"; do b_used[i]=$(usage_usec "$cg/system.slice/docker-${b_rows[$i]%%$'\t'*}.scope"); done
   sleep 2
   for i in "${!paths[@]}"; do before[i]=$(($(usage_usec "${paths[$i]}") - before[i])); done
+  for i in "${!b_rows[@]}"; do
+    b_used[i]=$(($(usage_usec "$cg/system.slice/docker-${b_rows[$i]%%$'\t'*}.scope") - b_used[i]))
+  done
   end=$(date +%s%N)
   read -r load1 load5 load15 _ </proc/loadavg
   printf 'load %s %s %s on %s cores; NOW is CPU over the last 2 s (100%% = one core)\n\n' \
@@ -473,6 +516,41 @@ status() {
   else
     printf 'no cargo or verification-family job runs outside a build slot\n'
   fi
+  builder_status "$uid" "$((end - start))"
+}
+
+# The buildx daemons and Kind nodes, each with its CPU over the sample above,
+# its memory and its recorded owner. A buildx daemon is idle under 1% of a
+# core; a Kind node never is by CPU (its control plane runs Kubernetes, about
+# 4-25% of a core at rest), so its age stands beside it instead. Each session
+# removes only its own: `kind delete cluster --name CLUSTER`, or
+# `docker buildx rm BUILDER`; nobody removes another's.
+builder_status() {
+  local uid="$1" span="$2" dir i id kind key name up now mem owner state idle=0
+  dir="$(getent passwd "$uid" | cut -d: -f6)/.cache/codewire-builders"
+  if [ "${#b_rows[@]}" -eq 0 ]; then
+    printf '\nno buildx or Kind node container is running\n'
+    return 0
+  fi
+  printf '\nbuilder containers (NOW over the same 2 s; remove only your own):\n'
+  printf '%-6s %-5s %-12s %-5s %-7s %-28s %s\n' KIND STATE UP NOW MEMORY OWNER NAME
+  for i in "${!b_rows[@]}"; do
+    IFS=$'\t' read -r id kind key name up <<<"${b_rows[$i]}"
+    now=$((b_used[i] * 100000 / span))
+    mem="$(awk '{printf "%.0fM", $1 / 1048576}' "/sys/fs/cgroup/system.slice/docker-$id.scope/memory.current" 2>/dev/null)"
+    owner="$(builder_owner "$dir" "$kind" "$key")"
+    if [ "$kind" = kind ]; then
+      state=up
+    elif [ "$now" -lt 1 ]; then
+      state=idle idle=$((idle + 1))
+    else
+      state=busy
+    fi
+    printf '%-6s %-5s %-12s %-5s %-7s %-28s %s\n' "$kind" "$state" "$up" "$now%" "${mem:--}" \
+      "${owner:-not recorded}" "$name"
+  done
+  printf '%s idle buildx daemon(s). Remove only your own: docker buildx rm BUILDER, or kind delete cluster --name CLUSTER.\n' \
+    "$idle"
 }
 
 case "${1:-}" in

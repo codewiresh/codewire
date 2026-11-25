@@ -1380,6 +1380,10 @@ create_cluster() {
     fi
     KIND_TRANSACTION_NODE_ID="$node_id"
     KIND_CREATED_BY_TRANSACTION=1
+    # Who made it, for `codewire-cpu status` (scripts/dev/builder-owner.sh).
+    # shellcheck source=scripts/dev/builder-owner.sh
+    { . "$ROOT/scripts/dev/builder-owner.sh" &&
+      builder_owner_record kind "$KIND_CLUSTER_NAME"; } 2>/dev/null || true
   else
     echo '::error::Kind reported creation success without the expected node; ownership is unconfirmed' >&2
     return 1
