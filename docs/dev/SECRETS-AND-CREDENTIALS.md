@@ -377,6 +377,16 @@ valid at the provider until it expires. Replacement must be fenced against concu
 it must not silently create another identity or retarget a profile. API-key
 providers have one authentication kind, so `add` needs no `--kind` flag.
 
+A cloud Codex or GitHub connect waits on one response stream while the person
+approves the device code, for up to its 15 minutes. A proxy in front of the
+server, such as a CDN, ends a response that sends nothing for about two
+minutes, so a client that sets `accepts_heartbeats` gets an empty `heartbeat`
+event after every 15 seconds with nothing else to send, until the credential
+or an error; the end of the stream follows the credential directly (#6384).
+`cw` and the SDKs set it and skip the heartbeats. An older client gets none,
+and against an older server, which sends none, an approval slower than the
+proxy's limit ends as an unknown acknowledgement with nothing saved.
+
 `rename NAME NEW_NAME` changes only the label, keeping the identity, material
 and profile links. `rotate NAME` accepts a replacement API key through protected
 input. Explicit rotation sets status Active, even if the old key was revoked;

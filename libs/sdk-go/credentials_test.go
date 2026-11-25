@@ -130,10 +130,21 @@ func (f *credentialFixture) EnrollCodex(ctx context.Context, req *connect.Reques
 	}
 	switch req.Msg.Name {
 	case "success":
+		if !req.Msg.AcceptsHeartbeats {
+			f.t.Error("enrollment must accept heartbeats")
+		}
+		// Heartbeats while the person approves the code are skipped (#6384).
+		heartbeat := &codewirev1.EnrollCodexResponse{Event: &codewirev1.EnrollCodexResponse_Heartbeat{Heartbeat: &codewirev1.EnrollmentHeartbeat{}}}
+		if err := stream.Send(heartbeat); err != nil {
+			return err
+		}
 		select {
 		case <-f.commit:
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+		if err := stream.Send(heartbeat); err != nil {
+			return err
 		}
 		return stream.Send(&codewirev1.EnrollCodexResponse{Event: &codewirev1.EnrollCodexResponse_Credential{Credential: credentialProto()}})
 	case "error":

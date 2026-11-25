@@ -219,7 +219,9 @@ class Credentials:
         Cancellation does not prove rollback: reconcile by name before retrying.
         """
         stream = self._context.server_stream(
-            self._mutations.enroll_codex, pb.EnrollCodexRequest(name=name),
+            # The edge ends a response silent for about two minutes, so the
+            # server sends heartbeats while the person approves the code.
+            self._mutations.enroll_codex, pb.EnrollCodexRequest(name=name, accepts_heartbeats=True),
             timeout_ms=_ENROLLMENT_TIMEOUT_MS,
         )
         challenged = False
@@ -238,6 +240,8 @@ class Credentials:
                 elif event == "credential" and challenged:
                     yield {"type": "credential", "credential": _credential(response.credential)}
                     return
+                elif event == "heartbeat":
+                    continue
                 else:
                     raise EnrollmentOutcomeUnknownError()
             raise EnrollmentOutcomeUnknownError()

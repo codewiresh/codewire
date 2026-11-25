@@ -263,6 +263,11 @@ only what differs.
 - **Ctrl-C:** pressed after approving the device code and before the save,
   it saves nothing and says so ("canceled; no credential was changed").
   Not yet observed.
+- **A slow approval:** in the cloud, approving the code five minutes after
+  it is shown still connects, through the public gateway; the service's
+  heartbeats keep the stream open (#6384). Before them, an approval after
+  about two minutes ended "GitHub enrollment acknowledgement is unknown" with
+  nothing saved. Not yet observed.
 - **Profile:** every profile includes the one GitHub connection; `set github`
   is refused.
 - **Use:** `git clone` of a private repository the connection can read, inside
@@ -330,6 +335,8 @@ only what differs.
 - **Ctrl-C:** pressed after approving the device code and before the save,
   it saves nothing and says so ("canceled; no credential was changed").
   Not yet observed.
+- **A slow approval:** as for GitHub (section 1), five minutes in the cloud
+  still connects (#6384). Not yet observed.
 - **Profile:** `set codex NAME`.
 - **Stopped mid-refresh:** as for a Claude sign-in (section 6), #5177. Not
   yet observed.

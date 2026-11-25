@@ -135,6 +135,7 @@ export function assertCredentialConverterCoverage(): void {
   ]));
   assertFields("Codex enrollment", EnrollCodexRequestSchema.fields, new Map([
     [1, "name"], [2, "credential_id"], [3, "expected_revocation_generation"],
+    [4, "accepts_heartbeats"],
   ]));
 }
 
@@ -282,6 +283,9 @@ export class Credentials {
         name,
         credentialId,
         expectedRevocationGeneration: reconnectGeneration,
+        // The edge ends a response silent for about two minutes, so the
+        // server sends heartbeats while the person approves the code.
+        acceptsHeartbeats: true,
       }, {
         signal: cancellation.signal, timeoutMs: ENROLLMENT_TIMEOUT_MS,
       });
@@ -301,6 +305,8 @@ export class Credentials {
             verification_url: value.verificationUrl, user_code: value.userCode,
             expires_at_unix: value.expiresAtUnix,
           } };
+        } else if (response.event.case === "heartbeat") {
+          continue;
         } else if (response.event.case === "credential" && challenged) {
           const credential = fromCredential(response.event.value);
           // Finish transport ownership before exposing the terminal event;

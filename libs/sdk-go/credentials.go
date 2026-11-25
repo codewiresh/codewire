@@ -281,7 +281,9 @@ func (s *CredentialService) EnrollCodex(ctx context.Context, name string, onChal
 	}
 	ctx, cancel := context.WithTimeout(ctx, credentialEnrollmentTimeout)
 	defer cancel()
-	stream, err := s.client.credentialEnrollments.EnrollCodex(ctx, connect.NewRequest(&codewirev1.EnrollCodexRequest{Name: name}))
+	// The edge ends a response silent for about two minutes, so the server
+	// sends heartbeats while the person approves the code.
+	stream, err := s.client.credentialEnrollments.EnrollCodex(ctx, connect.NewRequest(&codewirev1.EnrollCodexRequest{Name: name, AcceptsHeartbeats: true}))
 	if err != nil {
 		return nil, &EnrollmentOutcomeUnknownError{}
 	}
@@ -307,6 +309,7 @@ func (s *CredentialService) EnrollCodex(ctx context.Context, name string, onChal
 				return nil, &EnrollmentOutcomeUnknownError{}
 			}
 			return credential, nil
+		case *codewirev1.EnrollCodexResponse_Heartbeat:
 		default:
 			return nil, &EnrollmentOutcomeUnknownError{}
 		}

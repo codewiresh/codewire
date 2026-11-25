@@ -189,9 +189,11 @@ impl CodewireClient {
     /// The callback must return promptly; the one-time code is not a log field.
     pub async fn enroll_codex(
         &self,
-        request: EnrollCodexRequest,
+        mut request: EnrollCodexRequest,
         mut on_challenge: impl FnMut(CodexDeviceChallenge) -> bool,
     ) -> Result<Credential, ClientError> {
+        // The edge ends a response silent for about two minutes (#6384).
+        request.accepts_heartbeats = true;
         // Resolve once. Refreshing this provider for a future call never
         // replaces the original OAuth authority of this enrollment stream.
         let options = self
@@ -222,6 +224,7 @@ impl CodewireClient {
                     }
                     return Ok(*credential);
                 }
+                Some(enroll_codex_response::Event::Heartbeat(_)) => {}
                 _ => return Err(enrollment_unknown()),
             }
         }
@@ -232,9 +235,11 @@ impl CodewireClient {
     /// Cancellation or missing acknowledgement never automatically retries.
     pub async fn enroll_github(
         &self,
-        request: EnrollGithubRequest,
+        mut request: EnrollGithubRequest,
         mut on_challenge: impl FnMut(GithubDeviceChallenge) -> bool,
     ) -> Result<GithubEnrollment, ClientError> {
+        // The edge ends a response silent for about two minutes (#6384).
+        request.accepts_heartbeats = true;
         let options = self
             .auth_options()
             .await?
@@ -273,6 +278,7 @@ impl CodewireClient {
                         pending_permissions: message.pending_permissions,
                     });
                 }
+                Some(enroll_github_response::Event::Heartbeat(_)) => {}
                 _ => return Err(github_enrollment_unknown()),
             }
         }
@@ -646,6 +652,15 @@ mod tests {
         bytes
     }
 
+    /// The one request of an enrollment stream, out of its Connect envelope.
+    async fn enrollment_request<M: Message>(server: &MockServer) -> M {
+        let requests = server.received_requests().await.unwrap();
+        let [request] = requests.as_slice() else {
+            panic!("expected one request, got {}", requests.len());
+        };
+        M::decode_from_slice(&request.body[5..]).unwrap()
+    }
+
     fn challenge() -> EnrollCodexResponse {
         EnrollCodexResponse {
             event: Some(enroll_codex_response::Event::Challenge(Box::new(
@@ -732,7 +747,17 @@ mod tests {
     #[tokio::test]
     async fn enrollment_reports_challenge_before_returning_exact_committed_metadata() {
         let server = MockServer::start().await;
-        let mut body = frame(challenge());
+        let heartbeat = || {
+            frame(EnrollCodexResponse {
+                event: Some(enroll_codex_response::Event::Heartbeat(Default::default())),
+                ..Default::default()
+            })
+        };
+        // Heartbeats on either side of the challenge are skipped (#6384).
+        let mut body = heartbeat();
+        body.extend(frame(challenge()));
+        body.extend(heartbeat());
+        body.extend(heartbeat());
         body.extend(frame(EnrollCodexResponse {
             event: Some(enroll_codex_response::Event::Credential(Box::new(
                 Credential {
@@ -764,6 +789,8 @@ mod tests {
         assert!(received);
         assert_eq!(result.id, "stored-id");
         assert_eq!(result.revocation_generation, 9_007_199_254_740_993);
+        let request: EnrollCodexRequest = enrollment_request(&server).await;
+        assert!(request.accepts_heartbeats);
     }
 
     #[tokio::test]
@@ -802,9 +829,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_enrollment_heartbeats_alone_show_nothing_and_save_nothing() {
+        let server = MockServer::start().await;
+        let mut body = Vec::new();
+        for _ in 0..3 {
+            body.extend(frame(EnrollGithubResponse {
+                event: Some(enroll_github_response::Event::Heartbeat(Default::default())),
+                ..Default::default()
+            }));
+        }
+        stream_at(
+            &server,
+            "/codewire.v1.CredentialMutationService/EnrollGithub",
+            &mut body,
+        )
+        .await;
+        let mut shown = 0;
+        let error = client(&server)
+            .enroll_github(
+                EnrollGithubRequest {
+                    name: "work".into(),
+                    ..Default::default()
+                },
+                |_| {
+                    shown += 1;
+                    true
+                },
+            )
+            .await
+            .unwrap_err();
+        // A heartbeat is neither a challenge to show nor a result.
+        assert_eq!(shown, 0);
+        assert_eq!(error.code(), ErrorCode::Unknown);
+        assert!(error.message().contains("reconcile"));
+    }
+
+    #[tokio::test]
     async fn github_enrollment_delivers_one_safe_challenge_and_committed_oauth_identity() {
         let server = MockServer::start().await;
-        let mut body = frame(github_challenge("https://github.com/login/device"));
+        let heartbeat = || {
+            frame(EnrollGithubResponse {
+                event: Some(enroll_github_response::Event::Heartbeat(Default::default())),
+                ..Default::default()
+            })
+        };
+        // Heartbeats on either side of the challenge are skipped (#6384).
+        let mut body = heartbeat();
+        body.extend(frame(github_challenge("https://github.com/login/device")));
+        body.extend(heartbeat());
+        body.extend(heartbeat());
         body.extend(frame(EnrollGithubResponse {
             event: Some(enroll_github_response::Event::Credential(Box::new(
                 Credential {
@@ -862,6 +935,8 @@ mod tests {
             }]
         );
         server.verify().await;
+        let request: EnrollGithubRequest = enrollment_request(&server).await;
+        assert!(request.accepts_heartbeats);
     }
 
     #[tokio::test]

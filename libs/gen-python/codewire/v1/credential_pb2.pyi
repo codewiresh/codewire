@@ -213,24 +213,32 @@ class GetCredentialResponse(_message.Message):
     def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
 
 class EnrollCodexRequest(_message.Message):
-    __slots__ = ("name", "credential_id", "expected_revocation_generation")
+    __slots__ = ("name", "credential_id", "expected_revocation_generation", "accepts_heartbeats")
     NAME_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTS_HEARTBEATS_FIELD_NUMBER: _ClassVar[int]
     name: str
     credential_id: str
     expected_revocation_generation: int
-    def __init__(self, name: _Optional[str] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+    accepts_heartbeats: bool
+    def __init__(self, name: _Optional[str] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ..., accepts_heartbeats: _Optional[bool] = ...) -> None: ...
 
 class EnrollGithubRequest(_message.Message):
-    __slots__ = ("name", "credential_id", "expected_revocation_generation")
+    __slots__ = ("name", "credential_id", "expected_revocation_generation", "accepts_heartbeats")
     NAME_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTS_HEARTBEATS_FIELD_NUMBER: _ClassVar[int]
     name: str
     credential_id: str
     expected_revocation_generation: int
-    def __init__(self, name: _Optional[str] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+    accepts_heartbeats: bool
+    def __init__(self, name: _Optional[str] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ..., accepts_heartbeats: _Optional[bool] = ...) -> None: ...
+
+class EnrollmentHeartbeat(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class AddApiKeyCredentialRequest(_message.Message):
     __slots__ = ("provider", "name", "value", "expires_at_unix")
@@ -349,12 +357,14 @@ class CodexDeviceChallenge(_message.Message):
     def __init__(self, verification_url: _Optional[str] = ..., user_code: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
 
 class EnrollCodexResponse(_message.Message):
-    __slots__ = ("challenge", "credential")
+    __slots__ = ("challenge", "credential", "heartbeat")
     CHALLENGE_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     challenge: CodexDeviceChallenge
     credential: Credential
-    def __init__(self, challenge: _Optional[_Union[CodexDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+    heartbeat: EnrollmentHeartbeat
+    def __init__(self, challenge: _Optional[_Union[CodexDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ..., heartbeat: _Optional[_Union[EnrollmentHeartbeat, _Mapping]] = ...) -> None: ...
 
 class GithubDeviceChallenge(_message.Message):
     __slots__ = ("verification_url", "user_code", "expires_at_unix")
@@ -367,14 +377,16 @@ class GithubDeviceChallenge(_message.Message):
     def __init__(self, verification_url: _Optional[str] = ..., user_code: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
 
 class EnrollGithubResponse(_message.Message):
-    __slots__ = ("challenge", "credential", "pending_permissions")
+    __slots__ = ("challenge", "credential", "heartbeat", "pending_permissions")
     CHALLENGE_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     PENDING_PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
     challenge: GithubDeviceChallenge
     credential: Credential
+    heartbeat: EnrollmentHeartbeat
     pending_permissions: _containers.RepeatedCompositeFieldContainer[GithubAppPendingPermissions]
-    def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ..., pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
+    def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ..., heartbeat: _Optional[_Union[EnrollmentHeartbeat, _Mapping]] = ..., pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
 
 class GithubAppPendingPermissions(_message.Message):
     __slots__ = ("account", "installation_id", "account_kind")

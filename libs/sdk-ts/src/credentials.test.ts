@@ -132,9 +132,10 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
       assert.deepEqual(
         Object.keys(body),
         body.name === "reconnect"
-          ? ["name", "credentialId", "expectedRevocationGeneration"]
-          : ["name"],
+          ? ["name", "credentialId", "expectedRevocationGeneration", "acceptsHeartbeats"]
+          : ["name", "acceptsHeartbeats"],
       );
+      assert.equal(body.acceptsHeartbeats, true);
       const timeout = Number(request.headers.get("connect-timeout-ms"));
       assert.ok(timeout > 900_000 && timeout <= 960_000, "enrollment must override only this call's 30-second default");
       enrollmentAborted = false;
@@ -146,7 +147,10 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
           }, { once: true });
           controller.enqueue(frame({ challenge }));
           if (body.name === "success") {
+            // Heartbeats while the person approves the code are skipped (#6384).
+            controller.enqueue(frame({ heartbeat: {} }));
             releaseCommit = () => {
+              controller.enqueue(frame({ heartbeat: {} }));
               controller.enqueue(frame({ credential }));
               controller.enqueue(frame({}, 2));
               controller.close();

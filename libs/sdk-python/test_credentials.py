@@ -111,6 +111,8 @@ class CredentialFixture:
             yield challenge
             self.after_challenge = True
             if request.name == "success":
+                # Heartbeats while the person approves the code are skipped (#6384).
+                yield pb.EnrollCodexResponse(heartbeat=pb.EnrollmentHeartbeat())
                 yield pb.EnrollCodexResponse(credential=self.credential())
             elif request.name == "error":
                 raise ConnectError(Code.UNAVAILABLE, "synthetic unavailable")
@@ -238,7 +240,9 @@ class CredentialsTestCase(unittest.TestCase):
         self.assertEqual(self.paths, ["/codewire.v1.CredentialMutationService/EnrollCodex"])
         request = self.fixture.calls[0][1]
         self.assertEqual({field.name: field.number for field in request.DESCRIPTOR.fields}, {
-            "name": 1, "credential_id": 2, "expected_revocation_generation": 3})
+            "name": 1, "credential_id": 2, "expected_revocation_generation": 3,
+            "accepts_heartbeats": 4})
+        self.assertTrue(request.accepts_heartbeats)
         self.assertFalse(request.HasField("credential_id"))
         self.assertFalse(request.HasField("expected_revocation_generation"))
 

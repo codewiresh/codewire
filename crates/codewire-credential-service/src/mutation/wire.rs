@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
 use codewire_credential_broker::provider_oauth::claude::{
@@ -13,11 +14,18 @@ use codewire_server_core::connect_error::{
 };
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 
-use super::{CredentialMutationOwner, Error};
+use super::{CredentialMutationOwner, Error, Events};
 
 /// The ErrorInfo metadata key of the configured GitHub App's install page on
 /// `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED` (`docs/dev/SECRETS-AND-CREDENTIALS.md`).
 const INSTALL_URL: &str = "install_url";
+
+/// How long an enrollment stream may send nothing before a heartbeat, for a
+/// client that accepts them (#6384). Cloudflare, in front of the public
+/// gateway, ends a response silent for about two minutes, and a device code
+/// waits up to 15 for a person to approve it. As the dashboard's own event
+/// streams send theirs.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(super) fn router(owner: Arc<CredentialMutationOwner>) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(Service::new(owner)))
@@ -124,14 +132,26 @@ impl CredentialMutationService for Service {
                 request.expected_revocation_generation,
             )
             .map_err(&github_error)?;
-        let stream = futures::stream::unfold(
-            (events, github_error),
-            |(mut events, github_error)| async move {
-                let message = events.receiver.recv().await?;
-                Some((message.map_err(&github_error), (events, github_error)))
+        let heartbeat = request
+            .accepts_heartbeats
+            .then(|| proto::EnrollGithubResponse {
+                event: Some(proto::enroll_github_response::Event::Heartbeat(
+                    Default::default(),
+                )),
+                ..Default::default()
+            });
+        connectrpc::Response::stream_ok(with_heartbeats(
+            events,
+            heartbeat,
+            HEARTBEAT_INTERVAL,
+            |message| {
+                matches!(
+                    message.event,
+                    Some(proto::enroll_github_response::Event::Credential(_))
+                )
             },
-        );
-        connectrpc::Response::stream_ok(stream)
+            github_error,
+        ))
     }
 
     async fn complete_github_app_authorization(
@@ -219,11 +239,26 @@ impl CredentialMutationService for Service {
                 request.expected_revocation_generation,
             )
             .map_err(error)?;
-        let stream = futures::stream::unfold(events, |mut events| async {
-            let message = events.receiver.recv().await?;
-            Some((message.map_err(error), events))
-        });
-        connectrpc::Response::stream_ok(stream)
+        let heartbeat = request
+            .accepts_heartbeats
+            .then(|| proto::EnrollCodexResponse {
+                event: Some(proto::enroll_codex_response::Event::Heartbeat(
+                    Default::default(),
+                )),
+                ..Default::default()
+            });
+        connectrpc::Response::stream_ok(with_heartbeats(
+            events,
+            heartbeat,
+            HEARTBEAT_INTERVAL,
+            |message| {
+                matches!(
+                    message.event,
+                    Some(proto::enroll_codex_response::Event::Credential(_))
+                )
+            },
+            error,
+        ))
     }
 
     async fn add_api_key_credential(
@@ -389,6 +424,38 @@ impl CredentialMutationService for Service {
             .map_err(error)?;
         connectrpc::Response::ok(proto::DeleteCredentialResponse::default())
     }
+}
+
+/// An enrollment's events as its response stream. With `heartbeat`, the
+/// stream sends it after every `interval` with no event, until the credential
+/// or an error, so the end of the stream follows the credential directly.
+fn with_heartbeats<T: Clone>(
+    events: Events<T>,
+    heartbeat: Option<T>,
+    interval: Duration,
+    is_credential: fn(&T) -> bool,
+    map_error: impl Fn(Error) -> connectrpc::ConnectError,
+) -> impl futures::Stream<Item = Result<T, connectrpc::ConnectError>> {
+    futures::stream::unfold(
+        (events, heartbeat, map_error),
+        move |(mut events, mut heartbeat, map_error)| async move {
+            let message = match &heartbeat {
+                Some(beat) => match tokio::time::timeout(interval, events.receiver.recv()).await {
+                    Ok(message) => message?,
+                    Err(_) => Ok(beat.clone()),
+                },
+                None => events.receiver.recv().await?,
+            };
+            let ended = match &message {
+                Ok(message) => is_credential(message),
+                Err(_) => true,
+            };
+            if ended {
+                heartbeat = None;
+            }
+            Some((message.map_err(&map_error), (events, heartbeat, map_error)))
+        },
+    )
 }
 
 pub(super) fn credential(metadata: CredentialMetadata) -> proto::Credential {
@@ -718,5 +785,143 @@ mod tests {
         // Without an App there is no page to name.
         let wire = (service(None).await.github_error())(Error::GitHubInstallationRequired);
         assert!(error_info(&wire).metadata.is_empty());
+    }
+
+    mod heartbeats {
+        use futures::StreamExt as _;
+        use proto::enroll_github_response::Event;
+        use tokio::sync::mpsc;
+        use tokio::time::{Instant, timeout};
+
+        use super::*;
+
+        /// Longer than the edge's limit on a silent response: Cloudflare's
+        /// is about two minutes.
+        const EDGE_IDLE_LIMIT: Duration = Duration::from_secs(125);
+        const BOUND: Duration = Duration::from_secs(1);
+
+        fn message(event: Event) -> proto::EnrollGithubResponse {
+            proto::EnrollGithubResponse {
+                event: Some(event),
+                ..Default::default()
+            }
+        }
+
+        fn heartbeat() -> proto::EnrollGithubResponse {
+            message(Event::Heartbeat(Default::default()))
+        }
+
+        fn is_credential(message: &proto::EnrollGithubResponse) -> bool {
+            matches!(message.event, Some(Event::Credential(_)))
+        }
+
+        type Sender = mpsc::Sender<Result<proto::EnrollGithubResponse, Error>>;
+
+        fn stream(
+            accepts: bool,
+        ) -> (
+            Sender,
+            impl futures::Stream<Item = Result<proto::EnrollGithubResponse, connectrpc::ConnectError>>,
+        ) {
+            let (sender, receiver) = mpsc::channel(2);
+            let events = Events {
+                receiver,
+                _cancel: tokio_util::sync::CancellationToken::new().drop_guard(),
+            };
+            let stream = with_heartbeats(
+                events,
+                accepts.then(heartbeat),
+                HEARTBEAT_INTERVAL,
+                is_credential,
+                error,
+            );
+            (sender, stream)
+        }
+
+        fn kind(
+            item: Option<Result<proto::EnrollGithubResponse, connectrpc::ConnectError>>,
+        ) -> &'static str {
+            match item {
+                None => "end",
+                Some(Err(_)) => "error",
+                Some(Ok(message)) => match message.event {
+                    Some(Event::Challenge(_)) => "challenge",
+                    Some(Event::Credential(_)) => "credential",
+                    Some(Event::Heartbeat(_)) => "heartbeat",
+                    None => "empty",
+                },
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_stream_waiting_past_the_edge_limit_sends_a_heartbeat_each_interval() {
+            let (sender, stream) = stream(true);
+            let mut stream = std::pin::pin!(stream);
+            sender
+                .send(Ok(message(Event::Challenge(Default::default()))))
+                .await
+                .unwrap();
+            assert_eq!(
+                kind(timeout(BOUND, stream.next()).await.unwrap()),
+                "challenge"
+            );
+            // The person takes longer than the edge allows a silent response.
+            let start = Instant::now();
+            let mut last = start;
+            while last - start < EDGE_IDLE_LIMIT {
+                let item = timeout(HEARTBEAT_INTERVAL + BOUND, stream.next())
+                    .await
+                    .unwrap();
+                assert_eq!(kind(item), "heartbeat");
+                assert_eq!(Instant::now() - last, HEARTBEAT_INTERVAL);
+                last = Instant::now();
+            }
+            sender
+                .send(Ok(message(Event::Credential(Default::default()))))
+                .await
+                .unwrap();
+            assert_eq!(
+                kind(timeout(BOUND, stream.next()).await.unwrap()),
+                "credential"
+            );
+            // Nothing follows the credential but the end.
+            assert!(timeout(EDGE_IDLE_LIMIT, stream.next()).await.is_err());
+            drop(sender);
+            assert_eq!(kind(timeout(BOUND, stream.next()).await.unwrap()), "end");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_client_that_did_not_ask_gets_no_heartbeat() {
+            let (sender, stream) = stream(false);
+            let mut stream = std::pin::pin!(stream);
+            sender
+                .send(Ok(message(Event::Challenge(Default::default()))))
+                .await
+                .unwrap();
+            assert_eq!(
+                kind(timeout(BOUND, stream.next()).await.unwrap()),
+                "challenge"
+            );
+            assert!(timeout(EDGE_IDLE_LIMIT, stream.next()).await.is_err());
+            drop(sender);
+            assert_eq!(kind(timeout(BOUND, stream.next()).await.unwrap()), "end");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_heartbeat_follows_an_error() {
+            let (sender, stream) = stream(true);
+            let mut stream = std::pin::pin!(stream);
+            assert_eq!(
+                kind(
+                    timeout(HEARTBEAT_INTERVAL + BOUND, stream.next())
+                        .await
+                        .unwrap()
+                ),
+                "heartbeat"
+            );
+            sender.send(Err(Error::Expired)).await.unwrap();
+            assert_eq!(kind(timeout(BOUND, stream.next()).await.unwrap()), "error");
+            assert!(timeout(EDGE_IDLE_LIMIT, stream.next()).await.is_err());
+        }
     }
 }
