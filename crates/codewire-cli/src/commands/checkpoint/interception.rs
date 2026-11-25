@@ -64,13 +64,12 @@ fn refusal_step(code: &str, files: impl FnOnce() -> Option<Files>) -> Option<Str
     if code.ends_with("_restore_interception_switched_off") {
         return files().map(|files| format!("rm {}", files.switch));
     }
-    // Only the supervisor's log names the step a failed clear stopped at.
+    // Only the supervisor's log names the step a failed clear stopped at: the
+    // last such line, read across the rotated file and the current one.
     if code.ends_with("_state_disk_not_cleared") {
         return files().map(|files| {
-            format!(
-                "grep 'state_disk_clear outcome=failed' {}",
-                files.supervisor_log
-            )
+            let log = files.supervisor_log;
+            format!("grep -hs 'state_disk_clear outcome=failed' {log}.1 {log} | tail -n 1")
         });
     }
     None
@@ -139,11 +138,24 @@ mod tests {
             assert_eq!(
                 step(code).as_deref(),
                 Some(
-                    "grep 'state_disk_clear outcome=failed' /home/u/.codewire/native-v1/logs/supervisor.log"
+                    "grep -hs 'state_disk_clear outcome=failed' /home/u/.codewire/native-v1/logs/supervisor.log.1 /home/u/.codewire/native-v1/logs/supervisor.log | tail -n 1"
                 ),
                 "{code}"
             );
         }
+        // A quoted path takes the rotated file's suffix outside its quotes.
+        let quoted = refusal_step("start_state_disk_not_cleared", || {
+            Some(Files {
+                switch: String::new(),
+                supervisor_log: shell_word("/srv/my state/logs/supervisor.log"),
+            })
+        });
+        assert_eq!(
+            quoted.as_deref(),
+            Some(
+                "grep -hs 'state_disk_clear outcome=failed' '/srv/my state/logs/supervisor.log'.1 '/srv/my state/logs/supervisor.log' | tail -n 1"
+            )
+        );
     }
 
     #[test]
