@@ -363,6 +363,21 @@ strip = true
 [profile.dev.package."sha2@0.10.9"]
 opt-level = 3
 
+# IdP and auth integration suites run real Argon2id (64 MiB, t=3, p=2) and
+# bcrypt hashes. Unoptimized debug builds spent ~4.8 s on a single roundtrip
+# and ~70 s in codewire-idp::signup_limit alone (infra#1534).
+[profile.dev.package."argon2@0.5.3"]
+opt-level = 3
+
+[profile.dev.package."blake2@0.10.6"]
+opt-level = 3
+
+[profile.dev.package."bcrypt@0.15.1"]
+opt-level = 3
+
+[profile.dev.package."blowfish@0.9.1"]
+opt-level = 3
+
 # In-process VMM RPC fixtures admit their own test executable. Omit linked
 # debug information so it fits the unchanged 256MiB executable bound.
 [profile.test.package.codewire-local-vmm]
