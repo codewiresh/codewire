@@ -104,7 +104,13 @@ pub struct NetstackLimits {
     pub stream_chunk_bytes: usize,
     pub max_queued_packets: usize,
     pub max_packets_per_wake: usize,
+    /// A connection whose peer sends nothing for this long is aborted.
     pub tcp_idle_timeout: Duration,
+    /// How often an idle connection sends the peer a TCP keep-alive. A live
+    /// peer answers it, which counts as traffic, so a live but idle peer is
+    /// kept; one that answers nothing is still aborted at `tcp_idle_timeout`
+    /// (#6399). Below `tcp_idle_timeout`.
+    pub tcp_keep_alive: Duration,
 }
 
 impl Default for NetstackLimits {
@@ -121,6 +127,7 @@ impl Default for NetstackLimits {
             max_queued_packets: 256,
             max_packets_per_wake: 64,
             tcp_idle_timeout: Duration::from_secs(120),
+            tcp_keep_alive: Duration::from_secs(30),
         }
     }
 }
@@ -336,6 +343,12 @@ fn validate_limits(limits: NetstackLimits) -> std::io::Result<()> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "netstack TCP idle timeout must be between one second and one day",
+        ));
+    }
+    if limits.tcp_keep_alive.is_zero() || limits.tcp_keep_alive >= limits.tcp_idle_timeout {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "netstack TCP keep-alive must be nonzero and shorter than the idle timeout",
         ));
     }
     Ok(())

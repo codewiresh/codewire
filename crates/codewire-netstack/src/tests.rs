@@ -84,6 +84,7 @@ fn tight_limits() -> NetstackLimits {
         max_queued_packets: 16,
         max_packets_per_wake: 4,
         tcp_idle_timeout: Duration::from_secs(5),
+        tcp_keep_alive: Duration::from_secs(1),
     }
 }
 
@@ -660,11 +661,55 @@ async fn packet_transport_loss_closes_listeners_and_rejects_commands() {
     );
 }
 
+/// A link that forwards packets while `open` holds and drops them once it
+/// is cleared: a peer that stops answering, as a paused or dead one does.
+fn gated_link(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
+    open: Arc<std::sync::atomic::AtomicBool>,
+) {
+    tokio::spawn(async move {
+        while let Some(packet) = rx.recv().await {
+            if open.load(Ordering::SeqCst) && tx.send(packet).await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// A pair whose B-to-A direction runs through a [`gated_link`].
+fn pair_with_a_silenceable_peer(
+    limits: NetstackLimits,
+    open: Arc<std::sync::atomic::AtomicBool>,
+) -> (Netstack, Netstack) {
+    let (a_out_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(limits.max_queued_packets);
+    let (b_out_tx, b_out_rx) = mpsc::channel::<Vec<u8>>(limits.max_queued_packets);
+    let (a_in_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(limits.max_queued_packets);
+    gated_link(b_out_rx, a_in_tx, open);
+    let config = |local_ip| NetstackConfig {
+        local_ip,
+        prefix_len: PREFIX,
+        mtu: 1_500,
+        verify_rx_checksums: true,
+        accept_any_ip: false,
+        default_gateway: None,
+    };
+    let a = Netstack::with_config_and_limits(config(IpAddr::V6(A_IP)), limits, a_in_rx, a_out_tx)
+        .expect("A bounded netstack");
+    let b = Netstack::with_config_and_limits(config(IpAddr::V6(B_IP)), limits, b_in_rx, b_out_tx)
+        .expect("B bounded netstack");
+    (a, b)
+}
+
+/// A peer that stops answering is reclaimed at the idle timeout, even though
+/// the stack keeps sending it keep-alives (#6399).
 #[tokio::test]
 async fn idle_timeout_reclaims_a_silent_connection() {
     let mut limits = tight_limits();
     limits.tcp_idle_timeout = Duration::from_secs(1);
-    let (client_stack, server_stack) = wired_pair_with_limits(limits, limits);
+    limits.tcp_keep_alive = Duration::from_millis(300);
+    let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (client_stack, server_stack) = pair_with_a_silenceable_peer(limits, open.clone());
     let mut listener = server_stack.bind(7600).await.expect("listener");
     let mut client = client_stack
         .connect(SocketAddr::new(IpAddr::V6(B_IP), 7600))
@@ -674,6 +719,8 @@ async fn idle_timeout_reclaims_a_silent_connection() {
         .await
         .expect("accept timed out")
         .expect("accepted stream");
+    // From here the server answers nothing, keep-alives included.
+    open.store(false, Ordering::SeqCst);
 
     let mut byte = [0; 1];
     let error = tokio::time::timeout(Duration::from_secs(3), client.read(&mut byte))
@@ -681,6 +728,83 @@ async fn idle_timeout_reclaims_a_silent_connection() {
         .expect("idle timeout did not reclaim the connection")
         .expect_err("idle timeout must not look like a clean EOF");
     assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+}
+
+/// #6399: a live peer that sends nothing for longer than the idle timeout is
+/// kept, because it answers the stack's keep-alives. Without them the
+/// timeout would abort it, as it did a standard guest's idle platform
+/// connections. The timeout is 2 s rather than 1 s because a smoltcp peer
+/// answers a keep-alive probe at most once a second (its challenge-ACK
+/// limit); a Linux guest answers every one.
+#[tokio::test]
+async fn keep_alive_keeps_a_live_but_silent_peer() {
+    let mut limits = tight_limits();
+    limits.tcp_idle_timeout = Duration::from_secs(2);
+    limits.tcp_keep_alive = Duration::from_millis(300);
+    let (client_stack, server_stack) = wired_pair_with_limits(limits, limits);
+    let mut listener = server_stack.bind(7601).await.expect("listener");
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7601))
+        .await
+        .expect("client");
+    let mut server = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+
+    // Silent both ways for well over twice the idle timeout.
+    let mut byte = [0; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), client.read(&mut byte))
+            .await
+            .is_err(),
+        "the idle connection ended instead of staying open"
+    );
+    tokio::time::timeout(Duration::from_secs(2), client.write_all(b"x"))
+        .await
+        .expect("the write after the idle stretch hung")
+        .expect("client still writes");
+    tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut byte))
+        .await
+        .expect("the read after the idle stretch hung")
+        .expect("server still reads");
+    assert_eq!(&byte, b"x");
+}
+
+#[test]
+fn a_keep_alive_not_below_the_idle_timeout_is_refused() {
+    for keep_alive in [
+        Duration::ZERO,
+        Duration::from_secs(5),
+        Duration::from_secs(6),
+    ] {
+        let limits = NetstackLimits {
+            tcp_keep_alive: keep_alive,
+            ..tight_limits()
+        };
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(limits.max_queued_packets);
+        let (_in_tx, in_rx) = mpsc::channel::<Vec<u8>>(limits.max_queued_packets);
+        let config = NetstackConfig {
+            local_ip: IpAddr::V6(A_IP),
+            prefix_len: PREFIX,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: false,
+            default_gateway: None,
+        };
+        let Err(error) = Netstack::with_config_and_limits(config, limits, in_rx, tx) else {
+            panic!("a keep-alive of {keep_alive:?} with a 5 s idle timeout must be refused");
+        };
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{keep_alive:?}"
+        );
+    }
+    assert_eq!(
+        NetstackLimits::default().tcp_keep_alive,
+        Duration::from_secs(30)
+    );
 }
 
 /// Audit one wire packet like a checksum-verifying peer: every TCP segment
@@ -1256,6 +1380,7 @@ async fn handshakes_that_never_complete_do_not_wedge_the_listener() {
     let limits = NetstackLimits {
         accept_queue: 2,
         tcp_idle_timeout: Duration::from_secs(1),
+        tcp_keep_alive: Duration::from_millis(300),
         ..NetstackLimits::default()
     };
     let config = |local_ip| NetstackConfig {
@@ -1423,6 +1548,7 @@ async fn the_catch_all_drops_syns_beyond_the_connection_limit_until_a_slot_frees
     let limits = NetstackLimits {
         max_connections: 2,
         tcp_idle_timeout: Duration::from_secs(1),
+        tcp_keep_alive: Duration::from_millis(300),
         ..NetstackLimits::default()
     };
     let (client, worker) = any_ip_pair(limits, LOST);

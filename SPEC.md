@@ -759,10 +759,15 @@ their combined root disk.
 The VM has no network device. Inside the guest a TUN device carries raw IP
 over a vsock port to the host, where the confined network worker
 (`cw __native-network-worker`, on `crates/codewire-netstack`) terminates the
-guest's TCP and DNS and has no dial authority of its own. It carries no other
-UDP: a well-formed IPv4 datagram that is not a DNS A or AAAA question to the
-environment's resolver (`192.0.2.1:53`), such as DNS sent to another server or
-STUN, is dropped with no reply, so its sender waits out its own timeout, and
+guest's TCP and DNS and has no dial authority of its own. On each TCP
+connection it terminates, the netstack sends a keep-alive every 30 s, so a
+live but idle peer is kept, and aborts a connection whose peer has answered
+nothing for 120 s (#6399). The same netstack, with the same limits, carries
+a `standard` Pod's platform connections and `cw-egress`'s worker. It carries
+no other UDP: a well-formed IPv4 datagram that is not a DNS A or AAAA
+question to the environment's resolver (`192.0.2.1:53`), such as DNS sent to
+another server or STUN, is dropped with no reply, so its sender waits out its
+own timeout, and
 is recorded as refused, `udp_not_carried`, against its address and port in
 the refusal log below (#3997). The record is best effort: it is skipped
 rather than delay a TCP admission. ICMP, IPv6, and malformed or fragmented

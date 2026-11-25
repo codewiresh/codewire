@@ -40,6 +40,9 @@ fn tcp_socket(limits: &NetstackLimits) -> tcp::Socket<'static> {
     let tx = tcp::SocketBuffer::new(vec![0u8; limits.socket_buffer_bytes]);
     let mut socket = tcp::Socket::new(rx, tx);
     socket.set_timeout(Some(SmolDuration::from(limits.tcp_idle_timeout)));
+    // A live but idle peer answers the keep-alive, which resets the timeout's
+    // clock; a peer that answers nothing is still reclaimed (#6399).
+    socket.set_keep_alive(Some(SmolDuration::from(limits.tcp_keep_alive)));
     // The netstack relays bytes another TCP stack already segmented, so Nagle
     // would only add the peer's delayed-ACK wait (40 ms for a Linux guest) to
     // every small write that follows an unacknowledged one.
