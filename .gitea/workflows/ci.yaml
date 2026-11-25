@@ -1121,6 +1121,8 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && steps.test-archive.outputs.ready == 'true' }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run the Rust packages shard
@@ -1253,6 +1255,8 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.rust_features_expected == 'true' && steps.feature-archives.outputs.ready == 'true' }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run the Rust features shard
@@ -1417,6 +1421,8 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') && steps.local-vmm-archives.outputs.ready == 'true' }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run selected Rust and transport

@@ -198,7 +198,7 @@ run_rust_archive_tests() {
   local extract entry
   rm -rf -- "$root"
   mkdir -p "$root/targets/archive/tmp"
-  cp -a "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src"
+  cp -a --reflink=auto "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src"
   if [ -d "$RUST_TEST_ARCHIVE" ]; then
     # fetch-test-archive.sh --extract unpacked it as it downloaded, and
     # reported it ready only once its bytes hashed to the digest.
@@ -220,10 +220,11 @@ run_rust_archive_tests() {
   for entry in "$extract/target"/*; do
     [ "${entry##*/}" = tmp ] || ln -s "$entry" "$root/targets/archive/${entry##*/}"
   done
-  # Write the extraction out before any test runs: tests that sync a
-  # filesystem within a deadline (the guest probe's workspace install) would
-  # otherwise wait on gigabytes of fresh pages.
-  sync
+  # Flush only the extraction and build filesystems (not unrelated VM disks
+  # such as Docker overlays or Postgres): tests that sync a filesystem within a
+  # deadline (the guest probe's workspace install) would otherwise wait on
+  # gigabytes of fresh pages.
+  sync -f "$root" "$extract"
   echo "[rust-archive-tests] filter: $filter${RUST_TEST_PARTITION:+ partition: $RUST_TEST_PARTITION}"
   (
     cd "$root/src"
@@ -508,7 +509,7 @@ extract_shard_archive() {
   if [ "$SHARD_ARCHIVE_SOURCE_READY" != true ]; then
     rm -rf -- "$root"
     mkdir -p "$root"
-    cp -a "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src" || return 1
+    cp -a --reflink=auto "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src" || return 1
     SHARD_ARCHIVE_EXTRACT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-shard-archives.XXXXXX")"
     SHARD_ARCHIVE_SOURCE_READY=true
     trap shard_archive_cleanup EXIT
@@ -530,8 +531,12 @@ extract_shard_archive() {
   for entry in "$extract/target"/*; do
     [ "${entry##*/}" = tmp ] || ln -s "$entry" "$target/${entry##*/}" || return 1
   done
-  # Write the extraction out before any test runs (see run_rust_archive_tests).
-  sync
+  # Only the guest-probe kernel fixtures sync a filesystem under a tight
+  # deadline (see run_rust_archive_tests); scope the flush to those archives
+  # and their filesystems instead of a global sync on every feature shard.
+  case "$key" in
+    guest-probe-*) sync -f "$root" "$extract" ;;
+  esac
   SHARD_ARCHIVE_TARGET="$extract/target"
 }
 
