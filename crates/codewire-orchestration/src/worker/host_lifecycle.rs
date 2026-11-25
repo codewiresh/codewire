@@ -209,8 +209,9 @@ async fn create_until(
     if super::create::create_command_cancelled(&env.state, &env.desired_state) {
         return Ok(());
     }
+    let operation_id = operation_id(env_id, scope, HostOperationKind::Create);
     if env.state == "running" {
-        return announce_running(authority).await;
+        return announce_running(authority, &operation_id).await;
     }
     let host_id: String = sqlx::query_scalar(
         "SELECT host_id FROM environments WHERE id = $1 AND runtime_backend = 'host' \
@@ -223,7 +224,6 @@ async fn create_until(
     if env.state == "pending" {
         svc.transition(env_id, "pending", "creating").await?;
     }
-    let operation_id = operation_id(env_id, scope, HostOperationKind::Create);
     if !settle_open(pool, authority, env_id, &operation_id, deadline).await? {
         return svc.mark_error(env_id, UNANSWERED).await;
     }
@@ -255,7 +255,7 @@ async fn create_until(
             if state == proto::HostEnvironmentState::HOST_ENVIRONMENT_STATE_RUNNING {
                 svc.transition(env_id, "creating", "running").await?;
                 svc.mark_started(env_id).await?;
-                announce_running(authority).await?;
+                announce_running(authority, &operation_id).await?;
             } else {
                 // A create satisfied by a VM made earlier may find it
                 // stopped; it is never reported as running (#4640).
@@ -280,19 +280,20 @@ async fn create_until(
 /// cluster's setup and start do once the environment is usable (#6397). A
 /// host environment has nothing to set up: its host refuses a project that
 /// names repositories, credentials, secrets or skills. One row per command,
-/// so a retry whose attempt before ended without it writes it, and no other.
-async fn announce_running(authority: &ActivityAuthority) -> anyhow::Result<()> {
-    let generation = authority.operation_generation();
+/// keyed by its host operation: a retry whose attempt before ended without
+/// it writes it, and no other. The operation generation can't key it, since
+/// one workflow run's create, stop and start all share one.
+async fn announce_running(authority: &ActivityAuthority, operation_id: &str) -> anyhow::Result<()> {
     let mut tx = authority.pool().begin().await?;
     authority
         .lock_transaction_for_states(&mut tx, &["running"])
         .await?;
     let announced: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM environment_logs WHERE environment_id = $1 \
-         AND phase = 'complete' AND metadata->'operation_generation' = to_jsonb($2::bigint))",
+         AND phase = 'complete' AND metadata->>'host_operation_id' = $2)",
     )
     .bind(authority.environment_id())
-    .bind(generation)
+    .bind(operation_id)
     .fetch_one(&mut *tx)
     .await?;
     if !announced {
@@ -302,7 +303,7 @@ async fn announce_running(authority: &ActivityAuthority) -> anyhow::Result<()> {
             "complete",
             "completed",
             "Running on its host",
-            Some(serde_json::json!({ "operation_generation": generation })),
+            Some(serde_json::json!({ "host_operation_id": operation_id })),
         )
         .await?;
     }
@@ -388,9 +389,10 @@ async fn change_until(
         Change::Stop => svc.prepare_stop(&snapshot).await?,
         Change::Destroy => svc.prepare_destroy(&snapshot).await?,
     };
+    let operation_id = operation_id(env_id, scope, change.kind());
     if !proceed {
         if change == Change::Start && env.state == "running" {
-            return announce_running(authority).await;
+            return announce_running(authority, &operation_id).await;
         }
         return Ok(());
     }
@@ -413,7 +415,6 @@ async fn change_until(
             }
         };
     };
-    let operation_id = operation_id(env_id, scope, change.kind());
     // An earlier command's operation ends first, so the host's report below
     // includes whatever it did.
     if !settle_open(pool, authority, env_id, &operation_id, deadline).await? {
@@ -489,7 +490,7 @@ async fn change_until(
         (Change::Start, Vm::HOST_ENVIRONMENT_STATE_RUNNING) => {
             svc.complete_start(env_id).await?;
             svc.mark_started(env_id).await?;
-            announce_running(authority).await
+            announce_running(authority, &operation_id).await
         }
         (Change::Stop, Vm::HOST_ENVIRONMENT_STATE_STOPPED) => {
             svc.complete_stop(env_id).await?;

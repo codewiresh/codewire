@@ -61,7 +61,7 @@ async fn seed(db: &TestDatabase) -> Result<String> {
     Ok(host_id)
 }
 
-/// A new command: the API's intent change, which moves the generation on.
+/// A new command: the API's intent change, at operation `generation`.
 async fn command(db: &TestDatabase, desired: &str, generation: i64) -> Result<ActivityAuthority> {
     sqlx::query(
         "UPDATE environments SET desired_state = $2, environment_operation_generation = $3 \
@@ -489,10 +489,12 @@ async fn db_stop_start_and_destroy_each_name_the_vm_the_host_last_reported_once(
                 "destroyed",
             ),
         ];
-        for (expected_generation, (change, desired, generation, vm, ends)) in (1..).zip(steps) {
-            let authority = command(&db, desired, generation).await?;
+        for (expected_generation, (change, desired, step, vm, ends)) in (1..).zip(steps) {
+            // One workflow run makes every command, at the operation
+            // generation its create claimed: only the scope tells them apart.
+            let authority = command(&db, desired, 1).await?;
             let host_generation = expected_generation + 1;
-            let scope = scope(10 + generation);
+            let scope = scope(10 + step);
             let (changed, sent) = tokio::join!(
                 super::change(&db.pool, &authority, &scope, change),
                 answer_next(&db, &host_id, done(vm, host_generation))
