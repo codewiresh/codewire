@@ -15,6 +15,16 @@ impl std::fmt::Debug for v1::BootSecret {
     }
 }
 
+/// The owner's own SSH stream to an environment: not a remote one.
+impl From<uuid::Uuid> for v1::SshStreamOpen {
+    fn from(environment_id: uuid::Uuid) -> Self {
+        Self {
+            environment_id: environment_id.to_string(),
+            remote: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::v1;

@@ -6949,8 +6949,8 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<tonic::Streaming<v1::SshStreamFrame>>,
     ) -> Result<Response<Self::OpenEnvironmentSshStreamStream>, Status> {
         let mut inbound = request.into_inner();
-        let environment_id = ssh::opened_environment(&mut inbound).await?;
-        let permit = self.ssh_streams.admit(environment_id)?;
+        let (environment_id, remote) = ssh::opened_environment(&mut inbound).await?;
+        let permit = self.ssh_streams.admit(environment_id, remote)?;
         // Subscribed before access is taken, so no stop between the two is
         // missed.
         let operations = self.operation_events.subscribe();

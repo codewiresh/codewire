@@ -241,6 +241,11 @@ message SshStreamFrame {
 message SshStreamOpen {
   // The environment's UUID, as the public API names it.
   string environment_id = 1;
+  // A stream a host's tailnet peer opens for a client on the environment's
+  // tailnet (#3609, slice 3), not the owner's own: it has its own budget and
+  // idle timeout, so remote connections never use up the owner's. Protocol 28;
+  // an older supervisor counts it with the owner's.
+  bool remote = 2;
 }
 
 message RetireSupervisorRequest {

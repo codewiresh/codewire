@@ -16,6 +16,7 @@ use codewire_workspace_access::daemon_access::{
     HostKeyStore, daemon_ssh_server_config, public_key_line,
 };
 use codewire_workspace_access::scp::DaemonScpRunner;
+use codewire_workspace_access::session_attach::{DaemonSessionAttachRunner, SessionAttachRunner};
 use codewire_workspace_access::sftp::DaemonSftpRunner;
 use codewire_workspace_access::ssh::{
     DaemonBackedSshRunner, ForwardDialError, ForwardDialer, ForwardIo, ForwardTarget,
@@ -38,6 +39,15 @@ const HOST_KEY_DIRECTORY: &str = "ssh-host-keys";
 /// Open SSH streams, per environment and for every environment together.
 const MAX_STREAMS_PER_ENVIRONMENT: usize = 8;
 const MAX_STREAMS: usize = 64;
+/// Open remote streams, which a host's tailnet peer opens for clients on an
+/// environment's tailnet (#3609, slice 3), apart from the owner's, so remote
+/// connections never use up the owner's local ones. Provisional until one
+/// VS Code window's peak on a host VM is measured in slice 3's walk.
+const MAX_REMOTE_STREAMS_PER_ENVIRONMENT: usize = 16;
+const MAX_REMOTE_STREAMS: usize = 64;
+/// A remote connection that sends nothing for this long ends; keepalive
+/// answers count, so a live client is never ended.
+const REMOTE_INACTIVITY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// The largest SSH frame sent to the client, and the in-memory pipe and frame
 /// queue behind it: a stream's memory stays bounded whatever its peer does.
 const FRAME_BYTES: usize = 32 * 1024;
@@ -101,26 +111,44 @@ fn host_key_directory(keys: &Path, environment_id: Uuid) -> PathBuf {
 }
 
 /// Open streams, bounded per environment and in total, so no peer can
-/// exhaust the supervisor every environment shares.
+/// exhaust the supervisor every environment shares. The owner's streams and
+/// remote ones are counted apart, each against its own bounds.
 #[derive(Default)]
 pub(super) struct SshStreams {
-    open: Mutex<HashMap<Uuid, usize>>,
+    /// Keyed by environment and whether the streams are remote.
+    open: Mutex<HashMap<(Uuid, bool), usize>>,
 }
 
 impl SshStreams {
-    pub(super) fn admit(self: &Arc<Self>, environment_id: Uuid) -> Result<SshStreamPermit, Status> {
+    pub(super) fn admit(
+        self: &Arc<Self>,
+        environment_id: Uuid,
+        remote: bool,
+    ) -> Result<SshStreamPermit, Status> {
+        let (most_here, most) = if remote {
+            (MAX_REMOTE_STREAMS_PER_ENVIRONMENT, MAX_REMOTE_STREAMS)
+        } else {
+            (MAX_STREAMS_PER_ENVIRONMENT, MAX_STREAMS)
+        };
         let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
-        let total: usize = open.values().sum();
-        let here = open.get(&environment_id).copied().unwrap_or(0);
-        if total >= MAX_STREAMS || here >= MAX_STREAMS_PER_ENVIRONMENT {
-            return Err(Status::resource_exhausted(
-                "too many SSH connections to local environments are open; close one and retry",
-            ));
+        let total: usize = open
+            .iter()
+            .filter(|((_, kind), _)| *kind == remote)
+            .map(|(_, count)| count)
+            .sum();
+        let here = open.get(&(environment_id, remote)).copied().unwrap_or(0);
+        if total >= most || here >= most_here {
+            return Err(Status::resource_exhausted(if remote {
+                "too many remote SSH connections to this host's environments are open; close one and retry"
+            } else {
+                "too many SSH connections to local environments are open; close one and retry"
+            }));
         }
-        *open.entry(environment_id).or_default() += 1;
+        *open.entry((environment_id, remote)).or_default() += 1;
         Ok(SshStreamPermit {
             streams: Arc::clone(self),
             environment_id,
+            remote,
         })
     }
 }
@@ -129,6 +157,7 @@ impl SshStreams {
 pub(super) struct SshStreamPermit {
     streams: Arc<SshStreams>,
     environment_id: Uuid,
+    remote: bool,
 }
 
 impl Drop for SshStreamPermit {
@@ -138,23 +167,26 @@ impl Drop for SshStreamPermit {
             .open
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(count) = open.get_mut(&self.environment_id) {
+        let key = (self.environment_id, self.remote);
+        if let Some(count) = open.get_mut(&key) {
             *count -= 1;
             if *count == 0 {
-                open.remove(&self.environment_id);
+                open.remove(&key);
             }
         }
     }
 }
 
-/// The environment from a stream's first frame, which must open it.
+/// The environment from a stream's first frame, which must open it, and
+/// whether the stream is remote.
 pub(super) async fn opened_environment(
     inbound: &mut Streaming<v1::SshStreamFrame>,
-) -> Result<Uuid, Status> {
+) -> Result<(Uuid, bool), Status> {
     match inbound.message().await? {
         Some(v1::SshStreamFrame {
             frame: Some(Frame::Open(open)),
         }) => Uuid::parse_str(&open.environment_id)
+            .map(|environment_id| (environment_id, open.remote))
             .map_err(|_| Status::invalid_argument("the SSH stream names an invalid environment")),
         _ => Err(Status::invalid_argument(
             "an SSH stream opens with its environment",
@@ -260,8 +292,18 @@ pub(super) fn serve(
     let (outbound, frames) = mpsc::channel(QUEUED_FRAMES);
     let (server_side, client_side) = tokio::io::duplex(PIPE_BYTES);
     let (mut from_server, mut to_server) = tokio::io::split(client_side);
-    let config = Arc::new(daemon_ssh_server_config(host_key));
+    let mut config = daemon_ssh_server_config(host_key);
+    if permit.remote {
+        config.inactivity_timeout = Some(REMOTE_INACTIVITY);
+    }
+    let config = Arc::new(config);
     let runner = Arc::new(DaemonBackedSshRunner::new(daemon.clone()));
+    // Durable sessions over SSH, as a hosted environment serves them (#3827):
+    // `cw shell` and `cw attach` keep a session across reconnects.
+    let sessions: Arc<dyn SessionAttachRunner> = Arc::new(DaemonSessionAttachRunner::new(
+        daemon.credential_client(),
+        environment_id.to_string(),
+    ));
     let dialer: Arc<dyn ForwardDialer> = if features.forwarding {
         Arc::new(DaemonForwardDialer::new(daemon.clone()).with_unix(features.socket_forwarding))
     } else {
@@ -277,6 +319,7 @@ pub(super) fn serve(
         WorkspaceSshHandler::new(runner)
     }
     .with_exec_shell(features.exec_shell)
+    .with_session_attach(sessions)
     // The guest daemon serves its API on vsock, so no workload port is its.
     .with_port_forwarding(dialer, Arc::new(platform_listeners(None)));
     tokio::spawn(async move {
@@ -530,6 +573,33 @@ mod tests {
         (stdout, exit)
     }
 
+    /// Durable sessions attach over SSH, as a hosted environment serves
+    /// them, so `cw shell` and `cw attach` work over the tailnet (#3609), on
+    /// a remote stream as on the owner's.
+    #[tokio::test]
+    async fn an_ssh_stream_offers_durable_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = in_process_daemon(temp.path()).await;
+        let keys = HostKeys::new(temp.path());
+        let environment = Uuid::new_v4();
+        let streams = Arc::new(SshStreams::default());
+        let (operations, _) = broadcast::channel(16);
+        let connected = connect(
+            daemon,
+            keys.private(environment).unwrap(),
+            operations.subscribe(),
+            environment,
+            streams.admit(environment, true).unwrap(),
+        )
+        .await;
+        let mut sessions = connected.client.channel_open_session().await.unwrap();
+        sessions
+            .request_subsystem(true, "session@codewire.sh")
+            .await
+            .unwrap();
+        assert!(matches!(sessions.wait().await, Some(ChannelMsg::Success)));
+    }
+
     #[tokio::test]
     async fn an_ssh_stream_runs_commands_through_the_daemon_with_the_environments_key() {
         let temp = tempfile::tempdir().unwrap();
@@ -543,7 +613,7 @@ mod tests {
             keys.private(environment).unwrap(),
             operations.subscribe(),
             environment,
-            streams.admit(environment).unwrap(),
+            streams.admit(environment, false).unwrap(),
         )
         .await;
 
@@ -796,22 +866,55 @@ mod tests {
         let streams = Arc::new(SshStreams::default());
         let environment = Uuid::new_v4();
         let mut held = (0..MAX_STREAMS_PER_ENVIRONMENT)
-            .map(|_| streams.admit(environment).unwrap())
+            .map(|_| streams.admit(environment, false).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
-            streams.admit(environment).err().unwrap().code(),
+            streams.admit(environment, false).err().unwrap().code(),
             tonic::Code::ResourceExhausted
         );
         held.pop();
-        held.push(streams.admit(environment).unwrap());
+        held.push(streams.admit(environment, false).unwrap());
         while held.len() < MAX_STREAMS {
-            held.push(streams.admit(Uuid::new_v4()).unwrap());
+            held.push(streams.admit(Uuid::new_v4(), false).unwrap());
         }
         assert_eq!(
-            streams.admit(Uuid::new_v4()).err().unwrap().code(),
+            streams.admit(Uuid::new_v4(), false).err().unwrap().code(),
             tonic::Code::ResourceExhausted
         );
         held.clear();
+        assert!(streams.open.lock().unwrap().is_empty());
+    }
+
+    /// A remote flood, as many tailnet connections as the remote budget
+    /// allows, leaves the owner's own SSH working, and the owner's full
+    /// budget leaves remote connections theirs (#3609, slice 3).
+    #[test]
+    fn remote_streams_have_their_own_budget_apart_from_the_owners() {
+        let streams = Arc::new(SshStreams::default());
+        let environment = Uuid::new_v4();
+        let mut remote = (0..MAX_REMOTE_STREAMS_PER_ENVIRONMENT)
+            .map(|_| streams.admit(environment, true).unwrap())
+            .collect::<Vec<_>>();
+        let refused = streams.admit(environment, true).err().unwrap();
+        assert_eq!(refused.code(), tonic::Code::ResourceExhausted);
+        assert!(refused.message().contains("remote"), "{refused:?}");
+        let mut local = (0..MAX_STREAMS_PER_ENVIRONMENT)
+            .map(|_| streams.admit(environment, false).unwrap())
+            .collect::<Vec<_>>();
+        while remote.len() < MAX_REMOTE_STREAMS {
+            remote.push(streams.admit(Uuid::new_v4(), true).unwrap());
+        }
+        assert_eq!(
+            streams.admit(Uuid::new_v4(), true).err().unwrap().code(),
+            tonic::Code::ResourceExhausted
+        );
+        // The owner's total budget is untouched by every remote stream.
+        while local.len() < MAX_STREAMS {
+            local.push(streams.admit(Uuid::new_v4(), false).unwrap());
+        }
+        remote.clear();
+        assert!(streams.admit(environment, true).is_ok());
+        local.clear();
         assert!(streams.open.lock().unwrap().is_empty());
     }
 

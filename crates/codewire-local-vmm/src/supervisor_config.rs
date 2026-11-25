@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 27;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 28;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -93,6 +93,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         27,
         "cleared state disk (#6277): a boot that intercepts after one that didn't first clears the VM's state disk of earlier sign-ins, and is refused when that fails or when its checkpoint may hold one, unless the request sets start_with_uncleared_disk; an older supervisor ignores that field and never clears",
     ),
+    (
+        28,
+        "remote SSH streams (#3609, slice 3): SshStreamOpen.remote marks a stream a host's tailnet peer opens, which has its own budget and idle timeout; every stream serves session@codewire.sh; an older supervisor counts a remote stream with the owner's",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -126,6 +130,9 @@ pub enum SupervisorFeature {
     /// A boot that intercepts after one that didn't clears the VM's state
     /// disk first (#6277).
     ClearedStateDisk,
+    /// Remote SSH streams with their own budget, and `session@codewire.sh`
+    /// on every stream (#3609).
+    RemoteSsh,
 }
 
 impl SupervisorFeature {
@@ -161,6 +168,7 @@ impl SupervisorFeature {
             Self::Desktop => 25,
             Self::EgressRefusals => 26,
             Self::ClearedStateDisk => 27,
+            Self::RemoteSsh => 28,
         }
     }
 }
@@ -476,7 +484,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 27);
+        assert_eq!(info.protocol_version, 28);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

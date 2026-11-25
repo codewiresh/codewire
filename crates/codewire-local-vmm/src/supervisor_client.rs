@@ -475,7 +475,8 @@ impl NativeSupervisorClient {
 
     /// SSH to a running environment over this owner-only socket (#3025):
     /// `input`'s bytes go to the supervisor's SSH server for the environment
-    /// with this UUID, and its replies to `output`, until either side ends
+    /// `open` names (a UUID: the owner's own stream), and its replies to
+    /// `output`, until either side ends
     /// the connection. Supervisors before protocol 15 lack it; check
     /// [`Self::supports`] with [`SupervisorFeature::Ssh`] first. Errors:
     /// NotFound (no such environment), FailedPrecondition (not running),
@@ -483,7 +484,7 @@ impl NativeSupervisorClient {
     /// many SSH connections open).
     pub async fn pipe_ssh<R, W>(
         &mut self,
-        environment_id: Uuid,
+        open: impl Into<v1::SshStreamOpen>,
         mut input: R,
         mut output: W,
     ) -> Result<(), Status>
@@ -498,9 +499,7 @@ impl NativeSupervisorClient {
         let (frames, outbound) = tokio::sync::mpsc::channel(8);
         frames
             .send(v1::SshStreamFrame {
-                frame: Some(Frame::Open(v1::SshStreamOpen {
-                    environment_id: environment_id.to_string(),
-                })),
+                frame: Some(Frame::Open(open.into())),
             })
             .await
             .map_err(|_| Status::internal("local SSH stream closed"))?;
