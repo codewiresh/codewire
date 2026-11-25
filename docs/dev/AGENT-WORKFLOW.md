@@ -493,6 +493,40 @@ by the next `run`. The build slots keep compiles, test runs and verification
 families to three at once. An image or Kind build takes no slot; run at most
 one beside them.
 
+## Walks of a main commit
+
+A walk of a commit on `main` uses the `cw` main CI already built, never one
+compiled on the workstation. Only an unmerged branch compiles `cw`, and then
+in a build slot (`codewire-cpu build --`).
+
+```sh
+scripts/dev/fetch-main-build cw --commit <sha on main>
+export CW_BIN=…   # the line it prints
+```
+
+`fetch-main-build` takes the static `cw` from the daemon image Deploy Dev
+built for that commit. It accepts the image only with main CI's delivery
+signature on its exact digest, and only if the binary's own build record
+names that commit. Deploy Dev builds a daemon only for the commits it
+delivers. For any other commit, the helper uses the nearest first-parent
+ancestor with a signed image, and only when the planner's `daemon_image`
+fingerprint is equal at both: the same inputs make the same `cw`. Otherwise it
+refuses, and you compile in a build slot. It reads the registry named by
+`CODEWIRE_IMAGE_REGISTRY` with the local containers login, never the desktop
+keyring. It writes the checkout's
+`target/ci/cw` unless you pass `--cw`: where the Dev smokes build their own,
+and the path the workstation's network rules admit for a checkout's `cw`.
+Its provenance goes beside it, in `target/ci/cw.main-build.json`. It never
+replaces a `cw` it did not write there, such as a branch's own build, and it
+refuses a noexec directory.
+
+Every Dev walk that takes `CW_BIN` uses it: `with-dev-personal-walk.sh`, the
+credentials and interception walks, and the Dev smokes. Those smokes compile
+`cw` only when `CW_BIN` is unset. A local VM walk also needs a runtime from
+the same source as its `cw`. Main CI publishes none per commit in the layout
+`cw setup --local --from` reads, so that walk still builds its runtime
+(`docs/dev/LINUX-LOCAL-VMS.md`) until it does.
+
 ## Local Kind cluster for manual testing
 
 Keep the existing owner review cluster between sessions. Create a retained

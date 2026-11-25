@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Fetch main CI's already-built `cw` for a main commit, so a walk of main never compiles it.
+
+  scripts/dev/fetch-main-build cw [--commit SHA] [--cw PATH]
+
+The `cw` comes from the daemon image Deploy Dev builds and main CI signs:
+$CODEWIRE_IMAGE_REGISTRY/codewire/daemon:<sha>, a static x86_64 Linux build
+at /usr/local/bin/cw. The helper accepts it only when
+
+- the image's digest carries main CI's delivery signature (the codewire-runtime
+  key in scripts/ci/trust, with dev.codewire.image-family=daemon,
+  dev.codewire.source-sha=<the image's commit> and dev.codewire.verified=main-ci,
+  as verify-runtime-image-signatures.sh checks it);
+- the extracted `cw`'s own build record names that same commit; and
+- that commit is SHA itself, or SHA's nearest first-parent ancestor with a signed
+  image whose planner daemon_image fingerprint equals SHA's. Deploy Dev builds a
+  daemon only for the commits it delivers, and an equal fingerprint means the
+  same inputs, so the same `cw`.
+
+It reads the registry with the local containers login
+($XDG_RUNTIME_DIR/containers/auth.json, or REGISTRY_AUTH_FILE), never the
+Docker credential helper, and prints no credential. It writes PATH, by
+default target/ci/cw in this checkout: where the Dev smokes build their own
+cw, and the path the workstation's network rules already admit for a
+checkout's cw. Its provenance goes beside it, in PATH.main-build.json. It never
+replaces a file there that it did not write itself, such as a branch's own
+build. It prints the CW_BIN line walks read.
+
+The local VM runtime is not fetched yet: main CI publishes none per commit in
+the layout `cw setup --local --from` reads (docs/dev/AGENT-WORKFLOW.md, "Walks
+of a main commit").
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+PUBLIC_KEY = ROOT / "scripts/ci/trust/codewire-runtime-signing.pub"
+CW_PATH = "usr/local/bin/cw"
+ARTIFACT = "daemon_image"
+MAX_ANCESTORS = 30
+MAX_CW_BYTES = 256 * 1024 * 1024
+SHA = re.compile(r"[0-9a-f]{40}")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+class Refused(Exception):
+    pass
+
+
+def repository():
+    """The daemon image's repository on CODEWIRE_IMAGE_REGISTRY (docs/dev/CI-CONFIGURATION.md)."""
+    registry = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
+    if not re.fullmatch(r"[a-z0-9.-]+(:[0-9]+)?", registry):
+        raise Refused("set CODEWIRE_IMAGE_REGISTRY to the image registry host, with no scheme")
+    return f"{registry}/codewire/daemon"
+
+
+def run(argv, timeout, env=None):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, check=False)
+    except subprocess.TimeoutExpired:
+        raise Refused(f"{argv[0]} did not finish within {timeout} s")
+
+
+def git(*args):
+    completed = run(["git", "-C", str(ROOT), *args], 60)
+    if completed.returncode != 0:
+        raise Refused(f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}")
+    return completed.stdout.strip()
+
+
+def main_commit(ref):
+    sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+    if run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", sha, "origin/main"], 60).returncode != 0:
+        raise Refused(f"{sha} is not on origin/main; fetch first, or compile an unmerged branch in a build slot")
+    return sha
+
+
+def auth_file():
+    path = Path(os.environ.get("REGISTRY_AUTH_FILE") or
+                Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "containers/auth.json")
+    if not path.is_file():
+        raise Refused(f"no registry login at {path}; log in to the image registry with `skopeo login` and retry")
+    return path
+
+
+def digest_of(sha, auth):
+    completed = run(["skopeo", "inspect", "--authfile", str(auth), "--no-tags", "--format", "{{.Digest}}",
+                     f"docker://{repository()}:{sha}"], 120)
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and DIGEST.fullmatch(value) else None
+
+
+def signed(sha, digest, docker_config):
+    """main CI's delivery signature on exactly this digest, for this commit."""
+    env = {key: value for key, value in os.environ.items() if key not in ("BAO_ADDR", "BAO_TOKEN")}
+    env.update(DOCKER_CONFIG=str(docker_config), GOMAXPROCS="2")
+    completed = run(["cosign", "verify", "--key", str(PUBLIC_KEY), "--insecure-ignore-tlog",
+                     "--new-bundle-format=true",
+                     "--annotations", "dev.codewire.image-family=daemon",
+                     "--annotations", f"dev.codewire.source-sha={sha}",
+                     "--annotations", "dev.codewire.verified=main-ci",
+                     f"{repository()}@{digest}"], 180, env)
+    return completed.returncode == 0
+
+
+def fingerprint(sha):
+    with tempfile.TemporaryDirectory(prefix="fetch-main-build-plan-") as temporary:
+        plan = Path(temporary) / "plan.json"
+        completed = run([sys.executable, str(ROOT / "scripts/ci/plan/planner.py"), "--repository", str(ROOT),
+                         "--target-base", sha, "--head", sha, "--trusted-policy", sha,
+                         "--output", str(plan)], 600)
+        if completed.returncode != 0:
+            raise Refused(f"the planner failed at {sha}: {completed.stderr.strip()[-300:]}")
+        value = json.loads(plan.read_text())["artifacts"].get(ARTIFACT, {}).get("head_fingerprint")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise Refused(f"the planner gave no {ARTIFACT} fingerprint at {sha}")
+    return value
+
+
+def choose(sha, auth, docker_config):
+    """The signed daemon image whose `cw` is SHA's: SHA's own, or an equal-input ancestor's."""
+    ancestors = git("rev-list", "--first-parent", f"--max-count={MAX_ANCESTORS + 1}", sha).split()
+    wanted = None
+    for candidate in ancestors:
+        digest = digest_of(candidate, auth)
+        if not digest:
+            continue
+        if not signed(candidate, digest, docker_config):
+            print(f"fetch-main-build: {candidate[:12]}'s daemon image has no main-CI signature; skipped",
+                  file=sys.stderr)
+            continue
+        if candidate == sha:
+            return candidate, digest, "its own image"
+        wanted = wanted or fingerprint(sha)
+        if fingerprint(candidate) == wanted:
+            return candidate, digest, f"{ARTIFACT} fingerprint {wanted[:12]}, equal at both commits"
+        raise Refused(f"the newest signed daemon image before {sha[:12]} is {candidate[:12]}'s, and its "
+                      f"inputs differ; no main build of this cw exists yet, so compile it in a build slot")
+    raise Refused(f"no signed daemon image in {sha[:12]} or its {MAX_ANCESTORS} first-parent ancestors")
+
+
+def layer_reader(blob, media_type):
+    if media_type.endswith("+gzip") or media_type.endswith(".gzip"):
+        return tarfile.open(fileobj=gzip.open(blob), mode="r|")
+    if media_type.endswith("tar") or media_type.endswith(".tar"):
+        return tarfile.open(fileobj=open(blob, "rb"), mode="r|")
+    raise Refused(f"layer media type {media_type} is not read here")
+
+
+# The whiteouts that hide a lower layer's /usr/local/bin/cw: the file's own, a
+# parent directory's, or an opaque marker in one of its parents.
+_PARENTS = ("usr", "usr/local", "usr/local/bin")
+HIDING = {"usr/local/bin/.wh.cw", ".wh.usr", "usr/.wh.local", "usr/local/.wh.bin"} | {
+    f"{parent}/.wh..wh..opq" for parent in _PARENTS}
+
+
+def extract_cw(layout):
+    """/usr/local/bin/cw as the image's layers stack it: the last copy wins, and a whiteout hides lower ones."""
+    index = json.loads((layout / "index.json").read_text())
+    manifest_digest = index["manifests"][0]["digest"]
+    manifest = json.loads((layout / "blobs" / manifest_digest.replace(":", "/")).read_text())
+    found = None
+    for layer in manifest["layers"]:
+        blob = layout / "blobs" / layer["digest"].replace(":", "/")
+        hidden, own = False, None
+        with layer_reader(blob, layer["mediaType"]) as tar:
+            for member in tar:
+                name = member.name.removeprefix("./").lstrip("/")
+                if name in HIDING:
+                    hidden = True
+                elif name == CW_PATH:
+                    if not member.isreg() or member.size > MAX_CW_BYTES:
+                        raise Refused(f"{CW_PATH} in the image is not a regular file under 256 MiB")
+                    own = tar.extractfile(member).read()
+        # A layer's own copy survives its whiteouts, which hide only lower layers.
+        if own is not None:
+            found = own
+        elif hidden:
+            found = None
+    if found is None:
+        raise Refused(f"the image holds no {CW_PATH}")
+    return found
+
+
+def cw_release():
+    spec = importlib.util.spec_from_file_location("cw_release", ROOT / "scripts/ci/release/cw_release.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def provenance(path):
+    return path.with_name(path.name + ".main-build.json")
+
+
+def written_here(path):
+    """Whether PATH is still the exact cw this helper last wrote there, not a later build's."""
+    try:
+        recorded = json.loads(provenance(path).read_text()).get("sha256")
+        return (path.is_file() and not path.is_symlink()
+                and hashlib.sha256(path.read_bytes()).hexdigest() == recorded)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def fetch_cw(sha, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.statvfs(path.parent).f_flag & os.ST_NOEXEC:
+        raise Refused(f"{path.parent} is on a noexec filesystem, so its cw could not run; choose another --cw")
+    if (path.exists() or path.is_symlink()) and not written_here(path):
+        raise Refused(f"{path} exists and is not a main build this helper wrote, so it may be a branch's "
+                      "own cw; remove it, or choose another --cw")
+    image = repository()
+    auth = auth_file()
+    with tempfile.TemporaryDirectory(prefix="fetch-main-build-") as temporary:
+        work = Path(temporary)
+        # cosign reads a Docker config; this one holds only the containers
+        # login, so no credential helper (the desktop keyring) is consulted.
+        (work / "docker").mkdir()
+        (work / "docker/config.json").symlink_to(auth)
+        built, digest, why = choose(sha, auth, work / "docker")
+        layout = work / "layout"
+        copied = run(["skopeo", "copy", "--authfile", str(auth), "--override-os", "linux",
+                      "--override-arch", "amd64", f"docker://{image}@{digest}", f"oci:{layout}:cw"], 600)
+        if copied.returncode != 0:
+            raise Refused(f"skopeo could not copy {image}@{digest}: {copied.stderr.strip()[:300]}")
+        data = extract_cw(layout)
+    record = cw_release().build_record(data)
+    if record["source_revision"] != built:
+        raise Refused(f"the image's cw says it was built from {record['source_revision']}, not {built}")
+    partial = path.with_name(f".{path.name}.partial")
+    partial.write_bytes(data)
+    partial.chmod(0o755)
+    partial.replace(path)
+    source = {"requested": sha, "built_from": built, "why": why, "image": f"{image}@{digest}",
+              "sha256": hashlib.sha256(data).hexdigest(),
+              "target": record["target"], "package_version": record["package_version"]}
+    provenance(path).write_text(json.dumps(source, indent=2) + "\n")
+    print(f"fetch-main-build: cw for {sha[:12]} is {built[:12]}'s main build ({why}), "
+          f"from {image}@{digest}")
+    print(f"export CW_BIN={path}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("what", choices=["cw"])
+    parser.add_argument("--commit", default="origin/main", help="a commit on origin/main (default: its tip)")
+    parser.add_argument("--cw", type=Path, help="where to write cw (default: target/ci/cw in this checkout)")
+    args = parser.parse_args(argv)
+    for tool in ("git", "skopeo", "cosign"):
+        if shutil.which(tool) is None:
+            print(f"fetch-main-build: {tool} is not installed", file=sys.stderr)
+            return 2
+    try:
+        sha = main_commit(args.commit)
+        fetch_cw(sha, (args.cw or ROOT / "target/ci/cw").absolute())
+    except Refused as refusal:
+        print(f"fetch-main-build: {refusal}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
