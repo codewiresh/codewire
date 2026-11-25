@@ -674,27 +674,37 @@ reset_schema() {
 # so a lane takes the sum of its tests' times. The slow suites are split by
 # module across lanes, each with its own server, so that no one lane sets the
 # job's time: as one lane, the 50-test broker admission matrix took 246-626 s
-# (infra#1534, CI compute audit row 5). The times below are run 22601's
-# suites; the broker lanes' are scaled from one local run of each module (the
-# whole matrix took 117 s there and 246 s in run 22601).
+# (infra#1534, CI compute audit row 5). The times below are each lane's
+# suites' "[database suite]" times, the median of merge-queue runs 80119, 80131
+# and 80162 (2026-11-25), whose eleven lanes took 117-225 s; split from them,
+# no lane holds more than 123 s of them.
 readonly DATABASE_LANES=(
-  core                     # server-core, platform credentials, billing, Mesh: 65 s
-  credential-mutations     # credential-service mutations and delegation: 92 s
-  credential-service       # credential-service runtime and identity: 69 s
-  broker-admission         # broker admission itself, Claude sign-in, gRPC rotation: 70 s
-  broker-checked           # broker checked leases: 70 s
-  broker-decisions         # broker decisions and Codex login: 70 s
-  broker-refresh           # broker keepalive, material cache, subscription, SSH: 51 s (main run 69843); with the live watch's mount: about 120 s
-  orchestration            # orchestration preview, access and environments: 66 s
-  orchestration-journals   # orchestration cw runtime and managed agent journals: 78 s
-  orchestration-workspaces # orchestration sources, admin, workspaces and create limits: 88 s (main run 60167)
-  orchestration-hosts      # orchestration hosts, network and egress, organizations, billing: 109 s (main run 60167)
+  core                          # server-core migrations, revocation, Mesh ledger: 102 s
+  core-platform                 # platform credentials, OAuth, pool health, billing: 103 s
+  credential-mutations          # credential-service mutations' own tests and delegation: about 91 s
+  credential-mutation-providers # credential-service mutations by provider module: about 98 s
+  credential-service            # credential-service runtime and identity: 123 s
+  broker-admission              # broker admission itself, hosted front door, gRPC rotation: 96 s
+  broker-checked                # broker checked leases: 117 s
+  broker-decisions              # broker decisions and Codex login: 118 s
+  broker-refresh                # the live watch's mount, material cache, subscription: 103 s
+  broker-sessions               # broker SSH, keepalive and Claude sign-in: 105 s
+  orchestration                 # sandbox-stopped notices, preview and access profiles: 86 s
+  orchestration-workers         # orchestration worker loops, audit and environments: 89 s
+  orchestration-journals        # orchestration cw runtime journal and setup owner: 84 s
+  orchestration-agent-journal   # orchestration managed agent journal: 81 s
+  orchestration-workspaces      # workspace bindings, sources and sandbox identity: 94 s
+  orchestration-admin           # admin, quotas, limits and the rest of workspaces: 85 s
+  orchestration-hosts           # host sessions, lifecycle, operations and placement: 119 s
+  orchestration-access          # organizations, network and egress, billing, feedback: 106 s
 )
 # The order lanes start in when not all run at once: the longest first.
 readonly DATABASE_LANE_ORDER=(
-  broker-refresh credential-mutations orchestration-journals orchestration-hosts
-  broker-admission broker-checked broker-decisions credential-service orchestration
-  core orchestration-workspaces
+  credential-service orchestration-hosts broker-decisions broker-checked
+  orchestration-access broker-sessions core-platform broker-refresh core
+  credential-mutation-providers broker-admission orchestration-workspaces
+  credential-mutations orchestration-workers orchestration orchestration-admin
+  orchestration-journals orchestration-agent-journal
 )
 
 # The database suites' builds. Each uses one package and feature set, as its
@@ -847,88 +857,14 @@ database_lane_core() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture
 
-  counted_suite "platform credential storage matrix" platform-credential-storage \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test storage \
-      -- --ignored --nocapture --test-threads=4
-
-  counted_suite "platform access profile matrix" platform-access-profiles \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test profiles \
-      -- --ignored --nocapture --test-threads=4
-
-  counted_suite "platform owner-source authority matrix" platform-owner-source-authority \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test owner_sources \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "platform credential refresh matrix" platform-credential-refresh \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test refresh \
-      -- --ignored --nocapture --test-threads=4
-
-  counted_suite "platform credential restricted-role matrix" platform-credential-authority \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test authority \
-      -- --ignored --nocapture --test-threads=4
-
-  counted_suite "hosted placeholder key matrix" platform-placeholder-keys \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-platform-credentials --test placeholder_keys \
-      -- --ignored --nocapture --test-threads=4
-
-  counted_suite "OAuth-only restricted identity matrix" oauth-bearer-identity \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-server-core --test oauth_bearer_auth \
-      -- --ignored --nocapture
-
   counted_suite "session hash-only matrix" session-hash-only \
     DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-server-core --test session_auth -- --nocapture
-
-  counted_suite "organization deletion lifecycle matrix" organization-deletion-lifecycle \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-server-core --test org_deletion_lifecycle \
-      -- --nocapture
-
-  counted_suite "organization billing teardown matrix" organization-billing-teardown \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'billing_teardown::tests::db_' \
-      -- --nocapture
-
-  counted_suite "credit metering matrix" credit-metering \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'credit::tests::db_' \
-      -- --nocapture
-
-  counted_suite "credit changes: a notice names its organization and settles it" credit-changes \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'credit_changes::tests::db_' \
-      -- --nocapture
-
-  counted_suite "billing settings audit" billing-settings-audit \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'catalog_admin::tests::db_' \
-      -- --nocapture
-
-  counted_suite "saved cards: list, set up, make default and remove against a fake Stripe" saved-cards \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'cards::tests::db_' \
-      -- --nocapture
-
-  counted_suite "credit purchase matrix" credit-purchase \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-billing --lib 'credit_purchase::tests::db_' \
-      -- --nocapture
 
   counted_suite "Mesh migration ledger" mesh-migration-ledger \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture
-
-  counted_suite "server-core pool health matrix" server-core-pool-health \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1
 
   # One thread: the race test times a wake-up on the shared channel.
   counted_suite "server-core revocation fence matrix" server-core-revocation \
@@ -947,7 +883,9 @@ database_lane_credential_mutations() {
   counted_suite "public credential mutation matrix" public-credential-mutations \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
-      --lib mutation::tests:: -- --ignored --nocapture --test-threads=1
+      --lib mutation::tests:: -- --ignored \
+      --skip mutation::tests::provider_revocation:: --skip mutation::tests::github:: --skip mutation::tests::lifecycle:: --skip mutation::tests::ssh:: --skip mutation::tests::names:: \
+      --nocapture --test-threads=1
 
   counted_suite "owner-local delegation authority matrix" owner-local-delegation-authority \
     TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
@@ -1001,11 +939,6 @@ database_lane_broker_admission() {
       --skip platform::tests::subscription:: \
       --nocapture --test-threads=1
 
-  counted_suite "platform broker Claude sign-in matrix" platform-broker-claude-sign-in \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::claude_sign_in:: -- --ignored --nocapture --test-threads=1
-
   counted_suite "platform broker gRPC rotation drain matrix" platform-broker-grpc-rotation \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
@@ -1037,11 +970,6 @@ database_lane_broker_decisions() {
 }
 
 database_lane_broker_refresh() {
-  counted_suite "platform broker keepalive matrix" platform-broker-keepalive \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::keepalive:: -- --ignored --nocapture --test-threads=1
-
   counted_suite "platform broker material cache matrix" platform-broker-material-cache \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
@@ -1051,12 +979,6 @@ database_lane_broker_refresh() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests::subscription:: -- --ignored --nocapture --test-threads=1
-
-  counted_suite "platform broker SSH matrix" platform-broker-ssh \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-credential-broker --no-default-features \
-      --features platform,ssh-agent --lib platform::tests::ssh:: \
-      -- --ignored --nocapture --test-threads=1
 
   # In the shortest lane: it holds one watch past the unary dispatcher's
   # 60-second deadline, so it takes 65 s by design (#4762).
@@ -1078,141 +1000,10 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --test access_profiles \
       -- --ignored --nocapture --test-threads=4
 
-  counted_suite "public credential metadata matrix" public-credential-metadata \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --test credentials \
-      -- --ignored --nocapture --test-threads=3
-
-  # The orchestration batch already built this harness; a CI-profile build
-  # compiled the crate again for one test.
-  counted_suite "Mesh authorization receiver matrix" mesh-authorization-receiver \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
-      -- --ignored --exact --nocapture
-
-  counted_suite "environment external cleanup matrix" environment-external-cleanup \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-orchestration --test environment_external_cleanup \
-      -- --nocapture
-
-  counted_suite "environment session admission matrix" environment-session-admission \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environment_daemon::session_mutation::tests::db_' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment destroy template hint matrix" environment-destroy-template-hint \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
-      -- --ignored --exact --nocapture
-
-  counted_suite "environment projection capture matrix" environment-projection-capture \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::create::projection_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
   counted_suite "stopped sandbox notice matrix" sandbox-stopped-notice \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::sandbox_stopped_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "Sandbox audit log writer matrix" sandbox-audit-writer \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'audit::store_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "Sandbox audit log refusal subject bound" sandbox-audit-bound \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'audit::bound_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "Sandbox audit log read matrix" sandbox-audit-read \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'audit::read_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "abandoned lease sweep matrix" abandoned-lease-sweep \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::abandoned_leases::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "stop reason matrix" stop-reason \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::stop_reason_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-  counted_suite "systemd workspace opt-in matrix" systemd-workspace-opt-in \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'sandbox::systemd_workspace::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "idle stop setting" idle-stop-setting \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::idle_stop_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "stuck-state sweep" stuck-state-sweep \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::stuck_environments_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "no capacity outcome matrix" no-capacity-outcome \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::create::no_capacity_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "warm Pod start marks matrix" warm-pod-start-marks \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::create::pod_marks_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "terminal Pod replacement order matrix" terminal-pod-replacement-order \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::create::replacement_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "running row after mark_running" running-row-after-mark-running \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::create::running_row_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "confidential activation slot matrix" confidential-activation-slots \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::confidential_slots::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "organization tenant secret teardown matrix" organization-tenant-secret-teardown \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-orchestration --lib \
-      'worker::tenant_secret_teardown::tests::db_' \
-      -- --nocapture
-
-  counted_suite "encrypted tenant secret store matrix" encrypted-tenant-secret-store \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test -p codewire-orchestration --lib \
-      'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
-      -- --ignored --exact --nocapture
-
-  counted_suite "leader handover when a replica drains" leader-drain-handover \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::loops::leader_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 }
 
@@ -1229,72 +1020,12 @@ database_lane_orchestration_journals() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::cw_runtime::setup_owner_tests::db_' \
       -- --ignored --nocapture --test-threads=1
-
-  counted_suite "platform managed agent journal matrix" platform-managed-agent-journal \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::platform_agents::journal::database_tests::db_' \
-      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_orchestration_workspaces() {
   counted_suite "environment source admission matrix" environment-source-admission \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --test environment_sources \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment startup script matrix" environment-startup-script \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environment_startup_script::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin startup summary matrix" admin-startup-summary \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::startup_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin environment quota matrix" admin-environment-quota \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::quota_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin organization credit matrix" admin-organization-credit \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::credit_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin account suspension matrix" admin-account-suspension \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::suspension_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin organization Sandbox count matrix" admin-organization-sandbox-counts \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::sandbox_counts_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "credit exhausted stop matrix" credit-exhausted-stop \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::credit_stop::tests::db_' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "admin organization dedicated CPU matrix" admin-organization-dedicated-cpu \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::admin::dedicated_cpu_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "organization standard runtime move matrix" organization-standard-runtime-move \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'sandbox::standard_move::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
   counted_suite "workspace binding recorder matrix" workspace-binding-recorder \
@@ -1309,112 +1040,16 @@ database_lane_orchestration_workspaces() {
       'workspace_binding::store::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
-  counted_suite "sandbox identity issuer orgs matrix" sandbox-identity-issuer-orgs \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'identity::discovery::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment Mesh membership matrix" environment-mesh-membership \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'environment_mesh::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment resize admission matrix" environment-resize-admission \
-    DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environment_resize::tests::db_' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment create capacity matrix" environment-create-capacity \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::create::tests::db_' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "SSH proxy runtime lease matrix" ssh-proxy-runtime-lease \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::ssh_proxy::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment daemon repair lease matrix" environment-daemon-repair-lease \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environment_daemon::repair_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment membership access matrix" environment-membership-access \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environments::access_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "environment rate limit" environment-rate-limit \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environments::rate_limit_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "Sandbox and organization create limits" create-limits \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::create::limit_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
   counted_suite "sandbox identity groups, audiences and stops" sandbox-identity-records \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::identity::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "a fork keeps identity groups only for an admin" sandbox-identity-fork \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::create::identity_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "a restore's disk is at least its snapshot's size" snapshot-restore-disk \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::create::snapshot_disk_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "sandbox identity mint subject and records" sandbox-identity-mint \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'identity::mint::store::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "sandbox identity mint row retention" sandbox-identity-mint-retention \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'worker::identity_mints::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "failed create listing" failed-create-listing \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::environments::failed_create_listing_database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
-  counted_suite "live page watches and their organizations" live-watch \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::live::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 }
 
 # Split from orchestration-workspaces (codewire#5311): as one lane its 41 suites
 # took 204 s of main run 60167, 77 s longer than the next lane.
 database_lane_orchestration_hosts() {
-  counted_suite "CLI feedback limits and admin list" cli-feedback \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::feedback::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-
   counted_suite "host enrollment, grants and revocation" hosts \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1427,21 +1062,6 @@ database_lane_orchestration_hosts() {
       'connect::host_agent::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
-  counted_suite "platform network policies, revisions and selections" network-policies \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::network_policies::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-  counted_suite "hosted egress assignments from the policy store" egress-assignments \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'egress::assignment::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
-  counted_suite "hosted egress enforcement reports, records and status" egress-reports \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
-    cargo test --locked -p codewire-orchestration --lib \
-      'egress::reports::database_tests::' \
-      -- --ignored --nocapture --test-threads=1
   counted_suite "hosted interception trust: recorded once, its first writers' race and its sweep" egress-interception-trust \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1464,6 +1084,32 @@ database_lane_orchestration_hosts() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::host_lifecycle::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_orchestration_access() {
+  counted_suite "CLI feedback limits and admin list" cli-feedback \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::feedback::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform network policies, revisions and selections" network-policies \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::network_policies::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "hosted egress assignments from the policy store" egress-assignments \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'egress::assignment::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "hosted egress enforcement reports, records and status" egress-reports \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'egress::reports::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
   counted_suite "organization membership credential matrix" organization-membership-credentials \
@@ -1581,31 +1227,447 @@ database_lane_orchestration_hosts() {
       -- --ignored --nocapture --test-threads=1
 }
 
+database_lane_core_platform() {
+  counted_suite "platform credential storage matrix" platform-credential-storage \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test storage \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "platform access profile matrix" platform-access-profiles \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test profiles \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "platform owner-source authority matrix" platform-owner-source-authority \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test owner_sources \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform credential refresh matrix" platform-credential-refresh \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test refresh \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "platform credential restricted-role matrix" platform-credential-authority \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test authority \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "hosted placeholder key matrix" platform-placeholder-keys \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test placeholder_keys \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "OAuth-only restricted identity matrix" oauth-bearer-identity \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-server-core --test oauth_bearer_auth \
+      -- --ignored --nocapture
+
+  counted_suite "organization deletion lifecycle matrix" organization-deletion-lifecycle \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --test org_deletion_lifecycle \
+      -- --nocapture
+
+  counted_suite "organization billing teardown matrix" organization-billing-teardown \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'billing_teardown::tests::db_' \
+      -- --nocapture
+
+  counted_suite "credit metering matrix" credit-metering \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'credit::tests::db_' \
+      -- --nocapture
+
+  counted_suite "credit changes: a notice names its organization and settles it" credit-changes \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'credit_changes::tests::db_' \
+      -- --nocapture
+
+  counted_suite "billing settings audit" billing-settings-audit \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'catalog_admin::tests::db_' \
+      -- --nocapture
+
+  counted_suite "saved cards: list, set up, make default and remove against a fake Stripe" saved-cards \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'cards::tests::db_' \
+      -- --nocapture
+
+  counted_suite "credit purchase matrix" credit-purchase \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'credit_purchase::tests::db_' \
+      -- --nocapture
+
+  counted_suite "server-core pool health matrix" server-core-pool-health \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_orchestration_admin() {
+  counted_suite "environment startup script matrix" environment-startup-script \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_startup_script::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin startup summary matrix" admin-startup-summary \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::startup_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin environment quota matrix" admin-environment-quota \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::quota_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin organization credit matrix" admin-organization-credit \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::credit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin account suspension matrix" admin-account-suspension \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::suspension_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin organization Sandbox count matrix" admin-organization-sandbox-counts \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::sandbox_counts_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "credit exhausted stop matrix" credit-exhausted-stop \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::credit_stop::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "admin organization dedicated CPU matrix" admin-organization-dedicated-cpu \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::dedicated_cpu_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "organization standard runtime move matrix" organization-standard-runtime-move \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'sandbox::standard_move::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "sandbox identity issuer orgs matrix" sandbox-identity-issuer-orgs \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'identity::discovery::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment Mesh membership matrix" environment-mesh-membership \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'environment_mesh::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment resize admission matrix" environment-resize-admission \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_resize::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment create capacity matrix" environment-create-capacity \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "SSH proxy runtime lease matrix" ssh-proxy-runtime-lease \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::ssh_proxy::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment daemon repair lease matrix" environment-daemon-repair-lease \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_daemon::repair_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment membership access matrix" environment-membership-access \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::access_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment rate limit" environment-rate-limit \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::rate_limit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "Sandbox and organization create limits" create-limits \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::limit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "a fork keeps identity groups only for an admin" sandbox-identity-fork \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::identity_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "a restore's disk is at least its snapshot's size" snapshot-restore-disk \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::snapshot_disk_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "sandbox identity mint subject and records" sandbox-identity-mint \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'identity::mint::store::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "sandbox identity mint row retention" sandbox-identity-mint-retention \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::identity_mints::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "failed create listing" failed-create-listing \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::failed_create_listing_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "live page watches and their organizations" live-watch \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::live::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_orchestration_workers() {
+  counted_suite "public credential metadata matrix" public-credential-metadata \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --test credentials \
+      -- --ignored --nocapture --test-threads=3
+
+  # The orchestration batch already built this harness; a CI-profile build
+  # compiled the crate again for one test.
+  counted_suite "Mesh authorization receiver matrix" mesh-authorization-receiver \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
+      -- --ignored --exact --nocapture
+
+  counted_suite "environment external cleanup matrix" environment-external-cleanup \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-orchestration --test environment_external_cleanup \
+      -- --nocapture
+
+  counted_suite "environment session admission matrix" environment-session-admission \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environment_daemon::session_mutation::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment destroy template hint matrix" environment-destroy-template-hint \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
+      -- --ignored --exact --nocapture
+
+  counted_suite "environment projection capture matrix" environment-projection-capture \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::projection_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "Sandbox audit log writer matrix" sandbox-audit-writer \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit::store_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "Sandbox audit log read matrix" sandbox-audit-read \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit::read_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "Sandbox audit log refusal subject bound" sandbox-audit-bound \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit::bound_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "abandoned lease sweep matrix" abandoned-lease-sweep \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::abandoned_leases::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "stop reason matrix" stop-reason \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::stop_reason_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "systemd workspace opt-in matrix" systemd-workspace-opt-in \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'sandbox::systemd_workspace::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "idle stop setting" idle-stop-setting \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::idle_stop_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "stuck-state sweep" stuck-state-sweep \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::stuck_environments_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "no capacity outcome matrix" no-capacity-outcome \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::no_capacity_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "warm Pod start marks matrix" warm-pod-start-marks \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::pod_marks_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "terminal Pod replacement order matrix" terminal-pod-replacement-order \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::replacement_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "running row after mark_running" running-row-after-mark-running \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::running_row_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "confidential activation slot matrix" confidential-activation-slots \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::confidential_slots::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "organization tenant secret teardown matrix" organization-tenant-secret-teardown \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-orchestration --lib \
+      'worker::tenant_secret_teardown::tests::db_' \
+      -- --nocapture
+
+  counted_suite "encrypted tenant secret store matrix" encrypted-tenant-secret-store \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-orchestration --lib \
+      'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
+      -- --ignored --exact --nocapture
+
+  counted_suite "leader handover when a replica drains" leader-drain-handover \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::loops::leader_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_broker_sessions() {
+  counted_suite "platform broker Claude sign-in matrix" platform-broker-claude-sign-in \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::claude_sign_in:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform broker keepalive matrix" platform-broker-keepalive \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::keepalive:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "platform broker SSH matrix" platform-broker-ssh \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-broker --no-default-features \
+      --features platform,ssh-agent --lib platform::tests::ssh:: \
+      -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_orchestration_agent_journal() {
+  counted_suite "platform managed agent journal matrix" platform-managed-agent-journal \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::platform_agents::journal::database_tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+}
+
+database_lane_credential_mutation_providers() {
+  counted_suite "public credential mutation matrix: provider revocation" public-credential-mutations-provider-revocation \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests::provider_revocation:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "public credential mutation matrix: github" public-credential-mutations-github \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests::github:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "public credential mutation matrix: lifecycle" public-credential-mutations-lifecycle \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests::lifecycle:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "public credential mutation matrix: ssh" public-credential-mutations-ssh \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests::ssh:: -- --ignored --nocapture --test-threads=1
+
+  counted_suite "public credential mutation matrix: names" public-credential-mutations-names \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests::names:: -- --ignored --nocapture --test-threads=1
+}
+
 run_database_lane() {
   case "$1" in
     core) database_lane_core ;;
+    core-platform) database_lane_core_platform ;;
     credential-mutations) database_lane_credential_mutations ;;
+    credential-mutation-providers) database_lane_credential_mutation_providers ;;
     credential-service) database_lane_credential_service ;;
     broker-admission) database_lane_broker_admission ;;
     broker-checked) database_lane_broker_checked ;;
     broker-decisions) database_lane_broker_decisions ;;
     broker-refresh) database_lane_broker_refresh ;;
+    broker-sessions) database_lane_broker_sessions ;;
     orchestration) database_lane_orchestration ;;
+    orchestration-workers) database_lane_orchestration_workers ;;
     orchestration-journals) database_lane_orchestration_journals ;;
+    orchestration-agent-journal) database_lane_orchestration_agent_journal ;;
     orchestration-workspaces) database_lane_orchestration_workspaces ;;
+    orchestration-admin) database_lane_orchestration_admin ;;
     orchestration-hosts) database_lane_orchestration_hosts ;;
+    orchestration-access) database_lane_orchestration_access ;;
     *) echo "::error::unknown database lane: $1"; return 2 ;;
   esac
 }
 
-# At most this many database lanes run at once on a metal guest: all eleven.
+# At most this many database lanes run at once on a metal guest: all eighteen.
 # With all ten running (measured locally, 2026-10-26), their ten PostgreSQL
 # servers held 0.86-0.90 GiB and the runner with its test processes 1.2 GiB,
 # about 2.1 GiB of a heavy guest's 11.7; five at once held 1.1 GiB on CI
-# (main run 23934). The eleventh lane (codewire#5311) adds one server, about
-# 0.1 GiB. A finished lane's PostgreSQL is removed, so only running lanes hold
-# memory.
-readonly DATABASE_LANES_MEMORY_BOUND=11
+# (main run 23934). Each further lane adds one server, about 0.1 GiB, so
+# eighteen hold about 3 GiB. A finished lane's PostgreSQL is removed, so only
+# running lanes hold memory.
+readonly DATABASE_LANES_MEMORY_BOUND=18
 
 # start_lane_databases LANE...: the first lane uses the job's own database;
 # every other lane gets its own PostgreSQL beside it (on CI's job network, or
@@ -1768,10 +1830,11 @@ run_database() {
   # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
   # its own PostgreSQL, which creates and migrates a database for each test.
   # A lane mostly waits on its server: five at once averaged 2 cores of the
-  # heavy share of 16 and peaked at 5.1 (main runs 23934 and 23971), about
-  # one core per lane at its peak. So one lane per core of the share runs at
-  # once, at most DATABASE_LANES_MEMORY_BOUND, longest first, each with its
-  # part of the share (at least two) as its test threads;
+  # heavy share of 16 and peaked at 5.1 (main runs 23934 and 23971), and all
+  # eleven at once averaged 5.5 of the 16 (PR run 79012, the whole VM), about
+  # half a core per lane. So two lanes per core of the share run at once, at
+  # most DATABASE_LANES_MEMORY_BOUND, longest first, each with its part of the
+  # share (at least two) as its test threads;
   # CODEWIRE_CI_DATABASE_LANES_AT_ONCE sets the count instead. Elsewhere all
   # lanes run at once.
   local share at_once="${#DATABASE_LANES[@]}" lane_threads=""
@@ -1784,7 +1847,7 @@ run_database() {
         return 2
       fi
     else
-      ((share >= at_once)) || at_once="$share"
+      ((2 * share >= at_once)) || at_once=$((2 * share))
       ((at_once <= DATABASE_LANES_MEMORY_BOUND)) || at_once="$DATABASE_LANES_MEMORY_BOUND"
     fi
     lane_threads=$((share / at_once))

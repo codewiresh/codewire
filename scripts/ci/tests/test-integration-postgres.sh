@@ -394,9 +394,11 @@ batches = [
      '--test', 'placeholder_keys', '--no-run'],
     ['test', '-p', 'codewire-billing', '--lib', '--no-run'],
 ]
-lane_order = ['core', 'credential-mutations', 'credential-service', 'broker-admission', 'broker-checked',
-              'broker-decisions', 'broker-refresh', 'orchestration', 'orchestration-journals',
-              'orchestration-workspaces', 'orchestration-hosts']
+lane_order = ['core', 'core-platform', 'credential-mutations', 'credential-mutation-providers',
+              'credential-service', 'broker-admission', 'broker-checked', 'broker-decisions',
+              'broker-refresh', 'broker-sessions', 'orchestration', 'orchestration-workers',
+              'orchestration-journals', 'orchestration-agent-journal', 'orchestration-workspaces',
+              'orchestration-admin', 'orchestration-hosts', 'orchestration-access']
 # The fakes are shared; each case traces into its own folder, so the cases
 # below run side by side and are checked in order afterwards.
 tools = temporary / 'database-tools'
@@ -630,12 +632,12 @@ cases = {
     'instant': pool.submit(run_case, extra={'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net',
                                             'DB_TRACE_RM_DELAY': '0.3'}),
     'shared': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'}),
-    'heavy': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '16', 'DB_TRACE_BARRIER': '11'}),
+    'heavy': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '16', 'DB_TRACE_BARRIER': '18'}),
     'wide': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '40'}),
     'small': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '2'}),
     'serial': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '1'}),
     'invalid': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': 'two'}),
-    'too many': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '12'}),
+    'too many': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '19'}),
     'malformed': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12cores'}),
     'failed lane': pool.submit(run_case, 'test:platform::tests:: -- --ignored --skip', extra=network),
     'journal': pool.submit(run_case, 'test:platform_agents::journal::database_tests::db_'),
@@ -723,12 +725,14 @@ def check_lanes(commands, case, complete=True):
         assert sum(line == 'rm -f ' + runs[0].split()[3] for line in started) >= 3, (lane, started)
 lanes, lane_commands, lanes_environment = cases['lanes'].result()
 assert lanes.returncode == 0 and '[product-integration] green' in lanes.stdout, lanes.stdout + lanes.stderr
-# Without a CPU share (a cloud runner, a workstation) all eleven lanes run at
+# Without a CPU share (a cloud runner, a workstation) all eighteen lanes run at
 # once, longest first, with the test threads their commands name.
-lane_start_order = ('broker-refresh credential-mutations orchestration-journals orchestration-hosts broker-admission '
-                    'broker-checked broker-decisions credential-service orchestration core orchestration-workspaces')
+lane_start_order = ('credential-service orchestration-hosts broker-decisions broker-checked orchestration-access '
+                    'broker-sessions core-platform broker-refresh core credential-mutation-providers broker-admission '
+                    'orchestration-workspaces credential-mutations orchestration-workers orchestration '
+                    'orchestration-admin orchestration-journals orchestration-agent-journal')
 assert sorted(lane_start_order.split()) == sorted(lane_order)
-assert 'database lanes: 11 at a time: ' + lane_start_order in lanes.stdout, lanes.stdout
+assert 'database lanes: 18 at a time: ' + lane_start_order in lanes.stdout, lanes.stdout
 assert all(command['threads'] is None for command in lane_commands), 'a lane set test threads without a CPU share'
 for lane in lane_order:
     assert f'=== database lane {lane} ===' in lanes.stdout, lane
@@ -740,15 +744,15 @@ assert instant.returncode == 0 and '[product-integration] green' in instant.stdo
 for lane in lane_order:
     assert f'=== database lane {lane} ===' in instant.stdout, lane
 check_lanes(instant_commands, instant_environment)
-# On a metal guest, one lane per core of the share runs at once, at most the
-# memory bound of eleven, and each lane's tests get its part of the share, at
+# On a metal guest, two lanes per core of the share run at once, at most the
+# memory bound of eighteen, and each lane's tests get its part of the share, at
 # least two threads; every lane still runs every suite. A share of 12 runs all
-# eleven at once.
+# eighteen at once.
 shared, shared_commands, shared_environment = cases['shared'].result()
 assert shared.returncode == 0 and '[product-integration] green' in shared.stdout, shared.stdout + shared.stderr
-assert 'database lanes: 11 at a time, 2 test threads each: ' + lane_start_order in shared.stdout, shared.stdout
+assert 'database lanes: 18 at a time, 2 test threads each: ' + lane_start_order in shared.stdout, shared.stdout
 check_lanes(shared_commands, shared_environment)
-assert peak_running(shared_environment) <= 11, 'more than eleven lanes ran at once'
+assert peak_running(shared_environment) <= 18, 'more than eighteen lanes ran at once'
 lane_executions = executions_of(shared_commands)
 assert lane_executions and all(command['threads'] == '2' for command in lane_executions), lane_executions[:2]
 for lane in lane_order:
@@ -758,34 +762,34 @@ suite_times = [line for line in shared.stdout.splitlines() if line.startswith('[
 assert len(suite_times) == sum(suites_per_lane.values()), (len(suite_times), sum(suites_per_lane.values()))
 assert all(re.fullmatch(r'\[database suite\] [a-z0-9-]+: [1-9][0-9]* tests in [0-9]+ s', line)
            for line in suite_times), suite_times[:3]
-# A heavy guest's share of 16 runs all eleven at once, as does a share of 40,
-# with more threads each; a share of 2 runs two at a time, with two threads.
+# A heavy guest's share of 16 runs all eighteen at once, as does a share of 40,
+# with more threads each; a share of 2 runs four at a time, with two threads.
 heavy, heavy_commands, heavy_environment = cases['heavy'].result()
-assert heavy.returncode == 0 and 'database lanes: 11 at a time, 2 test threads each: ' in heavy.stdout, heavy.stdout
-# Each lane's first suite waits for the others (DB_TRACE_BARRIER): all eleven
+assert heavy.returncode == 0 and 'database lanes: 18 at a time, 2 test threads each: ' in heavy.stdout, heavy.stdout
+# Each lane's first suite waits for the others (DB_TRACE_BARRIER): all eighteen
 # ran at once.
-assert peak_running(heavy_environment) == 11, 'the heavy share did not run all eleven lanes at once'
+assert peak_running(heavy_environment) == 18, 'the heavy share did not run all eighteen lanes at once'
 check_lanes(heavy_commands, heavy_environment)
 wide, _, wide_environment = cases['wide'].result()
-assert wide.returncode == 0 and 'database lanes: 11 at a time, 3 test threads each: ' in wide.stdout, wide.stdout
-assert peak_running(wide_environment) <= 11, 'more lanes ran at once than the memory bound'
+assert wide.returncode == 0 and 'database lanes: 18 at a time, 2 test threads each: ' in wide.stdout, wide.stdout
+assert peak_running(wide_environment) <= 18, 'more lanes ran at once than the memory bound'
 small, _, small_environment = cases['small'].result()
-assert small.returncode == 0 and 'database lanes: 2 at a time, 2 test threads each: ' in small.stdout, small.stdout
-assert peak_running(small_environment) <= 2, 'more than two lanes ran on a share of two'
+assert small.returncode == 0 and 'database lanes: 4 at a time, 2 test threads each: ' in small.stdout, small.stdout
+assert peak_running(small_environment) <= 4, 'more than four lanes ran on a share of two'
 # One at a time on request; an invalid count fails before any lane runs.
 serial, serial_commands, serial_environment = cases['serial'].result()
 assert serial.returncode == 0 and 'database lanes: 1 at a time, 12 test threads each' in serial.stdout, serial.stdout
 assert peak_running(serial_environment) == 1, 'lanes overlapped at one at a time'
 check_lanes(serial_commands, serial_environment)
 invalid, invalid_commands, _ = cases['invalid'].result()
-assert invalid.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 11' in invalid.stdout + invalid.stderr
+assert invalid.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 18' in invalid.stdout + invalid.stderr
 assert not executions_of(invalid_commands)
 too_many, too_many_commands, _ = cases['too many'].result()
-assert too_many.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 11, not 12' in too_many.stdout + too_many.stderr
+assert too_many.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 18, not 19' in too_many.stdout + too_many.stderr
 assert not executions_of(too_many_commands)
 # A malformed share is ignored with a warning, never read as a smaller one.
 malformed, _, _ = cases['malformed'].result()
-assert malformed.returncode == 0 and 'database lanes: 11 at a time:' in malformed.stdout, malformed.stdout
+assert malformed.returncode == 0 and 'database lanes: 18 at a time:' in malformed.stdout, malformed.stdout
 assert 'ignoring CODEWIRE_CI_CPU_SHARE' in malformed.stdout + malformed.stderr
 failed_lane, failed_commands, failed_environment = cases['failed lane'].result()
 assert failed_lane.returncode != 0 and '[product-integration] green' not in failed_lane.stdout
