@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-24.
+Updated 2026-11-25.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -405,6 +405,12 @@ Issues: #5537, #5539. The rule is in
     2 with no journal row and no broker ending (#4909).
   - not walked: a due Codex sign-in, and a GitHub login renewing before a
     host checkout's `git`.
+
+  The first agent command after a start (#6123), 2026-11-25, on `cw` (the
+  featured build) and a guest runtime from `main` at 3e020c3405. In each of
+  three stop and start cycles (7.6, 8.1 and 8.0 s), the command run straight
+  after `cw --local start` found Claude's and Codex's login files, and
+  `claude -p` never said `Not logged in`.
 
 ## 7. `mac-vm-indexed-root`: a state root Spotlight may index is warned about
 

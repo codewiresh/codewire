@@ -29,7 +29,7 @@ observed**.
 | `cred-creator-departed` | not applicable | not applicable | not yet observed |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20, and main 8880d56e7, 2026-11-21 (a local VM from a `file` root is served a lease on both routes; a new `file` root keeps its key in `protected-v1` alone, 0700 and 0600; a root with nothing set uses Secret Service and says so first; the upgraded root, the 0644 refusal and a due refresh not yet observed) | the macOS file store; not part of this check | local stores only |
-| `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked); step 6 with a running VM holding the credential, `main` at 569a5c7a53, 2026-11-25 (#6128) | not yet observed (#4928) | not yet observed (#4928) |
+| `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked); step 6 with a running VM holding the credential, `main` at 569a5c7a53, 2026-11-25 (#6128) | partly observed: step 6 with a running VM holding the credential, `main` at 3e020c3405, 2026-11-25 (#6128); the other steps not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
 | `cred-pickers` | partly observed, main at 569a5c7a53, 2026-11-25 (#6286): the one picker from `add` and `connect`, an SSH import and a paste; a completed sign-in, `set` and Esc with credentials saved not yet observed | not yet observed | partly observed on Dev, the same build and date, as the personal-walk identity (#6286): as on Linux |
 | `cred-github-notice` | not applicable | not applicable | not yet observed (dashboard) |
@@ -1087,7 +1087,16 @@ sign-in and a Codex sign-in both named after their email address.
   with cw update w6123 --profile local:same, or remove it with cw rm
   w6123`. `list` still showed `walk  Codex  active`. After `cw --local
   update w6123 --profile local:same --yes` the delete went through, and
-  only the Claude sign-in was left. Not yet observed on macOS.
+  only the Claude sign-in was left.
+
+  Step 6 on macOS (Apple silicon), `main` at 3e020c3405, 2026-11-25
+  (#6128), with the featured build, a scratch `HOME` and a throwaway
+  keychain. Both refusals matched the Linux text word for word, apart from
+  the names, `list` kept the Codex sign-in `active`, and after `cw --local
+  update` the delete went through. As on Linux, the delete of the synthetic
+  ChatGPT sign-in also printed `OpenAI didn't confirm revoking the ChatGPT
+  sign-in: OpenAI couldn't be reached. …`, because the featured build never
+  reaches the provider.
 - **Gotchas:**
   - A `cw` older than the change, talking to a store that already holds the
     same name twice, is refused by the store rather than given one of them.

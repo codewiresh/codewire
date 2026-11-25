@@ -41,7 +41,7 @@ separately.
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
-| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke), and the first command after a start, 2026-11-25, source 569a5c7a53 (#6123) | no command yet | n/a | n/a |
+| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke), and the first command after a start, 2026-11-25, source 569a5c7a53 (#6123) | partly observed: the first command after a start, 2026-11-25, source 3e020c3405 (#6123) | n/a | n/a |
 | `agent-vm-platform-profile` | #4909 | not yet observed | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | partly observed 2026-11-19, v0.4.24 | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | partly observed 2026-11-19, source 8f3a2d502 | no command yet | no command yet |
@@ -1090,7 +1090,14 @@ request adds.
   each), found both Claude's and Codex's login files. `claude -p` never said
   `Not logged in`: it sent its signed-in requests, which the featured
   build's model fixture refused, since it serves only the smoke's own probe.
-  Not yet observed on macOS.
+
+  The same on macOS (Apple silicon), 2026-11-25. The `cw` (featured build)
+  and the guest runtime were built from `main` at 3e020c3405, with a scratch
+  `HOME` and a throwaway keychain. In each of three stop and start cycles
+  (7.6, 8.1 and 8.0 s), the first command found both login files, written
+  before it began by the guest clock. `claude -p` never said `Not logged
+  in`. It ended with the fixture's `API Error: 502 Codewire: Anthropic
+  couldn't be reached; try again.`
 
 ## `agent-vm-platform-profile`: a local VM on a platform profile is intercepted through the delegation
 
