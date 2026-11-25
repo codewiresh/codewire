@@ -31,8 +31,10 @@ pub enum Refusal {
     Busy,
     UpstreamFailed(UpstreamFailure),
     NameNotAllowed,
-    /// A hosted Sandbox's request that carries none of its placeholders,
-    /// refused whatever the network policy (#5555).
+    /// A request that carries none of the environment's placeholders where
+    /// the platform's credential service serves it, a hosted Sandbox or a
+    /// local VM on a platform profile: refused whatever the network policy
+    /// (#5555).
     SelectedCredentialOnly,
     /// The sign-in waits out its provider's rate limit on a refresh and the
     /// request's access token has expired (#4975): answered 429 with the
@@ -248,9 +250,9 @@ impl Refusal {
             Self::SelectedCredentialOnly => (
                 match host {
                     Some(host) => format!(
-                        "in a hosted Sandbox, requests to {host} must carry the Sandbox's Codewire credential."
+                        "requests to {host} from this environment must carry its Codewire credential."
                     ),
-                    None => "in a hosted Sandbox, these requests must carry the Sandbox's Codewire credential."
+                    None => "these requests from this environment must carry its Codewire credential."
                         .to_owned(),
                 },
                 None,

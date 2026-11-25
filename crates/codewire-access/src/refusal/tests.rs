@@ -101,7 +101,7 @@ fn table() -> Vec<(Refusal, u16, String)> {
         (
             Refusal::SelectedCredentialOnly,
             403,
-            "Codewire: in a hosted Sandbox, requests to api.anthropic.com must carry the Sandbox's Codewire credential.\n".to_owned(),
+            "Codewire: requests to api.anthropic.com from this environment must carry its Codewire credential.\n".to_owned(),
         ),
         (
             Refusal::Unavailable,
@@ -162,7 +162,7 @@ fn without_a_bound_host_the_sentence_leaves_it_out() {
     );
     assert_eq!(
         Refusal::SelectedCredentialOnly.body(None, None),
-        "Codewire: in a hosted Sandbox, these requests must carry the Sandbox's Codewire credential.\n"
+        "Codewire: these requests from this environment must carry its Codewire credential.\n"
     );
 }
 
