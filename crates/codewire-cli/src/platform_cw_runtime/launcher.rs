@@ -12,7 +12,7 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::fs::{HeldFile, Paths, Stamp, Tree};
+use super::fs::{FileId, HeldFile, Paths, Stamp, Tree};
 use super::wire::Code;
 use super::{Result, host, open_store, store_error, user};
 use codewire_cw_release::store::{EntryState, Status};
@@ -32,10 +32,12 @@ enum Launch {
 
 /// Called before ordinary CLI configuration/runtime initialization. Returning
 /// success means the caller is not an eligible image alias, or runs itself.
-/// An ordinary invocation runs the Store's selection, else, invoked as the
-/// image's cw, the release's cw (#5202). It replaces only this new
-/// invocation, never an already-running daemon, helper or session. A
-/// refusal says what it refused and carries its next step (#6315).
+/// An ordinary invocation runs the Store's selection, else the release's cw,
+/// else itself (#5202). The image's cw leaves that choice to an admitted
+/// release before it reads the Store, so a launcher fix ships with the
+/// release (#6331). It replaces only this new invocation, never an
+/// already-running daemon, helper or session. A refusal says what it refused
+/// and carries its next step (#6315).
 pub fn redirect_from<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -58,18 +60,21 @@ where
                 return Ok(None);
             }
             let deadline = Instant::now() + LAUNCH_BUDGET;
-            let defers = defers_to_release(&path);
             let image = Image::open(path, &decoded)?;
+            let running = FileId::of(&image.file)?;
+            let image_cw = fs::symlink_metadata(IMAGE_CW)
+                .ok()
+                .map(|m| FileId::metadata(&m));
+            let release = Release::open_at(Path::new(RELEASE_CW));
+            if hands_off(running, image_cw, release.as_ref().map(|r| r.id)) {
+                return Ok(release.map(Launch::Release));
+            }
             let selected = select(&Paths::fixed(), deadline)?;
             image.check()?;
             if Instant::now() >= deadline {
                 return Err(Code::Deadline);
             }
-            Ok(match selected {
-                Some(selected) => Some(Launch::Store(selected)),
-                None if defers => Release::open_at(Path::new(RELEASE_CW)).map(Launch::Release),
-                None => None,
-            })
+            Ok(selected.map(Launch::Store))
         })
     })
     .map_err(refusal)?;
@@ -87,10 +92,17 @@ where
     Ok(())
 }
 
-/// Only the image's cw defers to the release's; the release's cw invoked
-/// directly runs itself, so the two never redirect to each other.
-pub(super) fn defers_to_release(invoked: &Path) -> bool {
-    invoked.as_os_str() == std::ffi::OsStr::new(IMAGE_CW)
+/// Whether the running executable hands off to the release before reading
+/// the Store. Only the image's cw does, and never to the file it is running,
+/// so a link or a mount that makes the release look like the image's cw
+/// neither loops nor skips the Store check, and an invocation hands off at
+/// most once. Identities are device and inode, never `argv[0]` or a path.
+pub(super) fn hands_off(
+    running: FileId,
+    image_cw: Option<FileId>,
+    release: Option<FileId>,
+) -> bool {
+    image_cw == Some(running) && release.is_some_and(|release| release != running)
 }
 
 /// The release's cw, held open. It is admitted on the same terms as the
@@ -100,6 +112,7 @@ pub(super) fn defers_to_release(invoked: &Path) -> bool {
 pub(super) struct Release {
     path: PathBuf,
     file: File,
+    id: FileId,
     before: Stamp,
 }
 
@@ -115,10 +128,12 @@ impl Release {
         if !image_metadata(&metadata) {
             return None;
         }
+        let id = FileId::metadata(&metadata);
         let before = Stamp::of(&file).ok()?;
         let release = Self {
             path: path.to_owned(),
             file,
+            id,
             before,
         };
         release.check().ok()?;

@@ -1732,23 +1732,42 @@ fn platform_image_dispatch_private_roles_skip_all_admission() {
 }
 
 #[test]
-fn only_the_image_cw_defers_to_the_release_cw() {
-    // #5202: the image's cw runs the release's; the release's cw runs
-    // itself, so the two never hand off to each other.
-    assert!(super::launcher::defers_to_release(Path::new(
-        "/usr/local/bin/cw"
-    )));
-    for path in [
-        "/codewire/bin/cw",
-        "/usr/bin/cw",
-        "/home/codewire/.local/bin/cw",
-        "/usr/local/bin/../bin/cw",
-    ] {
-        assert!(
-            !super::launcher::defers_to_release(Path::new(path)),
-            "{path}"
-        );
-    }
+fn only_the_image_cw_hands_off_and_never_to_the_file_it_runs() {
+    // #6331: the image's cw hands the choice to the admitted release before
+    // it reads the Store. Which copy runs is its device and inode.
+    use super::fs::FileId;
+    use super::launcher::hands_off;
+    let root = tempfile::tempdir().unwrap();
+    let id = |path: &Path| FileId::metadata(&stdfs::metadata(path).unwrap());
+    let image = root.path().join("image-cw");
+    let release = root.path().join("release-cw");
+    write(&image, b"image", 0o555);
+    write(&release, b"release", 0o555);
+    let (image_id, release_id) = (id(&image), id(&release));
+
+    assert!(hands_off(image_id, Some(image_id), Some(release_id)));
+    // The release invoked directly runs the Store check itself.
+    assert!(!hands_off(release_id, Some(image_id), Some(release_id)));
+    // No admitted release, or no image cw: nothing to hand off to or from.
+    assert!(!hands_off(image_id, Some(image_id), None));
+    assert!(!hands_off(image_id, None, Some(release_id)));
+    // A mount that makes both names one file never hands off to itself.
+    assert!(!hands_off(image_id, Some(image_id), Some(image_id)));
+
+    // The release reached through a link named like the image's cw: the
+    // running file is the release, the name is the link, so it stays put.
+    let link = root.path().join("linked-image-cw");
+    symlink(&release, &link).unwrap();
+    let link_name = FileId::metadata(&stdfs::symlink_metadata(&link).unwrap());
+    assert!(!hands_off(id(&link), Some(link_name), Some(release_id)));
+
+    // A file swapped in under the image's name after the identities were
+    // read changes nothing about the file that is running.
+    stdfs::rename(&image, root.path().join("old-image-cw")).unwrap();
+    write(&image, b"swapped", 0o555);
+    assert_ne!(id(&image), image_id);
+    assert!(hands_off(image_id, Some(image_id), Some(release_id)));
+    assert!(!hands_off(image_id, Some(id(&image)), Some(release_id)));
 }
 
 #[test]

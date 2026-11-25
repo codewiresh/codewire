@@ -23,7 +23,7 @@ impl FileId {
         Ok(Self::metadata(&m))
     }
 
-    fn metadata(m: &fs::Metadata) -> Self {
+    pub(super) fn metadata(m: &fs::Metadata) -> Self {
         Self {
             device: m.dev(),
             inode: m.ino(),
