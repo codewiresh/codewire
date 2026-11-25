@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-24. Every step not listed as observed is **not yet
+Updated 2026-11-25. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -30,7 +30,7 @@ observed**.
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20, and main 8880d56e7, 2026-11-21 (a local VM from a `file` root is served a lease on both routes; a new `file` root keeps its key in `protected-v1` alone, 0700 and 0600; a root with nothing set uses Secret Service and says so first; the upgraded root, the 0644 refusal and a due refresh not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
-| `cred-pickers` | not yet observed | not yet observed | not yet observed |
+| `cred-pickers` | partly observed, main at 569a5c7a53, 2026-11-25 (#6286): the one picker from `add` and `connect`, an SSH import and a paste; a completed sign-in, `set` and Esc with credentials saved not yet observed | not yet observed | partly observed on Dev, the same build and date, as the personal-walk identity (#6286): as on Linux |
 | `cred-github-notice` | not applicable | not applicable | not yet observed (dashboard) |
 
 ## Before the walk
@@ -1097,55 +1097,39 @@ dashboard's half.
 
 ## 15. `cred-pickers`: what each guided picker offers
 
-Issues: #5446 (the rule and its test), #4985 (the four `connect` rows), #4717
-(the approved credentials screens). The owner's report on #5446, a `connect`
-picker with only Codex and GitHub, came from an installed v0.4.18; v0.4.22 is
-the first release with the four rows.
+Issues: #6286 (one picker for `add` and `connect`, approved by the owner),
+#5446 (the rule and its test), #4717 (the approved credentials screens).
 
 - **Entry points:** `cw credentials --local|--cloud connect` and `add` with
-  no provider, and `cw credentials --local|--cloud --profile P set` with no
+  no type, and `cw credentials --local|--cloud --profile P set` with no
   slot, at a terminal. The placement may also follow the subcommand
   (`cw credentials connect --local`).
 - **States to exercise:** each placement; no credentials yet and some
   already saved (the pickers hide nothing); Esc at a picker, which changes
   nothing.
 - **Driving it:**
-  - `connect` with no provider. Expect "What do you want to connect?" with
-    four rows, label then detail, in this order, in both placements:
-    `Codex  sign in with your ChatGPT account`, `GitHub  sign in with your
-    GitHub account`, `Claude (sign-in)  your subscription; shows your plan
-    and usage` and `Claude (token)  your subscription; lasts a year, for
-    automation, model requests only`. Pick Claude (sign-in), give a name,
-    and it connects as step 6 shows.
-  - `add` with no provider. Expect "Which provider?" with `OpenAI API key`,
-    `Anthropic API key` and `SSH private key`, in that order, in both
-    placements. API keys are under `add`, not `connect`; `add
-    claude-subscription`, the alias of `connect claude-token` (#4945), is
-    not a row.
-  - `--profile P set` with no slot. Expect "Which provider should this
-    profile use?" with `codex`, `openai`, `anthropic` and `ssh`: every slot
-    but GitHub's, which every profile includes.
-- **Proof:** each picker shows exactly the rows above, in that order, in
-  both placements, and picking Claude (sign-in) ends in `✓ Claude (sign-in)
-  connected as ACCOUNT`. `cargo test -p codewire-cli picker` holds each
-  picker's rows to the set its command accepts in each placement, and fails
-  when a provider is accepted but not offered.
-- **Gotchas:** walk a released `cw`, the one the owner installs, and record
-  its `cw --version`: no release before v0.4.22 has the Claude (token) row,
-  and v0.4.18 and v0.4.20 show only Codex and GitHub locally.
-  Locally, walk only against a private keyring, as "Before the walk" says.
-- **Observed:** not yet observed. The walk on a Mac and in the cloud, on a
-  released `cw` (v0.4.22 or later), is still to do.
-- **One picker for `add` and `connect` (#6286; not yet observed):**
-  - `add` and `connect` with no type show the same picker, in both
-    placements: "Which credential?", with seven rows, one per credential
-    type, and the details the owner approved on #6286:
-    `Codex`, `GitHub`, `Claude (sign-in)`, `Claude (token)`,
-    `Anthropic API key`, `OpenAI API key` and `SSH key`.
-  - Picking `Codex` from `add` signs in, as step 2 shows. Picking
-    `Anthropic API key` from `connect` asks for the key, as step 4 shows.
-  - Picking `SSH key` asks "SSH key": `Generate a new key` or
-    `Import a key file`.
+  - `add` or `connect` with no type. Expect the same picker from both, in
+    both placements: "Which credential?", with seven rows, label then
+    detail, in this order:
+
+    ```text
+    Codex              sign in with your ChatGPT account
+    GitHub             sign in with your GitHub account
+    Claude (sign-in)   your subscription; shows your plan and usage
+    Claude (token)     your subscription; lasts a year, for automation, model requests only
+    Anthropic API key  paste a key from console.anthropic.com
+    OpenAI API key     paste a key from platform.openai.com
+    SSH key            generate one, or import an OpenSSH key file
+    ```
+
+  - Each row runs its own flow, whichever verb was typed: `GitHub` from
+    `add` signs in, as step 1 shows, and `Anthropic API key` from `connect`
+    asks for the key, as step 4 shows. `add claude-subscription`, the alias
+    of `connect claude-token` (#4945), is not a row.
+  - `SSH key` asks "SSH key": `Generate a new key` (Codewire makes an
+    Ed25519 key and prints its public key) or `Import a key file` (an
+    OpenSSH private-key file on this computer), which asks for the file, as
+    step 7 shows.
   - `cw credentials add codex` and `cw credentials connect anthropic` do the
     same without the picker.
   - `--key-file` with `codex` is refused: `--key-file doesn't apply to
@@ -1153,12 +1137,43 @@ the first release with the four rows.
   - `connect ssh --name NAME` piped, with no `--key-file`: `SSH key needs a
     key file without a terminal`, then a `→` line naming
     `cw credentials generate ssh --name NAME` and `--key-file PATH`.
-  - **Proof:** the same rows from both verbs in both placements, and each
-    choice running its own flow whichever verb was typed.
-    `cargo test -p codewire-cli credential_input::types` holds both verbs to
-    every type and the picker to the approved rows, and
-    `cargo test -p codewire-access credential_types` fails when a type is
-    added in one place only.
+  - `--profile P set` with no slot. Expect "Which provider should this
+    profile use?" with `codex`, `openai`, `anthropic` and `ssh`: every slot
+    but GitHub's, which every profile includes.
+- **Proof:** each picker shows exactly the rows above, in that order, in
+  both placements, and each choice runs its own flow whichever verb was
+  typed. `cargo test -p codewire-cli credential_input::types` holds both
+  verbs to every type and the picker to the approved rows,
+  `cargo test -p codewire-access credential_types` fails when a type is
+  added in one place only, and `cargo test -p codewire-cli picker` holds
+  `set`'s rows to the slots it accepts.
+- **Gotchas:**
+  - Record `cw --version`: a `cw` without #6348 shows the older pickers,
+    "What do you want to connect?" with four sign-in rows and "Which
+    provider?" with the keys.
+  - Locally, walk only against a private keyring, as "Before the walk" says.
+  - On Dev, walk as an account sign-in (`with-dev-personal-walk.sh`). An
+    organization API key, such as the smoke identity's, is refused every
+    credential step: "organization-scoped API key cannot perform
+    account-global operations".
+- **Observed:**
+  - Linux, `cw` built from main at 569a5c7a53, 2026-11-25, at a terminal, in
+    the local-smoke isolation (#6286): `add` and `connect` each showed
+    "Which credential?" with the seven rows above; Esc printed "Canceled;
+    nothing selected". From `add`, `SSH key` then `Import a key file` asked
+    for "OpenSSH private-key file" and the passphrase and saved an `SSH key`,
+    printing its public key and fingerprint. From `connect`, `Anthropic API
+    key` asked for the key, and a synthetic key was saved as `Anthropic API
+    key`. From `add`, `GitHub` showed "Connect GitHub as NAME, on this
+    computer" with the device link and code; Ctrl+C printed "Login cancelled;
+    no credential was changed".
+  - Dev, the same build and date, as the personal-walk identity (#6286): the
+    same picker, SSH import and paste; `GitHub` showed "…, in your Codewire
+    account" with the device link and code, and Ctrl+C printed "Enrollment
+    cancelled; inspect the credential by name before retrying because
+    storage acknowledgement may be unknown".
+  - Not yet observed: a completed sign-in through the picker, a Mac, `set`,
+    and the pickers with credentials already saved.
 
 ## 16. `cred-github-notice`: GitHub's pending permissions, on the dashboard's Credentials page
 
