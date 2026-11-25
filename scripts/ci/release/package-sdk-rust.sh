@@ -61,7 +61,11 @@ if [[ -d "$target" ]]; then
       >"$target/CACHEDIR.TAG"
   (cd "$work/source" && cargo clean --locked -p codewire-proto -p codewire --target-dir "$target")
 fi
-(cd "$work/source" && cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
+# Cargo's verify build only checks that the packaged tarballs compile cleanly;
+# debuginfo is never part of a .crate archive and more than doubles compile
+# time for the 17 MB generated codewire-proto crate (infra#1534).
+(cd "$work/source" && CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
 
 for crate in codewire-proto codewire; do
   file="$target/package/$crate-$version.crate"

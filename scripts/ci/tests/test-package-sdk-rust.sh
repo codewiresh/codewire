@@ -21,6 +21,9 @@ cat >"$TMP/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$CARGO_CALLS"
+if [[ "$1" == package ]]; then
+  printf 'CARGO_PROFILE_DEV_DEBUG=%s\n' "${CARGO_PROFILE_DEV_DEBUG-unset}" >>"$CARGO_CALLS.env"
+fi
 case "$1" in
   metadata)
     printf '{"packages":[{"name":"codewire","version":"0.1.0"},{"name":"codewire-proto","version":"0.1.0"}]}\n'
@@ -84,8 +87,14 @@ done
 
 # A tag Cargo already wrote is left as it is.
 printf 'Signature: 8a477f597d28d172789f06886806bc55\n# cargo wrote this\n' >"$target/CACHEDIR.TAG"
-CODEWIRE_SDK_PACKAGE_TARGET_DIR="$target" "$SCRIPT" "$TMP/out-again" >"$TMP/again.log" 2>&1 ||
+# Caller-set line-tables-only (e.g. from local-rust-cache.sh) is still overridden
+# to 0 for the verify-only cargo package compile.
+CARGO_PROFILE_DEV_DEBUG=line-tables-only CODEWIRE_SDK_PACKAGE_TARGET_DIR="$target" \
+  "$SCRIPT" "$TMP/out-again" >"$TMP/again.log" 2>&1 ||
   fail "a second kept run failed: $(cat "$TMP/again.log")"
 grep -qx '# cargo wrote this' "$target/CACHEDIR.TAG" || fail "Cargo's own cache tag was rewritten"
+
+[[ "$(grep -cx 'CARGO_PROFILE_DEV_DEBUG=0' "$CARGO_CALLS.env")" -eq 3 ]] ||
+  fail "cargo package did not force CARGO_PROFILE_DEV_DEBUG=0: $(cat "$CARGO_CALLS.env")"
 
 printf '[test-package-sdk-rust] a kept target rebuilds only the two SDK crates from this tree\n'
