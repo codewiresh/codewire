@@ -821,6 +821,8 @@ class EmbeddedSourceTest(unittest.TestCase):
         "crates/codewire-local-vmm/src/supervisor_store/testdata/schema-11.sql",
         # codewire-tailnet src/golden_tests.rs, a #[cfg(test)] module
         "tests/fixtures/tailnet/tailscale_golden.json",
+        # codewire-access src/front_door.rs, its #[cfg(test)] module
+        "crates/codewire-access/front-door-hosts.txt",
     }
     INCLUDE = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"')
 

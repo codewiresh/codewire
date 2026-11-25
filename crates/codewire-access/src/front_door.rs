@@ -213,6 +213,26 @@ mod tests {
         assert_eq!(front_door_hosts(every), FRONT_DOOR_HOSTS);
     }
 
+    /// The checked-in list of every name any selection serves, which a Dev
+    /// delivery compares between orchestration's source and the pinned
+    /// cw-egress image's (egress-image-pin.py verify, infra#1534), is the
+    /// derived set itself, so a host change anywhere moves the list.
+    #[test]
+    fn the_checked_in_front_door_host_list_is_the_derived_set() {
+        let mut served: Vec<&str> = every_selection()
+            .into_iter()
+            .flat_map(|(_, selection)| front_door_hosts(selection))
+            .map(|host| host.leaf_name().expect("every entry has a leaf name"))
+            .collect();
+        served.sort_unstable();
+        served.dedup();
+        let listed: Vec<&str> = include_str!("../front-door-hosts.txt").lines().collect();
+        assert_eq!(
+            listed, served,
+            "crates/codewire-access/front-door-hosts.txt must list the derived set, one name a line"
+        );
+    }
+
     /// The `chatgpt.com` suffix is served for the Codex slot and no other
     /// selection, beside its exact host, and it is the only suffix any
     /// selection is served (#6195).

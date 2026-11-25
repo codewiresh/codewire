@@ -26,8 +26,11 @@ git init -q -b main "$repo"
 git -C "$repo" config user.name fixture
 git -C "$repo" config user.email fixture@example.invalid
 git -C "$repo" config commit.gpgsign false
-mkdir -p "$repo/scripts/ci/images" "$repo/scripts/ci/trust" "$repo/deployments/k8s/egress"
+mkdir -p "$repo/scripts/ci/images" "$repo/scripts/ci/trust" "$repo/deployments/k8s/egress" \
+  "$repo/crates/codewire-access/src"
 install -m 755 "$ROOT/scripts/ci/images/egress-image-pin.py" "$repo/scripts/ci/images/"
+# The front-door hosts every commit here serves, until a case changes them.
+install -m 644 "$ROOT/crates/codewire-access/front-door-hosts.txt" "$repo/crates/codewire-access/"
 install -m 644 "$ROOT/deployments/k8s/egress/kustomization.yaml" "$repo/deployments/k8s/egress/"
 # The fixture starts from the component with no pin, whatever main pins now
 # (#5550 pinned main's): its images block, always last, is cut off.
@@ -87,6 +90,47 @@ verify --commit "$pinned" --digest "$DIGEST" >"$work/pass.out" 2>"$work/pass.err
 grep -Fq "signed by main CI from $signed_source" "$work/pass.out" || fail 'the accepted source is not named'
 [[ "$(cat "$FAKE_VERIFY_CALLS")" == "registry.example.invalid/codewire/egress@$DIGEST" ]] ||
   fail "the verifier did not check exactly the delivered image: $(cat "$FAKE_VERIFY_CALLS")"
+
+# A delivered commit whose front-door hosts differ from those of the pinned
+# image's source is refused (infra#1534): orchestration would bind hosts
+# cw-egress doesn't serve. A commit that keeps them passes.
+git -C "$repo" switch -q -c hosts-moved "$pinned"
+printf 'new.example.invalid\n' >>"$repo/crates/codewire-access/front-door-hosts.txt"
+git -C "$repo" commit -qam 'a new front-door host'
+hosts_moved="$(git -C "$repo" rev-parse HEAD)"
+refuse hosts-moved 'changes the front-door hosts past the pinned cw-egress image' \
+  --commit "$hosts_moved" --digest "$DIGEST"
+git -C "$repo" switch -q -c hosts-kept "$pinned"
+printf 'unrelated\n' >"$repo/unrelated.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -qm 'an unrelated change'
+hosts_kept="$(git -C "$repo" rev-parse HEAD)"
+verify --commit "$hosts_kept" --digest "$DIGEST" >"$work/kept.out" 2>"$work/kept.err" ||
+  fail "a commit keeping the front-door hosts was refused: $(cat "$work/kept.err")"
+grep -Fq 'with the same front-door hosts' "$work/kept.out" || fail 'the front-door check did not report'
+# An image older than the list is compared by front_door.rs's host
+# declarations: a change to its tests alone keeps them, a host change doesn't.
+git -C "$repo" switch -q -c before-list "$unpinned"
+git -C "$repo" rm -q crates/codewire-access/front-door-hosts.txt
+printf 'pub const GITHUB_INTERCEPTED: bool = false;\nfn tests() {}\n' >"$repo/crates/codewire-access/src/front_door.rs"
+git -C "$repo" add -A
+git -C "$repo" commit -qm 'an image source from before the list'
+before_list="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" switch -q -c after-list "$before_list"
+python3 "$repo/scripts/ci/images/egress-image-pin.py" render --digest "$DIGEST"
+install -m 644 "$ROOT/crates/codewire-access/front-door-hosts.txt" "$repo/crates/codewire-access/"
+printf 'pub const GITHUB_INTERCEPTED: bool = false;\nfn tests() { /* more */ }\n' >"$repo/crates/codewire-access/src/front_door.rs"
+git -C "$repo" add -A
+git -C "$repo" commit -qm 'the list arrives; only tests changed'
+after_list="$(git -C "$repo" rev-parse HEAD)"
+FAKE_SIGNED_SOURCES="$before_list" verify --commit "$after_list" --digest "$DIGEST" >"$work/older.out" 2>"$work/older.err" ||
+  fail "an older image with the same host declarations was refused: $(cat "$work/older.err")"
+printf 'pub const GITHUB_INTERCEPTED: bool = true;\nfn tests() { /* more */ }\n' >"$repo/crates/codewire-access/src/front_door.rs"
+git -C "$repo" commit -qam 'GitHub turns on'
+github_on="$(git -C "$repo" rev-parse HEAD)"
+FAKE_SIGNED_SOURCES="$before_list" refuse older-host-change 'changes the front-door hosts past the pinned cw-egress image' \
+  --commit "$github_on" --digest "$DIGEST"
+git -C "$repo" switch -q main
 
 # Every other case fails closed and says why.
 refuse other-digest "but $pinned pins $DIGEST" --commit "$pinned" --digest "$OTHER_DIGEST"

@@ -44,6 +44,13 @@ VERIFIER = ROOT / "scripts/ci/images/verify-runtime-image-signatures.sh"
 PUBLIC_KEY = ROOT / "scripts/ci/trust/codewire-runtime-signing.pub"
 HEADER = "images:\n"
 ENTRY = f"  - name: {PLACEHOLDER}\n    digest: {{digest}}\n"
+# The front-door hosts orchestration binds and cw-egress serves, which both
+# compile in from codewire-access: the checked-in derived list, and for a
+# pinned image older than that list, the declarations it is derived from.
+FRONT_DOOR_HOSTS = "crates/codewire-access/front-door-hosts.txt"
+FRONT_DOOR_SOURCE = "crates/codewire-access/src/front_door.rs"
+FRONT_DOOR_DECLARATIONS = re.compile(
+    r"^pub const (?:GITHUB_INTERCEPTED|[A-Z_]*_HOSTS?|[A-Z_]*_WILDCARD)\b.*?;$", re.M | re.S)
 PIN_BLOCK = re.compile(
     r"^images:\n  - name: " + re.escape(PLACEHOLDER) + r"\n    digest: (\S+)\n", re.MULTILINE
 )
@@ -140,6 +147,39 @@ def verify(sha: str, digest: str, registry: str) -> str:
     raise PinError(f"no main-CI-verified signature of {reference} names a source that {sha} contains")
 
 
+def front_door(sha: str) -> str | None:
+    """What decides `sha`'s front-door hosts: its derived list, or before that
+    list existed, the host declarations in front_door.rs; None when neither
+    is readable."""
+    listed = run(["git", "-C", str(ROOT), "show", f"{commit(sha)}:{FRONT_DOOR_HOSTS}"], 120)
+    if listed.returncode == 0:
+        return "list:" + listed.stdout
+    source = run(["git", "-C", str(ROOT), "show", f"{commit(sha)}:{FRONT_DOOR_SOURCE}"], 120)
+    if source.returncode != 0:
+        return None
+    return "declarations:" + "\n".join(FRONT_DOOR_DECLARATIONS.findall(source.stdout))
+
+
+def same_front_door(sha: str, source: str) -> None:
+    """Refuse a delivery of `sha` whose front-door hosts differ from those of
+    the pinned cw-egress image's `source` (infra#1534): orchestration would
+    bind hosts cw-egress doesn't serve, as on 2026-11-24 when 576f428938's
+    GitHub routes met cw-egress from d9abce139c."""
+    delivered, pinned_image = front_door(sha), front_door(source)
+    if delivered is None or pinned_image is None:
+        raise PinError(f"the front-door hosts of {sha} or {source} cannot be read")
+    if delivered.split(":", 1)[0] != pinned_image.split(":", 1)[0]:
+        # One side predates the list: compare the declarations both have.
+        delivered = "declarations:" + "\n".join(FRONT_DOOR_DECLARATIONS.findall(
+            git("show", f"{commit(sha)}:{FRONT_DOOR_SOURCE}")))
+        pinned_image = "declarations:" + "\n".join(FRONT_DOOR_DECLARATIONS.findall(
+            git("show", f"{commit(source)}:{FRONT_DOOR_SOURCE}")))
+    if delivered != pinned_image:
+        raise PinError(
+            f"{sha} changes the front-door hosts past the pinned cw-egress image (built from {source}); "
+            "merge the cw-egress bump first")
+
+
 def render(digest: str) -> None:
     if not DIGEST.fullmatch(digest):
         raise PinError(f"not a sha256 digest: {digest!r}")
@@ -175,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify":
             registry = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
             source = verify(args.commit, args.digest, registry)
-            print(f"egress image pin: {args.digest} is the pin at {args.commit}, signed by main CI from {source}")
+            same_front_door(args.commit, source)
+            print(f"egress image pin: {args.digest} is the pin at {args.commit}, signed by main CI from {source}, "
+                  "with the same front-door hosts")
         else:
             pinned((ROOT / COMPONENT).read_text())
     except PinError as error:

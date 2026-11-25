@@ -1,0 +1,8 @@
+*.chatgpt.com
+api.anthropic.com
+api.github.com
+api.openai.com
+auth.openai.com
+chatgpt.com
+github.com
+platform.claude.com
