@@ -19,6 +19,8 @@ readonly STOCK_SSH_WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/stock-ssh-workload.sh"
 source "$SCRIPT_DIRECTORY/lib/local-smoke-isolation.sh"
 # shellcheck source=scripts/ci/verify/lib/native-smoke-interception.sh
 source "$SCRIPT_DIRECTORY/lib/native-smoke-interception.sh"
+# shellcheck source=scripts/ci/verify/lib/native-smoke-credentials.sh
+source "$SCRIPT_DIRECTORY/lib/native-smoke-credentials.sh"
 SMOKE_ARGUMENTS=("$@")
 
 CW_BIN=''
@@ -1935,6 +1937,7 @@ restart_failed_environment() {
   wait_for_journal_complete || die "stop after the $label kill left a partial journal"
   assert_direct_share_processes_stopped
   run_cw start --local "$NAME" --output json
+  RESTART_START_STDERR="$LAST_STDERR"
   jq -e '.state == "running" and (has("error_code") | not)' "$LAST_STDOUT" >/dev/null ||
     die "environment did not restart cleanly after the $label kill"
   [[ -z "$check_login" ]] || require_agent_login_after_start "$label"
@@ -2411,38 +2414,6 @@ EOF
       die 'application value entered a checked launch fixture instead of protected storage'
     fi
   done
-}
-
-run_application_secret_pty() {
-  local expected="$1" personal_expected="$2" collision_expected="$3" phase="$4" pty_log attempt
-  local -a SMOKE_EXTRA_ENVIRONMENT
-  pty_log="$SMOKE_ROOT/app-pty-$phase.log"
-  managed_cw_environment PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" "${NO_EGRESS_PROXIES[@]}"
-  if ! (
-    {
-      printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
-        "$expected" "$personal_expected" "$collision_expected" "$phase"
-      # The shell's own `exit` ends the session, and `cw shell` with it.
-      # Input stays open until the exact guest receipt, so nothing guesses
-      # when the console hop has completed. A plain `cw shell` sends every
-      # key to the session, Ctrl-B included, so a Ctrl-B d sent after the
-      # receipt was only stray input, and it reached a session that had
-      # already exited (#5584).
-      for ((attempt = 0; attempt < 400; attempt++)); do
-        if rg -q $'^app-secret-pty-ok\r?$' "$pty_log" 2>/dev/null; then
-          exit 0
-        fi
-        sleep 0.05
-      done
-      exit 1
-    } | smoke_cw /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
-      /usr/bin/script -qefc "$CW_BIN shell" "$pty_log"
-  ) >"$SMOKE_ROOT/app-pty-$phase.stdout" 2>"$SMOKE_ROOT/app-pty-$phase.stderr"; then
-    tail -n 80 "$SMOKE_ROOT/app-pty-$phase.stderr" >&2
-    die 'application projection PTY proof failed'
-  fi
-  cat "$SMOKE_ROOT/app-pty-$phase.stdout" "$SMOKE_ROOT/app-pty-$phase.stderr" >>"$TRANSCRIPT"
-  rg -q $'^app-secret-pty-ok\r?$' "$pty_log" || die 'PTY did not confirm the current application projection'
 }
 
 run_application_secret_smoke() {
@@ -3741,6 +3712,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     fi
     log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
     run_managed_credential_broker_smoke
+    run_claude_sign_in_smoke
     scan_serving_processes_for_credential_canaries
     # A VM checkpoint holds the guest's whole memory and a copy of its disks.
     # The Codex access token is in the guest by the listed direct delivery
@@ -3862,6 +3834,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local delete "id:$OPENAI_CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$ANTHROPIC_CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$SSH_CREDENTIAL_ID" --yes
+  if [[ -n "$CLAUDE_CREDENTIAL_ID" ]]; then
+    run_cw credentials --local --profile "$CLAUDE_PROFILE_NAME" delete --yes
+    run_cw credentials --local delete "id:$CLAUDE_CREDENTIAL_ID" --yes
+  fi
   run_cw secrets --local --user delete CW_NATIVE_PERSONAL_ONLY
   run_cw secrets --local --user delete CW_NATIVE_SCOPE_COLLISION
   run_cw secrets --local --user delete CW_NATIVE_PRECEDENCE

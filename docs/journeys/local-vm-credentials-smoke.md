@@ -127,7 +127,10 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
   still revoked. The start printed `Claude (sign-in) 'native-broker-claude'
   in profile native-claude is revoked; agents in this VM can't use it.` and
   its reconnect command, and the request after re-enrolling was answered
-  without a restart. `ssh`, `github` and `codex` not yet observed.
+  without a restart. The same step passed again, inside the managed smoke,
+  on `main` at 6557aa7e8 with #5512 and #5549 (Linux, KVM, 2026-11-20
+  17:43Z): its first call refreshed the sign-in through the authority's
+  staging. `ssh`, `github` and `codex` not yet observed.
 
 ## 3. `smoke-attach-restart`: attach across a restart
 
