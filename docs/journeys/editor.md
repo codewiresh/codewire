@@ -9,14 +9,14 @@ two entry points: `cw vscode`, and the editor's own Remote-SSH reaching a
 
 ## Where the journey stands
 
-Updated 2026-11-23.
+Updated 2026-11-24.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
 | `editor-connect` | cw-cli | observed 2026-11-14, with `ssh` and with the editor (#4641) | not yet observed |
 | `editor-server` | cw-cli | observed 2026-11-14 (#4641) | not yet observed |
 | `editor-edit` | cw-cli | observed 2026-11-14, with sftp and with the editor (#4641) | not yet observed |
-| `editor-reconnect` | cw-cli | observed 2026-11-14: the timed ending with `ssh`, and the editor's reconnect after a sleep (#4641); the lost-connection line is not yet observed (#6101) | not yet observed |
+| `editor-reconnect` | cw-cli | observed 2026-11-14: the timed ending with `ssh`, and the editor's reconnect after a sleep (#4641); the lost-connection line and the durable shell's reattach after a 90 s network cut on Dev 2026-11-24 (#6101) | not yet observed |
 | `editor-failures` | cw-cli | observed 2026-11-14 with `ssh`; the stopped and signed-out messages are fixed by #4643, not yet on Dev | not yet observed |
 
 ## Before the walk
@@ -118,7 +118,7 @@ Over the WebSocket fallback:
 After a network cut of about 90 s (#6101):
 
 - The plain `ssh cw-cloud-editor-walk` shell ends, and its terminal shows,
-  after OpenSSH's own line:
+  just before OpenSSH's own `Connection to … closed by remote host.`:
 
   ```text
   ✗ Lost the connection to editor-walk: SSH sessions end after about a minute offline, and their processes stop
@@ -187,4 +187,25 @@ Each failure names the next step, in the editor's Remote-SSH output or from
 
   The owner's result: "the editor walk works 100%". No timings or editor
   messages were recorded. Evidence: #4641.
+- Dev, 2026-11-24 (#6101), `editor-reconnect` after a network cut, with
+  `cw` built from main at 013f98d865 and OpenSSH 10.6, as the Dev smoke
+  identity, in a test Sandbox removed by name afterwards. Dev's desired
+  source moved from c4ff29d60b to 013f98d865 at 21:08:27Z, 4 s into the
+  walk, and the rollout was not checked; both have #6208, and the lines
+  below are the client's. The section was written with `cw setup ssh
+  --ssh-config-file` into a private file, which `ssh -F` read. The cut was
+  `IPAddressDeny=any` on the systemd scope that `ssh` and `cw` ran in, from
+  21:08:44.820 to 21:10:14.865Z (90 s).
+  - A session left with `exit` and no cut printed nothing from `cw`.
+  - The plain `ssh` shell, with `sleep 900 &` started in it, ended at
+    21:10:18.182, 3.3 s after the network came back. Its terminal showed
+    "✗ Lost the connection to w6101-editor: SSH sessions end after about a
+    minute offline, and their processes stop" and "→ for work that must keep
+    running, use cw shell --durable w6101-editor or cw run --detach", then
+    OpenSSH's "Connection to cw-cloud-w6101-editor closed by remote host."
+    The `sleep` was gone afterwards (`cw exec … kill -0` failed).
+  - `cw shell --durable w6101-editor`, via direct UDP, printed "[cw]
+    connection lost; reconnecting to the same session" and answered the
+    next command with a variable set before the cut, 5 s after the network
+    came back.
 - Production: not yet observed.
