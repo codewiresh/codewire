@@ -166,6 +166,7 @@ pub(super) async fn settle_end(
         kind: last.kind,
         mark: open.session.mark,
         paused_seen_ms: None,
+        started_at_ms: open.session.started_at_ms,
     };
     apply(pool, &open, &splits, after).await?;
     gaps().inc();
@@ -201,10 +202,11 @@ async fn open_session(pool: &PgPool, runtime_uid: &str) -> Result<Option<Open>, 
         Option<i64>,
         Option<DateTime<Utc>>,
         DateTime<Utc>,
+        DateTime<Utc>,
     );
     let row: Option<Row> = sqlx::query_as(
         "SELECT id, rate_kind, pause_generation, pause_sequence, paused_seen_at, \
-                last_observed_at \
+                started_at, last_observed_at \
            FROM sandbox_running_sessions \
           WHERE runtime_type = 'sandbox' AND runtime_uid = $1 AND ended_at IS NULL",
     )
@@ -212,7 +214,7 @@ async fn open_session(pool: &PgPool, runtime_uid: &str) -> Result<Option<Open>, 
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, kind, generation, sequence, paused_seen_at, last_observed_at)| Open {
+        |(id, kind, generation, sequence, paused_seen_at, started_at, last_observed_at)| Open {
             id,
             session: Session {
                 kind: if kind == "paused" {
@@ -225,6 +227,7 @@ async fn open_session(pool: &PgPool, runtime_uid: &str) -> Result<Option<Open>, 
                     sequence: sequence.unsigned_abs(),
                 }),
                 paused_seen_ms: paused_seen_at.map(|at| at.timestamp_millis()),
+                started_at_ms: Some(started_at.timestamp_millis()),
             },
             last_observed_at,
         },

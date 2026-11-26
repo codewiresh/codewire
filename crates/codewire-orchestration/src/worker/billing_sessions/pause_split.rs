@@ -8,6 +8,9 @@ use crate::pause_records::{Logged, PauseEvent, Record, VmState};
 /// A stretch of a paused Sandbox with no record longer than this is billed
 /// running past the last record before it, and marked for review.
 pub(crate) const GAP_LIMIT_MS: i64 = 60_000;
+/// Clock slack between `sandbox_running_sessions.started_at` (database bind
+/// time) and a warm-pool member's claim wake record (node wall clock).
+pub(crate) const PRE_BIND_WAKE_SLACK_MS: i64 = 5_000;
 
 pub(crate) const VM_PAUSED: &str = "vm_paused";
 pub(crate) const VM_RESUMED: &str = "vm_resumed";
@@ -34,6 +37,10 @@ pub(crate) struct Session {
     pub mark: Option<Mark>,
     /// While paused, when the latest record said so.
     pub paused_seen_ms: Option<i64>,
+    /// When this billing session opened (the binding's `bound_at`), so
+    /// pre-bind pauses from an unbound warm-pool Pod are not billed onto the
+    /// newly bound Sandbox (#5602).
+    pub started_at_ms: Option<i64>,
 }
 
 /// Close the open session at `at_ms` with `reason`, and open one of `kind`
@@ -123,6 +130,26 @@ pub(crate) fn plan(session: Session, logged: &[Logged]) -> Plan {
             continue;
         }
         let new_boot = previous.is_none_or(|mark| mark.generation != generation);
+        // An unbound warm-pool member pauses before claim and wakes as its
+        // binding commits (#5602). A pause that started before this session
+        // opened belongs to that unbound warm-pool stretch, not to the bound
+        // Sandbox; advance the mark past it without splitting or warning.
+        if plan.session.kind == Kind::Running
+            && let Some(started_at_ms) = plan.session.started_at_ms
+        {
+            let pre_bind_pause = state == VmState::Paused && since < started_at_ms;
+            let pre_bind_wake = previous.is_none()
+                && state == VmState::Running
+                && since <= started_at_ms.saturating_add(PRE_BIND_WAKE_SLACK_MS);
+            if pre_bind_pause || pre_bind_wake {
+                plan.session.mark = Some(Mark {
+                    generation,
+                    sequence,
+                })
+                .max(previous.filter(|_| !new_boot));
+                continue;
+            }
+        }
         let expected = match previous {
             Some(mark) if !new_boot => mark.sequence + 1,
             _ => 1,

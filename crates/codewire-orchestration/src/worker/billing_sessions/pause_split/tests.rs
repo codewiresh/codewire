@@ -33,6 +33,16 @@ fn running() -> Session {
         kind: Kind::Running,
         mark: None,
         paused_seen_ms: None,
+        started_at_ms: None,
+    }
+}
+
+fn running_since(started_at_ms: i64) -> Session {
+    Session {
+        kind: Kind::Running,
+        mark: None,
+        paused_seen_ms: None,
+        started_at_ms: Some(started_at_ms),
     }
 }
 
@@ -228,6 +238,7 @@ fn an_older_boots_records_and_a_boot_first_seen_above_one_are_handled() {
             sequence: 2,
         }),
         paused_seen_ms: None,
+        started_at_ms: None,
     };
     let old = [pause(PauseEvent::Paused, 7, 9, T)];
     assert!(plan(session, &old).splits.is_empty());
@@ -243,4 +254,70 @@ fn an_older_boots_records_and_a_boot_first_seen_above_one_are_handled() {
         }]
     );
     assert_eq!(plan.splits, [split(T, VM_PAUSED, Kind::Paused, false)]);
+}
+
+#[test]
+fn a_pre_bind_warm_pool_pause_and_claim_wake_never_split_the_bound_session() {
+    // Bound at T: the warm-pool Pod paused at T - 600 s and woke at T + 50 ms.
+    let read = [
+        state(VmState::Paused, 1, 1, T - 600_000, T - 10_000),
+        pause(PauseEvent::Resumed, 1, 2, T + 50),
+        state(VmState::Running, 1, 2, T + 50, T + 50),
+        state(VmState::Running, 1, 2, T + 50, T + 30_000),
+    ];
+    let first = plan(running_since(T), &read);
+    assert!(first.splits.is_empty(), "{:?}", first.splits);
+    assert!(first.missing.is_empty(), "{:?}", first.missing);
+    assert_eq!(
+        first.session.mark,
+        Some(Mark {
+            generation: 1,
+            sequence: 2
+        })
+    );
+    assert_eq!(first.session.kind, Kind::Running);
+
+    // A later post-bind idle suspend still splits cleanly at sequence 3.
+    let later = plan(
+        first.session,
+        &[
+            pause(PauseEvent::Paused, 1, 3, T + 120_000),
+            state(VmState::Paused, 1, 3, T + 120_000, T + 150_000),
+        ],
+    );
+    assert_eq!(
+        later.splits,
+        [split(T + 120_000, VM_PAUSED, Kind::Paused, false)]
+    );
+    assert!(later.missing.is_empty(), "{:?}", later.missing);
+}
+
+#[test]
+fn a_claim_wake_whose_pre_bind_pause_aged_out_adopts_the_mark_without_warning() {
+    // Only the post-wake running state record remains in the 90 s read window.
+    let read = [state(VmState::Running, 1, 2, T + 50, T + 95_000)];
+    let first = plan(running_since(T), &read);
+    assert!(first.splits.is_empty(), "{:?}", first.splits);
+    assert!(first.missing.is_empty(), "{:?}", first.missing);
+    assert_eq!(
+        first.session.mark,
+        Some(Mark {
+            generation: 1,
+            sequence: 2
+        })
+    );
+
+    // A running state record far after bind still flags missed earlier records.
+    let missed = plan(
+        running_since(T),
+        &[state(VmState::Running, 1, 4, T + 120_000, T + 130_000)],
+    );
+    assert_eq!(
+        missed.missing,
+        [Missing {
+            generation: 1,
+            first: 1,
+            last: 3
+        }]
+    );
 }

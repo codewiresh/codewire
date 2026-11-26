@@ -345,6 +345,20 @@ guest shuts down cleanly.
     not a pause"), and the time is billed as running.
   - **A wake whose resume was never reported:** billing reads the `resumed`
     record when the Sandbox is next seen, and charges `running` from it.
+  - **Unbound warm-pool pause (`#5602`):** an unbound `standard` warm-pool
+    member pauses itself on vsock port `7784` once its start-time egress
+    self-check has passed and it has stayed unbound past its settle grace
+    (`5 s`), dropping its idle binding long-poll first so idle pool members
+    consume near-zero CPU while staying `Ready`. When orchestration records
+    the Pod's workspace binding on claim, it opens one best-effort TCP
+    connection to the Pod's port `7777` (the same wake trigger as any other
+    suspended `standard` Pod), resuming the VM, delivering any renewed kubelet
+    tokens while frozen, and thawing the daemon so it calls `BindWorkspace`
+    immediately. Billing ignores `vm-pause-record` and `vm-pause-state` lines
+    whose pause began before the newly opened session's `started_at` (and the
+    claim wake's initial `running` state record within clock slack of
+    `started_at`), so claiming a paused warm-pool member produces no spurious
+    `vm_paused` split or missing-sequence warning.
 
 ### Calls that must not wake a suspended Sandbox
 

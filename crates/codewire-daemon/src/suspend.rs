@@ -169,6 +169,13 @@ async fn wait_for_wake(wall_clock: fn() -> SystemTime, mut last: SystemTime) {
     }
 }
 
+/// Whether this process sits in the frozen workload cgroup (`/workload`), so
+/// the runtime freezes it before pausing the VM and thaws it only after
+/// delivering renewed tokens.
+pub fn in_frozen_workload_process() -> bool {
+    in_frozen_workload(Path::new(OWN_CGROUPS))
+}
+
 /// Whether this process sits in the frozen workload: the hierarchy that
 /// carries the freezer places it at or under `/workload`.
 fn in_frozen_workload(own_cgroups: &Path) -> bool {

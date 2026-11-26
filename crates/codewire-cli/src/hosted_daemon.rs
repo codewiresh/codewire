@@ -117,12 +117,14 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // silent-UDP self-check overlaps readiness and binding on cold creates and
     // finishes before claim on warm-pool members (#6200, #5602). A failing
     // check exits while unbound, and `serve_after` never starts serving until
-    // it passes.
+    // it passes. Once an unbound `standard` warm-pool guest finishes its check
+    // and stays unbound past `WARM_IDLE_PAUSE_GRACE`, it drops the idle bind
+    // poll and asks `pod-runtime` to pause until claimed.
     #[cfg(target_os = "linux")]
-    let check = {
+    let (check, pause_unbound) = {
         let client = client.clone();
         let health = refusal.as_ref().map(|refusal| refusal.egress());
-        async move {
+        let check = async move {
             if carried {
                 let dns = std::env::var(codewire_daemon_proto::CLUSTER_DNS_IP_ENV).ok();
                 let passed = hosted_egress::guest_carried_self_check(
@@ -138,12 +140,20 @@ pub(crate) async fn run_bound_hosted_daemon_with(
             } else {
                 Ok(None)
             }
-        }
+        };
+        let pause_unbound: Option<UnboundPauseFn> =
+            standard_guest.then_some(crate::hosted_suspend::pause_while_unbound);
+        (check, pause_unbound)
     };
     #[cfg(not(target_os = "linux"))]
-    let check = std::future::ready(anyhow::Ok(()));
-    let (bound, check) =
-        bind_with_check(hosted_binding::bind_until_accepted(&client, &config), check).await?;
+    let (check, pause_unbound) = (std::future::ready(anyhow::Ok(())), None::<UnboundPauseFn>);
+    let (bound, check) = bind_with_check_and_pause(
+        || hosted_binding::bind_until_accepted(&client, &config),
+        check,
+        WARM_IDLE_PAUSE_GRACE,
+        pause_unbound,
+    )
+    .await?;
     paths
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
@@ -223,23 +233,78 @@ fn flatten_check<T>(
     result.map_err(|error| anyhow::anyhow!("egress self-check panicked: {error}"))?
 }
 
+/// How long an unbound `standard` guest stays awake after its start-time
+/// egress self-check passes before pausing to idle at ~0% CPU in a warm pool
+/// (#5602). Cold creates bind well inside this window and never pause.
+const WARM_IDLE_PAUSE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Result of asking `pod-runtime` to pause an unbound warm-pool guest.
+/// Only constructed on Linux hosted guests and in tests.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WarmPauseOutcome {
+    /// The runtime accepted the pause and the guest has now resumed.
+    Paused,
+    /// This guest or runtime cannot pause while unbound; stay awake.
+    Unavailable,
+}
+
+type UnboundPauseFn =
+    fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = WarmPauseOutcome> + Send>>;
+
 /// Runs `bind` and `check` together. If `check` fails while the daemon is
 /// still unbound, returns that error at once so an unhealthy unbound Pod exits
-/// instead of staying ready in a warm pool. If `check` passes first, keeps
-/// waiting for `bind` and returns an already-passed result. If `bind` wins,
-/// returns the still-running task so post-bind setup overlaps with it while
-/// [`serve_after`] still gates serving on it.
-async fn bind_with_check<B, T: Send + 'static>(
-    bind: impl std::future::Future<Output = B>,
+/// instead of staying ready in a warm pool. If `check` passes first and
+/// `pause` is provided, waits up to `pause_grace` for `bind`; if still
+/// unbound, drops the idle bind long-poll, pauses the VM until claimed, and
+/// polls for `bind` again upon wake. If `bind` wins, returns the still-running
+/// check so post-bind setup overlaps with it while [`serve_after`] still gates
+/// serving on it.
+async fn bind_with_check_and_pause<B, BFut, T, P, PFut>(
+    mut make_bind: B,
     check: impl std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
-) -> anyhow::Result<(B, PendingCheck<T>)> {
+    pause_grace: std::time::Duration,
+    pause: Option<P>,
+) -> anyhow::Result<(BFut::Output, PendingCheck<T>)>
+where
+    B: FnMut() -> BFut,
+    BFut: std::future::Future,
+    T: Send + 'static,
+    P: FnMut() -> PFut,
+    PFut: std::future::Future<Output = WarmPauseOutcome>,
+{
     let mut handle = tokio::spawn(check);
-    tokio::pin!(bind);
-    tokio::select! {
-        bound = &mut bind => Ok((bound, PendingCheck::Running(Some(handle)))),
-        result = &mut handle => {
-            let value = flatten_check(result)?;
-            Ok((bind.await, PendingCheck::Ready(Some(value))))
+    let value = {
+        let mut bind = std::pin::pin!(make_bind());
+        tokio::select! {
+            bound = &mut bind => return Ok((bound, PendingCheck::Running(Some(handle)))),
+            result = &mut handle => {
+                let value = flatten_check(result)?;
+                if pause.is_none() {
+                    return Ok((bind.await, PendingCheck::Ready(Some(value))));
+                }
+                match tokio::time::timeout(pause_grace, &mut bind).await {
+                    Ok(bound) => return Ok((bound, PendingCheck::Ready(Some(value)))),
+                    Err(_) => value,
+                }
+            }
+        }
+    };
+    // The idle `bind` future is dropped when leaving the block above so no
+    // half-open HTTP/1.1 long-poll spans the pause.
+    let Some(mut pause_fn) = pause else {
+        return Ok((make_bind().await, PendingCheck::Ready(Some(value))));
+    };
+    loop {
+        if pause_fn().await == WarmPauseOutcome::Unavailable {
+            return Ok((make_bind().await, PendingCheck::Ready(Some(value))));
+        }
+        let outcome = {
+            let mut bind = std::pin::pin!(make_bind());
+            tokio::time::timeout(pause_grace, &mut bind).await
+        };
+        if let Ok(bound) = outcome {
+            return Ok((bound, PendingCheck::Ready(Some(value))));
         }
     }
 }
@@ -411,10 +476,14 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{bind_with_check, serve_after};
+    use super::{WarmPauseOutcome, bind_with_check_and_pause, serve_after};
+
+    fn no_pause() -> Option<fn() -> std::future::Ready<WarmPauseOutcome>> {
+        None
+    }
 
     #[tokio::test]
     async fn a_failed_check_never_starts_what_it_serves() {
@@ -450,10 +519,19 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(5)).await;
             bind_tx.send("bound").unwrap();
         });
-        let (bound, pending) = bind_with_check(async move { bind_rx.await.unwrap() }, async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            Ok("trust")
-        })
+        let mut bind_rx = Some(bind_rx);
+        let (bound, pending) = bind_with_check_and_pause(
+            move || {
+                let rx = bind_rx.take().unwrap();
+                async move { rx.await.unwrap() }
+            },
+            async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok("trust")
+            },
+            Duration::from_secs(5),
+            no_pause(),
+        )
         .await
         .unwrap();
         driver.await.unwrap();
@@ -467,10 +545,23 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_check_that_fails_while_unbound_stops_before_bind_completes() {
-        let error = bind_with_check::<(), ()>(std::future::pending::<()>(), async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            anyhow::bail!("a probe was answered")
-        })
+        let paused = Arc::new(AtomicUsize::new(0));
+        let paused_in_cb = Arc::clone(&paused);
+        let error = bind_with_check_and_pause(
+            std::future::pending::<()>,
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Err::<(), _>(anyhow::anyhow!("a probe was answered"))
+            },
+            Duration::from_secs(5),
+            Some(move || {
+                let paused = Arc::clone(&paused_in_cb);
+                async move {
+                    paused.fetch_add(1, Ordering::SeqCst);
+                    WarmPauseOutcome::Paused
+                }
+            }),
+        )
         .await
         .err()
         .expect("a failing check must return an error while unbound");
@@ -478,12 +569,15 @@ mod tests {
             error.to_string().contains("a probe was answered"),
             "{error}"
         );
+        assert_eq!(paused.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_bind_that_completes_first_still_gates_serving_on_the_running_check() {
-        let (bound, pending) = bind_with_check(
-            async {
+        let paused = Arc::new(AtomicUsize::new(0));
+        let paused_in_cb = Arc::clone(&paused);
+        let (bound, pending) = bind_with_check_and_pause(
+            || async {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 "bound"
             },
@@ -491,10 +585,19 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 Ok("trust")
             },
+            Duration::from_secs(5),
+            Some(move || {
+                let paused = Arc::clone(&paused_in_cb);
+                async move {
+                    paused.fetch_add(1, Ordering::SeqCst);
+                    WarmPauseOutcome::Paused
+                }
+            }),
         )
         .await
         .unwrap();
         assert_eq!(bound, "bound");
+        assert_eq!(paused.load(Ordering::SeqCst), 0);
         let started = tokio::time::Instant::now();
         let served = Arc::new(AtomicBool::new(false));
         serve_after(pending.finish(), |value| {
@@ -512,10 +615,15 @@ mod tests {
         assert!(started.elapsed() <= Duration::from_millis(1_700));
 
         // If the still-running check fails after bind, serving never starts.
-        let (_, failing) = bind_with_check(async { "bound" }, async {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            anyhow::bail!("probe reached")
-        })
+        let (_, failing) = bind_with_check_and_pause(
+            || async { "bound" },
+            async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                anyhow::bail!("probe reached")
+            },
+            Duration::from_secs(5),
+            no_pause(),
+        )
         .await
         .unwrap();
         let served_after_fail = Arc::new(AtomicBool::new(false));
@@ -530,5 +638,109 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("probe reached"), "{err}");
         assert!(!served_after_fail.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unbound_standard_guest_drops_bind_pauses_after_grace_and_rebinds_on_wake() {
+        let bind_attempts = Arc::new(AtomicUsize::new(0));
+        let active_binds = Arc::new(AtomicUsize::new(0));
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let active_during_pause = Arc::new(AtomicUsize::new(99));
+
+        struct ActiveGuard(Arc<AtomicUsize>);
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let attempts = Arc::clone(&bind_attempts);
+        let active = Arc::clone(&active_binds);
+        let pauses_cb = Arc::clone(&pauses);
+        let active_cb = Arc::clone(&active_binds);
+        let active_seen = Arc::clone(&active_during_pause);
+
+        let (bound, pending) = bind_with_check_and_pause(
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let active = Arc::clone(&active);
+                async move {
+                    active.fetch_add(1, Ordering::SeqCst);
+                    let _guard = ActiveGuard(active);
+                    if attempt == 1 {
+                        // First bind stays pending past the warm grace window.
+                        std::future::pending::<&'static str>().await
+                    } else {
+                        // After wake, claim binding is immediately available.
+                        "claimed"
+                    }
+                }
+            },
+            async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok("trust")
+            },
+            Duration::from_secs(5),
+            Some(move || {
+                let pauses = Arc::clone(&pauses_cb);
+                let active = Arc::clone(&active_cb);
+                let seen = Arc::clone(&active_seen);
+                async move {
+                    seen.store(active.load(Ordering::SeqCst), Ordering::SeqCst);
+                    pauses.fetch_add(1, Ordering::SeqCst);
+                    WarmPauseOutcome::Paused
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bound, "claimed");
+        assert_eq!(pending.finish().await.unwrap(), "trust");
+        assert_eq!(pauses.load(Ordering::SeqCst), 1);
+        assert_eq!(bind_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            active_during_pause.load(Ordering::SeqCst),
+            0,
+            "the idle bind poll must be dropped before requesting a pause"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unavailable_unbound_pause_stays_awake_and_completes_bind_without_looping() {
+        let bind_attempts = Arc::new(AtomicUsize::new(0));
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&bind_attempts);
+        let pauses_cb = Arc::clone(&pauses);
+
+        let (bound, pending) = bind_with_check_and_pause(
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt == 1 {
+                        std::future::pending::<&'static str>().await
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        "bound-later"
+                    }
+                }
+            },
+            async { Ok("trust") },
+            Duration::from_secs(5),
+            Some(move || {
+                let pauses = Arc::clone(&pauses_cb);
+                async move {
+                    pauses.fetch_add(1, Ordering::SeqCst);
+                    WarmPauseOutcome::Unavailable
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bound, "bound-later");
+        assert_eq!(pending.finish().await.unwrap(), "trust");
+        assert_eq!(pauses.load(Ordering::SeqCst), 1);
+        assert_eq!(bind_attempts.load(Ordering::SeqCst), 2);
     }
 }

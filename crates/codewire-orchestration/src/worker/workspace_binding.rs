@@ -746,6 +746,7 @@ pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> an
 struct CheckedBinding {
     record: BindingRecord,
     pod: WorkspacePodIdentity,
+    pod_ip: String,
     /// Warm only for the first bind of an adopted warm-pool member.
     path: StartPath,
 }
@@ -870,6 +871,11 @@ async fn check_bindable_runtime(
     } else {
         StartPath::Cold
     };
+    let pod_ip = if member.ip.is_empty() {
+        observation.member.ip.clone()
+    } else {
+        member.ip.clone()
+    };
     Ok(Ok(CheckedBinding {
         path,
         record: BindingRecord {
@@ -890,6 +896,7 @@ async fn check_bindable_runtime(
             credential_scope: credential,
         },
         pod: pod_identity,
+        pod_ip,
     }))
 }
 
@@ -1018,6 +1025,9 @@ pub(crate) async fn record_workspace_binding(
     .await?;
     guard.commit().await?;
     debug_assert_eq!(checked.pod, *chain.member());
+    if outcome == WriteOutcome::Recorded {
+        wake::wake_bound_standard_pod(&env.id, &env.runtime_profile, &checked.pod_ip);
+    }
     Ok((outcome, checked.path))
 }
 
@@ -1152,30 +1162,7 @@ async fn bind_workspace_runtime_read(
     }
 }
 
-/// How often [`bind_before_ready`] re-reads the whole chain past the fast
-/// window while the caller waits. In between it re-reads only the observed
-/// Pod every [`EARLY_BIND_FAST_POLL`]
-/// ([`RuntimeObservations::wait_member_change`](crate::runtime::RuntimeObservations::wait_member_change)) and re-reads the
-/// chain as soon as that Pod changes, so a cold Pod's bind readiness is seen
-/// within that cadence; this bounds a change elsewhere in the chain.
-const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
-
-/// A warm member's adoption converges within a few hundred milliseconds of
-/// its claim, and its daemon serves SSH only once the binding is recorded, so
-/// for this long after the wait begins the chain is re-read on each change to
-/// the Claim, or every [`EARLY_BIND_FAST_POLL`] without one; a cold Pod still
-/// takes seconds to start, and its bind readiness then lands as a change to
-/// its own status.
-const EARLY_BIND_FAST_WINDOW: Duration = Duration::from_secs(2);
-const EARLY_BIND_FAST_POLL: Duration = Duration::from_millis(100);
-
-fn early_bind_poll(waited: Duration) -> Duration {
-    if waited < EARLY_BIND_FAST_WINDOW {
-        EARLY_BIND_FAST_POLL
-    } else {
-        EARLY_BIND_POLL
-    }
-}
+use wake::{EARLY_BIND_FAST_POLL, EARLY_BIND_FAST_WINDOW, EARLY_BIND_POLL, early_bind_poll};
 
 /// Design §10 (amended): while the caller waits for the gateway or for Claim
 /// Ready, record an identity-free Pod's binding as soon as the exact chain is
@@ -1916,6 +1903,7 @@ pub(crate) use bootstrap::workspace_bootstrap_current;
 pub(crate) use bootstrap::{BootstrapCheck, binding_bootstrap_check, binding_bootstrap_current};
 pub(crate) mod checks;
 mod pool_born;
+mod wake;
 pub(crate) use checks::{
     credential_scope, environment_scope_capture, images_match, member_still_observed,
     volume_matches,
