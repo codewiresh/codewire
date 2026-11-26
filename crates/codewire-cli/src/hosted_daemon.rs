@@ -113,7 +113,37 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // Only the Linux access server distinguishes a measured daemon.
     #[cfg(target_os = "linux")]
     let measured = config.measured().is_some();
-    let bound = hosted_binding::bind_until_accepted(&client, &config).await;
+    // Start the egress check / stream alongside workspace binding so the 2 s
+    // silent-UDP self-check overlaps readiness and binding on cold creates and
+    // finishes before claim on warm-pool members (#6200, #5602). A failing
+    // check exits while unbound, and `serve_after` never starts serving until
+    // it passes.
+    #[cfg(target_os = "linux")]
+    let check = {
+        let client = client.clone();
+        let health = refusal.as_ref().map(|refusal| refusal.egress());
+        async move {
+            if carried {
+                let dns = std::env::var(codewire_daemon_proto::CLUSTER_DNS_IP_ENV).ok();
+                let passed = hosted_egress::guest_carried_self_check(
+                    dns.and_then(|dns| dns.trim().parse().ok()),
+                )
+                .await?;
+                // Its host key carries the result, which orchestration checks.
+                client.set_guest_carried_self_check(passed);
+                Ok(None)
+            } else if let Some(egress) = egress {
+                let trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
+                Ok(Some(trust))
+            } else {
+                Ok(None)
+            }
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let check = std::future::ready(anyhow::Ok(()));
+    let (bound, check) =
+        bind_with_check(hosted_binding::bind_until_accepted(&client, &config), check).await?;
     paths
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
@@ -132,35 +162,14 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // comes after this write. No defaults, as from an older server, reports
     // nothing, and setup writes them itself.
     let defaults = apply_defaults(&daemon_config, &bound).await;
-    #[cfg(target_os = "linux")]
-    let check = {
-        let client = client.clone();
-        async move {
-            if carried {
-                let dns = std::env::var(codewire_daemon_proto::CLUSTER_DNS_IP_ENV).ok();
-                let passed = hosted_egress::guest_carried_self_check(
-                    dns.and_then(|dns| dns.trim().parse().ok()),
-                )
-                .await?;
-                // Its host key carries the result, which orchestration checks.
-                client.set_guest_carried_self_check(passed);
-            }
-            Ok(())
-        }
-    };
-    #[cfg(not(target_os = "linux"))]
-    let check = std::future::ready(Ok(()));
-    // A guest-carried daemon serves nothing until its self-check has passed
-    // (cw-security, #5602): `serve_after` never polls the serving future
+    // Nothing serves until the egress self-check has passed (cw-security,
+    // #4000, #5602): `serve_after` never creates or polls the serving future
     // after a failed check, so nothing listens and no host key is recorded.
-    // A standard Pod's `access_ready` is therefore evidence the check passed.
-    serve_after(
-        check,
+    serve_after(check.finish(), |trust| {
+        let _ = &trust;
         serve_bound(BoundServe {
-            // A guest-carried daemon keeps the settings for its literal
-            // routes (the binding's above) and runs no egress loop.
             #[cfg(target_os = "linux")]
-            egress: egress.filter(|_| !carried),
+            trust,
             #[cfg(target_os = "linux")]
             refusal,
             #[cfg(target_os = "linux")]
@@ -175,9 +184,64 @@ pub(crate) async fn run_bound_hosted_daemon_with(
             client,
             pod_uid,
             defaults,
-        }),
-    )
+        })
+    })
     .await
+}
+
+/// The pre-bind egress check state returned by [`bind_with_check`].
+enum PendingCheck<T> {
+    Ready(Option<T>),
+    Running(Option<tokio::task::JoinHandle<anyhow::Result<T>>>),
+}
+
+impl<T> Drop for PendingCheck<T> {
+    fn drop(&mut self) {
+        if let Self::Running(Some(handle)) = self {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> PendingCheck<T> {
+    async fn finish(mut self) -> anyhow::Result<T> {
+        match &mut self {
+            Self::Ready(value) => value
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("egress self-check result already consumed")),
+            Self::Running(handle) => match handle.take() {
+                Some(handle) => flatten_check(handle.await),
+                None => anyhow::bail!("egress self-check task already consumed"),
+            },
+        }
+    }
+}
+
+fn flatten_check<T>(
+    result: Result<anyhow::Result<T>, tokio::task::JoinError>,
+) -> anyhow::Result<T> {
+    result.map_err(|error| anyhow::anyhow!("egress self-check panicked: {error}"))?
+}
+
+/// Runs `bind` and `check` together. If `check` fails while the daemon is
+/// still unbound, returns that error at once so an unhealthy unbound Pod exits
+/// instead of staying ready in a warm pool. If `check` passes first, keeps
+/// waiting for `bind` and returns an already-passed result. If `bind` wins,
+/// returns the still-running task so post-bind setup overlaps with it while
+/// [`serve_after`] still gates serving on it.
+async fn bind_with_check<B, T: Send + 'static>(
+    bind: impl std::future::Future<Output = B>,
+    check: impl std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+) -> anyhow::Result<(B, PendingCheck<T>)> {
+    let mut handle = tokio::spawn(check);
+    tokio::pin!(bind);
+    tokio::select! {
+        bound = &mut bind => Ok((bound, PendingCheck::Running(Some(handle)))),
+        result = &mut handle => {
+            let value = flatten_check(result)?;
+            Ok((bind.await, PendingCheck::Ready(Some(value))))
+        }
+    }
 }
 
 /// The bind's saved project defaults applied, or nothing when the server
@@ -197,21 +261,24 @@ async fn apply_defaults(
     )
 }
 
-/// Runs `check`, then `serve` only once `check` has passed. `serve` is a
-/// future, so after a failed check it is never polled and nothing in it
-/// starts.
-async fn serve_after(
-    check: impl std::future::Future<Output = anyhow::Result<()>>,
-    serve: impl std::future::Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-    check.await?;
-    serve.await
+/// Runs `check`, then calls `serve` only once `check` has passed. After a
+/// failed check `serve` is never called, so nothing in it starts.
+async fn serve_after<T, Fut>(
+    check: impl std::future::Future<Output = anyhow::Result<T>>,
+    serve: impl FnOnce(T) -> Fut,
+) -> anyhow::Result<()>
+where
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let passed = check.await?;
+    serve(passed).await
 }
 
 /// What the bound daemon serves with, once bound.
 struct BoundServe {
+    /// The first broker egress session's trust, ready to install before serving.
     #[cfg(target_os = "linux")]
-    egress: Option<hosted_egress::EgressSettings>,
+    trust: Option<codewire_network_session::EgressTrust>,
     #[cfg(target_os = "linux")]
     refusal: Option<codewire_daemon::platform_refusal::PlatformRefusal>,
     #[cfg(target_os = "linux")]
@@ -235,7 +302,7 @@ struct BoundServe {
 async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
     let BoundServe {
         #[cfg(target_os = "linux")]
-        egress,
+        trust,
         #[cfg(target_os = "linux")]
         refusal,
         #[cfg(target_os = "linux")]
@@ -254,10 +321,8 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let mut daemon_config = daemon_config;
     #[cfg(target_os = "linux")]
-    if let Some(egress) = egress {
+    if let Some(trust) = trust {
         // The egress trust is installed here, before serving (#4001, #6072).
-        let health = refusal.as_ref().map(|refusal| refusal.egress());
-        let trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
         hosted_egress::install_trust(&trust, &mut daemon_config.interception)?;
     }
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
@@ -347,31 +412,123 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
-    use super::serve_after;
+    use super::{bind_with_check, serve_after};
 
     #[tokio::test]
     async fn a_failed_check_never_starts_what_it_serves() {
         let served = Arc::new(AtomicBool::new(false));
-        let serve = {
+        let failed = serve_after(async { anyhow::bail!("a probe was answered") }, |()| {
             let served = served.clone();
             async move {
                 served.store(true, Ordering::SeqCst);
                 Ok(())
             }
-        };
-        let failed = serve_after(async { anyhow::bail!("a probe was answered") }, serve).await;
+        })
+        .await;
         assert!(failed.is_err());
         assert!(!served.load(Ordering::SeqCst));
 
-        let serve = {
+        serve_after(async { Ok(42_u32) }, |value| {
             let served = served.clone();
             async move {
+                assert_eq!(value, 42);
                 served.store(true, Ordering::SeqCst);
                 Ok(())
             }
-        };
-        serve_after(async { Ok(()) }, serve).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(served.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_check_that_passes_before_bind_makes_post_bind_wait_immediate() {
+        let (bind_tx, bind_rx) = tokio::sync::oneshot::channel();
+        let driver = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            bind_tx.send("bound").unwrap();
+        });
+        let (bound, pending) = bind_with_check(async move { bind_rx.await.unwrap() }, async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok("trust")
+        })
+        .await
+        .unwrap();
+        driver.await.unwrap();
+        assert_eq!(bound, "bound");
+
+        let after_bind = tokio::time::Instant::now();
+        let value = pending.finish().await.unwrap();
+        assert_eq!(value, "trust");
+        assert_eq!(after_bind.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_check_that_fails_while_unbound_stops_before_bind_completes() {
+        let error = bind_with_check::<(), ()>(std::future::pending::<()>(), async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            anyhow::bail!("a probe was answered")
+        })
+        .await
+        .err()
+        .expect("a failing check must return an error while unbound");
+        assert!(
+            error.to_string().contains("a probe was answered"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bind_that_completes_first_still_gates_serving_on_the_running_check() {
+        let (bound, pending) = bind_with_check(
+            async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                "bound"
+            },
+            async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok("trust")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bound, "bound");
+        let started = tokio::time::Instant::now();
+        let served = Arc::new(AtomicBool::new(false));
+        serve_after(pending.finish(), |value| {
+            let served = served.clone();
+            async move {
+                assert_eq!(value, "trust");
+                served.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert!(served.load(Ordering::SeqCst));
+        // Overlapped with the 400 ms bind, only ~1.6 s remained after bind.
+        assert!(started.elapsed() <= Duration::from_millis(1_700));
+
+        // If the still-running check fails after bind, serving never starts.
+        let (_, failing) = bind_with_check(async { "bound" }, async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            anyhow::bail!("probe reached")
+        })
+        .await
+        .unwrap();
+        let served_after_fail = Arc::new(AtomicBool::new(false));
+        let err = serve_after(failing.finish(), |()| {
+            let served_after_fail = served_after_fail.clone();
+            async move {
+                served_after_fail.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("probe reached"), "{err}");
+        assert!(!served_after_fail.load(Ordering::SeqCst));
     }
 }

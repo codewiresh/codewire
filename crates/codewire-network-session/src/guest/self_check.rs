@@ -122,18 +122,21 @@ impl InterfaceProbes {
         socket
             .bind_device(Some(self.interface.as_bytes()))
             .map_err(|_| ProbeError::Setup)?;
-        let query = dns_query(DNS_PROBE_ID, DNS_PROBE_NAME);
+        // Connect the UDP socket to the resolver so it is never an unconnected
+        // listening socket and only accepts datagrams from that peer.
         socket
-            .send_to(&query, self.resolver)
+            .connect(self.resolver)
             .await
             .map_err(ProbeError::Network)?;
+        let query = dns_query(DNS_PROBE_ID, DNS_PROBE_NAME);
+        socket.send(&query).await.map_err(ProbeError::Network)?;
         let mut answer = [0_u8; 512];
         loop {
-            let (len, from) = socket
-                .recv_from(&mut answer)
+            let len = socket
+                .recv(&mut answer)
                 .await
                 .map_err(ProbeError::Network)?;
-            if from == self.resolver && answers_query(&answer[..len], DNS_PROBE_ID) {
+            if answers_query(&answer[..len], DNS_PROBE_ID) {
                 return Ok(());
             }
         }
