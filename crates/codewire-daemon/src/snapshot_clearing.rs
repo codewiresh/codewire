@@ -17,6 +17,7 @@ use std::path::Path;
 use crate::{antigravity_home, claude_home, codex_home};
 
 pub mod block;
+pub mod standard_vm;
 
 /// More than any login Codewire writes, so a larger file is not Codewire's.
 const MAX_LOGIN_BYTES: u64 = 1024 * 1024;

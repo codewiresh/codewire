@@ -76,7 +76,8 @@ async fn clear_files(
         .map_err(BlockClearingError::Files)?;
     let mut report = ClearingReport::default();
     for kind in [LoginKind::Codex, LoginKind::Claude, LoginKind::Antigravity] {
-        report.logins_removed += clear_logins(tools, disk, kind, block_size).await?;
+        report.logins_removed +=
+            clear_logins_at(tools, disk, kind.components(), kind, block_size).await?;
     }
     for components in ENVIRONMENT_BOUND_TREES {
         if files::remove_tree(tools, disk, components)
@@ -92,16 +93,17 @@ async fn clear_files(
     Ok(report)
 }
 
-/// Zero and remove Codewire's files in one agent's home, by the rules
-/// [`super::clear_workspace_volume`] applies to a mounted volume: a symlink,
-/// here or at a login's name, or a login too large to read fails the capture.
-async fn clear_logins(
+/// Zero and remove Codewire's files in one agent's home at `directory` inside
+/// an ext4 disk, by the rules [`super::clear_workspace_volume`] applies to a
+/// mounted volume: a symlink, here or at a login's name, or a login too large
+/// to read fails the capture.
+pub(super) async fn clear_logins_at(
     tools: &impl Tools,
     disk: &Path,
+    directory: &[&str],
     kind: LoginKind,
     block_size: u64,
 ) -> Result<usize, BlockClearingError> {
-    let directory = kind.components();
     let entries = match files::lookup_directory(tools, disk, directory)
         .await
         .map_err(BlockClearingError::Files)?
