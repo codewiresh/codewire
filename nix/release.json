@@ -1,26 +1,26 @@
 {
   "schema": "codewire.cw.nix/v1",
-  "release_tag": "v0.4.34",
+  "release_tag": "v0.4.35",
   "targets": {
     "aarch64-darwin": {
       "target": "aarch64-apple-darwin",
-      "sha256": "c76cf1a1cd31f918ca381fae0fd0446db3473cd90d26e44914a9b1991770c20f",
-      "size": 99017968
+      "sha256": "c80621aea8c8b09e79bc0d4bea713e625366052a8af7d0e142aea2c73cdd0627",
+      "size": 98690192
     },
     "aarch64-linux": {
       "target": "aarch64-unknown-linux-gnu",
-      "sha256": "6994f947832c682b5162f4cf0971f4c93cd02873140dea89e61c7eef005c75e3",
-      "size": 114917880
+      "sha256": "321b0ee60f9bbb057568c70842e98e8beae28f56ad15cb0b0db3f7e14d51f4cb",
+      "size": 114666232
     },
     "x86_64-darwin": {
       "target": "x86_64-apple-darwin",
-      "sha256": "d359c3e33292a0ef3033adc0d6febb95684d15c93c991482b3b1c46052a505c3",
-      "size": 108982304
+      "sha256": "182d19a00fdd0a2da6e117389785468b83b13cee157d58bd00f86a3fe156ef13",
+      "size": 108405552
     },
     "x86_64-linux": {
       "target": "x86_64-unknown-linux-musl",
-      "sha256": "26f23d7688671c648d58b4646512b3f8443644bb7e3d9d380c07ebc627447ceb",
-      "size": 128677072
+      "sha256": "e00916a0fc080776099fdae6faf362b958bc32d6ee2c827a6aa619b82e86a85d",
+      "size": 128627664
     }
   }
 }
