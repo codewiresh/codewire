@@ -7,6 +7,7 @@ const REGULAR: Rates = Rates {
     cpu_per_vcpu_hour: 43_800_000,
     memory_per_gib_hour: 14_100_000,
     disk_per_gib_hour: 87_000,
+    parked_storage_per_gib_hour: 0,
 };
 
 fn window(cpu_millicores: i32, memory_mib: i32, disk_gib: i32, seconds: i64) -> SessionWindow {
@@ -15,6 +16,7 @@ fn window(cpu_millicores: i32, memory_mib: i32, disk_gib: i32, seconds: i64) -> 
         memory_mib,
         disk_gib,
         microseconds: seconds * 1_000_000,
+        paused: false,
     }
 }
 
@@ -32,6 +34,28 @@ fn a_sandbox_costs_its_sessions_and_its_hour_is_at_its_largest_size() {
     assert_eq!(cost.cost_nano_eur, 131_400_000 + 112_800_000 + 870_000);
     assert_eq!((cost.cpu_millicores, cost.memory_mib), (4000, 8192));
     assert_eq!(cost.hourly_nano_eur, 175_200_000 + 112_800_000 + 870_000);
+}
+
+#[test]
+fn a_paused_stretch_costs_only_its_disk_and_isnt_running_time() {
+    let paused = SessionWindow {
+        paused: true,
+        ..window(2000, 8192, 10, 3600)
+    };
+    let rates = Rates {
+        parked_storage_per_gib_hour: 5_000,
+        ..REGULAR
+    };
+    let cost = sandbox_cost(
+        "env".into(),
+        "Env".into(),
+        rates,
+        &[window(2000, 8192, 10, 1800), paused],
+    );
+    assert_eq!(cost.running_seconds, 1800);
+    // Half an hour running, then an hour of 10 GiB at the storage rate.
+    assert_eq!(cost.cost_nano_eur, 201_270_000 / 2 + 10 * 5_000);
+    assert_eq!(cost.hourly_nano_eur, 201_270_000);
 }
 
 #[test]

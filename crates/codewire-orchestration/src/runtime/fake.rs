@@ -78,6 +78,8 @@ pub(crate) struct FakeRuntimeDriver {
     pub reapply_fails: Mutex<Vec<String>>,
     /// Environments whose re-apply never answers.
     pub reapply_hangs: Mutex<Vec<String>>,
+    /// What a read of a `standard` member's runtime log returns.
+    pub runtime_log: Mutex<Option<Result<Vec<u8>, String>>>,
 }
 
 #[async_trait]
@@ -960,6 +962,20 @@ impl RuntimeAccess for FakeRuntimeDriver {
         _tail_lines: i64,
     ) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("not scripted")
+    }
+
+    async fn runtime_log_since(
+        &self,
+        _placement: &Placement,
+        _member_name: &str,
+        _since: std::time::Duration,
+        _limit_bytes: i64,
+    ) -> anyhow::Result<Vec<u8>> {
+        match self.runtime_log.lock().unwrap().clone() {
+            Some(Ok(log)) => Ok(log),
+            Some(Err(message)) => Err(anyhow::anyhow!(message)),
+            None => anyhow::bail!("not scripted"),
+        }
     }
 
     async fn ssh_stream(

@@ -26,7 +26,9 @@ the reason it ended, and the vCPU, memory and disk allocated to it.
 
 ## A suspended stretch (`standard`, #5529)
 
-**Target, not built.** A `standard` Sandbox whose VM is paused inside its
+**Built (#5529), not yet observed.** Nothing suspends a Sandbox until its
+`idle_suspend` is set, and the split hasn't been walked on Dev. A
+`standard` Sandbox whose VM is paused inside its
 Pod ([IDLE-STOP.md](IDLE-STOP.md), "Suspend") is charged as suspended,
 only for the seconds between its runtime's own record of a pause and its
 record of the resume. Nothing the guest says moves a second between rates.
@@ -42,7 +44,9 @@ record of the resume. Nothing the guest says moves a second between rates.
   generation and sequence the loop applied, carried over at each split, so
   a record is never applied twice. A poll that can't read the records
   doesn't move a `standard` session's last observation, so no second past
-  an unread record is drawn at either rate.
+  an unread record is drawn at either rate. A paused session is observed
+  only up to its latest record; the next record, or the session's end,
+  settles the time after it.
 - **A paused session draws only its disk,** at the rate card's storage
   rate, which is 0 until an administrator sets one ("Prices"). Its vCPU and
   memory draw nothing.
@@ -55,14 +59,18 @@ record of the resume. Nothing the guest says moves a second between rates.
   generation and the missing sequence numbers, and counts it in
   `codewire_billing_pause_record_gaps_total`. An operator reviews every
   marked session and refunds it when the Sandbox was in fact paused.
-- **A stop** wakes a suspended Sandbox and reads its last lines first, so
-  its last record says running and the running session ends as any does.
+- **A stop** of a suspended Sandbox wakes its VM: the runtime resumes it at
+  the Pod's SIGTERM and records the resume. When the loop sees the Sandbox
+  stopped, it reads the Pod's last lines before it closes the session, so
+  the last record says running and the session ends as a running one does,
+  at the Sandbox's stop ("When it ends, and why"). If those lines can't be
+  read, the time from the last record seen to the stop is a gap.
 - **A boot that ends paused** (an eviction or a lost node, not
-  orchestration's stop) is paused only up to the Pod's end: its runtime
-  container's termination, or the Pod's deletion when that comes first. The
-  time from the last record seen to that end is a gap, settled as above. A
-  Sandbox that carries on in a new Pod turns running at the old Pod's end,
-  with `end_reason` `vm_boot_ended`, and the new boot's records, a new
+  orchestration's stop) is paused at most up to the next boot's first
+  record, or the session's end when that comes first. The time from the
+  last record seen to there is a gap, settled as above. A Sandbox that
+  carries on in a new Pod turns running where the new boot starts, with
+  `end_reason` `vm_boot_ended`, and the new boot's records, a new
   generation, split it from there.
 
 ## When it ends, and why

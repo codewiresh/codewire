@@ -1200,6 +1200,13 @@ database_lane_orchestration_access() {
       'worker::billing_sessions::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  # #5529: a standard Sandbox's session splits at its pause records.
+  counted_suite "billing session pause splits" billing-session-pauses \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::billing_sessions::pauses::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "credential relay target matrix" credential-relay-targets \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

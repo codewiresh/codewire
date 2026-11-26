@@ -45,28 +45,32 @@ pub struct HourCost {
 
 /// The rates the organization is charged now; zero on Unlimited.
 pub async fn charged_rates(pool: &PgPool, org_id: &str) -> AppResult<Rates> {
-    let (rate_card, cpu, memory, disk): (String, i64, i64, i64) = sqlx::query_as(
-        r#"SELECT o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
-                  r.memory_nano_eur_per_gib_hour, r.disk_nano_eur_per_gib_hour
+    let (rate_card, cpu, memory, disk, parked_storage): (String, i64, i64, i64, i64) =
+        sqlx::query_as(
+            r#"SELECT o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
+                  r.memory_nano_eur_per_gib_hour, r.disk_nano_eur_per_gib_hour,
+                  r.parked_storage_nano_eur_per_gib_hour
            FROM organizations o
            JOIN billing_rate_cards r ON r.rate_card = o.rate_card
            WHERE o.id = $1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+        )
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
     if rate_card == UNLIMITED_RATE_CARD {
         return Ok(Rates {
             cpu_per_vcpu_hour: 0,
             memory_per_gib_hour: 0,
             disk_per_gib_hour: 0,
+            parked_storage_per_gib_hour: 0,
         });
     }
     Ok(Rates {
         cpu_per_vcpu_hour: cpu,
         memory_per_gib_hour: memory,
         disk_per_gib_hour: disk,
+        parked_storage_per_gib_hour: parked_storage,
     })
 }
 
@@ -95,12 +99,13 @@ pub async fn sandbox_costs(
     month_start: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> AppResult<Vec<SandboxCost>> {
-    type Row = (String, String, i32, i32, i32, i64);
+    type Row = (String, String, i32, i32, i32, i64, bool);
     let rows: Vec<Row> = sqlx::query_as(
         r#"WITH bounded AS (
                SELECT s.environment_id,
                       COALESCE(e.name, s.runtime_name, s.environment_id) AS name,
                       s.cpu_millicores, s.memory_mib, s.disk_gib,
+                      s.rate_kind = 'paused' AS paused,
                       GREATEST(s.started_at, $2) AS bill_start,
                       LEAST(COALESCE(s.ended_at, s.last_observed_at), $3,
                             $2 + interval '1 month') AS bill_end
@@ -111,7 +116,7 @@ pub async fn sandbox_costs(
                  AND COALESCE(s.ended_at, s.last_observed_at) > $2
            )
            SELECT environment_id, name, cpu_millicores, memory_mib, disk_gib,
-                  (EXTRACT(EPOCH FROM (bill_end - bill_start)) * 1000000)::int8
+                  (EXTRACT(EPOCH FROM (bill_end - bill_start)) * 1000000)::int8, paused
            FROM bounded
            WHERE bill_end > bill_start
            ORDER BY environment_id, bill_start"#,
@@ -124,7 +129,7 @@ pub async fn sandbox_costs(
 
     let mut order: Vec<String> = Vec::new();
     let mut sandboxes: HashMap<String, (String, Vec<SessionWindow>)> = HashMap::new();
-    for (id, name, cpu_millicores, memory_mib, disk_gib, microseconds) in rows {
+    for (id, name, cpu_millicores, memory_mib, disk_gib, microseconds, paused) in rows {
         let entry = sandboxes.entry(id.clone()).or_insert_with(|| {
             order.push(id);
             (name, Vec::new())
@@ -134,6 +139,7 @@ pub async fn sandbox_costs(
             memory_mib,
             disk_gib,
             microseconds,
+            paused,
         });
     }
     let mut costs: Vec<SandboxCost> = order
@@ -152,12 +158,15 @@ pub async fn sandbox_costs(
 }
 
 fn sandbox_cost(id: String, name: String, rates: Rates, windows: &[SessionWindow]) -> SandboxCost {
-    let microseconds: i64 = windows.iter().map(|window| window.microseconds).sum();
+    // A paused stretch isn't running time, though its disk is charged.
+    let running = || windows.iter().filter(|window| !window.paused);
+    let microseconds: i64 = running().map(|window| window.microseconds).sum();
     let largest = SessionWindow {
         cpu_millicores: windows.iter().map(|w| w.cpu_millicores).max().unwrap_or(0),
         memory_mib: windows.iter().map(|w| w.memory_mib).max().unwrap_or(0),
         disk_gib: windows.iter().map(|w| w.disk_gib).max().unwrap_or(0),
         microseconds: 3_600_000_000,
+        paused: false,
     };
     SandboxCost {
         id,
@@ -179,7 +188,7 @@ pub async fn hourly_costs(
     since: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> AppResult<Vec<HourCost>> {
-    type Row = (DateTime<Utc>, i32, i32, i32, i64);
+    type Row = (DateTime<Utc>, i32, i32, i32, i64, bool);
     let rows: Vec<Row> = sqlx::query_as(
         r#"WITH hours AS (
                SELECT generate_series(date_trunc('hour', $2::timestamptz),
@@ -188,6 +197,7 @@ pub async fn hourly_costs(
            ),
            bounded AS (
                SELECT h.hour, s.cpu_millicores, s.memory_mib, s.disk_gib,
+                      s.rate_kind = 'paused' AS paused,
                       GREATEST(s.started_at, h.hour) AS bill_start,
                       LEAST(COALESCE(s.ended_at, s.last_observed_at), $3,
                             h.hour + interval '1 hour') AS bill_end
@@ -198,7 +208,7 @@ pub async fn hourly_costs(
                 AND COALESCE(s.ended_at, s.last_observed_at) > h.hour
            )
            SELECT hour, cpu_millicores, memory_mib, disk_gib,
-                  (EXTRACT(EPOCH FROM (bill_end - bill_start)) * 1000000)::int8
+                  (EXTRACT(EPOCH FROM (bill_end - bill_start)) * 1000000)::int8, paused
            FROM bounded
            WHERE bill_end > bill_start
            ORDER BY hour"#,
@@ -210,12 +220,13 @@ pub async fn hourly_costs(
     .await?;
 
     let mut hours: Vec<(DateTime<Utc>, Vec<SessionWindow>)> = Vec::new();
-    for (hour, cpu_millicores, memory_mib, disk_gib, microseconds) in rows {
+    for (hour, cpu_millicores, memory_mib, disk_gib, microseconds, paused) in rows {
         let window = SessionWindow {
             cpu_millicores,
             memory_mib,
             disk_gib,
             microseconds,
+            paused,
         };
         match hours.last_mut() {
             Some((last, windows)) if *last == hour => windows.push(window),
@@ -228,6 +239,7 @@ pub async fn hourly_costs(
             hour,
             cpu_hours: windows
                 .iter()
+                .filter(|w| !w.paused)
                 .map(|w| {
                     w.microseconds as f64 / MICROSECONDS_PER_HOUR * f64::from(w.cpu_millicores)
                         / 1000.0
@@ -235,6 +247,7 @@ pub async fn hourly_costs(
                 .sum(),
             mem_gb_hours: windows
                 .iter()
+                .filter(|w| !w.paused)
                 .map(|w| {
                     w.microseconds as f64 / MICROSECONDS_PER_HOUR * f64::from(w.memory_mib) / 1024.0
                 })

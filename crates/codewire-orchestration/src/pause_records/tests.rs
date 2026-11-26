@@ -28,7 +28,7 @@ fn the_runtimes_records_are_read_in_order() {
     let read = read(log.as_bytes());
     assert_eq!(read.refused, 0);
     assert_eq!(
-        read.records,
+        read.records(),
         [
             Record::Pause(PauseRecord {
                 event: PauseEvent::Paused,
@@ -98,7 +98,7 @@ fn a_marked_line_that_isnt_exactly_one_record_is_refused() {
         "{STATE_MARKER}{{\"generation\":7,\"sequence\":1,\"state\":\"paused\",\"since_unix_ms\":1,\"extra\":0}}"
     )));
     let read = read(log.as_bytes());
-    assert!(read.records.is_empty(), "{:?}", read.records);
+    assert!(read.logged.is_empty(), "{:?}", read.logged);
     assert_eq!(read.refused, refused.len() + 1);
 }
 

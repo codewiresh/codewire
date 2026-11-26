@@ -319,7 +319,8 @@ pub(crate) enum SessionWrite {
 ///
 /// An open row (keyed by the partial unique index `(runtime_type,
 /// runtime_uid) WHERE ended_at IS NULL`) refreshes its resources and
-/// `last_observed_at`. Otherwise a row opens only while the environment's
+/// `last_observed_at`, which never moves back: a paused session is observed
+/// only up to its latest pause record. Otherwise a row opens only while the environment's
 /// live binding names this Sandbox, starting at that binding's `bound_at`,
 /// no earlier than the Sandbox's last closed session and no later than this
 /// observation.
@@ -340,7 +341,7 @@ pub(crate) async fn open_or_heartbeat(
                disk_gib = $8,
                runtime_class = $9,
                runtime_tier = $10,
-               last_observed_at = $11,
+               last_observed_at = GREATEST(last_observed_at, $11),
                updated_at = $11
            WHERE runtime_type = 'sandbox' AND runtime_uid = $3 AND ended_at IS NULL"#,
     )
@@ -492,7 +493,11 @@ struct Reconciled {
 
 /// Mirrors `handler.reconcile`: resolve identity, classify, then open at
 /// bind or heartbeat (Running) or close (Terminated). Pending is a no-op.
-async fn reconcile(pool: &PgPool, member: &RuntimeMember) -> Reconciled {
+async fn reconcile(
+    pool: &PgPool,
+    runtime: &dyn RuntimeDriver,
+    member: &RuntimeMember,
+) -> Reconciled {
     let name = member.name.as_str();
     let uid = member.uid.as_str();
     let phase = member.phase;
@@ -530,6 +535,13 @@ async fn reconcile(pool: &PgPool, member: &RuntimeMember) -> Reconciled {
     let now = chrono::Utc::now();
     match phase {
         Phase::Running => {
+            // A `standard` Sandbox's session splits at its pause records
+            // first; unread, it isn't observed further this poll.
+            let observed = match pauses::advance(pool, runtime, &id, now).await {
+                pauses::Records::NotStandard => now,
+                pauses::Records::Observed(observed) => observed,
+                pauses::Records::Unread => return Reconciled::default(),
+            };
             let res = match resize_billing_resources(
                 pool,
                 &id.environment_id,
@@ -544,7 +556,7 @@ async fn reconcile(pool: &PgPool, member: &RuntimeMember) -> Reconciled {
                     return Reconciled::default();
                 }
             };
-            match open_or_heartbeat(pool, &id, &res, now).await {
+            match open_or_heartbeat(pool, &id, &res, observed).await {
                 Ok(SessionWrite::AwaitingBind) => {
                     return Reconciled {
                         awaiting_bind: true,
@@ -574,6 +586,13 @@ async fn reconcile(pool: &PgPool, member: &RuntimeMember) -> Reconciled {
             // it, not when this poll noticed (owner, 2026-11-10, #3950).
             // Without a record it ends now.
             let ended_at = member.stopped_at.map_or(now, |stopped| stopped.min(now));
+            // A stop's SIGTERM wakes a paused VM and its runtime records the
+            // resume, so a `standard` session reads its last records first,
+            // while its Pod's log can still be read; what's left is settled.
+            pauses::advance(pool, runtime, &id, now).await;
+            if let Err(error) = pauses::settle_end(pool, uid, ended_at).await {
+                tracing::error!(environment_id = id.environment_id, sandbox = name, %error, "billing-session: settle a paused session's end");
+            }
             if let Err(e) = close_by_uid(pool, uid, reason, ended_at).await {
                 tracing::error!(environment_id = id.environment_id, sandbox = name, reason, error = %e, "billing-session: close session");
             }
@@ -602,7 +621,7 @@ async fn run_cycle(pool: &PgPool, runtime: &dyn RuntimeDriver, namespace: &str) 
         if !member.uid.is_empty() {
             seen.insert(member.uid.clone());
         }
-        let reconciled = reconcile(pool, member).await;
+        let reconciled = reconcile(pool, runtime, member).await;
         unbillable_running += i64::from(reconciled.unbillable);
         awaiting_bind += i64::from(reconciled.awaiting_bind);
     }
@@ -658,6 +677,11 @@ pub(crate) async fn billing_session_loop(
         run_cycle(&ctx.pool, runtime.as_ref(), &namespace).await;
     }
 }
+
+#[path = "billing_sessions/pause_split.rs"]
+pub(crate) mod pause_split;
+#[path = "billing_sessions/pauses.rs"]
+mod pauses;
 
 #[cfg(test)]
 #[path = "billing_sessions/database_tests.rs"]

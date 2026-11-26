@@ -308,8 +308,12 @@ pub(crate) async fn aggregate_monthly_usage(
                       ($1::timestamptz + interval '1 month') AS end_at
            ),
            bounded AS (
-               SELECT s.cpu_millicores,
-                      s.memory_mib,
+               -- A paused stretch keeps its disk and uses no vCPU or
+               -- memory (#5529).
+               SELECT CASE WHEN s.rate_kind = 'paused' THEN 0 ELSE s.cpu_millicores END
+                          AS cpu_millicores,
+                      CASE WHEN s.rate_kind = 'paused' THEN 0 ELSE s.memory_mib END
+                          AS memory_mib,
                       s.disk_gib,
                       GREATEST(s.started_at, p.start_at) AS bill_start,
                       LEAST(COALESCE(s.ended_at, NOW()), p.end_at) AS bill_end

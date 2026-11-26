@@ -32,6 +32,8 @@ pub struct Rates {
     pub cpu_per_vcpu_hour: i64,
     pub memory_per_gib_hour: i64,
     pub disk_per_gib_hour: i64,
+    /// A GiB-hour of disk while a Sandbox is suspended.
+    pub parked_storage_per_gib_hour: i64,
 }
 
 /// One session's allocated size and the time to draw for it.
@@ -41,6 +43,9 @@ pub struct SessionWindow {
     pub memory_mib: i32,
     pub disk_gib: i32,
     pub microseconds: i64,
+    /// A paused `standard` session's (#5529): only its disk is drawn, at
+    /// the storage rate.
+    pub paused: bool,
 }
 
 const HOUR_MICROSECONDS: i128 = 3_600_000_000;
@@ -48,21 +53,24 @@ const HOUR_MICROSECONDS: i128 = 3_600_000_000;
 // denominator, so the sum is divided, and rounded down, once.
 const DENOMINATOR: i128 = 1_000 * 1_024 * HOUR_MICROSECONDS;
 
-/// What the windows cost at `rates`, in nano-euros, rounded down.
+/// What the windows cost at `rates`, in nano-euros, rounded down. A paused
+/// window costs only its disk, at the storage rate.
 pub fn usage_nano_eur(rates: Rates, windows: &[SessionWindow]) -> i64 {
     let numerator: i128 = windows
         .iter()
         .map(|window| {
             let time = i128::from(window.microseconds.max(0));
+            let disk = i128::from(window.disk_gib.max(0)) * 1_024_000;
+            if window.paused {
+                return disk * i128::from(rates.parked_storage_per_gib_hour) * time;
+            }
             let cpu = i128::from(window.cpu_millicores.max(0))
                 * 1_024
                 * i128::from(rates.cpu_per_vcpu_hour);
             let memory = i128::from(window.memory_mib.max(0))
                 * 1_000
                 * i128::from(rates.memory_per_gib_hour);
-            let disk = i128::from(window.disk_gib.max(0))
-                * 1_024_000
-                * i128::from(rates.disk_per_gib_hour);
+            let disk = disk * i128::from(rates.disk_per_gib_hour);
             (cpu + memory + disk) * time
         })
         .sum();
@@ -108,9 +116,10 @@ pub async fn draw_due_usage(pool: &PgPool) -> anyhow::Result<DrawSummary> {
 /// is open, its last observation, and returns the amount drawn, in nano-euros.
 pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::Result<i64> {
     let mut transaction = pool.begin().await?;
-    let card: Option<(String, i64, i64, i64)> = sqlx::query_as(
+    let card: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
         r#"SELECT o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
-                  r.memory_nano_eur_per_gib_hour, r.disk_nano_eur_per_gib_hour
+                  r.memory_nano_eur_per_gib_hour, r.disk_nano_eur_per_gib_hour,
+                  r.parked_storage_nano_eur_per_gib_hour
            FROM organizations o
            JOIN billing_rate_cards r ON r.rate_card = o.rate_card
            WHERE o.id = $1"#,
@@ -118,18 +127,19 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
     .bind(organization_id)
     .fetch_optional(&mut *transaction)
     .await?;
-    let Some((rate_card, cpu, memory, disk)) = card else {
+    let Some((rate_card, cpu, memory, disk, parked_storage)) = card else {
         // Deleted since it was listed; its sessions went with it.
         return Ok(0);
     };
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *transaction)
         .await?;
-    type Row = (String, i32, i32, i32, DateTime<Utc>, DateTime<Utc>);
+    type Row = (String, i32, i32, i32, DateTime<Utc>, DateTime<Utc>, bool);
     let due: Vec<Row> = sqlx::query_as(
         r#"SELECT id, cpu_millicores, memory_mib, disk_gib,
                   COALESCE(credit_drawn_through, started_at),
-                  LEAST(COALESCE(ended_at, last_observed_at), $2)
+                  LEAST(COALESCE(ended_at, last_observed_at), $2),
+                  rate_kind = 'paused'
            FROM sandbox_running_sessions
            WHERE organization_id = $1
              AND (ended_at IS NULL OR credit_drawn_through IS NULL
@@ -143,7 +153,7 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
     .await?;
     let due: Vec<Row> = due
         .into_iter()
-        .filter(|(_, _, _, _, from, to)| to > from)
+        .filter(|(_, _, _, _, from, to, _)| to > from)
         .collect();
     if due.is_empty() {
         transaction.commit().await?;
@@ -152,11 +162,12 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
 
     let windows: Vec<SessionWindow> = due
         .iter()
-        .map(|(_, cpu, memory, disk, from, to)| SessionWindow {
+        .map(|(_, cpu, memory, disk, from, to, paused)| SessionWindow {
             cpu_millicores: *cpu,
             memory_mib: *memory,
             disk_gib: *disk,
             microseconds: (*to - *from).num_microseconds().unwrap_or(i64::MAX),
+            paused: *paused,
         })
         .collect();
     let amount = if rate_card == UNLIMITED_RATE_CARD {
@@ -167,6 +178,7 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
                 cpu_per_vcpu_hour: cpu,
                 memory_per_gib_hour: memory,
                 disk_per_gib_hour: disk,
+                parked_storage_per_gib_hour: parked_storage,
             },
             &windows,
         )
@@ -928,6 +940,7 @@ mod tests {
         cpu_per_vcpu_hour: 43_800_000,
         memory_per_gib_hour: 14_100_000,
         disk_per_gib_hour: 87_000,
+        parked_storage_per_gib_hour: 0,
     };
     const HOUR: i64 = 3_600_000_000;
 
@@ -937,6 +950,7 @@ mod tests {
             memory_mib: memory,
             disk_gib: disk,
             microseconds,
+            paused: false,
         }
     }
 
@@ -957,6 +971,25 @@ mod tests {
         assert_eq!(top_up_charge_cents(euros(-500_000), 2_000), 100_000);
         assert_eq!(top_up_charge_cents(euros(-500_000), 3_000), 99_000);
         assert_eq!(top_up_charge_cents(euros(-500_000), 100_000), 100_000);
+    }
+
+    #[test]
+    fn a_paused_window_draws_only_its_disk_at_the_storage_rate() {
+        let paused = SessionWindow {
+            paused: true,
+            ..window(2_000, 8_192, 10, HOUR)
+        };
+        // The storage rate is 0 until an administrator sets one.
+        assert_eq!(usage_nano_eur(REGULAR, &[paused]), 0);
+        let priced = Rates {
+            parked_storage_per_gib_hour: 5_000,
+            ..REGULAR
+        };
+        assert_eq!(usage_nano_eur(priced, &[paused]), 10 * 5_000);
+        assert_eq!(
+            usage_nano_eur(priced, &[paused, window(2_000, 8_192, 10, HOUR)]),
+            10 * 5_000 + 201_270_000
+        );
     }
 
     #[test]
@@ -994,6 +1027,7 @@ mod tests {
             cpu_per_vcpu_hour: 21_900_000,
             memory_per_gib_hour: 7_050_000,
             disk_per_gib_hour: 43_500,
+            parked_storage_per_gib_hour: 0,
         };
         assert_eq!(
             usage_nano_eur(half, &[window(2_000, 8_192, 10, HOUR)]),
@@ -1003,6 +1037,7 @@ mod tests {
             cpu_per_vcpu_hour: 0,
             memory_per_gib_hour: 0,
             disk_per_gib_hour: 0,
+            parked_storage_per_gib_hour: 0,
         };
         assert_eq!(
             usage_nano_eur(zero, &[window(16_000, 32_768, 200, HOUR)]),
@@ -1191,6 +1226,60 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(due, 1);
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_a_paused_session_draws_only_its_disk_at_the_storage_rate() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        session(&pool, &fixture, "running", "1 hour", None).await;
+        session(&pool, &fixture, "paused", "1 hour", None).await;
+        sqlx::query("UPDATE sandbox_running_sessions SET rate_kind = 'paused' WHERE id = $1")
+            .bind(format!("{}-paused", fixture.organization_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rate: i64 = sqlx::query_scalar(
+            "SELECT parked_storage_nano_eur_per_gib_hour FROM billing_rate_cards \
+             WHERE rate_card = 'regular'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let drawn = draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+        // An hour of the default sandbox running, and an hour of its 10 GiB
+        // paused, at the card's storage rate.
+        assert_eq!(drawn, 201_270_000 + 10 * rate);
+        let undrawn: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sandbox_running_sessions WHERE organization_id = $1 \
+             AND credit_drawn_through IS DISTINCT FROM last_observed_at",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(undrawn, 0, "the paused session is drawn through too");
+
+        // Its hours count its disk and no vCPU or memory.
+        let (cpu, memory, disk) = crate::metering::aggregate_monthly_usage(
+            &pool,
+            &fixture.organization_id,
+            Utc::now() - chrono::Duration::days(1),
+            "standard",
+        )
+        .await
+        .unwrap();
+        let near = |value: f64, wanted: f64| (value - wanted).abs() < 0.01;
+        assert!(
+            near(cpu, 2.0) && near(memory, 8.0) && near(disk, 20.0),
+            "{cpu} {memory} {disk}"
+        );
         cleanup(&pool, fixture).await;
     }
 

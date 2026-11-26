@@ -279,7 +279,7 @@ async fn check_marked(ctx: &WorkerContext, runtime: &dyn RuntimeDriver, marked: 
             );
         }
         match check(
-            &read.records,
+            &read.records(),
             sandbox.suspended_at.timestamp_millis(),
             chrono::Utc::now().timestamp_millis(),
         ) {

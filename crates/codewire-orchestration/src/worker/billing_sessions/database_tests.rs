@@ -14,17 +14,22 @@ use crate::worker::environment_auth::WorkspaceCredentialScope;
 use crate::worker::workspace_binding::{BindingRecord, write_binding};
 
 const CREATOR: &str = "billing-bind-creator";
-const ORGANIZATION: &str = "billing-bind-organization";
+pub(super) const ORGANIZATION: &str = "billing-bind-organization";
 const PRESET: &str = "billing-bind-preset";
-const NAMESPACE: &str = "billing-sandboxes";
-const ENV: &str = "550e8400-e29b-41d4-a716-446655440000";
+pub(super) const NAMESPACE: &str = "billing-sandboxes";
+pub(super) const ENV: &str = "550e8400-e29b-41d4-a716-446655440000";
 const CLAIM: &str = "c0ffee00-e29b-41d4-a716-446655440000";
-const SANDBOX: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
+pub(super) const SANDBOX: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
 const OTHER_SANDBOX: &str = "5a4db0c5-9dad-11d1-80b4-00c04fd430c8";
 const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const GENERATION: i64 = 3;
 
 async fn seed(db: &TestDatabase) -> Result<()> {
+    seed_profile(db, "commodity").await
+}
+
+/// The environment, on runtime `profile`, written once at create.
+pub(super) async fn seed_profile(db: &TestDatabase, profile: &str) -> Result<()> {
     db.user(CREATOR).await?;
     db.organization(ORGANIZATION).await?;
     sqlx::query(
@@ -39,15 +44,16 @@ async fn seed(db: &TestDatabase) -> Result<()> {
     sqlx::query(
         "INSERT INTO environments \
          (id,org_id,created_by,preset_id,type,state,desired_state,project_spec, \
-          environment_operation_generation) \
+          environment_operation_generation,runtime_profile) \
          VALUES ($1,$2,$3,$4,'sandbox','creating','started', \
-         '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb,$5)",
+         '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb,$5,$6)",
     )
     .bind(ENV)
     .bind(ORGANIZATION)
     .bind(CREATOR)
     .bind(PRESET)
     .bind(GENERATION)
+    .bind(profile)
     .execute(&db.pool)
     .await?;
     sqlx::query(
@@ -63,7 +69,7 @@ async fn seed(db: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
-fn identity(runtime_uid: &str) -> Identity {
+pub(super) fn identity(runtime_uid: &str) -> Identity {
     Identity {
         environment_id: ENV.into(),
         org_id: ORGANIZATION.into(),
@@ -84,7 +90,7 @@ fn resources() -> Resources {
 }
 
 /// The recorder's fenced write of a Pod-scope binding of `SANDBOX`.
-async fn bind(pool: &PgPool) -> Result<DateTime<Utc>> {
+pub(super) async fn bind(pool: &PgPool) -> Result<DateTime<Utc>> {
     let authority = ActivityAuthority::capture(pool, ENV, GENERATION).await?;
     let mut guard = authority.begin_external_mutation(&["creating"]).await?;
     write_binding(
@@ -295,7 +301,7 @@ async fn db_an_open_session_keeps_its_heartbeat_across_a_rebind() -> Result<()> 
 }
 
 /// A Sandbox of `ENV`, known only by its claim, as the driver lists it.
-fn member(phase: Phase, phase_reason: &str) -> RuntimeMember {
+pub(super) fn member(phase: Phase, phase_reason: &str) -> RuntimeMember {
     RuntimeMember {
         namespace: NAMESPACE.into(),
         name: "cw-pool-1000m-4096mi-10gi-78909fe3-x7k2p".into(),
@@ -615,15 +621,20 @@ async fn db_a_member_of_another_organization_is_never_billed() -> Result<()> {
         };
 
         // It opens nothing, though the environment has a live binding.
-        let reconciled = reconcile(&db.pool, &foreign).await;
+        let reconciled = reconcile(&db.pool, &FakeRuntimeDriver::default(), &foreign).await;
         ensure!(reconciled.unbillable, "{reconciled:?}");
         ensure!(sessions(&db.pool).await?.is_empty());
 
         // And it doesn't move an open session to that organization.
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
         let before = session_row(&db.pool).await?;
         ensure!(before.6 == ORGANIZATION, "{}", before.6);
-        let reconciled = reconcile(&db.pool, &foreign).await;
+        let reconciled = reconcile(&db.pool, &FakeRuntimeDriver::default(), &foreign).await;
         ensure!(reconciled.unbillable, "{reconciled:?}");
         ensure!(session_row(&db.pool).await? == before);
         Ok(())
@@ -639,7 +650,12 @@ async fn db_an_active_resize_freezes_the_open_session() -> Result<()> {
     let result = async {
         seed(&db).await?;
         bind(&db.pool).await?;
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
         ensure!(billed(&db.pool).await? == (1500, 5120, 10));
 
         resize_operation(&db.pool, "resize-active", "pending", 0).await?;
@@ -649,7 +665,7 @@ async fn db_an_active_resize_freezes_the_open_session() -> Result<()> {
                 .bind("resize-active")
                 .execute(&db.pool)
                 .await?;
-            reconcile(&db.pool, &resized_member()).await;
+            reconcile(&db.pool, &FakeRuntimeDriver::default(), &resized_member()).await;
             let frozen = billed(&db.pool).await?;
             ensure!(frozen == (1500, 5120, 10), "{state}: {frozen:?}");
         }
@@ -666,10 +682,15 @@ async fn db_a_failed_resize_bills_last_applied_and_keeps_the_sidecars() -> Resul
     let result = async {
         seed(&db).await?;
         bind(&db.pool).await?;
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
 
         resize_operation(&db.pool, "resize-failed", "failed", 0).await?;
-        reconcile(&db.pool, &resized_member()).await;
+        reconcile(&db.pool, &FakeRuntimeDriver::default(), &resized_member()).await;
 
         // The sidecars' 500m and 1024 MiB stay; the workspace is last-applied,
         // whatever the Sandbox declares while its rollback converges.
@@ -688,11 +709,16 @@ async fn db_a_later_completed_resize_supersedes_a_failure() -> Result<()> {
     let result = async {
         seed(&db).await?;
         bind(&db.pool).await?;
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
 
         resize_operation(&db.pool, "resize-failed", "failed", 60).await?;
         resize_operation(&db.pool, "resize-completed", "completed", 0).await?;
-        reconcile(&db.pool, &resized_member()).await;
+        reconcile(&db.pool, &FakeRuntimeDriver::default(), &resized_member()).await;
 
         // What the Sandbox declares now, not the failure's last-applied shape.
         let got = billed(&db.pool).await?;
@@ -716,7 +742,12 @@ async fn db_a_grown_disk_bills_the_environments_applied_size() -> Result<()> {
             .await?;
 
         // The member still declares the 10 GiB it was created with.
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
 
         let got = billed(&db.pool).await?;
         ensure!(got == (1500, 5120, 120), "{got:?}");
@@ -733,7 +764,12 @@ async fn db_listing_and_sweep_share_one_namespace() -> Result<()> {
     let result = async {
         seed(&db).await?;
         bind(&db.pool).await?;
-        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        reconcile(
+            &db.pool,
+            &FakeRuntimeDriver::default(),
+            &member(Phase::Running, ""),
+        )
+        .await;
 
         // A namespace that lists nothing doesn't reach this one's sessions.
         let runtime = FakeRuntimeDriver::default();
@@ -759,7 +795,7 @@ async fn db_a_session_opening_during_a_resize_bills_last_applied() -> Result<()>
 
         // No open row to freeze at, so the last-applied shape is all there is.
         resize_operation(&db.pool, "resize-active", "applying", 0).await?;
-        reconcile(&db.pool, &resized_member()).await;
+        reconcile(&db.pool, &FakeRuntimeDriver::default(), &resized_member()).await;
 
         let got = billed(&db.pool).await?;
         ensure!(got == (2500, 3072, 30), "{got:?}");
@@ -793,7 +829,7 @@ async fn db_a_running_member_that_resolves_to_no_environment_is_unbillable() -> 
                 IdentityResolution::Unresolved(reason) => ensure!(reason == expected, "{reason}"),
                 other => anyhow::bail!("{expected}: {other:?}"),
             }
-            let reconciled = reconcile(&db.pool, &running).await;
+            let reconciled = reconcile(&db.pool, &FakeRuntimeDriver::default(), &running).await;
             ensure!(reconciled.unbillable, "{expected}: {reconciled:?}");
             ensure!(sessions(&db.pool).await?.is_empty(), "{expected}");
 
@@ -802,7 +838,7 @@ async fn db_a_running_member_that_resolves_to_no_environment_is_unbillable() -> 
                 phase: Phase::Pending,
                 ..running
             };
-            let reconciled = reconcile(&db.pool, &pending).await;
+            let reconciled = reconcile(&db.pool, &FakeRuntimeDriver::default(), &pending).await;
             ensure!(!reconciled.unbillable, "{expected}: {reconciled:?}");
         }
         Ok(())

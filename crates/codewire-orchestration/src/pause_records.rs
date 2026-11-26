@@ -62,12 +62,26 @@ pub enum Record {
     State(StateRecord),
 }
 
+/// A record, with the time the kubelet logged it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Logged {
+    pub at_unix_ms: i64,
+    pub record: Record,
+}
+
 /// What a read of the runtime's log held.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Read {
-    pub records: Vec<Record>,
+    /// In the order they were logged.
+    pub logged: Vec<Logged>,
     /// Marked lines that didn't parse strictly. Only the count is kept.
     pub refused: usize,
+}
+
+impl Read {
+    pub fn records(&self) -> Vec<Record> {
+        self.logged.iter().map(|logged| logged.record).collect()
+    }
 }
 
 /// The records in `log`, the runtime container's log read with timestamps:
@@ -85,9 +99,9 @@ pub fn read(log: &[u8]) -> Read {
         let Some((time, text)) = line.split_once(' ') else {
             continue;
         };
-        if !kubelet_time(time) {
+        let Some(at_unix_ms) = kubelet_time(time) else {
             continue;
-        }
+        };
         let parsed = if let Some(json) = text.strip_prefix(RECORD_MARKER) {
             serde_json::from_str(json).map(Record::Pause)
         } else if let Some(json) = text.strip_prefix(STATE_MARKER) {
@@ -96,16 +110,18 @@ pub fn read(log: &[u8]) -> Read {
             continue;
         };
         match parsed {
-            Ok(record) => read.records.push(record),
+            Ok(record) => read.logged.push(Logged { at_unix_ms, record }),
             Err(_) => read.refused += 1,
         }
     }
     read
 }
 
-/// Whether `time` is an RFC 3339 time as the kubelet writes it.
-fn kubelet_time(time: &str) -> bool {
-    chrono::DateTime::parse_from_rfc3339(time).is_ok()
+/// `time` as the kubelet writes it, RFC 3339, in Unix milliseconds.
+fn kubelet_time(time: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(time)
+        .ok()
+        .map(|time| time.timestamp_millis())
 }
 
 #[cfg(test)]

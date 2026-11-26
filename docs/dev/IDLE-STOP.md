@@ -314,16 +314,17 @@ guest shuts down cleanly.
   - **Reading them** needs `pods/log` read for `standard` Pods. The billing
     loop reads each running or suspended `standard` Pod's new lines every 60
     seconds, and keeps the last generation and sequence it saw.
-  - **A stop reads the last lines first.** Orchestration's stop of a
-    suspended Sandbox, a person's or idle stop's, first wakes it with a
-    connection to its 7777, reads the Pod's new lines, which then end on
-    `resumed`, and only then stops it. A boot whose last record says running
-    is billed as running to its end, and that end is not a gap.
+  - **A stop reads the last lines first.** A stop of a suspended Sandbox,
+    a person's or idle stop's, sends its Pod SIGTERM, and the runtime
+    resumes the VM before the guest shuts down, recording `resumed`. When
+    billing sees the Sandbox stopped, it reads the Pod's last lines before
+    it closes the session. A boot whose last record says running is billed
+    as running to the Sandbox's stop, and that end is not a gap.
   - **A boot that ends paused** (the Pod evicted or its node lost while the
-    VM is paused, not orchestration's stop) counts as suspended only up to
-    the Pod's end: the runtime container's termination, or the Pod's
-    deletion when that comes first. The time from the last record seen to
-    that end is settled as a gap, below.
+    VM is paused, not orchestration's stop) counts as suspended at most up
+    to the next boot's first record, or the session's end when that comes
+    first. The time from the last record seen to there is settled as a gap,
+    below.
   - **A gap** is time billing has no record for: a missing sequence number,
     a boot whose first record seen is above 1, or more than 30 seconds
     between state records. A gap of 60 seconds or less, two state-record
