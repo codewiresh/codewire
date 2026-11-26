@@ -68,10 +68,12 @@ cp "$FAKE_CW" "$evidence/cw"
 printf '[runtime-smoke] environment id env-0123\n' >&2
 case "${FAKE_SCENARIO:?}" in
   pass)
-    printf '{}\n' >"$evidence/tailnet-doctor.json"
+    if [[ "$EXPECTED_TAILNET_PATH_TRANSPORT" == "direct_udp" ]]; then
+      printf '{}\n' >"$evidence/tailnet-doctor.json"
+      printf 'tailnet-peer-relay-ssh-ok\n' >"$evidence/ssh-tailnet-peer-relay.out"
+    fi
     printf '{}\n' >"$evidence/tailnet-doctor-peer-relay.json"
     printf 'tailnet-ssh-ok\n' >"$evidence/ssh-tailnet.out"
-    printf 'tailnet-peer-relay-ssh-ok\n' >"$evidence/ssh-tailnet-peer-relay.out"
     printf 'tailnet-derp-ssh-ok\n' >"$evidence/ssh-tailnet-derp.out"
     printf 'websocket-ssh-ok\n' >"$evidence/ssh-websocket.out"
     printf '[runtime-smoke] runtime smoke passed for env-0123\n' >&2
@@ -249,26 +251,45 @@ exit_line() { grep -F '[transport-matrix] exit-failure' "$CASE/err" | tail -n 1;
 show_err() { sed 's/[[:cntrl:]]//g' "$CASE/err" >&2; }
 
 # The deployed dev, unchanged: no candidate image, no shared-dev override, no
-# namespace, and the smoke asserts direct UDP, the UDP relay and DERP.
+# namespace, and in broker mode (the default) the smoke asserts the UDP relay,
+# forced DERP and WebSocket without requiring direct UDP.
 new_case current-dev-pass
 run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 -- --current-dev --cleanup-on-failure
 [[ "$(case_rc)" == 0 ]] || { show_err; fail "current-dev pass exited $(case_rc)"; }
 [[ "$(cat "$CASE/state/candidate.args")" == $'--current-dev\n--\n--keep\n--skip-docker' ]] ||
   fail "current-dev run changed dev: $(tr '\n' ' ' <"$CASE/state/candidate.args")"
-grep -Fq 'transport=direct_udp relay_matrix=1 derp=1 keep_env=1 cw_bin=' "$CASE/state/candidate.env" ||
-  fail "current-dev run does not assert direct UDP, the UDP relay and DERP"
+grep -Fq 'transport=peer_relay relay_matrix=0 derp=1 keep_env=1 cw_bin=' "$CASE/state/candidate.env" ||
+  fail "current-dev run does not assert the UDP relay and DERP in broker mode"
 [[ "$(cat "$CASE/state/cw-rm")" == env-0123 ]] || fail "current-dev pass did not remove its environment"
 [[ ! -e "$CASE/state/deleted-namespaces" ]] || fail "current-dev run deleted a namespace"
 if grep -Eq '^(.* )?(patch|cordon|uncordon|annotate)( |$)' "$CASE/state/kubectl.log" 2>/dev/null; then
   fail "a run without cordoning changed a node"
 fi
-grep -Fq 'transport matrix passed for env-0123: direct_udp, udp_relay, derp_relay, websocket' "$CASE/err" ||
-  fail "current-dev pass did not name every path"
+grep -Fq 'transport matrix passed for env-0123: udp_relay, derp_relay, websocket' "$CASE/err" ||
+  fail "current-dev pass did not name every broker-mode path"
 grep -Eq 'skip_kube=0 name=transport-matrix-[0-9]{14}$' "$CASE/state/candidate.env" ||
   fail "the smoke did not get the run's environment name: $(cat "$CASE/state/candidate.env")"
 # 2400 s bound + 600 s to stop + 120 s removal + 10 s destroy wait + 62 s.
 grep -Fq 'worst case with cleanup 3192s' "$CASE/err" ||
   fail "the run did not log its worst case with cleanup"
+
+# Direct mode remains selectable when direct UDP is enabled on the target.
+new_case current-dev-direct-udp-pass
+run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp -- --current-dev --cleanup-on-failure
+[[ "$(case_rc)" == 0 ]] || { show_err; fail "current-dev direct_udp pass exited $(case_rc)"; }
+grep -Fq 'transport=direct_udp relay_matrix=1 derp=1 keep_env=1 cw_bin=' "$CASE/state/candidate.env" ||
+  fail "direct_udp run does not assert direct UDP, the UDP relay and DERP"
+grep -Fq 'transport matrix passed for env-0123: direct_udp, udp_relay, derp_relay, websocket' "$CASE/err" ||
+  fail "direct_udp pass did not name every direct-mode path"
+
+# An unsupported primary transport fails in setup before touching the cluster.
+new_case unsupported-transport
+run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 EXPECTED_TAILNET_PATH_TRANSPORT=derp -- --current-dev
+[[ "$(case_rc)" == 1 ]] || fail "unsupported transport exited $(case_rc)"
+grep -Fq "EXPECTED_TAILNET_PATH_TRANSPORT must be direct_udp, peer_relay or udp_relay, got 'derp'" "$CASE/err" ||
+  fail "unsupported transport did not name the rejected value"
+[[ "$(exit_line)" == '[transport-matrix] exit-failure step=setup cleanup=ok legs=unproven' ]] ||
+  { show_err; fail "unsupported transport exit line is wrong: $(exit_line)"; }
 
 # Nothing the smoke started outlives the run: the matrix kills the smoke's
 # process group, which timeout leads, even after the smoke itself exited.
@@ -461,10 +482,12 @@ printf 'transport=%s relay_matrix=%s derp=%s skip_kube=%s name=%s\n' \
 evidence="$(mktemp -d "${SMOKE_TMP_PARENT:?}/codewire-runtime-smoke.XXXXXX")"
 mkdir -p "$evidence/cw-config"
 cp "$FAKE_CW" "$evidence/cw"
-printf '{}\n' >"$evidence/tailnet-doctor.json"
+if [[ "$EXPECTED_TAILNET_PATH_TRANSPORT" == "direct_udp" ]]; then
+  printf '{}\n' >"$evidence/tailnet-doctor.json"
+  printf 'tailnet-peer-relay-ssh-ok\n' >"$evidence/ssh-tailnet-peer-relay.out"
+fi
 printf '{}\n' >"$evidence/tailnet-doctor-peer-relay.json"
 printf 'tailnet-ssh-ok\n' >"$evidence/ssh-tailnet.out"
-printf 'tailnet-peer-relay-ssh-ok\n' >"$evidence/ssh-tailnet-peer-relay.out"
 printf 'tailnet-derp-ssh-ok\n' >"$evidence/ssh-tailnet-derp.out"
 printf 'websocket-ssh-ok\n' >"$evidence/ssh-websocket.out"
 printf '[runtime-smoke] environment id env-0123\n' >&2
@@ -504,13 +527,13 @@ grep -Fq 'SMOKE_SKIP_KUBE=1: no Kubernetes runtime preflight' "$smoke_log" ||
   fail "the candidate smoke did not skip its Kubernetes preflight"
 grep -Fq 'running application-only commodity smoke' "$smoke_log" ||
   fail "the CI wrapper did not run the application-only smoke"
-grep -Eq '^transport=direct_udp relay_matrix=1 derp=1 skip_kube=1 name=transport-matrix-[0-9]{14}$' \
+grep -Eq '^transport=peer_relay relay_matrix=0 derp=1 skip_kube=1 name=transport-matrix-[0-9]{14}$' \
   "$CASE/state/smoke.env" || fail "the runtime smoke got the wrong inputs: $(cat "$CASE/state/smoke.env")"
 [[ "$(tr '\n' ' ' <"$CASE/state/smoke.args")" == '--timeout-seconds 900 --keep --skip-docker ' ]] ||
   fail "the runtime smoke got the wrong arguments: $(tr '\n' ' ' <"$CASE/state/smoke.args")"
 [[ "$(cat "$CASE/state/cw-rm")" == env-0123 ]] || fail "the run without Kubernetes kept its environment"
-grep -Fq 'transport matrix passed for env-0123: direct_udp, udp_relay, derp_relay, websocket' "$CASE/err" ||
-  fail "the run without Kubernetes did not pass every path"
+grep -Fq 'transport matrix passed for env-0123: udp_relay, derp_relay, websocket' "$CASE/err" ||
+  fail "the run without Kubernetes did not pass every broker-mode path"
 
 # Cordoning is the one thing the unattended matrix itself needs kubectl for.
 new_case no-kubernetes-cordon

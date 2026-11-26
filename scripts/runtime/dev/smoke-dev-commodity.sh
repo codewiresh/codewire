@@ -5089,7 +5089,11 @@ run_ssh_transport_smoke() {
   grep -qx "$expected_output" "$stdout" || die "$label SSH smoke returned unexpected output"
   if [[ "$transport" == "tailnet" && "$debug_tailnet" == "1" ]]; then
     if [[ "$force_derp" == "1" ]] && ! grep -q 'path probe transport=' "$stderr"; then
-      assert_tailnet_doctor_forced_derp_evidence "$TMPDIR_SMOKE/tailnet-doctor.json"
+      local doctor_json="$TMPDIR_SMOKE/tailnet-doctor.json"
+      if expect_tailnet_peer_relay; then
+        doctor_json="$TMPDIR_SMOKE/tailnet-doctor-peer-relay.json"
+      fi
+      assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
       log "forced DERP SSH completed; tailnet doctor evidence covers forced DERP path"
     else
       assert_tailnet_path_probe "$stderr" "$expected_transport"

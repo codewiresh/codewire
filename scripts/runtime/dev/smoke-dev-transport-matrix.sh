@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# The dev transport matrix: one fresh environment proves direct UDP, the
-# shared UDP relay, forced DERP and WebSocket. See usage below.
+# The dev transport matrix: one fresh environment proves the active tailnet
+# paths (shared UDP relay, forced DERP and WebSocket in broker mode per
+# #5002/#6489, plus direct UDP when EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp).
+# See usage below.
 #
 # How long a run can take. MATRIX_TIMEOUT_SECONDS bounds the smoke itself;
 # after it, the smoke gets SIGTERM and MATRIX_KILL_AFTER_SECONDS to stop.
@@ -38,6 +40,7 @@ MATRIX_DAEMON_TAG="${MATRIX_DAEMON_TAG:-}"
 MATRIX_BUILD_DAEMON="${MATRIX_BUILD_DAEMON:-0}"
 MATRIX_CANDIDATE_IMAGES="${MATRIX_CANDIDATE_IMAGES:-services daemon}"
 MATRIX_CW_BIN="${CW_BIN:-}"
+EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-peer_relay}"
 SMOKE_SKIP_KUBE="${SMOKE_SKIP_KUBE:-0}"
 SMOKE_NAME="${SMOKE_NAME:-transport-matrix-$(date -u +%Y%m%d%H%M%S)}"
 SMOKE_TAILNET_DIRECT_WAIT="${SMOKE_TAILNET_DIRECT_WAIT:-5s}"
@@ -63,14 +66,18 @@ usage() {
 Usage:
   scripts/runtime/dev/with-dev-smoke-auth.sh scripts/runtime/dev/smoke-dev-transport-matrix.sh [options]
 
-Creates one fresh dev commodity environment and proves every tailnet path on
-it through the runtime smoke: direct_udp as the primary path, forced DERP,
-websocket, and the shared UDP relay (udp_relay) with peer direct endpoints
-suppressed. With Kubernetes (the default), it also asserts the direct-UDP
-LoadBalancer, the relay NetworkPolicy and the daemon's tailnet logs, and the
-environment must land on EXPECTED_NODE. With SMOKE_SKIP_KUBE=1 and
---current-dev, it holds no Kubernetes identity at all, as Dev acceptance:
-only the Codewire API and the tailnet paths are exercised.
+Creates one fresh dev commodity environment and proves every active tailnet
+path on it through the runtime smoke: in broker mode (the default on Dev per
+#5002/#6489, EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay) it proves the shared
+UDP relay (udp_relay), forced DERP and websocket; with
+EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp it proves direct_udp as the primary
+path as well as forced DERP, websocket, and the shared UDP relay (udp_relay)
+with peer direct endpoints suppressed. With Kubernetes (the default), it also
+asserts the relay NetworkPolicy (and direct-UDP LoadBalancer in direct_udp
+mode) and the daemon's tailnet logs, and the environment must land on
+EXPECTED_NODE. With SMOKE_SKIP_KUBE=1 and --current-dev, it holds no
+Kubernetes identity at all, as Dev acceptance: only the Codewire API and the
+tailnet paths are exercised.
 
 Two targets:
   (default)      Candidate: deploy the candidate images to the singleton dev
@@ -250,6 +257,24 @@ for bound in MATRIX_TIMEOUT_SECONDS MATRIX_KILL_AFTER_SECONDS \
 done
 ((MATRIX_TIMEOUT_SECONDS > 0)) || die "MATRIX_TIMEOUT_SECONDS must be positive"
 ((MATRIX_CLEANUP_ATTEMPTS > 0)) || die "MATRIX_CLEANUP_ATTEMPTS must be positive"
+
+case "$EXPECTED_TAILNET_PATH_TRANSPORT" in
+  direct_udp)
+    MATRIX_PRIMARY_TRANSPORT=direct_udp
+    MATRIX_PEER_RELAY_MATRIX=1
+    MATRIX_PATHS_SUMMARY="direct_udp + udp_relay + forced DERP + websocket"
+    MATRIX_PATHS_PASSED="direct_udp, udp_relay, derp_relay, websocket"
+    ;;
+  peer_relay|udp_relay)
+    MATRIX_PRIMARY_TRANSPORT=peer_relay
+    MATRIX_PEER_RELAY_MATRIX=0
+    MATRIX_PATHS_SUMMARY="udp_relay + forced DERP + websocket"
+    MATRIX_PATHS_PASSED="udp_relay, derp_relay, websocket"
+    ;;
+  *)
+    die "EXPECTED_TAILNET_PATH_TRANSPORT must be direct_udp, peer_relay or udp_relay, got '$EXPECTED_TAILNET_PATH_TRANSPORT'"
+    ;;
+esac
 
 if [[ "$MATRIX_CURRENT_DEV" == "1" ]]; then
   # The deployed dev is tested as it is; nothing here may change it.
@@ -648,9 +673,9 @@ if [[ "$SMOKE_SKIP_KUBE" == "1" ]]; then
   target_description="$target_description, application and tailnet only"
 fi
 MATRIX_STEP=smoke
-log "running fresh-node direct_udp + udp_relay + forced DERP + websocket smoke for $SMOKE_NAME against $target_description (smoke bound ${MATRIX_TIMEOUT_SECONDS}s; worst case with cleanup $(matrix_worst_case_seconds "${#MATRIX_CORDONED_NODES[@]}")s)"
+log "running fresh-node $MATRIX_PATHS_SUMMARY smoke for $SMOKE_NAME against $target_description (smoke bound ${MATRIX_TIMEOUT_SECONDS}s; worst case with cleanup $(matrix_worst_case_seconds "${#MATRIX_CORDONED_NODES[@]}")s)"
 # In the background so a signal reaches this shell at once and is forwarded.
-EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
+EXPECTED_TAILNET_PATH_TRANSPORT="$MATRIX_PRIMARY_TRANSPORT" \
   SMOKE_SKIP_KUBE="$SMOKE_SKIP_KUBE" \
   SMOKE_NAME="$SMOKE_NAME" \
   CANDIDATE_WORKER_LOOPS="$MATRIX_WORKER_LOOPS" \
@@ -658,7 +683,7 @@ EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
   SMOKE_KEEP_ENV=1 \
   SMOKE_SKIP_DOCKER=1 \
   SMOKE_DERP_FALLBACK=1 \
-  SMOKE_PEER_RELAY_MATRIX=1 \
+  SMOKE_PEER_RELAY_MATRIX="$MATRIX_PEER_RELAY_MATRIX" \
   SMOKE_TAILNET_DIRECT_WAIT="$SMOKE_TAILNET_DIRECT_WAIT" \
   SMOKE_TAILNET_PEER_TIMEOUT="$SMOKE_TAILNET_PEER_TIMEOUT" \
   SMOKE_TAILNET_DIAL_TIMEOUT="$SMOKE_TAILNET_DIAL_TIMEOUT" \
@@ -692,14 +717,21 @@ MATRIX_STEP=evidence
 [[ -x "$MATRIX_CLI" ]] || die "cw binary from initial smoke is not executable: $MATRIX_CLI"
 
 log "smoke passed for $ENV_ID; evidence $INITIAL_EVIDENCE_DIR"
-[[ -s "$INITIAL_EVIDENCE_DIR/tailnet-doctor.json" ]] || \
-  die "path=direct_udp: direct_udp doctor evidence is missing from $INITIAL_EVIDENCE_DIR"
-[[ -s "$INITIAL_EVIDENCE_DIR/tailnet-doctor-peer-relay.json" ]] || \
-  die "path=udp_relay: udp_relay doctor evidence is missing from $INITIAL_EVIDENCE_DIR"
-grep -qx 'tailnet-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet.out" || \
-  die "path=direct_udp: direct_udp SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
-grep -qx 'tailnet-peer-relay-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet-peer-relay.out" || \
-  die "path=udp_relay: udp_relay SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
+if [[ "$MATRIX_PRIMARY_TRANSPORT" == "direct_udp" ]]; then
+  [[ -s "$INITIAL_EVIDENCE_DIR/tailnet-doctor.json" ]] || \
+    die "path=direct_udp: direct_udp doctor evidence is missing from $INITIAL_EVIDENCE_DIR"
+  [[ -s "$INITIAL_EVIDENCE_DIR/tailnet-doctor-peer-relay.json" ]] || \
+    die "path=udp_relay: udp_relay doctor evidence is missing from $INITIAL_EVIDENCE_DIR"
+  grep -qx 'tailnet-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet.out" || \
+    die "path=direct_udp: direct_udp SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
+  grep -qx 'tailnet-peer-relay-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet-peer-relay.out" || \
+    die "path=udp_relay: udp_relay SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
+else
+  [[ -s "$INITIAL_EVIDENCE_DIR/tailnet-doctor-peer-relay.json" ]] || \
+    die "path=udp_relay: udp_relay doctor evidence is missing from $INITIAL_EVIDENCE_DIR"
+  grep -qx 'tailnet-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet.out" || \
+    die "path=udp_relay: udp_relay SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
+fi
 grep -qx 'tailnet-derp-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet-derp.out" || \
   die "path=derp_relay: DERP SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
 grep -qx 'websocket-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-websocket.out" || \
@@ -707,4 +739,4 @@ grep -qx 'websocket-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-websocket.out" || \
 
 MATRIX_STEP=cleanup
 MATRIX_LEGS=passed
-log "fresh-node transport matrix passed for $ENV_ID: direct_udp, udp_relay, derp_relay, websocket"
+log "fresh-node transport matrix passed for $ENV_ID: $MATRIX_PATHS_PASSED"
