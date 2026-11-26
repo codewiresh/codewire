@@ -30,6 +30,13 @@ case "$1" in
     ;;
   clean) ;;
   package)
+    if [[ -n "${CARGO_ENV_LOG:-}" ]]; then
+      printf 'RUSTC_WRAPPER=%s SCCACHE_DIR=%s SCCACHE_CONF=%s SCCACHE_SERVER_UDS=%s SCCACHE_BUCKET=%s AWS_ACCESS_KEY_ID=%s CARGO_INCREMENTAL=%s CARGO_PROFILE_DEV_DEBUG=%s CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=%s\n' \
+        "${RUSTC_WRAPPER-unset}" "${SCCACHE_DIR-unset}" "${SCCACHE_CONF-unset}" \
+        "${SCCACHE_SERVER_UDS-unset}" "${SCCACHE_BUCKET-unset}" "${AWS_ACCESS_KEY_ID-unset}" \
+        "${CARGO_INCREMENTAL-unset}" "${CARGO_PROFILE_DEV_DEBUG-unset}" \
+        "${CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL-unset}" >"$CARGO_ENV_LOG"
+    fi
     target="${*: -1}"
     mkdir -p "$target/package"
     for crate in codewire-proto codewire; do
@@ -96,5 +103,59 @@ grep -qx '# cargo wrote this' "$target/CACHEDIR.TAG" || fail "Cargo's own cache 
 
 [[ "$(grep -cx 'CARGO_PROFILE_DEV_DEBUG=0' "$CARGO_CALLS.env")" -eq 3 ]] ||
   fail "cargo package did not force CARGO_PROFILE_DEV_DEBUG=0: $(cat "$CARGO_CALLS.env")"
+
+# Local-only sccache wiring for a kept target: starts an isolated server, strips
+# ambient remote SCCACHE_*/AWS_* vars, sets SCCACHE_CONF=/dev/null, and stops
+# the server on exit. Temporary targets and explicit RUSTC_WRAPPER stay untouched.
+cat >"$TMP/bin/sccache" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s uds=%s dir=%s conf=%s bucket=%s aws=%s\n' \
+  "$*" "${SCCACHE_SERVER_UDS-unset}" "${SCCACHE_DIR-unset}" "${SCCACHE_CONF-unset}" \
+  "${SCCACHE_BUCKET-unset}" "${AWS_ACCESS_KEY_ID-unset}" >>"$STUB_SCCACHE_LOG"
+EOF
+chmod +x "$TMP/bin/sccache"
+export STUB_SCCACHE_LOG="$TMP/sccache-calls" CARGO_ENV_LOG="$TMP/cargo-env"
+
+: >"$STUB_SCCACHE_LOG"
+: >"$CARGO_ENV_LOG"
+(
+  unset RUSTC_WRAPPER
+  SCCACHE_BUCKET=leaked-bucket AWS_ACCESS_KEY_ID=leaked-key \
+    CODEWIRE_SDK_PACKAGE_SCCACHE_BIN="$TMP/bin/sccache" \
+    CODEWIRE_SDK_PACKAGE_TARGET_DIR="$target" \
+    "$SCRIPT" "$TMP/out-sccache" >"$TMP/sccache.log" 2>&1
+) || fail "kept target with sccache failed: $(cat "$TMP/sccache.log")"
+grep -q "^--start-server .* dir=$target/\.sccache conf=/dev/null bucket=unset aws=unset$" "$STUB_SCCACHE_LOG" ||
+  fail "sccache start did not enforce local-only isolation: $(cat "$STUB_SCCACHE_LOG")"
+grep -q '^--stop-server ' "$STUB_SCCACHE_LOG" ||
+  fail "sccache server was not stopped on exit: $(cat "$STUB_SCCACHE_LOG")"
+grep -q "RUSTC_WRAPPER=$TMP/bin/sccache SCCACHE_DIR=$target/\.sccache SCCACHE_CONF=/dev/null .* SCCACHE_BUCKET=unset AWS_ACCESS_KEY_ID=unset CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=2" "$CARGO_ENV_LOG" ||
+  fail "cargo package did not receive expected local sccache env: $(cat "$CARGO_ENV_LOG")"
+
+# A temporary target never starts the kept-target sccache server.
+: >"$STUB_SCCACHE_LOG"
+: >"$CARGO_ENV_LOG"
+(
+  unset RUSTC_WRAPPER CODEWIRE_SDK_PACKAGE_TARGET_DIR
+  CODEWIRE_SDK_PACKAGE_SCCACHE_BIN="$TMP/bin/sccache" \
+    "$SCRIPT" "$TMP/out-tmp-no-sccache" >"$TMP/tmp-no-sccache.log" 2>&1
+) || fail "temporary target with sccache present failed: $(cat "$TMP/tmp-no-sccache.log")"
+[[ ! -s "$STUB_SCCACHE_LOG" ]] || fail "temporary target unexpectedly started sccache: $(cat "$STUB_SCCACHE_LOG")"
+grep -q 'RUSTC_WRAPPER=unset SCCACHE_DIR=unset ' "$CARGO_ENV_LOG" ||
+  fail "temporary target set RUSTC_WRAPPER/SCCACHE_DIR: $(cat "$CARGO_ENV_LOG")"
+
+# An explicit caller RUSTC_WRAPPER is preserved without starting a private server.
+: >"$STUB_SCCACHE_LOG"
+: >"$CARGO_ENV_LOG"
+(
+  RUSTC_WRAPPER=/custom/wrapper \
+    CODEWIRE_SDK_PACKAGE_SCCACHE_BIN="$TMP/bin/sccache" \
+    CODEWIRE_SDK_PACKAGE_TARGET_DIR="$target" \
+    "$SCRIPT" "$TMP/out-custom-wrapper" >"$TMP/custom-wrapper.log" 2>&1
+) || fail "kept target with explicit RUSTC_WRAPPER failed: $(cat "$TMP/custom-wrapper.log")"
+[[ ! -s "$STUB_SCCACHE_LOG" ]] || fail "explicit RUSTC_WRAPPER unexpectedly started private sccache: $(cat "$STUB_SCCACHE_LOG")"
+grep -q 'RUSTC_WRAPPER=/custom/wrapper ' "$CARGO_ENV_LOG" ||
+  fail "explicit RUSTC_WRAPPER was not preserved: $(cat "$CARGO_ENV_LOG")"
 
 printf '[test-package-sdk-rust] a kept target rebuilds only the two SDK crates from this tree\n'

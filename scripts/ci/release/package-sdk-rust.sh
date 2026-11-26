@@ -63,9 +63,48 @@ if [[ -d "$target" ]]; then
 fi
 # Cargo's verify build only checks that the packaged tarballs compile cleanly;
 # debuginfo is never part of a .crate archive and more than doubles compile
-# time for the 17 MB generated codewire-proto crate (infra#1534).
-(cd "$work/source" && CARGO_PROFILE_DEV_DEBUG=0 \
-  cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
+# time for the 17 MB generated codewire-proto crate (infra#1534). Optimizing
+# build-dependencies (protox + connectrpc-build) speeds up cold builds too.
+#
+# When a kept target folder is supplied (CI's warm sdk-package folder) and the
+# caller did not set RUSTC_WRAPPER, run an isolated local-disk sccache beside
+# the target so repeated verify builds with unchanged protos/sources hit local
+# disk (~15 s vs ~250 s) without any remote backend or OIDC identity (#5231).
+(
+  cd "$work/source"
+  export CARGO_PROFILE_DEV_DEBUG=0
+  export CARGO_PROFILE_DEV_BUILD_OVERRIDE_OPT_LEVEL=2
+  if [[ -n "${CODEWIRE_SDK_PACKAGE_TARGET_DIR:-}" && -z "${RUSTC_WRAPPER:-}" ]]; then
+    candidate="${CODEWIRE_SDK_PACKAGE_SCCACHE_BIN:-$(command -v sccache || true)}"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      # Local must stay local (#5231): drop every ambient SCCACHE_/AWS_ variable
+      # and point SCCACHE_CONF at /dev/null so sccache can never talk to a
+      # remote backend or another process's server.
+      for env_name in $(compgen -e); do
+        case "$env_name" in
+          SCCACHE_*|AWS_*) unset "$env_name" ;;
+        esac
+      done
+      mkdir -p "$target/.sccache"
+      export SCCACHE_DIR="$target/.sccache"
+      export SCCACHE_CACHE_SIZE="${CODEWIRE_SDK_PACKAGE_SCCACHE_SIZE:-2G}"
+      export SCCACHE_CONF=/dev/null
+      export SCCACHE_SERVER_UDS="$work/sccache.sock"
+      if "$candidate" --start-server >/dev/null 2>&1; then
+        export RUSTC_WRAPPER="$candidate"
+        export CARGO_INCREMENTAL=0
+        trap '"$RUSTC_WRAPPER" --stop-server >/dev/null 2>&1 || true' EXIT
+      else
+        unset SCCACHE_DIR SCCACHE_CACHE_SIZE SCCACHE_CONF SCCACHE_SERVER_UDS
+      fi
+    fi
+  fi
+  cargo package --locked -p codewire-proto -p codewire --target-dir "$target"
+  if [[ -n "${SCCACHE_SERVER_UDS:-}" && -n "${RUSTC_WRAPPER:-}" ]]; then
+    "$RUSTC_WRAPPER" --show-stats 2>/dev/null \
+      | grep -E '^(Compile requests|Cache hits|Cache misses|Cache location)' || true
+  fi
+)
 
 for crate in codewire-proto codewire; do
   file="$target/package/$crate-$version.crate"
