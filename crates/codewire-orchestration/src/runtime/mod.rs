@@ -896,6 +896,7 @@ pub trait RuntimeSnapshots: Send + Sync {
         placement: &Placement,
         snapshot_id: &str,
         source: &VolumeIdentity,
+        source_mode: VolumeMode,
         snapshot_class: &str,
     ) -> anyhow::Result<()>;
 

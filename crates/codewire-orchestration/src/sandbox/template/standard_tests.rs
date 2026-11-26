@@ -225,6 +225,20 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
     assert!(!env.contains_key("DOCKER_HOST"));
 }
 
+#[test]
+fn a_standard_fork_starts_with_vm_state_existing() {
+    // A fork from a snapshot boots over the restored state disk, so it starts
+    // as `existing` and refuses to create an empty disk if it is missing.
+    let fork = env(&render_sandbox_template(
+        NAMESPACE,
+        &TemplateOpts {
+            workspace_source_snapshot: Some("cw-snap-11111111-1111-4111-8111-111111111111".into()),
+            ..opts()
+        },
+    ));
+    assert_eq!(fork["CODEWIRE_VM_STATE"], "existing");
+}
+
 /// An environment's own template runs broker mode inside the VM, its
 /// daemon reaching cw-egress as one of its platform peers; a pool's
 /// identity-free template stays guest-carried, as admission holds a standard

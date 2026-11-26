@@ -59,7 +59,8 @@ pub fn is_clearing_sandbox(name: &str) -> bool {
     name.starts_with(NAME_PREFIX)
 }
 
-/// A source volume's mode, as its PVC states it.
+/// A source volume's clearing layout, recorded on its raw snapshot so
+/// clearing knows how to scrub it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeMode {
     /// A volume the node formats and the guest reaches over virtio-fs, so a
@@ -70,6 +71,11 @@ pub enum VolumeMode {
     /// A volume the guest formats and reads block by block, so clearing also
     /// wipes every block its guest cannot read through the filesystem.
     Block,
+    /// A `standard` runtime Filesystem volume whose guest home and workspace
+    /// live inside `runtime/vms/<vm>/disks/state.raw` (#5602). Clearing
+    /// scrubs logins and wipes free blocks inside `state.raw` without
+    /// mounting it (`cw __snapshot-clear --standard-vm`).
+    StandardVm,
 }
 
 impl VolumeMode {
@@ -77,6 +83,7 @@ impl VolumeMode {
         match self {
             Self::Filesystem => "Filesystem",
             Self::Block => "Block",
+            Self::StandardVm => "StandardVm",
         }
     }
 
@@ -86,6 +93,7 @@ impl VolumeMode {
         match label {
             None | Some("Filesystem") => Some(Self::Filesystem),
             Some("Block") => Some(Self::Block),
+            Some("StandardVm") => Some(Self::StandardVm),
             Some(_) => None,
         }
     }
@@ -160,6 +168,20 @@ pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Val
             ]),
             json!({
                 "volumeDevices": [{ "name": "workspace", "devicePath": CLEARING_DEVICE_PATH }],
+                "terminationMessagePath": CLEARING_REPORT_PATH,
+            }),
+        ),
+        VolumeMode::StandardVm => (
+            json!([
+                SUPPORT_IMAGE_CW,
+                CLEARING_COMMAND,
+                "--standard-vm",
+                CLEARING_MOUNT_PATH,
+                "--report",
+                CLEARING_REPORT_PATH
+            ]),
+            json!({
+                "volumeMounts": [{ "name": "workspace", "mountPath": CLEARING_MOUNT_PATH }],
                 "terminationMessagePath": CLEARING_REPORT_PATH,
             }),
         ),
@@ -505,9 +527,51 @@ mod tests {
             VolumeMode::from_label(Some("Filesystem")),
             Some(VolumeMode::Filesystem)
         );
+        assert_eq!(
+            VolumeMode::from_label(Some("StandardVm")),
+            Some(VolumeMode::StandardVm)
+        );
         // A raw snapshot from a release before the label.
         assert_eq!(VolumeMode::from_label(None), Some(VolumeMode::Filesystem));
         assert_eq!(VolumeMode::from_label(Some("block")), None);
+        assert_eq!(VolumeMode::from_label(Some("standard")), None);
+    }
+
+    #[test]
+    fn a_standard_vm_restore_mounts_filesystem_and_runs_standard_vm_clear() {
+        let template = render_clearing_template(
+            "dev-sandboxes",
+            &ClearingOpts {
+                volume_mode: VolumeMode::StandardVm,
+                ..opts()
+            },
+        );
+        let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
+        // A standard Sandbox volume is a Filesystem PVC holding state.raw.
+        assert!(claim.get("volumeMode").is_none());
+        assert_eq!(claim["dataSource"]["name"], raw_snapshot_name(ID));
+        assert_eq!(claim["resources"]["requests"]["storage"], "80Gi");
+
+        let pod = &template["spec"]["podTemplate"]["spec"];
+        assert_eq!(pod["runtimeClassName"], "commodity");
+        let container = &pod["containers"][0];
+        assert_eq!(
+            container["command"],
+            json!([
+                "/usr/local/bin/cw",
+                "__snapshot-clear",
+                "--standard-vm",
+                "/workspace",
+                "--report",
+                "/dev/termination-log"
+            ])
+        );
+        assert_eq!(container["terminationMessagePath"], "/dev/termination-log");
+        assert_eq!(
+            container["volumeMounts"],
+            json!([{ "name": "workspace", "mountPath": "/workspace" }])
+        );
+        assert!(container.get("volumeDevices").is_none());
     }
 
     #[test]

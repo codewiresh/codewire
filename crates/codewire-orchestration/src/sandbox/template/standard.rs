@@ -421,7 +421,12 @@ fn settings(
         ),
         (
             POD_RUNTIME_VM_STATE_ENV,
-            POD_RUNTIME_VM_STATE_NEW.to_owned(),
+            if opts.workspace_source_snapshot.is_some() {
+                POD_RUNTIME_VM_STATE_EXISTING
+            } else {
+                POD_RUNTIME_VM_STATE_NEW
+            }
+            .to_owned(),
         ),
         (POD_RUNTIME_EGRESS_MODE_ENV, egress_mode(opts).to_owned()),
         (

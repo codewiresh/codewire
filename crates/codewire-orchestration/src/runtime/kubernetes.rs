@@ -1022,13 +1022,9 @@ impl RuntimeSnapshots for KubernetesDriver {
         placement: &Placement,
         snapshot_id: &str,
         source: &VolumeIdentity,
+        source_mode: VolumeMode,
         snapshot_class: &str,
     ) -> anyhow::Result<()> {
-        let source_mode = if source.raw_block {
-            VolumeMode::Block
-        } else {
-            VolumeMode::Filesystem
-        };
         self.sandbox_client(placement)
             .ensure_volume_snapshot(
                 &raw_snapshot_name(snapshot_id),
@@ -2724,16 +2720,15 @@ mod tests {
     #[tokio::test]
     async fn the_raw_snapshot_is_of_the_source_volume_and_records_its_mode() {
         let placement = Placement::new("dev-sandboxes");
-        for (raw_block, mode) in [(true, VolumeMode::Block), (false, VolumeMode::Filesystem)] {
+        for mode in [
+            VolumeMode::Block,
+            VolumeMode::Filesystem,
+            VolumeMode::StandardVm,
+        ] {
             let (driver, writes) = driver_over_ready_snapshots("");
-
+            let source = stub_volume_identity(mode == VolumeMode::Block);
             driver
-                .snapshot_volume(
-                    &placement,
-                    "snap-1",
-                    &stub_volume_identity(raw_block),
-                    "class-a",
-                )
+                .snapshot_volume(&placement, "snap-1", &source, mode, "class-a")
                 .await
                 .unwrap();
 

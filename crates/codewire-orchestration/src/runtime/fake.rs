@@ -754,6 +754,7 @@ impl RuntimeSnapshots for FakeRuntimeDriver {
         _placement: &Placement,
         _snapshot_id: &str,
         _source: &VolumeIdentity,
+        _source_mode: VolumeMode,
         _snapshot_class: &str,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")

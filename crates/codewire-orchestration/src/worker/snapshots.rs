@@ -25,7 +25,9 @@ use crate::runtime::{
     VolumeMode,
 };
 use crate::sandbox::snapshots::quantity_bytes;
-use crate::sandbox::template::runtime_profile_spec;
+use crate::sandbox::template::{
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_STANDARD, RUNTIME_PROFILE_STANDARD, runtime_profile_spec,
+};
 
 /// The source environment wasn't stopped when the raw snapshot was to be taken.
 pub const FAILURE_NOT_STOPPED: &str = "environment_not_stopped";
@@ -123,6 +125,31 @@ fn source_capturable(state: &str, desired_state: &str, isolation_tier: &str) -> 
     state == "stopped" && desired_state == "stopped" && isolation_tier != "confidential"
 }
 
+/// The clearing layout recorded on a raw snapshot. A Block PVC is always a
+/// commodity guest-formatted disk; a Filesystem PVC belonging to a `standard`
+/// environment holds `state.raw` and must be cleared with `--standard-vm` so
+/// logins inside `state.raw` are never missed (#5602).
+fn source_volume_mode(raw_block: bool, runtime_profile: &str) -> VolumeMode {
+    if raw_block {
+        VolumeMode::Block
+    } else if runtime_profile == RUNTIME_PROFILE_STANDARD {
+        VolumeMode::StandardVm
+    } else {
+        VolumeMode::Filesystem
+    }
+}
+
+/// The RuntimeClass a clearing Pod runs under. `standard` only admits
+/// `pod-runtime`, whereas a clearing Pod runs the support image inside a Kata
+/// VM so untrusted guest filesystems are never parsed on the host.
+fn clearing_runtime_class(profile_runtime_class: &str) -> &str {
+    if profile_runtime_class == RUNTIME_CLASS_STANDARD {
+        RUNTIME_CLASS_COMMODITY
+    } else {
+        profile_runtime_class
+    }
+}
+
 /// Step 1: under the source's row lock, require it stopped and standard, and take
 /// the raw snapshot. Returns a failure code when the source can't be captured.
 /// The whole of it runs under one bound, because the lock is held throughout.
@@ -139,30 +166,34 @@ pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Resu
         // other connections insert rows that reference the environment, as
         // `ExternalMutationGuard` does.
         let row = sqlx::query(
-            "SELECT state, desired_state, isolation_tier
+            "SELECT state, desired_state, isolation_tier, runtime_profile
                FROM environments WHERE id = $1 FOR NO KEY UPDATE",
         )
         .bind(&environment_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let capturable = row.is_some_and(|row| {
-            source_capturable(
-                &row.get::<String, _>("state"),
-                &row.get::<String, _>("desired_state"),
-                &row.get::<String, _>("isolation_tier"),
-            )
-        });
-        if !capturable {
+        let Some(runtime_profile) = row
+            .filter(|row| {
+                source_capturable(
+                    &row.get::<String, _>("state"),
+                    &row.get::<String, _>("desired_state"),
+                    &row.get::<String, _>("isolation_tier"),
+                )
+            })
+            .map(|row| row.get::<String, _>("runtime_profile"))
+        else {
             return Ok(Some(FAILURE_NOT_STOPPED.to_owned()));
-        }
+        };
         let backend = load_backend_row(&ctx.pool, &environment_id).await?;
         let source = runtime
             .volume(&placement, &workspace_pvc_anchor(&backend))
             .await?;
         // A confidential source never reaches here (`source_capturable`), so
-        // a Block source is a commodity one the guest formats.
+        // a Block source is a commodity one the guest formats, and a standard
+        // source is a Filesystem volume holding `state.raw`.
+        let source_mode = source_volume_mode(source.raw_block, &runtime_profile);
         runtime
-            .snapshot_volume(&placement, snapshot_id, &source, &class)
+            .snapshot_volume(&placement, snapshot_id, &source, source_mode, &class)
             .await?;
         // The lock is held until the snapshot exists, so a start can't mount the
         // disk under it. Measured at about 1.2 s.
@@ -216,7 +247,7 @@ pub async fn run_clearing(
     let opts = ClearingOpts {
         snapshot_id,
         support_image: cfg.support_image(),
-        runtime_class: &profile.runtime_class_name,
+        runtime_class: clearing_runtime_class(&profile.runtime_class_name),
         storage_class: &storage_class,
         restore_size: &restore_size,
         volume_mode,
@@ -249,8 +280,9 @@ pub async fn run_clearing(
         wait.instrument(tracing::debug_span!("wait_for_clearing", snapshot_id = %snapshot_id));
     tokio::time::timeout(timeout, wait).await.map_err(|_| match volume_mode {
         VolumeMode::Filesystem => anyhow::anyhow!("clearing did not finish in time"),
-        VolumeMode::Block => anyhow::anyhow!(
-            "clearing a {restore_size} Block restore did not finish within {} s, planned at {} MiB/s of writes beyond {} s",
+        VolumeMode::Block | VolumeMode::StandardVm => anyhow::anyhow!(
+            "clearing a {restore_size} {} restore did not finish within {} s, planned at {} MiB/s of writes beyond {} s",
+            volume_mode.as_str(),
             timeout.as_secs(),
             BLOCK_CLEARING_PLANNED_BYTES_PER_SECOND / (1024 * 1024),
             CLEARING_TIMEOUT.as_secs()
@@ -258,14 +290,14 @@ pub async fn run_clearing(
     })?
 }
 
-/// A Filesystem clearing touches files only. A Block clearing may overwrite
-/// all of its free space when discards don't clear it, so it is given time for
-/// that at the planned rate, within the cap. A size that can't be read takes
-/// the cap.
+/// A Filesystem clearing touches files only. A Block or StandardVm clearing
+/// may overwrite all of its free space when discards/hole-punches don't clear
+/// it, so it is given time for that at the planned rate, within the cap. A
+/// size that can't be read takes the cap.
 fn clearing_timeout(volume_mode: VolumeMode, restore_bytes: Option<u64>) -> Duration {
     match volume_mode {
         VolumeMode::Filesystem => CLEARING_TIMEOUT,
-        VolumeMode::Block => restore_bytes
+        VolumeMode::Block | VolumeMode::StandardVm => restore_bytes
             .map(|bytes| {
                 CLEARING_TIMEOUT
                     + Duration::from_secs(bytes / BLOCK_CLEARING_PLANNED_BYTES_PER_SECOND)
@@ -275,12 +307,57 @@ fn clearing_timeout(volume_mode: VolumeMode, restore_bytes: Option<u64>) -> Dura
     }
 }
 
-/// Log a Block clearing's report (`cw __snapshot-clear --block`), a warning
-/// when any range was overwritten because discards didn't clear it: such a
-/// capture takes minutes rather than seconds, and that has to show.
+/// Parse a `cw __snapshot-clear --standard-vm` report line
+/// (`cleared logins=<n> trees=<n> ms=<ms>`). Returns `None` if malformed.
+fn parse_standard_vm_report(report: &str) -> Option<(&str, &str, &str)> {
+    fn field<'a>(token: &'a str, name: &str) -> Option<&'a str> {
+        token
+            .strip_prefix(name)?
+            .strip_prefix('=')
+            .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+    }
+    let mut tokens = report.split_whitespace();
+    if tokens.next()? != "cleared" {
+        return None;
+    }
+    let logins = field(tokens.next()?, "logins")?;
+    let trees = field(tokens.next()?, "trees")?;
+    let ms = field(tokens.next()?, "ms")?;
+    tokens.next().is_none().then_some((logins, trees, ms))
+}
+
+/// Log a Block or StandardVm clearing's report (`cw __snapshot-clear --block` /
+/// `--standard-vm`). For Block, warns when any range was overwritten because
+/// discards didn't clear it; for StandardVm, logs `logins`, `trees` and `ms`
+/// at info level and warns if the report is missing or malformed.
 fn log_clearing_report(snapshot_id: &str, volume_mode: VolumeMode, report: Option<&str>) {
-    if volume_mode != VolumeMode::Block {
-        return;
+    match volume_mode {
+        VolumeMode::Filesystem => return,
+        VolumeMode::StandardVm => {
+            let Some(report) = report else {
+                tracing::warn!(
+                    snapshot_id,
+                    "hosted snapshot: StandardVm clearing left no report"
+                );
+                return;
+            };
+            let Some((logins, trees, ms)) = parse_standard_vm_report(report) else {
+                tracing::warn!(
+                    snapshot_id,
+                    "hosted snapshot: StandardVm clearing report was malformed"
+                );
+                return;
+            };
+            tracing::info!(
+                snapshot_id,
+                logins,
+                trees,
+                ms,
+                "hosted snapshot: StandardVm clearing finished"
+            );
+            return;
+        }
+        VolumeMode::Block => {}
     }
     let Some(report) = report else {
         tracing::warn!(
@@ -550,7 +627,49 @@ mod tests {
             clearing_timeout(VolumeMode::Block, None),
             BLOCK_CLEARING_TIMEOUT_CAP
         );
+        assert_eq!(
+            clearing_timeout(VolumeMode::StandardVm, Some(80 * GIB)),
+            Duration::from_secs(300 + 640)
+        );
+        assert_eq!(
+            clearing_timeout(VolumeMode::StandardVm, None),
+            BLOCK_CLEARING_TIMEOUT_CAP
+        );
         assert!(BLOCK_CLEARING_TIMEOUT_CAP < Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn standard_sources_record_standard_vm_mode_and_clear_on_commodity_vm() {
+        assert_eq!(
+            source_volume_mode(false, "standard"),
+            VolumeMode::StandardVm
+        );
+        assert_eq!(
+            source_volume_mode(false, "commodity"),
+            VolumeMode::Filesystem
+        );
+        assert_eq!(source_volume_mode(true, "commodity"), VolumeMode::Block);
+        assert_eq!(source_volume_mode(true, "standard"), VolumeMode::Block);
+
+        assert_eq!(clearing_runtime_class("standard"), "commodity");
+        assert_eq!(clearing_runtime_class("commodity"), "commodity");
+        assert_eq!(clearing_runtime_class("runc"), "runc");
+        assert_eq!(clearing_runtime_class(""), "");
+
+        assert_eq!(
+            parse_standard_vm_report("cleared logins=2 trees=3 ms=415\n"),
+            Some(("2", "3", "415"))
+        );
+        for malformed in [
+            "",
+            "cleared logins=2 trees=3",
+            "cleared logins=2 trees=3 ms=abc",
+            "cleared logins=2 trees=3 ms=10 extra=1",
+            "other logins=2 trees=3 ms=10",
+            "cleared logins=0 trees=0 wiped ranges=1 bytes=4096 discard=true discarded=1 fallback=0 written=0 ms=5",
+        ] {
+            assert_eq!(parse_standard_vm_report(malformed), None, "{malformed}");
+        }
     }
 
     #[test]
