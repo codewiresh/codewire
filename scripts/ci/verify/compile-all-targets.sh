@@ -94,13 +94,61 @@ curated() {
 # workstation, where preflight runs this script as one job) they run one after
 # another, so they never take every core three times over. Each build's output
 # is printed whole when it ends, and the first failure is the exit status.
+# On pull requests whose selection narrows Rust verification to specific crates
+# (no |rust_workspace|), lint every selected crate and its transitive reverse
+# dependents (the closure select-verification.sh computes from Cargo metadata)
+# with both default features and --all-features across --all-targets. Push
+# runs (main and merge queue), dispatches, local runs, rust_workspace PRs, and
+# selections without matched root-workspace crates fail closed to --workspace
+# (infra#1534).
+CLIPPY_PACKAGE_ARGS=(--workspace)
+CLIPPY_SCOPE_LABEL='workspace'
+resolve_clippy_scope() {
+  local selection="${VERIFICATION_SELECTION:-}" manifest dir token package
+  local -a selected_packages=() names=()
+  [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || return 0
+  [[ "$selection" == '|valid:v3|'*'|complete|' ]] || return 0
+  [[ "$selection" != *'|rust_workspace|'* ]] || return 0
+  # Protobuf contract edits emit handwritten subsets without expanding every
+  # build.rs consumer through crate_graph_dependents; fail closed to workspace.
+  [[ "$selection" != *'|contracts_proto|'* ]] || return 0
+
+  for manifest in crates/*/Cargo.toml; do
+    dir="${manifest%/Cargo.toml}"
+    token="${dir#crates/}"
+    token="${token//-/_}"
+    # codewire-desktop and codewire-ui are excluded from the root workspace
+    # ([workspace] exclude in Cargo.toml) and checked separately.
+    case "$token" in
+      codewire_desktop|codewire_ui) continue ;;
+    esac
+    if [[ "$selection" == *"|rust_pkg_${token}|"* \
+        || "$selection" == *"|transport_pkg_${token}|"* ]]; then
+      package="$(sed -nE 's/^name = "([^"]+)"/\1/p; T; q' "$manifest")"
+      if [ -z "$package" ]; then
+        printf '::error file=%s::unable to determine Rust package name\n' "$manifest" >&2
+        return 1
+      fi
+      selected_packages+=(-p "$package")
+      names+=("$package")
+    fi
+  done
+
+  if [ "${#selected_packages[@]}" -gt 0 ]; then
+    CLIPPY_PACKAGE_ARGS=("${selected_packages[@]}")
+    CLIPPY_SCOPE_LABEL="${names[*]}"
+  fi
+}
+resolve_clippy_scope
+printf '[compile-all-targets] clippy scope: %s\n' "$CLIPPY_SCOPE_LABEL"
+
 default_clippy() {
   phase "root clippy (default features)" \
-    "$CARGO_BIN" clippy --locked --workspace --all-targets -- -D warnings
+    "$CARGO_BIN" clippy --locked "${CLIPPY_PACKAGE_ARGS[@]}" --all-targets -- -D warnings
 }
 all_features_clippy() {
   phase "root clippy (all features)" env CARGO_TARGET_DIR="$TARGET_DIR/all-features" \
-    "$CARGO_BIN" clippy --locked --workspace --all-targets --all-features -- -D warnings
+    "$CARGO_BIN" clippy --locked "${CLIPPY_PACKAGE_ARGS[@]}" --all-targets --all-features -- -D warnings
 }
 builds=(default_clippy all_features_clippy curated)
 logs="$(mktemp -d "${TMPDIR:-/tmp}/compile-all-targets.XXXXXX")"

@@ -212,6 +212,7 @@ compile_run() {
   local log="$1"
   : >"$TMP/compile.calls"
   (
+    unset GITHUB_EVENT_NAME VERIFICATION_SELECTION
     if [ -n "${2:-}" ]; then export CARGO_TARGET_DIR="$2"; else unset CARGO_TARGET_DIR; fi
     COMPILE_CALLS="$TMP/compile.calls" CARGO_BIN="$compile_cargo" \
       CURATED_RUST_MANIFEST_DIR="$compile_root/manifests" \
@@ -293,7 +294,8 @@ timed_run() {
   # timed_run LOG [FAIL_ALL_FEATURES] [CARGO_MAKEFLAGS]: one run with the timed
   # Cargo, under a fake shared jobserver unless the third argument is empty.
   : >"$TMP/compile.calls"
-  CARGO_TARGET_DIR="$targets" COMPILE_CALLS="$TMP/compile.calls" CARGO_BIN="$timed_cargo" \
+  env -u GITHUB_EVENT_NAME -u VERIFICATION_SELECTION \
+    CARGO_TARGET_DIR="$targets" COMPILE_CALLS="$TMP/compile.calls" CARGO_BIN="$timed_cargo" \
     CURATED_RUST_MANIFEST_DIR="$compile_root/manifests" FAIL_ALL_FEATURES="${2:-0}" \
     CARGO_MAKEFLAGS="${3---jobserver-auth=3,4}" \
     "$compile_root/scripts/ci/verify/compile-all-targets.sh" >"$1" 2>&1
@@ -337,4 +339,53 @@ if grep -qF 'start curated' "$TMP/compile.calls"; then
   compile_fail 'a serial run went on after a failing build'
 fi
 
-printf 'curated Rust workspace lock fixtures: stale and root drift rejected; current derp and cold-cache forms green; compile-all-targets stages each workspace afresh at one path under its target folder, locked, and runs its three builds in their own folders, at once under a shared jobserver\n'
+# Pull-request crate scoping: narrow pull-request selections lint every
+# selected root-workspace package (both rust_pkg_* and transport_pkg_*, never
+# the detached codewire-desktop) with default and --all-features; push runs,
+# rust_workspace selections, incomplete selections and desktop-only selections
+# fail closed to --workspace (infra#1534).
+for crate in codewire-alpha codewire-beta codewire-desktop codewire-ui; do
+  mkdir -p "$compile_root/crates/$crate"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$crate" >"$compile_root/crates/$crate/Cargo.toml"
+done
+scope_cargo="$EXEC_TMP/scope-cargo"
+cat >"$scope_cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = clippy ] || exit 0
+printf '%s\n' "$*" >>"$COMPILE_CALLS"
+EOF
+chmod +x "$scope_cargo"
+scope_case() {
+  local name="$1" event="$2" selection="$3" expected="$4"
+  : >"$TMP/compile.calls"
+  GITHUB_EVENT_NAME="$event" VERIFICATION_SELECTION="$selection" \
+    CARGO_TARGET_DIR="$targets" COMPILE_CALLS="$TMP/compile.calls" CARGO_BIN="$scope_cargo" \
+    CURATED_RUST_MANIFEST_DIR="$compile_root/manifests" CARGO_MAKEFLAGS='' \
+    "$compile_root/scripts/ci/verify/compile-all-targets.sh" >"$TMP/scope-$name.log" 2>&1 ||
+      compile_fail "scope case $name failed: $(cat "$TMP/scope-$name.log")"
+  grep -qxF "clippy --locked $expected --all-targets -- -D warnings" "$TMP/compile.calls" ||
+    compile_fail "scope case $name default clippy args wrong: $(cat "$TMP/compile.calls")"
+  grep -qxF "clippy --locked $expected --all-targets --all-features -- -D warnings" "$TMP/compile.calls" ||
+    compile_fail "scope case $name all-features clippy args wrong: $(cat "$TMP/compile.calls")"
+}
+scope_case pr-narrow pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_alpha|transport|transport_pkg_codewire_beta|rust_pkg_codewire_desktop|rust_pkg_codewire_ui|complete|' \
+  '-p codewire-alpha -p codewire-beta'
+scope_case pr-workspace pull_request \
+  '|valid:v3|rust|rust_workspace|rust_pkg_codewire_alpha|complete|' \
+  '--workspace'
+scope_case pr-contracts-proto pull_request \
+  '|valid:v3|contracts|contracts_proto|rust|rust_pkg_codewire_alpha|complete|' \
+  '--workspace'
+scope_case push-narrow push \
+  '|valid:v3|rust|rust_pkg_codewire_alpha|complete|' \
+  '--workspace'
+scope_case pr-desktop-only pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_desktop|complete|' \
+  '--workspace'
+scope_case pr-incomplete pull_request \
+  '|rust|rust_pkg_codewire_alpha|' \
+  '--workspace'
+
+printf 'curated Rust workspace lock fixtures: stale and root drift rejected; current derp and cold-cache forms green; compile-all-targets stages each workspace afresh at one path under its target folder, locked, runs its three builds in their own folders, at once under a shared jobserver, and scopes PR clippy to selected root packages\n'
