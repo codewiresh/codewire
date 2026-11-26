@@ -635,7 +635,7 @@ MUTATIONS = {
     "the dispatch runs before the superseded check": lambda t: move_step(
         t, SELECTION, "Emit trusted capability dispatch decisions", "Skip a superseded main commit"),
     "an archive step reads a fetch that follows it": lambda t: move_step(
-        t, "database", "Fetch and verify the database archives", "Make the fixture images present"),
+        t, "database", "Fetch and verify the database archives", "Wait for integration Postgres"),
     "Required verification stops waiting on a group": lambda t: in_job(
         t, REQUIRED, "      - database\n", ""),
     "Required verification ignores a group's result": lambda t: in_job(

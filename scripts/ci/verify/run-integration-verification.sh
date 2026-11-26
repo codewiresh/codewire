@@ -300,7 +300,17 @@ extract_archives() {
   # since tests check their paths' ancestry and compare canonical paths.
   rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
   mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT"
-  cp -a --reflink=auto "${BUILD_SOURCE_DIR:-$ROOT}/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+  if [ -n "${BUILD_SOURCE_DIR:-}" ]; then
+    cp -a --reflink=auto "$BUILD_SOURCE_DIR/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+  else
+    # Match pull requests' source layout without copying .git objects or target/
+    # across filesystems on main/mq runs; link .git so tests calling git
+    # ls-files still see the repository metadata.
+    mkdir -p "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+    tar --exclude='./.git' --exclude='./target' --exclude='./.tmp' \
+      -cf - -C "$ROOT" . | tar -xf - -C "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+    [ ! -e "$ROOT/.git" ] || ln -s "$ROOT/.git" "$DATABASE_ARCHIVE_BUILD_ROOT/src/.git" || return
+  fi
   # fetch-test-archive.sh --extract streams archive.tar.zst directly into
   # $dir/archive as it downloads and hashes (infra#1534), avoiding a 26 s
   # post-fetch extraction pass.
@@ -494,6 +504,12 @@ cleanup() {
     [ "$pidfile" = "$RUN_DIR/orchestration-daemon.pid" ] && signal="$(orchestration_daemon_stop_signal)"
     kill -"$signal" "$(cat "$pidfile")" 2>/dev/null || true
   done
+  if [ -n "${SUITE_LIST_PID:-}" ]; then
+    pkill -TERM -P "$SUITE_LIST_PID" 2>/dev/null || true
+    kill -TERM "$SUITE_LIST_PID" 2>/dev/null || true
+    wait "$SUITE_LIST_PID" 2>/dev/null || true
+    SUITE_LIST_PID=''
+  fi
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   integration_postgres_cleanup
   if [ -n "$RUST_ARCHIVES" ]; then
@@ -1829,6 +1845,7 @@ run_lanes() {
 list_database_suites() {
   local lane failed=false
   local -A list_pid=()
+  trap 'kill "${list_pid[@]}" 2>/dev/null || true; wait "${list_pid[@]}" 2>/dev/null || true; exit 143' TERM INT
   for lane in "${DATABASE_LANES[@]}"; do
     (SUITE_LIST_ONLY=true run_database_lane "$lane") >"$RUN_DIR/database-list-$lane.log" 2>&1 &
     list_pid[$lane]=$!
@@ -1851,23 +1868,43 @@ list_database_suites() {
 }
 
 run_database() {
-  local lane
+  local lane list_log list_status=0
   local -A lane_url=() lane_rust_url=()
   if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
     extract_archives "$RUST_DATABASE_ARCHIVES"
   else
     build_database_suites
   fi
-  list_database_suites
-  reset_schema
   if ! integration_postgres_lanes_available; then
+    list_database_suites
+    reset_schema
     log "database lanes run one after another against the explicit database"
     for lane in "${DATABASE_LANES[@]}"; do
       run_database_lane "$lane"
     done
     return 0
   fi
-  start_lane_databases "${DATABASE_LANES[@]}"
+  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+    # From archives, list_database_suites only inspects extracted binaries and
+    # sources into $SUITE_LISTINGS; run it beside schema reset and lane
+    # Postgres startup so its ~11 s coverage pass never delays lane launch.
+    # Keep reset_schema and start_lane_databases outside any `if`/`||` so
+    # `set -e` stays active across both functions and their subshells; cleanup()
+    # terminates $SUITE_LIST_PID (whose TERM trap stops its lane children) on abort.
+    list_log="$RUN_DIR/list-database-suites.log"
+    (list_database_suites) >"$list_log" 2>&1 &
+    SUITE_LIST_PID=$!
+    reset_schema
+    start_lane_databases "${DATABASE_LANES[@]}"
+    wait "$SUITE_LIST_PID" || list_status=$?
+    SUITE_LIST_PID=''
+    cat "$list_log"
+    [ "$list_status" -eq 0 ] || return "$list_status"
+  else
+    list_database_suites
+    reset_schema
+    start_lane_databases "${DATABASE_LANES[@]}"
+  fi
   # On a metal guest, the lanes share the job's part of the host
   # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
   # its own PostgreSQL, which creates and migrates a database for each test.
