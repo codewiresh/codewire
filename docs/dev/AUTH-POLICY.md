@@ -972,8 +972,15 @@ token they are given as the bearer), an SDK binds no profile with one, and
 [Signing in from the environment](#signing-in-from-the-environment).
 
 **What runs now (#5688):** the IdP issues user tokens and the product API
-admits them, as below. Settings' list and revoke and binding a profile with
-one are not yet shipped.
+admits them, as below. Binding a profile with one, and the Settings page,
+are not yet shipped.
+- **Settings' routes:** `GET /api/auth/user-tokens?account_id=…` lists the
+  account's live user tokens with their creation, expiry (none for one that
+  never expires) and last use, never a value. `POST
+  /api/auth/user-tokens/revoke` with `account_id` and `token_id` revokes one.
+  They take only the browser-session cookie, as the session list does, so a
+  user token can't list or revoke tokens. The revoke needs the exact Origin,
+  and another account's, an expired and a missing token all answer 404.
 - **Storage:** a user token is stored by digest in its own table,
   `oidc_user_tokens`, never with `cw`'s own access tokens. A server from
   before the change never reads that table, so after a rollback every user

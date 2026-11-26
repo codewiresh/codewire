@@ -871,3 +871,209 @@ async fn server_lock_timeout_releases_abandoned_authority_and_does_not_claim_suc
     lock.rollback().await.unwrap();
     worker.close().await;
 }
+
+// Settings' user tokens (#5688) share this boundary.
+
+/// A fresh account `id` with a live browser session whose cookie is `cookie`.
+async fn account(pool: &PgPool, id: &str, cookie: &str) {
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (id, email, enabled, two_factor_enabled) VALUES ($1, $1 || '@synthetic.test', true, true)")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, clock_timestamp() + interval '1 hour')")
+        .bind(format!("session-{id}"))
+        .bind(id)
+        .bind(hash_session_token(cookie))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A user token `id` of `owner`, by `value`, expiring after `expires` (SQL).
+async fn user_token(pool: &PgPool, owner: &str, id: &str, value: &str, expires: &str) {
+    sqlx::query(
+        "INSERT INTO oidc_clients (id, redirect_uris) VALUES ('codewire-cli', ARRAY[]::text[]) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO oidc_user_tokens (id, token_hash, client_id, user_id, sign_in_id, scopes, expires_at) \
+         VALUES ($1, $2, 'codewire-cli', $3, 'sign-in', ARRAY['codewire.api'], {expires})"
+    ))
+    .bind(id)
+    .bind(codewire_server_core::auth::hash_oauth_token(value))
+    .bind(owner)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn send(
+    app: &Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    bearer: Option<&str>,
+    body: Value,
+) -> (u16, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN);
+    if let Some(cookie) = cookie {
+        builder = builder.header("cookie", format!("codewire.session_token={cookie}"));
+    }
+    if let Some(bearer) = bearer {
+        builder = builder.header("authorization", format!("Bearer {bearer}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Settings lists the account's live user tokens with their expiry, or none,
+/// and last use; another account's and expired tokens stay out. A revoke
+/// deletes one of the account's own and audits it, refuses another's alike
+/// with a missing one, and neither route admits a user token as its caller.
+#[tokio::test]
+async fn settings_lists_and_revokes_the_accounts_own_user_tokens() {
+    let Some(pool) = pool().await else { return };
+    let app = app(pool.clone());
+    account(&pool, "user-token-owner", "owner-cookie").await;
+    account(&pool, "user-token-other", "other-cookie").await;
+    user_token(
+        &pool,
+        "user-token-owner",
+        "ut-month",
+        "value-month",
+        "NOW() + interval '30 days'",
+    )
+    .await;
+    user_token(&pool, "user-token-owner", "ut-never", "value-never", "NULL").await;
+    user_token(
+        &pool,
+        "user-token-owner",
+        "ut-expired",
+        "value-expired",
+        "NOW() - interval '1 minute'",
+    )
+    .await;
+    user_token(
+        &pool,
+        "user-token-other",
+        "ut-foreign",
+        "value-foreign",
+        "NULL",
+    )
+    .await;
+    sqlx::query("UPDATE oidc_user_tokens SET last_used_at = NOW() WHERE id = 'ut-month'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let list = "/api/auth/user-tokens?account_id=user-token-owner";
+    let (status, body) = send(&app, "GET", list, Some("owner-cookie"), None, Value::Null).await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<&str> = body["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|token| token["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["ut-month", "ut-never"], "live and own only");
+    let never = &body["tokens"][1];
+    assert!(
+        never["expires_at"].is_null(),
+        "a token that never expires has none"
+    );
+    assert!(body["tokens"][0]["last_used_at"].is_string());
+    assert!(
+        !body.to_string().contains("value-"),
+        "no token value is listed"
+    );
+
+    // Neither route admits a user token as its caller.
+    let (status, _) = send(&app, "GET", list, None, Some("value-never"), Value::Null).await;
+    assert_eq!(status, 401);
+    let revoke = |token: &str| json!({"account_id": "user-token-owner", "token_id": token});
+    let path = "/api/auth/user-tokens/revoke";
+    let (status, _) = send(
+        &app,
+        "POST",
+        path,
+        None,
+        Some("value-never"),
+        revoke("ut-month"),
+    )
+    .await;
+    assert_eq!(status, 401);
+    let (status, _) = send(&app, "GET", list, Some("other-cookie"), None, Value::Null).await;
+    assert_eq!(status, 403, "another account's session lists nothing here");
+
+    // Another account's token and an expired one answer as a missing one.
+    for token in ["ut-foreign", "ut-expired", "ut-missing"] {
+        let (status, _) = send(
+            &app,
+            "POST",
+            path,
+            Some("owner-cookie"),
+            None,
+            revoke(token),
+        )
+        .await;
+        assert_eq!(status, 404, "{token}");
+    }
+    let (status, body) = send(
+        &app,
+        "POST",
+        path,
+        Some("owner-cookie"),
+        None,
+        revoke("ut-never"),
+    )
+    .await;
+    assert_eq!((status, &body["revoked"]), (200, &json!(true)), "{body}");
+    let left: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM oidc_user_tokens WHERE user_id IN ('user-token-owner', 'user-token-other') ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, ["ut-expired", "ut-foreign", "ut-month"]);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action = 'user_token.revoked' \
+         AND user_id = 'user-token-owner' AND metadata->>'user_token_id' = 'ut-never'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "the revoke is audited");
+
+    for id in ["user-token-owner", "user-token-other"] {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}

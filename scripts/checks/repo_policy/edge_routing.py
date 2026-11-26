@@ -225,18 +225,27 @@ IDP_SESSION_INGRESSES = {
 }
 
 
+# The browser-facing Account controls on the cookie-only IdP boundary: each
+# prefix is its inventory, and "<prefix>/revoke" its revoke action.
+IDP_ACCOUNT_ROUTES = (
+    ("/api/auth/sessions", "Account sessions"),
+    ("/api/auth/user-tokens", "Account user tokens"),
+)
+
+
 def assert_idp_session_edges(
     fail: Callable[[str], None], reader: Callable[[str], str] = read_text
 ) -> None:
-    # The browser-facing Account inventory and revoke action both use this
-    # cookie-only IdP boundary. The broader /api fallback is orchestration.
+    # The broader /api fallback is orchestration, so each Account control
+    # needs its own IdP route at every local edge.
     for file in ("Caddyfile", "Caddyfile.docker"):
         source = reader(file)
         matchers = re.findall(r"^[ \t]*@idp path ([^\n]+)$", source, re.MULTILINE)
         paths = matchers[0].split() if len(matchers) == 1 else []
-        for path in ("/api/auth/sessions", "/api/auth/sessions/revoke"):
-            if paths.count(path) != 1:
-                fail(f"{file}: Account sessions need one exact IdP matcher for {path}")
+        for prefix, label in IDP_ACCOUNT_ROUTES:
+            for path in (prefix, f"{prefix}/revoke"):
+                if paths.count(path) != 1:
+                    fail(f"{file}: {label} need one exact IdP matcher for {path}")
         handlers = re.findall(r"handle @idp\s*\{([^}]*)\}", source, re.DOTALL)
         if len(handlers) != 1 or not re.search(
             r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8091\b", handlers[0]
@@ -246,51 +255,55 @@ def assert_idp_session_edges(
         document = ingress_document_by_name(reader(file), name, file, fail)
         if document is None:
             continue
-        entries = re.findall(
-            r"^[ \t]*- path: /api/auth/sessions[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
-            document, re.MULTILINE,
-        )
-        if len(entries) != 1:
-            fail(f"{file}: Account sessions need one IdP ingress path")
-            continue
-        shape = re.sub(r"\s+", " ", entries[0])
-        if not re.search(
-            r"path: /api/auth/sessions pathType: Prefix backend: service: "
-            r"name: codewire-idp port: name: http(?: |$)", shape
-        ):
-            fail(f"{file}: Account sessions must use IdP http with Prefix routing")
+        for prefix, label in IDP_ACCOUNT_ROUTES:
+            entries = re.findall(
+                rf"^[ \t]*- path: {re.escape(prefix)}[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
+                document, re.MULTILINE,
+            )
+            if len(entries) != 1:
+                fail(f"{file}: {label} need one IdP ingress path")
+                continue
+            shape = re.sub(r"\s+", " ", entries[0])
+            if not re.search(
+                rf"path: {re.escape(prefix)} pathType: Prefix backend: service: "
+                r"name: codewire-idp port: name: http(?: |$)", shape
+            ):
+                fail(f"{file}: {label} must use IdP http with Prefix routing")
 
 
 def idp_session_edges_self_test() -> None:
     for file in ("Caddyfile", "Caddyfile.docker", *IDP_SESSION_INGRESSES):
         original = read_text(file)
+        attacks: dict[str, str] = {}
         if file.startswith("Caddyfile"):
-            attacks = {
-                "missing inventory": original.replace("/api/auth/sessions ", "", 1),
-                "missing revoke": original.replace("/api/auth/sessions/revoke", "/api/auth/other", 1),
-                "wrong backend": original.replace(":8091", ":8084", 1),
-            }
-        else:
+            attacks["wrong backend"] = original.replace(":8091", ":8084", 1)
+        for prefix, label in IDP_ACCOUNT_ROUTES:
+            if file.startswith("Caddyfile"):
+                attacks[f"{label}: missing inventory"] = original.replace(f"{prefix} ", "", 1)
+                attacks[f"{label}: missing revoke"] = original.replace(
+                    f"{prefix}/revoke", "/api/auth/other", 1
+                )
+                continue
             entry = re.search(
-                r"^[ \t]*- path: /api/auth/sessions[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
+                rf"^[ \t]*- path: {re.escape(prefix)}[ \t]*\n[\s\S]*?(?=^[ \t]*- path:|\Z)",
                 original, re.MULTILINE,
             )
             if entry is None:
-                raise RuntimeError(f"{file}: missing Account session route fixture")
+                raise RuntimeError(f"{file}: missing {label} route fixture")
             block = entry.group(0)
-            attacks = {
-                "missing": original.replace(block, "", 1),
-                "wrong backend": original.replace(block, block.replace("name: codewire-idp", "name: codewire-orchestration"), 1),
-                "wrong path type": original.replace(block, block.replace("pathType: Prefix", "pathType: Exact"), 1),
-                "duplicate": original.replace(block, block + block, 1),
-            }
+            attacks.update({
+                f"{label}: missing": original.replace(block, "", 1),
+                f"{label}: wrong backend": original.replace(block, block.replace("name: codewire-idp", "name: codewire-orchestration"), 1),
+                f"{label}: wrong path type": original.replace(block, block.replace("pathType: Prefix", "pathType: Exact"), 1),
+                f"{label}: duplicate": original.replace(block, block + block, 1),
+            })
         for attack, changed in attacks.items():
             failures: list[str] = []
             assert_idp_session_edges(
                 failures.append, lambda path: changed if path == file else read_text(path)
             )
             if not any(file in failure for failure in failures):
-                raise RuntimeError(f"{file}: accepted {attack} Account session edge")
+                raise RuntimeError(f"{file}: accepted {attack} edge")
 
 
 def assert_github_browser_callback_ingress(

@@ -40,6 +40,8 @@
     "/api/auth/two-factor/skip-setup",
     "/api/auth/two-factor/validate",
     "/api/auth/two-factor/verify",
+    "/api/auth/user-tokens",
+    "/api/auth/user-tokens/revoke",
     "/api/auth/verify-email",
     "/api/oauth/authorize",
     "/api/oauth/device_authorization",

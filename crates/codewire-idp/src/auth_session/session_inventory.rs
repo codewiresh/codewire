@@ -384,7 +384,7 @@ fn optional_utc_time<S: Serializer>(
     }
 }
 
-async fn validate_actor(
+pub(crate) async fn validate_actor(
     tx: &mut Transaction<'_, Postgres>,
     digest: &str,
     account_id: &str,

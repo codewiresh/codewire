@@ -319,6 +319,22 @@ def permanent_raw_surface_self_test(
     if not permanent_raw_surface_failures(unknown_identity, policy, client_sources, _cache=cache):
         raise RuntimeError("permanent raw guard accepted an unapproved identity route")
 
+    # Settings' user token list and revoke (#5688) are the same cookie-only
+    # boundary, admitted by name.
+    user_token_routes = {"/api/auth/user-tokens", "/api/auth/user-tokens/revoke"}
+    prior_policy = dict(policy)
+    prior_policy["allowed_raw_routes"] = [
+        route for route in policy["allowed_raw_routes"] if route not in user_token_routes
+    ]
+    if not any(
+        failure.startswith("unapproved raw routes:")
+        and all(route in failure for route in user_token_routes)
+        for failure in permanent_raw_surface_failures(
+            sources, prior_policy, client_sources, _cache=cache
+        )
+    ):
+        raise RuntimeError("permanent raw guard lost the exact user-token-route admission proof")
+
     # Fresh-proof factor changes are exactly three cookie-only IdP routes. The
     # prior policy must reject them, and a sibling must not ride along.
     factor_routes = {

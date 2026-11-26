@@ -403,6 +403,13 @@ spec:
                 name: codewire-idp
                 port:
                   name: http
+          - path: /api/auth/user-tokens
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
           - path: /api/oidc
             pathType: Prefix
             backend:

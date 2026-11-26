@@ -60,6 +60,7 @@ use crate::email_password::{
 
 mod password_grant;
 mod session_inventory;
+mod user_token_inventory;
 
 // The cookie-only account controls share one boundary: exact Origin, the
 // session cookie and never a bearer, an owner-first lock order and a bounded,
@@ -1476,6 +1477,7 @@ fn router_with_state(state: SessionAuthState) -> Router {
         .route("/api/auth/sign-out", post(sign_out))
         .route("/api/auth/get-session", get(get_session))
         .merge(session_inventory::router())
+        .merge(user_token_inventory::router())
         .with_state(state)
 }
 
