@@ -643,9 +643,9 @@ spec:
     # nothing else: one container, the workspace, and no init container; the
     # workspace disk its one image volume, pinned by digest and mounted
     # read-only at /image; the one kvm device; a member's VM state new, its
-    # egress mode guest-carried (the egress mode rule) and its first process
-    # a literal systemd or image. infra's Kyverno holds every standard Pod to
-    # its shape too.
+    # egress mode guest-carried or broker (the egress mode rule) and its first
+    # process a literal systemd or image. infra's Kyverno holds every standard
+    # Pod to its shape too.
     - expression: >-
         !variables.standardPool ||
         size(variables.pod.containers) == 1 && variables.pod.containers[0].name == 'workspace' &&
@@ -962,17 +962,15 @@ spec:
     # codewire#5602: CODEWIRE_VM_EGRESS_MODE is how a `standard` Pod's runtime
     # chooses broker mode inside the VM or the guest's own network session,
     # and the binding listener waives the guest's self-check only for
-    # `broker`. Only a standard template's workspace container sets it, once:
-    # an environment's to exactly guest-carried or broker, a pool's to
-    # guest-carried, so a pooled member never goes without the self-check.
+    # `broker` (whose stream cw-egress checks). Only a standard template's
+    # workspace container sets it, once, to guest-carried or broker.
     - expression: >-
         variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
         c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
-        (variables.standardEnvironment && e.value in ['guest-carried', 'broker'] ||
-        variables.standardPool && e.value == 'guest-carried'))) &&
+        variables.standardTemplate && e.value in ['guest-carried', 'broker'])) &&
         (!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
-      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker (a pool's to guest-carried), and every standard template sets it
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker, and every standard template sets it
     # The tier label is the Pod's real tier (#5002, cw-security): infra's
     # trustee deny reads codewire.sh/isolation-tier from the Pod, so a Pod
     # carries it, always as confidential, exactly when it runs under the
@@ -1380,12 +1378,11 @@ spec:
         !variables.addsBroker || (
         variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' ||
         c.name == 'workspace' && !has(e.valueFrom) && has(e.value) &&
-        (variables.standardEnvironment && e.value in ['guest-carried', 'broker'] ||
-        variables.standardPool && e.value == 'guest-carried'))) &&
+        variables.standardTemplate && e.value in ['guest-carried', 'broker'])) &&
         (!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
         c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))
         )
-      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker (a pool's to guest-carried), and every standard template sets it
+      message: CODEWIRE_VM_EGRESS_MODE is set only on a standard template's workspace container, once, to guest-carried or broker, and every standard template sets it
     # codewire#5602: a `standard` Pod, per-environment or pooled, mounts
     # exactly the deployment's workspace disk as image-disk, and no other
     # image. Fails closed while the parameter names no disk. An update that

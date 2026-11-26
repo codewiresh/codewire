@@ -9,6 +9,7 @@ impl From<&SandboxWorkerCfg> for KubernetesRenderConfig {
             daemon_image: cfg.daemon_image.clone(),
             dind_image: cfg.dind_image.clone(),
             runtime_profile: cfg.runtime_profile.clone(),
+            warm_pool_runtime_profile: cfg.warm_pool_runtime_profile.clone(),
             docker_mode: cfg.docker_mode.clone(),
             dind_enabled: cfg.dind_enabled,
             allow_diagnostic_runtime: cfg.allow_diagnostic_runtime,

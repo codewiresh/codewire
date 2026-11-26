@@ -709,12 +709,10 @@ HOSTED_EGRESS_FRAGMENTS = [
     "variables.pod.runtimeClassName == 'standard'' name: standardPool",
     "expression: variables.standardEnvironment || variables.standardPool name: standardTemplate",
     # codewire#5602: the egress mode is a standard template's own, literal,
-    # one of two values on an environment and guest-carried on a pool, and
-    # always present on one.
+    # one of two values (guest-carried or broker), and always present on one.
     "variables.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'CODEWIRE_VM_EGRESS_MODE' || "
     "c.name == 'workspace' && !has(e.valueFrom) && has(e.value) && "
-    "(variables.standardEnvironment && e.value in ['guest-carried', 'broker'] || "
-    "variables.standardPool && e.value == 'guest-carried'))) && "
+    "variables.standardTemplate && e.value in ['guest-carried', 'broker'])) && "
     "(!variables.standardTemplate || variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) && "
     "c.env.exists_one(e, e.name == 'CODEWIRE_VM_EGRESS_MODE')))",
     # codewire#5602: a standard pool is admitted only in the standard shape.

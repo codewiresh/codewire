@@ -559,6 +559,37 @@ fn a_standard_record_never_adopts_a_commodity_pool_member() {
         revision(&claim(RUNTIME_PROFILE_STANDARD)),
         revision(&member)
     );
+
+    // Conversely, overriding the warm pool's runtime profile to `standard` on
+    // a `commodity` deployment makes `standard` environments adopt the pool
+    // while `commodity` environments start cold.
+    let standard_pool = KubernetesRenderConfig {
+        warm_pool_runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        ..config
+    };
+    let standard_member = standard_pool.pool(shape).unwrap();
+    assert_eq!(
+        standard_member.runtime_profile_spec().profile,
+        RUNTIME_PROFILE_STANDARD
+    );
+    let standard_claim = |recorded: &str| {
+        standard_pool
+            .environment(&RenderingIntent {
+                image: canonical.into(),
+                shape,
+                runtime_profile: recorded.into(),
+                ..intent(Isolation::Standard)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        revision(&standard_claim(RUNTIME_PROFILE_STANDARD)),
+        revision(&standard_member)
+    );
+    assert_ne!(
+        revision(&standard_claim(RUNTIME_PROFILE_COMMODITY)),
+        revision(&standard_member)
+    );
 }
 
 #[test]

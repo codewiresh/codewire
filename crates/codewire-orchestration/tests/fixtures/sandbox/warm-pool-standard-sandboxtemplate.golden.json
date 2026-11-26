@@ -225,7 +225,7 @@
               },
               {
                 "name": "CODEWIRE_VM_EGRESS_MODE",
-                "value": "guest-carried"
+                "value": "broker"
               },
               {
                 "name": "CODEWIRE_WORKSPACE_IMAGE",
@@ -328,6 +328,11 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/var/run/secrets/codewire/egress",
+                "name": "workspace-egress-identity",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
                 "readOnly": true
@@ -385,6 +390,21 @@
                 {
                   "serviceAccountToken": {
                     "audience": "codewire.internal.credential-workspace.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace-egress-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.egress.v1",
                     "expirationSeconds": 600,
                     "path": "token"
                   }

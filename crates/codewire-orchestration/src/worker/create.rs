@@ -299,6 +299,8 @@ pub struct SandboxWorkerCfg {
     /// Percentage of the smallest runtime node the shared pools may reserve.
     /// Empty keeps the default; validated by the warm-pool reconciler.
     pub warm_pool_max_node_percent: String,
+    /// Optional runtime profile override for shared warm pools.
+    pub warm_pool_runtime_profile: String,
     /// `SANDBOX_COORDINATOR_EXTRA_ROOTS=true` mounts the public
     /// `codewire-coordinator-extra-roots` bundle into identity-free workspaces
     /// so the daemon can verify a local cluster's coordinator. Dev and
@@ -508,6 +510,10 @@ impl SandboxWorkerCfg {
                 .unwrap_or_default(),
             warm_pool_max_node_percent: std::env::var(
                 crate::worker::warm_pool::MAX_NODE_PERCENT_ENV,
+            )
+            .unwrap_or_default(),
+            warm_pool_runtime_profile: std::env::var(
+                crate::sandbox::warm_pool::WARM_POOL_RUNTIME_PROFILE_ENV,
             )
             .unwrap_or_default(),
             coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",

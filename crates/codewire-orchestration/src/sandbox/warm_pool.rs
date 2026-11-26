@@ -61,6 +61,10 @@ pub const LAUNCH_TYPE_WARM: &str = "warm";
 pub const TEMPLATE_REF_HASH_LABEL: &str = "agents.x-k8s.io/sandbox-template-ref-hash";
 /// The warm-pool configuration key.
 pub const WARM_POOL_SHAPES_ENV: &str = "SANDBOX_WARM_POOL_SHAPES";
+/// Optional runtime profile override for warm pools (defaults to
+/// `SANDBOX_RUNTIME_PROFILE`). Lets a `commodity`-default deployment pool
+/// `standard` members for organizations opted into `standard` (#5602).
+pub const WARM_POOL_RUNTIME_PROFILE_ENV: &str = "SANDBOX_WARM_POOL_RUNTIME_PROFILE";
 /// The most unclaimed members one shape may hold, whatever the node cap
 /// allows. The admission policy pins the same bound.
 pub const MAX_POOL_MEMBERS: i32 = 16;

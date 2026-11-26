@@ -27,6 +27,9 @@ pub struct KubernetesRenderConfig {
     pub dind_image: String,
     /// The runtime of a standard-tier environment.
     pub runtime_profile: String,
+    /// Optional runtime profile override for shared warm pools (empty uses
+    /// `runtime_profile`).
+    pub warm_pool_runtime_profile: String,
     pub docker_mode: String,
     pub dind_enabled: bool,
     /// Diagnostic runtimes, and unpinned pool images, are allowed.
@@ -105,9 +108,11 @@ fn is_first_party_workspace_image(image_ref: &str) -> bool {
 
 impl KubernetesRenderConfig {
     /// Whether this deployment can have running `standard` Pods, either by
-    /// default or through per-organization selection (#6333).
+    /// default, through warm pools, or through per-organization selection (#6333).
     pub fn may_have_standard_pods(&self) -> bool {
-        self.standard_runtime.is_some() || self.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
+        self.standard_runtime.is_some()
+            || self.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
+            || self.warm_pool_runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
     }
 
     /// The runtime an isolation runs on here.
@@ -167,19 +172,22 @@ impl KubernetesRenderConfig {
         runtime_profile_spec(recorded, &self.docker_mode, self.dind_enabled)
     }
 
-    /// The runtime a warm pool member of `image` renders on: the
-    /// deployment's own ([`crate::sandbox::template::runtime_profile_of`]).
-    fn image_runtime_spec(&self, isolation: Isolation, image: &str) -> RuntimeProfileSpec {
-        let spec = self.runtime_spec(isolation);
+    /// The runtime a warm pool member of `image` renders on: the pool's
+    /// configured profile ([`crate::sandbox::template::runtime_profile_of`]).
+    fn pool_image_runtime_spec(
+        &self,
+        configured: &RuntimeProfileSpec,
+        image: &str,
+    ) -> RuntimeProfileSpec {
         let profile = crate::sandbox::template::runtime_profile_of(
-            &spec.profile,
+            &configured.profile,
             self.standard_runtime.as_ref(),
             image,
         );
-        if profile != spec.profile {
+        if profile != configured.profile {
             return runtime_profile_spec(profile, &self.docker_mode, self.dind_enabled);
         }
-        spec
+        configured.clone()
     }
 
     /// The environment's own rendering: its identity on top of the cluster
@@ -431,18 +439,26 @@ impl KubernetesRenderConfig {
     /// boot the canonical image and a configuration that cannot render
     /// identity-free workspaces render no pool.
     pub fn pool(&self, shape: WorkspaceShape) -> anyhow::Result<TemplateOpts> {
-        let configured = self.runtime_spec(Isolation::Standard);
+        let configured = if self.warm_pool_runtime_profile.trim().is_empty() {
+            self.runtime_spec(Isolation::Standard)
+        } else {
+            runtime_profile_spec(
+                &self.warm_pool_runtime_profile,
+                &self.docker_mode,
+                self.dind_enabled,
+            )
+        };
         anyhow::ensure!(
             configured.profile != RUNTIME_PROFILE_CONFIDENTIAL,
             "confidential workspaces are never pooled"
         );
         // A pool member must render exactly as the environment that adopts
         // it: the canonical image's own runtime, as `environment` picks it.
-        // On a `standard` deployment whose disk does not boot that image the
+        // On a `standard` pool whose disk does not boot that image the
         // environment goes to `commodity`, so no member would ever be
         // adopted (#5602).
         let image = canonical_workspace_runtime_image();
-        let runtime_spec = self.image_runtime_spec(Isolation::Standard, image);
+        let runtime_spec = self.pool_image_runtime_spec(&configured, image);
         anyhow::ensure!(
             runtime_spec.profile == configured.profile,
             "the standard disk does not boot the canonical workspace image, so no standard member could be adopted"

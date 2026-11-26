@@ -239,12 +239,11 @@ fn a_standard_fork_starts_with_vm_state_existing() {
     assert_eq!(fork["CODEWIRE_VM_STATE"], "existing");
 }
 
-/// An environment's own template runs broker mode inside the VM, its
-/// daemon reaching cw-egress as one of its platform peers; a pool's
-/// identity-free template stays guest-carried, as admission holds a standard
-/// pool member (#6261).
+/// Both per-environment and shared warm-pool `standard` templates run broker
+/// mode inside the VM and mount the egress token, so a pool member's
+/// rendering matches an adopting environment's rendering one-for-one (#5602).
 #[test]
-fn only_an_environments_own_template_runs_broker_mode_inside_the_vm() {
+fn standard_environment_and_pool_templates_both_run_broker_mode_inside_the_vm() {
     let broker = env(&render_sandbox_template(NAMESPACE, &opts()));
     assert_eq!(broker["CODEWIRE_VM_EGRESS_MODE"], "broker");
     let stream = broker["CODEWIRE_EGRESS_STREAM_ADDR"]
@@ -259,16 +258,16 @@ fn only_an_environments_own_template_runs_broker_mode_inside_the_vm() {
             .any(|peer| peer == stream),
         "cw-egress's stream is a platform peer"
     );
-    let pool = env(&render_sandbox_template(
+    let pool_template = render_sandbox_template(
         NAMESPACE,
         &TemplateOpts {
             environment_id: String::new(),
             organization_id: String::new(),
             ..opts()
         },
-    ));
-    assert_eq!(pool["CODEWIRE_VM_EGRESS_MODE"], "guest-carried");
-    // The egress token is mounted only where broker mode uses it.
+    );
+    let pool = env(&pool_template);
+    assert_eq!(pool["CODEWIRE_VM_EGRESS_MODE"], "broker");
     let volumes = |template: &Value| -> Vec<String> {
         pod(template)["volumes"]
             .as_array()
@@ -283,17 +282,9 @@ fn only_an_environments_own_template_runs_broker_mode_inside_the_vm() {
             .iter()
             .any(|name| name == token)
     );
-    let pool_template = render_sandbox_template(
-        NAMESPACE,
-        &TemplateOpts {
-            environment_id: String::new(),
-            organization_id: String::new(),
-            ..opts()
-        },
-    );
-    assert!(!volumes(&pool_template).iter().any(|name| name == token));
+    assert!(volumes(&pool_template).iter().any(|name| name == token));
     assert!(
-        !pod(&pool_template)
+        pod(&pool_template)
             .to_string()
             .contains(codewire_daemon_proto::EGRESS_TOKEN_MOUNT_PATH)
     );

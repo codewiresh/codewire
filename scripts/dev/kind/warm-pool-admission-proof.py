@@ -444,7 +444,7 @@ def standard_pool_cases(spool: dict, broker: dict) -> list[tuple[str, dict | Non
     """A `standard` pool template (#5602) is admitted only in the standard
     shape: one workspace container, its workspace disk the one image volume,
     mounted read-only, the kvm device, a new VM, a literal first process, its
-    VM settings as literals and its egress mode guest-carried."""
+    VM settings as literals and its egress mode guest-carried or broker."""
     disk = next(v for v in pod(spool)["volumes"] if "image" in v)
     support = {"name": "codewire-bin", "image": {"reference": OTHER_IMAGE, "pullPolicy": "IfNotPresent"}}
 
@@ -475,7 +475,8 @@ def standard_pool_cases(spool: dict, broker: dict) -> list[tuple[str, dict | Non
         ("on, standard pool: an init container", on, "create",
          mutate(spool, lambda t: pod(t).__setitem__("initContainers", [{"name": "prepare", "image": OTHER_IMAGE}])),
          STANDARD_POOL),
-        ("on, standard pool: broker egress mode", on, "create", mutate(spool, egress_mode("broker")), EGRESS_MODE),
+        ("on, standard pool: guest-carried egress mode", on, "create", mutate(spool, egress_mode("guest-carried")), None),
+        ("on, standard pool: another egress mode", on, "create", mutate(spool, egress_mode("open")), EGRESS_MODE),
         ("on, standard pool: no egress mode", on, "create", mutate(spool, egress_mode(None)), EGRESS_MODE),
         ("on, standard pool: an unknown VM setting", on, "create",
          mutate(spool, lambda t: env(t).append({"name": "CODEWIRE_VM_DEBUG", "value": "1"})), ENVIRONMENT),
