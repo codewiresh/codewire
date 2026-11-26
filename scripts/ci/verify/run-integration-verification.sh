@@ -239,6 +239,11 @@ archive_cargo() {
     return 0
   fi
   local extracted="$RUN_DIR/archives/$key"
+  if [ ! -f "$extracted/target/nextest/binaries-metadata.json" ] \
+      && [ -z "$features" ] && [ "$no_default" = false ] && [ -z "$profile" ] \
+      && [ -f "$RUN_DIR/archives/archive/target/nextest/binaries-metadata.json" ]; then
+    extracted="$RUN_DIR/archives/archive"
+  fi
   [ -f "$extracted/target/nextest/binaries-metadata.json" ] ||
     { echo "::error::no extracted archive $key; the build runner built none for it" >&2; return 2; }
   local filter="package($package)" part binary_filter=""
@@ -356,7 +361,15 @@ extract_archives() {
         mkdir -p "$(dirname "$link")"
         ln -s "$RUN_DIR/archives/$key/target/$binary" "$link"
       fi
-      if [ -n "${named[$binary]:-}" ]; then named[$binary]=ambiguous; else named[$binary]="$key"; fi
+      if [ -n "${named[$binary]:-}" ]; then
+        if [ "${named[$binary]}" = archive ] && [ "$key" != archive ]; then
+          named[$binary]="$key"
+        elif [ "$key" != archive ]; then
+          named[$binary]=ambiguous
+        fi
+      else
+        named[$binary]="$key"
+      fi
     done < <(jq -r '."rust-build-meta"."non-test-binaries"[][].path' "$metadata")
   done
   # A binary the run starts by name from DIR (CARGO_CI_DIR) that no build
@@ -2923,13 +2936,13 @@ esac
 case "$MODE" in
   database-archives)
     # The build runner's half of compile once: no PostgreSQL, no tests.
+    # Every default-feature database crate and codewire-db-migrate come from
+    # leg_archive's archive.tar.zst; this leg compiles only the three
+    # non-default-feature suites in one warm target folder (infra#1534).
     : "${ARCHIVE_BUILD_DIR:?ARCHIVE_BUILD_DIR is required}"
     mkdir -p "$ARCHIVE_BUILD_DIR"
-    # The runner follows server-core's suites in the first batch. Its own
-    # batch folder, from before that, is removed.
-    rm -rf -- "$CARGO_CI_TARGET_DIR/batch-migration-runner"
-    compile_batches database_build "${DATABASE_BUILD_BATCHES[0]} migration_runner" \
-      "${DATABASE_BUILD_BATCHES[@]:1}"
+    rm -rf -- "$CARGO_CI_TARGET_DIR"/batch-*
+    compile_batches database_build 'credential_service_enrollment credential_broker credential_broker_ssh'
     log "database archives built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l)"
     exit 0
     ;;
@@ -2938,15 +2951,26 @@ case "$MODE" in
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
     run_database
     ;;
-  services-control-archives|services-runtime-archives)
-    # The build runner's half of compile once for one service plane: no
-    # PostgreSQL, no tests. The binaries the plane starts go beside its
-    # archives, the migration runner first.
+  services-control-archives)
+    # Kept for direct invocations; ci.yaml serves the control plane directly
+    # from leg_archive's archive.tar.zst (infra#1534).
     mkdir -p "$ARCHIVE_BUILD_DIR"
-    plane="${MODE#services-}"
-    SELECTION="$(service_plane_selection "${plane%-archives}")"
-    mapfile -t batches < <(service_build_batches "${plane%-archives}")
+    SELECTION="$(service_plane_selection control)"
+    mapfile -t batches < <(service_build_batches control)
     compile_batches service_build "${batches[@]}"
+    log "$MODE built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l) archives, $(find "$ARCHIVE_BUILD_DIR" -maxdepth 1 -type f ! -name '*.tar.zst' | wc -l) binaries"
+    exit 0
+    ;;
+  services-runtime-archives)
+    # Every default-feature runtime crate and binary (coordinator, mesh, cw,
+    # codewire-db-migrate) comes from leg_archive's archive.tar.zst; this leg
+    # compiles only the kind-e2e orchestration wire-contract archive (which
+    # carries the kind-e2e orchestration and smoke binaries) in one warm
+    # target folder (infra#1534).
+    mkdir -p "$ARCHIVE_BUILD_DIR"
+    SELECTION="$(service_plane_selection runtime)"
+    rm -rf -- "$CARGO_CI_TARGET_DIR"/batch-*
+    compile_batches service_build orchestration
     log "$MODE built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l) archives, $(find "$ARCHIVE_BUILD_DIR" -maxdepth 1 -type f ! -name '*.tar.zst' | wc -l) binaries"
     exit 0
     ;;

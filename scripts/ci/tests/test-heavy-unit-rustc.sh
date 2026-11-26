@@ -115,13 +115,34 @@ status=0
 python3 "$PEAK" "$work/rss" -- sh -c 'exit 3' || status=$?
 [ "$status" -eq 3 ] || fail "peak-rss.py returned $status for a command that exited 3"
 
-# build-once puts the wrapper in front of every leg's and the checks' compiles,
-# and logs each one's peak beside its finish line.
+# build-once puts the wrapper in front of every leg's and the checks' compiles
+# via in_src (and restores it on corrupt-output retry), never wraps itself, and
+# logs each one's peak beside its finish line.
 once="$ROOT/scripts/ci/setup/build-once.sh"
-[ "$(grep -c '^  heavy_unit_wrapper$' "$once")" -eq 2 ] || fail 'build-once does not wrap both the legs and the checks'
-sed -n '/^checks() {/,/^}/p' "$once" | grep -A1 '^  unset RUSTC_WRAPPER$' | grep -q '^  heavy_unit_wrapper$' ||
-  fail 'the checks drop the heavy-unit wrapper with the compiler cache'
+sed -n '/^in_src() {/,/^}/p' "$once" | grep -q '^  heavy_unit_wrapper$' ||
+  fail 'in_src does not wrap compiles with heavy_unit_wrapper'
+sed -n '/^checks() {/,/^}/p' "$once" | grep -q '^  in_src$' ||
+  fail 'checks does not enter via in_src'
+sed -n '/^checks() {/,/^}/p' "$once" | grep -A1 '^    unset RUSTC_WRAPPER$' | grep -q '^    heavy_unit_wrapper$' ||
+  fail 'the checks corrupt-output retry drops the heavy-unit wrapper with the compiler cache'
 grep -q 'peak-rss.py" "$logs/$name.rss"' "$once" || fail 'a leg runs without its peak measured'
 grep -q 'peak-rss.py" "$logs/checks.rss"' "$once" || fail 'the checks run without their peak measured'
+
+# Calling heavy_unit_wrapper twice is idempotent and never points
+# BUILD_ONCE_HEAVY_NEXT_WRAPPER at heavy-unit-rustc.sh itself.
+next_after_twice="$(
+  bash -c '
+    set -euo pipefail
+    ROOT="$1"
+    work="$2"
+    eval "$(sed -n "/^heavy_unit_wrapper() {/,/^}/p" "$ROOT/scripts/ci/setup/build-once.sh")"
+    export RUSTC_WRAPPER=/fake/sccache
+    heavy_unit_wrapper
+    heavy_unit_wrapper
+    printf "%s|%s\n" "${RUSTC_WRAPPER:-}" "${BUILD_ONCE_HEAVY_NEXT_WRAPPER:-}"
+  ' _ "$ROOT" "$work"
+)"
+[ "$next_after_twice" = "$WRAPPER|/fake/sccache" ] ||
+  fail "heavy_unit_wrapper was not idempotent on repeat calls: $next_after_twice"
 
 echo 'test-heavy-unit-rustc: codewire_proto in its slots (one, two, the default six), others at once, no slot kept by a leftover process, the next wrapper kept, peaks measured'

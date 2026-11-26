@@ -132,24 +132,26 @@ done
   fail 'unexpected legs for every family'
 grep -Eq '^  "[a-z0-9_]+ (always|selected:[a-z0-9_,-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
   fail 'the leg table is missing'
-for retired in compile feature_checks local_vmm_checks; do
+for retired in compile feature_checks local_vmm_checks services_control; do
   if grep -Eq "^leg_$retired\(\) \{" "$SCRIPT"; then fail "the $retired check is still a build-runner leg"; fi
 done
 if "$SCRIPT" legs tests >/dev/null 2>&1; then fail 'legs accepted a lane'; fi
 # A selected leg runs when any of its tokens is selected.
 all='|database|service_idp|service_coordinator|service_billing|service_connectcore|service_orchestration|service_nats|'
 [ "$(VERIFICATION_SELECTION="$all" "$SCRIPT" legs | tr '\n' ' ')" = \
-  'archive database services_control services_runtime ' ] || fail 'unexpected legs with every family'
-[ "$(VERIFICATION_SELECTION='|service_nats|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive services_runtime ' ] ||
-  fail 'service_nats alone must select the runtime plane leg only'
-[ "$(VERIFICATION_SELECTION='|service_billing|service_temporal|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive services_control ' ] ||
-  fail 'service_billing alone must select the control plane leg only'
+  'archive database services_runtime ' ] || fail 'unexpected legs with every family'
+[ "$(VERIFICATION_SELECTION='|service_orchestration|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive services_runtime ' ] ||
+  fail 'service_orchestration alone must select the runtime plane leg only'
+[ "$(VERIFICATION_SELECTION='|service_nats|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] ||
+  fail 'service_nats alone runs from the workspace archive without its own leg'
+[ "$(VERIFICATION_SELECTION='|service_billing|service_temporal|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] ||
+  fail 'control-plane services run from the workspace archive without their own leg'
 [ "$(VERIFICATION_SELECTION='|service_temporal|service_nats_extra|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] ||
   fail 'a selected leg matched a token it does not name'
 while read -r name; do
   grep -Eq "^leg_$name\(\) \{" "$SCRIPT" || fail "the $name leg has no function"
   # Each leg builds in its own target folder.
-  grep -A12 -E "^leg_$name\(\) \{" "$SCRIPT" | grep -q "targets/$name\b\|service_plane_leg" ||
+  grep -A12 -E "^leg_$name\(\) \{" "$SCRIPT" | grep -q "targets/$name\b" ||
     fail "the $name leg does not build in targets/$name"
 done < <(VERIFICATION_SELECTION="${all}rust|transport|" BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs)
 
@@ -384,12 +386,15 @@ grep -q 'CODEWIRE_BUILD_ONCE_SCCACHE is off or local, not remote' "$work/prepare
   fail "the unknown cache setting's refusal does not name it: $(cat "$work/prepare.log")"
 [ -d "$marker_root/sccache" ] || fail 'a refused cache setting touched the build folder'
 rm -rf "$marker_root/sccache"
-# With it on, the legs compile through the cache, a rebuild after a corrupt
-# output does not (it may hold the corrupt output), and the Rust checks never.
+# With it on, the legs and Rust checks compile through the cache, and a rebuild
+# after a corrupt output does not (it may hold the corrupt output).
 grep -q '^    export RUSTC_WRAPPER="$sccache_bin"$' "$SCRIPT" || fail 'the legs do not use the compiler cache when it is on'
 grep -q '^  BUILD_ONCE_NO_CACHE=1 "$ROOT/scripts/ci/setup/build-once.sh" leg ' "$SCRIPT" ||
   fail 'a rebuild after a corrupt output reads the compiler cache'
-sed -n '/^checks() {/,/^}/p' "$SCRIPT" | grep -q '^  unset RUSTC_WRAPPER$' || fail 'the Rust checks use the compiler cache'
+sed -n '/^run_checks_beside_legs() {/,/^}/p' "$SCRIPT" | grep -q 'start_sccache_server checks' ||
+  fail 'the Rust checks do not start their compiler cache server'
+sed -n '/^checks() {/,/^}/p' "$SCRIPT" | grep -q '^    unset RUSTC_WRAPPER$' ||
+  fail 'a corrupt-output rebuild of the Rust checks does not disable the compiler cache'
 
 # A leg's epoch: an archive folder from before it (no epoch file, or an older
 # number) is wiped once, with the reason, and started again at the epoch;

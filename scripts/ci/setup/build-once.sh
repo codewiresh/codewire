@@ -600,13 +600,17 @@ bound_targets() {
 heavy_unit_wrapper() {
   # One compile of a heavy unit at a time across every leg and check
   # (heavy-unit-rustc.sh), in front of whatever RUSTC_WRAPPER is set.
+  local wrapper="$ROOT/scripts/ci/setup/heavy-unit-rustc.sh"
   export BUILD_ONCE_HEAVY_LOCK="$work/heavy-unit.lock"
+  if [ "${RUSTC_WRAPPER:-}" = "$wrapper" ]; then
+    return 0
+  fi
   if [ -n "${RUSTC_WRAPPER:-}" ]; then
     export BUILD_ONCE_HEAVY_NEXT_WRAPPER="$RUSTC_WRAPPER"
   else
     unset BUILD_ONCE_HEAVY_NEXT_WRAPPER
   fi
-  export RUSTC_WRAPPER="$ROOT/scripts/ci/setup/heavy-unit-rustc.sh"
+  export RUSTC_WRAPPER="$wrapper"
 }
 
 in_src() {
@@ -645,8 +649,7 @@ LEGS=(
   "local_vmm env:BUILD_ONCE_LOCAL_VMM"
   "features selected:rust"
   "database selected:database"
-  "services_control selected:service_idp,service_coordinator,service_billing,service_connectcore"
-  "services_runtime selected:service_orchestration,service_nats"
+  "services_runtime selected:service_orchestration"
 )
 
 leg_archive() {
@@ -711,9 +714,9 @@ leg_local_vmm() {
 }
 
 leg_database() {
-  # The database suites' archives, one per package and feature set, built by
-  # run-integration-verification.sh from its own suite list, with the
-  # CI-profile migration runner; bundled into one tar.
+  # Only the non-default-feature database archives (enrollment, broker platform
+  # and ssh-agent), built in one warm folder; every default-feature database
+  # crate and codewire-db-migrate run from archive.tar.zst (infra#1534).
   local out="$1" dir
   dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/database-archives.XXXXXX")"
   phase 'database archives' env CARGO_TARGET_DIR="$work/targets/database" \
@@ -723,32 +726,19 @@ leg_database() {
   rm -rf -- "$dir"
 }
 
-service_plane_leg() {
-  # service_plane_leg PLANE OUT: one service plane's archives, one per
-  # package and feature set, and the binaries the plane starts, built by
-  # run-integration-verification.sh from its own service lists; bundled into
-  # one tar. The leg runs when the plane's service tokens are selected, as
-  # the plane's job does (ci.yaml, its service scope step).
-  local plane="$1" out="$2" dir
-  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/services-$plane-archives.XXXXXX")"
-  phase "services $plane archives" env CARGO_TARGET_DIR="$work/targets/services_$plane" \
-    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/services_$plane" ARCHIVE_BUILD_DIR="$dir" \
-    scripts/ci/verify/run-integration-verification.sh "services-$plane-archives"
-  # The binaries shrink about threefold (the archives are compressed
-  # already), which the archive store's budget needs: the plane's job unpacks
-  # binaries.tar.gz beside the archives.
-  local -a binaries
-  mapfile -t binaries < <(find "$dir" -maxdepth 1 -type f ! -name '*.tar.zst' -printf '%f\n' | sort)
-  [ "${#binaries[@]}" -gt 0 ] || die "the services $plane leg kept no binaries"
-  tar -cf - -C "$dir" -- "${binaries[@]}" | gzip -1 > "$dir.binaries.tar.gz"
-  (cd "$dir" && rm -f -- "${binaries[@]}")
-  mv -- "$dir.binaries.tar.gz" "$dir/binaries.tar.gz"
-  tar -cf "$out/services_$plane.tar" -C "$dir" .
+leg_services_runtime() {
+  # Only the kind-e2e orchestration wire-contract archive (which carries the
+  # kind-e2e orchestration and smoke binaries); every default-feature service
+  # crate and binary (including the whole control plane) runs from
+  # archive.tar.zst (infra#1534).
+  local out="$1" dir
+  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/services-runtime-archives.XXXXXX")"
+  phase 'services runtime archives' env CARGO_TARGET_DIR="$work/targets/services_runtime" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/services_runtime" ARCHIVE_BUILD_DIR="$dir" \
+    scripts/ci/verify/run-integration-verification.sh services-runtime-archives
+  tar -cf "$out/services_runtime.tar" -C "$dir" .
   rm -rf -- "$dir"
 }
-
-leg_services_control() { service_plane_leg control "$1"; }
-leg_services_runtime() { service_plane_leg runtime "$1"; }
 
 leg_wanted() {
   case "$1" in
@@ -824,6 +814,28 @@ rebuild_corrupt_leg() {
   BUILD_ONCE_NO_CACHE=1 "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" >> "$log" 2>&1
 }
 
+start_sccache_server() {
+  # start_sccache_server NAME [LABEL]: start a per-task sccache server on its
+  # own socket so its stats are isolated and its cache location is verified.
+  local name="$1" label="${2:-}" start_output reason=''
+  [ -n "$label" ] || label="the $name leg's"
+  sccache_selected_only
+  export SCCACHE_SERVER_UDS="${RUNNER_TEMP:-/tmp}/build-once-sccache-$name.sock"
+  if [ -e "$SCCACHE_SERVER_UDS" ]; then
+    reason="a server already held $SCCACHE_SERVER_UDS"
+  elif ! start_output="$("$sccache_bin" --start-server 2>&1)"; then
+    reason="its server did not start: $(printf '%s' "$start_output" | tail -n 1 | tr -d '\r' | cut -c1-200)"
+  elif ! sccache_is_selected; then
+    reason="its server reports: $("$sccache_bin" --show-stats 2>/dev/null |
+      sed -n '/^Cache location/,/^[A-Z]/p' | sed '$d' | tr -s ' ' | tr '\n' ';' | cut -c1-300)"
+  fi
+  if [ -n "$reason" ]; then
+    echo "::warning::build-once: $label compiler cache is not this build folder's, or the shared one the job selected; it compiles without it ($reason)"
+    "$sccache_bin" --stop-server >/dev/null 2>&1 || true
+    export BUILD_ONCE_NO_CACHE=1
+  fi
+}
+
 run_one_leg() {
   # run_one_leg NAME OUT LOGS: one leg with its own log, rebuilt once when it
   # read a corrupt output; a failed leg is listed in LOGS/failed. Its folder's
@@ -833,28 +845,7 @@ run_one_leg() {
   local name="$1" out="$2" logs="$3" started=$SECONDS status=0
   mark_used "$work/targets/$name"
   if sccache_on; then
-    sccache_selected_only
-    # Each leg has its own server on the one cache folder, so its hit rate is
-    # its own.
-    export SCCACHE_SERVER_UDS="${RUNNER_TEMP:-/tmp}/build-once-sccache-$name.sock"
-    local start_output reason=''
-    # The leg starts its own server on a socket nothing else holds, so the
-    # server that answers is the one started with this leg's settings.
-    if [ -e "$SCCACHE_SERVER_UDS" ]; then
-      reason="a server already held $SCCACHE_SERVER_UDS"
-    elif ! start_output="$("$sccache_bin" --start-server 2>&1)"; then
-      reason="its server did not start: $(printf '%s' "$start_output" | tail -n 1 | tr -d '\r' | cut -c1-200)"
-    elif ! sccache_is_selected; then
-      # What the server says it caches in: folder, bucket name and prefix,
-      # never a credential.
-      reason="its server reports: $("$sccache_bin" --show-stats 2>/dev/null |
-        sed -n '/^Cache location/,/^[A-Z]/p' | sed '$d' | tr -s ' ' | tr '\n' ';' | cut -c1-300)"
-    fi
-    if [ -n "$reason" ]; then
-      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it ($reason)"
-      "$sccache_bin" --stop-server >/dev/null 2>&1 || true
-      export BUILD_ONCE_NO_CACHE=1
-    fi
+    start_sccache_server "$name"
   fi
   echo "[build-once] leg $name: start"
   python3 "$ROOT/scripts/ci/setup/peak-rss.py" "$logs/$name.rss" -- \
@@ -1019,11 +1010,17 @@ run_checks_beside_legs() {
   # own log, as one more task beside the legs; a failure is listed in
   # LOGS/failed as "checks".
   local logs="$1" started=$SECONDS status=0
+  if sccache_on; then
+    start_sccache_server checks
+  fi
   echo "[build-once] checks: start"
   python3 "$ROOT/scripts/ci/setup/peak-rss.py" "$logs/checks.rss" -- \
     "$ROOT/scripts/ci/setup/build-once.sh" checks > "$logs/checks.log" 2>&1 || status=1
   echo "[build-once] checks: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
   echo "[build-once] checks: peak_rss_mib=$(cat "$logs/checks.rss" 2>/dev/null || echo unknown)"
+  if sccache_on && [ "${BUILD_ONCE_NO_CACHE:-}" != 1 ]; then
+    sccache_leg_stats checks
+  fi
   if [ "$status" -ne 0 ]; then
     echo checks >> "$logs/failed"
     return 1
@@ -1153,15 +1150,12 @@ publish() {
 
 checks() {
   # The Rust checks (run-rust-checks.sh) from src, in their own warm target
-  # folders, on the build runner, beside the legs (build). A check that read a corrupt output in one of them wipes the folders
-  # its log names (clippy when it names none) and runs once more, as a leg
-  # does (rebuild_corrupt_leg).
+  # folders, on the build runner, beside the legs (build). They share the
+  # build folder's compiler cache for dependency builds (infra#1534); a check
+  # that read a corrupt output wipes the folders its log names (clippy when it
+  # names none) and runs once more without the cache, as a leg does.
   local log folder folders=() status=0
   in_src
-  # The canary caches the legs' compiles only (#5146); the checks still take
-  # their heavy units one at a time with the legs.
-  unset RUSTC_WRAPPER
-  heavy_unit_wrapper
   for folder in "${CHECK_FOLDERS[@]}"; do
     mark_used "$work/targets/$folder"
   done
@@ -1181,6 +1175,12 @@ checks() {
     rm -rf -- "$folder"
     mark_used "$folder"
   done
+  if sccache_on; then
+    echo "build-once: the compiler cache is emptied, and the Rust checks rebuild without it"
+    rm -rf -- "$sccache_dir"
+    unset RUSTC_WRAPPER
+    heavy_unit_wrapper
+  fi
   run_checks
 }
 

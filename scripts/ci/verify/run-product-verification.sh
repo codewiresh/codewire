@@ -339,6 +339,9 @@ shard_test() {
       fi
       ;;
     archives)
+      if [ "${SHARD_USE_WORKSPACE_ARCHIVE:-false}" = true ]; then
+        return 0
+      fi
       [ ! -e "$RUST_SHARD_ARCHIVES/$key.tar.zst" ] && [[ " ${SHARD_QUEUED_KEYS[*]-} " != *" $key "* ]] || {
         echo "::error::two test steps share the archive $key" >&2
         return 2
@@ -453,8 +456,9 @@ run_host_interface_refusal() {
     return 0
   fi
   RUST_SHARD_RUN_IN="scripts/ci/verify/run-in-public-netns.sh 1.1.1.1 --" \
+    SHARD_USE_WORKSPACE_ARCHIVE=true \
     shard_test cli-bin-host-interface-refusal \
-    '--run-ignored only -E test(=a_connection_to_the_hosts_own_interface_address_is_refused)' \
+    '--run-ignored only -E package(codewire-cli-bin)&test(=a_connection_to_the_hosts_own_interface_address_is_refused)' \
     -p codewire-cli-bin --test native_egress_broker -- --ignored --exact \
     a_connection_to_the_hosts_own_interface_address_is_refused
 }
@@ -467,8 +471,8 @@ run_daemon_stock_gh() {
     gh_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/stock-gh.XXXXXX")"
     scripts/ci/setup/fetch-pinned-gh.sh "$gh_dir" || { rm -rf -- "$gh_dir"; return 1; }
   fi
-  CODEWIRE_TEST_GH_BIN="${gh_dir:+$gh_dir/gh}" shard_test daemon-stock-gh \
-    '--run-ignored only -E test(=credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress)' \
+  CODEWIRE_TEST_GH_BIN="${gh_dir:+$gh_dir/gh}" SHARD_USE_WORKSPACE_ARCHIVE=true shard_test daemon-stock-gh \
+    '--run-ignored only -E package(codewire-daemon)&test(=credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress)' \
     -p codewire-daemon --lib -- --ignored --exact \
     credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress || status=$?
   [ -z "$gh_dir" ] || rm -rf -- "$gh_dir"
@@ -501,7 +505,16 @@ extract_shard_archive() {
   local key="$1" archive="$RUST_SHARD_ARCHIVES/$1.tar.zst" root
   root="$(shard_archive_root)"
   local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" workspace="${RUST_SHARD_WORKSPACE:-.}"
-  local extract target entry
+  local extract target entry extract_key="$key"
+  if [ ! -f "$archive" ] && [ "${SHARD_USE_WORKSPACE_ARCHIVE:-false}" = true ] \
+      && [ -f "$RUST_SHARD_ARCHIVES/archive.tar.zst" ]; then
+    archive="$RUST_SHARD_ARCHIVES/archive.tar.zst"
+    extract_key=archive
+    if [ -n "${SHARD_WORKSPACE_ARCHIVE_TARGET:-}" ]; then
+      SHARD_ARCHIVE_TARGET="$SHARD_WORKSPACE_ARCHIVE_TARGET"
+      return 0
+    fi
+  fi
   [ -f "$archive" ] || {
     echo "::error::no $key test archive; the build runner built none for this selection" >&2
     return 1
@@ -514,7 +527,7 @@ extract_shard_archive() {
     SHARD_ARCHIVE_SOURCE_READY=true
     trap shard_archive_cleanup EXIT
   fi
-  extract="$SHARD_ARCHIVE_EXTRACT/$key"
+  extract="$SHARD_ARCHIVE_EXTRACT/$extract_key"
   rm -rf -- "$extract"
   mkdir -p "$extract"
   "$nextest" nextest run --archive-file "$archive" \
@@ -538,6 +551,9 @@ extract_shard_archive() {
     guest-probe-*) sync -f "$root" "$extract" ;;
   esac
   SHARD_ARCHIVE_TARGET="$extract/target"
+  if [ "$extract_key" = archive ]; then
+    SHARD_WORKSPACE_ARCHIVE_TARGET="$SHARD_ARCHIVE_TARGET"
+  fi
 }
 
 # run_shard_archive KEY NEXTEST_ARGS...: run one archive's selected tests.

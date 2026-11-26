@@ -901,7 +901,6 @@ jobs:
     outputs:
       archive_sha256: ${{ steps.publish.outputs.archive_sha256 }}
       database_sha256: ${{ steps.publish.outputs.database_sha256 }}
-      services_control_sha256: ${{ steps.publish.outputs.services_control_sha256 }}
       services_runtime_sha256: ${{ steps.publish.outputs.services_runtime_sha256 }}
       features_sha256: ${{ steps.publish.outputs.features_sha256 }}
       local_vmm_sha256: ${{ steps.publish.outputs.local_vmm_sha256 }}
@@ -1212,8 +1211,9 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      # ready=true when the compile job's archives are fetched and verified;
-      # on a miss this job compiles and tests itself.
+      # ready=true when both the non-default-feature archives and the workspace
+      # archive (default-feature cli-bin and daemon tests) are fetched and
+      # verified; on a miss this job compiles and tests itself.
       - name: Fetch and verify the feature-graph test archives
         id: feature-archives
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.rust_features_expected == 'true' }}
@@ -1221,7 +1221,18 @@ jobs:
           ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.features_sha256 }}
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
-        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/features.tar"
+        run: |
+          set -euo pipefail
+          tmp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          out_a="$(mktemp)"; out_b="$(mktemp)"
+          trap 'rm -f "$out_a" "$out_b"' EXIT
+          GITHUB_OUTPUT="$out_a" scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$tmp_root/features.tar"
+          if grep -qx 'ready=true' "$out_a"; then
+            GITHUB_OUTPUT="$out_b" scripts/ci/setup/fetch-test-archive.sh --or-build "$COMPILE_ARCHIVE_SHA256" "$tmp_root/features-workspace.tar.zst"
+            cat "$out_b" >> "$GITHUB_OUTPUT"
+          else
+            cat "$out_a" >> "$GITHUB_OUTPUT"
+          fi
 
       # The merged source this pull request's archives were built from, at the
       # build path instead of the head's checkout, so the tests read and run
@@ -1268,6 +1279,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/features-archives"
           tar -xf "$RUNNER_TEMP/features.tar" -C "$RUNNER_TEMP/features-archives"
           rm -f "$RUNNER_TEMP/features.tar"
+          mv "$RUNNER_TEMP/features-workspace.tar.zst" "$RUNNER_TEMP/features-archives/archive.tar.zst"
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.rust_features_expected == 'true' && steps.feature-archives.outputs.ready == 'true' }}
@@ -1523,8 +1535,9 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # ready=true when the compile job's archives are fetched and verified;
-      # otherwise the steps that compile run instead.
+      # ready=true when both the non-default-feature database archives and the
+      # workspace archive (default-feature suites and codewire-db-migrate) are
+      # fetched and verified; otherwise the steps that compile run instead.
       - name: Fetch and verify the database archives
         id: database-archives
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
@@ -1532,7 +1545,18 @@ jobs:
           ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.database_sha256 }}
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
-        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/database.tar"
+        run: |
+          set -euo pipefail
+          tmp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          out_a="$(mktemp)"; out_b="$(mktemp)"
+          trap 'rm -f "$out_a" "$out_b"' EXIT
+          GITHUB_OUTPUT="$out_a" scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$tmp_root/database.tar"
+          if grep -qx 'ready=true' "$out_a"; then
+            GITHUB_OUTPUT="$out_b" scripts/ci/setup/fetch-test-archive.sh --or-build "$COMPILE_ARCHIVE_SHA256" "$tmp_root/database-workspace.tar.zst"
+            cat "$out_b" >> "$GITHUB_OUTPUT"
+          else
+            cat "$out_a" >> "$GITHUB_OUTPUT"
+          fi
 
       # The merged source this pull request's archives were built from, at the
       # build path instead of the head's checkout, so the tests read and run
@@ -1631,6 +1655,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/database-archives"
           tar -xf "$RUNNER_TEMP/database.tar" -C "$RUNNER_TEMP/database-archives"
           rm -f "$RUNNER_TEMP/database.tar"
+          mv "$RUNNER_TEMP/database-workspace.tar.zst" "$RUNNER_TEMP/database-archives/archive.tar.zst"
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') && steps.database-archives.outputs.ready == 'true' }}
@@ -1732,15 +1757,16 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      # A miss (evicted, or nothing built for this run) builds in place.
+      # Every control-plane crate and binary uses default features and lives in
+      # leg_archive's workspace archive (infra#1534); a miss builds in place.
       - name: Fetch and verify the service control-plane archives
         id: services-archives
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
-          ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.services_control_sha256 }}
+          ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
-        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/service-workspace.tar.zst"
 
       # The merged source this pull request's archives were built from, at the
       # build path instead of the head's checkout, so the tests read and run
@@ -1841,10 +1867,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/service-archives"
-          tar -xf "$RUNNER_TEMP/services.tar" -C "$RUNNER_TEMP/service-archives"
-          rm -f "$RUNNER_TEMP/services.tar"
-          tar -xzf "$RUNNER_TEMP/service-archives/binaries.tar.gz" -C "$RUNNER_TEMP/service-archives"
-          rm -f "$RUNNER_TEMP/service-archives/binaries.tar.gz"
+          mv "$RUNNER_TEMP/service-workspace.tar.zst" "$RUNNER_TEMP/service-archives/archive.tar.zst"
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
@@ -1940,7 +1963,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      # A miss (evicted, or nothing built for this run) builds in place.
+      # Default-feature runtime crates and binaries (coordinator, mesh, cw,
+      # codewire-db-migrate) come from leg_archive's workspace archive; when
+      # service_orchestration is selected, services_runtime.tar adds the
+      # kind-e2e orchestration wire-contract archive (infra#1534).
       - name: Fetch and verify the service runtime-plane archives
         id: services-archives
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -1948,7 +1974,19 @@ jobs:
           ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.services_runtime_sha256 }}
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
-        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+          ORCHESTRATION_SELECTED: ${{ contains(needs.verification-selection.outputs.selection, '|service_orchestration|') }}
+        run: |
+          set -euo pipefail
+          tmp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          out_a="$(mktemp)"; out_b="$(mktemp)"
+          trap 'rm -f "$out_a" "$out_b"' EXIT
+          GITHUB_OUTPUT="$out_a" scripts/ci/setup/fetch-test-archive.sh --or-build "$COMPILE_ARCHIVE_SHA256" "$tmp_root/service-workspace.tar.zst"
+          if grep -qx 'ready=true' "$out_a" && [ "$ORCHESTRATION_SELECTED" = true ]; then
+            GITHUB_OUTPUT="$out_b" scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$tmp_root/services.tar"
+            cat "$out_b" >> "$GITHUB_OUTPUT"
+          else
+            cat "$out_a" >> "$GITHUB_OUTPUT"
+          fi
 
       # The merged source this pull request's archives were built from, at the
       # build path instead of the head's checkout, so the tests read and run
@@ -2050,10 +2088,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/service-archives"
-          tar -xf "$RUNNER_TEMP/services.tar" -C "$RUNNER_TEMP/service-archives"
-          rm -f "$RUNNER_TEMP/services.tar"
-          tar -xzf "$RUNNER_TEMP/service-archives/binaries.tar.gz" -C "$RUNNER_TEMP/service-archives"
-          rm -f "$RUNNER_TEMP/service-archives/binaries.tar.gz"
+          mv "$RUNNER_TEMP/service-workspace.tar.zst" "$RUNNER_TEMP/service-archives/archive.tar.zst"
+          if [ -f "$RUNNER_TEMP/services.tar" ]; then
+            tar -xf "$RUNNER_TEMP/services.tar" -C "$RUNNER_TEMP/service-archives"
+            rm -f "$RUNNER_TEMP/services.tar"
+          fi
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
