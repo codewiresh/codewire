@@ -292,6 +292,7 @@ archive_cargo() {
 # share has a core for each.
 extract_archives() {
   local dir="$1" archive key binary link target metadata status failed=false
+  local -a keys=()
   local -A linked=() named=() extracting=()
   # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
   # a real copy there of the tree they were built from (a pull request's
@@ -300,8 +301,25 @@ extract_archives() {
   rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
   mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT"
   cp -a --reflink=auto "${BUILD_SOURCE_DIR:-$ROOT}/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+  # fetch-test-archive.sh --extract streams archive.tar.zst directly into
+  # $dir/archive as it downloads and hashes (infra#1534), avoiding a 26 s
+  # post-fetch extraction pass.
+  if [ -e "$dir/archive" ] || [ -L "$dir/archive" ]; then
+    [ -d "$dir/archive" ] && [ ! -L "$dir/archive" ] \
+      && [ -f "$dir/archive/target/nextest/binaries-metadata.json" ] || {
+      echo "::error::$dir/archive is not an extracted test archive directory" >&2
+      return 2
+    }
+    ln -s "$dir/archive" "$RUN_DIR/archives/archive"
+    keys+=(archive)
+  fi
   for archive in "$dir"/*.tar.zst; do
+    [ -f "$archive" ] || continue
     key="$(basename "$archive" .tar.zst)"
+    if [ "$key" = archive ] && [ -e "$dir/archive" ]; then
+      echo "::error::both $dir/archive and $archive are present" >&2
+      return 2
+    fi
     # nextest extracts only into an existing, empty folder.
     mkdir -p "$RUN_DIR/archives/$key"
     "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run --archive-file "$archive" \
@@ -309,11 +327,16 @@ extract_archives() {
       --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass \
       >"$RUN_DIR/archives/$key.extract.log" 2>&1 &
     extracting[$key]=$!
+    keys+=("$key")
   done
+  [ "${#keys[@]}" -gt 0 ] || {
+    echo "::error::no archives found in $dir" >&2
+    return 2
+  }
   # Every extraction is waited for, so none still writes when this returns;
   # each one's report follows in archive order.
-  for archive in "$dir"/*.tar.zst; do
-    key="$(basename "$archive" .tar.zst)"
+  for key in "${keys[@]}"; do
+    [ -n "${extracting[$key]:-}" ] || continue
     status=0
     wait "${extracting[$key]}" || status=$?
     cat "$RUN_DIR/archives/$key.extract.log" >&2
@@ -324,8 +347,7 @@ extract_archives() {
     fi
   done
   [ "$failed" = false ] || return 1
-  for archive in "$dir"/*.tar.zst; do
-    key="$(basename "$archive" .tar.zst)"
+  for key in "${keys[@]}"; do
     # An integration test starts its package's binaries by their build
     # folder path (CARGO_BIN_EXE_*, fixed when it compiled, as idp's
     # rewrap_cli does), and may write to its CARGO_TARGET_TMPDIR: link each

@@ -962,6 +962,44 @@ fi
 grep -q 'was built in /elsewhere/target, not a target folder of' "$TMP/extract-outside/out.log" ||
   { echo 'the extractor gave no reason for the refused target folder' >&2; exit 1; }
 
+# Pre-extracted workspace archive directory (fetch-test-archive.sh --extract):
+# links binaries with zero cargo-nextest extraction and refuses symlinked dirs.
+pre_dir="$TMP/extract-preextracted"
+mkdir -p "$pre_dir/root" "$pre_dir/run" "$pre_dir/archives-in/archive/target/nextest" \
+  "$pre_dir/archives-in/archive/target/debug"
+printf '{"rust-build-meta":{"target-directory":"%s","non-test-binaries":{"pkg":[{"name":"codewire-idp","path":"debug/codewire-idp"}]}}}\n' \
+  "$pre_dir/build/targets/archive" >"$pre_dir/archives-in/archive/target/nextest/binaries-metadata.json"
+: >"$pre_dir/archives-in/archive/target/debug/codewire-idp"
+(
+  set -euo pipefail
+  log() { :; }
+  eval "$(awk '/^extract_archives\(\) \{/,/^\}/' "$ROOT/scripts/ci/verify/run-integration-verification.sh")"
+  ROOT="$pre_dir/root" RUN_DIR="$pre_dir/run" DATABASE_ARCHIVE_BUILD_ROOT="$pre_dir/build" \
+    RUST_TEST_NEXTEST=/usr/bin/false extract_archives "$pre_dir/archives-in"
+) >"$pre_dir/out.log" 2>&1 || {
+  cat "$pre_dir/out.log" >&2
+  echo 'the extractor failed on a pre-extracted workspace archive directory' >&2
+  exit 1
+}
+[ -L "$pre_dir/build/targets/archive/debug/codewire-idp" ] &&
+  [ -L "$pre_dir/archives-in/codewire-idp" ] || {
+  echo 'the extractor did not link binaries from a pre-extracted archive directory' >&2
+  exit 1
+}
+sym_dir="$TMP/extract-symlink"
+mkdir -p "$sym_dir/root" "$sym_dir/run" "$sym_dir/archives-in"
+ln -s "$pre_dir/archives-in/archive" "$sym_dir/archives-in/archive"
+if (
+  set -euo pipefail
+  log() { :; }
+  eval "$(awk '/^extract_archives\(\) \{/,/^\}/' "$ROOT/scripts/ci/verify/run-integration-verification.sh")"
+  ROOT="$sym_dir/root" RUN_DIR="$sym_dir/run" DATABASE_ARCHIVE_BUILD_ROOT="$sym_dir/build" \
+    RUST_TEST_NEXTEST=/usr/bin/false extract_archives "$sym_dir/archives-in"
+) >"$sym_dir/out.log" 2>&1; then
+  echo 'the extractor accepted a symlinked pre-extracted archive directory' >&2
+  exit 1
+fi
+
 # The control plane's suites run in lanes when each can have its own
 # PostgreSQL: the selected lanes all at once, each against its own database
 # (the first against the job's own), each keeping its suites in order, and

@@ -652,13 +652,97 @@ LEGS=(
   "services_runtime selected:service_orchestration"
 )
 
+# resolve_archive_scope: populate ARCHIVE_PACKAGE_ARGS and ARCHIVE_SCOPE_LABEL
+# for leg_archive. On narrow pull requests (complete v3 selection without
+# |rust_workspace| or |contracts_proto|), build only the selected root-workspace
+# crates plus every default-feature consumer crate read from archive.tar.zst by
+# selected database/service jobs. Push runs (main and merge queue), dispatches,
+# local runs, rust_workspace/contracts_proto PRs, and empty selections fail
+# closed to --workspace (infra#1534).
+resolve_archive_scope() {
+  local selection="${VERIFICATION_SELECTION:-}" manifest dir token package
+  local -A seen=()
+  local -a packages=()
+  ARCHIVE_PACKAGE_ARGS=(--workspace)
+  ARCHIVE_SCOPE_LABEL='workspace'
+  [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || return 0
+  [[ "$selection" == '|valid:v3|'*'|complete|' ]] || return 0
+  [[ "$selection" != *'|rust_workspace|'* ]] || return 0
+  [[ "$selection" != *'|contracts_proto|'* ]] || return 0
+
+  add_archive_pkg() {
+    local pkg="$1"
+    [ -z "${seen[$pkg]:-}" ] || return 0
+    seen[$pkg]=1
+    packages+=("$pkg")
+  }
+
+  for manifest in crates/*/Cargo.toml; do
+    [ -f "$manifest" ] || continue
+    dir="${manifest%/Cargo.toml}"
+    token="${dir#crates/}"
+    token="${token//-/_}"
+    case "$token" in
+      codewire_desktop|codewire_ui) continue ;;
+    esac
+    if [[ "$selection" == *"|rust_pkg_${token}|"* \
+        || "$selection" == *"|transport_pkg_${token}|"* ]]; then
+      package="$(sed -nE 's/^name = "([^"]+)"/\1/p; T; q' "$manifest")"
+      [ -n "$package" ] || die "unable to determine Rust package name from $manifest"
+      add_archive_pkg "$package"
+    fi
+  done
+
+  if [[ "$selection" == *'|database|'* ]]; then
+    for package in codewire-billing codewire-credential-service codewire-mesh \
+        codewire-orchestration codewire-platform-credentials codewire-server-core; do
+      add_archive_pkg "$package"
+    done
+  fi
+  if [[ "$selection" == *'|service_idp|'* ]]; then
+    add_archive_pkg codewire-idp
+    add_archive_pkg codewire-server-core
+  fi
+  if [[ "$selection" == *'|service_coordinator|'* ]]; then
+    add_archive_pkg codewire-coordinator
+    add_archive_pkg codewire-server-core
+  fi
+  if [[ "$selection" == *'|service_billing|'* || "$selection" == *'|service_temporal|'* ]]; then
+    add_archive_pkg codewire-billing
+    add_archive_pkg codewire-server-core
+  fi
+  if [[ "$selection" == *'|service_connectcore|'* ]]; then
+    add_archive_pkg codewire-server-core
+  fi
+  if [[ "$selection" == *'|service_nats|'* ]]; then
+    add_archive_pkg codewire-coordinator
+    add_archive_pkg codewire-mesh
+    add_archive_pkg codewire-server-core
+  fi
+  if [[ "$selection" == *'|service_orchestration|'* ]]; then
+    add_archive_pkg codewire-cli-bin
+    add_archive_pkg codewire-server-core
+  fi
+
+  [ "${#packages[@]}" -gt 0 ] || return 0
+  mapfile -t packages < <(printf '%s\n' "${packages[@]}" | LC_ALL=C sort)
+  ARCHIVE_PACKAGE_ARGS=()
+  for package in "${packages[@]}"; do
+    ARCHIVE_PACKAGE_ARGS+=(-p "$package")
+  done
+  ARCHIVE_SCOPE_LABEL="${packages[*]}"
+}
+
 leg_archive() {
-  # The workspace test archive: every package's tests, default features,
-  # published as cargo-nextest writes it (no debug information: the header).
-  # Cargo's timings show which crates hold the leg up (codewire#5311).
+  # The workspace (or PR-scoped) test archive: default features, published as
+  # cargo-nextest writes it (no debug information: the header). Cargo's timings
+  # show which crates hold the leg up (codewire#5311).
   local out="$1"
+  resolve_archive_scope
+  echo "[build-once] test archive scope: $ARCHIVE_SCOPE_LABEL"
   phase 'test archive' env CARGO_TARGET_DIR="$work/targets/archive" \
-    cargo nextest archive --locked --workspace --all-targets --timings --archive-file "$out/archive.tar.zst"
+    cargo nextest archive --locked "${ARCHIVE_PACKAGE_ARGS[@]}" --all-targets --timings \
+      --archive-file "$out/archive.tar.zst"
   python3 -I "$ROOT/scripts/ci/setup/cargo-timings-summary.py" \
     "$work/targets/archive/cargo-timings/cargo-timing.html" '[build-once] timings:' || true
 }
@@ -1221,6 +1305,7 @@ case "${1:-}" in
   prepare) [ "$#" -eq 3 ] || die 'usage: build-once.sh prepare CHECKOUT build|checks'; prepare "$2" "$3" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -eq 1 ] || die 'usage: build-once.sh legs'; wanted_legs ;;
+  archive-scope) [ "$#" -eq 1 ] || die 'usage: build-once.sh archive-scope'; resolve_archive_scope; printf '%s\n' "${ARCHIVE_PACKAGE_ARGS[@]}" ;;
   run-legs) [ "$#" -eq 3 ] || die 'usage: build-once.sh run-legs OUT LOGS'; run_legs "$2" "$3" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;

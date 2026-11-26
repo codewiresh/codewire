@@ -155,6 +155,42 @@ while read -r name; do
     fail "the $name leg does not build in targets/$name"
 done < <(VERIFICATION_SELECTION="${all}rust|transport|" BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs)
 
+# PR archive scoping: narrow pull requests build only the selected crates plus
+# every default-feature consumer crate read from archive.tar.zst; push runs,
+# rust_workspace, contracts_proto, desktop-only and incomplete selections fail
+# closed to --workspace (infra#1534).
+archive_scope_case() {
+  local name="$1" event="$2" selection="$3" expected="$4" actual
+  actual="$(cd "$ROOT" && GITHUB_EVENT_NAME="$event" VERIFICATION_SELECTION="$selection" \
+    "$SCRIPT" archive-scope | tr '\n' ' ')"
+  actual="${actual% }"
+  [ "$actual" = "$expected" ] || fail "archive-scope $name: got '$actual', expected '$expected'"
+}
+archive_scope_case pr-narrow pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin|rust_pkg_codewire_desktop|complete|' \
+  '-p codewire-cli -p codewire-cli-bin'
+archive_scope_case pr-database pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_billing|database|complete|' \
+  '-p codewire-billing -p codewire-credential-service -p codewire-mesh -p codewire-orchestration -p codewire-platform-credentials -p codewire-server-core'
+archive_scope_case pr-services pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_idp|service_idp|service_nats|service_orchestration|complete|' \
+  '-p codewire-cli-bin -p codewire-coordinator -p codewire-idp -p codewire-mesh -p codewire-server-core'
+archive_scope_case pr-workspace pull_request \
+  '|valid:v3|rust|rust_workspace|rust_pkg_codewire_cli|complete|' \
+  '--workspace'
+archive_scope_case pr-contracts-proto pull_request \
+  '|valid:v3|contracts|contracts_proto|rust|rust_pkg_codewire_proto|complete|' \
+  '--workspace'
+archive_scope_case push-narrow push \
+  '|valid:v3|rust|rust_pkg_codewire_cli|complete|' \
+  '--workspace'
+archive_scope_case pr-desktop-only pull_request \
+  '|valid:v3|rust|rust_pkg_codewire_desktop|complete|' \
+  '--workspace'
+archive_scope_case pr-incomplete pull_request \
+  '|rust|rust_pkg_codewire_cli|' \
+  '--workspace'
+
 # Every run builds in one folder (#5146), so main's and a pull request's
 # compiler cache keys, which carry absolute paths, match; the kind follows the
 # event, main only for a push to main.
