@@ -10,13 +10,13 @@ and names in it are the ones that section proposes. The format is in
 
 ## Where it stands
 
-Updated 2026-11-26. Written first; every step is not yet observed.
+Updated 2026-11-26. `user-token` and `user-token-bind` observed on Dev, except the parts the table names; the rest not yet observed.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `sdk-config` | not yet observed | not yet observed |
-| `user-token` | not yet observed | not yet observed |
-| `user-token-bind` | not yet observed | not yet observed |
+| `user-token` | observed 2026-11-26 (#5688), except a password reset and an account disable | not yet observed |
+| `user-token-bind` | observed 2026-11-26 through `cw` (#5688); the SDK create (#5687) and the Codex or Claude sign-in comparison not yet | not yet observed |
 | `cli-env` | not yet observed | not yet observed |
 
 ## Before the walk
