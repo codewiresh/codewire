@@ -869,13 +869,30 @@ run_ci_script_tests() {
   # The slowest tests come first, so the runner's bound never queues them
   # behind the quick ones (longest-processing-time-first, infra#1534).
   run_side_by_side <<'STEPS'
-  scripts/ci/tests/test-workspace-image-verify-workflow.sh
-  scripts/ci/tests/test-integration-postgres.sh
   scripts/ci/tests/test-select-verification.sh
-  scripts/ci/tests/test-workspace-agent-contract.sh
-  scripts/ci/tests/test-rust-toolchain.sh
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   scripts/ci/tests/test-orchestrator-scripts.sh
+  scripts/ci/tests/test-build-local-image.sh
+  scripts/ci/tests/test-build-once.sh
+  scripts/ci/tests/test-integration-postgres.sh
+  python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
+  scripts/ci/tests/test-workspace-agent-contract.sh
+  python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
+  scripts/ci/tests/test-cargo-target-runner-failures.sh
+  scripts/ci/tests/test-warm-rust-cache.sh
+  scripts/ci/tests/test-free-block-probe.sh
+  python3 scripts/dev/test-macos-local-runtime.py
+  python3 scripts/dev/test-macos-ext4-tool.py
+  python3 scripts/dev/test-macos-cli.py
+  python3 -I -B scripts/ci/tests/test-scan-credential-canaries.py
+  python3 -I -B scripts/ci/tests/test-scan-token-shapes.py
+  python3 -I -B scripts/ci/tests/test-ci-done-measures.py
+  scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-ci-tests-wired.sh
+  scripts/ci/tests/test-resolve-deployed-source.sh
+  scripts/ci/tests/test-integration-plugins.sh
+  scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-policy-drift.sh
   scripts/ci/tests/test-kind-device-ownership.sh
   scripts/ci/tests/test-source-approval-workflow.sh
@@ -889,36 +906,24 @@ run_ci_script_tests() {
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
   scripts/ci/tests/test-package-sdk-rust.sh
   python3 -I -B scripts/ci/tests/test-proto-breaking-base.py ResolverTests
-  python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
-  python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   python3 -I -B scripts/ci/tests/test-pod-runtime-context.py
   python3 -I -B scripts/ci/tests/test-workspace-disk-inputs.py
   scripts/ci/tests/test-local-rust-cache.sh
-  scripts/ci/tests/test-build-local-image.sh
-  python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
-  scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-transport-local-vmm-checks.sh
-  scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-policy-cpu-cap.sh
   scripts/ci/tests/test-heavy-unit-rustc.sh
   scripts/ci/tests/test-standard-families.sh
-  scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-install-cargo-nextest.sh
   scripts/ci/tests/test-load-fixture-images.sh
   scripts/ci/tests/test-build-runner-measure.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
-  scripts/ci/tests/test-integration-plugins.sh
-  scripts/ci/tests/test-build-once.sh
   scripts/ci/tests/test-run-rust-checks.sh
   scripts/ci/tests/test-fetch-test-archive-extract.sh
   scripts/ci/tests/test-place-build-source.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
-  python3 -I -B scripts/ci/tests/test-ci-done-measures.py
-  python3 -I -B scripts/ci/tests/test-scan-credential-canaries.py
-  python3 -I -B scripts/ci/tests/test-scan-token-shapes.py
   python3 -I -B scripts/ci/tests/test-local-smoke-isolation.py
   python3 -I -B scripts/ci/tests/test-fetch-main-build.py
   scripts/ci/tests/test-pinned-tool.sh
@@ -930,7 +935,6 @@ run_ci_script_tests() {
   scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-require-verification-results.sh
-  scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-runner-no-bytecode.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
@@ -946,13 +950,9 @@ run_ci_script_tests() {
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
   scripts/ci/tests/test-run-host-rust-build.sh
-  scripts/ci/tests/test-free-block-probe.sh
   scripts/ci/tests/test-selfhost-vm.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
-  python3 scripts/dev/test-macos-cli.py
-  python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py
-  python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
   python3 scripts/dev/test-queue-pr-packages.py
 STEPS
@@ -1225,25 +1225,42 @@ run_contracts_proto() {
   bun --filter @codewire/proto-ts typecheck
   python3 scripts/checks/repo_checks.py proto-package-boundaries --self-test
   local -a proto_packages=() package
+  local admin_in_proto_packages=false
   for package in codewire-proto codewire-admin-proto; do
     if rust_packages_shard_covers "$package"; then
       echo "Contracts: $package's tests run in the Rust / transport packages shard of this run"
     else
       proto_packages+=(-p "$package")
+      [ "$package" != codewire-admin-proto ] || admin_in_proto_packages=true
     fi
   done
-  [ "${#proto_packages[@]}" -eq 0 ] || CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked "${proto_packages[@]}"
 
   # The Rust descriptor sets are compiled from proto/ by the proto crates'
   # build scripts, not by buf (#4950). This holds them to the pinned buf's:
   # equal as messages, and generating the same Rust.
-  local buf_descriptor_set
+  local buf_descriptor_set proto_test_status=0
   buf_descriptor_set="$(mktemp "${TMPDIR:-/tmp}/codewire-buf-descriptor-set.XXXXXX")"
   (cd proto && buf build --as-file-descriptor-set -o "$buf_descriptor_set")
-  CODEWIRE_BUF_DESCRIPTOR_SET="$buf_descriptor_set" \
-    CARGO_PROFILE_DEV_DEBUG=0 \
-    cargo test --locked -p codewire-admin-proto --test descriptor_parity -- --ignored
+  if [ "$admin_in_proto_packages" = true ]; then
+    # Run the proto unit tests and ignored descriptor_parity tests in one Cargo
+    # invocation so Cargo's feature unification compiles codewire-proto and
+    # codewire-admin-proto once instead of rebuilding both crates (~120 s on CI).
+    CODEWIRE_BUF_DESCRIPTOR_SET="$buf_descriptor_set" \
+      CARGO_PROFILE_DEV_DEBUG=0 \
+      cargo test --locked "${proto_packages[@]}" -- --include-ignored || proto_test_status=$?
+  else
+    if [ "${#proto_packages[@]}" -gt 0 ]; then
+      CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked "${proto_packages[@]}" || proto_test_status=$?
+    fi
+    if [ "$proto_test_status" -eq 0 ]; then
+      CODEWIRE_BUF_DESCRIPTOR_SET="$buf_descriptor_set" \
+        CARGO_PROFILE_DEV_DEBUG=0 \
+        cargo test --locked -p codewire-admin-proto --test descriptor_parity -- --ignored \
+        || proto_test_status=$?
+    fi
+  fi
   rm -f "$buf_descriptor_set"
+  [ "$proto_test_status" -eq 0 ] || return "$proto_test_status"
 
   PYTHONPATH=libs/gen-python .venv-proto/bin/python - <<'PY'
 import py_compile
@@ -1379,7 +1396,7 @@ DOCKERFILE
 # families read (main run 23934: Contracts ran alone first for about 175 s).
 standard_families() {
   local family token
-  for family in go-support:go_support sdk-go:sdk_go sdk-ts:sdk_ts \
+  for family in sdk-go:sdk_go sdk-ts:sdk_ts \
       sdk-python:sdk_python ios:ios; do
     token="${family#*:}"
     if selected "$token"; then printf '%s\n' "${family%%:*}"; fi
@@ -1418,10 +1435,12 @@ run_standard() {
   local -a others=() lanes=()
   mapfile -t others < <(standard_families)
   if selected web; then lanes+=('run_standard_in_order web'); fi
-  # Docs builds the Zola stage (~230 s on main); running it beside Web and the
-  # Go/SDK lane keeps Standard near the longest single family instead of
-  # serializing Docs behind go-support and ahead of the SDKs (infra#1534).
+  # Docs (~226 s) and go-support (~143-262 s) each run in their own lane beside
+  # Web and the SDK lane (sdk-go/sdk-ts/sdk-python, ~81-211 s), so Standard's
+  # wall time stays near the longest single lane instead of serializing the SDKs
+  # behind go-support (infra#1534).
   if selected docs; then lanes+=('run_standard_in_order docs'); fi
+  if selected go_support; then lanes+=('run_standard_in_order go-support'); fi
   if [ "${#others[@]}" -gt 0 ]; then lanes+=("run_standard_in_order ${others[*]}"); fi
   if [ "${#lanes[@]}" -eq 0 ]; then
     echo 'Standard: no family is selected (Contracts runs in its own job)'

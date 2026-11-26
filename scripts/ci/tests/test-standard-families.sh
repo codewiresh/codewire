@@ -135,10 +135,11 @@ for family in web docs go-support sdk-go sdk-python; do
   [ -n "$(at "$family" end)" ] || fail "$family did not run"
 done
 [ -z "$(at contracts start)" ] || fail 'Contracts ran in Standard'
-[ "$(at web start)" -lt "$(at go-support end)" ] || fail 'Web did not run beside the other families'
-[ "$(at docs start)" -lt "$(at go-support end)" ] || fail 'Docs did not run beside the other families'
-[ "$(at go-support end)" -le "$(at sdk-go start)" ] && [ "$(at sdk-go end)" -le "$(at sdk-python start)" ] ||
-  fail 'the other families did not run in order'
+[ "$(at web start)" -lt "$(at go-support end)" ] || fail 'Web did not run beside go-support'
+[ "$(at docs start)" -lt "$(at go-support end)" ] || fail 'Docs did not run beside go-support'
+[ "$(at sdk-go start)" -lt "$(at go-support end)" ] || fail 'SDKs did not run beside go-support'
+[ "$(at sdk-go end)" -le "$(at sdk-python start)" ] ||
+  fail 'the SDK families did not run in order'
 CASES=$((CASES + 1))
 
 : > "$work/order"
@@ -160,14 +161,14 @@ CASES=$((CASES + 1))
 # case runs run_standard in the background, as CI runs it, never as a
 # condition: a condition turns errexit off for everything it calls.
 : > "$work/order"
-SELECTION='|valid:v3|web|go_support|sdk_go|complete|'
+SELECTION='|valid:v3|web|sdk_go|sdk_python|complete|'
 rm -f "$work/release-web"
 status=0
-FAIL_FAMILY=go-support WEB_HOLD=1 run_standard > "$work/out" 2>&1 &
+FAIL_FAMILY=sdk-go WEB_HOLD=1 run_standard > "$work/out" 2>&1 &
 wait "$!" || status=$?
 [ "$status" -ne 0 ] || fail 'a failed family passed'
 [ -n "$(at web start)" ] && [ -z "$(at web end)" ] || fail 'Web was not stopped after the first failure'
-[ -z "$(at sdk-go start)" ] || fail 'a family started after the first failure'
+[ -z "$(at sdk-python start)" ] || fail 'a family started after the first failure'
 CASES=$((CASES + 1))
 
 # A failed command inside a family fails it, though later commands pass.

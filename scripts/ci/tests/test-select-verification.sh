@@ -1068,7 +1068,8 @@ run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
 # Rust families their scripts build for (#3494).
 run_paths_case build_once_fixtures pull_request refs/pull/3494/head false \
   'policy security security_js' \
-  scripts/ci/tests/test-build-once.sh scripts/ci/tests/test-run-rust-checks.sh
+  scripts/ci/tests/test-build-once.sh scripts/ci/tests/test-heavy-unit-rustc.sh \
+  scripts/ci/tests/test-run-rust-checks.sh
 # A test job's merged source and its fixture select Policy, which runs them (#5146).
 run_paths_case merged_source_placement pull_request refs/pull/5228/head false \
   'policy security security_js' \
@@ -1087,6 +1088,12 @@ run_paths_case rust_checks_script pull_request refs/pull/3451/head false \
 run_paths_case build_once_jobserver pull_request refs/pull/3452/head false \
   'confidential_script_tests deploy go_consumer_interop go_support policy release rust rust_workspace security security_js' \
   scripts/ci/setup/jobserver.py
+run_paths_case build_once_peak_rss pull_request refs/pull/6556/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/setup/peak-rss.py
+run_paths_case build_once_heavy_unit pull_request refs/pull/6556/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/setup/heavy-unit-rustc.sh
 run_paths_case guest_cpu_share pull_request refs/pull/3413/head false \
   'database policy rust rust_workspace security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/setup/cpu-share.sh

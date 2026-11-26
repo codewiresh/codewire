@@ -2526,7 +2526,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/select-warm-rust-cache.sh|\
       scripts/ci/setup/finish-warm-rust-cache.sh|\
       scripts/ci/setup/bound-cargo-jobs.sh|scripts/ci/setup/build-once.sh|\
-      scripts/ci/setup/jobserver.py|scripts/ci/verify/run-rust-checks.sh)
+      scripts/ci/setup/heavy-unit-rustc.sh|scripts/ci/setup/jobserver.py|\
+      scripts/ci/setup/peak-rss.py|scripts/ci/verify/run-rust-checks.sh)
         select_token policy
         select_token rust
         select_token rust_workspace
@@ -2548,6 +2549,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-warm-rust-cache.sh|\
       scripts/ci/tests/test-bound-cargo-jobs.sh|\
       scripts/ci/tests/test-build-once.sh|\
+      scripts/ci/tests/test-heavy-unit-rustc.sh|\
       scripts/ci/tests/test-place-build-source.sh|\
       scripts/ci/tests/test-run-rust-checks.sh)
         select_token policy
