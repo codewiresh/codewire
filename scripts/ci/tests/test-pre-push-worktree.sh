@@ -673,6 +673,28 @@ if command -v flock >/dev/null 2>&1; then
   [ "$(cat "$TMP/behind")" = behind ] || fail 'a stopped head blocked the waiter behind it'
   kill -CONT "$stopped"
   wait "$stopped" || fail 'a continued waiter was not served'
+  # A waiter whose queue is cleared again between writing its ticket's draft
+  # and moving it into place keeps waiting and is served (#6531): this mv
+  # removes the queue first, once.
+  mkdir -p "$TMP/race-bin"
+  cat >"$TMP/race-bin/mv" <<RACE
+#!/bin/sh
+if [ ! -e '$TMP/race-fired' ]; then : >'$TMP/race-fired'; rm -rf '$slots/queue'; fi
+exec env PATH=/usr/bin:/bin mv "\$@"
+RACE
+  chmod +x "$TMP/race-bin/mv"
+  "${slot_waiter[@]}" sleep 300 &
+  holders[1]=$!
+  until_true eval '! flock -n "$slots/2.lock" true' || fail 'slot 2 was not held again'
+  env PATH="$TMP/race-bin:$PATH" "${slot_waiter[@]}" sh -c "echo raced >'$TMP/raced'" &
+  raced=$!
+  until_true test -e "$TMP/race-fired" || fail 'the racing mv never ran'
+  until_true in_line 1 || fail 'a waiter whose queue went between its draft and its mv took no ticket'
+  kill -0 "$raced" 2>/dev/null || fail 'a waiter whose queue went between its draft and its mv exited'
+  kill -TERM "${holders[1]}"
+  wait "${holders[1]}" 2>/dev/null || true
+  wait "$raced" || fail 'a waiter whose queue went between its draft and its mv was not served'
+  [ "$(cat "$TMP/raced")" = raced ] || fail 'the raced waiter did not run its build'
   in_line 0 || fail 'a served waiter left its ticket in the line'
   kill -TERM "${holders[0]}" "${holders[2]}"
   wait "${holders[0]}" "${holders[2]}" 2>/dev/null || true

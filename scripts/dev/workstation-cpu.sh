@@ -345,11 +345,15 @@ build() {
     # ticket appears whole: queue_head removes one whose start time it cannot
     # read, and an empty file would be one. Its draft's name starts with a
     # dot, so queue_head's glob never sees it.
+    # Whoever cleared the queue may clear it again between these steps; then
+    # the ticket comes back on the next pass, under the same name, so it keeps
+    # its place in line (#6531).
     if [ ! -e "$ticket" ]; then
-      mkdir -p "$BUILD_SLOT_DIR/queue"
       process_start "$$"
-      echo "$proc_start" >"${ticket%/*}/.${ticket##*/}"
-      mv "${ticket%/*}/.${ticket##*/}" "$ticket"
+      mkdir -p "$BUILD_SLOT_DIR/queue" &&
+        { echo "$proc_start" >"${ticket%/*}/.${ticket##*/}"; } 2>/dev/null &&
+        mv "${ticket%/*}/.${ticket##*/}" "$ticket" 2>/dev/null ||
+        true
     fi
     queue_head
     if [ "$head" = "$ticket" ]; then
