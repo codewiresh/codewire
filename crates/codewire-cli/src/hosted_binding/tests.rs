@@ -820,6 +820,66 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     );
 }
 
+/// One call `client` sends that no listener answers, by its transport
+/// failure's kind as the log names it.
+async fn unanswered(client: &BindingClient) -> String {
+    let options = client.authorized().await.unwrap();
+    let error = client
+        .client
+        .bind_workspace_with_options(BindWorkspaceRequest::default(), options)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unavailable);
+    assert!(codewire_client::response_trace_id(error.response_headers()).is_none());
+    transport_failure(&error)
+}
+
+#[tokio::test]
+async fn a_call_no_listener_answers_is_logged_by_what_failed_on_the_way() {
+    let fixture = fixture(vec![]).await;
+    let client = |url: &str, roots: &Path| {
+        BindingClient::new(
+            url,
+            BindingRoots::Mounted(roots),
+            fixture.config.token_path(),
+            timing(),
+        )
+        .unwrap()
+    };
+    // Nothing listens on the port.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    assert_eq!(
+        unanswered(&client(
+            &format!("https://localhost:{port}"),
+            &fixture._pki.roots
+        ))
+        .await,
+        "ConnectionRefused"
+    );
+    // The listener's certificate is not from the mounted roots.
+    let other = SyntheticPki::new("localhost");
+    assert_eq!(unanswered(&client(&fixture.url, &other.roots)).await, "tls");
+    // No roots to load: the call fails before any dial.
+    let unmounted = tempfile::tempdir().unwrap();
+    assert_eq!(
+        unanswered(&client(&fixture.url, &unmounted.path().join("ca.crt"))).await,
+        "none"
+    );
+    assert!(fixture.recorded.lock().unwrap().at.is_empty());
+}
+
+#[test]
+fn a_transport_failure_kind_carries_no_peer_or_message() {
+    let error = ConnectError::unavailable("HTTPS request failed").with_source(std::io::Error::new(
+        std::io::ErrorKind::HostUnreachable,
+        "10.44.173.213:8087 value-bearing detail",
+    ));
+    assert_eq!(transport_failure(&error), "HostUnreachable");
+    assert_eq!(transport_failure(&ConnectError::unavailable("x")), "none");
+}
+
 /// A confidential workspace's binding configuration (B2c): its measured
 /// roots and environment, with the mounted roots path pointing elsewhere.
 fn measured_config(

@@ -305,3 +305,24 @@ fn absolute_name(name: Name) -> Name {
     }
     format!("{host}.").parse().unwrap_or(name)
 }
+
+/// Whether `error`, or anything it came from, is a TLS failure, so a caller
+/// can name that class without logging the failure's detail. An I/O error
+/// holds its cause in place rather than as a source, and a handshake's comes
+/// wrapped twice, so each one is opened.
+pub fn is_tls_failure(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(cause) = next {
+        if cause.is::<rustls::Error>() {
+            return true;
+        }
+        next = match cause
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+        {
+            Some(held) => Some(held as &(dyn std::error::Error + 'static)),
+            None => cause.source(),
+        };
+    }
+    false
+}

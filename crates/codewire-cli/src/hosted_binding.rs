@@ -571,16 +571,42 @@ fn classify(error: &ConnectError) -> AttemptError {
     // The listener names each call's trace, so a refused or failed call's
     // line leads to it (docs/CONFIGURATION.md, "Tracing"). `not_found` is the
     // binding's expected wait, called again at once.
-    if outcome != AttemptError::NotFound
-        && let Some(trace_id) = codewire_client::response_trace_id(error.response_headers())
-    {
-        tracing::info!(
-            code = error.code.as_str(),
-            trace_id,
-            "workspace binding call answered with an error"
-        );
+    if outcome != AttemptError::NotFound {
+        if let Some(trace_id) = codewire_client::response_trace_id(error.response_headers()) {
+            tracing::info!(
+                code = error.code.as_str(),
+                trace_id,
+                "workspace binding call answered with an error"
+            );
+        } else {
+            // A call the listener never answered: what failed on the way,
+            // as a kind only (#5602), never the message.
+            tracing::info!(
+                code = error.code.as_str(),
+                transport = transport_failure(error),
+                "workspace binding call got no answer"
+            );
+        }
     }
     outcome
+}
+
+/// The kind of a call's transport failure, carrying no peer or value: `tls`
+/// for a failed handshake, else the first I/O error's kind in its sources,
+/// or `none` when it has no source, as when the TLS trust could not be
+/// loaded before any dial.
+fn transport_failure(error: &ConnectError) -> String {
+    if codewire_tls::is_tls_failure(error) {
+        return "tls".to_owned();
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return format!("{:?}", io.kind());
+        }
+        source = cause.source();
+    }
+    "none".to_owned()
 }
 
 /// Call until an accepted binding arrives. `not_found` is called again at

@@ -15,7 +15,7 @@ mod incoming;
 mod peer;
 
 pub use client::ClientTlsEndpoint;
-pub use connect::{ConnectOriginTransport, PeerDial};
+pub use connect::{ConnectOriginTransport, PeerDial, is_tls_failure};
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
