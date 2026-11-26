@@ -112,3 +112,11 @@ commits = ["268a2e7f6bbba2aa1e063fc1810c2470055baa75"]
 paths = ['''^docs/journeys/network-and-egress\.md$''']
 regexTarget = "secret"
 regexes = ['''^sk-ant-made-up$''']
+
+[[allowlists]]
+description = "Antigravity's public Google Desktop OAuth client_secret constant (installed-app public identifier, owner decision 2026-11-25 on #6555)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-credential-broker/src/provider_oauth/antigravity\.rs$''']
+regexTarget = "line"
+regexes = ['''^pub\(crate\)[[:space:]]+const[[:space:]]+ANTIGRAVITY_OAUTH_CLIENT_SECRET:[[:space:]]*&str[[:space:]]*=[[:space:]]*"GOCSPX-[A-Za-z0-9_-]{28}";$''']
