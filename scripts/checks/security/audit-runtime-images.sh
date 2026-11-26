@@ -161,7 +161,7 @@ if [[ ! "$rust_channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 readonly rust_channel
-readonly rust_build_digest='e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c'
+readonly rust_build_digest='75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94'
 readonly rust_build_image="rust:${rust_channel}-bookworm@sha256:${rust_build_digest}"
 readonly debian_runtime_image='debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc'
 if [[ "$probe_images" == true ]]; then

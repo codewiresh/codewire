@@ -339,9 +339,10 @@ extract_archives() {
     while read -r binary; do
       # nextest also lists the libraries a build produced (a dependency's
       # static library, such as boringtun's .a in the credential service's
-      # enrollment build, main run 22655). Nothing starts one by its path, so
-      # it gets no link.
-      if [[ "$binary" =~ ^[a-z0-9_-]+(/deps)?/lib[A-Za-z0-9_.-]+\.(a|so|dylib|rlib)$ ]]; then
+      # enrollment build, main run 22655). Cargo 1.100 lists that one in its
+      # build script's out folder (debug/build/boringtun/HASH/out, #6494).
+      # Nothing starts one by its path, so it gets no link.
+      if [[ "$binary" =~ ^[a-z0-9_-]+(/deps|/build/[A-Za-z0-9_-]+(/[0-9a-f]+)?/out)?/lib[A-Za-z0-9_.-]+\.(a|so|dylib|rlib)$ ]]; then
         continue
       fi
       [[ "$binary" =~ ^[a-z0-9_-]+/[A-Za-z0-9_.-]+$ ]] ||

@@ -167,7 +167,7 @@ impl CwRuntimeCatalog {
 /// selects the previous release's payload, so a toolchain move adds its
 /// release here. An earlier one leaves when no supported release ships a
 /// payload built with it.
-const CW_RUNTIME_RUSTC_RELEASES: [&str; 3] = ["1.93.0", "1.99.0", "1.99.1"];
+const CW_RUNTIME_RUSTC_RELEASES: [&str; 4] = ["1.93.0", "1.99.0", "1.99.1", "1.100.0"];
 
 fn sealed_rustc(identity: &str) -> bool {
     identity
@@ -372,7 +372,7 @@ mod tests {
         current.payload.source_revision = "e".repeat(40);
         // The retained payload was built by an earlier sealed toolchain.
         assert_eq!(old.payload.rustc, "rustc 1.93.0 (synthetic fixture)");
-        current.payload.rustc = "rustc 1.99.1 (synthetic fixture)".to_owned();
+        current.payload.rustc = "rustc 1.100.0 (synthetic fixture)".to_owned();
         let catalog = CwRuntimeCatalog {
             schema_version: 1,
             active_sha256: current.payload.sha256.clone(),
@@ -402,6 +402,7 @@ mod tests {
             "rustc 1.93.0 (254b59607 2026-01-19)",
             "rustc 1.99.0 (b940084d7 2026-09-28)",
             "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+            "rustc 1.100.0 (0ef1bc386 2026-11-09)",
         ] {
             let mut admitted = provenance.clone();
             admitted.payload.rustc = sealed.to_owned();
@@ -411,12 +412,13 @@ mod tests {
             "rustc 1.91.1 (synthetic fixture)",
             "rustc 1.98.1 (synthetic fixture)",
             "rustc 1.99.2 (synthetic fixture)",
-            "rustc 1.100.0 (synthetic fixture)",
-            "rustc 1.99.1-beta.1 (synthetic fixture)",
-            "rustc 1.99.1",
-            "rustc  1.99.1 (synthetic fixture)",
-            "cargo 1.99.1 (synthetic fixture)",
-            "1.99.1 (synthetic fixture)",
+            "rustc 1.100.1 (synthetic fixture)",
+            "rustc 1.101.0 (synthetic fixture)",
+            "rustc 1.100.0-beta.1 (synthetic fixture)",
+            "rustc 1.100.0",
+            "rustc  1.100.0 (synthetic fixture)",
+            "cargo 1.100.0 (synthetic fixture)",
+            "1.100.0 (synthetic fixture)",
             "",
         ] {
             let mut changed = provenance.clone();

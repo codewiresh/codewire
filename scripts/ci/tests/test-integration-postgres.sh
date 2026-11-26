@@ -917,19 +917,23 @@ NEXTEST
     extract_archives "$case_dir/archives-in"
   ) > "$case_dir/out.log" 2>&1
 }
-extract_case '[{"name":"codewire-credential-service","path":"debug/codewire-credential-service"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.a"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.so"}]' libraries ||
+extract_case '[{"name":"codewire-credential-service","path":"debug/codewire-credential-service"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.a"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.so"},{"name":"boringtun","path":"debug/build/boringtun/1ad13103fd17b2da/out/libboringtun.a"}]' libraries ||
   { cat "$TMP/extract-libraries/out.log" >&2; echo 'the extractor refused a library nextest lists' >&2; exit 1; }
 [ -L "$TMP/extract-libraries/build/targets/archive/debug/codewire-credential-service" ] ||
   { echo 'the extractor did not link the archive binary' >&2; exit 1; }
 [ -d "$TMP/extract-libraries/build/src" ] ||
   { echo 'the extractor did not copy the checkout into the build folder (main run 23164)' >&2; exit 1; }
-[ ! -e "$TMP/extract-libraries/build/targets/archive/debug/deps" ] ||
+[ ! -e "$TMP/extract-libraries/build/targets/archive/debug/deps" ] &&
+  [ ! -e "$TMP/extract-libraries/build/targets/archive/debug/build" ] ||
   { echo 'the extractor linked a library' >&2; exit 1; }
 if extract_case '[{"name":"x","path":"debug/../escape"}]' escape; then
   echo 'the extractor accepted a path outside its folder' >&2; exit 1
 fi
 grep -q 'names an unexpected binary path: debug/../escape' "$TMP/extract-escape/out.log" ||
   { echo 'the extractor gave no reason for the refused path' >&2; exit 1; }
+if extract_case '[{"name":"x","path":"debug/build/x/1ad13103fd17b2da/out/x-tool"}]' buildout; then
+  echo 'the extractor skipped a build-script output that is not a library' >&2; exit 1
+fi
 if extract_case '[{"name":"x","path":"debug/deps/notalib-1.a"}]' nonlib; then
   echo 'the extractor skipped an unexpected non-library path' >&2; exit 1
 fi

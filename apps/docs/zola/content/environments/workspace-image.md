@@ -1,7 +1,7 @@
 ---
 title: The workspace image
 description: "What the Codewire workspace image holds: Ubuntu, language toolchains, Docker, Git, GitHub CLI and the coding agents, and how to add more."
-updated: 2026-11-22
+updated: 2026-11-25
 weight: 3
 ---
 
@@ -51,7 +51,7 @@ aider | aider 0.86.2
 | Python | Python 3.12 with `venv` and `pip`, `pipx`, `uv`, `poetry` |
 | JavaScript | Node.js 22, `npm`, `pnpm`, `yarn`, `bun` |
 | Go | Go 1.27 |
-| Rust | Rust 1.99 with `rustfmt` and `clippy` |
+| Rust | Rust 1.100 with `rustfmt` and `clippy` |
 | Containers | Docker Engine with Buildx and Compose; the daemon runs in the VM, see [Docker inside](@/environments/docker.md) |
 | Git | `git`, GitHub CLI (`gh`) |
 | Agents | Claude Code (`claude`), Codex (`codex`), Gemini CLI (`gemini`), Amp (`amp`), Aider (`aider`) |

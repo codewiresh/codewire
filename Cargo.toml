@@ -64,7 +64,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "AGPL-3.0-only"
 authors = ["Sonica"]
 
