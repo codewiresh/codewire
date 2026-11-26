@@ -1978,12 +1978,20 @@ VM can't use it.`, then the fix: a sign-in is reconnected under its own name
 credential is replaced in the profile (`cw credentials --local --profile work
 set SLOT NAME`). An expired one `has expired` and a failed one `needs
 reconnecting`. Reconnecting the same credential restores it on the next
-request, with no stop or start, when it is the profile's only usable
-credential: no broker ran, and the next request starts one with its provider
+request, with no stop or start. When it is the profile's only usable
+credential, no broker ran, and the next request starts one with its provider
 (observed for a Claude sign-in withheld at start, #5545). When another of the
-profile's credentials keeps the VM's broker running, the reconnected one is
-used from the next start instead: a broker's providers are fixed for its
-generation, and the authority refuses a changed set (#5615 lifts that). What
+profile's credentials keeps the VM's broker running, the next request's
+ensure finds the providers grown and the authority replaces that broker:
+it stops it, then starts one that serves the reconnected provider too
+(#5615). Only that change replaces a running broker within a generation,
+besides a network policy change (#4926): the set must only grow, every
+provider it adds must be one the VM's pinned profile revision names, and
+nothing else in the selection may differ. A set that shrinks or swaps a
+provider is refused as before, and the running broker keeps serving. A
+replacement that fails to start leaves no broker running. An SSH identity is
+not one of a broker's providers: the authority's SSH agent decides each
+signature from the credential as it is then. What
 the VM set up at start keeps its form until the next
 start: with its Anthropic slot withheld, Claude Code starts in its API-key
 form, and starts in its sign-in form again after a start.

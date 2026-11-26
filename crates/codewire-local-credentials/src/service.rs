@@ -64,6 +64,8 @@ const BROKER_STABLE_RUNTIME: std::time::Duration = std::time::Duration::from_sec
 const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 
 mod broker_child;
+mod broker_selection;
+use broker_selection::SelectionChange;
 mod credential_lifecycle;
 mod renewal;
 use renewal::BrokerRenewal;
@@ -676,29 +678,25 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 if *existing.shutdown.borrow() {
                     return Err(Status::unavailable("local credential broker is draining"));
                 }
-                // The network policy's answers are the one part of a
-                // selection that may change while a generation runs.
-                let under_this_policy = LocalBrokerProcessConfig {
-                    network_policy_allows_github: config.network_policy_allows_github,
-                    network_policy_allowed_hosts: config.network_policy_allowed_hosts.clone(),
-                    ..existing.config.clone()
+                let asked = broker_selection::Sources {
+                    projection: &request.projection,
+                    platform: &request.platform,
+                    local_profile: &request.local_profile,
                 };
-                if under_this_policy != config
-                    || existing.projection != request.projection
-                    || existing.platform != request.platform
-                    || existing.local_profile != request.local_profile
+                match broker_selection::selection_change(&self.authority, existing, &config, asked)
+                    .await?
                 {
-                    return Err(Status::failed_precondition(
-                        "broker selection changed within an active environment generation",
-                    ));
+                    SelectionChange::Refused => {
+                        return Err(Status::failed_precondition(
+                            "broker selection changed within an active environment generation",
+                        ));
+                    }
+                    SelectionChange::Same => {
+                        let running = *existing.state.borrow() == BrokerProcessState::Running;
+                        return Ok(broker_runtime(config, running));
+                    }
+                    SelectionChange::Replace => {}
                 }
-                if existing.config == config {
-                    let running = *existing.state.borrow() == BrokerProcessState::Running;
-                    return Ok(broker_runtime(config, running));
-                }
-                // A live policy change (#4926): the broker that served under
-                // the earlier answer is stopped before its replacement
-                // starts, so a replacement that fails leaves none serving.
             }
             stop_broker_entry(existing, &self.ssh_runtime).await?;
         }
