@@ -18,6 +18,8 @@ observed**.
 | `cred-codex-sign-in` | not yet observed | not yet observed | not yet observed |
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
+| `cred-gemini-key` | not yet observed | not yet observed | not yet observed |
+| `cred-antigravity-sign-in` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | observed, cw v0.4.24 on macOS 27.2.1, 2026-11-19 (every step: the login file holds only a placeholder, `claude -p` answers, `/status` names the plan and `/usage` shows its weekly usage; #3999 comment 117487) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed; dashboard sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
@@ -1380,3 +1382,141 @@ credentials are its creator's own computer's.
     `denied`), and the login is delivered again at the next check after it.
   - The stopped Sandbox, started by the owner, never has the login written,
     and its requests get the named 403.
+
+## 19. `cred-gemini-key`: add a Gemini API key
+
+Proposed, not yet shipped (#6555). Written first. The rules are in
+[`docs/dev/SECRETS-AND-CREDENTIALS.md`](../dev/SECRETS-AND-CREDENTIALS.md),
+"Gemini API key (`gemini`, PR 1)".
+
+- **Entry points:** `cw credentials --local|--cloud add gemini --name NAME`,
+  `cw credentials --local|--cloud connect gemini --name NAME`, the guided
+  "Which credential?" picker, `cw credentials --local|--cloud --profile P set
+  gemini NAME`, `rotate`, `revoke`, `delete`, and the dashboard's Settings →
+  Credentials → Add credential → **Gemini API key**.
+- **States to exercise:**
+  - enrolling a synthetic `AIzaSy…` canary key from stdin and through the
+    hidden prompt, in both placements and on the dashboard;
+  - listing (`list` and `list --output json`) and binding to profile slot
+    `gemini`;
+  - making a Gemini API request inside a Linux local VM, a Mac local VM, and a
+    hosted Sandbox on Dev through `agy --settings '{"modelProvider":"gemini"}'
+    -p "hi"`, `gemini`, and `curl https://generativelanguage.googleapis.com/…`
+    with `-H "x-goog-api-key: $GEMINI_API_KEY"`;
+  - a real Gemini API key request (owner-walked or synthetic refusal check)
+    followed by `scan-token-shapes.py` proving no `AIza…` key exists at rest;
+  - failure/refusal states:
+    - a `cwp1_` placeholder sent in a URL query parameter (both raw
+      `?key=$GEMINI_API_KEY` and percent-encoded `?key=cwp1%5F…`) refused `400`
+      and never sent upstream;
+    - a `cwp1_` placeholder sent in a disallowed credential header
+      (`Authorization: Bearer $GEMINI_API_KEY` or `x-api-key: $GEMINI_API_KEY`)
+      refused `400` and never forwarded;
+    - a `cwp1_` placeholder in `x-goog-api-key` beside a second credential
+      header or a `key=` / `access_token=` query parameter refused `400`
+      (`credential_conflict`);
+    - a request with no `cwp1_` placeholder refused `403
+      selected_credential_only` in a hosted Sandbox (and forwarded locally only
+      when the network policy allows `generativelanguage.googleapis.com:443`);
+    - a non-intercepted boot/placement projects no `GEMINI_API_KEY` and refuses
+      any loopback attempt before a lease;
+    - under the `locked` network policy, `generativelanguage.googleapis.com`
+      denied by egress policy (with no loopback bypass);
+    - a revoked key refused without reaching Google;
+  - rotating the key (`rotate NAME`) and deleting it (`delete NAME`).
+- **Proof:**
+  - `list` shows provider `google` and kind `Gemini API key`; the guided picker
+    lists `Gemini API key  paste a key from aistudio.google.com` in both
+    placements;
+  - inside an intercepted environment, `GEMINI_API_KEY` holds a `cwp1_`
+    placeholder (never the stored key), `GOOGLE_API_KEY` and
+    `GOOGLE_GEMINI_BASE_URL` are unset, and `SSL_CERT_DIR` and
+    `NODE_EXTRA_CA_CERTS` name the front door's CA;
+  - requests with `x-goog-api-key: $GEMINI_API_KEY` reach
+    `generativelanguage.googleapis.com` over TLS with the stored key swapped in
+    (synthetic canary gets Google's 400/401 invalid-key answer; real key gets a
+    model answer), and `agy` succeeds over HTTPS with no TLS error;
+  - raw or percent-encoded `?key=$GEMINI_API_KEY` and disallowed-header
+    placeholder requests are refused `400` by Codewire and never reach Google;
+  - in a hosted Sandbox, a request with no placeholder answers `403
+    selected_credential_only`; without interception, `GEMINI_API_KEY` is absent
+    and no loopback route exists;
+  - `scan-token-shapes.py` finds only `cwp1_` placeholders and zero
+    `google-api-key` (`AIza…`) bytes at rest in the environment;
+  - `delete` removes Codewire's copy and says the key itself is revoked only in
+    Google AI Studio.
+- **Observed:** not yet observed.
+
+## 20. `cred-antigravity-sign-in`: connect Antigravity by signing in
+
+Proposed, not yet shipped (#6555). Written first. The rules are in
+[`docs/dev/SECRETS-AND-CREDENTIALS.md`](../dev/SECRETS-AND-CREDENTIALS.md),
+"Antigravity sign-in (`antigravity`, PR 2)".
+
+- **Entry points:** `cw credentials --local|--cloud connect antigravity --name
+  NAME`, `add antigravity --name NAME`, the guided "Which credential?" picker,
+  `cw credentials --local|--cloud --profile P set antigravity NAME`, `revoke`,
+  `delete`, and the dashboard's Settings → Credentials → Add credential →
+  **Connect Antigravity**.
+- **States to exercise:**
+  - browser sign-in with PKCE and manual code paste (the link screen with copy
+    key `c`, retry on malformed paste, expiry refusal, Ctrl-C cancelling
+    without saving, and reconnect confirmation on an existing name);
+  - organization ownership refusal (Antigravity sign-in is personal only);
+  - listing (`list` and `list --output json` showing kind `Antigravity` and
+    the Google account email as `account_hint`) and binding to profile slot
+    `antigravity`;
+  - using `agy -p "hi"` inside a Linux local VM, a Mac local VM, and a hosted
+    Sandbox on Dev with no D-Bus keyring and no real token on disk;
+  - token refresh: an access token inside the 5-minute refresh window refreshes
+    outside the environment before the request; a managed refresh sent by `agy`
+    to `POST https://oauth2.googleapis.com/token` with
+    `codewire-managed-no-refresh-token` is answered locally with the `cwp1_`
+    placeholder and never reaches Google;
+  - failure/boundary states:
+    - a `cwp1_` placeholder sent to a non-`/v1internal:` path, a non-`POST`
+      method (`GET /v1internal:loadCodeAssist`), an empty method
+      (`POST /v1internal:`), or a multi-segment / percent-encoded path
+      (`POST /v1internal:foo/bar`, `POST /v1internal:foo%2fbar`) on
+      `daily-cloudcode-pa.googleapis.com` or `cloudcode-pa.googleapis.com` is
+      refused (`placeholder_outside_route`, `403`);
+    - a `cwp1_` placeholder in a raw or percent-encoded query parameter is
+      refused (`400`), and a placeholder beside `key=` / `access_token=` or a
+      second credential header is refused (`400 credential_conflict`);
+    - a Codewire placeholder or managed marker sent to
+      `oauth2.googleapis.com/revoke` or `/tokeninfo` is refused (`400
+      invalid_request`);
+    - a request with no placeholder to `daily-cloudcode-pa.googleapis.com`,
+      `cloudcode-pa.googleapis.com`, or `oauth2.googleapis.com` in a hosted
+      Sandbox is refused (`403 selected_credential_only`);
+    - under the `locked` network policy, `daily-cloudcode-pa.googleapis.com`,
+      `cloudcode-pa.googleapis.com`, and `oauth2.googleapis.com` are denied by
+      egress policy (with no loopback bypass);
+    - a non-intercepted boot/placement writes no `antigravity-oauth-token` and
+      refuses any loopback attempt before a lease;
+    - a 401 within 10 minutes of refresh does not force another refresh
+      (#4974); a revoked sign-in makes `agy`'s next call fail with Codewire's
+      named refusal and removes Codewire's managed
+      `~/.gemini/antigravity-cli/antigravity-oauth-token` within 2 minutes;
+  - `scan-token-shapes.py` across the environment after a real `agy` turn.
+- **Proof:**
+  - `~/.gemini/antigravity-cli/antigravity-oauth-token` (mode `0600`) holds
+    `token.access_token` as a `cwp1_` placeholder, `token.refresh_token` as
+    `codewire-managed-no-refresh-token`, `auth_method: "consumer"`, and
+    `id_token_email` — never a `ya29.` access token, `1//0` refresh token, or
+    signed Google ID token;
+  - `agy -p "hi"` succeeds through the front door on
+    `daily-cloudcode-pa.googleapis.com` with `SSL_CERT_DIR` trusting the front
+    door's CA and no browser login prompt;
+  - under `locked` egress policy, calls to `daily-cloudcode-pa.googleapis.com`
+    and `oauth2.googleapis.com` are denied; in a hosted Sandbox, calls without
+    a placeholder answer `403 selected_credential_only`; without interception,
+    no login file is written and no loopback route exists;
+  - `scan-token-shapes.py` finds only `cwp1_` placeholders and zero
+    `google-oauth` (`ya29.`), `jwt-google`, or Google refresh-token (`1//0…`)
+    bytes at rest in the environment;
+  - `rotate` is refused and points to `connect antigravity`;
+  - `delete` revokes in Codewire, reports whether Google confirmed revoking the
+    token at `POST oauth2.googleapis.com/revoke` (body-only, no query, no
+    `client_secret`), and names Google Account third-party access settings.
+- **Observed:** not yet observed.

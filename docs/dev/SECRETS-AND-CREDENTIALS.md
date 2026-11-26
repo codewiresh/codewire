@@ -894,6 +894,340 @@ Codewire placeholder or marker is refused before it is sent. The credential
 service's separate sign-in transport admits only that endpoint and the one
 profile read. Claude itself (`claude.com`) is reached only by your browser.
 
+### Gemini API keys and Antigravity sign-in (proposed, not yet built, #6555)
+
+Two Google-backed credential types join `codewire_access::CREDENTIAL_TYPES`
+(#6286) under provider ID `google`, matching how `openai` holds both `Codex`
+(`OAuth`) and `OpenAI API key` (`ApiKey`) without adding a new
+`CredentialAuthenticationKind` proto enum variant:
+
+| Word | Label | Short | Provider | Form | Slots | Flow | Agent holds | Hosts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `gemini` | Gemini API key | Gemini | `google` | `ApiKey` | `gemini` | paste | the `GEMINI_API_KEY` placeholder | `generativelanguage.googleapis.com` |
+| `antigravity` | Antigravity | Antigravity | `google` | `OAuth` | `antigravity` | sign-in | a placeholder in the delivered login (`~/.gemini/antigravity-cli/antigravity-oauth-token`) | `daily-cloudcode-pa.googleapis.com`, `cloudcode-pa.googleapis.com`, `oauth2.googleapis.com` |
+
+Separate profile slots (`gemini` and `antigravity`) allow a single profile to
+bind both a personal Antigravity sign-in (for `agy`) and a Gemini API key (for
+`gemini-cli`, Google GenAI SDKs, or `agy --settings '{"modelProvider":"gemini"}'`),
+just as a profile can bind both `codex` and `openai`.
+
+Adding provider `google` adds `google/` to `CREDENTIAL_NAME_PROVIDERS` (#4928),
+and extends `ManagedCredentialClients` from `u8` to `u16` with a finite
+`v3:<hex>` encoding for selections carrying the new client bits while keeping
+every existing `v1:` and `v2:` token byte-for-byte unchanged inside the seed's
+32-byte field. Neither type is ever a [direct delivery exception](#direct-delivery-exceptions):
+real keys and Google OAuth tokens stay strictly outside the Sandbox and local VM
+behind TLS front-door interception.
+
+#### Front-door-only routing (no loopback routes)
+
+Both `gemini` and `antigravity` are **front-door-only** — matching the loopback
+retirement direction above (#6280) and closing the loopback egress-policy bypass:
+
+- Neither type defines a `/_codewire/...` loopback prefix. All four hosts
+  (`generativelanguage.googleapis.com` in PR 1; `daily-cloudcode-pa.googleapis.com`,
+  `cloudcode-pa.googleapis.com`, and `oauth2.googleapis.com` in PR 2) are routed
+  strictly by intercepted host via `HostRoute::by_host`
+  (`crates/codewire-egress-front-door-bridge/src/lib.rs`) and
+  `intercepted_host_route` (`crates/codewire-credential-bridge/src/http_ingress.rs`).
+- `crates/codewire-credential-broker/src/runtime/entry.rs::intercepted()`
+  explicitly refuses `BridgeEntry::Loopback` for `gemini` and `antigravity`
+  slots and routes before any lease.
+- **When front-door interception is off:** neither `gemini` nor `antigravity`
+  falls back to loopback or direct delivery. Non-intercepted projection
+  (`ManagedCredentialClients::for_placement`) projects no `GEMINI_API_KEY` and
+  the daemon writes no `antigravity-oauth-token` (while keeping reserved
+  environment variables absent/refused), and any non-intercepted or loopback
+  request for either slot is refused before a lease.
+
+#### Delivery split
+
+1. **PR 1 — Gemini API key (`gemini`):** self-contained API-key credential with
+   no OAuth client secret or shared-host ambiguity; boundary security-cleared
+   by `cw-security`.
+2. **PR 2 — Antigravity sign-in (`antigravity`):** implements the owner-approved
+   plan (2026-11-25, #6555), with the narrow `.gitleaks.toml` allowlist landed
+   on `main` first as specified below.
+
+#### Gemini API key (`gemini`, PR 1)
+
+- **Ownership and lifecycle:** Personal or organization-owned (`Owner::may_hold`
+  permits `ApiKey` for both). Enrolled via `cw credentials --local|--cloud
+  add|connect gemini --name NAME [--expires-at DATE]` (guided picker row:
+  `Gemini API key  paste a key from aistudio.google.com`; hidden prompt:
+  `Paste your Gemini API key (from aistudio.google.com/apikey)`), and on the
+  dashboard under **Settings → Credentials → Add credential → Gemini API key**.
+  Supports `rotate`, `rename`, `revoke`, and `delete` (delete notes that the
+  key itself is revoked only in Google AI Studio).
+- **Target host and route:** Exact host `generativelanguage.googleapis.com` on
+  port 443 (HTTPS only), bound by the front door only when the `gemini` slot is
+  selected:
+  - `crates/codewire-access/src/front_door.rs` (`FRONT_DOOR_HOSTS` /
+    `front_door_hosts`) and `crates/codewire-access/front-door-hosts.txt`;
+  - `crates/codewire-egress-front-door-bridge/src/lib.rs`
+    (`RouteTable::built_in()`, `RouteTable::for_clients`, and
+    `with_optional_hosts` using `HostRoute::by_host`, keeping
+    `generativelanguage.googleapis.com` **out** of `RouteTable::defaults()`);
+  - `crates/codewire-credential-bridge/src/http_ingress.rs`
+    (`intercepted_host_route` mapping `generativelanguage.googleapis.com` to
+    slot `gemini`, route `gemini-api`; no loopback prefix in
+    `classify_http_request`);
+  - `crates/codewire-credential-broker/src/network.rs` (`selected_hosts`,
+    `RouteHost::GeminiApi`, and `validate_target`).
+  - Capability slot `gemini`, route `gemini-api`, operation `generate`,
+    transparent CRUD forwarding (no WebSockets, 4 MiB request bound, 256 MiB
+    redacted streaming response bound), matching `anthropic-api`.
+- **Per-route swap carrier, header injection, and query-parameter fail-closed
+  rules:**
+  - The broker injects `x-goog-api-key: <real-key>` on every leased request and
+    never places the real key in a URL query parameter.
+  - `x-goog-api-key` is added to `CREDENTIAL_HEADERS`
+    (`crates/codewire-credential-broker/src/runtime/swap.rs`, for conflict
+    detection across all routes) and `STRIPPED_REQUEST_HEADERS`
+    (`crates/codewire-credential-broker/src/transparent.rs`, so guest
+    `x-goog-api-key` is always stripped on swapped requests alongside
+    `authorization`, `x-api-key`, `cookie`, and `proxy-authorization`).
+  - **Per-route swap carrier:** Swap-carrier acceptance is scoped per route so
+    non-Gemini routes (Anthropic, Codex, GitHub, token hosts) never accept
+    `x-goog-api-key` as a swap trigger. On `generativelanguage.googleapis.com`,
+    only `x-goog-api-key` carrying a `cwp1_` placeholder triggers a swap (as
+    `google-genai-sdk`, `agy`, `@google/gemini-cli`, and the official
+    Python/TypeScript SDKs send). Any `cwp1_` placeholder sent in a disallowed
+    credential header (for example `Authorization`, `x-api-key`, `Cookie`, or
+    `Proxy-Authorization` on `generativelanguage.googleapis.com`, or
+    `x-goog-api-key` on any non-Gemini route) is refused (`400`), never
+    forwarded and never swapped.
+  - **Encoded query-parameter fail-closed rule:** Before any lease or
+    untouched-forward check, the broker inspects both raw query bytes **and**
+    percent-decoded query parameter names and values (matching `marked_encoded`
+    in `crates/codewire-credential-broker/src/runtime/token_host.rs`) for
+    `cwp1_` (`CREDENTIAL_PLACEHOLDER_TAG`). Any match — including
+    `?key=cwp1%5F...` or a foreign `cwp1_` placeholder in any query parameter —
+    fails closed (`400`), never forwarded and never swapped into a URL query
+    string.
+  - **Query-parameter conflict rule:** When swapping on
+    `generativelanguage.googleapis.com`, the broker refuses (`400
+    credential_conflict`) if any decoded query parameter is named `key` or
+    `access_token` (Google APIs accept both), or if any other header in
+    `CREDENTIAL_HEADERS` is present beside `x-goog-api-key`.
+  - **Untouched-forward rule:** Matching
+    `crates/codewire-credential-broker/src/runtime/untouched.rs`, a request to
+    `generativelanguage.googleapis.com` carrying no `cwp1_` placeholder in any
+    credential header or raw/percent-decoded query is refused (`403
+    selected_credential_only`) in a hosted Sandbox, and locally is forwarded
+    untouched only when the environment's network policy allows
+    `generativelanguage.googleapis.com:443` by rule (`NameNotAllowed`
+    otherwise).
+  - Response headers and streamed body bytes pass AV `RedactionSet` (raw, JSON,
+    percent, and base64 forms of the real key), with `accept-encoding: identity`
+    forced upstream.
+- **Placeholder and environment variables:**
+  - Projected variable (only when front-door interception is active):
+    `GEMINI_API_KEY=<cwp1_placeholder>` (per-environment HMAC placeholder, added
+    to `PROJECTED_PLACEHOLDER_SLOTS` and local guest
+    `PlaceholderSlot::GeminiApiKey` wire code `4`, bumping the guest seed ABI
+    from `seed=12` to `seed=13` and reducing `MAX_EGRESS_CA_DER_BYTES` by 49
+    bytes from 3084 to 3035).
+  - Reserved keys (`HttpProvider::GeminiApiKey::reserved_environment_keys()` and
+    `ManagedCredentialClient::Gemini`): `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and
+    `GOOGLE_GEMINI_BASE_URL`. `GOOGLE_API_KEY` is reserved and absent (never
+    projected beside `GEMINI_API_KEY`) because Google's GenAI SDKs warn when
+    both are set and let `GOOGLE_API_KEY` outrank `GEMINI_API_KEY`.
+    `GOOGLE_GEMINI_BASE_URL` is reserved and absent so requests reach the
+    intercepted `generativelanguage.googleapis.com` host.
+  - `agy` uses `GEMINI_API_KEY` directly when `modelProvider: "gemini"` is set
+    (`agy --settings '{"modelProvider":"gemini"}'` or
+    `~/.gemini/antigravity-cli/settings.json`); Codewire does not force
+    `modelProvider` in `settings.json` so a profile holding both `antigravity`
+    and `gemini` keeps `agy` on its Antigravity sign-in while SDKs and
+    `gemini-cli` use `GEMINI_API_KEY`.
+- **Guest TLS trust:** `NODE_EXTRA_CA_CERTS` (already set whenever a boot has
+  an egress CA) covers Node clients (`@google/gemini-cli`, `@google/genai`).
+  PR 1 extends both `publish_ca_directory` (`egress-ca.d/<hash>.0`) and
+  `with_trust_environment` in
+  `crates/codewire-vmm-guest-probe/src/guest/egress_trust.rs` (locally) and
+  `name_hosted_egress_ca` in `crates/codewire-daemon/src/env.rs` (hosted) so
+  `SSL_CERT_DIR` (`/etc/ssl/certs:/run/codewire-host/egress-ca.d` locally;
+  `/etc/ssl/certs:/codewire/run/egress-trust/ca.d` hosted) is published and set
+  whenever interception is active and `github`, `gemini`, or `antigravity` is
+  bound, covering `agy` (Go `crypto/x509`) and OpenSSL-backed clients without
+  replacing the image's system trust store.
+- **Egress policy and shape scan:** Governed by the environment's egress policy
+  like every other provider (`open` and `web` allow TCP 443; `locked` denies
+  `generativelanguage.googleapis.com:443` unless explicitly allowed by rule).
+  `scripts/ci/verify/scan-token-shapes.py` promotes `"google-api-key"`
+  (`AIza[A-Za-z0-9_-]{35}`, already in `SHAPES`) into `BOUND_SHAPES`, so no
+  baseline can ever excuse a real Gemini API key at rest.
+
+#### Antigravity sign-in (`antigravity`, PR 2)
+
+Owner approved the plan (2026-11-25T21:33Z and 2026-11-25T21:35Z, #6555):
+built-in public installed-app OAuth client constants (zero OpenBao dependency
+for `--cloud` or `--local`) and permanent exclusion of `www.googleapis.com`.
+
+- **Ownership and lifecycle:** Personal sign-in only (`CredentialAuthKind::OAuth`;
+  organizations cannot hold or bind it). Enrolled via `cw credentials
+  --local|--cloud connect|add antigravity --name NAME [-y]` (guided picker row:
+  `Antigravity  sign in with your Google account`) and on the dashboard under
+  **Settings → Credentials → Add credential → Connect Antigravity**. Uses
+  browser sign-in with PKCE S256 and manual code paste (same screen family as
+  `connect claude`). `rotate` is refused (reconnect with `connect antigravity`).
+  Deleting or revoking revokes in Codewire immediately and attempts best-effort
+  revocation at `POST https://oauth2.googleapis.com/revoke` sending `token`
+  **only** in the `application/x-www-form-urlencoded` body with
+  `query().is_none()` (never `?token=...`) and **never** sending
+  `client_secret` to `/revoke` (reporting whether Google confirmed it and
+  naming Google Account third-party access settings).
+- **Observed `agy` 1.5.17 OAuth protocol, scope pinning, and `id_token`
+  handling:**
+  - Authorize endpoint: `https://accounts.google.com/o/oauth2/auth`
+  - Public OAuth client ID:
+    `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`
+  - Manual redirect URI (for headless/SSH/cloud parity):
+    `https://antigravity.google/oauth-callback`
+  - Parameters: `response_type=code`, `access_type=offline`, `prompt=consent`,
+    `code_challenge=<S256>`, `code_challenge_method=S256`, `state=<random>`.
+  - Scopes requested by `agy` 1.5.17:
+    `https://www.googleapis.com/auth/cloud-platform`,
+    `https://www.googleapis.com/auth/userinfo.email`,
+    `https://www.googleapis.com/auth/userinfo.profile`,
+    `https://www.googleapis.com/auth/cclog`,
+    `https://www.googleapis.com/auth/experimentsandconfigs`,
+    `https://www.googleapis.com/auth/aicode`, and `openid`.
+  - **Granted-scope allow-list:** Enrollment and every refresh enforce an exact
+    granted-scope allow-list (matching `claude_oauth::within_sign_in_scopes` in
+    `crates/codewire-credential-broker/src/runtime/claude_token.rs`), refusing
+    any token whose granted scopes include anything outside the allow-listed
+    set. Before PR 2 merges, verify empirically whether `cloud-platform` is
+    strictly required by `cloudcode-pa` or can be omitted from the requested
+    and allowed scopes.
+  - **`id_token` handling:** If `id_token_email` is read from `id_token` at
+    enrollment or reconnect, validate `iss` (`https://accounts.google.com` or
+    `accounts.google.com`) and `aud` (our exact Antigravity `client_id`) and
+    bound the extracted email length. The signed `id_token` itself is **never**
+    stored for delivery and **never** written to the environment.
+  - Token exchange and refresh endpoint: `POST https://oauth2.googleapis.com/token`
+    (`application/x-www-form-urlencoded`). Access tokens expire in ~1 hour
+    (3600 s); Codewire refreshes proactively within 5 minutes of expiry through
+    the serialized refresh journal, applies the 10-minute 401 forced-refresh
+    cooldown (#4974), and handles 429 `Retry-After` (#4975).
+- **Zero direct delivery — strict blast-radius containment and symlink-safe
+  login writer:** Because Google's Antigravity OAuth client carries
+  `https://www.googleapis.com/auth/cloud-platform`, a real Google access token
+  (`ya29....`), refresh token (`1//0...`), or signed `id_token` **must never
+  enter a Sandbox or local VM** under any direct delivery exception. Instead,
+  only when front-door interception is active, `antigravity-login` delivery
+  returns solely the environment's `cwp1_` placeholder, the public managed
+  refresh marker, and the non-secret `id_token_email`, and the daemon writes
+  (or clears on revocation/departure)
+  `~/.gemini/antigravity-cli/antigravity-oauth-token` (mode `0600`) using the
+  symlink-safe `O_NOFOLLOW` + uid ownership + atomic rename pattern
+  (`crates/codewire-daemon/src/codex_home.rs`,
+  `crates/codewire-daemon/src/claude_home.rs`):
+  - `token.access_token`: the environment's `cwp1_` placeholder for the
+    `antigravity` slot;
+  - `token.token_type`: `"Bearer"`;
+  - `token.refresh_token`: `codewire-managed-no-refresh-token` (the public
+    managed marker);
+  - `token.expiry`: a far-future RFC 3339 timestamp (`2099-01-01T00:00:00Z`);
+  - `auth_method`: `"consumer"`;
+  - `id_token_email`: the credential's non-secret `account_hint` email (when
+    present).
+  Only the daemon's own managed file (carrying the managed refresh marker) is
+  updated or cleared on revocation/departure; a user's own login file is left
+  alone, matching Codex's `auth.json` rule.
+- **Target hosts and strict path/method rules (front-door-only, routed via
+  `HostRoute::by_host` and kept out of `RouteTable::defaults()`):**
+  - `daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com` on
+    port 443 (capability slot `antigravity`, route `antigravity-api`, operation
+    `generate`):
+    - **Strict path & method grammar:** Swaps are pinned to exact
+      single-segment `POST` paths matching
+      `^/v1internal:[A-Za-z][A-Za-z0-9_]*$` (no extra `/`, no `%`, no `..`, no
+      empty method name `/v1internal:`; methods are widened beyond `POST` only
+      for an empirically verified `agy` 1.5.17 call). This grammar is enforced
+      in **both** the front-door handler (`placeholder_outside_route`, `403`)
+      and `ProviderHttpsTransport::validate_target`
+      (`crates/codewire-credential-broker/src/network.rs`).
+    - **Per-route swap carrier & query fail-closed rules:** Accepts
+      `Authorization: Bearer <cwp1_placeholder>` only; any `cwp1_` placeholder
+      in another credential header is refused (`400`). Applies the same raw +
+      percent-decoded `cwp1_` query-parameter fail-closed refusal (`400`,
+      before any lease or untouched-forward check) and `access_token` / `key`
+      decoded query-parameter `credential_conflict` (`400`) rule as PR 1.
+    - **Untouched-forward rule:** A request carrying no `cwp1_` placeholder is
+      refused (`403 selected_credential_only`) in a hosted Sandbox, and locally
+      is forwarded untouched only when the network policy allows the host on
+      443 by rule (`NameNotAllowed` otherwise).
+  - `oauth2.googleapis.com` on port 443 (capability slot `antigravity`, route
+    `antigravity-oauth-token`, following `auth.openai.com` in #6197):
+    - Only `POST /token` with `grant_type=refresh_token` and `refresh_token`
+      equal to Codewire's managed marker (form-encoded or JSON, no repeated
+      keys, no credential headers) is answered locally by the broker after
+      refreshing the stored sign-in if within the refresh window. The answer
+      returns the environment's `cwp1_` placeholder, `token_type: "Bearer"`,
+      far-future `expires_in`, and the bare managed refresh marker again —
+      never a real token.
+    - Any Codewire placeholder or managed marker anywhere else on
+      `oauth2.googleapis.com` (including `/revoke`, `/tokeninfo`,
+      `/device/code`) is refused (`400 invalid_request`).
+    - The broker's own transport for this slot sends only to `POST /token` with
+      `query().is_none()` on `oauth2.googleapis.com`, so non-`/token` paths are
+      refused by `validate_target` even without a marker (matching
+      `auth.openai.com` in `network.rs`). Revocation uses its own isolated
+      enrollment/revocation transport pinned to `POST /revoke` with
+      `query().is_none()`.
+    - **Hosted impact:** Because hosted Sandboxes apply
+      `selected_credential_only` to every bound host, binding
+      `oauth2.googleapis.com` while `antigravity` is selected also refuses
+      unrelated `oauth2.googleapis.com` traffic in that Sandbox.
+  - **`www.googleapis.com` permanently excluded:** `www.googleapis.com` is
+    **not** bound in the front door and Codewire never injects the Antigravity
+    token onto `GET /oauth2/v2/userinfo` or any other path of
+    `www.googleapis.com` (binding a shared GCP API host with a
+    `cloud-platform`-scoped token creates unacceptable blast radius and breaks
+    unrelated GCS/Drive traffic under hosted `selected_credential_only`).
+    `id_token_email` is already supplied in `antigravity-oauth-token`; a
+    `cwp1_` placeholder reaching unbound `www.googleapis.com` is an opaque
+    per-environment HMAC tag carrying zero provider material and safely
+    receives a non-fatal 401.
+- **Shape scan:** `scripts/ci/verify/scan-token-shapes.py` promotes
+  `"google-oauth"` (`ya29\.`) and `"jwt-google"` (already in `SHAPES` /
+  `PROVIDER_ISSUERS`) into `BOUND_SHAPES`, adds Google refresh tokens
+  (`1//0[A-Za-z0-9_-]{20,}`) to `SHAPES` and `BOUND_SHAPES`, and adds
+  `b"1//0"` to `LITERALS` so the literal pre-filter matches it.
+- **Google installed-app OAuth `client_id` / `client_secret` handling (owner
+  decision 2026-11-25T21:35Z, #6555):**
+  - Google's `https://oauth2.googleapis.com/token` strictly requires
+    `client_secret` alongside `client_id` and PKCE `code_verifier` for Desktop
+    OAuth clients on both code exchange and refresh, and Antigravity's scopes
+    (`aicode`, `cclog`, `experimentsandconfigs`) are allowlisted only for
+    Google's Antigravity client ID. Per Google's own installed-application OAuth
+    specification, desktop `client_secret` values are public application
+    identifiers (not confidential secrets).
+  - **Built-in constants (zero OpenBao dependency):** Treat Antigravity's
+    public Google Desktop OAuth `client_id` and `client_secret` as built-in
+    constants (matching Claude and Codex installed-app OAuth clients so both
+    `--cloud` and `--local` work out of the box with no OpenBao dependency).
+    The runtime still keeps `client_secret` zeroized/redacted in logs and
+    errors, and sends it **only** to `POST https://oauth2.googleapis.com/token`
+    (never to `/revoke` or any other host/path).
+  - **Narrow `.gitleaks.toml` allowlist and two-PR landing order:** Because
+    `.gitea/workflows/source-approval.yml` scans PRs using `main`'s copy of
+    `.gitleaks.toml`, PR 2 lands in two ordered PRs:
+    1. First, a reviewed `.gitleaks.toml` PR on `main` adding a narrow
+       allowlist entry (`condition = "AND"`, exact `targetRules`, single exact
+       source file path, tightly anchored `regexTarget = "line"` / `"secret"`,
+       and no inline Gitleaks allow marker).
+    2. Second, the Antigravity OAuth implementation PR introducing the
+       constant in that single file. String obfuscation or splitting to evade
+       scanners is forbidden.
+  - **GitHub mirror push protection:** GitHub Secret Scanning Push Protection
+    on the public mirror (`codewiresh/codewire`) ignores `.gitleaks.toml` and
+    will reject a `GOCSPX-...` literal in `scripts/ci/release/mirror-github.sh`
+    until the owner clears the one-time push-protection bypass on GitHub for
+    that public installed-app client constant.
+
 ### Dashboard GitHub connection and repositories
 
 In Settings → Credentials, **Connect GitHub** starts GitHub App user
