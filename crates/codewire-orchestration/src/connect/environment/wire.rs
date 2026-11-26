@@ -34,6 +34,8 @@ pub(super) fn proto_environment(
         stop_reason: environment.stop_reason.unwrap_or_default(),
         idle_stop_seconds: environment.idle_stop_seconds,
         idle_stop_enforced: Some(idle_stop.is_on()),
+        idle_suspend_seconds: environment.idle_suspend_seconds,
+        suspended_at: optional_timestamp(environment.suspended_at)?,
         restarted_at: optional_timestamp(environment.restarted_at)?,
         restart_cause: environment.restart_cause.unwrap_or_default(),
         host: environment

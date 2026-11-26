@@ -388,6 +388,27 @@ func TestEnvironmentUnplannedRestartRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentIdleSuspendRoundTrips(t *testing.T) {
+	suspended, err := fromProtoEnvironment(&codewirev1.Environment{
+		State:              codewirev1.EnvironmentState_ENVIRONMENT_STATE_RUNNING,
+		IdleSuspendSeconds: 900,
+		SuspendedAt:        &timestamppb.Timestamp{Seconds: 1_795_348_800},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suspended.IdleSuspendSeconds != 900 || valueOrEmpty(suspended.SuspendedAt) != "2026-11-22T12:00:00Z" || suspended.State != "running" {
+		t.Fatalf("suspend changed: %+v", suspended)
+	}
+	awake, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awake.SuspendedAt != nil || awake.IdleSuspendSeconds != 0 {
+		t.Fatalf("an environment that is not suspended reports no suspend: %+v", awake)
+	}
+}
+
 func TestEnvironmentHostRoundTrips(t *testing.T) {
 	placed, err := fromProtoEnvironment(&codewirev1.Environment{
 		Host: &codewirev1.EnvironmentHost{Id: "host-1", Name: "build-box"},
@@ -415,7 +436,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	profileRevision := uint64(9_007_199_254_741_009)
 	platform := ProjectStoragePlacementPlatform
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
-		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero, IdleStopSeconds: &zero,
+		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero, IdleStopSeconds: &zero, IdleSuspendSeconds: &zero,
 		ExpectedProfileRevision: &profileRevision, ConfirmPersonalCredentials: true, ConfirmPersonalSecrets: true,
 		ProjectSpec: ProjectSpec{
 			SchemaVersion: 1, WorkingDirectory: destination,
@@ -430,7 +451,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create environment request: %v", err)
 	}
-	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.IdleStopSeconds == nil || request.ProjectSpec == nil || request.ExpectedProfileRevision == nil {
+	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.IdleStopSeconds == nil || request.IdleSuspendSeconds == nil || request.ProjectSpec == nil || request.ExpectedProfileRevision == nil {
 		t.Errorf("request lost scalar presence: %#v", request)
 	}
 	if len(request.GetProjectSpec().GetAgents().GetTools()) != 1 || len(request.GetProjectSpec().GetApplicationPorts()) != 1 || len(request.GetProjectSpec().GetRepositories()) != 1 {

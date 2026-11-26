@@ -64,6 +64,9 @@ pub struct CreateEnvironmentBody {
     /// Its own idle stop in seconds, 0 for off; `None` takes the default
     /// (#3384). Never part of `project_spec`.
     pub idle_stop_seconds: Option<i32>,
+    /// Its own idle suspend in seconds, 0 for off; `None` takes its
+    /// snapshot's, else off (#5529). Refused off `standard`.
+    pub idle_suspend_seconds: Option<i32>,
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,
     pub expected_profile_revision: Option<u64>,
@@ -858,10 +861,10 @@ async fn insert_environment(
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
                  runtime_backend, host_id, create_request_id, idle_stop_seconds,
-                 systemd_workspace, runtime_profile)
+                 systemd_workspace, runtime_profile, idle_suspend_seconds)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13, $14, $15, $16, $17, $18, $19)
+                 $12, $13, $14, $15, $16, $17, $18, $19, $20)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -893,7 +896,7 @@ async fn insert_environment(
     let name =
         environment_name::admitted_name(&mut transaction, p.org_id, p.name.as_deref()).await?;
     let host_id = placed_host(&mut transaction, &p, source_snapshot_id.is_some()).await?;
-    let snapshot_idle_stop = match source_snapshot_id {
+    let snapshot = match source_snapshot_id {
         Some(snapshot_id) => {
             admit_source_snapshot(
                 &mut transaction,
@@ -904,11 +907,10 @@ async fn insert_environment(
             )
             .await?
         }
-        None => None,
+        None => SnapshotTimeouts::default(),
     };
-    // The create's own, else its snapshot's, else off (owner, 2026-11-19:
-    // "not on by default").
-    let idle_stop_seconds = p.body.idle_stop_seconds.or(snapshot_idle_stop).unwrap_or(0);
+    let (idle_stop_seconds, idle_suspend_seconds) =
+        timeouts::resolve(p.body, snapshot, &p.runtime.profile);
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(&p.user.user_id)
@@ -929,6 +931,7 @@ async fn insert_environment(
         .bind(idle_stop_seconds)
         .bind(p.runtime.systemd_workspace)
         .bind(&p.runtime.profile)
+        .bind(idle_suspend_seconds)
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;
@@ -1298,9 +1301,7 @@ pub(crate) async fn create_environment_core(
         body.project_spec.resources.disk_gib,
         body.ttl_seconds,
     )?;
-    if let Some(idle_stop_seconds) = body.idle_stop_seconds {
-        super::environments::validate_idle_stop_seconds(idle_stop_seconds)?;
-    }
+    timeouts::validate(&body, &runtime.profile)?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
     // The admitted operation outlives a dropped request, so it owns its inputs.
@@ -1401,9 +1402,10 @@ pub(crate) async fn create_environment_core(
 
 mod create_defaults;
 mod source_snapshot;
+mod timeouts;
 
 use create_defaults::resolve_create_defaults;
-pub(crate) use source_snapshot::admit_source_snapshot;
+pub(crate) use source_snapshot::{SnapshotTimeouts, admit_source_snapshot};
 use source_snapshot::{fit_disk_to_source_snapshot, validate_source_snapshot_request};
 
 #[cfg(test)]

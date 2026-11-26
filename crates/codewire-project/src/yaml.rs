@@ -25,6 +25,7 @@ impl ProjectDocument {
             spec,
             local,
             idle_stop_seconds: None,
+            idle_suspend_seconds: None,
             working_directory_explicit,
         }
     }
@@ -32,6 +33,12 @@ impl ProjectDocument {
     /// The same document with `idle_stop` set: seconds, 0 for off.
     pub fn with_idle_stop(mut self, seconds: Option<i32>) -> Self {
         self.idle_stop_seconds = seconds;
+        self
+    }
+
+    /// The same document with `idle_suspend` set: seconds, 0 for off.
+    pub fn with_idle_suspend(mut self, seconds: Option<i32>) -> Self {
+        self.idle_suspend_seconds = seconds;
         self
     }
 
@@ -135,6 +142,7 @@ impl ProjectDocument {
                 }
             }),
             idle_stop: self.idle_stop_seconds.map(crate::format_idle_stop),
+            idle_suspend: self.idle_suspend_seconds.map(crate::format_idle_suspend),
         };
         // Long one-line values, such as a pinned image or a known_hosts
         // line, stay on one line; text with newlines is a literal block.
@@ -208,6 +216,8 @@ struct YamlProject<'a> {
     workspace: Option<YamlWorkspace<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     idle_stop: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_suspend: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -26,7 +26,8 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     34: "source_selection", 35: "network_state", 36: "network_failure",
     37: "error_code", 38: "network_policy", 39: "stop_reason",
     40: "idle_stop_seconds", 41: "idle_stop_enforced", 43: "restarted_at",
-    44: "restart_cause", 45: "host",
+    44: "restart_cause", 45: "host", 46: "idle_suspend_seconds",
+    47: "suspended_at",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
@@ -41,6 +42,9 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     34: "placement", 35: "request_id",
     # The SDK sets no idle stop yet (#3384), so a create from it is off.
     36: "idle_stop_seconds",
+    # Nor an idle suspend (#5529): a create from it takes its source
+    # snapshot's, otherwise off.
+    37: "idle_suspend_seconds",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {

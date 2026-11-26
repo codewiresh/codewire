@@ -48,6 +48,9 @@ service EnvironmentService {
   // Changes how long the environment may have no activity before it is
   // stopped. It never stops, starts or restarts the environment.
   rpc SetEnvironmentIdleStop(SetEnvironmentIdleStopRequest) returns (SetEnvironmentIdleStopResponse);
+  // Changes how long a `standard` environment may have no activity before
+  // its VM pauses inside its Pod. It never pauses, wakes or stops it.
+  rpc SetEnvironmentIdleSuspend(SetEnvironmentIdleSuspendRequest) returns (SetEnvironmentIdleSuspendResponse);
   // Saves, replaces or removes the startup script every start of the
   // environment runs. Only its creator may, while it is running or stopped;
   // a running environment keeps running and runs the new script at its next
@@ -201,6 +204,13 @@ message Environment {
   // The enrolled host the environment runs on (#3609), or absent when the
   // platform runs it. Hosts are a preview.
   EnvironmentHost host = 45;
+  // Seconds with no activity after which a `standard` environment's VM
+  // pauses inside its Pod (#5529). 0 is off; otherwise 300 to 604800.
+  int32 idle_suspend_seconds = 46;
+  // When the environment's daemon acknowledged a suspend. Absent while it
+  // isn't suspended. A suspended environment's state stays RUNNING, and any
+  // use wakes it.
+  google.protobuf.Timestamp suspended_at = 47;
 }
 
 // The host an environment runs on, as it is now.
@@ -305,6 +315,11 @@ message CreateEnvironmentRequest {
   // activity (#3384): 0 is off, otherwise 300 to 604800. Absent: a fork takes
   // its snapshot's timeout, and any other create is off.
   optional int32 idle_stop_seconds = 36;
+  // Pause a `standard` environment's VM inside its Pod after this many
+  // seconds with no activity (#5529): 0 is off, otherwise 300 to 604800.
+  // Absent: a fork takes its snapshot's timeout, and any other create is off.
+  // Refused on any other runtime profile.
+  optional int32 idle_suspend_seconds = 37;
 }
 
 // An environment's placement (#3609). Exactly one field is set.
@@ -576,6 +591,16 @@ message SetEnvironmentIdleStopRequest {
   int32 idle_stop_seconds = 3;
 }
 message SetEnvironmentIdleStopResponse {
+  string status = 1;
+}
+
+message SetEnvironmentIdleSuspendRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // 0 never suspends it; otherwise 300 to 604800.
+  int32 idle_suspend_seconds = 3;
+}
+message SetEnvironmentIdleSuspendResponse {
   string status = 1;
 }
 

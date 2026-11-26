@@ -139,6 +139,12 @@ type EnvironmentData struct {
 	// false the timeout is kept but not enforced.
 	// Nil from a server older than the field.
 	IdleStopEnforced *bool `json:"idle_stop_enforced,omitempty"`
+	// IdleSuspendSeconds is how long a standard environment may have no
+	// activity before its VM pauses inside its Pod; 0 never.
+	IdleSuspendSeconds int64 `json:"idle_suspend_seconds"`
+	// SuspendedAt is when its daemon acknowledged a suspend; nil while not
+	// suspended. A suspended environment's state stays running.
+	SuspendedAt *string `json:"suspended_at,omitempty"`
 	// RestartedAt is when a running Sandbox was running again after a restart
 	// nobody asked for (#5997); nil otherwise. The next start or stop clears it.
 	RestartedAt *string `json:"restarted_at,omitempty"`
@@ -215,7 +221,11 @@ type CreateEnvironmentBody struct {
 	// IdleStopSeconds stops the sandbox, keeping its disk, after this many
 	// seconds with no activity: 0 never does, otherwise 300 to 604800. Nil
 	// takes the default.
-	IdleStopSeconds            *int64      `json:"idle_stop_seconds,omitempty"`
+	IdleStopSeconds *int64 `json:"idle_stop_seconds,omitempty"`
+	// IdleSuspendSeconds pauses a standard sandbox's VM inside its Pod after
+	// this many seconds with no activity: 0 never does, otherwise 300 to
+	// 604800. Nil takes the source snapshot's, otherwise off.
+	IdleSuspendSeconds         *int64      `json:"idle_suspend_seconds,omitempty"`
 	IsolationTier              *string     `json:"isolation_tier,omitempty"`
 	ProjectSpec                ProjectSpec `json:"project_spec"`
 	ExpectedProfileRevision    *uint64     `json:"expected_profile_revision,omitempty"`

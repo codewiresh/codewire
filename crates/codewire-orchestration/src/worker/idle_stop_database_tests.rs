@@ -284,3 +284,41 @@ async fn db_an_idle_stop_loses_to_activity_during_the_check_and_a_start_resets_t
     .await;
     db.finish(result).await
 }
+
+/// A suspended Sandbox stays a candidate, marked so its daemon isn't asked:
+/// its time counts toward the stop (#5529, `docs/dev/IDLE-STOP.md`,
+/// "Calls that must not wake a suspended Sandbox").
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_suspended_sandbox_is_a_candidate_marked_suspended() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        sandbox(pool, ENVIRONMENT).await?;
+        ensure!(svc.set_idle_stop(ENVIRONMENT, 300).await?);
+        set_activity(pool, 600).await?;
+        let suspended = |pool: &PgPool| {
+            let pool = pool.clone();
+            async move {
+                Ok::<_, anyhow::Error>(
+                    crate::worker::idle_stop::candidates(&pool)
+                        .await?
+                        .into_iter()
+                        .map(|candidate| (candidate.id, candidate.suspended))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+        ensure!(suspended(pool).await? == [(ENVIRONMENT.to_owned(), false)]);
+        sqlx::query("UPDATE environments SET suspended_at = NOW() WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(suspended(pool).await? == [(ENVIRONMENT.to_owned(), true)]);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

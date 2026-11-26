@@ -106,12 +106,14 @@ type TargetRow = (String, String, i64, String, bool, bool);
 /// without which the bound daemon serves no bridge, and the interception its
 /// Pod's first bind stored, without which no epoch is made (#4001). `admissible`
 /// is the environment half of the broker's admission scope, which refuses
-/// every other state.
+/// every other state, and is false while the Sandbox is suspended: an epoch
+/// would wake it, and its daemon closed its own before the pause (#5529).
 macro_rules! live_targets {
     ($filter:literal) => {
         concat!(
             "SELECT b.environment_id, w.pod_uid, w.operation_generation, w.credential_scope, \
-                    e.state = 'running' AND e.desired_state = 'started', w.interception \
+                    e.state = 'running' AND e.desired_state = 'started' \
+                    AND e.suspended_at IS NULL, w.interception \
                FROM sandbox_environment_backend b \
                JOIN sandbox_workspace_bindings w \
                  ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid \

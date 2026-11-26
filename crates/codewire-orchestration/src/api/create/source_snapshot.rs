@@ -82,15 +82,32 @@ pub(super) async fn fit_disk_to_source_snapshot(
 /// snapshot counts toward its expiry in the transaction that authorizes it.
 /// Admitted, it answers the idle stop its source had when it was captured,
 /// which a fork takes unless its create names one (#3384).
+/// A ready snapshot's row, as a create from it reads it.
+#[derive(sqlx::FromRow)]
+struct SourceSnapshotRow {
+    state: String,
+    size_bytes: Option<i64>,
+    idle_stop_seconds: Option<i32>,
+    idle_suspend_seconds: Option<i32>,
+}
+
+/// The source's timeouts when it was captured, which a fork takes unless its
+/// create names its own. `None` for a snapshot captured before each existed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SnapshotTimeouts {
+    pub(crate) idle_stop_seconds: Option<i32>,
+    pub(crate) idle_suspend_seconds: Option<i32>,
+}
+
 pub(crate) async fn admit_source_snapshot(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     org_id: &str,
     user_id: &str,
     snapshot_id: &str,
     disk_gib: i32,
-) -> AppResult<Option<i32>> {
-    let row: Option<(String, Option<i64>, Option<i32>)> = sqlx::query_as(
-        "SELECT state, size_bytes, idle_stop_seconds FROM hosted_snapshots
+) -> AppResult<SnapshotTimeouts> {
+    let row: Option<SourceSnapshotRow> = sqlx::query_as(
+        "SELECT state, size_bytes, idle_stop_seconds, idle_suspend_seconds FROM hosted_snapshots
           WHERE id = $1 AND org_id = $2 AND created_by = $3
           FOR SHARE",
     )
@@ -99,7 +116,13 @@ pub(crate) async fn admit_source_snapshot(
     .bind(user_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((snapshot_state, size_bytes, idle_stop_seconds)) = row else {
+    let Some(SourceSnapshotRow {
+        state: snapshot_state,
+        size_bytes,
+        idle_stop_seconds,
+        idle_suspend_seconds,
+    }) = row
+    else {
         return Err(coded(
             StatusCode::NOT_FOUND,
             "snapshot_not_found",
@@ -127,5 +150,8 @@ pub(crate) async fn admit_source_snapshot(
         .bind(snapshot_id)
         .execute(&mut **transaction)
         .await?;
-    Ok(idle_stop_seconds)
+    Ok(SnapshotTimeouts {
+        idle_stop_seconds,
+        idle_suspend_seconds,
+    })
 }

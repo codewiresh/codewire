@@ -107,6 +107,9 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(44, "restart_cause", ZERO),
     // A local VM runs on this computer, not on an enrolled host (#3609).
     field(45, "host", ZERO),
+    // Only a `standard` cloud sandbox suspends; a local VM never does (#5529).
+    field(46, "idle_suspend_seconds", ZERO),
+    field(47, "suspended_at", ZERO),
 ];
 
 pub(super) const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
@@ -432,6 +435,10 @@ pub(super) const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_SET_ENVIRONMENT_IDLE_STOP_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_SET_ENVIRONMENT_IDLE_SUSPEND_SPEC,
         RpcBehavior::UnimplementedPlatformOnly,
     ),
     rpc(

@@ -865,6 +865,15 @@ async function runTests() {
     convertedEnvironment.restarted_at === undefined && convertedEnvironment.restart_cause === undefined,
     "an environment that did not restart reports no restart",
   );
+  const suspended = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_suspended", EnvironmentState.RUNNING),
+    idleSuspendSeconds: 900,
+    suspendedAt: { seconds: 1_795_348_800n, nanos: 0 },
+  }));
+  assert(suspended.idle_suspend_seconds === 900, "an idle suspend is retained");
+  assert(suspended.suspended_at === "2026-11-22T12:00:00Z", "a suspend keeps when it was acknowledged");
+  assert(suspended.state === "running", "a suspended environment stays running");
+  assert(convertedEnvironment.suspended_at === undefined, "an environment that is not suspended reports no suspend");
   const placed = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_placed", EnvironmentState.RUNNING),
     host: { id: "host-1", name: "build-box" },
@@ -1722,7 +1731,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 203;
+  const expectedAssertions = 207;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

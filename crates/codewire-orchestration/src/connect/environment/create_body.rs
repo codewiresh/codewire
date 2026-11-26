@@ -29,6 +29,7 @@ pub(super) fn create_body(
         name: request.name,
         ttl_seconds: request.ttl_seconds,
         idle_stop_seconds: request.idle_stop_seconds,
+        idle_suspend_seconds: request.idle_suspend_seconds,
         isolation_tier: match request.isolation_tier.as_known() {
             Some(proto::IsolationTier::Unspecified) | Some(proto::IsolationTier::Standard) => {
                 String::new()

@@ -75,7 +75,7 @@ fn an_unknown_key_is_named_at_its_own_position() {
         "{message}"
     );
     assert!(
-        message.ends_with("workspace, idle_stop at line 6, column 1"),
+        message.ends_with("workspace, idle_stop, idle_suspend at line 6, column 1"),
         "{message}"
     );
     assert_eq!((line, column), (6, 1));

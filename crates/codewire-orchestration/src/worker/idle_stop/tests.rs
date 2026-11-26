@@ -114,6 +114,7 @@ fn candidate(id: &str) -> Candidate {
         namespace: "ns".to_owned(),
         idle_stop_seconds: 300,
         last_activity_at: None,
+        suspended: false,
     }
 }
 

@@ -93,13 +93,18 @@ pub(crate) struct Candidate {
     pub namespace: String,
     pub idle_stop_seconds: i32,
     pub last_activity_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Its VM is paused (`docs/dev/IDLE-STOP.md`, "Suspend"): its daemon is
+    /// never asked, since the call would wake it, and nothing runs, so its
+    /// time counts toward the stop.
+    pub suspended: bool,
 }
 
 /// The running Sandboxes whose own activity is older than their timeout,
 /// with no request open. Each is idle unless its daemon saw use.
 pub(crate) async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
     sqlx::query_as(&format!(
-        r#"SELECT e.id, b.namespace, e.idle_stop_seconds, e.last_activity_at
+        r#"SELECT e.id, b.namespace, e.idle_stop_seconds, e.last_activity_at,
+                  e.suspended_at IS NOT NULL AS suspended
            FROM environments e
            JOIN sandbox_environment_backend b ON b.environment_id = e.id
            WHERE e.idle_stop_seconds > 0
@@ -191,9 +196,13 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
         &candidates,
     );
     let include_guest_cpu = counts_guest_cpu(&ctx.sandbox_cfg.runtime_profile);
-    let answers: Vec<(Candidate, Result<DaemonActivity, String>)> =
+    // `None` for a suspended Sandbox, whose daemon isn't asked.
+    let answers: Vec<(Candidate, Option<Result<DaemonActivity, String>>)> =
         futures::stream::iter(candidates)
             .map(|candidate| async move {
+                if candidate.suspended {
+                    return (candidate, None);
+                }
                 let answer = environment_daemon_activity_for_worker(
                     &ctx.pool,
                     ctx.runtime.as_deref(),
@@ -204,7 +213,7 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
                 )
                 .await
                 .map_err(|error| error.to_string());
-                (candidate, answer)
+                (candidate, Some(answer))
             })
             .buffer_unordered(DAEMON_CALLS_AT_ONCE)
             .collect()
@@ -216,24 +225,27 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             match &answer {
-                Ok(_) => {
+                None | Some(Ok(_)) => {
                     silent.remove(&candidate.id);
                     None
                 }
-                Err(_) => Some(
+                Some(Err(_)) => Some(
                     *silent
                         .entry(candidate.id.clone())
                         .or_insert_with(Instant::now),
                 ),
             }
         };
-        let decision = decide(
-            candidate.idle_stop_seconds,
-            &answer,
-            silent_since,
-            chrono::Utc::now(),
-            Instant::now(),
-        );
+        let decision = match &answer {
+            None => Decision::Stop,
+            Some(answer) => decide(
+                candidate.idle_stop_seconds,
+                answer,
+                silent_since,
+                chrono::Utc::now(),
+                Instant::now(),
+            ),
+        };
         match decision {
             Decision::Active(seen) => {
                 if let Err(error) = record_activity(&ctx.pool, &candidate.id, seen).await {

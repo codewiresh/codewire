@@ -265,6 +265,7 @@ class TransportTestCase(unittest.TestCase):
         # A Sandbox that never restarted on its own says nothing of it (#5997).
         self.assertNotIn("restarted_at", detached)
         self.assertNotIn("restart_cause", detached)
+        self.assertNotIn("suspended_at", detached)
 
     def test_environment_converter_preserves_native_values_and_short_enums(self) -> None:
         created_at = Timestamp()
@@ -303,6 +304,8 @@ class TransportTestCase(unittest.TestCase):
                 deletion_grace_until=created_at,
                 restarted_at=created_at,
                 restart_cause="runtime_replaced",
+                idle_suspend_seconds=900,
+                suspended_at=created_at,
                 preset_name="Python",
                 network="net_1",
                 ports=[
@@ -358,6 +361,8 @@ class TransportTestCase(unittest.TestCase):
                 "network": "net_1",
                 "operation_generation": 0,
                 "idle_stop_seconds": 0,
+                "idle_suspend_seconds": 900,
+                "suspended_at": "2026-01-01T00:00:00Z",
                 "ports": [
                     {
                         "id": "port_1",

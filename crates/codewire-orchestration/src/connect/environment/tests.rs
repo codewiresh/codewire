@@ -683,6 +683,8 @@ fn test_environment(state: &str, setup_complete: bool) -> Environment {
         error_code: None,
         stop_reason: None,
         idle_stop_seconds: 0,
+        idle_suspend_seconds: 0,
+        suspended_at: None,
         restarted_at: None,
         restart_cause: None,
         host: None,

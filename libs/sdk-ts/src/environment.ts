@@ -53,6 +53,8 @@ export class Environment implements EnvironmentData {
   readonly restart_cause: string | undefined;
   readonly host: EnvironmentHost | undefined;
   readonly idle_stop_seconds: number;
+  readonly idle_suspend_seconds: number;
+  readonly suspended_at: string | undefined;
   readonly error_reason: string | undefined;
   readonly isolation_tier: IsolationTier;
   readonly protected: boolean;
@@ -105,6 +107,8 @@ export class Environment implements EnvironmentData {
     this.restart_cause = data.restart_cause ?? undefined;
     this.host = data.host ?? undefined;
     this.idle_stop_seconds = data.idle_stop_seconds ?? 0;
+    this.idle_suspend_seconds = data.idle_suspend_seconds ?? 0;
+    this.suspended_at = data.suspended_at ?? undefined;
     this.error_reason = data.error_reason ?? undefined;
     this.isolation_tier = data.isolation_tier;
     this.protected = data.protected;

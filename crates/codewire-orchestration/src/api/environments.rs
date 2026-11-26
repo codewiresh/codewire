@@ -57,6 +57,12 @@ pub struct Environment {
     /// Seconds with no activity after which it stops itself, 0 for off
     /// (#3384).
     pub idle_stop_seconds: i32,
+    /// Seconds with no activity after which a `standard` Sandbox's VM
+    /// pauses, 0 for off (#5529).
+    pub idle_suspend_seconds: i32,
+    /// When its daemon acknowledged a suspend; its state stays running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
     /// When a running Sandbox was running again after a restart nobody
     /// asked for, and why (#5997); cleared by the next start or stop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,7 +192,7 @@ pub(crate) const ENV_SELECT_COLS: &str = concat!(
     COALESCE(b.setup_phase, 0) AS setup_phase,
     COALESCE(b.setup_complete, e.runtime_backend = 'host') AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
-    e.ttl_seconds, e.shutdown_at, e.idle_stop_seconds,
+    e.ttl_seconds, e.shutdown_at, e.idle_stop_seconds, e.idle_suspend_seconds, e.suspended_at,
     e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier,
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
@@ -240,6 +246,11 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         error_code: row.try_get("error_code")?,
         stop_reason: row.try_get("stop_reason")?,
         idle_stop_seconds: row.try_get("idle_stop_seconds")?,
+        idle_suspend_seconds: row.try_get("idle_suspend_seconds")?,
+        suspended_at: format_time_opt(
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("suspended_at")?
+                .map(|at| at.naive_utc()),
+        ),
         // TIMESTAMPTZ, unlike the older timestamps.
         restarted_at: format_time_opt(
             row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("restarted_at")?
@@ -1401,7 +1412,13 @@ pub(crate) async fn extend_environment_ttl_core(
 }
 
 mod admission;
+mod idle_suspend;
 mod start;
+
+pub(crate) use idle_suspend::{
+    require_standard_for_idle_suspend, set_environment_idle_suspend_core,
+    validate_idle_suspend_seconds,
+};
 
 pub(crate) use start::start_environment_core;
 
@@ -1684,6 +1701,8 @@ mod tests {
             error_code: None,
             stop_reason: None,
             idle_stop_seconds: 0,
+            idle_suspend_seconds: 0,
+            suspended_at: None,
             restarted_at: None,
             restart_cause: None,
             host: None,

@@ -15,6 +15,7 @@ pub use codewire_access::AccessProfileReference;
 pub mod create_input;
 mod environment_name;
 mod idle_stop;
+mod idle_suspend;
 mod normalize;
 mod overrides;
 mod platform_projection;
@@ -35,6 +36,10 @@ pub use idle_stop::{
     IDLE_STOP_FIELD, IDLE_STOP_ON_SECONDS, MAX_IDLE_STOP_SECONDS, MIN_IDLE_STOP_SECONDS,
     format_idle_stop, idle_stop_notice, idle_stop_reason, idle_stop_words, parse_idle_stop,
     validate_idle_stop_seconds,
+};
+pub use idle_suspend::{
+    IDLE_SUSPEND_FIELD, IDLE_SUSPEND_ON_SECONDS, format_idle_suspend, parse_idle_suspend,
+    validate_idle_suspend_seconds,
 };
 pub use overrides::{ProjectYamlFile, merge_project_files};
 pub use platform_projection::{
@@ -128,6 +133,9 @@ pub struct ProjectDocument {
     /// `idle_stop` in seconds, 0 for off; `None` when the file does not say.
     /// A setting of a cloud environment, so never part of `spec` (#3384).
     pub idle_stop_seconds: Option<i32>,
+    /// `idle_suspend` in seconds, 0 for off; `None` when the file does not
+    /// say. Like `idle_stop`, never part of `spec` (#5529).
+    pub idle_suspend_seconds: Option<i32>,
     working_directory_explicit: bool,
 }
 
@@ -513,6 +521,8 @@ struct RawProject {
     workspace: Option<RawWorkspaceBlock>,
     #[serde(default)]
     idle_stop: Option<idle_stop::IdleStopValue>,
+    #[serde(default)]
+    idle_suspend: Option<idle_suspend::IdleSuspendValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -112,6 +112,10 @@ export interface EnvironmentData {
   idle_stop_seconds?: number | null;
   /** Whether the server stops idle environments; when false the timeout is kept, not enforced. */
   idle_stop_enforced?: boolean;
+  /** Seconds with no activity after which a `standard` environment's VM pauses inside its Pod; 0 is off. */
+  idle_suspend_seconds?: number | null;
+  /** When its daemon acknowledged a suspend; absent while not suspended. Its state stays `running`. */
+  suspended_at?: string | null;
   isolation_tier: IsolationTier;
   memory_mb: number;
   name?: string | null;

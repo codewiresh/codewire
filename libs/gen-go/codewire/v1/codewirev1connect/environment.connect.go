@@ -81,6 +81,9 @@ const (
 	// EnvironmentServiceSetEnvironmentIdleStopProcedure is the fully-qualified name of the
 	// EnvironmentService's SetEnvironmentIdleStop RPC.
 	EnvironmentServiceSetEnvironmentIdleStopProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleStop"
+	// EnvironmentServiceSetEnvironmentIdleSuspendProcedure is the fully-qualified name of the
+	// EnvironmentService's SetEnvironmentIdleSuspend RPC.
+	EnvironmentServiceSetEnvironmentIdleSuspendProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleSuspend"
 	// EnvironmentServiceSetEnvironmentStartupScriptProcedure is the fully-qualified name of the
 	// EnvironmentService's SetEnvironmentStartupScript RPC.
 	EnvironmentServiceSetEnvironmentStartupScriptProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentStartupScript"
@@ -146,6 +149,9 @@ type EnvironmentServiceClient interface {
 	// Changes how long the environment may have no activity before it is
 	// stopped. It never stops, starts or restarts the environment.
 	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
+	// Changes how long a `standard` environment may have no activity before
+	// its VM pauses inside its Pod. It never pauses, wakes or stops it.
+	SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error)
 	// Saves, replaces or removes the startup script every start of the
 	// environment runs. Only its creator may, while it is running or stopped;
 	// a running environment keeps running and runs the new script at its next
@@ -282,6 +288,12 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
 			connect.WithClientOptions(opts...),
 		),
+		setEnvironmentIdleSuspend: connect.NewClient[v1.SetEnvironmentIdleSuspendRequest, v1.SetEnvironmentIdleSuspendResponse](
+			httpClient,
+			baseURL+EnvironmentServiceSetEnvironmentIdleSuspendProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleSuspend")),
+			connect.WithClientOptions(opts...),
+		),
 		setEnvironmentStartupScript: connect.NewClient[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse](
 			httpClient,
 			baseURL+EnvironmentServiceSetEnvironmentStartupScriptProcedure,
@@ -381,6 +393,7 @@ type environmentServiceClient struct {
 	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
 	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
 	setEnvironmentIdleStop        *connect.Client[v1.SetEnvironmentIdleStopRequest, v1.SetEnvironmentIdleStopResponse]
+	setEnvironmentIdleSuspend     *connect.Client[v1.SetEnvironmentIdleSuspendRequest, v1.SetEnvironmentIdleSuspendResponse]
 	setEnvironmentStartupScript   *connect.Client[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse]
 	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
 	getEnvironmentHostKey         *connect.Client[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse]
@@ -475,6 +488,11 @@ func (c *environmentServiceClient) SetEnvironmentIdleStop(ctx context.Context, r
 	return c.setEnvironmentIdleStop.CallUnary(ctx, req)
 }
 
+// SetEnvironmentIdleSuspend calls codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend.
+func (c *environmentServiceClient) SetEnvironmentIdleSuspend(ctx context.Context, req *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error) {
+	return c.setEnvironmentIdleSuspend.CallUnary(ctx, req)
+}
+
 // SetEnvironmentStartupScript calls codewire.v1.EnvironmentService.SetEnvironmentStartupScript.
 func (c *environmentServiceClient) SetEnvironmentStartupScript(ctx context.Context, req *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {
 	return c.setEnvironmentStartupScript.CallUnary(ctx, req)
@@ -562,6 +580,9 @@ type EnvironmentServiceHandler interface {
 	// Changes how long the environment may have no activity before it is
 	// stopped. It never stops, starts or restarts the environment.
 	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
+	// Changes how long a `standard` environment may have no activity before
+	// its VM pauses inside its Pod. It never pauses, wakes or stops it.
+	SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error)
 	// Saves, replaces or removes the startup script every start of the
 	// environment runs. Only its creator may, while it is running or stopped;
 	// a running environment keeps running and runs the new script at its next
@@ -694,6 +715,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceSetEnvironmentIdleSuspendHandler := connect.NewUnaryHandler(
+		EnvironmentServiceSetEnvironmentIdleSuspendProcedure,
+		svc.SetEnvironmentIdleSuspend,
+		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleSuspend")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceSetEnvironmentStartupScriptHandler := connect.NewUnaryHandler(
 		EnvironmentServiceSetEnvironmentStartupScriptProcedure,
 		svc.SetEnvironmentStartupScript,
@@ -806,6 +833,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceExtendEnvironmentTtlHandler.ServeHTTP(w, r)
 		case EnvironmentServiceSetEnvironmentIdleStopProcedure:
 			environmentServiceSetEnvironmentIdleStopHandler.ServeHTTP(w, r)
+		case EnvironmentServiceSetEnvironmentIdleSuspendProcedure:
+			environmentServiceSetEnvironmentIdleSuspendHandler.ServeHTTP(w, r)
 		case EnvironmentServiceSetEnvironmentStartupScriptProcedure:
 			environmentServiceSetEnvironmentStartupScriptHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentTrustReportProcedure:
@@ -901,6 +930,10 @@ func (UnimplementedEnvironmentServiceHandler) ExtendEnvironmentTtl(context.Conte
 
 func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleStop is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) SetEnvironmentStartupScript(context.Context, *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {

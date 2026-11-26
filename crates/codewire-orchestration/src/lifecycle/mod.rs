@@ -181,6 +181,11 @@ pub trait LifecycleStore {
         env_id: &str,
         idle_stop_seconds: i32,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn set_idle_suspend(
+        &self,
+        env_id: &str,
+        idle_suspend_seconds: i32,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
 /// What a start asks of its organization's environment quota: the limits,
@@ -266,7 +271,7 @@ impl Service<PgLifecycleStore> {
         .await?;
         let entry = if isolation_tier == "confidential" {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, restarted_at = NULL, restart_cause = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, restarted_at = NULL, restart_cause = NULL, suspended_at = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
             )
             .bind(env_id)
             .bind(org_id)
@@ -283,7 +288,7 @@ impl Service<PgLifecycleStore> {
             }
         } else {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, restarted_at = NULL, restart_cause = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
+                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, restarted_at = NULL, restart_cause = NULL, suspended_at = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
             )
             .bind(env_id)
             .bind(org_id)
@@ -589,6 +594,15 @@ impl<S: LifecycleStore> Service<S> {
             .set_idle_stop(env_id, idle_stop_seconds)
             .await
             .map_err(|e| anyhow::anyhow!("set idle stop: {e:#}"))
+    }
+
+    /// Records the environment's own idle suspend (#5529); false when it is
+    /// destroyed or gone.
+    pub async fn set_idle_suspend(&self, env_id: &str, seconds: i32) -> anyhow::Result<bool> {
+        self.store
+            .set_idle_suspend(env_id, seconds)
+            .await
+            .map_err(|e| anyhow::anyhow!("set idle suspend: {e:#}"))
     }
 
     /// Mirrors `PrepareStop`: Ok(true) → proceed with the stop.
@@ -998,7 +1012,7 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                "UPDATE environments SET stopped_at = NOW(), restarted_at = NULL, restart_cause = NULL,
+                "UPDATE environments SET stopped_at = NOW(), restarted_at = NULL, restart_cause = NULL, suspended_at = NULL,
                    error_reason = CASE WHEN error_code IN ($2, $3) THEN NULL ELSE error_reason END,
                    error_code = CASE WHEN error_code IN ($2, $3) THEN NULL ELSE error_code END
                   WHERE id = $1 AND state = 'stopped'",
@@ -1450,6 +1464,22 @@ impl LifecycleStore for PgLifecycleStore {
             .await?;
         Ok(rows > 0)
     }
+
+    async fn set_idle_suspend(&self, env_id: &str, seconds: i32) -> anyhow::Result<bool> {
+        let query = sqlx::query(
+            r#"UPDATE environments SET idle_suspend_seconds = $1
+               WHERE id = $2 AND state NOT IN ('destroyed', 'destroying')"#,
+        )
+        .bind(seconds)
+        .bind(env_id);
+        let entry = LogEntry {
+            phase: "lifecycle_intent",
+            status: "completed",
+            message: format!("idle suspend set to {seconds}s"),
+            metadata: serde_json::json!({ "kind": "idle_suspend", "idle_suspend_seconds": seconds }),
+        };
+        Ok(self.exec_logged(env_id, query, entry).await? > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1589,6 +1619,9 @@ mod tests {
             Ok(true)
         }
         async fn set_idle_stop(&self, _: &str, _: i32) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn set_idle_suspend(&self, _: &str, _: i32) -> anyhow::Result<bool> {
             Ok(true)
         }
     }

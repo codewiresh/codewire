@@ -146,7 +146,7 @@ pub fn idle_stop_notice(name: &str, idle_stop_seconds: i32) -> String {
 
 /// `1h30m` as seconds: whole numbers, each unit at most once, in d, h, m, s
 /// order. `None` for anything else.
-fn duration_seconds(value: &str) -> Option<i32> {
+pub(crate) fn duration_seconds(value: &str) -> Option<i32> {
     let mut rest = value;
     let mut total: i64 = 0;
     let mut units = ['d', 'h', 'm', 's'].into_iter();

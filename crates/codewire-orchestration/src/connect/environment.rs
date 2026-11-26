@@ -47,8 +47,8 @@ use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
     get_environment_core, list_environments_core, protect_environment_core, require_org_member,
-    set_environment_idle_stop_core, start_environment_core, stop_environment_core,
-    unprotect_environment_core,
+    set_environment_idle_stop_core, set_environment_idle_suspend_core, start_environment_core,
+    stop_environment_core, unprotect_environment_core,
 };
 use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
@@ -62,6 +62,10 @@ use crate::connect::presets::proto_preset;
 
 mod create_body;
 use create_body::create_body;
+mod daemon_wire;
+#[cfg(test)]
+use daemon_wire::proto_environment_daemon_state;
+use daemon_wire::{proto_environment_daemon_repair, proto_environment_daemon_status};
 
 /// A watch or a log follow ended as this replica restarts (#4426): nothing is
 /// lost, and the next replica serves the same stream.
@@ -540,6 +544,28 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         })
     }
 
+    async fn set_environment_idle_suspend(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SetEnvironmentIdleSuspendRequest>,
+    ) -> ServiceResult<proto::SetEnvironmentIdleSuspendResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = set_environment_idle_suspend_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            request.idle_suspend_seconds,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::SetEnvironmentIdleSuspendResponse {
+            status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
     async fn set_environment_startup_script(
         &self,
         ctx: RequestContext,
@@ -989,61 +1015,6 @@ fn proto_environment_log(log: ApiEnvironmentLog) -> AppResult<proto::Environment
     })
 }
 
-fn proto_environment_daemon_repair(
-    repair: ApiEnvironmentDaemonRepair,
-) -> proto::RepairEnvironmentDaemonResponse {
-    proto::RepairEnvironmentDaemonResponse {
-        status: Some(proto_environment_daemon_status(repair.status)).into(),
-        replaced_pod_name: repair.replaced_pod_name,
-        ..Default::default()
-    }
-}
-
-fn proto_environment_daemon_status(
-    status: ApiEnvironmentDaemonStatus,
-) -> proto::EnvironmentDaemonStatus {
-    proto::EnvironmentDaemonStatus {
-        state: proto_environment_daemon_state(status.state).into(),
-        protocol_version: status.protocol_version,
-        minimum_protocol_version: status.minimum_protocol_version,
-        daemon_version: status.daemon_version,
-        capabilities: status.capabilities,
-        message: status.message,
-        diagnostics: status
-            .diagnostics
-            .into_iter()
-            .map(proto_environment_daemon_diagnostic)
-            .collect(),
-        pod_name: status.pod_name,
-        ..Default::default()
-    }
-}
-
-fn proto_environment_daemon_diagnostic(
-    diagnostic: ApiEnvironmentDaemonDiagnostic,
-) -> proto::EnvironmentDaemonDiagnostic {
-    proto::EnvironmentDaemonDiagnostic {
-        name: diagnostic.name,
-        healthy: diagnostic.healthy,
-        message: diagnostic.message,
-        ..Default::default()
-    }
-}
-
-fn proto_environment_daemon_state(
-    state: codewire_daemon_proto::daemon::v1::DaemonState,
-) -> proto::EnvironmentDaemonState {
-    use codewire_daemon_proto::daemon::v1::DaemonState as Internal;
-    match state {
-        Internal::Unspecified => proto::EnvironmentDaemonState::Unspecified,
-        Internal::Unsupported => proto::EnvironmentDaemonState::Unsupported,
-        Internal::Starting => proto::EnvironmentDaemonState::Starting,
-        Internal::Ready => proto::EnvironmentDaemonState::Ready,
-        Internal::Unhealthy => proto::EnvironmentDaemonState::Unhealthy,
-        Internal::UpgradeRequired => proto::EnvironmentDaemonState::UpgradeRequired,
-    }
-}
-
 fn proto_prepare_complete(
     response: PrepareResponse,
     org_id: &str,
@@ -1074,6 +1045,7 @@ fn proto_create_request(
         name: body.name,
         ttl_seconds: body.ttl_seconds,
         idle_stop_seconds: body.idle_stop_seconds,
+        idle_suspend_seconds: body.idle_suspend_seconds,
         isolation_tier: match body.isolation_tier.as_str() {
             "confidential" => proto::IsolationTier::Confidential,
             "" | "standard" => proto::IsolationTier::Standard,

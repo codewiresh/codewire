@@ -256,3 +256,40 @@ fn idle_stop_is_read_beside_the_spec_and_written_back() {
         .to_string();
     assert!(error.contains("idle_stop"), "{error}");
 }
+
+/// `idle_suspend` sits beside `idle_stop`, outside the spec (#5529).
+#[test]
+fn idle_suspend_is_read_beside_the_spec_and_written_back() {
+    let document = parse_project_yaml("idle_stop: 6h\nidle_suspend: 15m\n").unwrap();
+    assert_eq!(document.idle_suspend_seconds, Some(900));
+    assert_eq!(document.idle_stop_seconds, Some(21_600));
+    assert_eq!(document.spec, ProjectSpec::default());
+    assert!(
+        !String::from_utf8(document.canonical_json().unwrap())
+            .unwrap()
+            .contains("idle"),
+    );
+    let (yaml, parsed) = reparse(&document);
+    assert!(
+        yaml.ends_with("idle_stop: 6h\nidle_suspend: 15m\n"),
+        "{yaml}"
+    );
+    assert_eq!(parsed, document);
+
+    assert_eq!(
+        parse_project_yaml("idle_suspend: on\n")
+            .unwrap()
+            .idle_suspend_seconds,
+        Some(900)
+    );
+    assert_eq!(
+        parse_project_yaml("version: 1\n")
+            .unwrap()
+            .idle_suspend_seconds,
+        None
+    );
+    let error = parse_project_yaml("idle_suspend: 2m\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("idle_suspend"), "{error}");
+}
