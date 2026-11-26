@@ -121,9 +121,10 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
     credential's placeholder, so the start doesn't fail with
     `start_access_unavailable` (#6600; not yet observed).
   - Re-enrolling the same credential serves the next request, with no stop
-    or start in between. With another usable credential in the profile, the
-    authority replaces the running broker with one that serves both (#5615;
-    not yet observed).
+    or start in between: the authority replaces the running broker with one
+    that serves the reconnected credential too (#5615, #6614). Observed on
+    macOS on 2026-11-26 for a Claude sign-in beside a Codex sign-in, and for
+    a Claude sign-in alone with #6614.
 - **Observed:** `claude`, 2026-11-20, with #5541, #5512 and #5545 on a
   local tree: every state above passed, including the start with the sign-in
   still revoked. The start printed `Claude (sign-in) 'native-broker-claude'

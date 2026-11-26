@@ -76,6 +76,44 @@ pub(super) async fn selection_change<S: ProtectedStore + 'static>(
     )
 }
 
+/// The managed clients whose environment keys an ensure's projection
+/// reserves: those of the pinned profile revision's slots, whatever their
+/// credentials' state, and GitHub while it is granted. That is what the
+/// supervisor configures the VM's clients from. From the grants alone, a
+/// credential reconnected while the VM runs would change the projection, and
+/// the ensure that replaces the broker for it (#5615) would be refused
+/// (#6614). Without a local profile, the granted slots.
+pub(super) async fn reserving_clients<S: ProtectedStore + 'static>(
+    authority: &Arc<LocalCredentialAuthority<S>>,
+    request: &BrokerEnsureRequest,
+    granted: &BTreeSet<String>,
+) -> Result<codewire_access::ManagedCredentialClients, Status> {
+    let mut slots = match request.local_profile.clone() {
+        Some(binding) => {
+            let authority = Arc::clone(authority);
+            run_blocking(move || {
+                authority
+                    .get_profile_revision(&binding.profile_id, binding.profile_revision)
+                    .map(|revision| {
+                        revision
+                            .profile
+                            .entries
+                            .into_keys()
+                            .map(|slot| slot.to_string())
+                            .collect::<BTreeSet<_>>()
+                    })
+            })
+            .await?
+        }
+        None => granted.clone(),
+    };
+    if granted.contains("github") {
+        slots.insert("github".to_owned());
+    }
+    codewire_access::ManagedCredentialClients::from_profile_slots(slots.iter().map(String::as_str))
+        .map_err(|_| Status::failed_precondition("invalid managed client selection"))
+}
+
 /// Whether `asked` only adds to `running`, and adds only providers the
 /// pinned profile revision names (`named`). A set that shrinks or swaps a
 /// provider is no growth: a revoked credential is refused at its lease, and

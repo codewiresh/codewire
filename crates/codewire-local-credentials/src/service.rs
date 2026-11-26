@@ -602,10 +602,8 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 Ok((providers, has_grants, selected_slots, false))
             })
             .await?;
-        let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
-            selected_slots.iter().map(String::as_str),
-        )
-        .map_err(|_| Status::failed_precondition("invalid managed client selection"))?;
+        let clients =
+            broker_selection::reserving_clients(&self.authority, &request, &selected_slots).await?;
         let mut reserved_keys: BTreeSet<String> = clients
             .reserved_environment_keys()
             .into_iter()

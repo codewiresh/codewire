@@ -56,6 +56,7 @@ struct Withheld {
     authority: Arc<LocalCredentialAuthority<EphemeralProtectedStore>>,
     binding: EnvironmentAccessBinding,
     config: LocalBrokerProcessConfig,
+    anthropic: CredentialId,
     ssh: CredentialId,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     launches: Arc<std::sync::Mutex<Vec<LocalBrokerProcessConfig>>>,
@@ -99,7 +100,7 @@ impl Withheld {
                 AccessProfileName::parse("work").unwrap(),
                 BTreeMap::from([
                     (CapabilitySlot::openai(), openai),
-                    (CapabilitySlot::anthropic(), anthropic),
+                    (CapabilitySlot::anthropic(), anthropic.clone()),
                     (CapabilitySlot::parse("ssh").unwrap(), ssh.clone()),
                 ]),
             )
@@ -158,6 +159,7 @@ impl Withheld {
             authority,
             binding,
             config,
+            anthropic,
             ssh,
             stopped,
             launches,
@@ -230,6 +232,61 @@ async fn a_reconnected_credential_replaces_the_running_broker_with_one_that_serv
                 .iter()
                 .all(|config| config.http_providers == set(&[OpenAiApiKey, AnthropicApiKey])),
         "{told:?}"
+    );
+    withheld.end().await;
+}
+
+/// #6614: a VM with a launch projection starts a broker even while every
+/// provider is withheld, and the projection's reserved keys are part of what
+/// an ensure compares. A credential reconnected since the start must not
+/// change them: the next ensure replaces the running broker with one that
+/// serves the reconnected provider, as without a projection.
+#[tokio::test(start_paused = true)]
+async fn a_reconnected_credential_replaces_the_broker_of_a_projected_environment() {
+    let directory = tempfile::tempdir().unwrap();
+    let withheld = Withheld::new(directory.path(), &[OpenAiApiKey]).await;
+    let id = withheld.config.environment_id.clone();
+    withheld.manager.stop(&id, Some(7)).await.unwrap();
+    withheld
+        .authority
+        .revoke_credential(&withheld.anthropic)
+        .unwrap();
+    let request = || BrokerEnsureRequest {
+        projection: Some(crate::LocalEnvironmentProjectionBinding {
+            selection: crate::LocalLaunchSecretSelection {
+                user: true,
+                ..Default::default()
+            },
+            selection_sha256: [2; 32],
+        }),
+        ..withheld.request()
+    };
+    // The start, with Anthropic withheld: its broker serves OpenAI alone.
+    let started = withheld.manager.ensure(request()).await.unwrap();
+    assert!(!started.running);
+    assert_eq!(
+        withheld.launches().last().unwrap().http_providers,
+        set(&[OpenAiApiKey])
+    );
+
+    let current = withheld
+        .authority
+        .get_credential(&withheld.anthropic)
+        .unwrap();
+    withheld
+        .authority
+        .rotate_credential_material(
+            &withheld.anthropic,
+            current.metadata.revocation_generation,
+            ProtectedValue::from_slice(b"synthetic-reconnected").unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+    withheld.manager.ensure(request()).await.unwrap();
+    assert_eq!(
+        withheld.launches().last().unwrap().http_providers,
+        set(&[OpenAiApiKey, AnthropicApiKey])
     );
     withheld.end().await;
 }
