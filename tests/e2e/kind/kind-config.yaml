@@ -34,8 +34,9 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             # ingress-ready: schedules the vendored ingress-nginx controller;
-            # the sandbox pool takes workspaces and the /dev/kvm plugin.
-            node-labels: "ingress-ready=true,codewire.sh/node-pool=sandbox"
+            # the sandbox pool takes workspaces and the /dev/kvm plugin;
+            # sandbox-runtime schedules cw-egress (#6387).
+            node-labels: "ingress-ready=true,codewire.sh/node-pool=sandbox,node.codewire.sh/purpose=sandbox-runtime"
     extraPortMappings:
       - containerPort: 80
         hostPort: 8090

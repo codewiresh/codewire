@@ -58,16 +58,25 @@ image=codewire-services
 crate="codewire-${SERVICE}"
 bin="$crate"
 destination=/
+workload_kind=deployment
+container_name="$SERVICE"
 features=""
 fixture=""
 fixture_features=""
 toolchain=codewire-rust-base
 rust_target=""
 case "$SERVICE" in
-  idp | billing | coordinator | derp) ;;
+  idp | billing | derp) ;;
+  coordinator) features="kind-e2e" ;;
   mesh)
     image=codewire-mesh
     destination=/usr/local/bin/
+    ;;
+  egress)
+    image=codewire-egress
+    crate=codewire-egress-node
+    bin=cw-egress
+    workload_kind=daemonset
     ;;
   orchestration) features="kind-e2e" ;;
   credential-service)
@@ -93,7 +102,7 @@ case "$SERVICE" in
     toolchain=codewire-cw-toolchain
     rust_target=x86_64-unknown-linux-musl
     ;;
-  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|derp|dashboard|daemon>" ;;
+  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|egress|derp|dashboard|daemon>" ;;
 esac
 deployment="codewire-${SERVICE}"
 if [ "$SERVICE" = daemon ]; then
@@ -101,6 +110,7 @@ if [ "$SERVICE" = daemon ]; then
   # Loading a new tag alone would leave it using the original daemon image.
   deployment=codewire-orchestration
 fi
+workload="${workload_kind}/${deployment}"
 IMAGE="${image}:e2e"
 STATE="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}"
 if [ "$image" != codewire-services ]; then
@@ -158,7 +168,7 @@ record_deploy() {
   local identity
   [ -n "$digest" ] && [ "$(source_digest)" = "$digest" ] || return 1
   identity="$(running_identity)" && [ -n "$identity" ] || return 1
-  kube annotate --overwrite "deployment/${deployment}" "${RECORD_KEY}=${digest} ${identity}" >/dev/null
+  kube annotate --overwrite "$workload" "${RECORD_KEY}=${digest} ${identity}" >/dev/null
 }
 
 # The admission objects the restarted Deployment's writes must pass (#3833):
@@ -216,7 +226,7 @@ sync_admission() {
     log "deleting ${name}, which this tree no longer renders"
     cluster delete "$name" --ignore-not-found >/dev/null || die "cannot delete ${name}"
   done <<<"$live"
-  kube annotate --overwrite "deployment/${deployment}" \
+  kube annotate --overwrite "$workload" \
     "${ADMISSION_KEY}=$(printf '%s' "$selected" | sha256sum | cut -c1-64)" >/dev/null
   count=0
   [ -z "$wanted" ] || count="$(wc -l <<<"$wanted")"
@@ -226,9 +236,9 @@ sync_admission() {
 deployment_selector() {
   local selector
   # shellcheck disable=SC2016 # a Go template, expanded by kubectl
-  selector="$(kube get "deployment/${deployment}" \
+  selector="$(kube get "$workload" \
     -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')" || return $?
-  [ -n "$selector" ] || die "deployment/${deployment} has no label selector"
+  [ -n "$selector" ] || die "${workload} has no label selector"
   printf '%s\n' "${selector%,}"
 }
 
@@ -240,7 +250,7 @@ if [ "${KIND_DEPLOY_RECORD_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 if [ "${KIND_DEPLOY_SKIP_CURRENT:-0}" = 1 ] && [ -n "$digest" ]; then
-  recorded="$(kube get "deployment/${deployment}" -o "go-template={{index .metadata.annotations \"${RECORD_KEY}\"}}" 2>/dev/null || true)"
+  recorded="$(kube get "$workload" -o "go-template={{index .metadata.annotations \"${RECORD_KEY}\"}}" 2>/dev/null || true)"
   identity="$(running_identity 2>/dev/null || true)"
   if [ -n "$identity" ] && [ "$recorded" = "${digest} ${identity}" ]; then
     log "${SERVICE} already runs this tree's source (${digest:0:12}); not rebuilding"
@@ -288,7 +298,7 @@ for binary in "$STATE/bin/"*; do
   fi
   case "${binary##*/}" in
     codewire-idp|codewire-billing|codewire-coordinator|codewire-orchestration|\
-    codewire-credential-service|codewire-mesh|codewire-derp|codewire-dashboard-web|cw) ;;
+    codewire-credential-service|codewire-mesh|codewire-derp|codewire-dashboard-web|cw|cw-egress) ;;
     *) die 'dev binary state contains an unknown binary' ;;
   esac
 done
@@ -382,9 +392,11 @@ sync_admission
 
 unrecorded() { log "${SERVICE}'s source or running image changed meanwhile; this deploy is not recorded"; }
 if [ "$SERVICE" = derp ]; then
-  # The relay, its routes and the coordinator's DERP map, as a new cluster
-  # gets them (common.sh deploy_overlay). Applying is idempotent; the image is
-  # set below like every other service's.
+  # The relay, its TLS certificate, its routes and the coordinator's DERP map,
+  # as a new cluster gets them (common.sh deploy_overlay). Applying is
+  # idempotent; the image is set below like every other service's.
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml" >/dev/null
+  kube wait --for=condition=Ready --timeout=120s certificate/codewire-kind-derp-tls >/dev/null
   kube apply -f "$ROOT/tests/e2e/kind/tailnet.yaml" >/dev/null
   configure_kind_coordinator_derp "$NAMESPACE" --context "kind-${KIND_CLUSTER_NAME}"
 fi
@@ -400,23 +412,23 @@ selector="$(deployment_selector)"
 previous="$(kube get pods -l "$selector" -o name)"
 if [ "$KIND_PROFILE" = 1 ]; then
   if [ "$SERVICE" = daemon ]; then
-    current_image="$(kube get "deployment/${deployment}" \
+    current_image="$(kube get "$workload" \
       -o 'jsonpath={.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_DAEMON_IMAGE")].value}')"
-    kube set env "deployment/${deployment}" --containers=orchestration "SANDBOX_DAEMON_IMAGE=$IMAGE" >/dev/null
+    kube set env "$workload" --containers=orchestration "SANDBOX_DAEMON_IMAGE=$IMAGE" >/dev/null
   else
-    current_image="$(kube get "deployment/${deployment}" \
-      -o "jsonpath={.spec.template.spec.containers[?(@.name==\"${SERVICE}\")].image}")"
-    kube set image "deployment/${deployment}" "${SERVICE}=$IMAGE" >/dev/null
+    current_image="$(kube get "$workload" \
+      -o "jsonpath={.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}")"
+    kube set image "$workload" "${container_name}=$IMAGE" >/dev/null
   fi
   # A changed image/env already starts one rollout. An identical repeated
   # deployment still needs a restart before waiting for the captured old Pods.
   if [ "$current_image" = "$IMAGE" ]; then
-    kube rollout restart "deployment/${deployment}" >/dev/null
+    kube rollout restart "$workload" >/dev/null
   fi
 else
-  kube rollout restart "deployment/${deployment}" >/dev/null
+  kube rollout restart "$workload" >/dev/null
 fi
-kube rollout status "deployment/${deployment}" --timeout=180s
+kube rollout status "$workload" --timeout=180s
 if [ -n "$previous" ]; then
   # shellcheck disable=SC2086 # one argument for each captured Pod
   kube wait --for=delete $previous --timeout=120s >/dev/null

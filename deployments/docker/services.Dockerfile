@@ -107,7 +107,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     case "$CODEWIRE_ORCHESTRATION_FEATURES" in \
       '') ;; \
       kind-e2e) \
-        feature_args="$feature_args codewire-orchestration/kind-e2e codewire-credential-service/kind-e2e" ;; \
+        feature_args="$feature_args codewire-orchestration/kind-e2e codewire-credential-service/kind-e2e codewire-coordinator/kind-e2e" ;; \
       *) \
         feature_args="$feature_args codewire-orchestration/$CODEWIRE_ORCHESTRATION_FEATURES" ;; \
     esac && \

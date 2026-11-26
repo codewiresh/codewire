@@ -612,7 +612,7 @@ def admitted_reuse(root: Path, profiles, value: dict, binding: dict, inventory) 
     require(value["artifacts"]["source_head"] == binding["source_head"]
             and value["artifacts"]["source_tree"] == binding["source_tree"],
             "saved Kind base uses another source; use a fresh profile")
-    manifest, _ = profiles.artifact_manifest(value)
+    manifest, _ = profiles.artifact_manifest(value, allow_legacy=False)
     require(set(manifest["files"]) == required_inventory(inventory), "saved artifact inventory differs")
     destination = profiles.manifest_path(value).parent
     require(decode(read_bytes(destination / PROVENANCE)) == binding,

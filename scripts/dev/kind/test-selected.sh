@@ -34,9 +34,9 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 # takes long enough that every orchestration or CLI change should not pay
 # for it. warm-pools needs the C0 agent-sandbox controller and the canonical
 # image (make kind-runtime-images).
-ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance integrated cw-runtime cw-managed-agents warm-pools)
+ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance integrated hosted-egress cw-runtime cw-managed-agents warm-pools)
 # deploy-service.sh services, in deploy order.
-SERVICES=(idp orchestration credential-service billing coordinator mesh derp dashboard daemon)
+SERVICES=(idp orchestration credential-service billing coordinator mesh egress derp dashboard daemon)
 # The credentials suite's stages, as credential-journey.sh orders them. Naming
 # some (KIND_CREDENTIAL_STAGES) reruns only those after the suite's setup:
 # an iteration aid that never makes a green credentials suite (#2890).
@@ -117,23 +117,19 @@ map_token() {
       full "$token" 'hakari feature unification rebuilds every service' ;;
     contracts_proto) full "$token" 'protobuf contracts change every service and client' ;;
     rust_pkg_codewire_local_vmm | transport_pkg_codewire_local_vmm | \
-      transport_pkg_codewire_vmm_guest_probe | rust_pkg_codewire_egress_broker | \
-      rust_pkg_codewire_egress_policy | rust_pkg_codewire_network_session | \
-      rust_pkg_codewire_confinement | rust_pkg_codewire_egress_worker)
+      transport_pkg_codewire_vmm_guest_probe | rust_pkg_codewire_network_session | \
+      rust_pkg_codewire_confinement)
       unobserved "$token" 'local microVM runtime; Kind runs none' ;;
     # The free-block scrub: local snapshots run it in the microVM runtime, hosted
     # Block clearing in a clearing Sandbox on a snapshot class Kind doesn't have.
     rust_pkg_codewire_ext4_scrub)
       unobserved "$token" 'local microVM snapshots and hosted Block clearing; observed on Dev' ;;
-    # Nothing links the TLS front door yet (#3999), so nothing runs it in Kind.
-    rust_pkg_codewire_egress_front_door)
-      unobserved "$token" 'no binary uses it yet' ;;
-    # Nor its credential route back end (#3999).
-    rust_pkg_codewire_egress_front_door_bridge)
-      unobserved "$token" 'no binary uses it yet' ;;
-    # Nor cw-egress, until its binary and manifests exist (#4000).
-    rust_pkg_codewire_egress_node)
-      unobserved "$token" 'no binary uses it yet' ;;
+    # cw-egress and its broker/policy/worker/front-door crates run on Kind
+    # through DaemonSet/codewire-egress (#6387).
+    rust_pkg_codewire_egress_node | rust_pkg_codewire_egress_broker | \
+      rust_pkg_codewire_egress_policy | rust_pkg_codewire_egress_worker | \
+      rust_pkg_codewire_egress_front_door | rust_pkg_codewire_egress_front_door_bridge)
+      want "$token" hosted-egress ;;
     # Kind deploys the /dev/kvm device plugin, but no retained suite asks for
     # codewire.sh/kvm yet (#5602).
     rust_pkg_codewire_kvm_device_plugin)

@@ -2188,7 +2188,7 @@ jobs:
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Build exact Kind service images
-        run: scripts/ci/images/build-kind-images.sh dashboard services mesh
+        run: scripts/ci/images/build-kind-images.sh dashboard services mesh egress
 
       - name: Clean compiler cache credentials
         if: ${{ always() }}

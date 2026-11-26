@@ -48,7 +48,11 @@ NODE_PORTS = {"http": 80, "tls": 443, "orchestration": 30084,
               "coordinator": 30090, "temporal": 30733, "postgres": 30432}
 DEFAULT_PORTS = {"http": 8090, "tls": 10443, "orchestration": 8084,
                  "coordinator": 18092, "temporal": 7233, "postgres": 25432}
-IMAGE_NAMES = ("dashboard", "services", "mesh", "daemon")
+IMAGE_NAMES = ("dashboard", "services", "mesh", "egress", "daemon")
+# Profiles saved before egress joined the Kind product image set carry four
+# product images; reading them stays valid for listing, port-lease scans and
+# teardown while new admissions require the current five-image set.
+LEGACY_IMAGE_NAMES = ("dashboard", "services", "mesh", "daemon")
 PROFILE_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce", "created_at",
                 "lifecycle", "ports", "origins", "node", "artifacts"}
 ARTIFACT_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce",
@@ -491,8 +495,9 @@ class Profiles:
             self.validate_images(artifacts["product_images"])
 
     @staticmethod
-    def validate_images(images: object) -> None:
-        require(isinstance(images, dict) and set(images) == set(IMAGE_NAMES), "invalid product image set")
+    def validate_images(images: object, *, allow_legacy: bool = True) -> None:
+        allowed = (set(IMAGE_NAMES), set(LEGACY_IMAGE_NAMES)) if allow_legacy else (set(IMAGE_NAMES),)
+        require(isinstance(images, dict) and set(images) in allowed, "invalid product image set")
         require(all(isinstance(value, str) and IMAGE_ID.fullmatch(value) is not None
                     for value in images.values()), "invalid product image ID")
 
@@ -752,7 +757,7 @@ class Profiles:
                      if artifacts is not None else "unsealed")
         return self.path(value["cluster_name"]) / "artifacts" / qualified / "manifest.json"
 
-    def artifact_manifest(self, value: dict, path: Path | None = None) -> tuple[dict, bytes]:
+    def artifact_manifest(self, value: dict, path: Path | None = None, *, allow_legacy: bool = True) -> tuple[dict, bytes]:
         path = path or self.manifest_path(value)
         manifest, raw = read_json(path, modes=(0o400,))
         require(set(manifest) == ARTIFACT_KEYS and manifest["schema"] == ARTIFACT_SCHEMA,
@@ -762,7 +767,7 @@ class Profiles:
         require(isinstance(manifest["source_head"], str) and HEX40.fullmatch(manifest["source_head"])
                 and isinstance(manifest["source_tree"], str) and HEX40.fullmatch(manifest["source_tree"]),
                 "invalid artifact source identity")
-        self.validate_images(manifest["product_images"])
+        self.validate_images(manifest["product_images"], allow_legacy=allow_legacy)
         expected = self.path(value["cluster_name"]) / "artifacts" / (
             f"{manifest['source_head']}-{manifest['source_tree']}") / "manifest.json"
         require(path == expected, "artifact descriptor is outside its source-qualified profile directory")
@@ -956,7 +961,7 @@ class Profiles:
             value = self.load(cluster)
             require(nonce == value["ownership_nonce"] and value["lifecycle"] != "deleted",
                     "artifact profile ownership/lifecycle mismatch")
-            manifest, raw = self.artifact_manifest(value, manifest_path.absolute())
+            manifest, raw = self.artifact_manifest(value, manifest_path.absolute(), allow_legacy=False)
             require(self.docker.image_ids(cluster) == manifest["product_images"],
                     "sealed artifact image IDs differ from this profile's admitted product images")
             value["artifacts"] = {key: manifest[key] for key in ("source_head", "source_tree", "product_images")}

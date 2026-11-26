@@ -19,9 +19,10 @@ resources:
   # The `standard` profile's class, without the Kata classes Kind cannot run.
   - ../../runtime-profiles/standard
 
-# The /dev/kvm device plugin (#5602).
+# The /dev/kvm device plugin (#5602) and cw-egress (#6387).
 components:
   - ../../kvm-device-plugin
+  - ../../egress
 
 # The non-promotable Kind credential fixture provides this fixed synthetic App
 # itself. Production and Dev continue to receive only their deployment-owned
@@ -51,6 +52,42 @@ patches:
     target:
       kind: DaemonSet
       name: codewire-kvm-device-plugin
+  # Run the locally built cw-egress image and reach orchestration in default.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: codewire-egress
+      spec:
+        template:
+          spec:
+            dnsConfig:
+              nameservers:
+                - 1.1.1.1
+                - 8.8.8.8
+            containers:
+              - name: egress
+                image: codewire-egress:local
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: CODEWIRE_EGRESS_ORCHESTRATION_URL
+                    value: https://codewire-orchestration.default.svc.cluster.local:8088
+    target:
+      kind: DaemonSet
+      name: codewire-egress
+  - patch: |-
+      - op: replace
+        path: /spec/egress/1/to
+        value:
+          - ipBlock:
+              cidr: 1.1.1.1/32
+          - ipBlock:
+              cidr: 8.8.8.8/32
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-egress
   - path: credential-service-origin-patch.yaml
     target:
       kind: Deployment

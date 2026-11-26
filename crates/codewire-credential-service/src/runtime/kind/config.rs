@@ -21,6 +21,8 @@ pub(super) struct Config {
     pub(super) listeners: Listeners,
     pub(super) runtime_directory: PathBuf,
     pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
+    pub(super) hosted_placeholders: bool,
+    pub(super) sandbox_namespace: Option<String>,
     /// The browser origin of the harness ingress, `http://127.0.0.1:<port>`.
     pub(super) public_origin: String,
 }
@@ -83,6 +85,15 @@ impl Config {
         )
         .map_err(|_| RuntimeError::Tls)?;
         let public_origin = kind_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
+        let hosted_placeholders =
+            super::super::config::hosted_placeholders_config(&|name| std::env::var_os(name))?;
+        let sandbox_namespace =
+            super::super::config::sandbox_namespace(&|name| std::env::var_os(name))?;
+        if hosted_placeholders
+            && super::super::config::interception_namespace(&sandbox_namespace).is_none()
+        {
+            return Err(RuntimeError::Configuration("CREDENTIAL_SANDBOX_NAMESPACE"));
+        }
         Ok(Self {
             database_url,
             listeners: Listeners {
@@ -98,6 +109,8 @@ impl Config {
             oauth_keepalive: super::super::config::oauth_keepalive_config(&|name| {
                 std::env::var_os(name)
             })?,
+            hosted_placeholders,
+            sandbox_namespace,
             public_origin,
         })
     }

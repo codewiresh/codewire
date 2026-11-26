@@ -2175,6 +2175,10 @@ PY
     fail 'sealed ingress render does not contain the local controller once'
   [ "$(grep -Fc "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" "$rendered")" -eq 2 ] ||
     fail 'sealed ingress render does not contain the local certgen twice'
+  [ "$(grep -Fc 'gateway.envoyproxy.io/owning-gateway-name: codewire-kind-public' "$rendered")" -eq 1 ] ||
+    fail 'sealed ingress render does not label ingress-nginx-controller with owning-gateway-name'
+  [ "$(grep -Fc 'gateway.envoyproxy.io/owning-gateway-namespace: ingress-nginx' "$rendered")" -eq 1 ] ||
+    fail 'sealed ingress render does not label ingress-nginx-controller with owning-gateway-namespace'
   [ "$(grep -Fc 'imagePullPolicy: Never' "$rendered")" -eq 3 ] ||
     fail 'sealed ingress render does not prohibit registry pulls'
   if grep -Fq "$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/" "$rendered"; then
@@ -2195,6 +2199,17 @@ PY
   fi
   [ "$(grep -Fc "$KIND_DIND_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not contain the local DinD alias once'
+  mkdir -p "$FIXTURE/egress-render"
+  egress_rendered="$(RUN_DIR="$FIXTURE/egress-render" KIND_EGRESS_DNS_RESOLVER=172.21.0.1 render_kind_overlay_manifest)"
+  [ "$(grep -Fc '        - 172.21.0.1' "$egress_rendered")" -eq 1 ] ||
+    fail 'Kind overlay did not substitute cw-egress nameserver with KIND_EGRESS_DNS_RESOLVER'
+  [ "$(grep -Fc '        cidr: 172.21.0.1/32' "$egress_rendered")" -eq 1 ] ||
+    fail 'Kind overlay did not substitute cw-egress NetworkPolicy DNS CIDR with KIND_EGRESS_DNS_RESOLVER'
+  ! grep -Fq '192.0.2.53' "$egress_rendered" ||
+    fail 'Kind overlay retained the 192.0.2.53 placeholder after DNS substitution'
+  if RUN_DIR="$FIXTURE/egress-render" KIND_EGRESS_DNS_RESOLVER='not-an-ip' render_kind_overlay_manifest >/dev/null 2>&1; then
+    fail 'Kind overlay accepted a non-IPv4 KIND_EGRESS_DNS_RESOLVER'
+  fi
   [ "$(grep -Fc 'SANDBOX_IMAGE_CACHE: disabled' "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not disable the public-image cache'
   # The e2e overlay runs no pool (the warm-pools suite configures its own),
@@ -3587,7 +3602,7 @@ RECORDER
   : >"$CALLS"
   log() { record "log:$*"; }
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci record_retained_cluster_sources
-  printf 'record-only=1 %s\n' idp orchestration credential-service billing coordinator mesh derp dashboard daemon \
+  printf 'record-only=1 %s\n' idp orchestration credential-service billing coordinator mesh egress derp dashboard daemon \
     | cmp -s - <(grep '^record-only=' "$CALLS") || fail 'a new retained cluster did not record every service'
   grep -Fxq 'log:could not record the source of mesh; make kind-test will rebuild it' "$CALLS" ||
     fail 'a failed source record was not logged'

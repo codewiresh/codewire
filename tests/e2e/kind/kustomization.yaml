@@ -27,13 +27,16 @@ resources:
   - coordinator-nodeport.yaml
   # Kind's own DERP relay and the plain-HTTP coordinator route (#3836).
   - tailnet.yaml
+  # Kind's hosted-egress gateway stand-in and Kata stand-in RuntimeClass (#6387).
+  - egress.yaml
   # The `standard` profile's class, without the Kata classes Kind cannot run
   # (#5602).
   - ../../../deployments/k8s/runtime-profiles/standard
 
-# The /dev/kvm device plugin the `standard` profile's Pods take (#5602).
+# The /dev/kvm device plugin (#5602) and cw-egress (#6387).
 components:
   - ../../../deployments/k8s/kvm-device-plugin
+  - ../../../deployments/k8s/egress
 
 patches:
   # Kind's one node is labelled as the sandbox pool, not as a runtime node, and
@@ -52,6 +55,50 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
+  # cw-egress runs on the sandbox-runtime Kind node from the local image built
+  # by build-kind-images.sh (#6387). common.sh replaces 192.0.2.53 with the
+  # Kind Docker network's IPv4 gateway at render time.
+  - target:
+      kind: DaemonSet
+      name: codewire-egress
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: codewire-egress
+      spec:
+        template:
+          spec:
+            containers:
+              - name: egress
+                image: codewire-egress:e2e
+                imagePullPolicy: Never
+                env:
+                  - name: CODEWIRE_EGRESS_ORCHESTRATION_URL
+                    value: https://codewire-orchestration.codewire-e2e.svc.cluster.local:8088
+  # Broker settings for Kind's gateway stand-in (egress.yaml, #6387). The
+  # switch ships off in the checked-in overlay; toggling it on puts Kind
+  # sandboxes through cw-egress without any extra manifest edit.
+  - target:
+      kind: ConfigMap
+      name: codewire-hosted-egress
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: codewire-hosted-egress
+      data:
+        CODEWIRE_HOSTED_EGRESS_ENABLED: "false"
+        CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY: "codewire.local/codewire/daemon"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE: "ingress-nginx"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME: "codewire-kind-public"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE: "ingress-nginx"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT: "443"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE: "codewire-kind-gateway"
+        CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP: "10.96.0.243"
+        CODEWIRE_HOSTED_EGRESS_FENCE_REVISION: "1"
+        CODEWIRE_CLUSTER_DNS_IP: "10.96.0.10"
+        CODEWIRE_STANDARD_IMAGE_DISK_REFERENCE: ""
   # The registries the image cache may hold images from: the public
   # workspace mirror and Docker Official Images (docs/CONFIGURATION.md).
   - target:
@@ -82,6 +129,11 @@ patches:
               - name: credential-service
                 image: codewire-services:e2e
                 imagePullPolicy: Never
+                env:
+                  # Wire hosted interception CAs against the Kind sandbox namespace
+                  # in both synthetic fixture and real modes (#6387).
+                  - name: CREDENTIAL_SANDBOX_NAMESPACE
+                    value: dev-sandboxes
   - target:
       kind: Deployment
       name: codewire-dashboard
@@ -480,3 +532,31 @@ transformers:
     target:
       kind: ServiceAccount|NetworkPolicy
       name: cw-image-cache
+  # Keep Kind's hosted-egress gateway stand-in and its read grant in
+  # ingress-nginx, with orchestration's subject in codewire-e2e (#6387).
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-kind-gateway-ingress-nginx
+    patch: |-
+      - op: replace
+        path: /metadata/namespace
+        value: ingress-nginx
+    target:
+      kind: Service|Role|RoleBinding
+      name: codewire-(kind-gateway|orchestration-gateway-read)
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-kind-gateway-role-subject
+    patch: |-
+      - op: replace
+        path: /subjects/0/namespace
+        value: codewire-e2e
+    target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      name: codewire-orchestration-gateway-read

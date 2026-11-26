@@ -31,10 +31,13 @@ kind_derp_node_address() {
 # namespace, then kubectl arguments (a context). Changing the environment rolls
 # the coordinator; an unchanged one leaves it running.
 configure_kind_coordinator_derp() {
-  local namespace="$1" address
+  local namespace="$1" address broker_host
   shift
   address="$(kind_derp_node_address "$@")" || return $?
+  broker_host="codewire-derp.${namespace}.svc.cluster.local"
   kubectl "$@" -n "$namespace" set env deployment/codewire-coordinator --containers=coordinator \
-    "DERP_HOST=${address}" "DERP_PORT=${KIND_DERP_PORT}" DERP_INSECURE=true >/dev/null || return $?
-  printf '[kind-tailnet] coordinator advertises DERP relay %s:%s\n' "$address" "$KIND_DERP_PORT" >&2
+    "DERP_HOST=${address}" "DERP_PORT=${KIND_DERP_PORT}" DERP_INSECURE=true \
+    "KIND_DERP_BROKER_HOST=${broker_host}" >/dev/null || return $?
+  printf '[kind-tailnet] coordinator advertises DERP relay %s:%s (broker TLS %s)\n' \
+    "$address" "$KIND_DERP_PORT" "$broker_host" >&2
 }

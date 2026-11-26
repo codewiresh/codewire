@@ -6,6 +6,12 @@ rust-version.workspace = true
 # Server-side crate: AGPL like the other backend services.
 license = "AGPL-3.0-only"
 
+[features]
+# Enables KIND_DERP_BROKER_HOST so Kind can advertise a verified-TLS in-cluster
+# DERP node beside the host-facing ingress node (#6387). Never enabled in
+# promotable images.
+kind-e2e = []
+
 [dependencies]
 anyhow = { workspace = true }
 async-nats = { workspace = true }

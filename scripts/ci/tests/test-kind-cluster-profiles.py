@@ -1160,9 +1160,35 @@ class ProfileTests(unittest.TestCase):
                     "KIND_PROFILE_ARTIFACT_ROOT": str(self.path() / "artifacts")}
         for key, value in expected.items():
             self.assertEqual(fields[key], value)
-        self.assertEqual(len(fields), 43)
+        self.assertEqual(len(fields), 44)
+        self.assertIn("KIND_PROFILE_EGRESS_IMAGE_ID", fields)
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]+", key) for key in fields))
         self.assertTrue(all(isinstance(value, str) and "\0" not in value for value in fields.values()))
+
+    def test_legacy_four_image_profile_loads_while_new_admission_requires_egress(self):
+        legacy = self.profiles.ensure("alpha")
+        path, manifest = self.seal(legacy)
+        manifest["product_images"] = {name: manifest["product_images"][name] for name in profile.LEGACY_IMAGE_NAMES}
+        raw = json.dumps(manifest).encode()
+        path.chmod(0o600)
+        path.write_bytes(raw)
+        path.chmod(0o400)
+        with self.assertRaises(profile.ProfileError):
+            self.profiles.record_artifacts("alpha", legacy["ownership_nonce"], path)
+        legacy["artifacts"] = {
+            "source_head": manifest["source_head"],
+            "source_tree": manifest["source_tree"],
+            "product_images": manifest["product_images"],
+            "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        self.save_unvalidated(legacy, "alpha")
+        # Listing, allocating another profile, loading env and verifying saved
+        # bytes still work with an older four-image profile on disk.
+        self.assertEqual(self.profiles.load("alpha")["artifacts"]["product_images"], manifest["product_images"])
+        self.assertEqual(self.profiles.env("alpha")["KIND_PROFILE_EGRESS_IMAGE_ID"], "")
+        self.assertEqual(self.profiles.verify_artifacts("alpha")["cluster_name"], "alpha")
+        other = self.profiles.ensure("beta")
+        self.assertEqual(other["cluster_name"], "beta")
 
     def test_renderer_changes_only_six_host_mappings_in_one_pass(self):
         value = self.profiles.ensure("alpha")

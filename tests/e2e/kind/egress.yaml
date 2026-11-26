@@ -1,0 +1,69 @@
+# Kind's hosted-egress gateway stand-in and Kata stand-in RuntimeClass (#6387).
+#
+# In Dev and Production, broker-mode Sandboxes dial the pinned ClusterIP of the
+# Envoy Gateway proxy Service for the coordinator/API edge, and orchestration's
+# gateway_check verifies that Service holds that ClusterIP. Kind runs
+# ingress-nginx instead, so this Service pins 10.96.0.243 in front of the live
+# ingress-nginx-controller Pods (real endpoints, never empty).
+# common.sh render_ingress_manifest adds the matching Envoy owning-gateway
+# labels to ingress-nginx-controller's Pod template so broker-mode
+# NetworkPolicies and admission policies apply unchanged.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-kind-gateway
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: egress
+spec:
+  type: ClusterIP
+  clusterIP: 10.96.0.243
+  selector:
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: ingress-nginx
+    app.kubernetes.io/name: ingress-nginx
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: https
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-gateway-read
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["codewire-kind-gateway"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-gateway-read
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-gateway-read
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: codewire-e2e
+---
+# Kata stand-in on Kind: uses runc so broker-mode commodity templates (including
+# hosted-egress-tun) can be exercised locally without Kata hardware (#6387).
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: commodity
+handler: runc

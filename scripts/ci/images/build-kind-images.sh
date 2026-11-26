@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build Kind product images once through the canonical Bake graph and load the
 # exact results into the job-local Docker store. With no arguments it builds all
-# four (the local gate). CI names its family: the three service images on one
-# worker, the daemon image (the static CW producer) on another.
+# five (the local gate). CI names its family: the service, dashboard, mesh and
+# egress images on one worker, the daemon image (the static CW producer) on
+# another.
 #
-# usage: build-kind-images.sh [dashboard] [services] [mesh] [daemon]
+# usage: build-kind-images.sh [dashboard] [services] [mesh] [egress] [daemon]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -24,7 +25,7 @@ esac
 families=()
 for family in "$@"; do
   case "$family" in
-    dashboard|services|mesh|daemon) ;;
+    dashboard|services|mesh|egress|daemon) ;;
     *) printf 'unknown Kind image family: %s\n' "$family" >&2; exit 2 ;;
   esac
   case " ${families[*]} " in
@@ -33,7 +34,7 @@ for family in "$@"; do
   families+=("$family")
 done
 if [ "${#families[@]}" -eq 0 ]; then
-  families=(dashboard services mesh daemon)
+  families=(dashboard services mesh egress daemon)
 fi
 family_targets=("${families[@]/%/-ci}")
 if [ "$#" -eq 0 ]; then

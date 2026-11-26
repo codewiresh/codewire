@@ -314,7 +314,7 @@ verify_kind_build_cache_contract() {
 
   [[ "$(grep -cF 'codewire-rust-base = "target:rust-base"' "$BAKE_FILE")" -eq 1 ]] ||
     fail 'Bake does not build the shared Rust base once as a linked target'
-  for target in dashboard-ci services-ci mesh-ci daemon-ci; do
+  for target in dashboard-ci services-ci mesh-ci egress-ci daemon-ci; do
     grep -qF "\"$target\"" "$BAKE_FILE" || fail "Bake omits Kind target $target"
   done
   grep -qF 'default = "disabled"' "$BAKE_FILE" ||
@@ -370,7 +370,7 @@ verify_kind_build_cache_contract() {
   # profile, which the shared product target fixes and no Kind target or
   # caller's environment overrides (#2892).
   local kind_target kind_block
-  for kind_target in dashboard-ci services-ci mesh-ci daemon-ci; do
+  for kind_target in dashboard-ci services-ci mesh-ci egress-ci daemon-ci; do
     kind_block="$(sed -n "/^target \"$kind_target\" {/,/^}/p" "$BAKE_FILE")"
     grep -Eq '"dev\.codewire\.promotable"[[:space:]]*=[[:space:]]*"false"' <<<"$kind_block" ||
       fail "Kind image $kind_target is not marked non-promotable"
@@ -474,7 +474,8 @@ fixture.create_source(destination)
 for name in (
     'apps/dashboard/Dockerfile', 'deployments/docker/services.Dockerfile',
     'deployments/docker/services.Dockerfile.dockerignore',
-    'deployments/docker/mesh.Dockerfile', 'deployments/docker/derp.Dockerfile',
+    'deployments/docker/mesh.Dockerfile', 'deployments/docker/egress.Dockerfile',
+    'deployments/docker/derp.Dockerfile',
     'docker-compose.yml', 'images/confidential-probe/Dockerfile',
     'scripts/ci/images/build-kind-images.sh',
     'scripts/ci/images/build-push-image.sh', 'scripts/ci/images/build-push-runtime-images.sh',
@@ -869,6 +870,7 @@ case "${1:-} ${2:-} ${3:-}" in
         "dashboard-ci": {},
         "services-ci": {},
         "mesh-ci": {},
+        "egress-ci": {},
         "daemon-ci": {}
       }' >"$metadata"
       exit 0
@@ -1407,8 +1409,8 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
     "$source_fixture/scripts/ci/images/build-kind-images.sh"
 )
-[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
-  fail 'Kind did not bind and append the private credential file to all four Bake targets'
+[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 5 ]] ||
+  fail 'Kind did not bind and append the private credential file to all five Bake targets'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not pass the exact private credential file path to Bake'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
@@ -1547,8 +1549,8 @@ grep -Eq ' buildx bake .*--builder codewire-kind-.* kind $' "$FAKE_DOCKER_CALLS"
   fail 'Kind Bake did not use its bounded transient builder'
 grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not destroy its transient BuildKit daemon'
-[[ "$(grep -c ' image inspect ' "$FAKE_DOCKER_CALLS" || true)" -eq 12 ]] ||
-  fail 'Kind did not verify existence and trust labels for all four loaded images'
+[[ "$(grep -c ' image inspect ' "$FAKE_DOCKER_CALLS" || true)" -eq 15 ]] ||
+  fail 'Kind did not verify existence and trust labels for all five loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||

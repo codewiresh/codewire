@@ -251,7 +251,7 @@ const SANDBOX_NAMESPACE: &str = "CREDENTIAL_SANDBOX_NAMESPACE";
 
 /// The sandbox namespace when set: a Kubernetes namespace name, from this
 /// service's own configuration, never from a request.
-fn sandbox_namespace(
+pub(super) fn sandbox_namespace(
     lookup: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<String>, RuntimeError> {
     let Some(value) = lookup(SANDBOX_NAMESPACE) else {

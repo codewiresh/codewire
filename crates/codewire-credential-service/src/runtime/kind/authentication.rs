@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_credential_broker::platform::bridge::{
-    PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
+    PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator, RelayCaller,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -83,6 +83,13 @@ impl PlatformBridgeAuthenticator for KindBridgeAuthenticator {
         );
         drop(evidence);
         Ok(authority)
+    }
+
+    async fn authenticate_relay(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<RelayCaller, PlatformBridgeAuthenticationError> {
+        self.inner.authenticate_relay(metadata).await
     }
 }
 

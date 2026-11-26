@@ -283,8 +283,9 @@ def inventory_outputs(rows=INVENTORY_ROWS) -> dict[str, set[str]]:
 BUILDS = {
     "idp": ("codewire-idp", "", ""), "orchestration": ("codewire-orchestration", "kind-e2e", ""),
     "credential-service": ("codewire-credential-service", "enrollment,kind-e2e", "enrollment,kind-e2e"),
-    "billing": ("codewire-billing", "", ""), "coordinator": ("codewire-coordinator", "", ""),
-    "mesh": ("codewire-mesh", "", ""), "derp": ("codewire-derp", "", ""),
+    "billing": ("codewire-billing", "", ""), "coordinator": ("codewire-coordinator", "kind-e2e", ""),
+    "mesh": ("codewire-mesh", "", ""), "egress": ("codewire-egress-node", "", ""),
+    "derp": ("codewire-derp", "", ""),
     "dashboard": ("codewire-dashboard-web", "", ""), "daemon": ("codewire-cli-bin", "", ""),
 }
 
@@ -396,7 +397,8 @@ class DeveloperProfileTests(unittest.TestCase):
             "KIND_PROFILE_SOURCE_HEAD": "b" * 40, "KIND_PROFILE_SOURCE_TREE": "c" * 40,
             "KIND_PROFILE_IMAGE_PREFIX": "codewire-kind-" + name + "-" + ("d" if name == "dev-a" else "e") * 12,
             "KIND_PROFILE_DASHBOARD_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_SERVICES_IMAGE_ID": IMAGE_ID,
-            "KIND_PROFILE_MESH_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_DAEMON_IMAGE_ID": IMAGE_ID,
+            "KIND_PROFILE_MESH_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_EGRESS_IMAGE_ID": IMAGE_ID,
+            "KIND_PROFILE_DAEMON_IMAGE_ID": IMAGE_ID,
         }
         for key, position in (("KIND_INGRESS_HTTP_HOST_PORT", 0), ("KIND_INGRESS_TLS_HOST_PORT", 1),
                               ("KIND_ORCHESTRATION_HOST_PORT", 2), ("KIND_COORDINATOR_HOST_PORT", 3),
@@ -1164,10 +1166,11 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         edge = ["apply", "-f", str(self.tree / "tests/e2e/kind/tailnet.yaml")]
         apply, = [i for i, args in enumerate(kubectl) if args[-3:] == edge]
         self.assertEqual(kubectl[apply][:4], context + ["-n", "codewire-e2e"])
-        set_env = next(i for i, args in enumerate(kubectl) if args[-7:-4] == ["set", "env", "deployment/codewire-coordinator"])
+        set_env = next(i for i, args in enumerate(kubectl) if args[-8:-5] == ["set", "env", "deployment/codewire-coordinator"])
         self.assertEqual(kubectl[set_env][:2], context)
-        self.assertEqual(kubectl[set_env][-4:],
-                         ["--containers=coordinator", "DERP_HOST=172.18.0.2", "DERP_PORT=443", "DERP_INSECURE=true"])
+        self.assertEqual(kubectl[set_env][-5:],
+                         ["--containers=coordinator", "DERP_HOST=172.18.0.2", "DERP_PORT=443", "DERP_INSECURE=true",
+                          "KIND_DERP_BROKER_HOST=codewire-derp.codewire-e2e.svc.cluster.local"])
         set_image = next(i for i, args in enumerate(kubectl)
                          if args[-4:] == ["set", "image", "deployment/codewire-derp", "derp=" + output])
         self.assertLess(apply, set_env)
@@ -1718,6 +1721,7 @@ class SmokeGroupTests(unittest.TestCase):
             "workspace-services": "run_retained_workspace_services_suite",
             "final-fencing": "run_retained_final_fencing_suite", "integrated": "run_retained_integrated_suite",
             "runtime-acceptance": "run_retained_runtime_acceptance_suite",
+            "hosted-egress": "run_retained_hosted_egress_suite",
             "cw-runtime": "run_admitted_cw_runtime_journey", "cw-managed-agents": "run_retained_managed_agents_journey",
         }
         self.assertEqual(set(mapped), set(entries))
@@ -1757,6 +1761,7 @@ SYNTHETIC_CRATES = {
     "codewire-billing": (["codewire-server-core"], []),
     "codewire-coordinator": ([], []),
     "codewire-derp": ([], []),
+    "codewire-egress-node": ([], []),
     "codewire-mesh": (["codewire-server-core"], []),
     "codewire-dashboard-web": (["codewire-server-core"], []),
     "codewire-cli-bin": (["codewire-cli"], []),

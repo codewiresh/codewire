@@ -616,6 +616,8 @@ struct DerpMapConfig {
     derp_host: String,
     derp_port: u16,
     derp_insecure: bool,
+    #[cfg(feature = "kind-e2e")]
+    kind_derp_broker_host: Option<String>,
     stun_servers: Vec<StunServerConfig>,
 }
 
@@ -655,6 +657,8 @@ impl DerpMapConfig {
             derp_host: setting(&lookup, "DERP_HOST").ok_or(DerpMapConfigError::MissingHost)?,
             derp_port: port_setting(&lookup, "DERP_PORT", 443),
             derp_insecure: bool_setting(&lookup, "DERP_INSECURE"),
+            #[cfg(feature = "kind-e2e")]
+            kind_derp_broker_host: setting(&lookup, "KIND_DERP_BROKER_HOST"),
             stun_servers,
         })
     }
@@ -745,6 +749,8 @@ pub(crate) fn test_derp_map() -> DerpMap {
         derp_host: "derp.example.invalid".into(),
         derp_port: 443,
         derp_insecure: false,
+        #[cfg(feature = "kind-e2e")]
+        kind_derp_broker_host: None,
         stun_servers: Vec::new(),
     })
 }
@@ -758,6 +764,20 @@ fn build_derp_map(cfg: DerpMapConfig) -> serde_json::Value {
         "STUNPort": -1,
         "InsecureForTests": cfg.derp_insecure,
     })];
+
+    #[cfg(feature = "kind-e2e")]
+    if let Some(broker_host) = cfg.kind_derp_broker_host {
+        // Broker-mode Sandboxes refuse InsecureForTests and look up their own
+        // DERP_HOST by name, while host clients take the first node (#6387).
+        nodes.push(json!({
+            "Name": "1b",
+            "RegionID": 1,
+            "HostName": broker_host,
+            "DERPPort": 443,
+            "STUNPort": -1,
+            "InsecureForTests": false,
+        }));
+    }
 
     for (idx, server) in cfg.stun_servers.iter().enumerate() {
         nodes.push(json!({
@@ -1095,6 +1115,8 @@ mod tests {
             derp_host: "derp.example.com".into(),
             derp_port: 443,
             derp_insecure: false,
+            #[cfg(feature = "kind-e2e")]
+            kind_derp_broker_host: None,
             stun_servers: Vec::new(),
         });
 
@@ -1105,6 +1127,35 @@ mod tests {
         assert_eq!(relay["DERPPort"], 443);
         assert_eq!(relay["STUNPort"], -1);
         assert_eq!(relay["InsecureForTests"], false);
+    }
+
+    #[cfg(feature = "kind-e2e")]
+    #[test]
+    fn kind_derp_broker_host_adds_verified_tls_node_after_primary() {
+        let config = DerpMapConfig::from_lookup(lookup(&[
+            ("DERP_HOST", "172.21.0.2"),
+            ("DERP_PORT", "443"),
+            ("DERP_INSECURE", "true"),
+            (
+                "KIND_DERP_BROKER_HOST",
+                " codewire-derp.codewire-e2e.svc.cluster.local ",
+            ),
+        ]))
+        .unwrap();
+        let derp_map = build_derp_map(config);
+        let nodes = derp_map["Regions"]["1"]["Nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["Name"], "1a");
+        assert_eq!(nodes[0]["HostName"], "172.21.0.2");
+        assert_eq!(nodes[0]["InsecureForTests"], true);
+        assert_eq!(nodes[1]["Name"], "1b");
+        assert_eq!(
+            nodes[1]["HostName"],
+            "codewire-derp.codewire-e2e.svc.cluster.local"
+        );
+        assert_eq!(nodes[1]["DERPPort"], 443);
+        assert_eq!(nodes[1]["STUNPort"], -1);
+        assert_eq!(nodes[1]["InsecureForTests"], false);
     }
 
     fn lookup<'a>(settings: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -1156,6 +1207,8 @@ mod tests {
             derp_host: "derp.example.com".into(),
             derp_port: 8443,
             derp_insecure: true,
+            #[cfg(feature = "kind-e2e")]
+            kind_derp_broker_host: None,
             stun_servers: vec![StunServerConfig {
                 host: "stun.example.com".into(),
                 port: 3478,
@@ -1179,6 +1232,8 @@ mod tests {
             derp_host: "derp.example.com".into(),
             derp_port: 443,
             derp_insecure: false,
+            #[cfg(feature = "kind-e2e")]
+            kind_derp_broker_host: None,
             stun_servers: vec![
                 StunServerConfig {
                     host: "stun.codewire-dev.sh".into(),

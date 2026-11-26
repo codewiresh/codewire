@@ -47,7 +47,7 @@ DIGEST_REFERENCE = re.compile(r"[a-z0-9.-]+(?:/[a-z0-9._-]+)+@sha256:[0-9a-f]{64
 # The service images and the daemon image build on separate workers: the
 # daemon's static CW producer is independent of the three service compiles.
 GROUP_IMAGES = {
-    "product": tuple(f"codewire-{name}:e2e" for name in ("dashboard", "services", "mesh")),
+    "product": tuple(f"codewire-{name}:e2e" for name in ("dashboard", "services", "mesh", "egress")),
     "daemon": ("codewire-daemon:e2e",),
 }
 PRODUCT_IMAGES = GROUP_IMAGES["product"] + GROUP_IMAGES["daemon"]

@@ -219,7 +219,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_service_and_daemon_images_build_on_separate_producers(self) -> None:
         product = named_step(self.jobs["kind-product"], "Build exact Kind service images")
-        self.assertEqual(product["run"], "scripts/ci/images/build-kind-images.sh dashboard services mesh")
+        self.assertEqual(product["run"], "scripts/ci/images/build-kind-images.sh dashboard services mesh egress")
         daemon = named_step(self.jobs["kind-daemon"], "Build exact Kind daemon image")
         self.assertEqual(daemon["run"], "scripts/ci/images/build-kind-images.sh daemon")
         for job_name in ("kind-product", "kind-daemon"):

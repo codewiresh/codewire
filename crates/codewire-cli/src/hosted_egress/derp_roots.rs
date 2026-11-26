@@ -23,8 +23,11 @@
 //! a link; the file is
 //! opened beneath it with `openat2`, so the kubelet's `..data` link resolves
 //! only inside the mount and one that leaves it is refused. Both must be
-//! owned by root or the daemon's own user and writable by no one else, and
-//! the bundle is read from the descriptor that was checked. A kernel that
+//! owned by root or the daemon's own user, and the bundle file must be
+//! writable by no one else; the mount root directory itself is already proven
+//! read-only (`ST_RDONLY`) by `platform_mount` and kubelet ConfigMap tmpfs
+//! mounts carry `0777`/`2777` mode bits on their mount root. The bundle is
+//! read from the descriptor that was checked. A kernel that
 //! cannot open it contained (no `openat2`, or flags it does not know) reads
 //! no bundle, never falls back to a plain open: a relay that needs one is
 //! then refused as unverified.
@@ -88,7 +91,7 @@ fn extra_roots_from(
         );
         return Ok(Vec::new());
     }
-    platform_owned(&rustix::fs::fstat(&directory)?)
+    platform_owner(&rustix::fs::fstat(&directory)?)
         .with_context(|| format!("the extra roots directory {}", mount.display()))?;
     let opened = rustix::fs::openat2(
         &directory,
@@ -157,12 +160,20 @@ fn is_read_only(directory: &OwnedFd) -> anyhow::Result<bool> {
         .contains(StatVfsMountFlags::RDONLY))
 }
 
-/// Owned by root or this process's user, and writable by no one else.
-fn platform_owned(stat: &Stat) -> anyhow::Result<()> {
+/// Owned by root or this process's user. Used on the mount root directory,
+/// which `platform_mount` has already proven is a read-only mount (`ST_RDONLY`)
+/// and which kubelet creates with `0777`/`2777` mode bits for ConfigMap tmpfs.
+fn platform_owner(stat: &Stat) -> anyhow::Result<()> {
     let owner = stat.st_uid;
     if owner != 0 && owner != rustix::process::geteuid().as_raw() {
         bail!("is owned by uid {owner}, not root or the daemon's user");
     }
+    Ok(())
+}
+
+/// Owned by root or this process's user, and writable by no one else.
+fn platform_owned(stat: &Stat) -> anyhow::Result<()> {
+    platform_owner(stat)?;
     if stat.st_mode & 0o022 != 0 {
         bail!("is writable by its group or by others");
     }

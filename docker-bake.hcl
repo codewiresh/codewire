@@ -41,7 +41,7 @@ group "default" {
 }
 
 group "kind" {
-  targets = ["dashboard-ci", "services-ci", "mesh-ci", "daemon-ci"]
+  targets = ["dashboard-ci", "services-ci", "mesh-ci", "egress-ci", "daemon-ci"]
 }
 
 target "rust-base" {
@@ -207,6 +207,13 @@ target "services-ci" {
 
 target "mesh-ci" {
   inherits = ["mesh"]
+  labels = {
+    "dev.codewire.promotable" = "false"
+  }
+}
+
+target "egress-ci" {
+  inherits = ["egress"]
   labels = {
     "dev.codewire.promotable" = "false"
   }

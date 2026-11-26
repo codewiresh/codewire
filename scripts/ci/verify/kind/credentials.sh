@@ -96,7 +96,8 @@ deploy_kind_credential_issuers() {
     certificate/codewire-kind-postgres-root issuer/codewire-kind-postgres \
     certificate/codewire-kind-postgres-tls \
     certificate/codewire-kind-coordinator-root issuer/codewire-kind-coordinator \
-    certificate/codewire-kind-coordinator-tls || return $?
+    certificate/codewire-kind-coordinator-tls \
+    certificate/codewire-kind-derp-tls || return $?
   publish_kind_trust_roots || return $?
 }
 

@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-device-ownership kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-device-ownership kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-egress-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets kind-stripe-test-keys kind-stripe-test-keys-remove accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
@@ -238,7 +238,7 @@ kind-down:
 # Rebuild one service from current source into the retained cluster, e.g.
 # `make kind-deploy SERVICE=credential-service`.
 kind-deploy:
-	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|mesh|derp|dashboard|daemon>" >&2; exit 2; }
+	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|mesh|egress|derp|dashboard|daemon>" >&2; exit 2; }
 	./scripts/dev/kind/deploy-service.sh "$(SERVICE)"
 
 # Republish the retained cluster's synthetic trust roots (kind-deploy also
@@ -463,7 +463,7 @@ deploy-local-static: local-runtime build-dashboard-local
 
 # Build all local images and deploy everything into local kind.
 # Shared/prod agent-sandbox is applied from this repo via CI/CD.
-up: build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local
+up: build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-egress-local build-services-local
 	@kind get clusters | grep -q codewire || $(MAKE) kind-cluster
 	@$(MAKE) kind-ingress
 	@$(MAKE) kind-label-local-nodes
@@ -472,6 +472,7 @@ up: build-daemon build-dashboard-local build-sandbox-controller build-derp-local
 	kind load docker-image codewire-dashboard:local --name codewire
 	kind load docker-image agent-sandbox-controller:local --name codewire
 	kind load docker-image codewire-derp:local --name codewire
+	kind load docker-image codewire-egress:local --name codewire
 	kind load docker-image codewire-services:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind/
 	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/local-internal-tls.sh
@@ -524,16 +525,21 @@ build-sandbox-controller:
 build-derp-local:
 	docker buildx bake --file docker-bake.hcl --pull --load --set 'derp.tags=codewire-derp:local' derp
 
+build-egress-local:
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'egress-ci.tags=codewire-egress:local' egress-ci
+
 build-services-local:
 	docker buildx bake --file docker-bake.hcl --pull --load --set 'services-ci.tags=codewire-services:local' services-ci
 
 rollout-local-runtime:
 	$(KUBECTL) -n default rollout restart deployment codewire-coordinator codewire-idp codewire-billing codewire-orchestration codewire-derp
+	$(KUBECTL) -n default rollout restart daemonset codewire-egress
 	@$(KUBECTL) -n default rollout status deployment codewire-coordinator --timeout=90s
 	@$(KUBECTL) -n default rollout status deployment codewire-idp --timeout=90s
 	@$(KUBECTL) -n default rollout status deployment codewire-billing --timeout=90s
 	@$(KUBECTL) -n default rollout status deployment codewire-orchestration --timeout=90s
 	@$(KUBECTL) -n default rollout status deployment codewire-derp --timeout=90s
+	@$(KUBECTL) -n default rollout status daemonset codewire-egress --timeout=90s
 
 sync-local-secrets:
 	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/sync-local-secrets.sh
@@ -551,12 +557,13 @@ prune-local-legacy-runtime:
 	-$(KUBECTL) delete clusterrole/codewire-server clusterrolebinding/codewire-server clusterrolebinding/codewire-server-auth-delegator --ignore-not-found
 
 # Load and apply the local runtime pieces needed for sandbox-backed environments.
-local-runtime: build-daemon build-sandbox-controller build-derp-local build-services-local
+local-runtime: build-daemon build-sandbox-controller build-derp-local build-egress-local build-services-local
 	@$(MAKE) kind-label-local-nodes
 	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image $(REGISTRY)/codewire/daemon:local --name codewire
 	kind load docker-image agent-sandbox-controller:local --name codewire
 	kind load docker-image codewire-derp:local --name codewire
+	kind load docker-image codewire-egress:local --name codewire
 	kind load docker-image codewire-services:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/agent-sandbox/overlays/local-kind/
 	$(KUBECTL) -n agent-sandbox-system rollout restart deployment agent-sandbox-controller
@@ -570,7 +577,7 @@ kind-cluster:
 	$(MAKE) kind-label-local-nodes
 
 kind-label-local-nodes:
-	@$(KUBECTL) label node codewire-control-plane codewire.sh/node-pool=sandbox --overwrite
+	@$(KUBECTL) label node codewire-control-plane codewire.sh/node-pool=sandbox node.codewire.sh/purpose=sandbox-runtime --overwrite
 
 kind-sandbox-namespace:
 	@$(KUBECTL) create namespace dev-sandboxes --dry-run=client -o yaml | $(KUBECTL) apply -f -

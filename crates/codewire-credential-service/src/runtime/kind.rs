@@ -95,7 +95,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         ));
         // Kind runs orchestration, the credential relay, beside this service.
         let authenticator = KubernetesPlatformBridgeAuthenticator::new(
-            client,
+            client.clone(),
             pool.clone(),
             Arc::new(TestKekProvider),
             config::NAMESPACE.to_owned(),
@@ -114,9 +114,37 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         )
         .with_github_app_authorization_owner(github_app_authorization.clone())
         .map_err(|_| RuntimeError::Configuration("Kind GitHub App broker owner"))?;
+        let bridge = if config.hosted_placeholders {
+            placeholder_keys_granted(&pool).await?;
+            bridge
+                .with_hosted_placeholders()
+                .map_err(|_| RuntimeError::Configuration("hosted placeholders"))?
+        } else {
+            bridge
+        };
         // Use the production SSH owner and packaged tools; only provider login,
         // HTTP and envelope authority are synthetic in this fixture.
         let bridge = ssh::configure(bridge, &config.runtime_directory)?;
+        let bridge = match super::config::interception_namespace(&config.sandbox_namespace) {
+            Some(namespace) => {
+                tracing::info!(
+                    target: TARGET,
+                    namespace,
+                    hosted_placeholders = config.hosted_placeholders,
+                    "interception CAs wired"
+                );
+                bridge
+                    .with_interception_cas(Arc::new(crate::interception::PlatformInterceptionCas::new(
+                        crate::interception::SandboxPods::new(
+                            crate::interception::KubernetesPods::new(client.clone()),
+                            namespace.to_owned(),
+                        ),
+                        store.clone(),
+                    )))
+                    .map_err(|_| RuntimeError::Configuration("interception CAs"))?
+            }
+            None => bridge,
+        };
         let mutation = Arc::new(CredentialMutationOwner::new(
             pool.clone(),
             store.clone(),

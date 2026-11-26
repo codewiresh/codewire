@@ -46,6 +46,9 @@ IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
 IMAGE_CACHE_NAME = "cw-image-cache"
 RELEASE_REVISION_ROLE = "codewire-orchestration-release-revision"
 SANDBOX_ROLE = "codewire-orchestration-sandboxes"
+KIND_GATEWAY_READ_ROLE = "codewire-orchestration-gateway-read"
+KIND_GATEWAY_READ_NAMESPACE = "ingress-nginx"
+KIND_GATEWAY_SERVICE = "codewire-kind-gateway"
 # codewire#2282: cluster-scoped grants only, all read-only but TokenReview.
 CLUSTER_ROLE_RULES = (
     'rules: - apiGroups: - authentication.k8s.io resources: - tokenreviews verbs: - create '
@@ -1937,6 +1940,46 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                     f"{target['subject_namespace']}/{orchestration}"
                 )
 
+    def assert_kind_gateway_read(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+        if target["path"] != "tests/e2e/kind":
+            return
+        role = exactly_one(resources, "Role", KIND_GATEWAY_READ_ROLE, label, output)
+        binding = exactly_one(resources, "RoleBinding", KIND_GATEWAY_READ_ROLE, label, output)
+        expected_rules = compact(
+            f"""
+            rules:
+            - apiGroups:
+              - ""
+              resourceNames:
+              - {KIND_GATEWAY_SERVICE}
+              resources:
+              - services
+              verbs:
+              - get
+            """
+        )
+        if role and (
+            metadata_field(role, "namespace") != KIND_GATEWAY_READ_NAMESPACE
+            or compact(top_level_block(role, "rules")) != expected_rules
+        ):
+            output.append(
+                f"{label}: Kind gateway read Role must grant only get on "
+                f"Service/{KIND_GATEWAY_READ_NAMESPACE}/{KIND_GATEWAY_SERVICE}"
+            )
+        if binding:
+            expected_ref = compact(
+                f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {KIND_GATEWAY_READ_ROLE}"
+            )
+            expected_subject = compact(
+                f"subjects: - kind: ServiceAccount name: {orchestration} namespace: {target['subject_namespace']}"
+            )
+            if (
+                metadata_field(binding, "namespace") != KIND_GATEWAY_READ_NAMESPACE
+                or compact(top_level_block(binding, "roleRef")) != expected_ref
+                or compact(top_level_block(binding, "subjects")) != expected_subject
+            ):
+                output.append(f"{label}: Kind gateway read binding escaped its namespace or identity")
+
     def assert_bound_surface(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
         bindings = [
             resource
@@ -1950,16 +1993,17 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             f"{metadata_field(binding, 'name')}"
             for binding in bindings
         )
-        expected = sorted(
-            [
-                f"ClusterRoleBinding/<cluster>/{orchestration}",
-                f"RoleBinding/{target['role_namespace']}/{INTERNAL_ROOTS_ROLE}",
-                f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
-                f"RoleBinding/{target['role_namespace']}/{SANDBOX_ROLE}",
-                f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
-                f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
-            ]
-        )
+        expected_list = [
+            f"ClusterRoleBinding/<cluster>/{orchestration}",
+            f"RoleBinding/{target['role_namespace']}/{INTERNAL_ROOTS_ROLE}",
+            f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
+            f"RoleBinding/{target['role_namespace']}/{SANDBOX_ROLE}",
+            f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
+            f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
+        ]
+        if target["path"] == "tests/e2e/kind":
+            expected_list.append(f"RoleBinding/{KIND_GATEWAY_READ_NAMESPACE}/{KIND_GATEWAY_READ_ROLE}")
+        expected = sorted(expected_list)
         if actual != expected:
             output.append(
                 f"{label}: orchestration ServiceAccount binding surface is "
@@ -1971,6 +2015,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         assert_cluster_role(resources, label, output)
         assert_sandbox_role(resources, target, label, output)
         assert_token_request_authz(resources, target, label, output)
+        assert_kind_gateway_read(resources, target, label, output)
         assert_bound_surface(resources, target, label, output)
         assert_internal_roots(resources, target, label, output)
         assert_image_cache(resources, target, label, output)

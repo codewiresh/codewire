@@ -49,6 +49,11 @@ fn open_directory(path: &Path) -> OwnedFd {
 fn the_kubelets_mount_is_read_and_its_links_followed_inside_it() {
     let mount = kubelet_mount();
     assert_eq!(read(mount.path()).unwrap().len(), 1);
+    // Kubelet creates ConfigMap tmpfs mount roots with 0777/2777 mode bits
+    // while mounting them MS_RDONLY (verified by platform_mount) and setting
+    // the ca.crt file itself to 0444.
+    chmod(mount.path(), 0o777);
+    assert_eq!(read(mount.path()).unwrap().len(), 1);
 }
 
 #[test]
@@ -80,8 +85,10 @@ fn a_bundle_planted_in_a_plain_directory_is_ignored() {
 /// so what would stop the start on the mount does not stop it here.
 #[test]
 fn only_the_platforms_mount_is_held_to_the_fatal_checks() {
-    let writable = kubelet_mount();
-    chmod(writable.path(), 0o777);
+    let writable = tempfile::tempdir().unwrap();
+    std::fs::write(writable.path().join(BUNDLE), ca_pem()).unwrap();
+    chmod(&writable.path().join(BUNDLE), 0o666);
+    chmod(writable.path(), 0o755);
     assert!(read(writable.path()).is_err(), "fatal on the mount");
     assert!(
         extra_roots_from(true, false, writable.path(), BUNDLE, |_| Ok(false))
@@ -158,10 +165,6 @@ fn a_bundle_the_workload_could_write_is_refused() {
         chmod(mount.path(), 0o755);
         assert!(read(mount.path()).is_err(), "{mode:o}");
     }
-    // A writable mount directory, whose links could be replaced.
-    let mount = kubelet_mount();
-    chmod(mount.path(), 0o777);
-    assert!(read(mount.path()).is_err());
 }
 
 #[test]

@@ -37,6 +37,9 @@ spec:
         app.kubernetes.io/name: codewire
         app.kubernetes.io/component: derp
     spec:
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: derp
           image: codewire-services:e2e
@@ -45,6 +48,8 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 8443
+              name: https
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -58,6 +63,20 @@ spec:
             # No STUN: Kind advertises no STUN server, so peers stay on DERP.
             - name: STUN_PORT
               value: "-1"
+            # Verified TLS listener sharing the same Relay instance for
+            # broker-mode Sandboxes (#6387).
+            - name: TLS_PORT
+              value: "8443"
+            - name: TLS_PUBLIC_HOSTNAME
+              value: codewire-derp.$(POD_NAMESPACE).svc.cluster.local
+            - name: TLS_PUBLIC_CERT_FILE
+              value: /run/codewire-derp-tls/tls.crt
+            - name: TLS_PUBLIC_KEY_FILE
+              value: /run/codewire-derp-tls/tls.key
+          volumeMounts:
+            - name: derp-tls
+              mountPath: /run/codewire-derp-tls
+              readOnly: true
           resources:
             requests:
               cpu: 10m
@@ -77,6 +96,11 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+      volumes:
+        - name: derp-tls
+          secret:
+            secretName: codewire-kind-derp-tls
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service
@@ -95,6 +119,9 @@ spec:
     - port: 8080
       targetPort: 8080
       name: http
+    - port: 8443
+      targetPort: 8443
+      name: https
 ---
 # Hostless, so it answers on the node address over HTTP and HTTPS. The DERP
 # client sends HTTP/1.1 without ALPN; ingress-nginx passes its Upgrade header.

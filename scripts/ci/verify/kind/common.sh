@@ -834,7 +834,7 @@ mark_retained_cluster_prepared() {
 record_retained_cluster_sources() {
   local service
   [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ] || return 0
-  for service in idp orchestration credential-service billing coordinator mesh derp dashboard daemon; do
+  for service in idp orchestration credential-service billing coordinator mesh egress derp dashboard daemon; do
     KIND_DEPLOY_RECORD_ONLY=1 "$ROOT/scripts/dev/kind/deploy-service.sh" "$service" \
       || log "could not record the source of ${service}; make kind-test will rebuild it"
   done
@@ -1234,7 +1234,7 @@ build_images_and_smokes() {
 kind_suite_smoke_groups() {
   case "$1" in
     edge-contract | final-fencing | runtime-acceptance) printf '%s\n' orchestration ;;
-    credentials) printf '%s\n' cli ;;
+    credentials | hosted-egress) printf '%s\n' cli ;;
     workspace-services) printf '%s\n' orchestration client client-ffi cli ;;
     integrated) printf '%s\n' client-kind-e2e billing ;;
     cw-runtime | cw-managed-agents) printf '%s\n' client cli ;;
@@ -1695,11 +1695,22 @@ load_images_into_kind() {
     kind load image-archive --name "$KIND_CLUSTER_NAME" "$KIND_PROFILE_ARTIFACT_DIR/images.tar" || return $?
     wait_for_kind_api_after_image_load || return $?
   else
-  for image in \
-      codewire-dashboard:e2e \
-      codewire-services:e2e \
-      codewire-mesh:e2e \
-      codewire-daemon:e2e; do
+  local -a product_images=(
+      codewire-dashboard:e2e
+      codewire-services:e2e
+      codewire-mesh:e2e
+      codewire-daemon:e2e
+  )
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
+    product_images=(
+      codewire-dashboard:e2e
+      codewire-services:e2e
+      codewire-mesh:e2e
+      codewire-egress:e2e
+      codewire-daemon:e2e
+    )
+  fi
+  for image in "${product_images[@]}"; do
     log "loading ${image} into kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
     wait_for_kind_api_after_image_load || return $?
@@ -1762,36 +1773,58 @@ load_images_into_kind() {
 render_ingress_manifest() {
   local source="$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml"
   local rendered="$RUN_DIR/ingress-nginx-deploy.yaml"
+  local sealed=0
 
   if validate_sealed_kind_images; then
-    python3 - "$source" "$rendered" \
-      "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY' || return $?
-from pathlib import Path
-import sys
-
-source, rendered, controller, certgen = sys.argv[1:]
-text = Path(source).read_text()
-replacements = {
-    "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": (controller, 1),
-    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": (certgen, 2),
-}
-for old, (new, expected_count) in replacements.items():
-    old_block = f"image: {old}\n        imagePullPolicy: IfNotPresent"
-    actual_count = text.count(old_block)
-    if actual_count != expected_count:
-        raise SystemExit(
-            f"vendored ingress image occurrence mismatch: expected {expected_count}, got {actual_count}"
-        )
-    new_block = f"image: {new}\n        imagePullPolicy: Never"
-    text = text.replace(old_block, new_block)
-Path(rendered).write_text(text)
-PY
-    printf '%s\n' "$rendered"
+    sealed=1
   else
     local sealed_status=$?
     [ "$sealed_status" -eq 1 ] || return "$sealed_status"
-    printf '%s\n' "$source"
   fi
+  python3 - "$source" "$rendered" "$sealed" \
+    "$KIND_INGRESS_CONTROLLER_LOCAL_IMAGE" "$KIND_INGRESS_CERTGEN_LOCAL_IMAGE" <<'PY' || return $?
+from pathlib import Path
+import sys
+
+source, rendered, sealed, controller, certgen = sys.argv[1:]
+text = Path(source).read_text()
+# Label the ingress-nginx controller Pods with the Envoy owning-gateway labels
+# that broker-mode NetworkPolicies and admission policies select (#6387).
+old_labels = (
+    "  template:\n"
+    "    metadata:\n"
+    "      labels:\n"
+    "        app.kubernetes.io/component: controller\n"
+    "        app.kubernetes.io/instance: ingress-nginx\n"
+    "        app.kubernetes.io/name: ingress-nginx\n"
+)
+new_labels = (
+    old_labels
+    + "        gateway.envoyproxy.io/owning-gateway-name: codewire-kind-public\n"
+    + "        gateway.envoyproxy.io/owning-gateway-namespace: ingress-nginx\n"
+)
+if text.count(old_labels) != 1:
+    raise SystemExit(
+        f"vendored ingress controller template label mismatch: expected 1, got {text.count(old_labels)}"
+    )
+text = text.replace(old_labels, new_labels, 1)
+if sealed == "1":
+    replacements = {
+        "registry.k8s.io/ingress-nginx/controller:v1.12.1@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b": (controller, 1),
+        "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.5.2@sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea": (certgen, 2),
+    }
+    for old, (new, expected_count) in replacements.items():
+        old_block = f"image: {old}\n        imagePullPolicy: IfNotPresent"
+        actual_count = text.count(old_block)
+        if actual_count != expected_count:
+            raise SystemExit(
+                f"vendored ingress image occurrence mismatch: expected {expected_count}, got {actual_count}"
+            )
+        new_block = f"image: {new}\n        imagePullPolicy: Never"
+        text = text.replace(old_block, new_block)
+Path(rendered).write_text(text)
+PY
+  printf '%s\n' "$rendered"
 }
 
 render_agent_sandbox_manifest() {
@@ -1829,6 +1862,23 @@ PY
   printf '%s\n' "$rendered"
 }
 
+# Upstream DNS resolver for cw-egress on Kind (#6387): the Kind node's Docker
+# network IPv4 gateway, which answers external DNS without cluster names (unlike
+# CoreDNS). KIND_EGRESS_DNS_RESOLVER overrides it when explicitly provided.
+kind_egress_dns_resolver() {
+  local resolver="${KIND_EGRESS_DNS_RESOLVER:-}" node="${KIND_CLUSTER_NAME}-control-plane"
+  if [ -z "$resolver" ]; then
+    resolver="$(docker inspect --format \
+      '{{range $name, $net := .NetworkSettings.Networks}}{{if $net.Gateway}}{{println $net.Gateway}}{{end}}{{end}}' \
+      "$node" 2>/dev/null | head -n 1)" || true
+  fi
+  if ! [[ "$resolver" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo "::error::could not determine IPv4 DNS resolver for cw-egress on Kind node ${node}: ${resolver:-none}" >&2
+    return 1
+  fi
+  printf '%s\n' "$resolver"
+}
+
 render_kind_overlay_manifest() {
   local source="$ROOT/tests/e2e/kind"
   local rendered="$RUN_DIR/codewire-kind-overlay.yaml"
@@ -1861,6 +1911,29 @@ for public, (local, expected) in replacements.items():
         )
 path.write_text(text)
 PY
+  if [ -n "${KIND_EGRESS_DNS_RESOLVER:-}" ]; then
+    python3 - "$rendered" "$KIND_EGRESS_DNS_RESOLVER" <<'PY' || return $?
+import ipaddress
+from pathlib import Path
+import sys
+
+rendered, resolver = sys.argv[1:]
+try:
+    ip = ipaddress.IPv4Address(resolver)
+except ValueError as exc:
+    raise SystemExit(f"KIND_EGRESS_DNS_RESOLVER must be an IPv4 address: {resolver!r}") from exc
+path = Path(rendered)
+text = path.read_text()
+old_ns = "        - 192.0.2.53\n"
+old_cidr = "        cidr: 192.0.2.53/32\n"
+if text.count(old_ns) != 1 or text.count(old_cidr) != 1:
+    raise SystemExit(
+        f"cw-egress DNS placeholder occurrence mismatch: nameserver={text.count(old_ns)} cidr={text.count(old_cidr)}"
+    )
+text = text.replace(old_ns, f"        - {ip}\n", 1).replace(old_cidr, f"        cidr: {ip}/32\n", 1)
+path.write_text(text)
+PY
+  fi
   render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?
   if validate_sealed_kind_images; then
     python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY' || return $?
@@ -1947,7 +2020,9 @@ deploy_overlay() {
 
   log "deploying kind e2e overlay"
   kubectl -n "$NS" delete job codewire-db-migrate --ignore-not-found --wait=true || return $?
-  kind_overlay="$(render_kind_overlay_manifest)" || return $?
+  local egress_dns_resolver
+  egress_dns_resolver="$(kind_egress_dns_resolver)" || return $?
+  kind_overlay="$(KIND_EGRESS_DNS_RESOLVER="$egress_dns_resolver" render_kind_overlay_manifest)" || return $?
   local applied=0
   for i in $(seq 1 12); do
     if [ -n "$kind_overlay" ]; then
@@ -1968,10 +2043,11 @@ deploy_overlay() {
   # relay (tailnet.yaml, #3836).
   configure_kind_coordinator_derp "$NS" || return $?
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
-    # Only services-ci carries the Kind relay; a release image has no
-    # /codewire-derp. Tailnet peers then have no relay, never Production's.
-    log "release-image gate: Kind's DERP relay is not selected"
+    # Only services-ci carries the Kind relay and only build-ci/prebuilt-ci
+    # carries codewire-egress:e2e (cw-egress is outside the runtime release set).
+    log "release-image gate: Kind's DERP relay and cw-egress are not selected"
     kubectl -n "$NS" scale deploy/codewire-derp --replicas=0 || return $?
+    kubectl -n "$NS" delete daemonset/codewire-egress --ignore-not-found || return $?
   fi
   deploy_kind_credential_issuers || return $?
   # Staged rollout: the services fail fast (correctly) when Postgres or
@@ -1989,6 +2065,7 @@ deploy_overlay() {
     deploy/codewire-mesh \
     deploy/codewire-orchestration \
     deploy/codewire-coordinator \
+    deploy/codewire-derp \
     --replicas=0 || return $?
 
   log "waiting for postgres and temporal (service dependencies)"
@@ -2035,7 +2112,11 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s || return $?
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s || return $?
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s || return $?
-  kubectl -n "$NS" rollout status deploy/codewire-derp --timeout=300s || return $?
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
+    kubectl -n "$NS" scale deploy/codewire-derp --replicas=1 || return $?
+    kubectl -n "$NS" rollout status deploy/codewire-derp --timeout=300s || return $?
+    kubectl -n "$NS" rollout status daemonset/codewire-egress --timeout=300s || return $?
+  fi
 }
 
 require_dashboard_browser_host_dependencies() {
