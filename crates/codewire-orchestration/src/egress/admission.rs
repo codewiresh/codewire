@@ -44,9 +44,22 @@ impl<'a> From<&'a VerifiedPodIdentity> for Reviewed<'a> {
 pub enum CallerRefusal {
     /// The token is cw-egress's account in another namespace.
     WrongNamespace,
-    /// The caller Pod is gone, replaced, terminating, not cw-egress or not
-    /// scheduled.
+    /// The caller Pod is gone, replaced, not cw-egress or not scheduled.
     NotTheCaller,
+    /// The caller Pod is terminating, and asked for a new stream.
+    Draining,
+}
+
+/// What a cw-egress call is for. A terminating cw-egress is draining: it
+/// takes no new stream, but keeps the streams it holds until its deadline,
+/// so their calls are still served (#6483).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerUse {
+    /// Admitting a new stream.
+    NewStream,
+    /// A call for a stream the caller already holds: its assignment watch,
+    /// reports, leaves and front-door sessions.
+    HeldStream,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,6 +81,7 @@ pub fn caller_node(
     identity: Reviewed<'_>,
     caller: &MemberFacts,
     server_namespace: &str,
+    used: CallerUse,
 ) -> Result<String, CallerRefusal> {
     if identity.namespace != server_namespace {
         return Err(CallerRefusal::WrongNamespace);
@@ -75,12 +89,18 @@ pub fn caller_node(
     if caller.name.as_deref() != Some(identity.pod_name)
         || caller.namespace.as_deref() != Some(identity.namespace)
         || caller.uid.as_deref() != Some(identity.pod_uid)
-        || caller.terminating
         || caller.service_account.as_deref() != Some(EGRESS_NODE_SERVICE_ACCOUNT)
     {
         return Err(CallerRefusal::NotTheCaller);
     }
-    caller.node_name.clone().ok_or(CallerRefusal::NotTheCaller)
+    let node = caller
+        .node_name
+        .clone()
+        .ok_or(CallerRefusal::NotTheCaller)?;
+    if caller.terminating && used == CallerUse::NewStream {
+        return Err(CallerRefusal::Draining);
+    }
+    Ok(node)
 }
 
 /// The guest Pod is the reviewed, running, broker-mode workspace on the

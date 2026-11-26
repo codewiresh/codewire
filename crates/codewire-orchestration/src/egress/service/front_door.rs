@@ -22,7 +22,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status};
 use uuid::Uuid;
 
-use super::{EgressServiceState, denied};
+use super::{CallerUse, EgressServiceState, denied};
 use crate::front_door::BindingKey;
 
 mod session;
@@ -40,7 +40,7 @@ impl EgressServiceState {
         ctx: &RequestContext,
         mut requests: InboundStream<FrontDoorSessionRequest>,
     ) -> ServiceResult<ServiceStream<FrontDoorSessionResponse>> {
-        let caller = self.caller(ctx).await?;
+        let caller = self.caller(ctx, CallerUse::HeldStream).await?;
         let Some(front_doors) = &self.front_doors else {
             return Err(ConnectError::unimplemented(
                 "hosted credential interception is off",

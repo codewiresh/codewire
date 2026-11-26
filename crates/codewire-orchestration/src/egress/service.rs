@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use codewire_egress_node::replacement::StartLimiter;
 
-use super::admission::{self, Reviewed};
+use super::admission::{self, CallerUse, Reviewed};
 use super::assignment::{AssignedPolicy, Intercept, environment_policy, interception_bindings};
 use super::lockdown;
 use super::reports;
@@ -211,7 +211,7 @@ fn unavailable(what: &str, error: impl std::fmt::Display) -> ConnectError {
 
 impl EgressServiceState {
     /// The caller, from its own reviewed token and live Pod.
-    async fn caller(&self, ctx: &RequestContext) -> Result<Caller, ConnectError> {
+    async fn caller(&self, ctx: &RequestContext, used: CallerUse) -> Result<Caller, ConnectError> {
         let identity = self
             .attestation
             .review_egress_node(ctx.headers(), &self.server_namespace)
@@ -229,24 +229,32 @@ impl EgressServiceState {
             expires_at: tokio::time::Instant::now()
                 + Duration::from_secs(identity.expires_at_unix().saturating_sub(unix_now())),
         };
-        let node = self.caller_still_serving(&caller).await?;
+        let node = self.caller_still_serving(&caller, used).await?;
         Ok(Caller { node, ..caller })
     }
 
-    async fn caller_node(&self, ctx: &RequestContext) -> Result<String, ConnectError> {
-        Ok(self.caller(ctx).await?.node)
+    async fn caller_node(
+        &self,
+        ctx: &RequestContext,
+        used: CallerUse,
+    ) -> Result<String, ConnectError> {
+        Ok(self.caller(ctx, used).await?.node)
     }
 
     /// The caller's node, read again from its live Pod: it must still be the
     /// reviewed cw-egress, in orchestration's own namespace.
-    async fn caller_still_serving(&self, caller: &Caller) -> Result<String, ConnectError> {
+    async fn caller_still_serving(
+        &self,
+        caller: &Caller,
+        used: CallerUse,
+    ) -> Result<String, ConnectError> {
         let facts = self
             .attestation
             .attested_pod(&caller.namespace, &caller.name)
             .await
             .map_err(|error| unavailable("read the caller Pod", error))?
             .ok_or_else(denied)?;
-        admission::caller_node(caller.reviewed(), &facts, &self.server_namespace).map_err(
+        admission::caller_node(caller.reviewed(), &facts, &self.server_namespace, used).map_err(
             |refusal| {
                 tracing::warn!(?refusal, "egress caller refused");
                 denied()
@@ -733,7 +741,12 @@ impl Watch {
         }
         let deadline = RECHECK_TIMEOUT.min(left);
         let reads = async {
-            if self.state.caller_still_serving(&self.caller).await? != self.caller.node {
+            if self
+                .state
+                .caller_still_serving(&self.caller, CallerUse::HeldStream)
+                .await?
+                != self.caller.node
+            {
                 return Err(denied());
             }
             self.state
@@ -765,7 +778,7 @@ impl EgressService for EgressConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, AdmitRequest>,
     ) -> ServiceResult<AdmitResponse> {
-        let node = self.state.caller_node(&ctx).await?;
+        let node = self.state.caller_node(&ctx, CallerUse::NewStream).await?;
         let request = request.view();
         let peer: IpAddr = request.peer_ip.parse().map_err(|_| denied())?;
         if !self.state.allow_start(&node, peer) {
@@ -833,7 +846,7 @@ impl EgressService for EgressConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, WatchAssignmentRequest>,
     ) -> ServiceResult<ServiceStream<WatchAssignmentResponse>> {
-        let caller = self.state.caller(&ctx).await?;
+        let caller = self.state.caller(&ctx, CallerUse::HeldStream).await?;
         let request = request.view();
         let guest = self.state.named_guest(request.pod_name, request.pod_uid);
         self.state.guest_on_node(&guest, &caller.node).await?;
@@ -858,7 +871,7 @@ impl EgressService for EgressConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, ReportEnforcementRequest>,
     ) -> ServiceResult<ReportEnforcementResponse> {
-        let node = self.state.caller_node(&ctx).await?;
+        let node = self.state.caller_node(&ctx, CallerUse::HeldStream).await?;
         let request = request.to_owned_message();
         let guest = self.state.named_guest(&request.pod_name, &request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;
@@ -880,7 +893,7 @@ impl EgressService for EgressConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, ReportRecordsRequest>,
     ) -> ServiceResult<ReportRecordsResponse> {
-        let node = self.state.caller_node(&ctx).await?;
+        let node = self.state.caller_node(&ctx, CallerUse::HeldStream).await?;
         let request = request.to_owned_message();
         let guest = self.state.named_guest(&request.pod_name, &request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;
@@ -937,7 +950,7 @@ impl EgressService for EgressConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, SignInterceptionLeavesRequest>,
     ) -> ServiceResult<SignInterceptionLeavesResponse> {
-        let node = self.state.caller_node(&ctx).await?;
+        let node = self.state.caller_node(&ctx, CallerUse::HeldStream).await?;
         let request = request.view();
         let guest = self.state.named_guest(request.pod_name, request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;

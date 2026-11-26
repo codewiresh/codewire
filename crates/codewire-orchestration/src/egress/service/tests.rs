@@ -1080,6 +1080,43 @@ async fn an_open_watch_ends_when_its_caller_is_replaced_moved_or_expired() {
 }
 
 #[tokio::test]
+async fn a_draining_cw_egress_admits_no_new_stream_but_keeps_serving_the_ones_it_holds() {
+    // A terminating cw-egress drains for its deadline (#6483): ending its
+    // watches would end every pair with an open connection at once.
+    let caller_path = format!("/api/v1/namespaces/{SERVER}/pods/{CALLER}");
+    let draining = Cluster::healthy().with(|cluster| {
+        cluster
+            .pods
+            .get_mut()
+            .unwrap()
+            .get_mut(&caller_path)
+            .unwrap()
+            .metadata
+            .deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::jiff::Timestamp::UNIX_EPOCH,
+        ));
+    });
+    let (status, body) = call(&draining, "Admit", admit_body()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    assert!(watch(&draining, later()).recheck().await.is_ok());
+    let frame = first_frame(&draining, named_guest()).await;
+    assert!(frame["assignment"].is_object(), "{frame}");
+    // Past the caller check, a malformed report is refused as malformed. The
+    // store's pool connects nowhere, so nothing is stored.
+    for (method, body) in [
+        ("ReportEnforcement", named_guest()),
+        (
+            "ReportRecords",
+            json!({"podUid": GUEST_UID, "podName": GUEST, "records": [{}]}),
+        ),
+    ] {
+        let (status, response) = call(&draining, method, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method}: {response}");
+    }
+}
+
+#[tokio::test]
 async fn a_watch_refuses_a_uid_that_is_not_the_pods() {
     let frame = first_frame(
         &Cluster::healthy(),

@@ -76,37 +76,61 @@ fn admit(guest: &MemberFacts, peer: IpAddr) -> Result<(), GuestRefusal> {
 
 #[test]
 fn the_callers_node_comes_from_its_own_live_pod() {
-    assert_eq!(
-        caller_node(caller_identity(), &caller(), SERVER).unwrap(),
-        NODE
-    );
+    for used in [CallerUse::NewStream, CallerUse::HeldStream] {
+        assert_eq!(
+            caller_node(caller_identity(), &caller(), SERVER, used).unwrap(),
+            NODE
+        );
+    }
 }
 
 #[test]
 fn a_caller_in_another_namespace_or_under_another_account_is_refused() {
-    let elsewhere = Reviewed {
-        namespace: "other",
-        ..caller_identity()
-    };
+    for used in [CallerUse::NewStream, CallerUse::HeldStream] {
+        let elsewhere = Reviewed {
+            namespace: "other",
+            ..caller_identity()
+        };
+        assert_eq!(
+            caller_node(elsewhere, &caller(), SERVER, used),
+            Err(CallerRefusal::WrongNamespace)
+        );
+        let as_sandbox = facts(caller_identity(), SANDBOX_SERVICE_ACCOUNT, &[]);
+        assert_eq!(
+            caller_node(caller_identity(), &as_sandbox, SERVER, used),
+            Err(CallerRefusal::NotTheCaller)
+        );
+        let mut replaced = caller();
+        replaced.uid = Some("other-uid".to_owned());
+        assert_eq!(
+            caller_node(caller_identity(), &replaced, SERVER, used),
+            Err(CallerRefusal::NotTheCaller)
+        );
+        let mut unscheduled = caller();
+        unscheduled.node_name = None;
+        assert_eq!(
+            caller_node(caller_identity(), &unscheduled, SERVER, used),
+            Err(CallerRefusal::NotTheCaller)
+        );
+    }
+}
+
+#[test]
+fn a_draining_caller_keeps_the_streams_it_holds_but_admits_no_new_one() {
+    let mut draining = caller();
+    draining.terminating = true;
     assert_eq!(
-        caller_node(elsewhere, &caller(), SERVER),
-        Err(CallerRefusal::WrongNamespace)
+        caller_node(caller_identity(), &draining, SERVER, CallerUse::NewStream),
+        Err(CallerRefusal::Draining)
     );
-    let as_sandbox = facts(caller_identity(), SANDBOX_SERVICE_ACCOUNT, &[]);
     assert_eq!(
-        caller_node(caller_identity(), &as_sandbox, SERVER),
-        Err(CallerRefusal::NotTheCaller)
+        caller_node(caller_identity(), &draining, SERVER, CallerUse::HeldStream).unwrap(),
+        NODE
     );
-    let mut replaced = caller();
-    replaced.uid = Some("other-uid".to_owned());
+    // Draining excuses nothing else: a replaced caller is still refused.
+    draining.uid = Some("other-uid".to_owned());
     assert_eq!(
-        caller_node(caller_identity(), &replaced, SERVER),
-        Err(CallerRefusal::NotTheCaller)
-    );
-    let mut unscheduled = caller();
-    unscheduled.node_name = None;
-    assert_eq!(
-        caller_node(caller_identity(), &unscheduled, SERVER),
+        caller_node(caller_identity(), &draining, SERVER, CallerUse::HeldStream),
         Err(CallerRefusal::NotTheCaller)
     );
 }
