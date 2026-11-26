@@ -457,6 +457,19 @@ pub(super) fn workload_listener() -> Option<std::os::fd::RawFd> {
     super::hosted_ingress::container_listener_fd()
 }
 
+/// Whether container PID 1 spawns the local-VM credential loopback forwarder on
+/// `CREDENTIAL_BRIDGE_LOOPBACK_PORT`. In a hosted `standard` Pod, the hosted
+/// daemon binds that loopback port itself (`CredentialBridgeTransport::Hosted`),
+/// so spawning the local forwarder holds the port and fails any Sandbox with a
+/// credential profile with `EADDRINUSE`.
+pub(super) fn uses_local_credential_forwarder() -> bool {
+    uses_local_credential_forwarder_for(workload_listener())
+}
+
+fn uses_local_credential_forwarder_for(listener: Option<std::os::fd::RawFd>) -> bool {
+    listener.is_none()
+}
+
 /// Whether an environment, as the image and the project give it, sets the
 /// listener's variable.
 fn names_listener_variable(environment: &[String]) -> bool {
@@ -630,5 +643,13 @@ mod tests {
             "CODEWIRE_WORKSPACE_SHIM_ADDR=127.0.0.1:17777".to_owned(),
         ];
         assert!(!names_listener_variable(&other));
+    }
+
+    #[test]
+    fn hosted_workspace_leaves_credential_loopback_port_for_hosted_daemon() {
+        assert!(!uses_local_credential_forwarder_for(Some(
+            HOSTED_DAEMON_LISTENER_FD
+        )));
+        assert!(uses_local_credential_forwarder_for(None));
     }
 }

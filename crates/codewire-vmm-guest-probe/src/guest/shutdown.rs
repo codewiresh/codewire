@@ -12,14 +12,93 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result, bail};
 
 /// How long the workload may take to exit after SIGTERM before the container
 /// is killed. The host waits 30 s for the whole poweroff.
 pub(super) const WORKLOAD_STOP_GRACE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Outcome of one non-blocking `waitpid(-1, ..., WNOHANG)` poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reap {
+    Exited(libc::pid_t),
+    Pending,
+    NoChildren,
+}
+
+fn reap_any_child() -> io::Result<Reap> {
+    let mut status = 0;
+    // SAFETY: `status` is a valid stack pointer for `waitpid` with `WNOHANG`.
+    let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+    if reaped > 0 {
+        return Ok(Reap::Exited(reaped));
+    }
+    if reaped == 0 {
+        return Ok(Reap::Pending);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ECHILD) {
+        return Ok(Reap::NoChildren);
+    }
+    if error.kind() == io::ErrorKind::Interrupted {
+        return Ok(Reap::Pending);
+    }
+    Err(error)
+}
+
+/// Reaps container children until `poweroff` is requested. When a local-VM
+/// `credential_forwarder` child is present, its exit ends container PID 1.
+pub(super) fn wait_for_poweroff(
+    credential_forwarder: Option<Child>,
+    poweroff: &AtomicBool,
+) -> Result<()> {
+    wait_for_poweroff_with(credential_forwarder, poweroff, reap_any_child)
+}
+
+fn wait_for_poweroff_with(
+    mut credential_forwarder: Option<Child>,
+    poweroff: &AtomicBool,
+    mut reap_any: impl FnMut() -> io::Result<Reap>,
+) -> Result<()> {
+    loop {
+        if poweroff.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if let Some(forwarder) = credential_forwarder.as_mut()
+            && forwarder
+                .try_wait()
+                .context("observe credential loopback forwarder")?
+                .is_some()
+        {
+            bail!("credential loopback forwarder exited");
+        }
+        match reap_any().context("reap workspace child")? {
+            Reap::Exited(pid) => {
+                if credential_forwarder.as_ref().is_some_and(|forwarder| {
+                    pid == libc::pid_t::try_from(forwarder.id()).unwrap_or(-1)
+                }) {
+                    bail!("credential loopback forwarder exited");
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Reap::NoChildren => {
+                if credential_forwarder.is_some() {
+                    bail!("workspace init lost its credential loopback forwarder");
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Reap::Pending => {
+                thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+}
 
 /// The workspace container's PID 1 in this namespace, from `runc state`.
 pub(super) fn container_init_pid() -> Option<i32> {
@@ -322,5 +401,34 @@ mod tests {
         assert_eq!(unescape("a\\011b\\134c\\012"), b"a\tb\\c\n");
         assert_eq!(unescape("trailing\\04"), b"trailing\\04");
         assert!(parse_mountinfo("no separator here\n").is_empty());
+    }
+
+    #[test]
+    fn wait_for_poweroff_without_local_forwarder_tolerates_no_children_until_poweroff() {
+        let poweroff = AtomicBool::new(false);
+        let mut polls = 0usize;
+        let result = wait_for_poweroff_with(None, &poweroff, || {
+            polls += 1;
+            if polls >= 2 {
+                poweroff.store(true, Ordering::Release);
+            }
+            Ok(Reap::NoChildren)
+        });
+        assert!(result.is_ok(), "expected clean poweroff, got {result:?}");
+        assert!(polls >= 2);
+    }
+
+    #[test]
+    fn wait_for_poweroff_fails_if_local_forwarder_exits() {
+        let poweroff = AtomicBool::new(false);
+        let child = Command::new("/bin/true").spawn().expect("spawn /bin/true");
+        let error = wait_for_poweroff_with(Some(child), &poweroff, || Ok(Reap::Pending))
+            .expect_err("exiting local credential forwarder must fail wait_for_poweroff");
+        assert!(
+            error
+                .to_string()
+                .contains("credential loopback forwarder exited"),
+            "unexpected error: {error:#}"
+        );
     }
 }

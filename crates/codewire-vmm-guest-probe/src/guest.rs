@@ -1336,9 +1336,15 @@ pub fn run_workspace_init() -> Result<()> {
         Err(error) => return fail_workspace_init("workspace-confinement-failed", error),
     };
     ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
-    let mut credential_forwarder = match spawn_credential_forwarder(&plan) {
-        Ok(forwarder) => forwarder,
-        Err(error) => return fail_workspace_init("workspace-credential-forwarder-failed", error),
+    let credential_forwarder = if hosted::uses_local_credential_forwarder() {
+        match spawn_credential_forwarder(&plan) {
+            Ok(forwarder) => Some(forwarder),
+            Err(error) => {
+                return fail_workspace_init("workspace-credential-forwarder-failed", error);
+            }
+        }
+    } else {
+        None
     };
     if let Err(error) = run_workspace_install(&plan, deadline, &bootstrap)
         .and_then(|()| acknowledge_workspace_install(&plan, deadline))
@@ -1382,35 +1388,7 @@ pub fn run_workspace_init() -> Result<()> {
     publish_workspace_readiness(&plan)?;
     drop(bootstrap);
 
-    loop {
-        if POWEROFF_REQUESTED.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if credential_forwarder
-            .try_wait()
-            .context("observe credential loopback forwarder")?
-            .is_some()
-        {
-            bail!("credential loopback forwarder exited");
-        }
-        let mut status = 0;
-        let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped == libc::pid_t::try_from(credential_forwarder.id()).unwrap_or(-1) {
-            bail!("credential loopback forwarder exited");
-        }
-        if reaped > 0 {
-            thread::sleep(Duration::from_millis(20));
-            continue;
-        }
-        if reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
-            bail!("workspace init lost its credential loopback forwarder");
-        }
-        if reaped == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            thread::sleep(Duration::from_millis(20));
-            continue;
-        }
-        return Err(io::Error::last_os_error()).context("reap workspace child");
-    }
+    shutdown::wait_for_poweroff(credential_forwarder, &POWEROFF_REQUESTED)
 }
 
 /// Synthetic, static workload used by the checked-in native acceptance gate.
