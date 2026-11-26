@@ -2612,7 +2612,7 @@ fn record_setup_complete(
         &env.id,
         CreateMilestone::SetupComplete,
         StartPath::from_launch_type(Some(probe.launch_type.as_str())),
-        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+        start_profile(&ctx.sandbox_cfg, env),
         since_accepted,
     );
 }

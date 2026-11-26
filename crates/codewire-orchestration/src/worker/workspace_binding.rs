@@ -1101,9 +1101,7 @@ async fn bind_workspace_runtime_read(
             )
             .await?;
             if let Some((path, since)) = milestone {
-                let profile = cfg.map_or(StartProfile::Other, |cfg| {
-                    start_profile(cfg, &env.isolation_tier)
-                });
+                let profile = cfg.map_or(StartProfile::Other, |cfg| start_profile(cfg, env));
                 record_create_milestone(&env.id, CreateMilestone::Bound, path, profile, since);
             }
             // The recorder refuses anything but the observed chain, so the

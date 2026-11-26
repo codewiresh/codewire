@@ -177,11 +177,25 @@ fn container_stages(timeline: &PodStartTimeline) -> Vec<StageMarks> {
         .collect()
 }
 
-/// The runtime profile label for an environment's isolation tier, resolved
-/// exactly as the driver resolves the rendered profile.
-pub(super) fn start_profile(cfg: &SandboxWorkerCfg, isolation_tier: &str) -> StartProfile {
+/// The runtime profile label for an environment's isolation tier and recorded
+/// runtime profile, resolved as the driver renders it (#5602, #6333).
+pub(super) fn start_profile(
+    cfg: &SandboxWorkerCfg,
+    env: &super::env_data::EnvironmentRow,
+) -> StartProfile {
+    start_profile_for(cfg, &env.isolation_tier, &env.runtime_profile)
+}
+
+fn start_profile_for(
+    cfg: &SandboxWorkerCfg,
+    isolation_tier: &str,
+    recorded_profile: &str,
+) -> StartProfile {
     match runtime_profile_for_isolation_tier(isolation_tier) {
         Ok(Some(profile)) => StartProfile::from_runtime_profile(profile),
+        Ok(None) if !recorded_profile.trim().is_empty() => {
+            StartProfile::from_runtime_profile(recorded_profile)
+        }
         Ok(None) => StartProfile::from_runtime_profile(&cfg.runtime_profile),
         Err(_) => StartProfile::Other,
     }
@@ -566,17 +580,31 @@ mod tests {
     }
 
     #[test]
-    fn profile_follows_the_isolation_tier_before_the_process_default() {
+    fn profile_follows_the_isolation_tier_and_recorded_profile_before_the_process_default() {
         let cfg = SandboxWorkerCfg {
             runtime_profile: "commodity".into(),
             ..Default::default()
         };
-        assert_eq!(start_profile(&cfg, "standard"), StartProfile::Commodity);
         assert_eq!(
-            start_profile(&cfg, "confidential"),
+            start_profile_for(&cfg, "standard", ""),
+            StartProfile::Commodity
+        );
+        assert_eq!(
+            start_profile_for(&cfg, "standard", "standard"),
+            StartProfile::Standard
+        );
+        assert_eq!(
+            start_profile_for(&cfg, "standard", "commodity"),
+            StartProfile::Commodity
+        );
+        assert_eq!(
+            start_profile_for(&cfg, "confidential", "standard"),
             StartProfile::Confidential
         );
-        assert_eq!(start_profile(&cfg, "unsupported"), StartProfile::Other);
+        assert_eq!(
+            start_profile_for(&cfg, "unsupported", "standard"),
+            StartProfile::Other
+        );
     }
 
     #[test]

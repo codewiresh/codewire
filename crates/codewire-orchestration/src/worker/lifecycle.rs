@@ -671,7 +671,7 @@ pub async fn handle_environment_start(
     // Record the transition `prepare_start` just committed, so the shared
     // waits below observe their stages as this start's (`resume`).
     env.state = "starting".to_string();
-    let profile = start_profile(&ctx.sandbox_cfg, &env.isolation_tier);
+    let profile = start_profile(&ctx.sandbox_cfg, &env);
 
     let backend = match load_backend_row(&ctx.pool, env_id).await {
         Ok(b) => b,

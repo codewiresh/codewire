@@ -1149,7 +1149,7 @@ async fn run_environment_create(
             return Ok(None);
         }
 
-        let profile = start_profile(cfg, &env.isolation_tier);
+        let profile = start_profile(cfg, &env);
         // No backend row yet is fine — first iteration.
         let backend = load_backend_row(&ctx.pool, env_id).await.ok();
 
@@ -2861,7 +2861,7 @@ async fn wait_with_early_bind_recording<T>(
                         observe_create_stage(
                             StartStage::WorkspaceBind,
                             path,
-                            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                            start_profile(&ctx.sandbox_cfg, env),
                             recorded.elapsed,
                         );
                     }
@@ -2978,7 +2978,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             observe_create_stage(
                 StartStage::WorkspaceBind,
                 path,
-                start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                start_profile(&ctx.sandbox_cfg, env),
                 recorded.elapsed,
             );
         }
