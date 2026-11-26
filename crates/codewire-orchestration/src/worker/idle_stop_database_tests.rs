@@ -322,3 +322,81 @@ async fn db_a_suspended_sandbox_is_a_candidate_marked_suspended() -> Result<()> 
     .await;
     db.finish(result).await
 }
+
+/// Idle suspend (#5529): only a running, unmarked `standard` Sandbox with
+/// idle suspend on and older activity is a candidate; the daemon's
+/// acknowledgement marks a running one once; a failed pause clears only its
+/// own mark.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_idle_suspend_finds_marks_and_clears_the_right_sandboxes() -> Result<()> {
+    use crate::worker::idle_suspend;
+
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        const STANDARD: &str = "3b9e6c2d-1f4a-4e8b-9c7d-5a6b7c8d9e0f";
+        const KATA: &str = "5d2e8f1a-3c4b-4a6d-8e9f-0a1b2c3d4e5f";
+        // The runtime record is written once, at create.
+        for (environment, profile) in [(STANDARD, "standard"), (KATA, "commodity")] {
+            sqlx::query(
+                "INSERT INTO environments(id,org_id,created_by,type,preset_id,state,desired_state, \
+                   project_spec,started_at,runtime_profile,idle_suspend_seconds) \
+                 SELECT $1,org_id,created_by,type,preset_id,'running','started',project_spec, \
+                   NOW() - interval '1 hour',$3,900 FROM environments WHERE id = $2",
+            )
+            .bind(environment)
+            .bind(ENVIRONMENT)
+            .bind(profile)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO sandbox_environment_backend(environment_id, namespace) \
+                 VALUES ($1, 'idle-ns')",
+            )
+            .bind(environment)
+            .execute(pool)
+            .await?;
+        }
+        let ids = |candidates: Vec<idle_suspend::Candidate>| {
+            candidates.into_iter().map(|c| c.id).collect::<Vec<_>>()
+        };
+
+        // Recent activity: no candidate. Older than 15 minutes: the
+        // standard one only.
+        set_activity_of(pool, STANDARD, 60).await?;
+        set_activity_of(pool, KATA, 1_000).await?;
+        ensure!(ids(idle_suspend::candidates(pool).await?).is_empty());
+        set_activity_of(pool, STANDARD, 1_000).await?;
+        ensure!(ids(idle_suspend::candidates(pool).await?) == [STANDARD]);
+
+        // The acknowledgement marks it, once; a marked one is no candidate.
+        idle_suspend::mark(pool, STANDARD).await?;
+        let marked = idle_suspend::marked(pool).await?;
+        ensure!(marked.len() == 1 && marked[0].id == STANDARD);
+        let first = marked[0].suspended_at;
+        idle_suspend::mark(pool, STANDARD).await?;
+        ensure!(idle_suspend::marked(pool).await?[0].suspended_at == first);
+        ensure!(idle_suspend::candidates(pool).await?.is_empty());
+
+        // Clearing a mark other than the one in force changes nothing.
+        idle_suspend::clear_mark(pool, STANDARD, first - chrono::Duration::seconds(1)).await?;
+        ensure!(idle_suspend::marked(pool).await?.len() == 1);
+        idle_suspend::clear_mark(pool, STANDARD, first).await?;
+        ensure!(idle_suspend::marked(pool).await?.is_empty());
+        ensure!(ids(idle_suspend::candidates(pool).await?) == [STANDARD]);
+
+        // A stopped Sandbox is neither marked nor a candidate.
+        sqlx::query("UPDATE environments SET state = 'stopped' WHERE id = $1")
+            .bind(STANDARD)
+            .execute(pool)
+            .await?;
+        idle_suspend::mark(pool, STANDARD).await?;
+        ensure!(idle_suspend::marked(pool).await?.is_empty());
+        ensure!(idle_suspend::candidates(pool).await?.is_empty());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

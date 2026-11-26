@@ -24,6 +24,7 @@ pub mod identity;
 pub mod lease_owner;
 pub mod lifecycle;
 pub(crate) mod openbao;
+pub mod pause_records;
 pub(crate) mod repository_mount;
 pub mod resize_metrics;
 pub mod runtime;

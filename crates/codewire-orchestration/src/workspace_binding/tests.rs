@@ -480,6 +480,8 @@ pub(super) struct FakeStore {
     interception: Mutex<HashMap<String, bool>>,
     /// Each Pod's interception trust, recorded once (#6200).
     trust: Mutex<HashMap<String, bool>>,
+    /// Environments whose suspended mark a wake report cleared (#5529).
+    woken: Mutex<Vec<String>>,
 }
 
 impl FakeStore {
@@ -498,6 +500,7 @@ impl FakeStore {
             reports: Mutex::new(Vec::new()),
             interception: Mutex::new(HashMap::new()),
             trust: Mutex::new(HashMap::new()),
+            woken: Mutex::new(Vec::new()),
         })
     }
 
@@ -641,6 +644,11 @@ impl BindingStore for FakeStore {
             ));
         }
         Ok(outcome)
+    }
+
+    async fn clear_suspended(&self, environment_id: &str) -> Result<(), BindingStoreUnavailable> {
+        self.woken.lock().unwrap().push(environment_id.to_owned());
+        Ok(())
     }
 
     async fn report_mesh_attachment(
@@ -1523,6 +1531,7 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         reports: Mutex::new(Vec::new()),
         interception: Mutex::new(HashMap::new()),
         trust: Mutex::new(HashMap::new()),
+        woken: Mutex::new(Vec::new()),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))
@@ -2520,6 +2529,31 @@ async fn reports_are_recorded_for_the_bound_pod_only() {
             .await,
         Err(BindError::FailedPrecondition)
     );
+}
+
+/// A wake report (#5529) clears the bound environment's suspended mark, and
+/// only the bound Pod's: another address, or no credential, clears nothing.
+#[tokio::test]
+async fn a_wake_report_clears_only_the_bound_environments_mark() {
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    let state = &fixture.state;
+    assert_eq!(
+        state.report_wake(&valid_bearer(), Some(OTHER_PEER)).await,
+        Err(BindError::PermissionDenied)
+    );
+    assert_eq!(
+        state.report_wake(&HeaderMap::new(), Some(PEER)).await,
+        Err(BindError::Unauthenticated)
+    );
+    assert!(fixture.store.woken.lock().unwrap().is_empty());
+    state
+        .report_wake(&valid_bearer(), Some(PEER))
+        .await
+        .unwrap();
+    assert_eq!(*fixture.store.woken.lock().unwrap(), [ENVIRONMENT_ID]);
 }
 
 /// #3628 PR 5b, design §4 (cw-confidential's C2): each gate refuses before

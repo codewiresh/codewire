@@ -1073,6 +1073,21 @@ pub trait RuntimeAccess: Send + Sync {
         tail_lines: i64,
     ) -> anyhow::Result<Vec<u8>>;
 
+    /// A `standard` member's runtime container log from the last `since`,
+    /// with timestamps and at most `limit_bytes`: where the runtime's pause
+    /// records are (#5529, [`crate::pause_records`]). On `standard` the
+    /// workspace container is the runtime's.
+    async fn runtime_log_since(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        since: Duration,
+        limit_bytes: i64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let _ = (placement, member_name, since, limit_bytes);
+        anyhow::bail!("this runtime keeps no pause records")
+    }
+
     /// A stream to the SSH server of the environment's current runtime, proven
     /// to be the one its bound claim controls.
     async fn ssh_stream(

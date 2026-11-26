@@ -9,8 +9,9 @@ use codewire_daemon::config::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
 use codewire_proto::codewire::internal::v1::{
     GitIdentity, IssueIdentityTokenResponse, IssueMeshEnrollmentRequest,
     IssueMeshEnrollmentResponse, RecordHostKeyResponse, RefreshAccessResponse,
-    ReportMeshAttachmentRequest, ReportMeshAttachmentResponse, WorkspaceBindingService,
-    WorkspaceDefaults, WorkspaceIdentityFile, WorkspaceIdentityFiles,
+    ReportMeshAttachmentRequest, ReportMeshAttachmentResponse, ReportWakeRequest,
+    ReportWakeResponse, WorkspaceBindingService, WorkspaceDefaults, WorkspaceIdentityFile,
+    WorkspaceIdentityFiles,
 };
 use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
@@ -87,6 +88,7 @@ struct Recorded {
     /// The code `IssueMeshEnrollment` answers with; `None` refuses.
     mesh_code: Option<String>,
     mesh_reports: Vec<i32>,
+    wake_reports: usize,
     /// What `IssueIdentityToken` answers: a token and its expiry, or an
     /// error code and message. `None` is unavailable with no name.
     identity: Option<IdentityAnswer>,
@@ -280,6 +282,15 @@ impl WorkspaceBindingService for ScriptedService {
             .mesh_reports
             .push(request.report.to_i32());
         connectrpc::Response::ok(ReportMeshAttachmentResponse::default())
+    }
+
+    async fn report_wake(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, ReportWakeRequest>,
+    ) -> ServiceResult<ReportWakeResponse> {
+        self.recorded.lock().unwrap().wake_reports += 1;
+        connectrpc::Response::ok(ReportWakeResponse::default())
     }
 
     async fn issue_identity_token(
@@ -1010,6 +1021,9 @@ async fn mesh_enrollment_returns_one_code_and_its_network_and_refuses_malformed_
         fixture.recorded.lock().unwrap().mesh_reports,
         [MeshAttachmentReport::NotAMember as i32]
     );
+    // A suspend's wake report reaches orchestration (#5529).
+    fixture.client.report_wake().await.unwrap();
+    assert_eq!(fixture.recorded.lock().unwrap().wake_reports, 1);
 }
 
 #[tokio::test]

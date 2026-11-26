@@ -49,8 +49,10 @@ mod host_daemon;
 mod repair_database_tests;
 mod session_client;
 mod session_mutation;
+mod suspended;
 
 pub(crate) use activity::{DaemonActivity, environment_daemon_activity_for_worker};
+mod suspend;
 pub(crate) use app_ports::push_environment_app_ports;
 #[cfg(test)]
 use app_ports::send_app_ports;
@@ -58,6 +60,7 @@ pub(crate) use desktop::environment_desktop_daemon_core;
 use session_client::session_client_for_target;
 #[cfg(test)]
 pub(crate) use session_mutation::setup_admits_sessions;
+pub(crate) use suspend::{DaemonSuspend, environment_daemon_suspend_for_worker};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -618,6 +621,9 @@ pub async fn get_environment_daemon_status_core(
         super::proxy::RunningTarget::Sandbox(target) => target.pod_name.clone(),
         super::proxy::RunningTarget::Host(_) => String::new(),
     };
+    if let Some(status) = suspended::status(&state.pool, environment_id, &pod_name).await? {
+        return Ok(status);
+    }
     let (channel, token) =
         session_client::daemon_channel(state, target, DaemonRequestBudget::Control).await?;
     query_daemon(channel, token, &pod_name).await

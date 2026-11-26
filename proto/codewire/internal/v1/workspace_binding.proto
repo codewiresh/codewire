@@ -50,6 +50,14 @@ service WorkspaceBindingService {
     option idempotency_level = IDEMPOTENT;
   }
 
+  // A standard Sandbox's daemon is running again after a suspend (#5529,
+  // docs/dev/IDLE-STOP.md, "Suspend"): clears the Sandbox's suspended mark.
+  // For a Sandbox that isn't marked it changes nothing. It moves no second
+  // between billing rates.
+  rpc ReportWake(ReportWakeRequest) returns (ReportWakeResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
   // Issues a sandbox identity token for the bound environment and one
   // audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
   // "Minting"). A refusal's message is its name: invalid_target,
@@ -255,6 +263,10 @@ message ReportMeshAttachmentRequest {
 }
 
 message ReportMeshAttachmentResponse {}
+
+message ReportWakeRequest {}
+
+message ReportWakeResponse {}
 
 message IssueIdentityTokenRequest {
   // The audience: an absolute https URI, canonicalised before it is matched

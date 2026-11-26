@@ -288,7 +288,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         let quiet = codewire_workspace_access::quiet::PlatformQuiet::new();
         if carried {
             codewire_daemon::suspend::install(std::sync::Arc::new(
-                crate::hosted_suspend::HostedSuspend::new(quiet.clone()),
+                crate::hosted_suspend::HostedSuspend::new(quiet.clone(), client.clone()),
             ));
         }
         let access = hosted_access::serve(

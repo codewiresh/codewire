@@ -1280,6 +1280,29 @@ impl RuntimeAccess for KubernetesDriver {
         Ok(logs.into_bytes())
     }
 
+    async fn runtime_log_since(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        since: std::time::Duration,
+        limit_bytes: i64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &placement.namespace);
+        let logs = pods
+            .logs(
+                member_name,
+                &LogParams {
+                    container: Some("workspace".into()),
+                    since_seconds: Some(i64::try_from(since.as_secs()).unwrap_or(i64::MAX)),
+                    limit_bytes: Some(limit_bytes),
+                    timestamps: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(logs.into_bytes())
+    }
+
     async fn ssh_stream(
         &self,
         placement: &Placement,
@@ -1875,6 +1898,33 @@ mod tests {
             request.starts_with("GET /api/v1/namespaces/dev-sandboxes/pods/workspace-a/log?")
                 && request.contains("container=workspace")
                 && request.contains("tailLines=200")
+                && request.contains("timestamps=true"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_runtime_log_is_read_from_the_workspace_container_bounded_in_time_and_size() {
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        assert!(
+            driver
+                .runtime_log_since(
+                    &Placement::new("dev-sandboxes"),
+                    "workspace-a",
+                    std::time::Duration::from_secs(90),
+                    8_388_608,
+                )
+                .await
+                .is_err()
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let request = &requests[0];
+        assert!(
+            request.starts_with("GET /api/v1/namespaces/dev-sandboxes/pods/workspace-a/log?")
+                && request.contains("container=workspace")
+                && request.contains("sinceSeconds=90")
+                && request.contains("limitBytes=8388608")
                 && request.contains("timestamps=true"),
             "{request}"
         );

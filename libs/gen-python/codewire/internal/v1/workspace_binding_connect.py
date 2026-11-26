@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .workspace_binding_pb2 import AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest, BindWorkspaceResponse, IssueIdentityTokenRequest, IssueIdentityTokenResponse, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse
+from .workspace_binding_pb2 import AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest, BindWorkspaceResponse, IssueIdentityTokenRequest, IssueIdentityTokenResponse, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse, ReportWakeRequest, ReportWakeResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -51,6 +51,9 @@ class WorkspaceBindingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def report_mesh_attachment(self, request: ReportMeshAttachmentRequest, ctx: RequestContext[ReportMeshAttachmentRequest, ReportMeshAttachmentResponse]) -> ReportMeshAttachmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def report_wake(self, request: ReportWakeRequest, ctx: RequestContext[ReportWakeRequest, ReportWakeResponse]) -> ReportWakeResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def issue_identity_token(self, request: IssueIdentityTokenRequest, ctx: RequestContext[IssueIdentityTokenRequest, IssueIdentityTokenResponse]) -> IssueIdentityTokenResponse:
@@ -129,6 +132,16 @@ class WorkspaceBindingServiceASGIApplication(ConnectASGIApplication[WorkspaceBin
                         idempotency_level=IdempotencyLevel.IDEMPOTENT,
                     ),
                     function=svc.report_mesh_attachment,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/ReportWake": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ReportWake",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=ReportWakeRequest,
+                        output=ReportWakeResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=svc.report_wake,
                 ),
                 "/codewire.internal.v1.WorkspaceBindingService/IssueIdentityToken": Endpoint.unary(
                     method=MethodInfo(
@@ -300,6 +313,26 @@ class WorkspaceBindingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def report_wake(
+        self,
+        request: ReportWakeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReportWakeResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReportWake",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=ReportWakeRequest,
+                output=ReportWakeResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def issue_identity_token(
         self,
         request: IssueIdentityTokenRequest,
@@ -337,6 +370,9 @@ class WorkspaceBindingServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def report_mesh_attachment(self, request: ReportMeshAttachmentRequest, ctx: RequestContext[ReportMeshAttachmentRequest, ReportMeshAttachmentResponse]) -> ReportMeshAttachmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def report_wake(self, request: ReportWakeRequest, ctx: RequestContext[ReportWakeRequest, ReportWakeResponse]) -> ReportWakeResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def issue_identity_token(self, request: IssueIdentityTokenRequest, ctx: RequestContext[IssueIdentityTokenRequest, IssueIdentityTokenResponse]) -> IssueIdentityTokenResponse:
@@ -413,6 +449,16 @@ class WorkspaceBindingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.IDEMPOTENT,
                     ),
                     function=service.report_mesh_attachment,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/ReportWake": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ReportWake",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=ReportWakeRequest,
+                        output=ReportWakeResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=service.report_wake,
                 ),
                 "/codewire.internal.v1.WorkspaceBindingService/IssueIdentityToken": EndpointSync.unary(
                     method=MethodInfo(
@@ -573,6 +619,25 @@ class WorkspaceBindingServiceClientSync(ConnectClientSync):
                 service_name="codewire.internal.v1.WorkspaceBindingService",
                 input=ReportMeshAttachmentRequest,
                 output=ReportMeshAttachmentResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def report_wake(
+        self,
+        request: ReportWakeRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReportWakeResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReportWake",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=ReportWakeRequest,
+                output=ReportWakeResponse,
                 idempotency_level=IdempotencyLevel.IDEMPOTENT,
             ),
             headers=headers,

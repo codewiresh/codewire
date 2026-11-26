@@ -26,7 +26,7 @@ use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConf
 use codewire_proto::codewire::internal::v1::{
     AllocatePeerRelayRequest, AllocatePeerRelayResponse, IssueIdentityTokenRequest,
     IssueMeshEnrollmentRequest, MeshAttachmentReport, RecordHostKeyRequest, RefreshAccessRequest,
-    ReportMeshAttachmentRequest,
+    ReportMeshAttachmentRequest, ReportWakeRequest,
 };
 use codewire_proto::codewire::internal::v1::{
     BindWorkspaceRequest, BindWorkspaceResponse, WorkspaceAccess, WorkspaceBindingServiceClient,
@@ -428,6 +428,19 @@ impl BindingClient {
                 },
                 options,
             )
+            .await
+            .map(|_| ())
+            .map_err(|error| classify(&error))
+    }
+
+    /// Tell orchestration this Pod's daemon is running again after a
+    /// suspend, which clears the Sandbox's suspended mark (#5529).
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn report_wake(&self) -> Result<(), AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
+        self.client
+            .report_wake_with_options(ReportWakeRequest::default(), options)
             .await
             .map(|_| ())
             .map_err(|error| classify(&error))

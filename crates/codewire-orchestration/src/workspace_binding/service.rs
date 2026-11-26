@@ -18,8 +18,9 @@ use codewire_proto::codewire::internal::v1::{
     IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
     MeshAttachmentReport as ProtoMeshAttachmentReport, RecordHostKeyRequest, RecordHostKeyResponse,
     RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest,
-    ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService, WorkspaceDefaults,
-    WorkspaceIdentityFile, WorkspaceIdentityFiles, WorkspaceMeshAttachment,
+    ReportMeshAttachmentResponse, ReportWakeRequest, ReportWakeResponse, WorkspaceAccess,
+    WorkspaceBindingService, WorkspaceDefaults, WorkspaceIdentityFile, WorkspaceIdentityFiles,
+    WorkspaceMeshAttachment,
 };
 use codewire_server_core::bounded_http1::PeerAddr;
 use codewire_server_core::peer_token::{self, PEER_TOKEN_LIFETIME_SECS};
@@ -693,6 +694,23 @@ impl WorkspaceBindingState {
         Ok(ReportMeshAttachmentResponse::default())
     }
 
+    /// The bound Pod's daemon is running again after a suspend: the
+    /// environment's suspended mark is cleared (#5529,
+    /// `docs/dev/IDLE-STOP.md`, "Suspend"). It moves no billed second.
+    pub(crate) async fn report_wake(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<IpAddr>,
+    ) -> Result<ReportWakeResponse, BindError> {
+        let bound = self.bound(headers, peer).await?;
+        still_valid(&bound.caller.identity)?;
+        self.store
+            .clear_suspended(&bound.binding.environment_id)
+            .await
+            .map_err(|_| BindError::Unavailable)?;
+        Ok(ReportWakeResponse::default())
+    }
+
     /// The Mesh network node the bound environment serves, when it joins one
     /// and this platform offers hosted Mesh.
     async fn mesh_target(
@@ -1070,6 +1088,15 @@ impl WorkspaceBindingService for WorkspaceBindingConnectService {
             .report_mesh_attachment(ctx.headers(), peer_of(&ctx), report)
             .await;
         observe("report_mesh_attachment", result)
+    }
+
+    async fn report_wake(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ReportWakeRequest>,
+    ) -> ServiceResult<ReportWakeResponse> {
+        let result = self.state.report_wake(ctx.headers(), peer_of(&ctx)).await;
+        observe("report_wake", result)
     }
 
     async fn issue_identity_token(

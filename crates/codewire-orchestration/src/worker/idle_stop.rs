@@ -296,7 +296,7 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
 }
 
 /// Records `seen` as the Sandbox's activity, never moving it back.
-async fn record_activity(
+pub(crate) async fn record_activity(
     pool: &PgPool,
     environment_id: &str,
     seen: chrono::DateTime<chrono::Utc>,

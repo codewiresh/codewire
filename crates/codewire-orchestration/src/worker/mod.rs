@@ -32,6 +32,7 @@ pub mod identity_mints;
 pub mod idle_stop;
 #[cfg(test)]
 mod idle_stop_database_tests;
+pub(crate) mod idle_suspend;
 pub mod image_cache;
 pub mod lifecycle;
 pub mod loops;

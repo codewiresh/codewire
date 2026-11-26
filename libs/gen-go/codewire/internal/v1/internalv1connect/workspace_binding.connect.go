@@ -51,6 +51,9 @@ const (
 	// WorkspaceBindingServiceReportMeshAttachmentProcedure is the fully-qualified name of the
 	// WorkspaceBindingService's ReportMeshAttachment RPC.
 	WorkspaceBindingServiceReportMeshAttachmentProcedure = "/codewire.internal.v1.WorkspaceBindingService/ReportMeshAttachment"
+	// WorkspaceBindingServiceReportWakeProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's ReportWake RPC.
+	WorkspaceBindingServiceReportWakeProcedure = "/codewire.internal.v1.WorkspaceBindingService/ReportWake"
 	// WorkspaceBindingServiceIssueIdentityTokenProcedure is the fully-qualified name of the
 	// WorkspaceBindingService's IssueIdentityToken RPC.
 	WorkspaceBindingServiceIssueIdentityTokenProcedure = "/codewire.internal.v1.WorkspaceBindingService/IssueIdentityToken"
@@ -84,6 +87,11 @@ type WorkspaceBindingServiceClient interface {
 	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
 	// Records how far this Pod's Mesh network membership has come.
 	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
+	// A standard Sandbox's daemon is running again after a suspend (#5529,
+	// docs/dev/IDLE-STOP.md, "Suspend"): clears the Sandbox's suspended mark.
+	// For a Sandbox that isn't marked it changes nothing. It moves no second
+	// between billing rates.
+	ReportWake(context.Context, *connect.Request[v1.ReportWakeRequest]) (*connect.Response[v1.ReportWakeResponse], error)
 	// Issues a sandbox identity token for the bound environment and one
 	// audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
 	// "Minting"). A refusal's message is its name: invalid_target,
@@ -144,6 +152,13 @@ func NewWorkspaceBindingServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyIdempotent),
 			connect.WithClientOptions(opts...),
 		),
+		reportWake: connect.NewClient[v1.ReportWakeRequest, v1.ReportWakeResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceReportWakeProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("ReportWake")),
+			connect.WithIdempotency(connect.IdempotencyIdempotent),
+			connect.WithClientOptions(opts...),
+		),
 		issueIdentityToken: connect.NewClient[v1.IssueIdentityTokenRequest, v1.IssueIdentityTokenResponse](
 			httpClient,
 			baseURL+WorkspaceBindingServiceIssueIdentityTokenProcedure,
@@ -161,6 +176,7 @@ type workspaceBindingServiceClient struct {
 	allocatePeerRelay    *connect.Client[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse]
 	issueMeshEnrollment  *connect.Client[v1.IssueMeshEnrollmentRequest, v1.IssueMeshEnrollmentResponse]
 	reportMeshAttachment *connect.Client[v1.ReportMeshAttachmentRequest, v1.ReportMeshAttachmentResponse]
+	reportWake           *connect.Client[v1.ReportWakeRequest, v1.ReportWakeResponse]
 	issueIdentityToken   *connect.Client[v1.IssueIdentityTokenRequest, v1.IssueIdentityTokenResponse]
 }
 
@@ -192,6 +208,11 @@ func (c *workspaceBindingServiceClient) IssueMeshEnrollment(ctx context.Context,
 // ReportMeshAttachment calls codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment.
 func (c *workspaceBindingServiceClient) ReportMeshAttachment(ctx context.Context, req *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error) {
 	return c.reportMeshAttachment.CallUnary(ctx, req)
+}
+
+// ReportWake calls codewire.internal.v1.WorkspaceBindingService.ReportWake.
+func (c *workspaceBindingServiceClient) ReportWake(ctx context.Context, req *connect.Request[v1.ReportWakeRequest]) (*connect.Response[v1.ReportWakeResponse], error) {
+	return c.reportWake.CallUnary(ctx, req)
 }
 
 // IssueIdentityToken calls codewire.internal.v1.WorkspaceBindingService.IssueIdentityToken.
@@ -227,6 +248,11 @@ type WorkspaceBindingServiceHandler interface {
 	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
 	// Records how far this Pod's Mesh network membership has come.
 	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
+	// A standard Sandbox's daemon is running again after a suspend (#5529,
+	// docs/dev/IDLE-STOP.md, "Suspend"): clears the Sandbox's suspended mark.
+	// For a Sandbox that isn't marked it changes nothing. It moves no second
+	// between billing rates.
+	ReportWake(context.Context, *connect.Request[v1.ReportWakeRequest]) (*connect.Response[v1.ReportWakeResponse], error)
 	// Issues a sandbox identity token for the bound environment and one
 	// audience its organization registered (docs/dev/SANDBOX-IDENTITY.md,
 	// "Minting"). A refusal's message is its name: invalid_target,
@@ -282,6 +308,13 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyIdempotent),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceBindingServiceReportWakeHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceReportWakeProcedure,
+		svc.ReportWake,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("ReportWake")),
+		connect.WithIdempotency(connect.IdempotencyIdempotent),
+		connect.WithHandlerOptions(opts...),
+	)
 	workspaceBindingServiceIssueIdentityTokenHandler := connect.NewUnaryHandler(
 		WorkspaceBindingServiceIssueIdentityTokenProcedure,
 		svc.IssueIdentityToken,
@@ -302,6 +335,8 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 			workspaceBindingServiceIssueMeshEnrollmentHandler.ServeHTTP(w, r)
 		case WorkspaceBindingServiceReportMeshAttachmentProcedure:
 			workspaceBindingServiceReportMeshAttachmentHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceReportWakeProcedure:
+			workspaceBindingServiceReportWakeHandler.ServeHTTP(w, r)
 		case WorkspaceBindingServiceIssueIdentityTokenProcedure:
 			workspaceBindingServiceIssueIdentityTokenHandler.ServeHTTP(w, r)
 		default:
@@ -335,6 +370,10 @@ func (UnimplementedWorkspaceBindingServiceHandler) IssueMeshEnrollment(context.C
 
 func (UnimplementedWorkspaceBindingServiceHandler) ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) ReportWake(context.Context, *connect.Request[v1.ReportWakeRequest]) (*connect.Response[v1.ReportWakeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.ReportWake is not implemented"))
 }
 
 func (UnimplementedWorkspaceBindingServiceHandler) IssueIdentityToken(context.Context, *connect.Request[v1.IssueIdentityTokenRequest]) (*connect.Response[v1.IssueIdentityTokenResponse], error) {

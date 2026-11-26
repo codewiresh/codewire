@@ -219,6 +219,14 @@ class ReportMeshAttachmentResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
+class ReportWakeRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ReportWakeResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class IssueIdentityTokenRequest(_message.Message):
     __slots__ = ("resource",)
     RESOURCE_FIELD_NUMBER: _ClassVar[int]

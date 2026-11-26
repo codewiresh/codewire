@@ -199,6 +199,12 @@ pub trait BindingStore: Send + Sync {
     ) -> Result<bool, BindingStoreUnavailable> {
         Err(BindingStoreUnavailable)
     }
+
+    /// Clears the environment's suspended mark, which its bound daemon's
+    /// wake report does (#5529). An unmarked environment is left alone.
+    async fn clear_suspended(&self, _environment_id: &str) -> Result<(), BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
 }
 
 pub use crate::environment_mesh::{
@@ -503,6 +509,21 @@ impl BindingStore for PgBindingStore {
         crate::environment_mesh::report_attachment(&self.pool, environment_id, pod_uid, report)
             .await
             .map_err(mesh_store_unavailable)
+    }
+
+    async fn clear_suspended(&self, environment_id: &str) -> Result<(), BindingStoreUnavailable> {
+        sqlx::query(
+            "UPDATE environments SET suspended_at = NULL \
+             WHERE id = $1 AND suspended_at IS NOT NULL",
+        )
+        .bind(environment_id)
+        .execute(&self.pool)
+        .await
+        .map(drop)
+        .map_err(|error| {
+            tracing::warn!(error = %error, "workspace binding could not clear the suspended mark");
+            BindingStoreUnavailable
+        })
     }
 }
 

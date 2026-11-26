@@ -265,3 +265,35 @@ async fn db_a_fence_raised_while_the_repair_is_admitted_is_seen_before_it_starts
 
     fixture.cleanup().await;
 }
+
+/// A suspended Sandbox's daemon status comes from its mark, without the
+/// daemon (#5529); an unmarked one's is asked of the daemon.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_suspended_sandboxs_daemon_status_comes_from_its_mark() {
+    let fixture = LeaseFixture::seed(NAMESPACE).await;
+    assert_eq!(
+        suspended::status(&fixture.pool, &fixture.id, "workspace-a")
+            .await
+            .unwrap(),
+        None
+    );
+    sqlx::query("UPDATE environments SET suspended_at = now() WHERE id = $1")
+        .bind(&fixture.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let status = suspended::status(&fixture.pool, &fixture.id, "workspace-a")
+        .await
+        .unwrap()
+        .expect("answered from the mark");
+    assert_eq!(status.state, v1::DaemonState::Ready);
+    assert_eq!(status.message, suspended::SUSPENDED_MESSAGE);
+    assert_eq!(
+        suspended::status(&fixture.pool, "no-such-environment", "workspace-a")
+            .await
+            .unwrap(),
+        None
+    );
+    fixture.cleanup().await;
+}
