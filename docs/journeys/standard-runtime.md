@@ -9,22 +9,23 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-26. `standard-create`, `standard-exec`,
-`standard-application-secrets`, `standard-docker`, `standard-network` and
-`standard-stop-start` are partly observed on Dev (`#5602`), except the parts
-the table names; the rest are not yet observed.
+Updated 2026-11-26. `standard-admission` is observed on Dev, and
+`standard-create`, `standard-exec`, `standard-application-secrets`,
+`standard-docker`, `standard-network`, `standard-stop-start` and
+`standard-beside-commodity` are partly observed on Dev (`#5602`), except the
+parts the table names; the rest are not yet observed.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
-| `standard-create` | not yet observed | observed 2026-11-26 through `cw` (warm-pool and cold creates, `#5602`); dashboard, SDK, uncached image disk and no-KVM pending not yet | not yet observed |
-| `standard-exec` | not yet observed | observed 2026-11-26 for `cw exec` and `codewire.yaml` setup (`#5602`); `cw shell` persistence, `cw setup ssh`, `cw run` and dashboard terminal not yet | not yet observed |
+| `standard-create` | not yet observed | observed 2026-11-26 through `cw` (paused and unpaused warm-pool creates, cold create, and side-by-side `commodity` baseline, `#5602`); dashboard, SDK, uncached image disk and no-KVM pending not yet | not yet observed |
+| `standard-exec` | not yet observed | observed 2026-11-26 for `cw exec`, `cw run`, `cw shell --durable` persistence, `cw setup ssh` + OpenSSH login and `codewire.yaml` setup (`#5602`); dashboard terminal not yet | not yet observed |
 | `standard-application-secrets` | not yet observed | observed 2026-11-26 for setup and `cw exec` (`#5602`); unset check on a no-secrets sandbox not yet | not yet observed |
-| `standard-docker` | not yet observed | steps 1 and 2 observed 2026-11-26 (`#5602`); step 3 disk check and Docker-published preview port not yet | not yet observed |
-| `standard-network` | not yet observed | observed 2026-11-26 for allowed HTTPS, RFC1918 refusal, pre-bind self-check and credential interception (`#5602`); `cw --cloud policy` refusal log and NetworkPolicy read not yet | not yet observed |
+| `standard-docker` | not yet observed | steps 1 to 3 observed 2026-11-26 (`#5602`); Docker-published preview port not yet | not yet observed |
+| `standard-network` | not yet observed | observed 2026-11-26 for allowed HTTPS, RFC1918 refusal, live `locked`/`open` policy switch, applied NetworkPolicy read, pre-bind self-check, credential interception and 11 min silent TCP hold (`#5602`, `#6399`); `cw --cloud policy log` no command yet (`#4000`) | not yet observed |
 | `standard-closed-egress` | not yet observed | not yet observed | not yet observed |
 | `standard-stop-start` | not yet observed | steps 1 to 3 observed 2026-11-24 and 2026-11-26 (`#5602`); step 4 not yet | not yet observed |
-| `standard-admission` | not yet observed | not yet observed | not yet observed |
-| `standard-beside-commodity` | not yet observed | not yet observed | not yet observed |
+| `standard-admission` | not yet observed | observed 2026-11-26 (all 12 refusal cases vs passing baseline via live `--dry-run=server`, `#5602`) | not yet observed |
+| `standard-beside-commodity` | not yet observed | step 2 observed 2026-11-26 (custom `--image` fallback to `commodity`, `#5602`); step 1 not yet | not yet observed |
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
 | `standard-suspend` | not yet observed | not yet observed | not yet observed |
 
@@ -65,18 +66,28 @@ the table names; the rest are not yet observed.
   Pod's container list and security context in step 3.
 - **Gotchas:** `kubectl exec` into `workspace` lands in the runtime's
   container, outside the VM, and proves nothing about the sandbox.
-- **Observed:** on Dev, 2026-11-26 (`cw v0.4.26`, source `f07496877d`, runtime
-  digest `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
+- **Observed:** on Dev, 2026-11-26 (`cw v0.4.26`, source `f07496877d` with
+  runtime digest
+  `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
+  and source `e06341033f` with runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
   `#5602`): warm-pool creates reached `bound` in `488–493 ms`, `access_ready`
   in `797–896 ms` and `setup_complete` in `967 ms` (`cw` printed
   `SSH access ready` in `0.5–0.6 s`; two concurrent warm-pool creates both
-  adopted in `0.6–0.7 s`), and a non-pooled cold create (`1 vCPU / 4 GiB /
-  90 GiB`) reached `bound` in `13.1 s`, `access_ready` in `15.2 s` and
-  `setup_complete` in `15.6 s`. `uname -r` inside the guest printed
-  `6.18.48-codewire3`; the Pod ran one `workspace` container on RuntimeClass
-  `standard` with no `dind` container. Dashboard and SDK entry points, an
-  uncached image disk and a node with no free `/dev/kvm` device are not yet
-  observed.
+  adopted in `0.6–0.7 s`), and paused warm-pool creates (`#6632`) reached
+  `bound` in `454–469 ms`, `access_ready` in `927 ms` (`0.6–0.7 s` CLI;
+  `3,174 ms` after >3 min pause including automatic `cw-egress` reconnect)
+  while idling at `22.2–25.6 mCPU` pod-level total (`0.3%` of 8 vCPUs on the
+  8 vCPU pool member; `0` billing warnings). A non-pooled cold create
+  (`1 vCPU / 4 GiB / 90 GiB`) reached `bound` in `13.1 s`, `access_ready` in
+  `15.2 s` and `setup_complete` in `15.6 s`, with `128 MiB` `fdatasync`
+  throughput of `263–284 MB/s` (side-by-side `commodity` cold create of the
+  same shape on `e06341033f`: `bound` `7.49 s`, `access_ready` `9.90 s`,
+  `setup_complete` `10.30 s`, `128 MiB` `fdatasync` `204 MB/s`). `uname -r`
+  inside the guest printed `6.18.48-codewire3`; the Pod ran one `workspace`
+  container on RuntimeClass `standard` with no `dind` container. Dashboard
+  and SDK entry points, an uncached image disk and a node with no free
+  `/dev/kvm` device are not yet observed.
 
 ## `standard-exec`: commands, shells and setup run inside the VM
 
@@ -96,15 +107,25 @@ the table names; the rest are not yet observed.
 - **Proof:** the exit code and nonce, the surviving process's PID, and the
   user `id` prints over SSH.
 - **Observed:** on Dev, 2026-11-26 (`cw v0.4.26`, source `78401cfc72` with
-  runtime digest `sha256:a6d8ab5fa9d8d05263fceebc6dcb5256019cde5fc11972e4f0436cd4f4fe7d30`
-  and source `f07496877d` with runtime digest
+  runtime digest `sha256:a6d8ab5fa9d8d05263fceebc6dcb5256019cde5fc11972e4f0436cd4f4fe7d30`,
+  source `f07496877d` with runtime digest
   `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
+  and source `e06341033f` with runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
   `#5602`): `cw exec` ran commands and returned output (including 10 parallel
-  `cw exec` calls across two running sandboxes in `3.745 s`), `codewire.yaml`
-  `install_command` and `startup_script` wrote files read back via `cw exec`,
-  and `cw ports --publish 8080 --access public` served a preview from the
-  sandbox. `cw shell` persistence across terminal close, `cw setup ssh` with
-  an SSH client, `cw run` and the dashboard terminal are not yet observed.
+  `cw exec` calls across two running sandboxes in `3.745 s`), `cw run`
+  streamed output and reported `Session exited with code 7`,
+  `cw shell --durable` kept `sleep 600` (PID `62`) running across `Ctrl-B d`
+  disconnect with the session still `Running` in `cw ls`, `cw setup ssh`
+  wrote the managed SSH config (`StrictHostKeyChecking yes` +
+  `KnownHostsCommand cw --cloud ssh known-hosts %H`) and `ssh` logged in
+  cleanly (`uid=1000(codewire) gid=1000(codewire) groups=1000(codewire),1001(docker)`,
+  kernel `6.18.48-codewire3`), `codewire.yaml` `install_command` and
+  `startup_script` wrote files read back via `cw exec`, and
+  `cw ports --publish 8080 --access public` served a preview from the
+  sandbox. On Dev, neither `standard` nor `commodity` published a direct UDP
+  endpoint (`stun_server_count=0`; `commodity` connected via relay and
+  `standard` via DERP). The dashboard terminal is not yet observed.
 
 ## `standard-application-secrets`: a sandbox's application secrets reach its commands and setup
 
@@ -149,14 +170,20 @@ the table names; the rest are not yet observed.
      workspace container, so the workspace itself has no such directory.
 - **Proof:** the image ID present in one sandbox and absent in the other, and
   Docker's data on its own disk.
-- **Observed:** steps 1 and 2 on Dev, 2026-11-26 (`cw v0.4.26`, source
-  `f07496877d`, runtime digest
+- **Observed:** steps 1 to 3 on Dev, 2026-11-26 (`cw v0.4.26`, source
+  `f07496877d` with runtime digest
   `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
+  and source `e06341033f` with runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
   `#5602`): two `standard` sandboxes ran `docker run --rm busybox` and
   `docker run --rm alpine` concurrently; sandbox A listed one image while
   sandbox B listed zero images before its own pull, showing isolated per-VM
-  Docker daemons. Step 3 (`df -h /` disk check) and reaching a
-  Docker-published port through a preview are not yet observed.
+  Docker daemons. In an 80 GiB sandbox, `lsblk` showed separate `35.1G`
+  `vda` (`/workspace` + `/home/codewire`) and `35.1G` `vdb` disks,
+  `docker info` reported `DockerRootDir=/var/lib/docker`, and
+  `docker run --rm busybox df -h /` showed a `34.2G` overlay (~half the
+  sandbox volume). Reaching a Docker-published port through a preview is not
+  yet observed.
 
 ## `standard-closed-egress`: the first version refuses every workload connection
 
@@ -190,15 +217,26 @@ the table names; the rest are not yet observed.
   self-check passed" with its three probes, before the create's
   `access_ready`. A daemon whose check did not pass never records its host
   key, and the create fails rather than finishing.
-- **Observed:** on Dev, 2026-11-26 (`cw v0.4.26`, source `f07496877d`, runtime
-  digest `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
-  `#5602`): allowed HTTPS egress returned HTTP 200 (10/10 parallel requests
-  across two sandboxes), RFC1918 egress to `10.96.0.1:443` was refused, warm
-  members logged `egress stream authenticated (ca=true)` and
-  `egress self-check passed; the daemon serves` before claim, and Dev's
-  exact-source credential interception smoke passed on `standard`. Walking
-  `cw --cloud policy` and `cw --cloud policy log` and reading the Pod's
-  NetworkPolicy directly are not yet observed.
+- **Observed:** on Dev, 2026-11-26 (`cw v0.4.26`, source `f07496877d` with
+  runtime digest
+  `sha256:34d0586252dae97b2a87f9a4a6ee5f3ddf624aa450fbed3ca2d3f24ff09d5550`,
+  and source `e06341033f` with runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
+  `#5602`, `#6399`): allowed HTTPS egress returned HTTP 200 (10/10 parallel
+  requests across two sandboxes), RFC1918 egress to `10.96.0.1:443` was
+  refused, live switching with `cw --cloud update --policy locked` enforced
+  `locked` (refusing `https://example.com/`) and switching back to `open`
+  restored HTTP 200, warm members logged `egress stream authenticated
+  (ca=true)` and `egress self-check passed; the daemon serves` before claim,
+  Dev's exact-source credential interception smoke passed on `standard`, and
+  two silent guest TCP connections through `cw-egress` (`SO_KEEPALIVE=0` on
+  guest sockets) survived `660 s` and `670 s` idle and carried data cleanly
+  afterwards with zero redials (`#6399`). Operator inspection of the Pod's
+  NetworkPolicies (`cw-daemon-net-<env>`, `<template>-network-policy`, and
+  ingress-only `cw-daemon-warm-<env>`) confirmed egress is restricted solely
+  to platform peers (`egress:8089`, `orchestration:8087`, `derp:8443`,
+  `envoy-gateway:10443`, `udp-relay:41641`). `cw --cloud policy log` has no
+  hosted command yet (`#4000`, `network-and-egress.md`).
 
 ## `standard-stop-start`: the home, the workspace and the root persist until the image changes
 
@@ -247,7 +285,24 @@ the table names; the rest are not yet observed.
   try each case are added with the profile.
 - **Proof:** each refusal's message names the rule it broke, and nothing is
   created.
-- **Observed:** not yet observed.
+- **Observed:** on Dev, 2026-11-26 (source `e06341033f`, runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
+  `#5602`): against Dev's enforced `codewire-shared-sandbox-runtime-security`
+  and `codewire-standard-runtime-no-ephemeral-containers` Kyverno policies,
+  an unmutated live `standard` Pod spec passed `kubectl create
+  --dry-run=server`, while every single-field mutation was refused by
+  `validate.kyverno.svc-fail` naming the broken rule (creating nothing):
+  second container (`standard-runtime-pod-shape`), `privileged: true`
+  (`deny-privileged`, `standard-runtime-pod-shape`), `hostPath` volume
+  (`deny-host-path`, `standard-runtime-pod-shape`), another runtime image
+  digest (`standard-runtime-image`), explicit `command` or `args`
+  (`standard-runtime-pod-shape`), `seLinuxOptions.type`
+  (`standard-runtime-pod-shape`), unconfined `seccompProfile` or
+  `appArmorProfile` (`standard-runtime-pod-shape`), another image-disk
+  reference (`standard-runtime-pod-shape`), writable image-disk mount
+  (`standard-runtime-pod-shape: a standard Pod mounts its image disk
+  read-only`), and a `commodity` Pod requesting `codewire.sh/kvm: 1`
+  (`kvm-device-only-on-standard`).
 
 ## `standard-beside-commodity`: the other profiles do not change
 
@@ -265,7 +320,15 @@ the table names; the rest are not yet observed.
 - **Proof:** the two RuntimeClass names, and that the user sees no
   difference in either case: the create and the start print no warning,
   and `cw exec --in NAME -- true` exits 0.
-- **Observed:** not yet observed.
+- **Observed:** step 2 on Dev, 2026-11-26 (`cw v0.4.26`, source
+  `e06341033f`, runtime digest
+  `sha256:e4f91de6b6d50c720fe8da5fd1a914d3f6c0da2a03361fee0d83f3d8982e2995`,
+  `#5602`): creating a sandbox with `--image ubuntu:24.04` in a
+  `standard`-enabled organization printed no warning, ran on RuntimeClass
+  `commodity` (guest kernel `7.2.15`, `codewire.sh/egress: broker`), and
+  `cw exec -- true` exited 0. Step 1 (a pre-move `commodity` sandbox
+  stopping and starting after its organization moves to `standard`) is not
+  yet observed.
 
 ## `standard-organization-move`: one organization moves, the others don't
 
