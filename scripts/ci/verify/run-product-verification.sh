@@ -198,7 +198,17 @@ run_rust_archive_tests() {
   local extract entry
   rm -rf -- "$root"
   mkdir -p "$root/targets/archive/tmp"
-  cp -a --reflink=auto "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src"
+  if [ -n "${BUILD_SOURCE_DIR:-}" ]; then
+    cp -a --reflink=auto "$BUILD_SOURCE_DIR/." "$root/src"
+  else
+    # Match pull requests' source layout without copying .git objects or target/
+    # across filesystems on main/mq runs; link .git so tests calling git
+    # ls-files (e.g. codewire-cw-release) still see the repository metadata.
+    mkdir -p "$root/src"
+    tar --exclude='./.git' --exclude='./target' --exclude='./.tmp' \
+      -cf - -C "$ROOT" . | tar -xf - -C "$root/src"
+    [ ! -e "$ROOT/.git" ] || ln -s "$ROOT/.git" "$root/src/.git"
+  fi
   if [ -d "$RUST_TEST_ARCHIVE" ]; then
     # fetch-test-archive.sh --extract unpacked it as it downloaded, and
     # reported it ready only once its bytes hashed to the digest.

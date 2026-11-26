@@ -782,7 +782,8 @@ async fn a_subname_is_served_with_the_admitted_destination() {
             .unwrap();
         let response = sender.send_request(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        drop(sender);
+        // A live response keeps the client's connection open.
+        drop((response, sender));
         assert_eq!(served(outcome).await.requests, 1);
     }
     let seen = backend.seen();
