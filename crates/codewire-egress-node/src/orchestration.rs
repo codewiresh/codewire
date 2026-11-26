@@ -274,8 +274,13 @@ impl Orchestration {
                 // end it at 5 s.
                 self.options()?.with_timeout(WATCH_LIFETIME),
             )
-            .await?;
-        while let Some(message) = stream.message::<WatchAssignmentResponse>().await? {
+            .await
+            .map_err(watch_error)?;
+        while let Some(message) = stream
+            .message::<WatchAssignmentResponse>()
+            .await
+            .map_err(watch_error)?
+        {
             let message = message.to_owned_message();
             on_change(
                 message
@@ -286,6 +291,20 @@ impl Orchestration {
             );
         }
         Ok(())
+    }
+}
+
+/// Why a watch ended. UNAUTHENTICATED is about cw-egress's own token, never
+/// the Pod: orchestration ends a watch so when the token it was opened with
+/// runs out, which happens whenever kubelet writes the next token late. It
+/// is retried like an outage, keeping the Pod's last assignment. Read as a
+/// refusal, it ended every pair on the node and each connection through
+/// them (#6399).
+fn watch_error(error: ConnectError) -> CallError {
+    if error.code == ErrorCode::Unauthenticated {
+        CallError::Unavailable("egress-node token".into())
+    } else {
+        CallError::from(error)
     }
 }
 
@@ -508,6 +527,24 @@ mod tests {
         ));
         assert!(matches!(
             CallError::from(ConnectError::deadline_exceeded("lifetime")),
+            CallError::Expired
+        ));
+    }
+
+    #[test]
+    fn a_watch_refusing_the_nodes_token_is_retried_and_one_ending_the_pod_is_not() {
+        let expired = ConnectError::unauthenticated("egress node credential expired");
+        assert!(matches!(watch_error(expired), CallError::Unavailable(_)));
+        // Every other call still reads it as a refusal.
+        let expired = ConnectError::unauthenticated("egress node credential expired");
+        assert!(matches!(CallError::from(expired), CallError::Refused));
+        // Orchestration ending the Pod still closes its stream.
+        assert!(matches!(
+            watch_error(ConnectError::permission_denied("egress is not admitted")),
+            CallError::Refused
+        ));
+        assert!(matches!(
+            watch_error(ConnectError::deadline_exceeded("lifetime")),
             CallError::Expired
         ));
     }
