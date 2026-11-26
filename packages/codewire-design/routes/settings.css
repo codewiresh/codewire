@@ -24,8 +24,8 @@
 /* Rows: sessions, credentials, profiles, secrets and API keys are .cw-row-list
    rows inside their card; this sheet lays out each row's contents. */
 [data-dashboard-app] .cw-personal-api-key-groups { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] :is(.cw-account-sessions, .cw-account-organizations) { margin-block: 0; }
-[data-dashboard-app] .cw-account-session,
+[data-dashboard-app] :is(.cw-account-sessions, .cw-user-tokens, .cw-account-organizations) { margin-block: 0; }
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token),
 [data-dashboard-app] .cw-credential-row,
 [data-dashboard-app] .cw-profile-row,
 [data-dashboard-app] .cw-personal-secret-row,
@@ -34,18 +34,18 @@
 [data-dashboard-app] .cw-credential-row { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
 [data-dashboard-app] .cw-credential-row > :not(.cw-credential-identity, .cw-credential-status, .cw-menu) { grid-column: 1 / -1; }
 [data-dashboard-app] .cw-profile-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-[data-dashboard-app] :is(.cw-account-session, .cw-account-organization) > header,
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token, .cw-account-organization) > header,
 [data-dashboard-app] .cw-personal-secret-row > header { display: grid; gap: var(--space-1); min-width: 0; }
-[data-dashboard-app] :is(.cw-account-session, .cw-account-organization, .cw-security-row, .cw-profile-row, .cw-personal-secret-row) h3,
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token, .cw-account-organization, .cw-security-row, .cw-profile-row, .cw-personal-secret-row) h3,
 [data-dashboard-app] .cw-personal-api-key-row h4 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
 [data-dashboard-app] .cw-profile-row h3 { margin-bottom: var(--space-1); }
-[data-dashboard-app] .cw-account-session code,
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token) code,
 [data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: var(--text-code); }
 /* A key's fingerprint is one 50-character word; it wraps as the key does. */
 [data-dashboard-app] .cw-public-key > small { overflow-wrap: anywhere; }
 [data-dashboard-app] :is(.cw-credential-row, .cw-profile-row) > .cw-button { justify-self: start; }
-/* Session, organization and security rows: what it is on the left, its actions on the right. */
-[data-dashboard-app] :is(.cw-account-session, .cw-account-organization) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
+/* Session, user token, organization and security rows: what it is on the left, its actions on the right. */
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token, .cw-account-organization) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
 /* A security row: its title and status beside its actions, the explanation the full width under them. */
 [data-dashboard-app] .cw-security-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "text text"; align-items: center; gap: var(--space-1) var(--space-3); min-width: 0; }
 [data-dashboard-app] .cw-security-row > h3 { grid-area: title; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
@@ -55,11 +55,11 @@
 [data-dashboard-app] .cw-security-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: var(--space-2); }
 /* Sign-in methods: an outcome alert sits one step above the rows. */
 [data-dashboard-app] .cw-sign-in-methods > .cw-card-content { display: grid; gap: var(--space-4); }
-[data-dashboard-app] :is(.cw-account-session, .cw-account-organization) > header p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token, .cw-account-organization) > header p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
 /* The email with its verification state and, until it is verified, a way to send a new link. */
 [data-dashboard-app] .cw-settings-email { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 [data-dashboard-app] .cw-settings-email form { display: contents; }
-[data-dashboard-app] .cw-account-session > header code { color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] :is(.cw-account-session, .cw-user-token) > header code { color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
 [data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: var(--space-1); }
 [data-dashboard-app] .cw-credential-identity > div > span,

@@ -23,7 +23,7 @@
         <div class="cw-settings-layout">
           {% let settings_section = "api-keys" %}{% include "settings-nav.html" %}
           <div class="cw-settings-content cw-personal-api-keys-page">
-<header class="cw-page-header"><div><div class="cw-page-title-row"><h1 class="cw-page-title">API keys</h1>{% if page.organizations_available && page.one_time_key.is_empty() %}<span class="cw-badge">{{ page.key_count() }}<span class="cw-sr-only">{% if page.key_count() == 1 %} key{% else %} keys{% endif %}</span></span>{% endif %}</div><p class="cw-page-description">Codewire API keys you created, for the CLI and SDK. Each key belongs to one organization.</p></div>{% if page.one_time_key.is_empty() %}<button class="cw-button" type="button" data-dialog-open="create-personal-api-key" aria-haspopup="dialog" aria-controls="create-personal-api-key"{% if !page.organizations_available || page.organizations.is_empty() %} disabled{% endif %}>Create key</button>{% endif %}</header>
+<header class="cw-page-header"><div><div class="cw-page-title-row"><h1 class="cw-page-title">API keys</h1>{% if page.organizations_available && page.one_time_key.is_empty() %}<span class="cw-badge">{{ page.key_count() }}<span class="cw-sr-only">{% if page.key_count() == 1 %} key{% else %} keys{% endif %}</span></span>{% endif %}</div><p class="cw-page-description">Your API keys and user tokens for the CLI and SDK. Each key belongs to one organization.</p></div>{% if page.one_time_key.is_empty() %}<button class="cw-button" type="button" data-dialog-open="create-personal-api-key" aria-haspopup="dialog" aria-controls="create-personal-api-key"{% if !page.organizations_available || page.organizations.is_empty() %} disabled{% endif %}>Create key</button>{% endif %}</header>
 {% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
 {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
 {% if !page.form.error.is_empty() && (!page.organizations_available || page.organizations.is_empty()) %}<p class="cw-alert cw-alert--error" role="alert">{{ page.form.error }}</p>{% endif %}
@@ -78,4 +78,29 @@
 </form></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit" form="create-personal-api-key-form">Create key</button></footer></dialog>
 {% endif %}
 {% if page.one_time_key.is_empty() && (!page.first_page_url.is_empty() || !page.next_page_url.is_empty()) %}<nav class="cw-session-pagination" aria-label="Organization pages">{% if !page.first_page_url.is_empty() %}<a href="{{ page.first_page_url }}">First page</a>{% endif %}{% if !page.next_page_url.is_empty() %}<a href="{{ page.next_page_url }}">Next page</a>{% endif %}</nav>{% endif %}
+{% if page.one_time_key.is_empty() %}
+<section id="user-tokens" class="cw-section" aria-labelledby="user-tokens-title">
+<header class="cw-section-header"><div><h2 id="user-tokens-title" class="cw-section-title">User tokens</h2><p class="cw-section-description">Tokens from <code>cw auth token</code> act as you until they expire or you revoke them.</p></div></header>
+{% if !user_tokens.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ user_tokens.message }}</p>{% endif %}
+{% if !user_tokens.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ user_tokens.error }}</p>{% endif %}
+{% if !user_tokens.available %}<p class="cw-alert cw-alert--warning" role="status">User tokens are unavailable. Reload to try again.</p>
+{% else if user_tokens.tokens.is_empty() && !user_tokens.later_page %}<p class="cw-settings-muted">You have no user tokens.</p>
+{% else %}
+<ul class="cw-row-list cw-user-tokens">
+{% for token in user_tokens.tokens %}<li class="cw-user-token">
+<header><h3>User token{% if token.expires.is_empty() %} <span class="cw-status cw-status--quiet cw-status--sentence" data-tone="warning">Never expires</span>{% endif %}</h3><code>{{ token.id }}</code><p>Created {{ token.created }}{% if !token.expires.is_empty() %} · Expires {{ token.expires }}{% endif %} · {% if token.last_used.is_empty() %}Never used{% else %}Last used {{ token.last_used }}{% endif %}</p></header>
+<button class="cw-text-action" type="button" data-dialog-open="revoke-user-token-{{ token.id }}" aria-haspopup="dialog" aria-controls="revoke-user-token-{{ token.id }}">Revoke</button>
+<dialog class="cw-dialog" data-dialog id="revoke-user-token-{{ token.id }}" aria-labelledby="revoke-user-token-title-{{ token.id }}">
+<header class="cw-dialog-header"><h2 id="revoke-user-token-title-{{ token.id }}">Revoke user token?</h2></header>
+<div class="cw-dialog-body"><p>Anything using <code>{{ token.id }}</code> stops working at once.</p></div>
+<form method="post" action="/settings/api-keys/_actions/user-tokens/revoke"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}"><input type="hidden" name="token_id" value="{{ token.id }}">
+<footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Revoke token</button></footer>
+</form>
+</dialog>
+</li>{% endfor %}
+</ul>
+{% if user_tokens.later_page || !user_tokens.next_url.is_empty() %}<nav class="cw-session-pagination" aria-label="User token pages">{% if user_tokens.later_page %}<a href="/settings/api-keys/#user-tokens">First page</a>{% endif %}{% if !user_tokens.next_url.is_empty() %}<a href="{{ user_tokens.next_url }}">Next page</a>{% endif %}</nav>{% endif %}
+{% endif %}
+</section>
+{% endif %}
 </div></div></div></main></div></body></html>

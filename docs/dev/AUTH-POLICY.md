@@ -972,8 +972,9 @@ token they are given as the bearer), an SDK binds no profile with one, and
 [Signing in from the environment](#signing-in-from-the-environment).
 
 **What runs now (#5688):** the IdP issues user tokens and the product API
-admits them, as below. Binding a profile with one, and the Settings page,
-are not yet shipped.
+admits them, as below. Binding a profile with one is not yet shipped.
+- **Settings → API keys → User tokens** lists them and revokes one, through
+  the routes below.
 - **Settings' routes:** `GET /api/auth/user-tokens?account_id=…` lists the
   account's live user tokens with their creation, expiry (none for one that
   never expires) and last use, never a value. `POST
@@ -1036,11 +1037,11 @@ sign-in for that command, as `CODEWIRE_API_KEY` does today.
 - **Lifetime:** chosen when it is issued, a number of days or never. The
   default is 1 day.
 - **What ends it:** signing out or revoking the sign-in it came from, a
-  password reset, an account disable, or revoking the token itself in
-  Settings. A token that never expires lives until one of those, so Settings
-  lists each live token with its creation, expiry and last use, and marks
-  the ones that never expire. A stream it
-  admitted ends as an OAuth token's does under
+  password reset, an account disable, or revoking the token itself on the
+  API keys page. A token that never expires lives until one of those, so the
+  API keys page lists each live token with its creation, expiry and last
+  use, and marks the ones that never expire. A stream it admitted ends as an
+  OAuth token's does under
   [Account access revocation](#account-access-revocation).
 - **What it can't do:** make API keys, change sign-in methods or second
   factors, or delete the account. It is refused for those by its kind.

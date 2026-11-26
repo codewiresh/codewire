@@ -330,6 +330,11 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   height: var(--space-1-5);
 }
 
+/* A status written as a phrase keeps its sentence case. */
+.cw-status--sentence {
+  text-transform: none;
+}
+
 /* Toast: a polite status that floats over the page, so a message never moves
    the content under it. The element stays rendered as an empty live region
    until a message arrives; empty, it draws nothing. */

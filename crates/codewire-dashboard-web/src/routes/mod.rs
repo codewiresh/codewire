@@ -41,6 +41,7 @@ mod snapshots;
 mod terminal;
 mod terminal_readiness;
 mod terminal_sessions;
+mod user_tokens;
 
 use axum::{
     Router,
@@ -308,6 +309,10 @@ fn settings_routes() -> Router<AppState> {
         .route(
             "/settings/api-keys/_actions/delete",
             post(personal_api_keys::delete_action).layer(DefaultBodyLimit::max(8192)),
+        )
+        .route(
+            "/settings/api-keys/_actions/user-tokens/revoke",
+            post(user_tokens::revoke_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route("/settings", get(slash_redirect))
         .route("/settings/", get(settings::settings))

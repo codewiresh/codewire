@@ -73,6 +73,7 @@ pub(crate) struct SettingsSecretsTemplate<'a> {
 pub(crate) struct SettingsApiKeysTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) page: &'a PersonalApiKeysPageView,
+    pub(crate) user_tokens: &'a crate::account_user_tokens::UserTokensView,
 }
 
 #[derive(Template)]

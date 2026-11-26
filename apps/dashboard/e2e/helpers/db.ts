@@ -46,6 +46,37 @@ export async function deleteSession(id: string) {
   await sql`DELETE FROM sessions WHERE id = ${id}`;
 }
 
+// A user token (#5688) stored as `cw auth token` stores one; only its digest
+// is kept, and the value never leaves this helper.
+export async function createUserToken(
+  email: string,
+  { expiresInDays, used }: { expiresInDays: number | null; used: boolean },
+) {
+  const [user] = await sql`SELECT id FROM users WHERE email = ${email}`;
+  if (!user) throw new Error(`Cannot create an E2E user token for missing user ${email}`);
+  const id = `e2e_ut_${randomUUID()}`;
+  const tokenHash = createHash("sha256").update(randomBytes(32).toString("hex")).digest("hex");
+  await sql`
+    INSERT INTO oidc_clients (id, redirect_uris) VALUES ('codewire-cli', ARRAY[]::text[])
+    ON CONFLICT (id) DO NOTHING
+  `;
+  await sql`
+    INSERT INTO oidc_user_tokens (id, token_hash, client_id, user_id, sign_in_id, scopes, expires_at, last_used_at)
+    VALUES (${id}, ${tokenHash}, 'codewire-cli', ${user.id}, ${`e2e_sign_in_${randomUUID()}`}, ARRAY['openid'],
+      CASE WHEN ${expiresInDays}::int IS NULL THEN NULL ELSE NOW() + make_interval(days => ${expiresInDays}::int) END,
+      CASE WHEN ${used} THEN NOW() ELSE NULL END)
+  `;
+  return id;
+}
+
+export async function userTokenIds(email: string): Promise<string[]> {
+  const rows = await sql`
+    SELECT t.id FROM oidc_user_tokens t JOIN users u ON u.id = t.user_id
+    WHERE u.email = ${email} ORDER BY t.id
+  `;
+  return rows.map((row) => row.id as string);
+}
+
 // Controlled visual data belongs only to the isolated synthetic visual owner.
 // Keep future expiry stable across real IdP sliding-expiry authentication.
 export async function stabilizeSyntheticAccountVisual(email: string, sessionIds: string[]) {

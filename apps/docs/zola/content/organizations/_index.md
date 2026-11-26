@@ -58,6 +58,9 @@ environments.
 - **API keys**: `cw api-keys create NAME [--expires DAYS]` prints a `cw_` key
   once. Set `CODEWIRE_API_KEY` to use it instead of a browser sign-in; it acts
   in the organization it was created in.
+- **User tokens**: `cw auth token` prints one that acts as you. **Settings →
+  API keys** lists yours, with when each expires and was last used, and
+  **Revoke** ends one at once.
 
 ## Billing
 

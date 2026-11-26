@@ -19,6 +19,7 @@ use tokio::{
 
 use crate::{
     account_sessions,
+    account_user_tokens::UserTokensView,
     auth::{authenticated_identity, enforce_two_factor},
     error::WebError,
     personal_api_keys_connect as api,
@@ -56,6 +57,9 @@ pub(super) struct PageQuery {
     message: String,
     #[serde(default)]
     error: String,
+    /// A later page of user tokens.
+    #[serde(default)]
+    token_cursor: String,
 }
 
 // Request authority is never retained in a diagnostic model.
@@ -231,16 +235,29 @@ async fn inventory_response(
                 truncated: false,
             })
             .collect();
-        if let Err(error) = load_groups(
+    }
+    let (groups, mut user_tokens) = tokio::join!(
+        async {
+            if !context.organizations_available {
+                return Ok(());
+            }
+            load_groups(
+                state,
+                &context.cookie,
+                &context.account_id,
+                &mut page.groups,
+            )
+            .await
+        },
+        super::user_tokens::read(
             state,
-            &context.cookie,
+            context.cookie.clone(),
             &context.account_id,
-            &mut page.groups,
-        )
-        .await
-        {
-            return web_error(WebError::Connect(error), headers);
-        }
+            &query.token_cursor,
+        ),
+    );
+    if let Err(error) = groups {
+        return web_error(WebError::Connect(error), headers);
     }
     if page.error.is_empty() {
         page.error = approved_error(&query.error).into();
@@ -248,7 +265,11 @@ async fn inventory_response(
     if page.message.is_empty() {
         page.message = approved_message(&query.message).into();
     }
-    render(state, context, page, status)
+    user_tokens.message = super::user_tokens::approved_message(&query.message).into();
+    if user_tokens.error.is_empty() {
+        user_tokens.error = super::user_tokens::approved_error(&query.error).into();
+    }
+    render(state, context, page, &user_tokens, status)
 }
 
 async fn load_groups(
@@ -449,7 +470,13 @@ pub(super) async fn create_action(
                 page.one_time_name = created.metadata.name;
                 page.one_time_organization = organization.name.clone();
                 page.form = PersonalApiKeyFormView::default();
-                return render(&state, &context, page, StatusCode::OK);
+                return render(
+                    &state,
+                    &context,
+                    page,
+                    &UserTokensView::default(),
+                    StatusCode::OK,
+                );
             }
             Err(error) if error.code == ErrorCode::Unauthenticated => {
                 return private(login_redirect(PATH, &headers));
@@ -611,6 +638,7 @@ fn render(
     state: &AppState,
     context: &PageContext,
     mut page: PersonalApiKeysPageView,
+    user_tokens: &UserTokensView,
     status: StatusCode,
 ) -> Response {
     page.account_id = context.account_id.clone();
@@ -624,6 +652,7 @@ fn render(
             SettingsApiKeysTemplate {
                 view: &context.view,
                 page: &page,
+                user_tokens,
             },
         ),
         csrf_cookie(&state.public_origin, &page.csrf_token),
