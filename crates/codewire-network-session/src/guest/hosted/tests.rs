@@ -158,16 +158,22 @@ enum Event {
     Ended(String),
 }
 
-struct Recorder(mpsc::UnboundedSender<Event>);
+/// Each event with the instant the loop reported it, so a pacing test measures
+/// the loop's own gaps, not when the test got round to reading them.
+struct Recorder(mpsc::UnboundedSender<(Event, Instant)>);
+
+impl Recorder {
+    fn send(&self, event: Event) {
+        let _ = self.0.send((event, Instant::now()));
+    }
+}
 
 impl EgressEvents for Recorder {
     fn egress_trust(&mut self, trust: &EgressTrust) {
-        let _ = self
-            .0
-            .send(Event::Trust(matches!(trust, EgressTrust::Ca(_))));
+        self.send(Event::Trust(matches!(trust, EgressTrust::Ca(_))));
     }
     fn ready(&mut self) {
-        let _ = self.0.send(Event::Ready);
+        self.send(Event::Ready);
     }
     fn round_ended(&mut self, end: &RoundEnd) {
         let name = match end {
@@ -182,7 +188,7 @@ impl EgressEvents for Recorder {
                 "version-refused".to_owned()
             }
         };
-        let _ = self.0.send(Event::Ended(name));
+        self.send(Event::Ended(name));
     }
 }
 
@@ -204,7 +210,9 @@ fn ipv4_packet(len: usize) -> Vec<u8> {
 }
 
 struct Walk {
-    events: mpsc::UnboundedReceiver<Event>,
+    events: mpsc::UnboundedReceiver<(Event, Instant)>,
+    /// When the loop reported the last event [`Walk::event`] returned.
+    at: Instant,
     seen: mpsc::UnboundedReceiver<Seen>,
     egress: Arc<FakeEgress>,
     peer: UnixDatagram,
@@ -246,6 +254,7 @@ where
     });
     Walk {
         events,
+        at: Instant::now(),
         seen,
         egress,
         peer,
@@ -255,10 +264,12 @@ where
 
 impl Walk {
     async fn event(&mut self) -> Event {
-        tokio::time::timeout(WAIT, self.events.recv())
+        let (event, at) = tokio::time::timeout(WAIT, self.events.recv())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        self.at = at;
+        event
     }
     async fn seen(&mut self) -> Seen {
         tokio::time::timeout(WAIT, self.seen.recv())
@@ -375,15 +386,15 @@ async fn changed_trust_redials_wait_the_trust_pacing_and_double() {
     assert_eq!(walk.event().await, Event::Ready);
     assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
     assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
-    let first = std::time::Instant::now();
+    let first = walk.at;
     assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
-    let second = std::time::Instant::now();
+    let second = walk.at;
     assert!(
         second - first >= trust_wait,
         "the trust wait, not the loop's"
     );
     assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
-    assert!(second.elapsed() >= trust_wait * 2, "doubled to its cap");
+    assert!(walk.at - second >= trust_wait * 2, "doubled to its cap");
 }
 
 /// A version refusal is not healed by redialling either, before or after the
@@ -417,20 +428,20 @@ async fn version_refusals_wait_the_slow_pacing_and_an_admitted_stream_starts_it_
     );
     let refused = Event::Ended("version-refused".to_owned());
     assert_eq!(walk.event().await, refused);
-    let first = std::time::Instant::now();
+    let first = walk.at;
     assert_eq!(walk.event().await, refused);
-    let second = std::time::Instant::now();
+    let second = walk.at;
     assert!(second - first >= slow, "the slow wait, not the loop's");
     assert_eq!(walk.event().await, refused);
-    assert!(second.elapsed() >= slow * 2, "doubled");
+    assert!(walk.at - second >= slow * 2, "doubled");
     // No refused round reported a trust or readiness.
     assert_eq!(walk.event().await, Event::Trust(false));
     assert_eq!(walk.event().await, Event::Ready);
     assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
     assert_eq!(walk.event().await, refused);
-    let restarted = std::time::Instant::now();
+    let restarted = walk.at;
     assert_eq!(walk.event().await, refused);
-    let waited = restarted.elapsed();
+    let waited = walk.at - restarted;
     assert!(
         waited >= slow && waited < slow * 5,
         "the first slow wait again, not eight times it: {waited:?}"
@@ -462,7 +473,7 @@ async fn a_failed_check_is_sent_and_the_daemon_never_reports_ready() {
         !walk
             .events
             .try_recv()
-            .is_ok_and(|event| event == Event::Ready)
+            .is_ok_and(|(event, _)| event == Event::Ready)
     );
 }
 
