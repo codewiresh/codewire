@@ -83,7 +83,7 @@ pub(super) async fn bind_token(f: &Fixture) -> Result<CredentialRecord> {
                 profile_id: changed.id.clone(),
                 profile_revision: changed.revision,
             },
-            Some(&context.user_id),
+            &codewire_platform_credentials::PersonalConfirmation::SignIn(context.user_id.clone()),
         )
         .await?;
     Ok(token)

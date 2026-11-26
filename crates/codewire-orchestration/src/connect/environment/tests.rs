@@ -145,6 +145,11 @@ fn create_round_trip_keeps_profile_revision_and_personal_confirmations_distinct(
     let body = create_body(request).unwrap();
     assert_eq!(body.expected_profile_revision, Some(3));
     assert!(body.confirm_personal_credentials && !body.confirm_personal_secrets);
+    // The wire never says which credential confirmed; the handler does.
+    assert_eq!(
+        body.confirmed_with,
+        codewire_platform_credentials::ConfirmedWith::UserToken
+    );
     assert!(body.omit_application_previews);
     let wire = proto_create_request(body, "organization");
     assert_eq!(wire.expected_profile_revision, Some(3));
@@ -771,50 +776,59 @@ async fn send_as(
     (status, reason)
 }
 
-/// A user token gives no personal confirmation (#5688): a create or a source
-/// update that asks for one is refused by its kind before any read, while a
-/// `cw login` sign-in sending the same request isn't.
+/// A user token never confirms personal application secrets (#5688): a create
+/// or a source update that asks for that is refused by its kind before any
+/// read. Its profile confirmation isn't refused, and neither is a `cw login`
+/// sign-in's secrets confirmation.
 #[tokio::test]
-async fn a_user_token_is_refused_the_personal_confirmation() {
+async fn a_user_token_is_refused_only_the_personal_secrets_confirmation() {
     use codewire_server_core::auth::CredentialContext;
     let user_token = || CredentialContext::UserToken {
         token_id: "synthetic-token".into(),
         client_id: "codewire-cli".into(),
         scopes: vec!["codewire.api".into()],
     };
-    for (method, body) in [
-        (
-            "CreateEnvironment",
-            r#"{"orgId":"org-1","confirmPersonalCredentials":true}"#,
-        ),
+    let sign_in = || CredentialContext::OidcAccessToken {
+        client_id: "codewire-cli".into(),
+        scopes: vec!["codewire.api".into()],
+    };
+    let secrets = [
         (
             "CreateEnvironment",
             r#"{"orgId":"org-1","confirmPersonalSecrets":true}"#,
         ),
         (
             "UpdateEnvironmentSources",
-            r#"{"orgId":"org-1","environmentId":"env-1","confirmPersonalCredentials":true}"#,
-        ),
-        (
-            "UpdateEnvironmentSources",
             r#"{"orgId":"org-1","environmentId":"env-1","confirmPersonalSecrets":true}"#,
         ),
-    ] {
+    ];
+    for (method, body) in secrets {
         let (status, reason) = send_as(method, body, user_token()).await;
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{method} {body}");
         assert!(
             reason.contains("USER_TOKEN_NOT_ALLOWED"),
             "{method} {body}: {reason}"
         );
+        let (_, reason) = send_as(method, body, sign_in()).await;
+        assert!(
+            !reason.contains("USER_TOKEN_NOT_ALLOWED"),
+            "{method} {body}: {reason}"
+        );
     }
-    let (_, reason) = send_as(
-        "CreateEnvironment",
-        r#"{"orgId":"org-1","confirmPersonalCredentials":true}"#,
-        CredentialContext::OidcAccessToken {
-            client_id: "codewire-cli".into(),
-            scopes: vec!["codewire.api".into()],
-        },
-    )
-    .await;
-    assert!(!reason.contains("USER_TOKEN_NOT_ALLOWED"), "{reason}");
+    for (method, body) in [
+        (
+            "CreateEnvironment",
+            r#"{"orgId":"org-1","confirmPersonalCredentials":true}"#,
+        ),
+        (
+            "UpdateEnvironmentSources",
+            r#"{"orgId":"org-1","environmentId":"env-1","confirmPersonalCredentials":true}"#,
+        ),
+    ] {
+        let (_, reason) = send_as(method, body, user_token()).await;
+        assert!(
+            !reason.contains("USER_TOKEN_NOT_ALLOWED"),
+            "{method} {body}: {reason}"
+        );
+    }
 }

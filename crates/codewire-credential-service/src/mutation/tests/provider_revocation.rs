@@ -934,7 +934,13 @@ async fn a_revoke_first_delete_a_sandbox_holds_on_an_earlier_revision_is_refused
             profile_revision: profile.revision,
         };
         manager
-            .create_binding(&context, binding.clone(), Some(&context.user_id))
+            .create_binding(
+                &context,
+                binding.clone(),
+                &codewire_platform_credentials::PersonalConfirmation::SignIn(
+                    context.user_id.clone(),
+                ),
+            )
             .await?;
         // `unset`: the profile as it is now no longer selects it.
         manager

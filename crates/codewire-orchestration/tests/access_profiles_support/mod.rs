@@ -131,6 +131,8 @@ pub fn source_replacement(
         allow_restart: false,
         confirm_personal_credentials: true,
         confirm_personal_secrets: false,
+        // These model a sign-in, which keeps direct delivery.
+        confirmed_with: codewire_platform_credentials::ConfirmedWith::SignIn,
     }
 }
 

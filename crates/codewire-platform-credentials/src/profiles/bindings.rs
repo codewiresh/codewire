@@ -9,16 +9,18 @@ impl PlatformAccessProfileStore {
     /// Personal confirmation is an explicit per-call choice attributed to the
     /// authenticated creator, not identity proof from an unchecked request ID.
     /// Organization selections supply `None`; personal selections must supply
-    /// the exact profile owner and remain permitted by current context policy.
+    /// the exact profile owner, with the credential that confirmed, and remain
+    /// permitted by current context policy. Each write replaces both stored
+    /// confirmations, so a rebind never keeps the earlier caller's.
     pub async fn create_binding(
         &self,
         context: &GrantContext,
         binding: EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
+        personal_confirmation: &PersonalConfirmation,
     ) -> Result<EnvironmentAccessBinding, Error> {
         let mut tx = self.begin_transaction().await?;
         let binding = self
-            .create_binding_in(&mut tx, context, binding, personal_owner_confirmation)
+            .create_binding_in(&mut tx, context, binding, personal_confirmation)
             .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(binding)
@@ -31,21 +33,23 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
         binding: EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
+        personal_confirmation: &PersonalConfirmation,
     ) -> Result<EnvironmentAccessBinding, Error> {
         validate_binding(context, &binding)?;
         lock_environment(tx, context, false, true).await?;
-        self.admit_binding(tx, context, &binding, personal_owner_confirmation)
+        self.admit_binding(tx, context, &binding, personal_confirmation)
             .await?;
+        let (confirmed_by, confirmed_by_user_token) = personal_confirmation.columns();
         sqlx::query(
             "INSERT INTO platform_environment_access_bindings \
-             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
-             VALUES ($1,$2,$3,$4)",
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by, \
+             personal_owner_confirmed_by_user_token) VALUES ($1,$2,$3,$4,$5)",
         )
         .bind(binding.environment_id.as_str())
         .bind(binding.profile_id.as_str())
         .bind(generation(binding.profile_revision)?)
-        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .bind(confirmed_by)
+        .bind(confirmed_by_user_token)
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -62,7 +66,7 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
         binding: EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
+        personal_confirmation: &PersonalConfirmation,
     ) -> Result<EnvironmentAccessBinding, Error> {
         validate_binding(context, &binding)?;
         if context.environment_generation != 0 || context.placement != GrantPlacement::Platform {
@@ -91,7 +95,7 @@ impl PlatformAccessProfileStore {
             Some(true) => {}
         }
         let profile = profile_for_context(tx, context, &binding).await?;
-        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
+        validate_personal_confirmation(context, &profile, personal_confirmation)?;
         let credentials = load_credentials(tx, &profile).await?;
         validate_profile_entries(&profile, &credentials, &self.catalog).map_err(access_error)?;
         // A credential that needs Reconnect does not block the Sandbox: like a
@@ -102,15 +106,17 @@ impl PlatformAccessProfileStore {
                 return Err(Error::UnsupportedEntry);
             }
         }
+        let (confirmed_by, confirmed_by_user_token) = personal_confirmation.columns();
         sqlx::query(
             "INSERT INTO platform_environment_access_bindings \
-             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
-             VALUES ($1,$2,$3,$4)",
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by, \
+             personal_owner_confirmed_by_user_token) VALUES ($1,$2,$3,$4,$5)",
         )
         .bind(binding.environment_id.as_str())
         .bind(binding.profile_id.as_str())
         .bind(generation(binding.profile_revision)?)
-        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .bind(confirmed_by)
+        .bind(confirmed_by_user_token)
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -124,7 +130,7 @@ impl PlatformAccessProfileStore {
         context: &GrantContext,
         expected: &EnvironmentAccessBinding,
         replacement: EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
+        personal_confirmation: &PersonalConfirmation,
     ) -> Result<EnvironmentAccessBinding, Error> {
         let mut tx = self.begin_transaction().await?;
         let binding = self
@@ -133,7 +139,7 @@ impl PlatformAccessProfileStore {
                 context,
                 expected,
                 replacement,
-                personal_owner_confirmation,
+                personal_confirmation,
             )
             .await?;
         tx.commit().await.map_err(database_error)?;
@@ -147,7 +153,7 @@ impl PlatformAccessProfileStore {
         context: &GrantContext,
         expected: &EnvironmentAccessBinding,
         replacement: EnvironmentAccessBinding,
-        personal_owner_confirmation: Option<&OwnerId>,
+        personal_confirmation: &PersonalConfirmation,
     ) -> Result<EnvironmentAccessBinding, Error> {
         validate_binding(context, expected)?;
         validate_binding(context, &replacement)?;
@@ -155,16 +161,19 @@ impl PlatformAccessProfileStore {
         if load_binding(tx, context).await?.binding != *expected {
             return Err(Error::StaleBinding);
         }
-        self.admit_binding(tx, context, &replacement, personal_owner_confirmation)
+        self.admit_binding(tx, context, &replacement, personal_confirmation)
             .await?;
+        let (confirmed_by, confirmed_by_user_token) = personal_confirmation.columns();
         sqlx::query(
             "UPDATE platform_environment_access_bindings SET profile_id=$2,profile_revision=$3, \
-             personal_owner_confirmed_by=$4,updated_at=now() WHERE environment_id=$1",
+             personal_owner_confirmed_by=$4,personal_owner_confirmed_by_user_token=$5, \
+             updated_at=now() WHERE environment_id=$1",
         )
         .bind(replacement.environment_id.as_str())
         .bind(replacement.profile_id.as_str())
         .bind(generation(replacement.profile_revision)?)
-        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .bind(confirmed_by)
+        .bind(confirmed_by_user_token)
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;

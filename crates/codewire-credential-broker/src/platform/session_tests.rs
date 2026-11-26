@@ -232,6 +232,7 @@ fn hosted_constructor_rejects_owner_local_context_even_with_valid_pods() {
             workspace,
             local.context,
             local.credential_owner,
+            true,
             local.identity_expires_at_unix,
         ),
         Err(PlatformRuntimeError::Denied),
@@ -766,6 +767,7 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
         workspace,
         context,
         local.credential_owner.clone(),
+        true,
         local.identity_expires_at_unix,
     )
     .unwrap();
@@ -785,6 +787,7 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
         "user",
         "organization",
         "personal",
+        "direct delivery",
         "relay",
         "owner",
     ] {
@@ -803,6 +806,8 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
                 changed.context.allow_personal_credentials =
                     !changed.context.allow_personal_credentials
             }
+            // A rebind that changes which credential confirmed it.
+            "direct delivery" => changed.direct_delivery = !changed.direct_delivery,
             "relay" => changed.relay_mut().uid = Uuid::new_v4(),
             "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),
             _ => unreachable!(),
@@ -823,6 +828,7 @@ fn lease_authority_is_the_same_response_apart_from_expiry() {
             ..local.context.clone()
         },
         local.credential_owner.clone(),
+        true,
         local.identity_expires_at_unix,
     )
     .unwrap();
@@ -843,6 +849,7 @@ fn lease_authority_is_the_same_response_apart_from_expiry() {
         "user",
         "organization",
         "personal",
+        "direct delivery",
         "relay",
         "workspace",
         "identity kind",
@@ -870,6 +877,7 @@ fn lease_authority_is_the_same_response_apart_from_expiry() {
                 changed.context.allow_personal_credentials =
                     !changed.context.allow_personal_credentials
             }
+            "direct delivery" => changed.direct_delivery = !changed.direct_delivery,
             "relay" => changed.relay_mut().uid = Uuid::new_v4(),
             "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
             "identity kind" => changed.identity = local.identity.clone(),

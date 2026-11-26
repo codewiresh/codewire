@@ -18,7 +18,7 @@ use codewire_credential_broker::timing::{self, Phase};
 #[cfg(feature = "enrollment")]
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_platform_credentials::{
-    PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError,
+    PersonalConfirmation, PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError,
 };
 use codewire_project::PlatformProjectionSelection;
 use codewire_protected_store::secret_envelope::KekProvider;
@@ -418,7 +418,10 @@ pub(crate) struct Scope {
     pub(crate) creator_enabled: bool,
     pub(crate) profile_id: Option<String>,
     pub(crate) profile_revision: Option<i64>,
+    /// A sign-in's personal confirmation.
     pub(crate) confirmed_by: Option<String>,
+    /// A user token's personal confirmation (#5688); at most one is set.
+    pub(crate) confirmed_by_user_token: Option<String>,
     pub(crate) profile_user: Option<String>,
     pub(crate) profile_organization: Option<String>,
 }
@@ -461,32 +464,60 @@ impl Scope {
             placement: GrantPlacement::Platform,
             user_id: OwnerId::parse(&self.creator).map_err(|_| Error::Denied)?,
             organization_id: Some(OwnerId::parse(&self.organization).map_err(|_| Error::Denied)?),
-            allow_personal_credentials: self.profile_user.as_deref() == Some(&self.creator)
-                && self.confirmed_by.as_deref() == Some(&self.creator),
+            allow_personal_credentials: self.creator_confirmed(),
             authorized_credentials: BTreeSet::new(),
         })
     }
 
+    /// The binding's personal confirmation as this scope read it. Both
+    /// columns set is never a confirmation.
+    fn confirmation(&self) -> Result<PersonalConfirmation, Error> {
+        let owner = |id: &str| OwnerId::parse(id).map_err(|_| Error::Denied);
+        match (&self.confirmed_by, &self.confirmed_by_user_token) {
+            (None, None) => Ok(PersonalConfirmation::None),
+            (Some(id), None) => Ok(PersonalConfirmation::SignIn(owner(id)?)),
+            (None, Some(id)) => Ok(PersonalConfirmation::UserToken(owner(id)?)),
+            (Some(_), Some(_)) => Err(Error::Denied),
+        }
+    }
+
+    /// The bound profile is the creator's own, and exactly one confirmation,
+    /// with either credential, names the creator.
+    fn creator_confirmed(&self) -> bool {
+        self.profile_user.as_deref() == Some(&self.creator)
+            && self.confirmation().is_ok_and(|confirmation| {
+                confirmation.owner().map(OwnerId::as_str) == Some(self.creator.as_str())
+            })
+    }
+
+    /// Only the creator's own sign-in confirmation admits the direct delivery
+    /// exceptions; a user token's never does (#5688).
+    fn direct_delivery(&self) -> bool {
+        self.profile_user.as_deref() == Some(&self.creator)
+            && self.confirmed_by.as_deref() == Some(&self.creator)
+            && self.confirmed_by_user_token.is_none()
+    }
+
     fn owner(&self) -> Result<Owner, Error> {
+        let unconfirmed = self.confirmed_by.is_none() && self.confirmed_by_user_token.is_none();
         match (
             &self.profile_id,
             self.profile_revision,
             &self.profile_user,
             &self.profile_organization,
-            &self.confirmed_by,
         ) {
-            (None, None, None, None, None) => Ok(Owner::User(
+            (None, None, None, None) if unconfirmed => Ok(Owner::User(
                 OwnerId::parse(&self.creator).map_err(|_| Error::Denied)?,
             )),
-            (Some(_), Some(revision), Some(user), None, Some(confirmed))
-                if revision > 0 && user == &self.creator && confirmed == &self.creator =>
+            (Some(_), Some(revision), Some(user), None)
+                if revision > 0 && user == &self.creator && self.creator_confirmed() =>
             {
                 Ok(Owner::User(
                     OwnerId::parse(user).map_err(|_| Error::Denied)?,
                 ))
             }
-            (Some(_), Some(revision), None, Some(org), None)
-                if revision > 0 && org == &self.organization =>
+            (Some(_), Some(revision), None, Some(org))
+                if revision > 0 && org == &self.organization && unconfirmed =>
             {
                 Ok(Owner::Organization(
                     OwnerId::parse(org).map_err(|_| Error::Denied)?,
@@ -556,6 +587,7 @@ macro_rules! scope_query {
      w.managed_credential_clients,w.projection_selection_sha256,w.credential_scope, \
      COALESCE(m.id,'') AS member_id,COALESCE(m.role,'') AS member_role,u.enabled AS creator_enabled, \
      b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by, \
+     b.personal_owner_confirmed_by_user_token AS confirmed_by_user_token, \
      p.user_id AS profile_user,p.organization_id AS profile_organization \
      FROM public.environments e \
      JOIN public.users u ON u.id=e.created_by \
@@ -603,7 +635,8 @@ const SCOPE_AND_METADATA_QUERY: &str = concat!(
      scope.binding_claim_uid, scope.binding_sandbox_uid, scope.managed_credential_clients, \
      scope.projection_selection_sha256, scope.credential_scope, scope.member_id, scope.member_role, \
      scope.creator_enabled, scope.profile_id, \
-     scope.profile_revision, scope.confirmed_by, scope.profile_user, scope.profile_organization, \
+     scope.profile_revision, scope.confirmed_by, scope.confirmed_by_user_token, \
+     scope.profile_user, scope.profile_organization, \
      metadata.organization_selected, metadata.user_placement, metadata.project_reference, \
      metadata.credential_reference, metadata.ordinary_keys, metadata.selection_valid \
      FROM (",
@@ -702,11 +735,7 @@ impl AuthoritySource {
                 .map_err(profile_error)?;
             if Some(binding.binding.profile_id.as_str()) != scope.profile_id.as_deref()
                 || Some(binding.binding.profile_revision as i64) != scope.profile_revision
-                || binding
-                    .personal_owner_confirmed_by
-                    .as_ref()
-                    .map(OwnerId::as_str)
-                    != scope.confirmed_by.as_deref()
+                || binding.personal_confirmation != scope.confirmation()?
             {
                 return Err(Error::Denied);
             }
@@ -790,6 +819,7 @@ impl AuthoritySource {
             platform_pod(&identities.workspace)?,
             context,
             owner,
+            scope.direct_delivery(),
             identities.expires_at_unix,
         )?;
         Ok(Resolved {
@@ -1003,3 +1033,7 @@ mod relay_only_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "authority/scope_tests.rs"]
+mod scope_tests;
