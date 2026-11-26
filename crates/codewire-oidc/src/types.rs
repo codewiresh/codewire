@@ -80,6 +80,9 @@ pub enum GrantType {
     RefreshToken,
     /// `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628)
     DeviceCode,
+    /// `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693), for a
+    /// user token from the client's own access token.
+    TokenExchange,
 }
 
 /// OAuth response type. This provider supports `code` only (no implicit
@@ -237,6 +240,22 @@ pub struct AccessGrant {
     /// its tokens can end all of them. `None` from a store that keeps none,
     /// or for a token issued before stores kept one.
     pub sign_in: Option<String>,
+}
+
+/// A user token's backing record: a separate access token exchanged for the
+/// client's own (RFC 8693), with no refresh token.
+#[derive(Debug, Clone)]
+pub struct UserTokenGrant {
+    /// The subject of the access token it was exchanged for.
+    pub subject: Subject,
+    /// The client that exchanged it.
+    pub client_id: String,
+    /// At most the exchanged token's scopes.
+    pub scopes: Scopes,
+    /// The sign-in of the exchanged token; the user token ends with it.
+    pub sign_in: String,
+    /// Its lifetime; `None` lives until it is revoked.
+    pub expires_in_secs: Option<u64>,
 }
 
 /// An issued refresh token's backing record (rotated on use).

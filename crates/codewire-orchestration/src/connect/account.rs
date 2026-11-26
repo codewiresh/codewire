@@ -11,7 +11,7 @@ use codewire_proto::codewire::console::v1::{
     GetGitIdentityResponse, GitIdentity, UpdateGitIdentityRequest, UpdateGitIdentityResponse,
 };
 use codewire_server_core::account_deletion::AccountOrganization;
-use codewire_server_core::connect::{auth_user, rpc_app_error};
+use codewire_server_core::connect::{auth_context, auth_user, rpc_app_error};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
@@ -88,6 +88,8 @@ impl AccountService for AccountConnectService {
         request: ServiceRequest<'_, DeleteAccountRequest>,
     ) -> ServiceResult<DeleteAccountResponse> {
         let user = auth_user(&ctx)?.clone();
+        codewire_server_core::auth::refuse_user_token(auth_context(&ctx)?)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
         let request = request.view();
         let operation = service::delete_account(&self.state, &user, request.confirm_email)
             .await

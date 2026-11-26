@@ -206,6 +206,72 @@ async fn a_revoked_grant_ends_streams_of_its_client_only() {
     assert_eq!(revoked_now(&desktop), None);
 }
 
+/// A stream a user token admitted (#5688) ends when the token's row is
+/// deleted, and when its client's grant is revoked for the user, as the
+/// sign-in it came from does. A user token of another user stays.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn a_user_token_stream_ends_with_its_row_and_its_grant() {
+    let pool = database().await;
+    let fence = Fence::new();
+    let mut cursor = LogCursor::default();
+    backstop(&fence, &pool, &mut cursor).await;
+    let a = account(&pool, "user-token").await;
+    let b = account(&pool, "user-token-other").await;
+    // A user token's row names a real client, unlike the fixture's tokens.
+    sqlx::query(
+        "INSERT INTO oidc_clients (id, redirect_uris) VALUES ('codewire-cli', ARRAY[]::text[]) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("client");
+    let mut watches = Vec::new();
+    for (account, id) in [(&a, "deleted"), (&a, "granted"), (&b, "other")] {
+        let token_id = format!("{id}_{}", account.key_id);
+        sqlx::query(
+            "INSERT INTO oidc_user_tokens \
+                 (id, token_hash, client_id, user_id, sign_in_id, scopes) \
+             VALUES ($1, encode(sha256($1::bytea), 'hex'), 'codewire-cli', $2, 'sign-in', \
+                     ARRAY['codewire.api'])",
+        )
+        .bind(&token_id)
+        .bind(&account.user_id)
+        .execute(&pool)
+        .await
+        .expect("user token");
+        let admitted_by = Admitted {
+            user_id: account.user_id.clone(),
+            credential: AdmittedCredential::UserToken {
+                token_id: token_id.clone(),
+                client_id: "codewire-cli".into(),
+            },
+            organization: None,
+        };
+        watches.push((token_id, admitted(&fence, &pool, &admitted_by).await));
+    }
+    let [(deleted_id, deleted), (_, granted), (_, other)] = watches.try_into().ok().unwrap();
+
+    execute(
+        &pool,
+        "DELETE FROM oidc_user_tokens WHERE id = $1",
+        &deleted_id,
+    )
+    .await;
+    backstop(&fence, &pool, &mut cursor).await;
+    assert_eq!(revoked_now(&deleted), Some(Revocation::UserToken));
+    assert_eq!(revoked_now(&granted), None);
+
+    sqlx::query("SELECT codewire_revoke_oauth_grant($1, 'codewire-cli')")
+        .bind(&a.user_id)
+        .execute(&pool)
+        .await
+        .expect("revoke the grant");
+    backstop(&fence, &pool, &mut cursor).await;
+    assert_eq!(revoked_now(&granted), Some(Revocation::OAuthGrant));
+    assert_eq!(revoked_now(&other), None);
+}
+
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
 async fn expiry_ends_nothing_and_a_sign_out_leaves_other_sessions_streams() {

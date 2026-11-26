@@ -847,6 +847,7 @@ pub async fn finalize_account_deletion_database(
         "DELETE FROM api_keys WHERE user_id = $1",
         "DELETE FROM data_deletion_requests WHERE user_id = $1",
         "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+        "DELETE FROM oidc_user_tokens WHERE user_id = $1",
         "DELETE FROM tenant_secrets WHERE scope = 'user' AND scope_id = $1",
         "DELETE FROM tenant_secret_deks WHERE scope = 'user' AND scope_id = $1",
     ] {

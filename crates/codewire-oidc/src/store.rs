@@ -17,7 +17,7 @@ use crate::error::StoreResult;
 use crate::jwks::{PublicJwk, SigningKey};
 use crate::types::{
     AccessGrant, AuthCodeGrant, AuthOutcome, AuthRequestId, Client, DeviceAuthorization,
-    RefreshGrant, RequestContext, StoredAuthRequest,
+    RefreshGrant, RequestContext, StoredAuthRequest, UserTokenGrant,
 };
 
 /// Persistence for in-flight authorization requests.
@@ -188,6 +188,33 @@ pub trait DeviceAuthorizationStore: Send + Sync {
 
     /// Delete a request once its code has been redeemed.
     async fn delete(&self, device_code: &str) -> StoreResult<()>;
+}
+
+/// What storing a user token did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserTokenIssue {
+    /// The token was stored and may be returned.
+    Issued,
+    /// The subject has exchanged too many tokens lately; nothing was stored.
+    RateLimited,
+    /// The subject token's sign-in ended before the token was stored, so
+    /// nothing was.
+    SignInEnded,
+}
+
+/// Persistence for user tokens (the token-exchange grant).
+///
+/// Optional — only hosts that issue user tokens implement and inject it.
+/// The store owns the subject's rate limit and the token's expiry.
+#[async_trait]
+pub trait UserTokenStore: Send + Sync {
+    /// Store a new user token by its raw value, unless the subject is over
+    /// its rate limit.
+    async fn store_user_token(
+        &self,
+        token: &str,
+        grant: UserTokenGrant,
+    ) -> StoreResult<UserTokenIssue>;
 }
 
 /// Lets the host inject deployment-specific claims into id_tokens and

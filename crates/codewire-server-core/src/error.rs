@@ -243,6 +243,7 @@ pub fn hint_for_code(code: &str) -> Option<&'static str> {
         "api_key_scope_violation" => {
             "Use a user credential for account-level or global admin operations"
         }
+        "user_token_not_allowed" => "Sign in with 'cw login' or the dashboard for this",
         "preset_in_use" => "Delete all environments using this preset first",
         "quota_exceeded" => "Destroy unused environments with 'cw rm' or ask for a higher limit",
         // Go's CodeResourceLimit constant carries this wire value.

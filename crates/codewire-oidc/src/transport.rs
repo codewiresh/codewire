@@ -103,6 +103,33 @@ async fn token(
         return oauth_error(&OAuthError::invalid_client("missing client_id"));
     };
 
+    // A token exchange answers with its own shape (RFC 8693 §2.2.1).
+    if form.get("grant_type").map(String::as_str)
+        == Some("urn:ietf:params:oauth:grant-type:token-exchange")
+    {
+        let exchanged = match crate::exchange::UserTokenLifetime::parse(
+            form.get("codewire_expires_in_days").map(String::as_str),
+        ) {
+            Ok(lifetime) => {
+                p.exchange_token(
+                    &client_id,
+                    client_secret.as_deref(),
+                    form.get("subject_token")
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                    form.get("subject_token_type").map(String::as_str),
+                    lifetime,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        return match exchanged {
+            Ok(tokens) => no_store(Json(tokens).into_response()),
+            Err(e) => oauth_error(&e),
+        };
+    }
+
     let result = match form.get("grant_type").map(String::as_str) {
         Some("authorization_code") => {
             p.exchange_authorization_code(

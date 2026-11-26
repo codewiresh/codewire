@@ -32,6 +32,7 @@ pub mod device;
 pub mod discovery;
 pub mod endsession;
 pub mod error;
+pub mod exchange;
 pub mod flow;
 pub mod introspection;
 pub mod jwks;
@@ -47,18 +48,19 @@ pub use device::{DeviceAuthorizationResponse, normalize_user_code};
 pub use discovery::{DiscoveryDocument, EndpointPaths};
 pub use endsession::{EndSessionOutcome, RawEndSessionParams};
 pub use error::{ErrorCode, OAuthError, StoreError, StoreResult};
+pub use exchange::{TokenExchangeResponse, UserTokenLifetime};
 pub use flow::{AuthorizeOutcome, RawAuthorizeParams, TokenResponse};
 pub use introspection::IntrospectionResponse;
 pub use jwks::{Jwk, Jwks, PublicJwk, SigningKey};
 pub use pkce::CodeChallengeMethod;
 pub use store::{
     AuthorizationStore, ClientStore, DeviceAuthorizationStore, KeyStore, TokenCustomizer,
-    TokenStore, UserAuthenticator,
+    TokenStore, UserAuthenticator, UserTokenIssue, UserTokenStore,
 };
 pub use types::{
     AccessGrant, ApplicationType, AuthCodeGrant, AuthMethod, AuthOutcome, AuthRequestId,
     AuthorizationRequest, Claims, Client, DeviceAuthorization, DeviceStatus, GrantType, Issuer,
-    RefreshGrant, RequestContext, ResponseType, Scopes, StoredAuthRequest, Subject,
+    RefreshGrant, RequestContext, ResponseType, Scopes, StoredAuthRequest, Subject, UserTokenGrant,
 };
 
 use std::sync::Arc;
@@ -92,6 +94,7 @@ pub struct Provider {
     customizer: Arc<dyn TokenCustomizer>,
     device_store: Option<Arc<dyn store::DeviceAuthorizationStore>>,
     device_verification_uri: Option<String>,
+    user_tokens: Option<Arc<dyn store::UserTokenStore>>,
 }
 
 impl std::fmt::Debug for Provider {
@@ -148,6 +151,11 @@ impl Provider {
         self.device_store.as_ref()
     }
 
+    /// The user-token store, if the token-exchange grant is enabled.
+    pub fn user_tokens(&self) -> Option<&Arc<dyn store::UserTokenStore>> {
+        self.user_tokens.as_ref()
+    }
+
     /// The user-facing verification URI for device flow (where the end-user
     /// enters their user code). Defaults to `{issuer}/device` when unset.
     pub fn device_verification_uri(&self) -> String {
@@ -194,6 +202,7 @@ pub struct ProviderBuilder {
     customizer: Option<Arc<dyn TokenCustomizer>>,
     device_store: Option<Arc<dyn store::DeviceAuthorizationStore>>,
     device_verification_uri: Option<String>,
+    user_tokens: Option<Arc<dyn store::UserTokenStore>>,
 }
 
 impl ProviderBuilder {
@@ -209,6 +218,7 @@ impl ProviderBuilder {
             customizer: None,
             device_store: None,
             device_verification_uri: None,
+            user_tokens: None,
         }
     }
 
@@ -255,6 +265,13 @@ impl ProviderBuilder {
         self
     }
 
+    /// Enable the token-exchange grant for user tokens by injecting their
+    /// store.
+    pub fn user_tokens(mut self, s: Arc<dyn store::UserTokenStore>) -> Self {
+        self.user_tokens = Some(s);
+        self
+    }
+
     /// Override the device-flow verification URI (defaults to `{issuer}/device`).
     pub fn device_verification_uri(mut self, uri: impl Into<String>) -> Self {
         self.device_verification_uri = Some(uri.into());
@@ -280,6 +297,7 @@ impl ProviderBuilder {
                 .customizer
                 .unwrap_or_else(|| Arc::new(DefaultCustomizer)),
             device_store: self.device_store,
+            user_tokens: self.user_tokens,
             device_verification_uri: self.device_verification_uri,
         })
     }

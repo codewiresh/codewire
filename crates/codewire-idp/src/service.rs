@@ -191,6 +191,9 @@ pub async fn build_provider(
     .keys(Arc::new(keys))
     .device_store(Arc::new(device_store))
     .device_verification_uri(format!("{}/device", cfg.frontend_url.trim_end_matches('/')))
+    .user_tokens(Arc::new(crate::user_tokens::PgUserTokenStore::new(
+        pool.clone(),
+    )))
     .authenticator(Arc::new(PgUserAuthenticator::new(
         pool.clone(),
         cfg.frontend_url.clone(),

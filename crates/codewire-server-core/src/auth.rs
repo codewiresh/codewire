@@ -142,6 +142,9 @@ pub enum CredentialKind {
     ApiKey,
     /// OIDC-issued opaque access token presented as a bearer (flavor 2).
     OidcAccessToken,
+    /// A user token from `cw auth token`: an opaque bearer exchanged for a
+    /// `cw` sign-in's access token (#5688).
+    UserToken,
 }
 
 impl CredentialKind {
@@ -151,6 +154,7 @@ impl CredentialKind {
             CredentialKind::SessionCookie => "session",
             CredentialKind::ApiKey => "api_key",
             CredentialKind::OidcAccessToken => "oidc",
+            CredentialKind::UserToken => "user_token",
         }
     }
 }
@@ -180,6 +184,15 @@ pub enum CredentialContext {
         client_id: String,
         scopes: Vec<String>,
     },
+    /// A user token (#5688). It acts as its user, as the `cw` sign-in it came
+    /// from does, except where a method refuses it by this kind.
+    UserToken {
+        /// The `oidc_user_tokens` row. Not a secret: Settings shows it.
+        token_id: String,
+        /// The client whose sign-in exchanged it.
+        client_id: String,
+        scopes: Vec<String>,
+    },
 }
 
 impl CredentialContext {
@@ -189,6 +202,7 @@ impl CredentialContext {
             CredentialContext::SessionCookie { .. } => CredentialKind::SessionCookie,
             CredentialContext::ApiKey { .. } => CredentialKind::ApiKey,
             CredentialContext::OidcAccessToken { .. } => CredentialKind::OidcAccessToken,
+            CredentialContext::UserToken { .. } => CredentialKind::UserToken,
         }
     }
 }
@@ -418,6 +432,11 @@ pub(crate) async fn resolve_authentication(
         if let Some(auth) = authenticate_oidc_access_token(&state.pool, token).await? {
             return Ok(auth);
         }
+        // A user token lives in its own table, so a binary from before never
+        // admits one (#5688).
+        if let Some(auth) = authenticate_user_token(&state.pool, token).await? {
+            return Ok(auth);
+        }
     }
 
     Err(AppError::Unauthorized)
@@ -567,10 +586,25 @@ fn oauth_bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// Applies the shared baseline product policy after credential resolution.
 /// A valid identity-only OAuth token is forbidden, not unauthenticated.
 pub(crate) fn require_product_access(auth: &Authentication) -> Result<(), AppError> {
-    if let CredentialContext::OidcAccessToken { scopes, .. } = &auth.credential
+    if let CredentialContext::OidcAccessToken { scopes, .. }
+    | CredentialContext::UserToken { scopes, .. } = &auth.credential
         && !scopes.iter().any(|scope| scope == PRODUCT_API_SCOPE)
     {
         return Err(insufficient_scope());
+    }
+    Ok(())
+}
+
+/// Refuses a user token what AUTH-POLICY reserves for a sign-in: making an
+/// API key and deleting the account (#5688). Sign-in methods and second
+/// factors are browser-session routes, which never admit a bearer.
+pub fn refuse_user_token(credential: &CredentialContext) -> Result<(), AppError> {
+    if matches!(credential, CredentialContext::UserToken { .. }) {
+        return Err(AppError::Coded {
+            status: axum::http::StatusCode::FORBIDDEN,
+            code: "user_token_not_allowed",
+            detail: "a user token can't do this; sign in with `cw login` or the dashboard".into(),
+        });
     }
     Ok(())
 }
@@ -830,6 +864,69 @@ pub fn touch_api_key_last_used_best_effort(pool: &PgPool, key_id: &str) {
     }));
 }
 
+/// As [`touch_api_key_last_used_best_effort`], for a user token, which
+/// Settings lists with its last use (#5688).
+pub fn touch_user_token_last_used_best_effort(pool: &PgPool, token_id: &str) {
+    let pool = pool.clone();
+    let token_id = token_id.to_owned();
+    std::mem::drop(tokio::spawn(async move {
+        let update = sqlx::query(
+            r#"UPDATE oidc_user_tokens
+                  SET last_used_at = NOW()
+                WHERE id = $1
+                  AND (last_used_at IS NULL OR last_used_at < NOW() - interval '1 minute')"#,
+        )
+        .bind(token_id)
+        .execute(&pool);
+        let _ = tokio::time::timeout(API_KEY_LAST_USED_TOUCH_TIMEOUT, update).await;
+    }));
+}
+
+/// A user token (#5688): the digest looked up in `oidc_user_tokens`, joined
+/// to an enabled user and client. One that never expires has no expiry. It
+/// carries no bearer authority, so the routes that publish credentials, which
+/// re-check `oidc_access_tokens`, refuse it, and it is never a platform
+/// administrator: a token made to be copied into environments holds no admin
+/// right.
+async fn authenticate_user_token(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<Authentication>, AppError> {
+    let row: Option<(String, String, String, Vec<String>)> = sqlx::query_as(
+        r#"
+        SELECT t.id, t.user_id, t.client_id, t.scopes
+          FROM oidc_user_tokens t
+          JOIN users u ON u.id = t.user_id
+          JOIN oidc_clients c ON c.id = t.client_id
+         WHERE t.token_hash = $1
+           AND (t.expires_at IS NULL OR t.expires_at > NOW())
+           AND NOT c.disabled
+           AND u.enabled
+        "#,
+    )
+    .bind(hash_oauth_token(token))
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)?;
+    Ok(row.map(|(token_id, user_id, client_id, scopes)| {
+        touch_user_token_last_used_best_effort(pool, &token_id);
+        Authentication {
+            user: AuthUser {
+                user_id,
+                org_id: None,
+                is_admin: false,
+                via_api_key: false,
+            },
+            credential: CredentialContext::UserToken {
+                token_id,
+                client_id,
+                scopes,
+            },
+            oauth_bearer_authority: None,
+        }
+    }))
+}
+
 type OidcAccessTokenRow = (
     String,
     bool,
@@ -911,6 +1008,44 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_user_token_is_refused_by_its_kind() {
+        let refused = refuse_user_token(&CredentialContext::UserToken {
+            token_id: "token".into(),
+            client_id: "codewire-cli".into(),
+            scopes: vec![PRODUCT_API_SCOPE.into()],
+        });
+        assert!(matches!(
+            refused,
+            Err(AppError::Coded {
+                status: axum::http::StatusCode::FORBIDDEN,
+                code: "user_token_not_allowed",
+                ..
+            })
+        ));
+        for credential in [
+            CredentialContext::SessionCookie {
+                session_id: "session".into(),
+            },
+            CredentialContext::OidcAccessToken {
+                client_id: "codewire-cli".into(),
+                scopes: vec![PRODUCT_API_SCOPE.into()],
+            },
+        ] {
+            assert!(refuse_user_token(&credential).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_user_token_without_the_product_scope_is_forbidden() {
+        let auth = auth_with(CredentialContext::UserToken {
+            token_id: "token".into(),
+            client_id: "codewire-cli".into(),
+            scopes: vec!["openid".into()],
+        });
+        assert!(require_product_access(&auth).is_err());
+    }
 
     fn headers_with(header: &str, value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

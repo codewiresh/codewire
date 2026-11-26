@@ -102,7 +102,9 @@ fn credential_kind(
         codewire_server_core::auth::CredentialContext::ApiKey { .. } => {
             MeshAuthorizationCredentialKind::ApiKey
         }
-        codewire_server_core::auth::CredentialContext::OidcAccessToken { .. } => {
+        // A user token acts as the `cw` sign-in it came from (#5688).
+        codewire_server_core::auth::CredentialContext::OidcAccessToken { .. }
+        | codewire_server_core::auth::CredentialContext::UserToken { .. } => {
             MeshAuthorizationCredentialKind::OauthBearer
         }
     }

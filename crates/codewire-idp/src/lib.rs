@@ -48,6 +48,7 @@ pub mod tokens;
 pub mod two_factor;
 mod undeliverable;
 pub mod user_auth;
+pub mod user_tokens;
 
 pub use abuse_metrics::expose as expose_abuse_metrics;
 pub use auth_requests::PgAuthorizationStore;

@@ -111,6 +111,11 @@ fn a_person_reads_with_their_own_sign_in_and_no_other_clients_token() {
         client_id: client.into(),
         scopes: vec!["codewire.api".into()],
     };
+    let user_token = |client: &str| CredentialContext::UserToken {
+        token_id: "t-1".into(),
+        client_id: client.into(),
+        scopes: vec!["codewire.api".into()],
+    };
     for allowed in [
         CredentialContext::SessionCookie {
             session_id: "s-1".into(),
@@ -122,13 +127,18 @@ fn a_person_reads_with_their_own_sign_in_and_no_other_clients_token() {
         token("codewire-cli"),
         token("codewire-desktop"),
         token("codewire-ios"),
+        user_token("codewire-cli"),
     ] {
         assert!(
             read::require_reader_credential(&allowed).is_ok(),
             "{allowed:?}"
         );
     }
-    for refused in [token("some-integration"), token("codewire-cli-")] {
+    for refused in [
+        token("some-integration"),
+        token("codewire-cli-"),
+        user_token("some-integration"),
+    ] {
         assert!(
             read::require_reader_credential(&refused).is_err(),
             "{refused:?}"

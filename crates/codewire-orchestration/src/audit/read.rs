@@ -87,22 +87,26 @@ fn not_found() -> AppError {
 const NATIVE_CLIENTS: [&str; 3] = ["codewire-cli", "codewire-desktop", "codewire-ios"];
 
 /// A person reads the log with their own sign-in: a browser session, an API
-/// key, or a token issued to one of Codewire's own apps. A token issued to any
-/// other client, on a person's behalf, never reads it; a workload's
-/// credentials are not user credentials at all and never reach this read.
+/// key, or a token issued to one of Codewire's own apps. A user token acts as
+/// the sign-in it was exchanged from (#5688). A token issued to any other
+/// client, on a person's behalf, never reads it; a workload's credentials are
+/// not user credentials at all and never reach this read.
 pub fn require_reader_credential(credential: &CredentialContext) -> AppResult<()> {
     match credential {
         CredentialContext::SessionCookie { .. } | CredentialContext::ApiKey { .. } => Ok(()),
         CredentialContext::OidcAccessToken { client_id, .. }
+        | CredentialContext::UserToken { client_id, .. }
             if NATIVE_CLIENTS.contains(&client_id.as_str()) =>
         {
             Ok(())
         }
-        CredentialContext::OidcAccessToken { .. } => Err(coded(
-            StatusCode::FORBIDDEN,
-            "audit_reader_credential",
-            "the audit log is read with your own sign-in or an API key",
-        )),
+        CredentialContext::OidcAccessToken { .. } | CredentialContext::UserToken { .. } => {
+            Err(coded(
+                StatusCode::FORBIDDEN,
+                "audit_reader_credential",
+                "the audit log is read with your own sign-in or an API key",
+            ))
+        }
     }
 }
 

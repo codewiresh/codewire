@@ -339,6 +339,14 @@ impl TokenStore for PgTokenStore {
                         .await
                         .map_err(StoreError::new)?;
                 }
+                // Every user token of the user, whichever sign-in made it
+                // (#5688): the holder of a copied refresh token may have
+                // exchanged an access token it got.
+                sqlx::query("DELETE FROM oidc_user_tokens WHERE user_id = $1")
+                    .bind(&user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(StoreError::new)?;
             }
             tracing::warn!(
                 %user_id,
@@ -398,6 +406,13 @@ impl TokenStore for PgTokenStore {
         let hash = hash_oauth_token(token);
         let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
         let mut sign_ins: Vec<String> = Vec::new();
+        // A user token presented here ends alone; only the sign-in's own
+        // tokens end the sign-in.
+        sqlx::query("DELETE FROM oidc_user_tokens WHERE token_hash = $1")
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::new)?;
         for sql in [
             "DELETE FROM oidc_access_tokens WHERE token_hash = $1 RETURNING sign_in_id",
             "DELETE FROM oidc_refresh_tokens WHERE token_hash = $1 RETURNING sign_in_id",
@@ -414,6 +429,7 @@ impl TokenStore for PgTokenStore {
             for sql in [
                 "DELETE FROM oidc_access_tokens WHERE sign_in_id = $1",
                 "DELETE FROM oidc_refresh_tokens WHERE sign_in_id = $1",
+                "DELETE FROM oidc_user_tokens WHERE sign_in_id = $1",
             ] {
                 sqlx::query(sql)
                     .bind(sign_in)

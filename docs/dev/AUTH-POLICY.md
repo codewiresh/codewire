@@ -522,7 +522,7 @@ Disablement is checked when Codewire authenticates a new request or begins a
 new stream. A stream already admitted ends when the authority that admitted it
 is lost (#3586). An exec, file, attach or log-follow stream, and the
 dashboard's terminal, the SSH proxy's WebSocket or the desktop viewer's, ends
-in six cases:
+in seven cases:
 
 - its user is disabled, which covers suspension and account deletion;
 - the browser session that admitted it is deleted before it expired: a
@@ -536,6 +536,8 @@ in six cases:
   before tokens carried their sign-in ends alone, and its next refresh starts
   one;
 - the API key that admitted it is disabled or deleted;
+- the user token that admitted it is deleted, by any of the ways that end
+  one, or the `cw` client's grant is revoked for its user (#5688);
 - its user leaves, or is removed from, the organization its environment
   belongs to: the `membership` kind;
 - that organization's deletion starts: the `organization` kind, which ends
@@ -543,7 +545,7 @@ in six cases:
 
 Such a stream ends within seconds normally, and within 30 seconds at most.
 Expiry never ends a stream (#3827): one whose credential expired runs on until
-one of the six cases applies to its user, grant, key or organization. A sign-out ends only
+one of the seven cases applies to its user, grant, key, token or organization. A sign-out ends only
 the streams its own session admitted, so another machine's stream keeps
 running.
 
@@ -968,6 +970,43 @@ nothing issues a user token for `CODEWIRE_JWT_TOKEN` (the SDKs send whatever
 token they are given as the bearer), an SDK binds no profile with one, and
 `cw` is unchanged. The change that ships a part moves it into
 [Signing in from the environment](#signing-in-from-the-environment).
+
+**What runs now (#5688):** the IdP issues user tokens and the product API
+admits them, as below. Settings' list and revoke and binding a profile with
+one are not yet shipped.
+- **Storage:** a user token is stored by digest in its own table,
+  `oidc_user_tokens`, never with `cw`'s own access tokens. A server from
+  before the change never reads that table, so after a rollback every user
+  token is refused.
+- **The exchange:** `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+  at the token endpoint, for the `codewire-cli` client only.
+  - `subject_token` must be a live `cw` access token that names its sign-in,
+    with `subject_token_type=urn:ietf:params:oauth:token-type:access_token`.
+  - `codewire_expires_in_days` is 1 to 3650 or `never`; it defaults to 1.
+  - Every refusal of the subject answers the same `invalid_grant`. A token
+    from before tokens carried their sign-in is refused until its next
+    refresh.
+  - A user may exchange 30 an hour; past that the answer is `slow_down`.
+  - Each one issued writes `user_token.issued` to the audit log, naming the
+    token's id, its sign-in and its expiry.
+- **What it may do:** it acts as its user, as `cw` does, but never as a
+  platform administrator. It holds no bearer authority, so the routes that
+  publish credentials refuse it. `CreateApiKey` and `DeleteAccount` refuse
+  it with `user_token_not_allowed`. Sign-in methods, passwords and second
+  factors are browser-session routes, which never admit a bearer.
+- **What ends it,** each at once, with its streams:
+  - ending its sign-in: `cw logout`, or revoking any token of the sign-in;
+  - presenting the user token itself to the revocation endpoint, which ends
+    only that token;
+  - a password reset, account deletion, or refresh-token reuse on any of the
+    user's sign-ins, each of which deletes all of the user's user tokens;
+  - revoking the `cw` client's grant for the user;
+  - an account disable, which refuses them.
+
+  Each live token that ends, by any of these, writes `user_token.revoked` to
+  the audit log with its id and sign-in, from the table's delete trigger. A
+  repository check (`user-token-deletes`) refuses code that deletes a user's
+  access tokens without their user tokens.
 
 **The CLI.** With `CODEWIRE_API_KEY` set, and `CODEWIRE_API_URL` or
 `CODEWIRE_SERVER_URL` naming the server, `cw` uses them instead of the saved

@@ -78,6 +78,7 @@ fn grant_types(raw: &[String]) -> Vec<GrantType> {
             "authorization_code" => Some(GrantType::AuthorizationCode),
             "refresh_token" => Some(GrantType::RefreshToken),
             "urn:ietf:params:oauth:grant-type:device_code" => Some(GrantType::DeviceCode),
+            "urn:ietf:params:oauth:grant-type:token-exchange" => Some(GrantType::TokenExchange),
             _ => None,
         })
         .collect()

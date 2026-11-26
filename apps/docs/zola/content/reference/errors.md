@@ -1,7 +1,7 @@
 ---
 title: Errors
 description: The error codes the Codewire platform returns, what each one means, and what to do next.
-updated: 2026-11-23
+updated: 2026-11-24
 weight: 10
 ---
 
@@ -33,6 +33,7 @@ the message text, which can change.
 | `access_denied` | Only the environment's creator, or someone it is shared with, may do this | Ask the creator to share it; see [Members and sharing](@/organizations/members.md) |
 | `insufficient_scope` | The sign-in lacks the API scope | `cw login` again |
 | `api_key_scope_violation` | An API key cannot do account-level or global operations | Use your own sign-in for this |
+| `user_token_not_allowed` | A user token can't make API keys or delete the account | Use `cw login` or the dashboard for this |
 
 ## Not found
 

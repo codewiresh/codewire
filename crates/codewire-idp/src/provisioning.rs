@@ -103,7 +103,9 @@ pub async fn ensure_cli_client(pool: &PgPool) -> anyhow::Result<()> {
              access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
         VALUES (
             'codewire-cli', 'Codewire CLI', 'native', 'none', ARRAY[]::text[],
-            ARRAY['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+            -- Token exchange issues `cw auth token`'s user tokens (#5688).
+            ARRAY['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token',
+                  'urn:ietf:params:oauth:grant-type:token-exchange'],
             ARRAY['code'],
             ARRAY['openid', 'profile', 'email', 'offline_access', 'codewire.api'],
             true,

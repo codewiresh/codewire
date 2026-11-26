@@ -922,6 +922,11 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+        sqlx::query("DELETE FROM oidc_user_tokens WHERE user_id = $1")
+            .bind(&fixtures.user_id)
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
             .bind(&fixtures.oidc_client_id)
             .execute(pool)

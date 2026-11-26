@@ -81,6 +81,9 @@ impl Harness {
                 "SELECT (id,deletion_state) ON public.organizations".into(),
                 "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens".into(),
                 "SELECT (id,disabled) ON public.oidc_clients".into(),
+                // A bearer that misses oidc_access_tokens is looked up as a user token (#5688).
+                "SELECT (id,token_hash,user_id,client_id,scopes,expires_at,last_used_at) ON public.oidc_user_tokens".into(),
+                "UPDATE (last_used_at) ON public.oidc_user_tokens".into(),
                 // Ordinary account auth retains its existing session sliding
                 // expiry and API-key usage paths; these are not metadata writes.
                 "SELECT (id,token_hash,user_id,expires_at) ON public.sessions".into(),

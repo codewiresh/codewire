@@ -42,6 +42,13 @@ const EMAIL_PASSWORD_CLIENT: &str = "email-password-e2e";
 const REDIRECT: &str = "http://localhost:9876/callback";
 const IOS_CLIENT: &str = "codewire-ios";
 const IOS_REDIRECT: &str = "sh.codewire.ios:/oauth/callback";
+/// The CLI client's grants: the device grant, refresh, and the user-token
+/// exchange (#5688).
+const CLI_GRANT_TYPES: [&str; 3] = [
+    "urn:ietf:params:oauth:grant-type:device_code",
+    "refresh_token",
+    "urn:ietf:params:oauth:grant-type:token-exchange",
+];
 const TEST_CAPABILITY_HMAC_SECRET: &str = "synthetic-idp-capability-hmac-secret";
 type PersistedNewKeyRow = (String, String, Vec<u8>, Vec<u8>, String, i16);
 type PersistedEnvelopeFields = (
@@ -1914,13 +1921,7 @@ async fn standard_cli_device_grant_uses_browser_approval(pool: PgPool) {
     .unwrap();
     assert_eq!(client_row.0, "native");
     assert_eq!(client_row.1, "none");
-    assert_eq!(
-        client_row.2,
-        vec![
-            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
-            "refresh_token".to_string(),
-        ]
-    );
+    assert_eq!(client_row.2, CLI_GRANT_TYPES);
     assert_eq!(
         client_row.3,
         vec![
@@ -8193,4 +8194,330 @@ async fn a_resend_to_a_suppressed_address_says_it_cannot_be_delivered_in_its_dat
         metric(r#"codewire_idp_mail_suppressed_total{reason="complaint"}"#).await,
         complaints + 1.0
     );
+}
+
+/// The IdP's provider with the user-token exchange, for the CLI client.
+async fn user_token_provider(pool: &PgPool) -> codewire_oidc::Provider {
+    codewire_idp::provisioning::ensure_cli_client(pool)
+        .await
+        .expect("provision the CLI client");
+    let cfg = IdpConfig {
+        scopes_supported: vec![
+            "openid".into(),
+            "offline_access".into(),
+            "codewire.api".into(),
+        ],
+        ..refresh_config(true)
+    };
+    build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap()
+}
+
+/// A `cw` sign-in for USER: one access and one refresh token named `{name}`.
+async fn cw_sign_in(tokens: &PgTokenStore, name: &str, sign_in: Option<&str>) {
+    let scopes = Scopes(vec!["openid".into(), "codewire.api".into()]);
+    let access = AccessGrant {
+        scopes: scopes.clone(),
+        sign_in: sign_in.map(str::to_owned),
+        ..access_grant(USER, "codewire-cli")
+    };
+    let refresh = RefreshGrant {
+        scopes,
+        sign_in: sign_in.map(str::to_owned),
+        ..refresh_grant(USER, "codewire-cli")
+    };
+    tokens
+        .store_access(&format!("{name}-access"), access, 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_refresh(&format!("{name}-refresh"), refresh, 3600)
+        .await
+        .unwrap();
+}
+
+async fn bearer(pool: &PgPool, token: &str) -> Option<CredentialContext> {
+    let state = AuthState { pool: pool.clone() };
+    codewire_server_core::auth::authenticate_product_credential(&state, None, Some(token))
+        .await
+        .ok()
+        .map(|auth| auth.credential)
+}
+
+/// A `cw` sign-in exchanges its access token for a user token (#5688): the
+/// token authenticates as its user, never as an admin, is audited by id and
+/// sign-in, can't be exchanged again, and ends when its sign-in ends, with
+/// its streams fenced. Another client, a token from before sign-ins were
+/// kept, and a token of an ended sign-in are refused alike.
+#[tokio::test]
+async fn a_user_token_is_exchanged_from_a_cw_sign_in_and_ends_with_it() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping user token exchange test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_user_token", user_token_exchange).await;
+}
+
+async fn user_token_exchange(pool: PgPool) {
+    use codewire_oidc::UserTokenLifetime::{Days, Never};
+    use codewire_oidc::exchange::ACCESS_TOKEN_TYPE;
+    seed(&pool).await;
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let p = user_token_provider(&pool).await;
+    let tokens = PgTokenStore::new(pool.clone());
+    cw_sign_in(&tokens, "cw", Some("sign-in-cw")).await;
+    let exchange = |subject: &'static str, client: &'static str, lifetime| {
+        let p = p.clone();
+        async move {
+            p.exchange_token(client, None, subject, Some(ACCESS_TOKEN_TYPE), lifetime)
+                .await
+        }
+    };
+
+    let month = exchange("cw-access", "codewire-cli", Days(30))
+        .await
+        .unwrap();
+    assert_eq!(month.expires_in, Some(30 * 86_400));
+    assert_eq!(month.issued_token_type, ACCESS_TOKEN_TYPE);
+    let never = exchange("cw-access", "codewire-cli", Never).await.unwrap();
+    assert_eq!(never.expires_in, None);
+    let stored: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT sign_in_id, expires_at IS NULL FROM oidc_user_tokens ORDER BY expires_at NULLS LAST",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        [
+            ("sign-in-cw".to_owned(), false),
+            ("sign-in-cw".to_owned(), true)
+        ]
+    );
+
+    // It acts as its user, never as an admin.
+    match bearer(&pool, &month.access_token).await {
+        Some(CredentialContext::UserToken { client_id, .. }) => {
+            assert_eq!(client_id, "codewire-cli")
+        }
+        other => panic!("a user token authenticates as one: {other:?}"),
+    }
+    let state = AuthState { pool: pool.clone() };
+    let auth = codewire_server_core::auth::authenticate_product_credential(
+        &state,
+        None,
+        Some(&never.access_token),
+    )
+    .await
+    .unwrap();
+    assert!(!auth.user.is_admin, "a user token holds no admin right");
+
+    // Each issue is audited by id and sign-in, never by value.
+    let audited: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT metadata FROM audit_logs WHERE action = 'user_token.issued' AND user_id = $1",
+    )
+    .bind(USER)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited.len(), 2);
+    for row in &audited {
+        assert_eq!(row["sign_in_id"], "sign-in-cw");
+        let text = row.to_string();
+        assert!(!text.contains(&month.access_token) && !text.contains(&never.access_token));
+    }
+
+    // Refused alike: a user token as the subject, another client, a token
+    // from before sign-ins were kept.
+    let user_token: &'static str = Box::leak(month.access_token.clone().into_boxed_str());
+    let again = exchange(user_token, "codewire-cli", Days(1))
+        .await
+        .unwrap_err();
+    assert_eq!(again.code, ErrorCode::InvalidGrant);
+    cw_sign_in(&tokens, "old", None).await;
+    let old = exchange("old-access", "codewire-cli", Days(1))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (old.code, old.description.clone()),
+        (again.code, again.description.clone())
+    );
+    let desktop = exchange("cw-access", CLIENT, Days(1)).await.unwrap_err();
+    assert_eq!(desktop.code, ErrorCode::UnauthorizedClient);
+
+    // `cw logout` ends the sign-in, and its user tokens with it.
+    tokens.revoke("cw-refresh").await.unwrap();
+    assert!(bearer(&pool, &month.access_token).await.is_none());
+    assert!(bearer(&pool, &never.access_token).await.is_none());
+    let fenced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM credential_revocations WHERE kind = 'user_token'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fenced, 2, "each user token's streams are fenced");
+    let ended = exchange("cw-access", "codewire-cli", Days(1))
+        .await
+        .unwrap_err();
+    assert_eq!(ended.code, ErrorCode::InvalidGrant);
+}
+
+/// What else ends a user token (#5688): refresh-token reuse ends all of the
+/// user's, an account disable deletes them, and revoking one ends it alone.
+/// The exchange is limited per user, and a refusal stores nothing.
+#[tokio::test]
+async fn user_tokens_end_on_reuse_and_disable_and_are_rate_limited() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping user token revocation test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_user_token_end", user_token_ends).await;
+}
+
+async fn user_token_ends(pool: PgPool) {
+    use codewire_oidc::UserTokenLifetime::Days;
+    use codewire_oidc::exchange::ACCESS_TOKEN_TYPE;
+    seed(&pool).await;
+    let p = user_token_provider(&pool).await;
+    let tokens = PgTokenStore::new(pool.clone()).with_reuse_revocation(true);
+    cw_sign_in(&tokens, "a", Some("sign-in-a")).await;
+    cw_sign_in(&tokens, "b", Some("sign-in-b")).await;
+    let issue = |subject: &'static str| {
+        let p = p.clone();
+        async move {
+            p.exchange_token(
+                "codewire-cli",
+                None,
+                subject,
+                Some(ACCESS_TOKEN_TYPE),
+                Days(1),
+            )
+            .await
+        }
+    };
+    let first = issue("a-access").await.unwrap().access_token;
+    let second = issue("a-access").await.unwrap().access_token;
+    let other = issue("b-access").await.unwrap().access_token;
+
+    // Revoking one user token ends it alone; its sign-in stays.
+    tokens.revoke(&first).await.unwrap();
+    assert!(bearer(&pool, &first).await.is_none());
+    assert!(bearer(&pool, &second).await.is_some());
+    assert!(tokens.get_access("a-access").await.unwrap().is_some());
+
+    // An account disable deletes every user token, with the user's other
+    // OAuth tokens, so enabling the account again brings none back.
+    sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET enabled = true WHERE id = $1")
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(bearer(&pool, &second).await.is_none());
+    assert!(bearer(&pool, &other).await.is_none());
+
+    // A rotated refresh token presented again ends all of the user's user
+    // tokens, whichever sign-in made them.
+    cw_sign_in(&tokens, "d", Some("sign-in-d")).await;
+    cw_sign_in(&tokens, "e", Some("sign-in-e")).await;
+    let from_d = issue("d-access").await.unwrap().access_token;
+    let from_e = issue("e-access").await.unwrap().access_token;
+    let rotated = tokens.consume_refresh("d-refresh").await.unwrap().unwrap();
+    tokens
+        .store_refresh("d-refresh-2", rotated, 3600)
+        .await
+        .unwrap();
+    assert!(tokens.consume_refresh("d-refresh").await.unwrap().is_none());
+    assert!(bearer(&pool, &from_d).await.is_none());
+    assert!(bearer(&pool, &from_e).await.is_none());
+
+    // At most 30 an hour per user; a refusal stores nothing.
+    cw_sign_in(&tokens, "c", Some("sign-in-c")).await;
+    let issued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = 'user_token.issued'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for _ in issued..30 {
+        issue("c-access").await.unwrap();
+    }
+    let limited = issue("c-access").await.unwrap_err();
+    assert_eq!(limited.code, ErrorCode::SlowDown);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM oidc_user_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 30 - issued, "a refusal stores nothing");
+}
+
+/// Browser-session routes never admit a user token (#5688): approving a
+/// device sign-in and turning a second factor on or off answer 401 to
+/// one, though it authenticates on the product API.
+#[tokio::test]
+async fn a_user_token_is_refused_on_browser_session_routes() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping user token session-route test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_user_token_session", user_token_session_routes).await;
+}
+
+async fn user_token_session_routes(pool: PgPool) {
+    use codewire_oidc::UserTokenLifetime::Days;
+    use codewire_oidc::exchange::ACCESS_TOKEN_TYPE;
+    seed(&pool).await;
+    let p = user_token_provider(&pool).await;
+    let tokens = PgTokenStore::new(pool.clone());
+    cw_sign_in(&tokens, "s", Some("sign-in-s")).await;
+    let token = p
+        .exchange_token(
+            "codewire-cli",
+            None,
+            "s-access",
+            Some(ACCESS_TOKEN_TYPE),
+            Days(1),
+        )
+        .await
+        .unwrap()
+        .access_token;
+    assert!(bearer(&pool, &token).await.is_some(), "the token is live");
+
+    let auth = AuthState { pool: pool.clone() };
+    let device = codewire_idp::device_verification::router(p.clone(), auth.clone());
+    let (status, _, _) = sess_req_bearer(
+        &device,
+        "POST",
+        "/api/oauth/device_verification",
+        &token,
+        r#"{"user_code":"ABCD-EFGH"}"#,
+    )
+    .await;
+    assert_eq!(status, 401, "device approval is a browser-session route");
+
+    let second_factor = codewire_idp::two_factor::router(
+        pool.clone(),
+        "synthetic-session-secret".into(),
+        false,
+        auth,
+    );
+    for path in [
+        "/api/auth/two-factor/enable",
+        "/api/auth/two-factor/disable",
+    ] {
+        let (status, _, _) = sess_req_bearer(&second_factor, "POST", path, &token, "{}").await;
+        assert_eq!(status, 401, "{path} is a browser-session route");
+    }
 }

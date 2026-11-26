@@ -261,6 +261,9 @@ impl Harness {
                 "UPDATE (updated_at) ON public.org_members".into(),
                 "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens".into(),
                 "SELECT (id,disabled) ON public.oidc_clients".into(),
+                // A bearer that misses oidc_access_tokens is looked up as a user token (#5688).
+                "SELECT (id,token_hash,user_id,client_id,scopes,expires_at,last_used_at) ON public.oidc_user_tokens".into(),
+                "UPDATE (last_used_at) ON public.oidc_user_tokens".into(),
                 "SELECT (id,token_hash,user_id,expires_at) ON public.sessions".into(),
                 "UPDATE (expires_at,updated_at) ON public.sessions".into(),
                 "SELECT (id,user_id,org_id,key_prefix,key_hash,expires_at,disabled_at,scopes,last_used_at) ON public.api_keys".into(),

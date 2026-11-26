@@ -47,6 +47,12 @@ enum CarriedCredential {
     ApiKey {
         key_id: String,
     },
+    /// A user token (#5688). A replica from before can't read this kind and
+    /// refuses the admission, never admits it.
+    UserToken {
+        token_id: String,
+        client_id: String,
+    },
 }
 
 impl CarriedAdmission {
@@ -64,6 +70,13 @@ impl CarriedAdmission {
             },
             CarriedCredential::ApiKey { key_id } => AdmittedCredential::ApiKey {
                 key_id: bounded(key_id)?,
+            },
+            CarriedCredential::UserToken {
+                token_id,
+                client_id,
+            } => AdmittedCredential::UserToken {
+                token_id: bounded(token_id)?,
+                client_id: bounded(client_id)?,
             },
         };
         let organization = match &self.org_id {
@@ -128,6 +141,13 @@ impl Fence {
             },
             AdmittedCredential::ApiKey { key_id } => CarriedCredential::ApiKey {
                 key_id: key_id.clone(),
+            },
+            AdmittedCredential::UserToken {
+                token_id,
+                client_id,
+            } => CarriedCredential::UserToken {
+                token_id: token_id.clone(),
+                client_id: client_id.clone(),
             },
         };
         Some(CarriedAdmission {

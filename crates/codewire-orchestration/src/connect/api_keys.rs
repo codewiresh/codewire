@@ -13,7 +13,7 @@ use codewire_proto::codewire::v1::{
     DeleteApiKeyResponse, ListApiKeysRequest, ListApiKeysResponse, UpdateApiKeyRequest,
     UpdateApiKeyResponse,
 };
-use codewire_server_core::connect::{auth_user, rpc_app_error};
+use codewire_server_core::connect::{auth_context, auth_user, rpc_app_error};
 use codewire_server_core::{AppError, ValidationIssue};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use sqlx::PgPool;
@@ -61,6 +61,8 @@ impl ApiKeyService for ApiKeyConnectService {
         request: ServiceRequest<'_, CreateApiKeyRequest>,
     ) -> ServiceResult<CreateApiKeyResponse> {
         let user = auth_user(&ctx)?.clone();
+        codewire_server_core::auth::refuse_user_token(auth_context(&ctx)?)
+            .map_err(|err| rpc_app_error(&err, &ctx))?;
         let request = request.view();
         validate_create(request.name, request.expires_in_days)
             .map_err(|err| rpc_app_error(&err, &ctx))?;
@@ -219,6 +221,64 @@ mod tests {
 
     fn rendered_validation(err: AppError) -> ConnectError {
         ConnectError::from_app_error(&err, Some("req_test"))
+    }
+
+    /// A user token can't make an API key (#5688): refused by its kind before
+    /// the request is read or the database is touched.
+    #[tokio::test]
+    async fn a_user_token_is_refused_making_a_key() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use codewire_server_core::auth::{AuthUser, CredentialContext};
+        use codewire_server_core::connect::connect_router;
+        use tower::ServiceExt as _;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .unwrap();
+        let mut request = Request::post("/codewire.v1.ApiKeyService/CreateApiKey")
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .body(Body::from(r#"{"orgId":"org-one","name":"ci"}"#))
+            .unwrap();
+        request.extensions_mut().insert(AuthUser {
+            user_id: "synthetic-user".into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        });
+        request
+            .extensions_mut()
+            .insert(CredentialContext::UserToken {
+                token_id: "synthetic-token".into(),
+                client_id: "codewire-cli".into(),
+                scopes: vec!["codewire.api".into()],
+            });
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect_router(router(pool)).oneshot(request),
+        )
+        .await
+        .expect("refused before any database access")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "permission_denied", "{body}");
+        // The reason travels in the ErrorInfo detail, as protobuf bytes.
+        use base64::Engine as _;
+        let info = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(
+                body["details"][0]["value"]
+                    .as_str()
+                    .unwrap()
+                    .trim_end_matches('='),
+            )
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&info).contains("USER_TOKEN_NOT_ALLOWED"),
+            "{body}"
+        );
     }
 
     #[test]

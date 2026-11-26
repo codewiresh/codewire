@@ -83,6 +83,17 @@ pub const ADMIN_ACCOUNT_DELETE: Limit = Limit {
     per_user: true,
 };
 
+/// User tokens one user may exchange in an hour (#5688). `cw auth token` is
+/// run by hand or once per script start; a loop minting tokens is not a use.
+/// Not in [`LIMITS`]: no setting raises it.
+pub const USER_TOKEN_ISSUE: Limit = Limit {
+    name: "user_token_issue",
+    key_prefix: "user_token_issue",
+    window_secs: 3_600,
+    default_max: 30,
+    per_user: true,
+};
+
 /// Card setups one organization may start in an hour (#4750). Adding a card
 /// takes one or two tries; a SetupIntent per try is what card testing with
 /// stolen cards needs many of. Not in [`LIMITS`]: no setting raises it.

@@ -697,6 +697,7 @@ async fn reset_password(
             "DELETE FROM two_factor_tokens WHERE user_id = $1",
             "DELETE FROM oidc_auth_requests WHERE user_id = $1",
             "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_user_tokens WHERE user_id = $1",
             "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
             "DELETE FROM oidc_device_authorizations WHERE user_id = $1",
         ] {

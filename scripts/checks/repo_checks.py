@@ -44,6 +44,7 @@ from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
 from repo_policy.revocation_log_writers import check_revocation_log_writers
 from repo_policy.sandbox_audit_writers import check_sandbox_audit_writers
 from repo_policy.bearer_refused_reason import check_bearer_refused_reason
+from repo_policy.user_token_deletes import check_user_token_deletes
 from repo_policy.image_patch_paths import check_image_patch_paths
 from repo_policy.workspace_image_pin import check_workspace_image_pin
 from repo_policy.workspace_lints import check_workspace_lints
@@ -174,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     bearer_refused_parser = subparsers.add_parser("bearer-refused-reason")
     bearer_refused_parser.add_argument("--self-test", action="store_true")
     bearer_refused_parser.set_defaults(func=check_bearer_refused_reason)
+    user_token_deletes_parser = subparsers.add_parser("user-token-deletes")
+    user_token_deletes_parser.add_argument("--self-test", action="store_true")
+    user_token_deletes_parser.set_defaults(func=check_user_token_deletes)
     workspace_lints_parser = subparsers.add_parser("workspace-lints")
     workspace_lints_parser.add_argument("--self-test", action="store_true")
     workspace_lints_parser.set_defaults(func=check_workspace_lints)

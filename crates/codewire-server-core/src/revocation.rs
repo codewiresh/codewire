@@ -53,6 +53,7 @@ pub enum Revocation {
     OAuthToken,
     OAuthGrant,
     ApiKey,
+    UserToken,
     /// The user left the stream's organization or was removed from it.
     Membership,
     /// The stream's organization started to be deleted.
@@ -67,6 +68,7 @@ impl Revocation {
             "oauth_token" => Self::OAuthToken,
             "oauth_grant" => Self::OAuthGrant,
             "api_key" => Self::ApiKey,
+            "user_token" => Self::UserToken,
             "membership" => Self::Membership,
             "organization" => Self::Organization,
             _ => return None,
@@ -81,6 +83,7 @@ impl Revocation {
             Self::OAuthToken => "oauth_token",
             Self::OAuthGrant => "oauth_grant",
             Self::ApiKey => "api_key",
+            Self::UserToken => "user_token",
             Self::Membership => "membership",
             Self::Organization => "organization",
         }
@@ -126,6 +129,10 @@ enum AdmittedCredential {
     ApiKey {
         key_id: String,
     },
+    UserToken {
+        token_id: String,
+        client_id: String,
+    },
 }
 
 impl Admitted {
@@ -154,6 +161,14 @@ impl Admitted {
             },
             CredentialContext::ApiKey { key_id, .. } => AdmittedCredential::ApiKey {
                 key_id: key_id.clone(),
+            },
+            CredentialContext::UserToken {
+                token_id,
+                client_id,
+                ..
+            } => AdmittedCredential::UserToken {
+                token_id: token_id.clone(),
+                client_id: client_id.clone(),
             },
             CredentialContext::OidcAccessToken { .. } => {
                 let bearer = bearer?;
@@ -224,6 +239,19 @@ impl Admitted {
                 },
             ],
             AdmittedCredential::ApiKey { key_id } => vec![user, Authority::ApiKey(key_id.clone())],
+            // A user token ends when its row is deleted, and when its client's
+            // grant is revoked for the user, as the sign-in it came from does.
+            AdmittedCredential::UserToken {
+                token_id,
+                client_id,
+            } => vec![
+                user,
+                Authority::UserToken(token_id.clone()),
+                Authority::OAuthGrant {
+                    user_id: self.user_id.clone(),
+                    client_id: client_id.clone(),
+                },
+            ],
         }
     }
 }
@@ -235,6 +263,7 @@ enum Authority {
     OAuthToken(String),
     OAuthGrant { user_id: String, client_id: String },
     ApiKey(String),
+    UserToken(String),
     Membership { user_id: String, org_id: String },
     Organization(String),
 }
@@ -679,6 +708,7 @@ impl LogRow {
                 client_id: id,
             },
             Revocation::ApiKey => Authority::ApiKey(id),
+            Revocation::UserToken => Authority::UserToken(id),
             Revocation::Membership | Revocation::Organization => {
                 let Some(org_id) = self.org_id.clone() else {
                     tracing::warn!(seq = self.seq, kind = %self.kind, "unreadable credential revocation row");
