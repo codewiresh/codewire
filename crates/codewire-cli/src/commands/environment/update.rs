@@ -1,5 +1,6 @@
 //! `cw update ENV`: an existing environment's secret and credential sources,
-//! network policy, idle stop and, from a file, its startup script.
+//! network policy, idle stop, idle suspend and, from a file, its startup
+//! script.
 
 use super::*;
 
@@ -59,6 +60,12 @@ pub(super) async fn platform(
         .as_deref()
         .map(codewire_project::parse_idle_stop)
         .transpose()?;
+    let idle_suspend = args
+        .idle_suspend
+        .take()
+        .as_deref()
+        .map(codewire_project::parse_idle_suspend)
+        .transpose()?;
     let output = args.output;
     let environment = args.environment.clone();
     let sources_changed = args.clear_secrets
@@ -67,7 +74,7 @@ pub(super) async fn platform(
         || args.user_secrets.is_some()
         || args.org_secrets
         || args.profile.is_some();
-    if sources_changed || (policy.is_none() && idle_stop.is_none()) {
+    if sources_changed || (policy.is_none() && idle_stop.is_none() && idle_suspend.is_none()) {
         sources::update_platform_sources(platform, environment_client, org_id, args).await?;
     }
     if let Some(reference) = policy {
@@ -90,6 +97,16 @@ pub(super) async fn platform(
             .context("set idle stop")?;
         print_env_idle_stop_status(&environment, &response, idle_stop_seconds, output)?;
         idle_stop::note_after_update(environment_client, org_id, &environment_id, output).await;
+    }
+    // A runtime that can't suspend is refused by the server, by name.
+    if let Some(idle_suspend_seconds) = idle_suspend {
+        let environment_id =
+            resolve_environment_id(environment_client, org_id, &environment).await?;
+        let response = environment_client
+            .set_environment_idle_suspend(org_id, &environment_id, idle_suspend_seconds)
+            .await
+            .context("set idle suspend")?;
+        idle_suspend::print_status(&environment, &response, idle_suspend_seconds, output)?;
     }
     Ok(())
 }

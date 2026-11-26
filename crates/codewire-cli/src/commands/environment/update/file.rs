@@ -111,7 +111,8 @@ impl Target<'_> {
 }
 
 /// What the Sandbox saved, as `cw export` reads it: its spec with declared
-/// environment values withheld, and its current size and idle stop.
+/// environment values withheld, and its current size, idle stop and idle
+/// suspend.
 struct Saved<'a> {
     spec: &'a codewire_project::ProjectSpec,
     withheld: &'a [String],
@@ -127,6 +128,7 @@ enum Route {
     Profile,
     Resize,
     IdleStop,
+    IdleSuspend,
 }
 
 impl Route {
@@ -139,6 +141,9 @@ impl Route {
             Route::Profile => format!("change {pronoun} with `cw update {name} --profile`"),
             Route::Resize => format!("change {pronoun} with `cw resize {name}`"),
             Route::IdleStop => format!("change {pronoun} with `cw update {name} --idle-stop`"),
+            Route::IdleSuspend => {
+                format!("change {pronoun} with `cw update {name} --idle-suspend`")
+            }
         }
     }
 
@@ -150,6 +155,7 @@ impl Route {
             Route::Profile => format!("cw update {name} --profile PROFILE"),
             Route::Resize => format!("cw resize {name} --cpu CPU --memory MEMORY"),
             Route::IdleStop => format!("cw update {name} --idle-stop DURATION"),
+            Route::IdleSuspend => format!("cw update {name} --idle-suspend DURATION"),
         }
     }
 }
@@ -273,6 +279,12 @@ fn differences(file: &PlatformDocument, saved: &Saved<'_>) -> Vec<Difference> {
             file.idle_stop_seconds == Some(environment.idle_stop_seconds),
             "idle_stop",
             Route::IdleStop,
+        ),
+        (
+            file.idle_suspend_seconds.is_some(),
+            file.idle_suspend_seconds == Some(environment.idle_suspend_seconds),
+            "idle_suspend",
+            Route::IdleSuspend,
         ),
     ];
     checks

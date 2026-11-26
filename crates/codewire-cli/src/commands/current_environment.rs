@@ -517,6 +517,7 @@ mod tests {
                 restart: Default::default(),
                 failed: None,
                 stop_reason: None,
+                suspended: false,
                 daemon_health: String::new(),
                 id: VM_ID.into(),
             },

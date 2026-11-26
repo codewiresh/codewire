@@ -239,7 +239,7 @@ for assertion in \
 done
 
 if ! platform_create_uses_canonical_workspace \
-    crates/codewire-cli/src/commands/environment.rs; then
+    crates/codewire-cli/src/commands/environment/create_request.rs; then
   echo "runtime image audit: platform create no longer consumes the canonical workspace default" >&2
   fail=1
 fi

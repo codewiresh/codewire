@@ -177,6 +177,9 @@ pub(crate) fn cloud_export(
         )
         .with_idle_stop(
             (environment.idle_stop_seconds > 0).then_some(environment.idle_stop_seconds),
+        )
+        .with_idle_suspend(
+            (environment.idle_suspend_seconds > 0).then_some(environment.idle_suspend_seconds),
         ),
         notes,
     })
@@ -544,6 +547,7 @@ credentials: {profile: "platform:id:7c0e2a4b-3f1d-4e5a-9b8c-0d1e2f3a4b5c"}
             isolation_tier: "confidential".into(),
             ttl_seconds: Some(7200),
             idle_stop_seconds: 1800,
+            idle_suspend_seconds: 900,
             ..Default::default()
         };
         let export = cloud_export(&environment, saved.clone(), vec!["NODE_ENV".into()]).unwrap();
@@ -552,12 +556,15 @@ credentials: {profile: "platform:id:7c0e2a4b-3f1d-4e5a-9b8c-0d1e2f3a4b5c"}
         let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
         // Its idle stop is written beside the spec, and off is left out.
         assert_eq!(parsed.idle_stop_seconds, Some(1800));
+        assert_eq!(parsed.idle_suspend_seconds, Some(900));
         let off = Environment {
             idle_stop_seconds: 0,
+            idle_suspend_seconds: 0,
             ..environment.clone()
         };
         let off = cloud_export(&off, saved.clone(), Vec::new()).unwrap();
         assert_eq!(off.document.idle_stop_seconds, None);
+        assert_eq!(off.document.idle_suspend_seconds, None);
         let mut expected = saved.clone();
         expected.resources = codewire_project::ResourceSpec {
             cpu_millicores: Some(4000),

@@ -50,6 +50,8 @@ pub(super) struct PlatformDocument {
     pub(super) spec: codewire_project::ProjectSpec,
     /// `idle_stop`, which a create sends beside the spec.
     pub(super) idle_stop_seconds: Option<i32>,
+    /// `idle_suspend`, sent beside the spec as `idle_stop` is.
+    pub(super) idle_suspend_seconds: Option<i32>,
     /// Whether the file names `working_directory`, rather than leaving it to
     /// follow its repositories.
     pub(super) working_directory_explicit: bool,
@@ -91,6 +93,7 @@ pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<Platform
         working_directory_explicit: document.working_directory_is_explicit(),
         spec: document.spec,
         idle_stop_seconds: document.idle_stop_seconds,
+        idle_suspend_seconds: document.idle_suspend_seconds,
         unused_fields,
     })
 }
@@ -106,6 +109,7 @@ fn other_update_flags(args: &EnvUpdateArgs) -> Vec<&'static str> {
         (args.clear_profile, "--clear-profile"),
         (args.policy.is_some(), "--policy"),
         (args.idle_stop.is_some(), "--idle-stop"),
+        (args.idle_suspend.is_some(), "--idle-suspend"),
     ]
     .into_iter()
     .filter_map(|(given, flag)| given.then_some(flag))
@@ -128,8 +132,9 @@ pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
         changes_sources(args)
             || args.policy.is_some()
             || args.idle_stop.is_some()
+            || args.idle_suspend.is_some()
             || !args.file.is_empty(),
-        "select a change with --file, --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, --policy, or --idle-stop"
+        "select a change with --file, --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, --policy, --idle-stop, or --idle-suspend"
     );
     if !args.file.is_empty() {
         let others = other_update_flags(args);
@@ -141,6 +146,9 @@ pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
     }
     if let Some(idle_stop) = &args.idle_stop {
         codewire_project::parse_idle_stop(idle_stop)?;
+    }
+    if let Some(idle_suspend) = &args.idle_suspend {
+        codewire_project::parse_idle_suspend(idle_suspend)?;
     }
     anyhow::ensure!(
         !(args.clear_secrets
@@ -942,6 +950,35 @@ mod tests {
         let both = update_args(&["--idle-stop", "1h", "--clear-profile"]);
         validate_update_args(&both).unwrap();
         assert!(changes_sources(&both));
+    }
+
+    /// `--idle-suspend` is a change of its own too, with its own range
+    /// (#5529), and `--file` names it among the flags it doesn't combine with.
+    #[test]
+    fn idle_suspend_is_an_update_without_a_source_change() {
+        let args = update_args(&["--idle-suspend", "15m"]);
+        validate_update_args(&args).unwrap();
+        assert!(!changes_sources(&args));
+        validate_update_args(&update_args(&["--idle-suspend", "off"])).unwrap();
+        validate_update_args(&update_args(&["--idle-suspend", "on"])).unwrap();
+        for value in ["soon", "1m", "8d"] {
+            let error = validate_update_args(&update_args(&["--idle-suspend", value])).unwrap_err();
+            assert!(
+                error.to_string().contains("idle_suspend"),
+                "{value}: {error}"
+            );
+        }
+        let error = validate_update_args(&update_args(&[
+            "--file",
+            "codewire.yaml",
+            "--idle-suspend",
+            "15m",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`--file` changes only the startup script and doesn't combine with --idle-suspend; run them as separate updates"
+        );
     }
 
     /// `--file` is a change of its own, and names the flags given beside it

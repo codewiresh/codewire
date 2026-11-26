@@ -1730,6 +1730,51 @@ fn env_create_sends_the_idle_stop_from_the_file_or_the_flag() {
     );
 }
 
+/// `idle_suspend` in codewire.yaml is sent beside the spec as `idle_stop`
+/// is, and `--idle-suspend` wins over it; on is 15 minutes (#5529).
+#[test]
+fn env_create_sends_the_idle_suspend_from_the_file_or_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("codewire.yaml");
+    std::fs::write(&file, "image: workspace\nidle_suspend: 30m\n").unwrap();
+    let file = file.to_str().unwrap();
+    let request = |extra: &[&str]| {
+        let mut argv = vec!["cw", "create", "--cloud", "--file", file];
+        argv.extend_from_slice(extra);
+        let (_, _, EnvCommand::Create(args)) = env_operation(Cli::try_parse_from(argv).unwrap())
+        else {
+            panic!("expected env create command");
+        };
+        env_create_request_from_args(&args)
+    };
+    let from_file = request(&[]).unwrap();
+    assert_eq!(from_file.idle_suspend_seconds, Some(1800));
+    assert_eq!(from_file.idle_stop_seconds, None);
+    for (flag, seconds) in [("15m", 900), ("off", 0), ("on", 900)] {
+        assert_eq!(
+            request(&["--idle-suspend", flag]).unwrap().idle_suspend_seconds,
+            Some(seconds),
+            "{flag}"
+        );
+    }
+    let error = format!("{:#}", request(&["--idle-suspend", "1m"]).unwrap_err());
+    assert!(
+        error.contains("invalid --idle-suspend") && error.contains("from 5m to 7d"),
+        "{error}"
+    );
+
+    let cli = Cli::try_parse_from(["cw", "create", "--image", "workspace"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
+        panic!("expected env create command");
+    };
+    assert_eq!(
+        env_create_request_from_args(&args)
+            .unwrap()
+            .idle_suspend_seconds,
+        None
+    );
+}
+
 #[test]
 fn env_create_requires_canonical_agent_ids() {
     let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi-code"]).unwrap();
@@ -2932,6 +2977,52 @@ fn format_env_info_text_uses_go_style_labels() {
     // A local VM is never stopped for being idle, so says nothing of it.
     environment.environment_type = "vm".to_string();
     assert!(!format_env_info_text(&environment).contains("IdleStop"));
+}
+
+/// A cloud sandbox's info names its idle suspend, and a suspended one reads
+/// `suspended` though its state stays running (#5529).
+#[test]
+fn format_env_info_text_shows_the_idle_suspend_and_a_suspended_state() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    environment.environment_type = "sandbox".to_string();
+    let text = format_env_info_text(&environment);
+    assert!(text.contains("IdleSuspend:   off\n"), "{text}");
+    assert!(text.contains("State:         running\n"), "{text}");
+    environment.idle_suspend_seconds = 900;
+    environment.suspended_at = Some("2026-11-25T10:00:00Z".to_string());
+    let text = format_env_info_text(&environment);
+    assert!(text.contains("IdleSuspend:   15m\n"), "{text}");
+    assert!(text.contains("State:         suspended\n"), "{text}");
+    let json = serde_json::to_value(&environment).unwrap();
+    assert_eq!(json["state"], "running");
+    assert_eq!(json["idle_suspend_seconds"], 900);
+    assert_eq!(json["suspended_at"], "2026-11-25T10:00:00Z");
+    // A mark left on a sandbox that moved to error isn't a suspend.
+    environment.state = "error".to_string();
+    assert!(
+        format_env_info_text(&environment).contains("State:         error\n"),
+        "{}",
+        format_env_info_text(&environment)
+    );
+    environment.state = "running".to_string();
+    environment.environment_type = "vm".to_string();
+    assert!(!format_env_info_text(&environment).contains("IdleSuspend"));
+}
+
+#[test]
+fn the_idle_suspend_confirmation_says_what_happens() {
+    assert_eq!(
+        format_env_idle_suspend_text("app", 900),
+        "Environment app: pauses after 15m with no activity; any use wakes it.\n"
+    );
+    assert_eq!(
+        format_env_idle_suspend_text("app", 0),
+        "Environment app: idle suspend off; it never pauses for being idle.\n"
+    );
 }
 
 #[test]

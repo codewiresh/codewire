@@ -13,6 +13,7 @@ use crate::presentation::*;
 
 mod create_request;
 mod environment_wire;
+mod idle;
 mod network_status;
 use create_request::{create_environment_request_from_proto, proto_create_environment_request};
 use environment_wire::environment_from_proto;
@@ -808,27 +809,6 @@ impl EnvironmentClient {
             .cancel_environment_deletion(rpc::CancelEnvironmentDeletionRequest {
                 org_id: org_id.to_string(),
                 environment_id: environment_id.to_string(),
-                ..Default::default()
-            })
-            .await
-            .map_err(display_client_error)?;
-        Ok(StatusResponse {
-            status: response.status,
-        })
-    }
-
-    pub async fn set_environment_idle_stop(
-        &self,
-        org_id: &str,
-        environment_id: &str,
-        idle_stop_seconds: i32,
-    ) -> anyhow::Result<StatusResponse> {
-        let response = self
-            .inner
-            .set_environment_idle_stop(rpc::SetEnvironmentIdleStopRequest {
-                org_id: org_id.to_string(),
-                environment_id: environment_id.to_string(),
-                idle_stop_seconds,
                 ..Default::default()
             })
             .await

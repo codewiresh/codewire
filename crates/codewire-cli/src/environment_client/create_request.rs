@@ -12,6 +12,7 @@ pub(super) fn proto_create_environment_request(
         name: request.name.clone(),
         ttl_seconds: request.ttl_seconds,
         idle_stop_seconds: request.idle_stop_seconds,
+        idle_suspend_seconds: request.idle_suspend_seconds,
         isolation_tier: match request.isolation_tier.as_str() {
             "" | "standard" => rpc::IsolationTier::Standard.into(),
             "confidential" => rpc::IsolationTier::Confidential.into(),
@@ -54,6 +55,7 @@ pub(super) fn create_environment_request_from_proto(
         name: value.name,
         ttl_seconds: value.ttl_seconds,
         idle_stop_seconds: value.idle_stop_seconds,
+        idle_suspend_seconds: value.idle_suspend_seconds,
         isolation_tier: match value.isolation_tier.as_known() {
             Some(rpc::IsolationTier::Confidential) => "confidential".into(),
             Some(rpc::IsolationTier::Standard) | Some(rpc::IsolationTier::Unspecified) | None => {

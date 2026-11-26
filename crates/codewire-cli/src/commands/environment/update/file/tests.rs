@@ -12,6 +12,7 @@ fn document(yaml: &str) -> PlatformDocument {
         working_directory_explicit: parsed.working_directory_is_explicit(),
         spec: parsed.spec,
         idle_stop_seconds: parsed.idle_stop_seconds,
+        idle_suspend_seconds: parsed.idle_suspend_seconds,
         unused_fields: Vec::new(),
     }
 }
@@ -144,6 +145,11 @@ fn every_other_setting_the_file_states_differently_is_named_with_its_route() {
         compare("idle_stop: off\n"),
         [("idle_stop", Route::IdleStop)]
     );
+    assert_eq!(
+        compare("idle_suspend: 15m\n"),
+        [("idle_suspend", Route::IdleSuspend)]
+    );
+    assert_eq!(compare("idle_suspend: off\n"), []);
 }
 
 #[test]

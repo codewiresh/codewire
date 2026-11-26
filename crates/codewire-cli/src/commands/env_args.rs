@@ -75,6 +75,12 @@ pub(crate) struct EnvCreateArgs {
     pub(crate) idle_stop: Option<String>,
     #[arg(
         long,
+        value_name = "DURATION",
+        help = "Pause a standard cloud sandbox, keeping its processes, after this long with no activity: 5m to 7d, on (15m) or off; any use wakes it; overrides codewire.yaml idle_suspend (default off)"
+    )]
+    pub(crate) idle_suspend: Option<String>,
+    #[arg(
+        long,
         value_name = "CPU",
         help = "CPU cores (for example 2, 0.5, or 500m; a local VM rounds up to whole cores)"
     )]

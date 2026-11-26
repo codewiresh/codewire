@@ -42,6 +42,14 @@ pub struct Environment {
     /// than the field, which says nothing either way (#3384).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_stop_enforced: Option<bool>,
+    /// Seconds with no activity before a `standard` cloud sandbox suspends;
+    /// 0 never does (#5529).
+    #[serde(default)]
+    pub idle_suspend_seconds: i32,
+    /// When its daemon acknowledged a suspend, RFC 3339; absent while it
+    /// isn't suspended. Its state stays running, and any use wakes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
     /// When a running Sandbox was running again after a restart nobody
     /// asked for, RFC 3339 (#5997); cleared by the next start or stop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,6 +195,13 @@ impl Environment {
         self.destroyed_at
             .as_deref()
             .unwrap_or(&self.state_changed_at)
+    }
+
+    /// A running sandbox whose VM is paused: its state stays `running`, and
+    /// any use wakes it (#5529). A mark left on one in another state, such as
+    /// `error`, isn't a suspend.
+    pub fn suspended(&self) -> bool {
+        self.state == "running" && self.suspended_at.is_some()
     }
 }
 
@@ -419,6 +434,10 @@ pub struct CreateEnvironmentRequest {
     /// takes the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_stop_seconds: Option<i32>,
+    /// Seconds with no activity before a `standard` sandbox suspends, 0 for
+    /// off; `None` takes the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_suspend_seconds: Option<i32>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,

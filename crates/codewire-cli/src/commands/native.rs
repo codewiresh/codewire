@@ -27,6 +27,9 @@ use super::*;
 use crate::commands::progress::terminal_text;
 use info_text::format_native_environment;
 use policy_view::{network_policy_text, print_network_policy_update};
+use unsupported_options::{
+    reject_unsupported_native_create_options, reject_unsupported_native_update_options,
+};
 
 mod create_hint;
 pub(crate) mod dev_store;
@@ -41,6 +44,7 @@ mod ports;
 mod profile;
 mod snapshot_restore;
 mod sources;
+mod unsupported_options;
 pub(crate) use profile::require_native_agent_profile;
 
 pub(crate) use lifecycle::{
@@ -1587,10 +1591,7 @@ pub(crate) async fn handle_native_environment_update(
     globals: &Globals,
     args: EnvUpdateArgs,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        args.idle_stop.is_none(),
-        "--idle-stop applies to cloud sandboxes; a local VM is never stopped for being idle"
-    );
+    reject_unsupported_native_update_options(&args)?;
     sources::validate_update_args(&args)?;
     let mut supervisor = native_boot_client().await?;
     if let Some(policy) = args.policy.as_deref() {
@@ -4133,41 +4134,6 @@ fn display_host_path(path: &Path) -> String {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
-}
-
-fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
-    let mut unsupported = Vec::new();
-    if args.preset_slug.is_some() || args.preset_id.is_some() {
-        unsupported.push("presets");
-    }
-    if args.spec.is_some() {
-        unsupported.push("--spec");
-    }
-    if args.ttl.is_some() {
-        unsupported.push("--ttl");
-    }
-    if args.idle_stop.is_some() {
-        unsupported.push("--idle-stop");
-    }
-    if args.isolation.is_some() {
-        unsupported.push("--isolation");
-    }
-    if args.coding_agent.is_some() {
-        unsupported.push("--coding-agent");
-    }
-    if !args.follow || args.no_wait {
-        unsupported.push("asynchronous creation");
-    }
-    if args.write_preset || args.save_preset.is_some() {
-        unsupported.push("preset publication");
-    }
-    if !unsupported.is_empty() {
-        anyhow::bail!(
-            "native local preview does not yet support: {}",
-            unsupported.join(", ")
-        );
-    }
-    parse_env_settings(&args.env, "cw create").map(drop)
 }
 
 fn parse_native_memory(value: &str) -> anyhow::Result<u32> {

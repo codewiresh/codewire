@@ -493,6 +493,7 @@ pub(crate) fn local_entry(
             restart: Default::default(),
             failed: None,
             stop_reason: None,
+            suspended: false,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -539,6 +540,7 @@ pub(crate) fn cloud_entry(
             restart: super::environment::info::UnplannedRestart::of(environment),
             failed,
             stop_reason: environment.stop_reason.clone(),
+            suspended: environment.suspended(),
             daemon_health: daemon_health.to_owned(),
             id: environment.id.clone(),
         },
@@ -596,6 +598,7 @@ fn host_entry(
             restart: Default::default(),
             failed: None,
             stop_reason: None,
+            suspended: false,
             daemon_health,
             id: environment.id,
         },
@@ -838,7 +841,8 @@ pub(crate) async fn handle_environment_inventory(
         environment_inventory(globals, placement, &InventoryOptions::listing(&args)).await?;
     let mut rows = Vec::with_capacity(inventory.entries.len());
     for entry in &inventory.entries {
-        let running = entry.state().eq_ignore_ascii_case("running");
+        // Reading a suspended sandbox's sessions would wake it.
+        let running = entry.state().eq_ignore_ascii_case("running") && !entry.list.suspended;
         let target = inventory_target(&entry.list);
         let (sessions, error) = if running {
             match list_target_sessions(globals, target.clone()).await {
@@ -1188,7 +1192,8 @@ fn format_environment_inventory_at(
 /// A listing's STATE cell. A sandbox that came back after its Pod failed says so,
 /// because its processes went with the old Pod (#3772), unless the server said
 /// when: a note under the list says so instead (#5997). A sandbox the platform
-/// stopped says why; one a person stopped needs no reason (#3384).
+/// stopped says why; one a person stopped needs no reason (#3384). A suspended
+/// one says so, though its state stays running (#5529).
 ///
 /// A create the platform ended says when, because a new environment may
 /// already carry its name (#4482).
@@ -1199,6 +1204,8 @@ fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono:
             display_str(&entry.state),
             super::collaboration::time_ago_at(&failed.at, now)
         )
+    } else if entry.suspended {
+        "suspended".to_owned()
     } else if entry.restart.restarted && !entry.restart.recorded() {
         format!("{} (restarted)", display_str(&entry.state))
     } else if let Some(reason @ ("idle" | "credit")) = entry.stop_reason.as_deref() {
@@ -1325,6 +1332,7 @@ mod tests {
             restart: Default::default(),
             failed: None,
             stop_reason: None,
+            suspended: false,
             daemon_health: String::new(),
             id: format!(
                 "{name}-{}-id",
@@ -1909,6 +1917,36 @@ mod tests {
         // Scripts reading the state still see the state.
         assert_eq!(json["state"], "running");
         assert_eq!(json["restarted"], true);
+    }
+
+    /// A suspended sandbox reads `suspended` in `cw ls`, and its JSON keeps
+    /// the `running` state beside `suspended` (#5529).
+    #[test]
+    fn a_suspended_sandbox_says_so_in_the_state_cell_and_json() {
+        let mut environment = Environment {
+            id: "env-app".into(),
+            name: Some("app".into()),
+            state: "running".into(),
+            ..Environment::default()
+        };
+        let awake = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(state_cell(&awake.list, chrono::Utc::now()), "running");
+        let json = serde_json::to_value(&awake.list).unwrap();
+        assert!(json.get("suspended").is_none(), "{json}");
+
+        environment.suspended_at = Some("2026-11-25T10:00:00Z".into());
+        let suspended = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(state_cell(&suspended.list, chrono::Utc::now()), "suspended");
+        let json = serde_json::to_value(&suspended.list).unwrap();
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["suspended"], true);
+
+        // A mark left on a sandbox that moved to error isn't a suspend.
+        environment.state = "error".into();
+        let failed = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(state_cell(&failed.list, chrono::Utc::now()), "error");
+        let json = serde_json::to_value(&failed.list).unwrap();
+        assert!(json.get("suspended").is_none(), "{json}");
     }
 
     #[test]

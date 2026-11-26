@@ -132,6 +132,7 @@ where
                 ""
             }
         ));
+        output.push_str(&super::idle_suspend::info_line(environment));
     }
     if let Some(shutdown_at) = environment.shutdown_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("ShutdownAt:    {shutdown_at}\n"));
@@ -186,6 +187,9 @@ pub(crate) fn env_state_label(environment: &Environment) -> &str {
     }
     if environment.failed_create() {
         return "failed";
+    }
+    if environment.suspended() {
+        return "suspended";
     }
     trimmed_str(&environment.state).unwrap_or("--")
 }
