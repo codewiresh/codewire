@@ -40,6 +40,7 @@ pub mod connect_error;
 pub mod connect_testing;
 pub mod credit_enforcement;
 pub mod db;
+pub mod environment_wake;
 pub mod error;
 pub mod health;
 pub mod http;

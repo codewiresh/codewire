@@ -2272,6 +2272,13 @@ run_coordinator() {
       connect::tests::production_client_session_ends_when_its_access_is_revoked -- --exact \
       --nocapture
 
+  # #5529: only an authorized hello naming a suspended Sandbox asks for its wake.
+  logfile="$RUN_DIR/coordinator-hello-wake.log"
+  listed_run "coordinator hello wake" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      connect::tests::hello_wake::only_an_authorized_hello_for_a_suspended_sandbox_asks_for_its_wake -- --exact \
+      --nocapture
+
   # #3586: a client's session ends when its credential is lost, and the
   # environment's replica drops a remote client on its own read of the log.
   logfile="$RUN_DIR/coordinator-credential-revocation.log"

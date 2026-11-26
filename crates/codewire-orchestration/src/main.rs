@@ -869,6 +869,8 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         host_operation_signals.clone(),
     );
+    // The coordinator's wakes of suspended Sandboxes (#5529).
+    codewire_orchestration::api::environment_wakes::spawn_environment_wake_listener(pool.clone());
     // One LISTEN connection serves every fenced stream in this process.
     let revocation = codewire_server_core::revocation::Fence::new();
     revocation.spawn_listener(pool.clone());

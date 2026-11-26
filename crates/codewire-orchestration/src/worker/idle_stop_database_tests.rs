@@ -400,3 +400,99 @@ async fn db_idle_suspend_finds_marks_and_clears_the_right_sandboxes() -> Result<
     .await;
     db.finish(result).await
 }
+
+/// Whether nothing arrives on `listener` for a moment.
+async fn nothing_sent(listener: &mut sqlx::postgres::PgListener) -> bool {
+    tokio::time::timeout(std::time::Duration::from_millis(300), listener.try_recv())
+        .await
+        .is_err()
+}
+
+/// The coordinator's wake request (#5529): a hello naming a marked, running
+/// Sandbox sends its id on the wake channel; an unmarked or stopped one
+/// sends nothing.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_hello_asks_for_a_wake_only_for_a_suspended_running_sandbox() -> Result<()> {
+    use codewire_server_core::environment_wake::{CHANNEL, request_if_suspended};
+
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
+        listener.listen(CHANNEL).await?;
+        ensure!(!request_if_suspended(pool, ENVIRONMENT).await?);
+        ensure!(nothing_sent(&mut listener).await);
+
+        sqlx::query("UPDATE environments SET suspended_at = NOW() WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(request_if_suspended(pool, ENVIRONMENT).await?);
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), listener.try_recv())
+            .await??
+            .ok_or_else(|| anyhow::anyhow!("the listener lost its connection"))?;
+        ensure!(sent.channel() == CHANNEL && sent.payload() == ENVIRONMENT);
+
+        sqlx::query("UPDATE environments SET state = 'stopped' WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(!request_if_suspended(pool, ENVIRONMENT).await?);
+        ensure!(nothing_sent(&mut listener).await);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Where a wake connects comes from the environment's row alone (#5529):
+/// its daemon's Service in the namespace the row names, only while it is
+/// running and marked.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_wakes_target_comes_from_the_row_alone() -> Result<()> {
+    use crate::api::environment_wakes::dial_target;
+
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend(environment_id, namespace) \
+             VALUES ($1, 'wake-ns')",
+        )
+        .bind(ENVIRONMENT)
+        .execute(pool)
+        .await?;
+        ensure!(dial_target(pool, ENVIRONMENT).await?.is_none());
+        sqlx::query("UPDATE environments SET suspended_at = NOW() WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        let target = dial_target(pool, ENVIRONMENT).await?;
+        ensure!(
+            target.as_deref()
+                == Some(&*format!(
+                    "{}.wake-ns.svc.cluster.local:7777",
+                    crate::sandbox::template::workspace_daemon_service_name(ENVIRONMENT)
+                )),
+            "{target:?}"
+        );
+        // An id with no row, or a stopped Sandbox, has no target.
+        ensure!(
+            dial_target(pool, "0b5c9e7a-2f1d-4c3b-8a9e-6d5f4e3c2b1a")
+                .await?
+                .is_none()
+        );
+        sqlx::query("UPDATE environments SET state = 'stopped' WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(dial_target(pool, ENVIRONMENT).await?.is_none());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

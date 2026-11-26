@@ -248,6 +248,19 @@ impl ProductionAuthorizer {
         let fenced = self
             .fence_client(headers, &authentication, hello.org_id.trim())
             .await?;
+        // A hello for a suspended Sandbox asks orchestration to wake it: its
+        // daemon ended its coordinator session before the pause (#5529).
+        // Only a hello asks, never a session's re-check. A failure logs
+        // which Sandbox only, nothing of the client.
+        if codewire_server_core::environment_wake::request_if_suspended(
+            &self.state.pool,
+            &environment_id.to_string(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(%environment_id, "coordinator could not ask for a suspended sandbox's wake");
+        }
         Ok(AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             principal: Principal::User(authentication.user.user_id.clone()),
@@ -1204,6 +1217,7 @@ mod tests {
     /// convergence"). A starved CI guest failed a fixed 5 s (#4241, #4169).
     const PRODUCTION_AUTH_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
 
+    mod hello_wake;
     mod org_deleting;
     mod revocation;
 

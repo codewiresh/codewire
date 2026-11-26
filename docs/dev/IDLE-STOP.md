@@ -245,8 +245,19 @@ guest shuts down cleanly.
     orchestration path uses (previews, sessions, agents, the browser
     terminal, the SSH fallback). It is also orchestration's explicit wake: a
     connection to the Pod's 7777. The coordinator asks orchestration for one
-    when it authorizes a hello naming a suspended Sandbox. The connection
-    reaches the guest only once the VM runs again.
+    when it authorizes a hello naming a suspended Sandbox: in the same
+    statement that finds the mark, it sends the Sandbox's id on the
+    `environment_wakes` database channel, and only after the hello passed
+    its access checks for that Sandbox. Orchestration listens on it; where
+    it connects comes from the Sandbox's row alone, never the message: for a
+    Sandbox still marked, one connection to its daemon's 7777, at most once
+    every 5 seconds per Sandbox. Since any role that reaches the database
+    can send on the channel, the listener is bounded as a whole: it queues
+    at most 256 requests, drops and counts any more, and reads at most 50
+    rows a second. A listener that reconnects can miss a wake; the client's
+    next use wakes the Sandbox then. A client's periodic re-check of its
+    session never asks. The connection reaches the guest only once the
+    VM runs again.
   - **A stop.** SIGTERM, including idle stop's, wakes a paused VM first, so
     the guest shuts down cleanly.
   - **Inbound bytes on a platform connection the network worker relays:**
@@ -347,6 +358,7 @@ into a Sandbox adds its row.
 | Idle activity check, every 30 s | `worker/idle_stop.rs` (`environment_daemon_activity_for_worker`) | Yes, the daemon over 7777 | Never asks a `suspended` Sandbox's daemon. While suspended, `last_activity_at` doesn't move (nothing runs), so the time counts toward idle stop: a suspended Sandbox is a stop candidate like a running one, and is stopped without the daemon call (see "The stop") |
 | Credential relay epochs, reconcile every 1 s, epoch at most 600 s | `worker/credential_relay.rs` (`daemon_target`, `RECONCILE_INTERVAL`), `credential_relay/epoch.rs` (`EPOCH_MAX_LIFETIME`) | Yes, the daemon over its cluster Service | Opens no epoch for a `suspended` Sandbox; the daemon closed its own before the pause |
 | Coordinator sessions' heartbeat, every 15 s: the tailnet session and the mesh session | `crates/codewire-coordinator/src/lib.rs` (`COORDINATE_HEARTBEAT_INTERVAL`), `session.rs`; `crates/codewire-mesh/src/mesh_coordinate.rs` (`HEARTBEAT_INTERVAL`) | Yes, over each of the daemon's coordinator sessions | The daemon ends both before the pause and redials them at the wake; a hello naming the Sandbox wakes it through orchestration |
+| Coordinator client session re-check (#3828) | `crates/codewire-coordinator/src/lib.rs` (`client_environment_access`) | No: database only | Never asks for a wake; only a new hello does |
 | DERP relay traffic to the daemon | `crates/codewire-derp` | Yes, over the daemon's relay connection | The daemon closes it before the pause and redials at the wake |
 | `cw-egress` stream for broker mode | `crates/codewire-egress-node` | Yes, the admitted stream | Kept: `cw-egress` has no keepalive, idle timer or read deadline after the hello, and the stream's TCP peer is the Pod runtime's worker (it dials 8089 from the Pod's namespace), which keeps acknowledging while the VM is paused. Between that socket and the guest, though, the worker's user-space TCP stack (`codewire-netstack`) aborts a connection whose peer answers nothing for `tcp_idle_timeout` (120 s). It sends a keep-alive every 30 s (#6399), so a live but idle guest answers and keeps its connections; a paused guest can't answer, so a pause longer than about 2 minutes ends the stream, and the daemon redials at the wake; open workload connections through egress reset once. A shorter pause resumes on the old stream. The stream also ends on a `cw-egress` drain or an assignment change. The daemon handles both resuming on the old stream and redialing. Before the VM resumes, the supervisor writes the current egress token at the daemon's token path, since a pause of more than about 10 minutes outlives the copy the guest holds and a redial with it fails admission. Each redial counts against `cw-egress`'s start limit (10 per 60 s per Pod IP); a newer admitted stream replaces an older one for the same Pod |
 | Kubelet token rotations | the Pod's projected tokens | No: the supervisor reads them | The supervisor holds each renewed token and delivers it at the wake |
