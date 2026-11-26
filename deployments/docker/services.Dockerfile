@@ -140,7 +140,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
       codewire-rust-build cargo test --locked --profile "$CODEWIRE_RUST_PROFILE" \
         -p codewire-credential-service --features enrollment,kind-e2e --lib --no-run \
         --message-format=json > /tmp/credential-fixture-artifacts.jsonl && \
-      credential_fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\(/src/target/'"$CODEWIRE_RUST_PROFILE"'/deps/codewire_credential_service-[0-9a-f][0-9a-f]*\)".*@\1@p;}}' /tmp/credential-fixture-artifacts.jsonl)" && \
+      credential_fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\(/src/target/'"$CODEWIRE_RUST_PROFILE"'/build/codewire-credential-service/[0-9a-f][0-9a-f]*/out/codewire_credential_service-[0-9a-f][0-9a-f]*\)".*@\1@p;}}' /tmp/credential-fixture-artifacts.jsonl)" && \
       test -n "$credential_fixture" && test -x "$credential_fixture" && \
       "$credential_fixture" --list > /tmp/credential-fixture-tests.txt && \
       grep -qx 'runtime::kind::serve_kind_credential_fixture: test' /tmp/credential-fixture-tests.txt && \

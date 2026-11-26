@@ -215,7 +215,7 @@ verify_services_dockerfile_contract() {
   grep -qF 'codewire-rust-build cargo test --locked --profile "$CODEWIRE_RUST_PROFILE"' <<<"$fixture_block" ||
     fail 'credential fixture compilation escaped its test-only branch or the selected profile'
   # shellcheck disable=SC2016
-  grep -qF '"executable":"\(/src/target/'\''"$CODEWIRE_RUST_PROFILE"'\''/deps/codewire_credential_service-' <<<"$fixture_block" ||
+  grep -qF '"executable":"\(/src/target/'\''"$CODEWIRE_RUST_PROFILE"'\''/build/codewire-credential-service/[0-9a-f][0-9a-f]*/out/codewire_credential_service-' <<<"$fixture_block" ||
     fail 'credential fixture is not read from the selected profile target directory'
   ! grep -qE -- '--profile ci|target/ci/|= ci( |$)' <<<"$fixture_block" ||
     fail 'credential fixture still selects the ci profile'
