@@ -128,6 +128,10 @@ async fn run(
     wall_clock: fn() -> SystemTime,
 ) {
     tokio::time::sleep(ANSWER_LEAD).await;
+    // The runtime pauses the VM straight after its answer, before this task
+    // runs again, so the time before the pause is read before asking: read
+    // after the answer, it already follows the resume and shows no gap.
+    let before = wall_clock();
     let paused = match platform.ask_pause().await {
         Ok(accepted) => accepted,
         Err(error) => {
@@ -136,7 +140,7 @@ async fn run(
         }
     };
     if paused {
-        wait_for_wake(wall_clock).await;
+        wait_for_wake(wall_clock, before).await;
     }
     platform.release();
     bridge.release().await;
@@ -146,13 +150,13 @@ async fn run(
     suspending.store(false, Ordering::SeqCst);
 }
 
-/// Returns at the first tick after a wall-clock gap, or after
-/// [`QUIET_TICKS`] ticks without one.
-async fn wait_for_wake(wall_clock: fn() -> SystemTime) {
+/// Returns at the first tick after a wall-clock gap since `last`, the time
+/// read before the pause was asked for, or after [`QUIET_TICKS`] ticks
+/// without one.
+async fn wait_for_wake(wall_clock: fn() -> SystemTime, mut last: SystemTime) {
     let mut ticks = tokio::time::interval(SUSPEND_TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticks.tick().await;
-    let mut last = wall_clock();
     for _ in 0..QUIET_TICKS {
         ticks.tick().await;
         let now = wall_clock();

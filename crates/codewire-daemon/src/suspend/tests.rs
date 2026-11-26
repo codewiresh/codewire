@@ -7,6 +7,9 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Ok,
+    /// `ok`, and the VM pauses before the daemon runs again, as the Pod's
+    /// runtime pauses it straight after the answer.
+    OkPausedAtOnce,
     No,
     Fails,
 }
@@ -49,6 +52,10 @@ impl SuspendPlatform for FakePlatform {
         Box::pin(async move {
             match answer {
                 Answer::Ok => Ok(true),
+                Answer::OkPausedAtOnce => {
+                    pause_for(Duration::from_secs(60));
+                    Ok(true)
+                }
                 Answer::No => Ok(false),
                 Answer::Fails => Err(io::Error::other("the runtime is gone")),
             }
@@ -126,6 +133,21 @@ async fn it_holds_answers_then_asks_and_a_wall_clock_gap_releases_and_reports_th
     // The VM was paused for a minute: the next tick sees the gap.
     pause_for(Duration::from_secs(60));
     run_for(SUSPEND_TICK + Duration::from_millis(10)).await;
+    assert_eq!(platform.calls(), ["hold", "ask", "release", "report"]);
+    assert!(bridge.owner_for_test().epoch_token().is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pause_straight_after_the_answer_is_seen_at_the_first_tick_after_the_resume() {
+    let platform = FakePlatform::new(Answer::OkPausedAtOnce);
+    let cgroups = own_cgroups("/workload/workspace");
+    let bridge = CredentialBridge::new(None);
+    let suspend = suspend(&platform, &cgroups);
+
+    assert!(suspend.begin(&bridge).await.unwrap());
+    // The waking connection waits on the release, so it comes at once, not
+    // after the quiet ticks.
+    run_for(ANSWER_LEAD + SUSPEND_TICK + Duration::from_millis(10)).await;
     assert_eq!(platform.calls(), ["hold", "ask", "release", "report"]);
     assert!(bridge.owner_for_test().epoch_token().is_some());
 }
