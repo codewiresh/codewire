@@ -245,6 +245,9 @@ defer_slow_check() {
 # (cpu-share.sh), else one per CPU. The first failure stops the rest and is
 # printed last, with the check that failed.
 DEFERRED_JOBS="${VERIFICATION_TEST_JOBS:-$(ci_cpu_share)}"
+if [[ "${SELECT_VERIFICATION_DEFERRED_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  DEFERRED_JOBS="$SELECT_VERIFICATION_DEFERRED_JOBS"
+fi
 DEFERRED_JOBS="${DEFERRED_JOBS:-$(nproc)}"
 run_deferred_checks() {
   local log="$TMP/deferred-checks.log" status=0 count
@@ -5027,14 +5030,14 @@ grep -qxF '  scripts/ci/verify/check-shell-scripts.sh --self-test' "$shared_shel
 grep -qxF '    scripts/ci/verify/check-shell-scripts.sh --changed-since "$CODEWIRE_SHELL_POLICY_BASE"' \
   "$shared_shell_policy"
 grep -qxF '    scripts/ci/verify/check-shell-scripts.sh' "$shared_shell_policy"
-# ShellCheck's base (#3119 A7, M1): a pull request's base, or on a push to
-# main the newest main commit main CI verified, the selection's own base. An
-# unverified main base is empty, so every script is checked; no other event
-# names a base.
+# ShellCheck's base (#3119 A7, M1; infra#1534): a pull request's base, a
+# merge-queue batch's main base, or on a push to main the newest main commit
+# main CI verified, the selection's own base. An unverified main base is empty,
+# so every script is checked; no other event names a base.
 # shellcheck disable=SC2016 # Match the workflow's literal expressions.
-grep -qxF "          CODEWIRE_SHELL_POLICY_BASE: \${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.outputs.push_verified_base) || '' }}" \
+grep -qxF "          CODEWIRE_SHELL_POLICY_BASE: \${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.outputs.push_verified_base) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/mq/') && needs.verification-selection.outputs.push_base) || '' }}" \
   "$ROOT/.gitea/workflows/ci.yaml" || {
-  echo 'Shell policy does not take the pull request base or the verified main base' >&2
+  echo 'Shell policy does not take the pull request base, merge-queue batch base, or verified main base' >&2
   exit 1
 }
 grep -qF 'run_selected_family dev_smoke_script_tests dev-smoke-script-tests' \

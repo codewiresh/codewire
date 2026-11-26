@@ -882,6 +882,21 @@ run_ci_script_tests() {
   export "GIT_CONFIG_KEY_$count=maintenance.auto" "GIT_CONFIG_VALUE_$count=false"
   export "GIT_CONFIG_KEY_$((count + 1))=gc.auto" "GIT_CONFIG_VALUE_$((count + 1))=0"
   export GIT_CONFIG_COUNT=$((count + 2))
+  # test-select-verification.sh runs ~780 checks and otherwise tails Policy by
+  # 2-4 min at run_side_by_side's nested share/4 worker cap while Policy's
+  # 2x-share CPU pin sits mostly idle (infra#1534). Honor an explicit
+  # VERIFICATION_TEST_JOBS (e.g. preflight's 1); otherwise size from the
+  # runner's CPU share (6 on an 8-share/16-CPU guest, 8 on 16-share/32-CPU).
+  unset SELECT_VERIFICATION_DEFERRED_JOBS
+  if [ -z "${VERIFICATION_TEST_JOBS:-}" ]; then
+    local share="${CODEWIRE_CI_CPU_SHARE:-}" selector_jobs
+    if [[ "$share" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      selector_jobs=$(( (share * 3 + 3) / 4 ))
+      [ "$selector_jobs" -ge 4 ] || selector_jobs=4
+      [ "$selector_jobs" -le 8 ] || selector_jobs=8
+      export SELECT_VERIFICATION_DEFERRED_JOBS="$selector_jobs"
+    fi
+  fi
   # The slowest tests come first, so the runner's bound never queues them
   # behind the quick ones (longest-processing-time-first, infra#1534).
   run_side_by_side <<'STEPS'
