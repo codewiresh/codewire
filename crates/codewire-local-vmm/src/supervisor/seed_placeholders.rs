@@ -157,7 +157,7 @@ impl PlatformPlaceholdersRefusal {
     }
 
     /// The supervisor log's `platform_seed_refused` line.
-    fn record(self, log: Option<&diagnostic_log::DiagnosticLog>, generation: u64) {
+    pub(super) fn record(self, log: Option<&diagnostic_log::DiagnosticLog>, generation: u64) {
         diagnostic_log::record(
             log,
             "platform_seed_refused",

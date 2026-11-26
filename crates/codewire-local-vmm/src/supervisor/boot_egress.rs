@@ -48,6 +48,7 @@ impl Supervisor {
             Ok(client) => {
                 let protocol = client.info().protocol_version;
                 egress_intercept::AuthorityServes {
+                    reachable: true,
                     boot_secrets: AuthorityFeature::BootSecrets.served_by(protocol),
                     front_door_delegation: AuthorityFeature::FrontDoorDelegation
                         .served_by(protocol),
@@ -81,7 +82,11 @@ impl Supervisor {
                 .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
         };
         let interception =
-            egress_intercept::for_boot(&self.config.root, self.log.as_deref(), broker, authority);
+            egress_intercept::for_boot(&self.config.root, self.log.as_deref(), broker, authority)
+                .map_err(|refusal| {
+                refusal.record(self.log.as_deref(), broker.environment_generation);
+                SupervisorError::PlatformPlaceholders(refusal)
+            })?;
         let egress = BootEgress {
             network_policy_label: crate::runner_service::policy_label(&network_policy),
             network_policy,

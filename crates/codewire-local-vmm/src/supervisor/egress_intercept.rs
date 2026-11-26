@@ -17,6 +17,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::seed_placeholders::PlatformPlaceholdersRefusal;
 use crate::control::v1;
 use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::supervisor_config::EGRESS_INTERCEPT_SWITCH;
@@ -133,13 +134,14 @@ fn interception(switch: InterceptSwitch, skipped: Option<Skipped>) -> v1::Interc
 /// switch off, and the log and the boot's report say why. A boot whose
 /// credentials come from the platform intercepts only where its relay can
 /// serve the front door: against an authority that joins the platform's
-/// front-door session (#4909), on Linux and macOS alike (#6191).
+/// front-door session (#4909), on Linux and macOS alike (#6191). Where it
+/// can't, with the switch on, the boot is refused instead (#6280).
 pub(super) fn for_boot(
     root: &Path,
     log: Option<&DiagnosticLog>,
     broker: &super::CredentialBrokerEnsureRequest,
     authority: AuthorityServes,
-) -> v1::Interception {
+) -> Result<v1::Interception, PlatformPlaceholdersRefusal> {
     let switch = read_switch(root);
     if switch == InterceptSwitch::Unrecognized && !WARNED_UNRECOGNIZED.swap(true, Ordering::Relaxed)
     {
@@ -160,13 +162,41 @@ pub(super) fn for_boot(
         ),
         None => diagnostic_log::record(log, "egress_intercept", &[generation, switch_name]),
     }
-    interception(switch, skipped)
+    match platform_refusal(broker.platform.is_some(), skipped, authority) {
+        Some(refusal) => Err(refusal),
+        None => Ok(interception(switch, skipped)),
+    }
+}
+
+/// Why a platform boot is refused rather than started without interception
+/// while the switch is on (#6280): it would take the platform's real logins,
+/// which #6270 keeps out of every platform boot. A reachable authority that
+/// can't serve the front door is an older one, and gets the step that
+/// replaces it; one that can't be reached gets the step to start again.
+/// `None` for a boot that intercepts, a local profile's boot and a boot with
+/// the switch off.
+fn platform_refusal(
+    platform: bool,
+    skipped: Option<Skipped>,
+    authority: AuthorityServes,
+) -> Option<PlatformPlaceholdersRefusal> {
+    if !platform || skipped.is_none() {
+        None
+    } else if authority.reachable {
+        Some(PlatformPlaceholdersRefusal::Unsupported)
+    } else {
+        Some(PlatformPlaceholdersRefusal::Unavailable(
+            tonic::Code::Unavailable,
+        ))
+    }
 }
 
 /// What the running credential authority serves that interception needs,
 /// asked only when the switch is on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct AuthorityServes {
+    /// The supervisor reached it to ask.
+    pub(super) reachable: bool,
     /// It carries a boot's secrets to its brokers (#3999).
     pub(super) boot_secrets: bool,
     /// It joins a platform delegation's front-door session (#4909).
@@ -203,12 +233,19 @@ mod tests {
     use super::*;
 
     const SECRETS_ONLY: AuthorityServes = AuthorityServes {
+        reachable: true,
         boot_secrets: true,
         front_door_delegation: false,
     };
     const BOTH: AuthorityServes = AuthorityServes {
+        reachable: true,
         boot_secrets: true,
         front_door_delegation: true,
+    };
+    const NEITHER: AuthorityServes = AuthorityServes {
+        reachable: true,
+        boot_secrets: false,
+        front_door_delegation: false,
     };
 
     #[test]
@@ -253,6 +290,40 @@ mod tests {
             Some(Skipped::PlatformCredentials)
         );
         assert_eq!(skipped(On, true, true, BOTH), None);
+    }
+
+    /// A platform boot that would start without interception is refused
+    /// instead, for every reason it could skip (#6280), and named for what
+    /// the person does next. A local profile's boot keeps its skips, and the
+    /// switch's `off` still starts both.
+    #[test]
+    fn a_platform_boot_that_would_skip_interception_is_refused() {
+        use InterceptSwitch::{Off, On};
+        use PlatformPlaceholdersRefusal::{Unavailable, Unsupported};
+        let refusal = |switch, has_broker, platform, authority| {
+            platform_refusal(
+                platform,
+                skipped(switch, has_broker, platform, authority),
+                authority,
+            )
+        };
+        // An authority that predates front-door delegation, or boot secrets.
+        assert_eq!(refusal(On, true, true, SECRETS_ONLY), Some(Unsupported));
+        assert_eq!(refusal(On, true, true, NEITHER), Some(Unsupported));
+        // No broker: a platform binding always asks for one, but the rule
+        // doesn't lean on that.
+        assert_eq!(refusal(On, false, true, BOTH), Some(Unsupported));
+        // An authority the supervisor couldn't reach to ask.
+        assert_eq!(
+            refusal(On, true, true, AuthorityServes::default()),
+            Some(Unavailable(tonic::Code::Unavailable))
+        );
+        assert_eq!(refusal(On, true, true, BOTH), None);
+        for authority in [NEITHER, SECRETS_ONLY, AuthorityServes::default()] {
+            assert_eq!(refusal(Off, true, true, authority), None);
+            assert_eq!(refusal(On, true, false, authority), None);
+            assert_eq!(refusal(On, false, false, authority), None);
+        }
     }
 
     /// The boot's report says what its log says (#4912): intercepted for an

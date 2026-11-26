@@ -983,18 +983,16 @@ request adds.
     profile delivers, waiting at most 10 s, so the first agent command run
     straight after it finds its login and never says `Not logged in`
     (#6123);
-  - a VM whose credentials come from the platform, on macOS or against an
-    authority that does not join the platform's front-door session, starts
-    without interception: its recorded state reads interception off, the
-    supervisor's log gives the reason (`skipped=platform_credentials`), and
-    `cw --local info` shows `no placeholders: they come from the platform`
-    under its `Credentials` row, with `{"state": "not_intercepted", "reason":
-    "platform_credentials"}` in its JSON. Its
-    seed carries no authority and no placeholders, so the guest sets no
-    `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
-    trusting an authority that nothing serves. On Linux against a current
-    authority it intercepts through the delegation (#4909,
-    `agent-vm-platform-profile`);
+  - a VM whose credentials come from the platform, against an authority
+    that does not join the platform's front-door session or predates boot
+    secrets, is refused with the switch on, never started without
+    interception (#6280): the start fails with
+    `platform_placeholders_unsupported` and the step to stop the local VMs
+    so cw replaces the credential service, the supervisor's log has the
+    skip and a `platform_seed_refused` line, and no VM starts, so no login
+    file is written (not yet observed). Against a current authority it
+    intercepts through the delegation, on Linux and macOS alike (#4909,
+    #6191, `agent-vm-platform-profile`);
   - **only the boot's pairing secret pairs a credential broker with the
     front door** (#3999). The runner mints it for the boot and keeps it in
     memory; the credential authority hands it to each broker, successors
