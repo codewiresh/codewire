@@ -318,6 +318,7 @@ async fn access_is_renewed_at_half_life_and_each_token_reproves_the_session() {
         dialer,
         Arc::new(RecordingDataPlane::default()),
         Duration::from_millis(50),
+        crate::quiet::PlatformQuiet::new().subscribe(),
         shutdown,
     ));
 
@@ -368,6 +369,7 @@ async fn an_ended_session_is_replaced_only_after_renewal() {
         Arc::new(LocalCoordinator(address)),
         Arc::new(RecordingDataPlane::default()),
         Duration::from_millis(50),
+        crate::quiet::PlatformQuiet::new().subscribe(),
         shutdown,
     ));
     // Each dial follows a renewal. The first session is ended by the
@@ -382,6 +384,55 @@ async fn an_ended_session_is_replaced_only_after_renewal() {
     );
     assert_eq!(plane.refreshes.load(Ordering::SeqCst), 2);
     let _ = stop.send(true);
+}
+
+#[tokio::test]
+async fn a_hold_ends_the_session_and_dials_none_until_released() {
+    let (coordinator, address) = serve_coordinator(0).await;
+    let plane = FakePlane::new(600);
+    let grants = AccessGrants::new(plane.clone(), grant("peer-token-0", 600, 4));
+    let dialer: Arc<dyn CoordinatorDialer> = Arc::new(LocalCoordinator(address));
+    let first = DialedSession::dial(&grants, dialer.as_ref(), ENVIRONMENT)
+        .await
+        .unwrap();
+    let quiet = crate::quiet::PlatformQuiet::new();
+    let data_plane = Arc::new(RecordingDataPlane::default());
+    let (stop, shutdown) = watch::channel(false);
+    let sessions = tokio::spawn(run_coordinator_sessions(
+        Some(first),
+        ENVIRONMENT,
+        grants.clone(),
+        dialer,
+        data_plane.clone(),
+        Duration::from_millis(50),
+        quiet.subscribe(),
+        shutdown,
+    ));
+    // The session is being driven: it publishes this node's updates.
+    tokio::time::timeout(HANG_GUARD, async {
+        while data_plane.publishing.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first session is driven");
+
+    quiet.hold();
+    // Held well past the retry delay, nothing is dialled.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(coordinator.seen().len(), 1);
+    assert_eq!(plane.refreshes.load(Ordering::SeqCst), 0);
+
+    // Released, the daemon renews its grant and opens a new session at
+    // once: well inside the 45 s after which a silent session ends anyway.
+    quiet.release();
+    let seen = coordinator.wait_for(2, Duration::from_secs(5)).await;
+    assert_eq!(seen[1], connected("peer-token-1"));
+    let _ = stop.send(true);
+    tokio::time::timeout(HANG_GUARD, sessions)
+        .await
+        .expect("the sessions stop")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1208,9 +1259,15 @@ async fn a_broker_daemon_dials_its_verified_relay_by_address_and_redials_there_a
     ]}}});
     let grant = grant_for("https://coordinator.codewire.invalid");
     let secret = StaticSecret::random_from_rng(OsRng);
-    let _transport = connect_derp(Some(&platform), Some(&map), &grant, &secret)
-        .await
-        .unwrap();
+    let _transport = connect_derp(
+        Some(&platform),
+        Some(&map),
+        &grant,
+        &secret,
+        &DerpHold::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(*dialled.lock().unwrap(), [proxy]);
 
     cut.notify_waiters();
@@ -1238,7 +1295,7 @@ async fn no_caller_reaches_a_platform_relay_unverified() {
             port: 443,
             transport,
         };
-        let refused = connect_derp_transport_platform(
+        let refused = codewire_tailnet::derp_transport::connect_derp_transport_platform(
             &target,
             "127.0.0.1:9".parse().unwrap(),
             Arc::clone(&dial),
@@ -1262,7 +1319,7 @@ async fn a_daemon_outside_broker_mode_still_dials_a_node_marked_for_tests() {
     ]}}});
     let grant = grant_for("https://coordinator.codewire.invalid");
     let secret = StaticSecret::random_from_rng(OsRng);
-    connect_derp(None, Some(&map), &grant, &secret)
+    connect_derp(None, Some(&map), &grant, &secret, &DerpHold::new())
         .await
         .unwrap();
 }
@@ -1285,10 +1342,16 @@ async fn a_broker_daemon_dials_only_its_deployments_verified_relay() {
         let grant = grant.clone();
         let secret = StaticSecret::random_from_rng(OsRng);
         async move {
-            let error = connect_derp(Some(&platform), Some(&map), &grant, &secret)
-                .await
-                .err()
-                .expect("refused");
+            let error = connect_derp(
+                Some(&platform),
+                Some(&map),
+                &grant,
+                &secret,
+                &DerpHold::new(),
+            )
+            .await
+            .err()
+            .expect("refused");
             let refusal = error
                 .downcast_ref::<BrokerRefusal>()
                 .expect("a typed refusal");
@@ -1318,6 +1381,7 @@ async fn a_broker_daemon_dials_only_its_deployments_verified_relay() {
         None,
         &grant,
         &StaticSecret::random_from_rng(OsRng),
+        &DerpHold::new(),
     )
     .await
     .err()

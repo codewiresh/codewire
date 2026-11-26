@@ -32,7 +32,8 @@ use codewire_daemon::app_ports::AppPorts;
 use codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
 use codewire_tailnet::derp_transport::{
-    DerpTarget, DerpTransport, connect_derp_transport_absolute, connect_derp_transport_platform,
+    DerpHold, DerpTarget, DerpTransport, connect_derp_transport_absolute_held,
+    connect_derp_transport_platform_held,
 };
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
@@ -332,6 +333,9 @@ pub async fn drive_session(
 
 /// Keep the environment's coordinator session up until shutdown: drive
 /// `first`, then renew the grant and reconnect whenever a session ends.
+/// While `quiet` holds, the session is ended and none is dialled
+/// ([`crate::quiet`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_coordinator_sessions(
     first: Option<DialedSession>,
     environment_id: Uuid,
@@ -339,10 +343,20 @@ pub async fn run_coordinator_sessions(
     dialer: Arc<dyn CoordinatorDialer>,
     data_plane: Arc<dyn PeerDataPlane>,
     retry_delay: Duration,
+    mut quiet: watch::Receiver<bool>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next = first;
     loop {
+        if *quiet.borrow() {
+            // A session opened before the hold goes with it.
+            next = None;
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                () = crate::quiet::until_released(&mut quiet) => {}
+            }
+            tracing::info!("workspace tailnet coordinator session released; reconnecting");
+        }
         let dialed = match next.take() {
             Some(dialed) => dialed,
             None => {
@@ -366,6 +380,10 @@ pub async fn run_coordinator_sessions(
         };
         tokio::select! {
             _ = shutdown.changed() => return,
+            () = crate::quiet::until_held(&mut quiet) => {
+                tracing::info!("workspace tailnet coordinator session held closed");
+                continue;
+            }
             result = drive_session(dialed, data_plane.as_ref()) => match result {
                 Ok(()) => tracing::info!("workspace tailnet coordinator session ended; reconnecting"),
                 Err(error) => tracing::warn!(error = %error, "workspace tailnet coordinator session failed; reconnecting"),
@@ -587,6 +605,9 @@ pub struct DaemonTailnetConfig {
     /// A broker-mode daemon's platform path: DERP at the deployment's own
     /// relay, direct UDP endpoints taken as literals, and no STUN.
     pub platform: Option<DaemonPlatform>,
+    /// Holds the coordinator session and the DERP connection closed while
+    /// the daemon suspends.
+    pub quiet: crate::quiet::PlatformQuiet,
 }
 
 /// Build the tailnet connection from the coordinator's DERP map (falling
@@ -601,7 +622,14 @@ pub async fn connect_daemon_tailnet(
     plane: Arc<dyn AccessControlPlane>,
 ) -> Result<DaemonTailnet> {
     let secret = StaticSecret::random_from_rng(OsRng);
-    let fallback = connect_derp(config.platform.as_ref(), derp_map, grant, &secret).await?;
+    let fallback = connect_derp(
+        config.platform.as_ref(),
+        derp_map,
+        grant,
+        &secret,
+        config.quiet.derp(),
+    )
+    .await?;
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let local_disco = disco_private.public();
@@ -760,6 +788,7 @@ async fn connect_derp(
     derp_map: Option<&serde_json::Value>,
     grant: &WorkspaceAccessGrant,
     secret: &StaticSecret,
+    hold: &DerpHold,
 ) -> Result<codewire_tailnet::conn::Transport> {
     let Some(platform) = platform else {
         let target = match derp_target_from_map(derp_map) {
@@ -771,7 +800,7 @@ async fn connect_derp(
             derp_port = target.port,
             "workspace tailnet connecting DERP relay"
         );
-        return connect_derp_transport_absolute(&target, secret)
+        return connect_derp_transport_absolute_held(&target, secret, hold)
             .await
             .context("connect DERP relay");
     };
@@ -802,12 +831,13 @@ async fn connect_derp(
         derp_address = %address,
         "workspace tailnet connecting DERP relay by the Pod interface"
     );
-    connect_derp_transport_platform(
+    connect_derp_transport_platform_held(
         &target,
         address,
         Arc::clone(&platform.dial),
         platform.derp_extra_roots.clone(),
         secret,
+        hold,
     )
     .await
     .context("connect DERP relay")
@@ -925,6 +955,7 @@ pub async fn run(
         dialer,
         tailnet.clone(),
         COORDINATOR_RETRY_DELAY,
+        config.quiet.subscribe(),
         shutdown.clone(),
     ));
     let mut shutdown = shutdown;

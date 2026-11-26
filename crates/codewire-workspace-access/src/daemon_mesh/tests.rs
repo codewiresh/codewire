@@ -180,6 +180,7 @@ struct Harness {
     current: CurrentMembership,
     grants: watch::Sender<WorkspaceAccessGrant>,
     shutdown: watch::Sender<bool>,
+    quiet: crate::quiet::PlatformQuiet,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -194,6 +195,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
     let (_ports, ports_rx) = watch::channel(AppPorts::default());
     std::mem::forget(_ports);
     let (current_tx, current) = watch::channel(MeshConnectState::NotJoined);
+    let quiet = crate::quiet::PlatformQuiet::new();
     let task = tokio::spawn(run(
         DaemonMeshConfig {
             environment_id: ENVIRONMENT,
@@ -206,6 +208,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
                 readiness_poll: Duration::from_millis(10),
                 connect_rejoin_wait: Duration::from_millis(10),
             },
+            quiet: quiet.clone(),
         },
         grants_rx,
         plane.clone(),
@@ -220,6 +223,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
         current,
         grants,
         shutdown,
+        quiet,
         task,
     }
 }
@@ -293,6 +297,34 @@ async fn each_stream_uses_one_fresh_code_and_an_ended_stream_rejoins() {
     // A second attach is not reported again.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(reports(&harness.plane), [MeshReport::Attached]);
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_hold_leaves_the_network_and_its_release_joins_again() {
+    let harness = start(Some("work"), Vec::new());
+    harness
+        .until(|plane, _| reports(plane) == [MeshReport::Attached])
+        .await;
+    let first = harness.joiner.latest.lock().unwrap().clone().unwrap();
+
+    harness.quiet.hold();
+    tokio::time::timeout(HANG_GUARD, async {
+        while !matches!(*harness.current.borrow(), MeshConnectState::Rejoining) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a hold leaves the network");
+    // Held, nothing joins, however long the hold lasts.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(joins(&harness.joiner), 1);
+    assert_eq!(harness.plane.issued.lock().unwrap().len(), 1);
+
+    harness.quiet.release();
+    harness.until(|_, joiner| joins(joiner) == 2).await;
+    let second = harness.joiner.latest.lock().unwrap().clone().unwrap();
+    assert!(!Arc::ptr_eq(&first, &second), "a new membership");
     harness.stop().await;
 }
 

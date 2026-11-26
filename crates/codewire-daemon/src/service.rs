@@ -58,6 +58,8 @@ pub struct DaemonServiceImpl {
     before_launch: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// A local guest daemon's recent log, which `ReadDaemonLog` returns.
     recent_log: Option<crate::recent_log::RecentLog>,
+    /// A hosted daemon's suspend in a standard VM (#5529).
+    suspend: Option<std::sync::Arc<crate::suspend::Suspend>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,7 +169,16 @@ impl DaemonServiceImpl {
             workload_sockets,
             before_launch: None,
             recent_log: None,
+            // Only a hosted daemon in a standard VM installs one (#5529).
+            suspend: crate::suspend::installed()
+                .map(|platform| std::sync::Arc::new(crate::suspend::Suspend::new(platform))),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_suspend_for_test(mut self, suspend: crate::suspend::Suspend) -> Self {
+        self.suspend = Some(std::sync::Arc::new(suspend));
+        self
     }
 
     /// The same service, answering `ReadDaemonLog` from `recent_log`.
@@ -307,6 +318,20 @@ impl DaemonService for DaemonServiceImpl {
         Ok(Response::new(v1::ReadDaemonLogResponse {
             data: recent_log.snapshot(),
         }))
+    }
+
+    async fn suspend(
+        &self,
+        request: Request<v1::SuspendRequest>,
+    ) -> Result<Response<v1::SuspendResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        let suspend = self
+            .suspend
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("this daemon can't suspend"))?;
+        let accepted = suspend.begin(&self.credential_bridge).await?;
+        Ok(Response::new(v1::SuspendResponse { accepted }))
     }
 
     async fn poweroff_guest(

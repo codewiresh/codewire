@@ -271,6 +271,10 @@ pub struct DaemonMeshConfig {
     /// Local ports never served on the Mesh address (as on the tailnet).
     pub reserved_ports: BTreeSet<u16>,
     pub timing: MeshTiming,
+    /// While it holds, the node leaves its network and joins none, which
+    /// ends the membership's coordinator session and relay; on release it
+    /// joins again.
+    pub quiet: crate::quiet::PlatformQuiet,
 }
 
 /// Keep the environment's node in its network while the grant names one,
@@ -285,6 +289,7 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let timing = config.timing;
+    let mut quiet = config.quiet.subscribe();
     let mut fault_wait = timing.fault_backoff;
     let mut refused_wait = timing.refused_backoff;
     let mut last_report: Option<MeshReport> = None;
@@ -301,6 +306,13 @@ pub async fn run(
     loop {
         if *shutdown.borrow() {
             return;
+        }
+        if *quiet.borrow() {
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                () = crate::quiet::until_released(&mut quiet) => {}
+            }
+            tracing::info!("workspace Mesh membership released; joining again");
         }
         let target = grants.borrow_and_update().mesh().cloned();
         let Some(target) = target else {
@@ -353,20 +365,26 @@ pub async fn run(
                     config.reserved_ports.clone(),
                     stopped,
                 ));
-                let keep = serve_until_ended(
-                    membership.as_ref(),
-                    &target,
-                    &mut grants,
-                    &mut shutdown,
-                    timing.readiness_poll,
-                )
-                .await;
+                let (keep, held) = tokio::select! {
+                    keep = serve_until_ended(
+                        membership.as_ref(),
+                        &target,
+                        &mut grants,
+                        &mut shutdown,
+                        timing.readiness_poll,
+                    ) => (keep, false),
+                    () = crate::quiet::until_held(&mut quiet) => (true, true),
+                };
                 current.send_replace(MeshConnectState::Rejoining);
                 let _ = stop.send(true);
                 forwarding.abort();
                 drop(membership);
                 if !keep {
                     return;
+                }
+                if held {
+                    tracing::info!("workspace Mesh membership held closed");
+                    continue;
                 }
                 tracing::info!("workspace Mesh membership ended; rejoining");
                 if !wait(timing.fault_backoff, &mut grants, &mut shutdown).await {

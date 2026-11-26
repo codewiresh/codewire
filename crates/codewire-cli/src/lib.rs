@@ -31,6 +31,8 @@ mod hosted_exec;
 mod hosted_identity;
 #[cfg(target_os = "linux")]
 pub mod hosted_listener;
+#[cfg(target_os = "linux")]
+mod hosted_suspend;
 mod identity_token;
 mod local_runtime_pin;
 mod mesh;

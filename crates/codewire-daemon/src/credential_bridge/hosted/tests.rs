@@ -679,3 +679,52 @@ async fn a_launch_after_a_lost_epoch_waits_for_the_next() {
     assert_eq!(projected.anthropic().unwrap().as_str(), PLACEHOLDER);
     bridge.shutdown().await;
 }
+
+/// A suspend's hold ends the open epoch and refuses another until released
+/// (#5529, `docs/dev/IDLE-STOP.md`, "Suspend").
+#[tokio::test]
+async fn a_hold_ends_the_open_epoch_and_refuses_another_until_released() {
+    let bound = std::time::Duration::from_secs(5);
+    let (_temp, bridge, path) = fixture();
+    let (sender, mut connection) = prepared(&bridge, &path).await;
+    assert!(matches!(
+        connection.output.next().await.unwrap().unwrap().payload,
+        Some(v1::credential_bridge_guest_message::Payload::Ready(_))
+    ));
+    sender.send(Ok(open(&bridge))).await.unwrap();
+    tokio::time::timeout(bound, bridge.wait_for_initial_host(&context(&bridge)))
+        .await
+        .unwrap()
+        .unwrap();
+
+    bridge.hold().await;
+    assert!(
+        tokio::time::timeout(bound, connection.output.next())
+            .await
+            .expect("the held epoch ends")
+            .is_none()
+    );
+    let (_refused, receiver) = mpsc::channel(1);
+    assert_eq!(
+        bridge
+            .connect_with_token_file(ReceiverStream::new(receiver), &path)
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::Unavailable
+    );
+
+    bridge.release().await;
+    let (sender, mut connection) = prepared(&bridge, &path).await;
+    assert!(matches!(
+        connection.output.next().await.unwrap().unwrap().payload,
+        Some(v1::credential_bridge_guest_message::Payload::Ready(_))
+    ));
+    sender.send(Ok(open(&bridge))).await.unwrap();
+    tokio::time::timeout(bound, bridge.wait_for_initial_host(&context(&bridge)))
+        .await
+        .unwrap()
+        .unwrap();
+    bridge.shutdown().await;
+}

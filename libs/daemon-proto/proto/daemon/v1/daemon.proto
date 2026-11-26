@@ -32,6 +32,15 @@ service DaemonService {
   // Sandbox running. Only the time is kept, never what passed.
   rpc GetActivity(GetActivityRequest) returns (GetActivityResponse);
 
+  // A hosted standard Sandbox's suspend (#5529, docs/dev/IDLE-STOP.md,
+  // "Suspend"): the daemon holds closed its platform connections whose far
+  // end sends periodic traffic, ends the credential relay's open epoch and
+  // refuses new ones, answers, then asks the Pod's runtime to pause the VM.
+  // UNIMPLEMENTED from a daemon that can't suspend: any but a hosted one in
+  // a standard VM, and one older than this call. FAILED_PRECONDITION from a
+  // daemon outside the workload the pause freezes.
+  rpc Suspend(SuspendRequest) returns (SuspendResponse);
+
   // Private host-initiated channel for material-free guest credential
   // requests and typed recipient-encrypted application projections. The host
   // authenticates with the generation daemon capability; provider values and
@@ -371,6 +380,13 @@ message SetAppPortsRequest {
 }
 
 message SetAppPortsResponse {}
+
+message SuspendRequest {}
+
+message SuspendResponse {
+  // False while a suspend is already under way.
+  bool accepted = 1;
+}
 
 message GetActivityRequest {
   // Also count a busy minute of the whole guest kernel's CPU, which sees the

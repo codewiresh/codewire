@@ -3399,6 +3399,13 @@ mod tests {
             Err(Status::unimplemented("fixture unused activity RPC"))
         }
 
+        async fn suspend(
+            &self,
+            _request: Request<v1::SuspendRequest>,
+        ) -> Result<Response<v1::SuspendResponse>, Status> {
+            Err(Status::unimplemented("fixture unused suspend RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;

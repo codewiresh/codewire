@@ -145,6 +145,7 @@ pub(crate) async fn serve(
     connector: LocalDaemonConnector,
     plane: Arc<BindingClient>,
     app_ports: AppPortsSender,
+    quiet: codewire_workspace_access::quiet::PlatformQuiet,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let daemon = DaemonSessionClient::connect_local(connector, bound.daemon_credential)
@@ -220,6 +221,7 @@ pub(crate) async fn serve(
                     environment_id: bound.environment_id,
                     reserved_ports: reserved_ports.clone(),
                     timing: mesh_timing,
+                    quiet: quiet.clone(),
                 },
                 grants.subscribe(),
                 mesh_plane,
@@ -243,6 +245,7 @@ pub(crate) async fn serve(
                     )),
                     reserved_ports,
                     platform: bound.platform.clone(),
+                    quiet: quiet.clone(),
                 },
                 grants.clone(),
                 plane.clone(),
@@ -275,6 +278,21 @@ pub(crate) async fn serve(
         // refused.
         tracing::error!("workspace SSH host key refused for this Pod; access is not ready");
     }
+    record_host_key_per_generation_of(grants, recorded_generation, plane, public_key, shutdown);
+    ssh.await
+        .context("workspace SSH listener task")?
+        .context("serve workspace SSH")
+}
+
+/// Records the host key again for each new operation generation of the
+/// grant, when the binding carries one.
+fn record_host_key_per_generation_of(
+    grants: Option<Arc<AccessGrants>>,
+    recorded_generation: Option<u64>,
+    plane: Arc<dyn AccessControlPlane>,
+    public_key: String,
+    shutdown: watch::Receiver<bool>,
+) {
     if let (Some(grants), Some(recorded)) = (grants, recorded_generation) {
         tokio::spawn(record_host_key_per_generation(
             plane,
@@ -284,9 +302,6 @@ pub(crate) async fn serve(
             shutdown,
         ));
     }
-    ssh.await
-        .context("workspace SSH listener task")?
-        .context("serve workspace SSH")
 }
 
 /// Record this Pod's host key, then `start` the grant's tasks (#2238). The

@@ -60,13 +60,26 @@ pub(crate) fn hosted_loopback_address() -> std::net::SocketAddr {
     (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into()
 }
 
-struct BridgeOwner {
+pub(crate) struct BridgeOwner {
     accepting: Mutex<bool>,
     // One active epoch, the epoch draining behind it and one prepared
     // replacement; no unbounded Open waiters.
     permits: Arc<Semaphore>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
+    /// Cancelled when a suspend holds the bridge, which ends the epochs
+    /// open then; `None` while held, when no epoch opens (#5529).
+    open_epochs: std::sync::Mutex<Option<CancellationToken>>,
+}
+
+impl BridgeOwner {
+    /// The token that ends this epoch at a hold, or `None` while held.
+    pub(crate) fn epoch_token(&self) -> Option<CancellationToken> {
+        self.open_epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 pub(crate) struct CredentialBridgeConnection {
@@ -162,6 +175,7 @@ impl CredentialBridge {
                 permits: Arc::new(Semaphore::new(3)),
                 tasks: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
+                open_epochs: std::sync::Mutex::new(Some(CancellationToken::new())),
             }),
         }
     }
@@ -348,6 +362,10 @@ impl CredentialBridge {
         if !*accepting || self.owner.shutdown.is_cancelled() {
             return Err(hosted::unavailable());
         }
+        // A suspend holds the bridge: no epoch opens until it ends.
+        let Some(epoch) = self.owner.epoch_token() else {
+            return Err(hosted::unavailable());
+        };
         if let Some((capabilities, placeholders)) = local_capabilities {
             // Keep the local eager-Open contract: RPC headers are sent only
             // after this already-authenticated host has actually activated.
@@ -360,7 +378,14 @@ impl CredentialBridge {
                 .await?;
             drop(self.owner.tasks.spawn(async move {
                 let _permit = permit;
-                connection.run_until(owner.shutdown.cancelled()).await;
+                connection
+                    .run_until(async {
+                        tokio::select! {
+                            _ = owner.shutdown.cancelled() => {},
+                            _ = epoch.cancelled() => {},
+                        }
+                    })
+                    .await;
             }));
             drop(accepting);
             return Ok(CredentialBridgeConnection {
@@ -375,6 +400,7 @@ impl CredentialBridge {
             let admitted = tokio::select! {
                 biased;
                 _ = owner.shutdown.cancelled() => return,
+                _ = epoch.cancelled() => return,
                 result = read_open(&mut input, identity, deadline, intercepted, true) => result,
             };
             let (capabilities, placeholders) = match admitted {
@@ -386,7 +412,7 @@ impl CredentialBridge {
                 Err(_) => return,
             };
             let accepting = owner.accepting.lock().await;
-            if !*accepting || owner.shutdown.is_cancelled() {
+            if !*accepting || owner.shutdown.is_cancelled() || epoch.is_cancelled() {
                 return;
             }
             // The relay admits the next epoch before the current identity
@@ -404,6 +430,7 @@ impl CredentialBridge {
                 .run_until(async {
                     tokio::select! {
                         _ = owner.shutdown.cancelled() => {},
+                        _ = epoch.cancelled() => {},
                         _ = tokio::time::sleep(HOSTED_EPOCH_MAX_LIFETIME) => {},
                     }
                 })
@@ -414,6 +441,36 @@ impl CredentialBridge {
             output,
             workspace_authorization,
         })
+    }
+
+    /// Ends the open epoch and refuses new ones until [`Self::release`]: a
+    /// suspending daemon holds it, since the relay's traffic would wake a
+    /// paused VM (#5529, `docs/dev/IDLE-STOP.md`, "Suspend").
+    pub(crate) async fn hold(&self) {
+        let _accepting = self.owner.accepting.lock().await;
+        let held = self
+            .owner
+            .open_epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(open) = held {
+            open.cancel();
+        }
+    }
+
+    pub(crate) async fn release(&self) {
+        let _accepting = self.owner.accepting.lock().await;
+        self.owner
+            .open_epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(CancellationToken::new);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_for_test(&self) -> &BridgeOwner {
+        &self.owner
     }
 
     pub(crate) async fn shutdown(&self) {

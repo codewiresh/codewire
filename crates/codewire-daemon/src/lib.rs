@@ -57,6 +57,7 @@ pub mod snapshot_clearing;
 #[cfg(target_os = "linux")]
 pub mod ssh_known_hosts;
 pub mod stop_evidence;
+pub mod suspend;
 #[cfg(unix)]
 pub mod unix_forward;
 #[cfg(unix)]

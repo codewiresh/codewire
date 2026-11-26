@@ -16,6 +16,7 @@ pub mod daemon_tailnet;
 pub mod host_key;
 pub mod peer_relay;
 pub mod platform;
+pub mod quiet;
 pub mod scp;
 pub mod session_attach;
 pub mod sftp;

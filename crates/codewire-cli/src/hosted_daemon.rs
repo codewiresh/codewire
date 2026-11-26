@@ -163,6 +163,8 @@ pub(crate) async fn run_bound_hosted_daemon_with(
             measured,
             #[cfg(target_os = "linux")]
             platform,
+            #[cfg(target_os = "linux")]
+            carried,
             paths,
             bound,
             daemon_config,
@@ -212,6 +214,9 @@ struct BoundServe {
     measured: bool,
     #[cfg(target_os = "linux")]
     platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
+    /// A standard VM's guest carries this daemon, which can then suspend.
+    #[cfg(target_os = "linux")]
+    carried: bool,
     paths: codewire_daemon::hosted_state::HostedStatePaths,
     bound: hosted_binding::BoundWorkspace,
     daemon_config: codewire_daemon::Config,
@@ -232,6 +237,8 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         measured,
         #[cfg(target_os = "linux")]
         platform,
+        #[cfg(target_os = "linux")]
+        carried,
         paths,
         bound,
         daemon_config,
@@ -276,6 +283,14 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
             .ok();
         // One token cache for the identity socket and the token files.
         let identity_tokens = crate::hosted_identity::tokens(client.clone());
+        // Held closed while the daemon suspends, which only a daemon a
+        // standard VM's guest carries does (#5529).
+        let quiet = codewire_workspace_access::quiet::PlatformQuiet::new();
+        if carried {
+            codewire_daemon::suspend::install(std::sync::Arc::new(
+                crate::hosted_suspend::HostedSuspend::new(quiet.clone()),
+            ));
+        }
         let access = hosted_access::serve(
             paths.clone(),
             hosted_access::BoundAccess {
@@ -292,6 +307,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
             connector,
             client.clone(),
             app_ports.clone(),
+            quiet,
             access_shutdown_rx,
         );
         tokio::spawn(async move {
