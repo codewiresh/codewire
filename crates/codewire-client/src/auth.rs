@@ -24,8 +24,10 @@ use url::Url;
 use crate::{BearerToken, ClientConfig, ClientError, TokenProvider};
 
 mod refreshing;
+mod user_token;
 
 pub use refreshing::RefreshingTokenProvider;
+pub use user_token::{USER_TOKEN_MAX_DAYS, UserToken, UserTokenLifetime, UserTokenLifetimeError};
 
 /// How long before its access token expires a client renews it.
 const REFRESH_AHEAD: Duration = Duration::from_secs(10 * 60);

@@ -79,7 +79,9 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   - `cw logout`, revoking it in Settings, a password reset and an account
     disable: each ends it at once;
   - presented to the exchange again: refused.
-- **Driving it:** no command yet (#5687).
+- **Driving it:** `cw auth token` from the scratch `cw` home, captured
+  (`T=$(cw auth token --expires 30)`) and at the terminal; Settings for
+  the list and each revocation.
 - **Proof:** the token works before each change and answers
   `unauthenticated` after it. Settings shows its last use. The audit log has
   a row for each one issued and each revocation. A capture of the walk's

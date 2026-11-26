@@ -4,7 +4,10 @@ use crate::commands::progress::terminal_text;
 
 use super::*;
 
+mod auth_token;
 pub(crate) mod refusal;
+
+pub(crate) use auth_token::{AuthCommand, handle_auth_command};
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;

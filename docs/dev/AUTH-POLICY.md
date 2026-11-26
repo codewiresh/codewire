@@ -968,11 +968,14 @@ empty value counts as unset.
 The owner decided this on 2026-11-21 (#5687, #5688). Until each part ships,
 nothing issues a user token for `CODEWIRE_JWT_TOKEN` (the SDKs send whatever
 token they are given as the bearer), an SDK binds no profile with one, and
-`cw` is unchanged. The change that ships a part moves it into
-[Signing in from the environment](#signing-in-from-the-environment).
+`cw` changes only as "What runs now" says. The change that ships a part moves
+it into [Signing in from the environment](#signing-in-from-the-environment).
 
-**What runs now (#5688):** the IdP issues user tokens and the product API
-admits them, as below. Binding a profile with one is not yet shipped.
+**What runs now (#5688):** the IdP issues user tokens, the product API
+admits them, and `cw auth token` asks for one through the token exchange, as
+below. Against a server from before the exchange, the command says that the
+server doesn't issue user tokens yet. Binding a profile with one is not yet
+shipped.
 - **Settings → API keys → User tokens** lists them and revokes one, through
   the routes below.
 - **Settings' routes:** `GET /api/auth/user-tokens?account_id=…` lists the

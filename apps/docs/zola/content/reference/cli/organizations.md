@@ -1,7 +1,7 @@
 ---
 title: Organizations
-description: setup, login, logout, whoami, org, api-keys and cost.
-updated: 2026-11-13
+description: setup, login, logout, whoami, auth token, org, api-keys and cost.
+updated: 2026-11-26
 weight: 7
 aliases: ["/cli/account"]
 ---
@@ -52,6 +52,26 @@ unreachable or refused), the sign-in is still removed from this machine, but
 `logout` exits non-zero, names the reason, and says until when the sign-in's
 access token stays valid. `logout` never ends an API key: with
 `CODEWIRE_API_KEY` set it says so; delete the key with `cw api-keys delete`.
+
+## cw auth token
+
+```sh
+cw auth token [--expires DAYS|never]   # DAYS: 1 to 3650; default: 1 day
+```
+
+Prints a user token from your `cw login` sign-in, for an SDK or a script
+that acts as you. It prints the token only when its output is captured or
+piped, never at a terminal:
+
+```sh
+export CODEWIRE_JWT_TOKEN=$(cw auth token --expires 30)
+```
+
+The token is printed on one line and nowhere else. `cw auth token` refuses
+when you are not signed in, and when `CODEWIRE_API_KEY` is set, because an
+API key can't be exchanged for a user token. Signing out of `cw`, a
+password reset, disabling the account, or revoking the token on the API keys
+page ends it. A server that doesn't issue user tokens yet says so.
 
 ## cw org
 

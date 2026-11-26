@@ -38,6 +38,7 @@ pub use auth::{
     CODEWIRE_DESKTOP_OAUTH_REDIRECT_URI, CODEWIRE_DESKTOP_OAUTH_SCOPES, CredentialStore,
     FileCredentialStore, OAuthClient, OAuthCredentials, OAuthDeviceAuthorization, OAuthDiscovery,
     OAuthPkceAuthorization, OAuthTokenResponse, OAuthUserInfo, RefreshingTokenProvider,
+    USER_TOKEN_MAX_DAYS, UserToken, UserTokenLifetime, UserTokenLifetimeError,
 };
 #[cfg(feature = "desktop-pkce-loopback")]
 pub use auth::{DesktopOAuthCancellation, DesktopOAuthLogin};

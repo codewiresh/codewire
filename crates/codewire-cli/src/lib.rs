@@ -234,7 +234,9 @@ const HELP_SECTIONS: &[HelpSection] = &[
     ),
     HelpSection::full(
         "Account and organization",
-        &["logout", "whoami", "org", "identity", "api-keys", "cost"],
+        &[
+            "logout", "whoami", "auth", "org", "identity", "api-keys", "cost",
+        ],
     ),
     HelpSection::full("Session controls", &["send", "wait", "interrupt", "steer"]),
     HelpSection::full(
@@ -416,6 +418,11 @@ enum Command {
     Logout,
     #[command(about = "Show current user and server")]
     Whoami(WhoamiArgs),
+    #[command(about = "Issue a user token from your sign-in")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     #[command(about = "Send feedback to the Codewire team", long_about = FEEDBACK_LONG_ABOUT)]
     Feedback(FeedbackArgs),
     #[command(
@@ -1046,6 +1053,7 @@ where
         Command::Setup(args) => handle_setup_command(&globals, args).await,
         Command::Logout => handle_logout_command(&globals).await,
         Command::Whoami(args) => handle_whoami_command(&globals, args).await,
+        Command::Auth { command } => handle_auth_command(&globals, command).await,
         Command::Feedback(args) => handle_feedback_command(&globals, args).await,
         Command::Host { command } => handle_host_command(&globals, command).await,
         Command::Hosts(args) => handle_hosts_command(&globals, args).await,
@@ -1188,15 +1196,17 @@ where
             flat::operation(&globals, operation).await
         }
         Command::Help(args) => flat::handle_help(args),
-        Command::Version => {
-            print!("{}", Cli::command().render_version());
-            Ok(())
-        }
+        Command::Version => print_version(),
     };
     if selection_changes && result.is_ok() {
         refresh_rex_selection();
     }
     update::notice::report(&command, &matches, result, json)
+}
+
+fn print_version() -> anyhow::Result<()> {
+    print!("{}", Cli::command().render_version());
+    Ok(())
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {
