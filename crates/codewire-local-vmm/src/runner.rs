@@ -116,7 +116,6 @@ use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process
 pub(crate) use intercept::boot_interception;
 pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
 pub use intercept::{FrontDoorFailure, FrontDoorStop, InterceptRefusal};
-#[cfg(target_os = "linux")]
 mod cw_runtime_disk;
 mod disk_admission;
 mod egress_spawn;
@@ -233,6 +232,7 @@ struct PreparedDirectShare {
 
 pub struct CloudHypervisorRunner {
     state_root: PrivateRoot,
+    cw_runtime_root: Option<PrivateRoot>,
     artifacts: AdmittedArtifacts,
     /// The configuration schema the admitted VZ helper accepts, kept once
     /// its probe answers (#4654). One cache serves the runner's life because
@@ -276,6 +276,7 @@ impl CloudHypervisorRunner {
         };
         Ok(Self {
             state_root,
+            cw_runtime_root: None,
             artifacts,
             #[cfg(target_os = "macos")]
             vz_protocol: crate::vz::ProtocolCache::default(),
@@ -320,11 +321,8 @@ impl CloudHypervisorRunner {
         if let Some(restore) = &request.checkpoint {
             self.admit_restore(&request, restore)?;
         }
-        let cw_runtime_disk = request
-            .cw_runtime_catalog_generation
-            .as_deref()
-            .map(|generation| CwRuntimeStore::create(&self.state_root)?.open_catalog(generation))
-            .transpose()?;
+        let cw_runtime_disk =
+            self.open_cw_runtime_disk(request.cw_runtime_catalog_generation.as_deref())?;
         let image_disk = request
             .image_disk
             .as_ref()
@@ -335,12 +333,13 @@ impl CloudHypervisorRunner {
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
         let is_hosted = hosted.is_some();
-        if let Some(disk) = persisted
-            .as_ref()
-            .and_then(|state| state.cw_runtime_disk.as_ref())
-        {
-            revalidate_persisted_cw_runtime_disk(&self.state_root, disk, is_hosted)?;
-        }
+        revalidate_persisted_cw_runtime_disk(
+            &self.state_root,
+            persisted.as_ref(),
+            &request,
+            cw_runtime_disk.as_ref(),
+            is_hosted,
+        )?;
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
         let (root_disk_path, root_disk) =
@@ -545,7 +544,7 @@ impl CloudHypervisorRunner {
             revalidate_setup_disk(setup, prepared.request.setup)?;
         }
         if let Some(disk) = &prepared.cw_runtime_disk {
-            CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
+            CwRuntimeStore::create(self.cw_runtime_root())?.revalidate_attachment(disk)?;
         }
         if let (Some(attachment), Some(disk)) = (&prepared.request.image_disk, &prepared.image_disk)
         {
@@ -4746,6 +4745,7 @@ mod tests {
         let artifact = AdmittedArtifact::for_test("/nonexistent/test-artifact");
         let runner = CloudHypervisorRunner {
             state_root: PrivateRoot::open(&state_path).unwrap(),
+            cw_runtime_root: None,
             artifacts: AdmittedArtifacts::for_test(artifact.clone(), artifact.clone(), artifact),
             #[cfg(target_os = "macos")]
             vz_protocol: crate::vz::ProtocolCache::default(),

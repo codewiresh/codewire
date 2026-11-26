@@ -614,6 +614,11 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__pod-runtime", hide = true)]
     PodRuntime,
+    /// Build-time helper for `images/pod-runtime/Dockerfile`: pre-bakes the
+    /// read-only `cw-runtime` ext4 catalog beside `cw-runtime.lock.json` (#5602).
+    #[cfg(target_os = "linux")]
+    #[command(name = "__pod-runtime-prepare-catalog", hide = true)]
+    PodRuntimePrepareCatalog,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-network-worker", hide = true)]
     NativeNetworkWorker(NativeNetworkWorkerArgs),
@@ -1117,6 +1122,12 @@ where
         Command::NativeRunner(args) => run_native_runner(args).await,
         #[cfg(target_os = "linux")]
         Command::PodRuntime => run_pod_runtime().await,
+        #[cfg(target_os = "linux")]
+        Command::PodRuntimePrepareCatalog => {
+            codewire_local_vmm::pod_runtime::prepare_pod_runtime_catalog()
+                .map(drop)
+                .map_err(anyhow::Error::from)
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]

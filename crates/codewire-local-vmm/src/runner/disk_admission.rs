@@ -19,6 +19,27 @@ use crate::state::{PersistedVmState, StateDiskIdentity, StateError, VmPaths};
 
 pub(super) fn revalidate_persisted_cw_runtime_disk(
     state_root: &PrivateRoot,
+    persisted: Option<&PersistedVmState>,
+    request: &CreateVmRequest,
+    next_catalog: Option<&AdmittedCwRuntimeDisk>,
+    hosted: bool,
+) -> Result<(), RunnerError> {
+    let Some(disk) = persisted.and_then(|state| state.cw_runtime_disk.as_ref()) else {
+        return Ok(());
+    };
+    if hosted && request.checkpoint.is_none() && next_catalog.is_some() {
+        // Hosted non-checkpoint boots attach the newly verified read-only
+        // catalog from the signed `pod-runtime` image; the prior Pod's
+        // catalog may have lived in an older container image or pre-baked
+        // rollout and is never attached to this boot (#5602).
+        disk.validate_metadata()?;
+        return Ok(());
+    }
+    revalidate_persisted_cw_runtime_attachment(state_root, disk, hosted)
+}
+
+fn revalidate_persisted_cw_runtime_attachment(
+    state_root: &PrivateRoot,
     disk: &AdmittedCwRuntimeDisk,
     hosted: bool,
 ) -> Result<(), RunnerError> {
@@ -275,25 +296,94 @@ mod tests {
 
         // Local VMs still reject st_dev drift; hosted standard Pods accept it.
         assert!(matches!(
-            revalidate_persisted_cw_runtime_disk(&engine, &remounted_catalog, false),
+            revalidate_persisted_cw_runtime_attachment(&engine, &remounted_catalog, false),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
-        revalidate_persisted_cw_runtime_disk(&engine, &remounted_catalog, true).unwrap();
+        revalidate_persisted_cw_runtime_attachment(&engine, &remounted_catalog, true).unwrap();
 
         // Any on-volume attribute change or hash drift still fails closed in hosted mode.
         let mut wrong_inode = remounted_catalog.clone();
         wrong_inode.identity.inode = wrong_inode.identity.inode.wrapping_add(1);
         assert!(matches!(
-            revalidate_persisted_cw_runtime_disk(&engine, &wrong_inode, true),
+            revalidate_persisted_cw_runtime_attachment(&engine, &wrong_inode, true),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
 
         let mut wrong_sha = remounted_catalog;
         wrong_sha.manifest.disk.sha256 = "f".repeat(64);
         assert!(matches!(
-            revalidate_persisted_cw_runtime_disk(&engine, &wrong_sha, true),
+            revalidate_persisted_cw_runtime_attachment(&engine, &wrong_sha, true),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
+    }
+
+    #[test]
+    fn hosted_non_checkpoint_boot_accepts_retired_prior_catalog_when_replacing_with_baked_catalog()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = PrivateRoot::create(&temp.path().join("engine")).unwrap();
+        let old_image = PrivateRoot::create(&temp.path().join("old-image")).unwrap();
+        let new_image = PrivateRoot::create(&temp.path().join("new-image")).unwrap();
+
+        let lock_path = fixture_cw_runtime_lock(&temp.path().join("source"));
+        let old_store = CwRuntimeStore::create(&old_image).unwrap();
+        let old_source = old_store.admit_source(&lock_path).unwrap().provenance;
+        let prior_catalog = old_store
+            .prepare_catalog(&old_source, &BTreeMap::new())
+            .unwrap();
+        let new_store = CwRuntimeStore::create(&new_image).unwrap();
+        let new_source = new_store.admit_source(&lock_path).unwrap().provenance;
+        let next_catalog = new_store
+            .prepare_catalog(&new_source, &BTreeMap::new())
+            .unwrap();
+
+        // Remove the old container image's catalog directory, as happens on pod-runtime upgrade.
+        fs::remove_dir_all(old_image.path()).unwrap();
+
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&engine, vm_id).unwrap();
+        write_test_ext4(&paths.state_disk, Uuid::new_v4(), MINIMUM_STATE_DISK_BYTES);
+        let persisted = PersistedVmState {
+            intercept: false,
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Running,
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
+            state_disk: StateDiskIdentity::capture(&paths.state_disk).unwrap(),
+            docker_disk: None,
+            root_generation: None,
+            root_disk: None,
+            cw_runtime_disk: Some(prior_catalog),
+            api_socket: None,
+            vsock_socket: None,
+        };
+        let request = test_request(vm_id, "a".repeat(64), None);
+
+        // Hosted non-checkpoint boot with a verified next_catalog succeeds across image upgrade.
+        revalidate_persisted_cw_runtime_disk(
+            &engine,
+            Some(&persisted),
+            &request,
+            Some(&next_catalog),
+            true,
+        )
+        .unwrap();
+
+        // Local VMs still require the retained prior catalog to exist in state_root.
+        assert!(
+            revalidate_persisted_cw_runtime_disk(
+                &engine,
+                Some(&persisted),
+                &request,
+                Some(&next_catalog),
+                false,
+            )
+            .is_err()
+        );
     }
 
     #[test]

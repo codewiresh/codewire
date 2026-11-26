@@ -34,9 +34,11 @@ use crate::setup_pack::{PublishedSetupRequest, ensure_published_setup_pack};
 use crate::workspace::ensure_empty_state_disk;
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError};
 
+mod baked_catalog;
 mod guest_log;
 mod hosted;
 mod suspend;
+pub use baked_catalog::prepare_baked_catalog;
 use codewire_vmm_guest_probe::image_disk::BuildId;
 pub use hosted::HostedPaths;
 
@@ -281,6 +283,21 @@ pub async fn run_pod_runtime() -> Result<(), PodRuntimeError> {
     .await
 }
 
+/// Build-time entrypoint for `images/pod-runtime/Dockerfile`: pre-bakes the
+/// sealed read-only `cw-runtime` ext4 catalog beside `cw-runtime.lock.json`.
+pub fn prepare_pod_runtime_catalog() -> Result<String, PodRuntimeError> {
+    prepare_baked_catalog(&PodPaths::default())
+}
+
+/// Per-phase millisecond timings collected across a `standard` Pod boot (#5602).
+struct BootTimings {
+    started: std::time::Instant,
+    runner_ms: u128,
+    image_ms: u128,
+    cw_runtime_ms: u128,
+    request_ms: u128,
+}
+
 /// Boots the VM described by `settings` and runs it until `stop` resolves
 /// or the VM ends.
 pub async fn run(
@@ -288,17 +305,35 @@ pub async fn run(
     paths: &PodPaths,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<(), PodRuntimeError> {
+    let started = std::time::Instant::now();
     let engine_root = ensure_private_dir(&paths.state_volume.join("runtime"))?;
+    let phase = std::time::Instant::now();
     let runner = CloudHypervisorRunner::new(RunnerConfig {
         state_root: engine_root.clone(),
         artifact_root: paths.artifact_root.clone(),
         artifact_lock: paths.artifact_lock.clone(),
     })
     .await?;
+    let runner_ms = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
     let image = admit_image(settings, paths)?;
-    let catalog = install_cw_runtime(&engine_root, &paths.cw_runtime_lock)?;
+    let image_ms = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
+    let (cw_runtime_root, catalog) =
+        baked_catalog::resolve_cw_runtime(&engine_root, &paths.cw_runtime_lock)?;
+    let runner = runner.with_cw_runtime_root(cw_runtime_root)?;
+    let cw_runtime_ms = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
     let request = boot_request(settings, paths, &engine_root, &image, catalog)?;
-    boot_and_wait(&runner, request, settings, paths, stop).await
+    let request_ms = phase.elapsed().as_millis();
+    let timings = BootTimings {
+        started,
+        runner_ms,
+        image_ms,
+        cw_runtime_ms,
+        request_ms,
+    };
+    boot_and_wait(&runner, request, settings, paths, timings, stop).await
 }
 
 /// The published disk, admitted and checked against the image the project
@@ -477,6 +512,7 @@ async fn boot_and_wait(
     request: CreateVmRequest,
     settings: &PodSettings,
     paths: &PodPaths,
+    timings: BootTimings,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<(), PodRuntimeError> {
     eprintln!(
@@ -487,13 +523,19 @@ async fn boot_and_wait(
     let hosted_settings = hosted::read_settings(|name| std::env::var(name).ok(), &paths.hosted)?;
     let tokens = hosted::read_tokens(&paths.hosted, settings.egress_mode)?;
     let booting = std::time::Instant::now();
+    let phase = std::time::Instant::now();
     let prepared = runner
         .prepare_hosted(request, settings.egress_mode.hosted())
         .await?;
+    let prepare_ms = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
     let mut running = runner.start(prepared).await?;
+    let start_ms = phase.elapsed().as_millis();
     // The guest waits for these before it starts the workspace, network
     // readiness included, so they go before the network worker's wait.
+    let phase = std::time::Instant::now();
     hosted::hand_over(&running, hosted_settings, tokens.clone()).await?;
+    let handover_ms = phase.elapsed().as_millis();
     // Suspend (#5529): its pauses and wakes, and from here on every token
     // delivery, which it holds while the VM is paused.
     let suspender = Arc::new(suspend::Suspender::new(
@@ -508,14 +550,18 @@ async fn boot_and_wait(
         Box::new(|record| eprintln!("{}", record.line())),
     ));
     let executable = fs::canonicalize(std::env::current_exe()?)?;
+    let phase = std::time::Instant::now();
     running
         .start_network_worker(&executable, BOOT_TIMEOUT)
         .await?;
     let _channels =
         hosted::open_guest_channels(&running.paths().vsock_socket, Arc::clone(&suspender)).await?;
+    let network_ms = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
     let stage = running
         .authenticated_guest_terminal_stage(BOOT_TIMEOUT)
         .await?;
+    let guest_ms = phase.elapsed().as_millis();
     if stage.is_failure() {
         // The boot already failed; that error is the one to report.
         let _ = running.stop().await;
@@ -523,8 +569,18 @@ async fn boot_and_wait(
     }
     mark_ready(&paths.run_directory)?;
     eprintln!(
-        "standard runtime: the guest is up after {} ms",
-        booting.elapsed().as_millis()
+        "standard runtime: the guest is up after {} ms (runner_ms={} image_ms={} cw_runtime_ms={} request_ms={} prepare_ms={} start_ms={} handover_ms={} network_ms={} guest_ms={} total_ms={})",
+        booting.elapsed().as_millis(),
+        timings.runner_ms,
+        timings.image_ms,
+        timings.cw_runtime_ms,
+        timings.request_ms,
+        prepare_ms,
+        start_ms,
+        handover_ms,
+        network_ms,
+        guest_ms,
+        timings.started.elapsed().as_millis(),
     );
 
     tokio::pin!(stop);
@@ -556,16 +612,6 @@ async fn boot_and_wait(
         ExitClass::GuestShutdown => Ok(()),
         other => Err(PodRuntimeError::GuestFailed(format!("{other:?}"))),
     }
-}
-
-/// The image's sealed cw runtime, installed as a catalog the VM attaches
-/// read-only; the guest's hosted daemon runs from it.
-fn install_cw_runtime(engine_root: &Path, lock: &Path) -> Result<String, PodRuntimeError> {
-    let store = crate::cw_runtime::CwRuntimeStore::create(&PrivateRoot::open(engine_root)?)?;
-    let asset = store.admit_source(lock)?;
-    Ok(store
-        .prepare_catalog(&asset.provenance, &std::collections::BTreeMap::new())?
-        .generation)
 }
 
 fn ensure_private_dir(path: &Path) -> Result<PathBuf, PodRuntimeError> {

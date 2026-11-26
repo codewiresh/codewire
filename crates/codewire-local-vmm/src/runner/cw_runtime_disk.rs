@@ -1,9 +1,44 @@
-//! Whether a running VM still has the cw runtime disk it was admitted with.
+//! Whether a running VM still has the cw runtime disk it was admitted with,
+//! and selecting a separate read-only `cw-runtime` store root for `standard`
+//! Pods (#5602).
 
+use std::path::PathBuf;
+
+use super::CloudHypervisorRunner;
 use crate::RunnerError;
+#[cfg(target_os = "linux")]
 use crate::ch_api::VmInfo;
+#[cfg(target_os = "linux")]
 use crate::cw_runtime::AdmittedCwRuntimeDisk;
+use crate::host::path::PrivateRoot;
 
+impl CloudHypervisorRunner {
+    /// Open and revalidate the `cw-runtime` catalog from `root` instead of
+    /// `state_root` (used by `standard` Pods whose catalog is pre-baked
+    /// read-only into the runtime image, #5602).
+    pub fn with_cw_runtime_root(mut self, root: PathBuf) -> Result<Self, RunnerError> {
+        self.cw_runtime_root = Some(PrivateRoot::open(&root)?);
+        Ok(self)
+    }
+
+    pub(super) fn cw_runtime_root(&self) -> &PrivateRoot {
+        self.cw_runtime_root.as_ref().unwrap_or(&self.state_root)
+    }
+
+    pub(super) fn open_cw_runtime_disk(
+        &self,
+        generation: Option<&str>,
+    ) -> Result<Option<crate::cw_runtime::AdmittedCwRuntimeDisk>, RunnerError> {
+        Ok(generation
+            .map(|generation| {
+                crate::cw_runtime::CwRuntimeStore::create(self.cw_runtime_root())?
+                    .open_catalog(generation)
+            })
+            .transpose()?)
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn validate_live_cw_runtime_disk(
     info: &VmInfo,
     expected: &AdmittedCwRuntimeDisk,

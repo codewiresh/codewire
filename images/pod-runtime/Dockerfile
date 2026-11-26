@@ -19,4 +19,8 @@ RUN userdel --remove ubuntu && \
     chown 1000:1000 /codewire/run /state
 
 USER 1000:1000
+# Pre-bake the sealed read-only cw-runtime ext4 catalog once at image build
+# time so cold standard Pod boots open it directly from page cache instead of
+# copying runtime.pack and running mkfs.ext4 + debugfs on the sandbox PVC.
+RUN /usr/local/bin/cw __pod-runtime-prepare-catalog
 ENTRYPOINT ["/usr/local/bin/cw", "__pod-runtime"]
