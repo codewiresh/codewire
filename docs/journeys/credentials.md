@@ -521,7 +521,7 @@ Issues: #4714 (local), #2559 (cloud).
   plan you want to use. Claude then shows a code: copy it and paste it here."
   Sign in, copy the `code#state` Claude shows, paste it into the code field
   (nothing shows) and press **Connect Claude**. Expect a row reading
-  "Anthropic · Claude" with the Claude account's email, offering
+  "Claude" with the Claude account's email, offering
   **Reconnect**, and no "(sign-in)" or "Claude sign-in" anywhere on the page.
 - **Dashboard states:** a paste that isn't `code#state` reopens the dialog
   with the name kept and the field empty, ready for another paste; a refused

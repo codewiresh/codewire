@@ -308,7 +308,8 @@ Codewire takes. Each row is one type, in picker order, and holds:
 
 The lists people see in `cw` read it: its picker, the words `add` and
 `connect` take, and `kind_label`. The docs' "Add and connect" table is
-generated from it. The dashboard's labels don't read it yet (#6286 step 4).
+generated from it. The dashboard's Credentials rows show its labels too,
+except a Claude sign-in, which the dashboard lists as Claude.
 
 The boundary lists stay where they are, each pinned by its own golden test
 and checked against the registry: the provider catalog's forms, the guest
@@ -849,7 +850,7 @@ from Complete clears it, and starting again replaces it. The
 cookie stays in the browser that started the sign-in, so a dashboard replica
 keeps nothing. A wrong or malformed code reopens the dialog with the name kept
 and the code cleared; an expired sign-in says to start again. A sign-in's row
-reads "Anthropic · Claude" with the Claude account's email and offers
+reads "Claude" with the Claude account's email and offers
 **Reconnect**, which repeats the dialog for that identity at its current
 generation.
 

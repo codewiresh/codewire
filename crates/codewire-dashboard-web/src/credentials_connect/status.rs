@@ -22,7 +22,7 @@ pub(super) fn credential_status_at(
     if form == "github" && credential.status == CredentialStatus::Revoked {
         return Ok(("Disconnected", "danger"));
     }
-    if form != "claude" || credential.status != CredentialStatus::Active {
+    if form != "claude-token" || credential.status != CredentialStatus::Active {
         return Ok(status);
     }
     Ok(match credential.expires_at_unix {

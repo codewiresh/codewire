@@ -103,8 +103,7 @@ mod rendered {
         CredentialRowView {
             id: ID.into(),
             name: "Work Claude".into(),
-            provider: "Anthropic",
-            authentication: "Claude",
+            kind: "Claude",
             account_hint: "person@example.test".into(),
             status: "Active",
             status_tone: "success",

@@ -262,7 +262,7 @@ test("a Claude subscription token reads its expiry and is replaced by paste from
     await route.fulfill({ status: 204 });
   });
   const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Claude Max"]') });
-  await expect(row.locator(".cw-credential-identity")).toContainText("Anthropic · Claude subscription token");
+  await expect(row.locator(".cw-credential-identity strong + span")).toHaveText("Claude (token)");
   await expect(row.locator(".cw-credential-identity")).toContainText("Expires October 20, 2026");
   await expect(row.locator(".cw-credential-status")).toHaveText("Expires soon");
   await expect(row.locator(".cw-credential-status")).toHaveAttribute("data-tone", "warning");
@@ -631,7 +631,7 @@ test("an ended or refused Claude sign-in says to start again, keeping the name",
 
 test("a Claude sign-in row names its account and Reconnect starts a new sign-in for it", { tag: "@mobile" }, async ({ page }) => {
   const row = page.locator(".cw-credential-row").filter({ hasText: "Personal Claude" });
-  await expect(row).toContainText("Anthropic · Claude");
+  await expect(row.locator(".cw-credential-identity strong + span")).toHaveText("Claude");
   await expect(row).toContainText("owner@example.test");
   const menu = await rowMenu(row);
   await expect(menuItems(menu)).toContainText(["Reconnect"]);

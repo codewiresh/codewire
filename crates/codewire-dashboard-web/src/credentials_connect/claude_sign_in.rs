@@ -106,7 +106,7 @@ pub(crate) async fn complete_claude_sign_in(
             let current = get_exact_credential(state, cookie.clone(), credential_id).await?;
             if current.revocation_generation != *generation
                 || current.name != name
-                || credential_form(&current)? != "claude-sign-in"
+                || credential_form(&current)? != "claude"
             {
                 return Err(ConnectError::aborted("credential metadata changed"));
             }
@@ -145,7 +145,7 @@ fn validate_sign_in_ack(
     current: Option<&Credential>,
 ) -> Result<(), ConnectError> {
     validate_credential_metadata(credential)?;
-    if credential_form(credential)? != "claude-sign-in"
+    if credential_form(credential)? != "claude"
         || credential.name != expected_name
         || credential.status != CredentialStatus::Active
         || credential.account_hint.as_deref().is_none_or(str::is_empty)

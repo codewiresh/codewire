@@ -379,7 +379,7 @@ pub(crate) async fn add_claude_subscription_token(
             let current = get_exact_credential(state, cookie.clone(), credential_id).await?;
             if current.revocation_generation != *generation
                 || current.name != name
-                || credential_form(&current)? != "claude"
+                || credential_form(&current)? != "claude-token"
             {
                 return Err(ConnectError::aborted("credential metadata changed"));
             }
@@ -415,7 +415,7 @@ fn validate_subscription_token_ack(
 ) -> Result<(), ConnectError> {
     validate_credential_metadata(credential)?;
     let expected_expiry = now + CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
-    if credential_form(credential)? != "claude"
+    if credential_form(credential)? != "claude-token"
         || credential.name != expected_name
         || credential.account_hint.is_some()
         || credential.status != CredentialStatus::Active
@@ -1025,7 +1025,8 @@ fn build_settings_data_at(
     let mut choices = CredentialChoicesView::default();
     let mut rows = Vec::with_capacity(credentials.len());
     for (index, credential) in credentials.into_iter().enumerate() {
-        let form = credential_form(&credential)?;
+        let kind = credential_type(&credential)?;
+        let form = kind.word;
         let slot = form_slot(form);
         if !seen_credentials.insert(credential.id.clone()) {
             return Err(invalid_metadata());
@@ -1089,29 +1090,28 @@ fn build_settings_data_at(
         rows.push(CredentialRowView {
             id: credential.id,
             name: credential.name,
-            provider: provider_label(form),
+            kind: row_label(kind),
             oauth_provider: match form {
                 "codex" => "codex",
                 "github" => "github",
-                "openai" | "anthropic" | "gemini" | "antigravity" | "claude" | "claude-sign-in"
+                "openai" | "anthropic" | "gemini" | "antigravity" | "claude-token" | "claude"
                 | "ssh" => "",
                 _ => unreachable!("credential_form returns a closed form"),
             },
-            authentication: authentication_label(form),
             account_hint: credential.account_hint.unwrap_or_default(),
             status,
             status_tone,
             api_key: matches!(form, "openai" | "anthropic" | "gemini"),
             oauth: matches!(form, "codex" | "github"),
-            subscription_token: form == "claude",
-            claude_sign_in: form == "claude-sign-in",
+            subscription_token: form == "claude-token",
+            claude_sign_in: form == "claude",
             // A subscription token has no refresh and no provider answer
             // marks it: only its recorded expiry asks its owner for a new one.
-            reconnect_needed: (matches!(
-                form,
-                "codex" | "github" | "claude-sign-in" | "antigravity"
-            ) && credential.status == CredentialStatus::RefreshFailed)
-                || (form == "claude" && credential.status == CredentialStatus::Active && withheld),
+            reconnect_needed: (matches!(form, "codex" | "github" | "claude" | "antigravity")
+                && credential.status == CredentialStatus::RefreshFailed)
+                || (form == "claude-token"
+                    && credential.status == CredentialStatus::Active
+                    && withheld),
             revoked,
             expires,
             generation: credential.revocation_generation,
@@ -1390,31 +1390,34 @@ pub(crate) fn credential_slot(credential: &Credential) -> Result<&'static str, C
     credential_form(credential).map(form_slot)
 }
 
-/// The closed provider/authentication form a credential takes, which names
-/// its labels and actions: `claude` is a Claude subscription token, the
-/// anthropic provider's OAuth kind, pasted from `claude setup-token`;
-/// `claude-sign-in` is Claude Code's own claude.ai login, which Codewire
-/// refreshes.
+/// The registry type a stored credential is (#6286). Its `word`, `cw`'s
+/// argument, is the form that keys the dashboard's actions and states:
+/// `claude` is Claude Code's own claude.ai sign-in, which Codewire refreshes,
+/// and `claude-token` is a Claude subscription token, the anthropic
+/// provider's OAuth kind, pasted from `claude setup-token`. Its `label` is
+/// the type the Credentials page shows.
+pub(crate) fn credential_type(
+    credential: &Credential,
+) -> Result<&'static codewire_access::CredentialType, ConnectError> {
+    use codewire_access::CredentialAuthKind as Form;
+    let form = match credential.authentication_kind {
+        kind if kind == CredentialAuthenticationKind::Oauth => Form::OAuth,
+        kind if kind == CredentialAuthenticationKind::ApiKey => Form::ApiKey,
+        kind if kind == CredentialAuthenticationKind::ClaudeSignIn => Form::ClaudeSignIn,
+        kind if kind == CredentialAuthenticationKind::SshKey => Form::SshKey,
+        _ => return Err(invalid_metadata()),
+    };
+    codewire_access::credential_type_of(&credential.provider, form).ok_or_else(invalid_metadata)
+}
+
+/// The form a credential takes: its registry type's word.
 pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, ConnectError> {
-    match (credential.provider.as_str(), credential.authentication_kind) {
-        ("openai", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("codex"),
-        ("openai", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("openai"),
-        ("github", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("github"),
-        ("anthropic", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("anthropic"),
-        ("anthropic", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("claude"),
-        ("anthropic", kind) if kind == CredentialAuthenticationKind::ClaudeSignIn => {
-            Ok("claude-sign-in")
-        }
-        ("google", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("gemini"),
-        ("google", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("antigravity"),
-        ("ssh", kind) if kind == CredentialAuthenticationKind::SshKey => Ok("ssh"),
-        _ => Err(invalid_metadata()),
-    }
+    credential_type(credential).map(|kind| kind.word)
 }
 
 fn form_slot(form: &'static str) -> &'static str {
     match form {
-        "claude" | "claude-sign-in" => "anthropic",
+        "claude-token" | "claude" => "anthropic",
         form => form,
     }
 }
@@ -1430,7 +1433,7 @@ fn capability_withheld(credential: &Credential) -> bool {
 /// expiry is withheld too, as the broker withholds any expired credential.
 fn capability_withheld_at(credential: &Credential, form: &str, now: u64) -> bool {
     capability_withheld(credential)
-        || (form == "claude"
+        || (form == "claude-token"
             && credential
                 .expires_at_unix
                 .is_some_and(|expiry| expiry <= now))
@@ -1446,8 +1449,8 @@ fn attention_notice(form: &str) -> &'static str {
         "anthropic" => "Anthropic API key needs replacing",
         "gemini" => "Gemini API key needs replacing",
         "antigravity" => "Antigravity sign-in needs Reconnect",
-        "claude" => "Claude subscription token needs replacing",
-        "claude-sign-in" => "Claude sign-in needs Reconnect",
+        "claude-token" => "Claude subscription token needs replacing",
+        "claude" => "Claude sign-in needs Reconnect",
         "ssh" => "SSH key needs replacing",
         _ => unreachable!("closed form"),
     }
@@ -1463,8 +1466,8 @@ fn attention_view(form: &str, credential_id: &str) -> CredentialAttentionView {
     let action = match form {
         "codex" | "github" => "reconnect",
         "openai" | "anthropic" | "gemini" => "rotate",
-        "claude" => "replace",
-        "claude-sign-in" | "antigravity" | "ssh" => "",
+        "claude-token" => "replace",
+        "claude" | "antigravity" | "ssh" => "",
         _ => unreachable!("closed form"),
     };
     CredentialAttentionView {
@@ -1477,27 +1480,13 @@ fn attention_view(form: &str, credential_id: &str) -> CredentialAttentionView {
     }
 }
 
-fn provider_label(form: &str) -> &'static str {
-    match form {
-        "codex" => "OpenAI Codex",
-        "openai" => "OpenAI API",
-        "github" => "GitHub",
-        "anthropic" | "claude" | "claude-sign-in" => "Anthropic",
-        "gemini" | "antigravity" => "Google",
-        "ssh" => "SSH",
-        _ => unreachable!("closed form"),
-    }
-}
-
-fn authentication_label(form: &str) -> &'static str {
-    match form {
-        "codex" | "github" => "OAuth",
-        "openai" | "anthropic" | "gemini" => "API key",
-        "claude" => "Claude subscription token",
-        "claude-sign-in" => "Claude",
-        "antigravity" => "Antigravity",
-        "ssh" => "SSH key",
-        _ => unreachable!("closed form"),
+/// The type a Credentials row shows: its registry label, except that the
+/// dashboard lists a Claude sign-in as plain Claude, beside Claude (token).
+fn row_label(kind: &codewire_access::CredentialType) -> &'static str {
+    if kind.word == "claude" {
+        "Claude"
+    } else {
+        kind.label
     }
 }
 
@@ -1664,12 +1653,11 @@ mod tests {
             CredentialAuthenticationKind::ClaudeSignIn,
         );
         sign_in.account_hint = Some("person@example.test".into());
-        assert_eq!(credential_form(&sign_in).unwrap(), "claude-sign-in");
+        assert_eq!(credential_form(&sign_in).unwrap(), "claude");
         assert_eq!(credential_slot(&sign_in).unwrap(), "anthropic");
         let data = build_settings_data(vec![sign_in.clone()], Vec::new()).unwrap();
         let row = &data.credentials[0];
-        assert_eq!(row.provider, "Anthropic");
-        assert_eq!(row.authentication, "Claude");
+        assert_eq!(row.kind, "Claude");
         assert_eq!(row.account_hint, "person@example.test");
         assert!(!row.subscription_token && !row.oauth && !row.api_key);
         assert!(row.claude_sign_in && !row.reconnect_needed);
@@ -1678,10 +1666,7 @@ mod tests {
         let data = build_settings_data(vec![sign_in], Vec::new()).unwrap();
         assert_eq!(data.credentials[0].status, "Reconnect needed");
         assert!(data.credentials[0].reconnect_needed);
-        assert_eq!(
-            attention_notice("claude-sign-in"),
-            "Claude sign-in needs Reconnect"
-        );
+        assert_eq!(attention_notice("claude"), "Claude sign-in needs Reconnect");
     }
 
     #[test]
@@ -1972,7 +1957,7 @@ mod tests {
             "anthropic",
             CredentialAuthenticationKind::ApiKey,
         );
-        assert_eq!(credential_form(&active).unwrap(), "claude");
+        assert_eq!(credential_form(&active).unwrap(), "claude-token");
         assert_eq!(credential_slot(&active).unwrap(), "anthropic");
         assert_eq!(credential_form(&key).unwrap(), "anthropic");
         let profile = |n: u8, credential: u8| AccessProfile {
@@ -2000,15 +1985,14 @@ mod tests {
         };
         for n in [1, 2, 3, 5] {
             let row = row(n);
-            assert_eq!(row.provider, "Anthropic");
-            assert_eq!(row.authentication, "Claude subscription token");
+            assert_eq!(row.kind, "Claude (token)");
             assert!(row.subscription_token && !row.api_key && !row.oauth);
             assert_eq!(row.oauth_provider, "");
         }
         let key_row = row(6);
         assert_eq!(
-            (key_row.authentication, key_row.subscription_token),
-            ("API key", false)
+            (key_row.kind, key_row.subscription_token),
+            ("Anthropic API key", false)
         );
         assert!(key_row.api_key);
         for (n, status, tone, reconnect) in [
@@ -2084,6 +2068,9 @@ mod tests {
         assert!(invalid(&|c| c.provider = "openai".into()));
         assert!(invalid(
             &|c| c.authentication_kind = CredentialAuthenticationKind::ApiKey.into()
+        ));
+        assert!(invalid(
+            &|c| c.authentication_kind = CredentialAuthenticationKind::ClaudeSignIn.into()
         ));
         assert!(invalid(&|c| c.name = "Other".into()));
         assert!(invalid(&|c| c.account_hint = Some("account".into())));
@@ -2500,12 +2487,10 @@ mod tests {
         }
     }
 
-    /// Each registry type is one dashboard form, filling one of its slots
-    /// (#6286). The dashboard's form words differ from `cw`'s (its `claude`
-    /// is Claude (token)) until #6286 step 4 renames them.
+    /// Each registry type is the dashboard form of its own word, labelled as
+    /// the registry labels it, filling one of its slots (#6286).
     #[test]
-    fn each_registry_type_is_one_dashboard_form() {
-        let mut forms = BTreeSet::new();
+    fn each_registry_type_is_its_own_dashboard_form_and_label() {
         for row in &codewire_access::CREDENTIAL_TYPES {
             let kind = match row.form {
                 codewire_access::CredentialAuthKind::OAuth => CredentialAuthenticationKind::Oauth,
@@ -2516,19 +2501,27 @@ mod tests {
                 codewire_access::CredentialAuthKind::SshKey => CredentialAuthenticationKind::SshKey,
                 other => panic!("no dashboard form for {other:?}"),
             };
-            let form = credential_form(&credential(
+            let stored = credential(
                 "00000000-0000-4000-8000-000000000099",
                 "registry",
                 row.provider,
                 kind,
-            ))
-            .unwrap_or_else(|_| panic!("{} has no dashboard form", row.word));
+            );
+            let form = credential_type(&stored)
+                .unwrap_or_else(|_| panic!("{} has no dashboard form", row.word));
+            assert_eq!(form.word, row.word);
+            let shown = row_label(form);
             assert!(
-                row.slots.contains(&form_slot(form)),
-                "{} fills {form}",
+                shown == row.label || (row.word == "claude" && shown == "Claude"),
+                "{} shows {shown}",
                 row.word
             );
-            assert!(forms.insert(form), "{form} names two types");
+            assert!(
+                row.slots.contains(&form_slot(form.word)),
+                "{} fills {}",
+                row.word,
+                form.word
+            );
         }
     }
 }

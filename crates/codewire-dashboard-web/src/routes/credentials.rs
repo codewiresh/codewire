@@ -1558,8 +1558,7 @@ mod tests {
             credentials: vec![CredentialRowView {
                 id: "00000000-0000-4000-8000-000000000001".into(),
                 name: "legacy-github".into(),
-                provider: "GitHub",
-                authentication: "OAuth",
+                kind: "GitHub",
                 account_hint: "verified-user".into(),
                 status: "Active",
                 status_tone: "success",
@@ -1882,7 +1881,7 @@ mod tests {
         let mut codex = dialog_data().credentials.remove(0);
         codex.id = "00000000-0000-4000-8000-000000000005".into();
         codex.name = "Work Codex".into();
-        codex.provider = "OpenAI Codex";
+        codex.kind = "Codex";
         codex.account_hint = "owner@example.test".into();
         codex.oauth_provider = "codex";
         codex.status = "Reconnect needed";
@@ -1920,8 +1919,7 @@ mod tests {
         CredentialRowView {
             id: id.into(),
             name: "Claude Max".into(),
-            provider: "Anthropic",
-            authentication: "Claude subscription token",
+            kind: "Claude (token)",
             account_hint: String::new(),
             status: if reconnect_needed {
                 "Expired"
@@ -1947,7 +1945,7 @@ mod tests {
     fn sign_in_row(id: &str) -> CredentialRowView {
         CredentialRowView {
             name: "Personal Claude".into(),
-            authentication: "Claude",
+            kind: "Claude",
             account_hint: "owner@example.test".into(),
             status: "Active",
             status_tone: "success",
@@ -1973,7 +1971,7 @@ mod tests {
             .find(|row| row.contains("Personal Claude"))
             .unwrap();
         let (primary, dialogs) = row.split_once("<dialog").unwrap();
-        assert!(primary.contains("<span>Anthropic · Claude</span><span>owner@example.test</span>"));
+        assert!(primary.contains("<span>Claude</span><span>owner@example.test</span>"));
         let items: Vec<_> = primary
             .split("class=\"cw-menu-item")
             .skip(1)
@@ -2024,7 +2022,7 @@ mod tests {
             .find(|row| row.contains("Claude Max"))
             .unwrap();
         let (primary, dialogs) = row.split_once("<dialog").unwrap();
-        assert!(primary.contains("<span>Anthropic · Claude subscription token</span>"));
+        assert!(primary.contains("<span>Claude (token)</span>"));
         assert!(primary.contains("<span>Expires October 20, 2027</span>"));
         assert!(primary.contains("data-tone=\"warning\">Expires soon</span>"));
         let items: Vec<_> = primary

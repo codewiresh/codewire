@@ -472,8 +472,8 @@ pub(crate) struct CredentialChoicesView {
 pub(crate) struct CredentialRowView {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) provider: &'static str,
-    pub(crate) authentication: &'static str,
+    /// The registry type's label, such as "Claude (token)".
+    pub(crate) kind: &'static str,
     pub(crate) account_hint: String,
     pub(crate) status: &'static str,
     pub(crate) status_tone: &'static str,
