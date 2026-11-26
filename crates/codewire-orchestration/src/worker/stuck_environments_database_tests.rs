@@ -125,3 +125,34 @@ async fn db_a_recent_change_is_not_swept() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+/// A suspended running Sandbox's bootstrap check waits for its wake: its SSH
+/// login would wake the VM (#5529, `docs/dev/IDLE-STOP.md`, "Calls that must
+/// not wake a suspended Sandbox"). A stop of one, and a mark left on one in
+/// error, are still swept.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_suspended_running_sandbox_is_not_swept_for_its_bootstrap_check() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        sqlx::query("UPDATE environments SET suspended_at = NOW() - interval '6 minutes'")
+            .execute(&db.pool)
+            .await?;
+        let swept = stuck_environment_ids(&db.pool).await?;
+        for (id, state, desired_state, expected) in CASES {
+            let expected = expected.filter(|_| !(state == "running" && desired_state == "started"));
+            let reason = swept
+                .iter()
+                .find(|(swept, _)| swept == id)
+                .map(|(_, reason)| *reason);
+            ensure!(
+                reason == expected,
+                "suspended {state} with desired {desired_state}: swept with {reason:?}, expected {expected:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

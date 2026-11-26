@@ -581,7 +581,8 @@ async fn reconcile_incomplete_external_cleanup(ctx: &WorkerContext) {
 /// stale one (a republished selection, new managed clients, a new
 /// generation), and nothing else asks for that on a running Sandbox. Its
 /// SSH access check logs in as the access probe, which idle stop doesn't
-/// count as use (#3384). Each comes with the reason its trigger records.
+/// count as use (#3384). A suspended one waits for its wake: that login
+/// would wake it (#5529). Each comes with the reason its trigger records.
 pub(super) async fn stuck_environment_ids(
     pool: &PgPool,
 ) -> sqlx::Result<Vec<(String, &'static str)>> {
@@ -601,7 +602,9 @@ pub(super) async fn stuck_environment_ids(
             WHERE e.state != e.desired_state
               AND GREATEST(e.state_changed_at, COALESCE(log_activity.last_activity_at, e.state_changed_at)) < NOW() - ($2 * INTERVAL '1 second')
               AND e.state NOT IN ('destroyed', 'build_failed')
-              AND (e.state != 'error' OR e.retry_count < 3)"#,
+              AND (e.state != 'error' OR e.retry_count < 3)
+              AND NOT (e.state = 'running' AND e.desired_state = 'started'
+                       AND e.suspended_at IS NOT NULL)"#,
     )
     .bind(&kinds)
     .bind(RECOVERY_ACTIVITY_WINDOW_SECS)
