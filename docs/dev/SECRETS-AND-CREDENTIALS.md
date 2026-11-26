@@ -1892,7 +1892,8 @@ create or update needs the person's own sign-in: a browser session or a
 `cw login` OAuth token, with the explicit personal confirmation. Every API key
 is refused (`require_account_credential`), and `cw` skips profiles when it
 signs in with one. A program signed in with an API key gets no managed
-credential.
+credential. A user token is refused when it gives the personal confirmation
+(`user_token_not_allowed`), until the rule below ships.
 
 **Approved, not yet shipped** (owner, 2026-11-21; #5687, #5688). The rules
 are in [AUTH-POLICY.md](AUTH-POLICY.md#user-tokens-and-the-cli-approved-not-yet-shipped):

@@ -13,7 +13,7 @@ use codewire_access::{
 };
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
 use codewire_project::{CredentialBinding, ProjectSpec, SecretBindings};
-use codewire_server_core::auth::AuthUser;
+use codewire_server_core::auth::{AuthUser, CredentialContext, refuse_user_token};
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
 };
@@ -499,6 +499,23 @@ async fn resolve_selection_in(
     Ok((selected, Some(profile)))
 }
 
+/// A user token gives no personal confirmation (#5688). The bindings it would
+/// make aren't yet kept from the direct delivery exceptions
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Who may bind a personal profile"),
+/// so selecting a personal profile or personal secrets still needs a sign-in.
+/// Every such selection needs the confirmation (`confirm_sources`), so
+/// refusing it here refuses each one before anything is created.
+pub(crate) fn refuse_user_token_confirmation(
+    credential: &CredentialContext,
+    confirm_personal_credentials: bool,
+    confirm_personal_secrets: bool,
+) -> AppResult<()> {
+    if confirm_personal_credentials || confirm_personal_secrets {
+        refuse_user_token(credential)?;
+    }
+    Ok(())
+}
+
 fn confirm_sources(
     user: &AuthUser,
     selected: &EnvironmentSourceSelection,
@@ -918,6 +935,35 @@ mod tests {
         machine.via_api_key = true;
         machine.org_id = Some("org".into());
         assert!(confirm_sources(&machine, &selection, true, true).is_err());
+    }
+
+    #[test]
+    fn a_user_token_gives_no_personal_confirmation() {
+        let user_token = CredentialContext::UserToken {
+            token_id: "t-1".into(),
+            client_id: "codewire-cli".into(),
+            scopes: vec!["codewire.api".into()],
+        };
+        let sign_in = CredentialContext::OidcAccessToken {
+            client_id: "codewire-cli".into(),
+            scopes: vec!["codewire.api".into()],
+        };
+        for (credentials, secrets) in [(true, false), (false, true), (true, true)] {
+            let refused = refuse_user_token_confirmation(&user_token, credentials, secrets)
+                .expect_err("a user token's confirmation is refused");
+            assert!(
+                matches!(
+                    refused,
+                    AppError::Coded {
+                        code: "user_token_not_allowed",
+                        ..
+                    }
+                ),
+                "{refused:?}"
+            );
+            assert!(refuse_user_token_confirmation(&sign_in, credentials, secrets).is_ok());
+        }
+        assert!(refuse_user_token_confirmation(&user_token, false, false).is_ok());
     }
 
     #[test]

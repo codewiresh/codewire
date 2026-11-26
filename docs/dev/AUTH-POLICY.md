@@ -975,7 +975,8 @@ it into [Signing in from the environment](#signing-in-from-the-environment).
 admits them, and `cw auth token` asks for one through the token exchange, as
 below. Against a server from before the exchange, the command says that the
 server doesn't issue user tokens yet. Binding a profile with one is not yet
-shipped.
+shipped, so until it is, a create or source update that gives the personal
+confirmation with a user token is refused (`user_token_not_allowed`).
 - **Settings → API keys → User tokens** lists them and revokes one, through
   the routes below.
 - **Settings' routes:** `GET /api/auth/user-tokens?account_id=…` lists the
@@ -1048,6 +1049,8 @@ sign-in for that command, as `CODEWIRE_API_KEY` does today.
   [Account access revocation](#account-access-revocation).
 - **What it can't do:** make API keys, change sign-in methods or second
   factors, or delete the account. It is refused for those by its kind.
+  Until the binding below ships, it also can't give the personal
+  confirmation.
 - **Audit:** each one issued writes a row naming its parent sign-in, and so
   does each revocation. Neither names the token. The SDKs never log it and
   remove it from errors.

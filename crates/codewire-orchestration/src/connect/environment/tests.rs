@@ -717,3 +717,104 @@ fn test_environment(state: &str, setup_complete: bool) -> Environment {
         network_policy: None,
     }
 }
+
+/// Sends `body` to `method` as `credential`, against a database that doesn't
+/// exist, and returns the status and the Connect error's reason.
+async fn send_as(
+    method: &str,
+    body: &str,
+    credential: codewire_server_core::auth::CredentialContext,
+) -> (axum::http::StatusCode, String) {
+    use axum::body::{Body, to_bytes};
+    use base64::Engine as _;
+    use codewire_server_core::connect::connect_router;
+    use tower::ServiceExt as _;
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://synthetic@127.0.0.1:1/synthetic")
+        .unwrap();
+    let state = crate::api::test_state::offline(pool).await;
+    let mut request =
+        axum::http::Request::post(format!("/codewire.v1.EnvironmentService/{method}"))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+    request
+        .extensions_mut()
+        .insert(codewire_server_core::auth::AuthUser {
+            user_id: "synthetic-user".into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        });
+    request.extensions_mut().insert(credential);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connect_router(router(state)).oneshot(request),
+    )
+    .await
+    .expect("answered without waiting on the database")
+    .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let reason = body["details"][0]["value"]
+        .as_str()
+        .and_then(|value| {
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(value.trim_end_matches('='))
+                .ok()
+        })
+        .map(|info| String::from_utf8_lossy(&info).into_owned())
+        .unwrap_or_default();
+    (status, reason)
+}
+
+/// A user token gives no personal confirmation (#5688): a create or a source
+/// update that asks for one is refused by its kind before any read, while a
+/// `cw login` sign-in sending the same request isn't.
+#[tokio::test]
+async fn a_user_token_is_refused_the_personal_confirmation() {
+    use codewire_server_core::auth::CredentialContext;
+    let user_token = || CredentialContext::UserToken {
+        token_id: "synthetic-token".into(),
+        client_id: "codewire-cli".into(),
+        scopes: vec!["codewire.api".into()],
+    };
+    for (method, body) in [
+        (
+            "CreateEnvironment",
+            r#"{"orgId":"org-1","confirmPersonalCredentials":true}"#,
+        ),
+        (
+            "CreateEnvironment",
+            r#"{"orgId":"org-1","confirmPersonalSecrets":true}"#,
+        ),
+        (
+            "UpdateEnvironmentSources",
+            r#"{"orgId":"org-1","environmentId":"env-1","confirmPersonalCredentials":true}"#,
+        ),
+        (
+            "UpdateEnvironmentSources",
+            r#"{"orgId":"org-1","environmentId":"env-1","confirmPersonalSecrets":true}"#,
+        ),
+    ] {
+        let (status, reason) = send_as(method, body, user_token()).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{method} {body}");
+        assert!(
+            reason.contains("USER_TOKEN_NOT_ALLOWED"),
+            "{method} {body}: {reason}"
+        );
+    }
+    let (_, reason) = send_as(
+        "CreateEnvironment",
+        r#"{"orgId":"org-1","confirmPersonalCredentials":true}"#,
+        CredentialContext::OidcAccessToken {
+            client_id: "codewire-cli".into(),
+            scopes: vec!["codewire.api".into()],
+        },
+    )
+    .await;
+    assert!(!reason.contains("USER_TOKEN_NOT_ALLOWED"), "{reason}");
+}

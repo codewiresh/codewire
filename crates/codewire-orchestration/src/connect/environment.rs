@@ -13,7 +13,7 @@ use buffa_types::{Duration, Struct, Timestamp};
 use chrono::{DateTime, NaiveDateTime};
 use codewire_daemon_bridge::drain::{Restart, end_at, end_on, restart_end};
 use codewire_proto::codewire::v1 as proto;
-use codewire_server_core::connect::{auth_user, wire_error};
+use codewire_server_core::connect::{auth_context, auth_user, wire_error};
 use codewire_server_core::connect_error::ConnectError as RenderedConnectError;
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
@@ -40,7 +40,7 @@ use crate::api::environment_resize::{
 use crate::api::environment_setup_retry::retry_environment_setup_core;
 use crate::api::environment_sources::{
     EnvironmentSourceSelection, EnvironmentSourcesUpdate, EnvironmentSourcesUpdateOutcome,
-    UpdateEnvironmentSourcesBody, update_environment_sources_core,
+    UpdateEnvironmentSourcesBody, refuse_user_token_confirmation, update_environment_sources_core,
 };
 use crate::api::environment_startup_script::set_environment_startup_script_core;
 use crate::api::environments::{
@@ -138,6 +138,12 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<proto::CreateEnvironmentResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
+        refuse_user_token_confirmation(
+            auth_context(&ctx)?,
+            request.confirm_personal_credentials,
+            request.confirm_personal_secrets,
+        )
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
         let org_id = create_organization(&self.state.pool, &user, &request)
             .await
             .map_err(|error| environment_rpc_error(&error, &ctx))?;
@@ -288,6 +294,12 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<proto::UpdateEnvironmentSourcesResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
+        refuse_user_token_confirmation(
+            auth_context(&ctx)?,
+            request.confirm_personal_credentials,
+            request.confirm_personal_secrets,
+        )
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
         let organization = request.org_id.clone();
         let environment = request.environment_id.clone();
         let body =
