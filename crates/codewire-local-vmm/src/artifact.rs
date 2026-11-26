@@ -369,7 +369,7 @@ impl AdmittedArtifacts {
     }
 
     /// What the guest init declares in its one ABI marker, such as
-    /// `seed=12;cw_catalog=1;net=2`, for telling a person which runtime an
+    /// `seed=13;cw_catalog=1;net=2`, for telling a person which runtime an
     /// environment moved from and to. An init without exactly one marker, or
     /// with one that is not printable ASCII, is unsupported.
     pub(crate) fn guest_runtime_abi(&self) -> Result<String, ArtifactError> {
@@ -926,7 +926,7 @@ pub(crate) fn validate_parameter_path(path: &Path) -> Result<(), ArtifactError> 
 }
 
 /// What an initramfs's guest init declares in its one ABI marker, such as
-/// `seed=12;cw_catalog=1;net=2`. An init without exactly one marker, or with
+/// `seed=13;cw_catalog=1;net=2`. An init without exactly one marker, or with
 /// one that is not printable ASCII, is unsupported.
 pub(crate) fn declared_guest_abi(initramfs: &AdmittedArtifact) -> Result<String, ArtifactError> {
     let init = read_canonical_initramfs_entry(initramfs, b"init")?;

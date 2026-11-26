@@ -1845,7 +1845,7 @@ fn every_shipped_managed_clients_encoding_is_pinned_and_round_trips() {
     );
 
     let mut seen = std::collections::BTreeSet::new();
-    for bits in 0..32_u8 {
+    for bits in 0..32_u16 {
         let base = ManagedCredentialClients(bits);
         let mut selections = vec![base];
         if base.contains(ManagedCredentialClient::Anthropic) {
@@ -1862,4 +1862,71 @@ fn every_shipped_managed_clients_encoding_is_pinned_and_round_trips() {
         }
     }
     assert_eq!(seen.len(), 64);
+
+    // Every Gemini selection uses a distinct v3:<hex> token within the 32-byte
+    // seed field and round-trips without colliding with any v1/v2 token (#6555).
+    for low in 0..32_u16 {
+        let base = ManagedCredentialClients(ManagedCredentialClient::Gemini.bit() | low);
+        let mut selections = vec![base];
+        if base.contains(ManagedCredentialClient::Anthropic) {
+            selections.push(base.with_anthropic_subscription_token().unwrap());
+            selections.push(base.with_anthropic_sign_in().unwrap());
+        }
+        for selection in selections {
+            let encoded = selection.encode();
+            assert!(encoded.starts_with("v3:"), "{encoded}");
+            assert!(encoded.len() < 32, "{encoded}");
+            assert_eq!(
+                ManagedCredentialClients::decode(encoded).unwrap(),
+                selection
+            );
+            assert!(seen.insert(encoded), "{encoded} encodes two selections");
+        }
+    }
+    assert_eq!(seen.len(), 128);
+}
+
+#[test]
+fn gemini_projects_only_behind_interception_and_reserves_google_names() {
+    let selected = ManagedCredentialClients::from_profile_slots(["gemini"]).unwrap();
+    assert_eq!(selected.encode(), "v3:80");
+    assert!(!selected.uses_loopback_http());
+    assert_eq!(
+        selected.reserved_environment_keys(),
+        BTreeSet::from(["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"])
+    );
+    let placeholder =
+        CredentialPlaceholder::parse("cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        // Without interception, Gemini projects nothing (front-door-only, no loopback fallback).
+        let plain = selected.for_placement(placement);
+        assert!(!plain.environment.contains_key("GEMINI_API_KEY"));
+        let no_interception = selected.for_placement_intercepted(placement, None);
+        assert!(!no_interception.environment.contains_key("GEMINI_API_KEY"));
+        // With interception but no Gemini placeholder, nothing is projected.
+        let empty = selected.for_placement_intercepted(placement, Some(&Interception::new(None)));
+        assert!(!empty.environment.contains_key("GEMINI_API_KEY"));
+        // With interception carrying Gemini's placeholder, GEMINI_API_KEY holds the placeholder
+        // while GOOGLE_API_KEY and GOOGLE_GEMINI_BASE_URL remain absent.
+        let intercepted = selected.for_placement_intercepted(
+            placement,
+            Some(&Interception::new(None).with_gemini(placeholder.clone())),
+        );
+        assert_eq!(
+            intercepted
+                .environment
+                .get("GEMINI_API_KEY")
+                .map(String::as_str),
+            Some(placeholder.as_str())
+        );
+        assert!(!intercepted.environment.contains_key("GOOGLE_API_KEY"));
+        assert!(
+            !intercepted
+                .environment
+                .contains_key("GOOGLE_GEMINI_BASE_URL")
+        );
+    }
 }

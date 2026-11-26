@@ -93,6 +93,7 @@ where
             ));
         }
         let presented = match Presented::of(&request.headers) {
+            Presented::DisallowedPlaceholder => return Err(BrokerRequestError::InvalidRequest),
             Presented::Conflict => return Ok(credential_conflict_response()),
             Presented::Foreign => {
                 if self.untouched_forwards.challenges_git(

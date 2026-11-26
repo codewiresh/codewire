@@ -3,11 +3,11 @@
 
 /// The provider ids a credential name is unique within. A reference
 /// `PROVIDER/NAME` names a provider only when its prefix is one of these.
-pub const CREDENTIAL_NAME_PROVIDERS: [&str; 4] = ["anthropic", "openai", "github", "ssh"];
+pub const CREDENTIAL_NAME_PROVIDERS: [&str; 5] = ["anthropic", "openai", "github", "ssh", "google"];
 
 /// The prefixes a new name may not start with, as a refusal lists them:
-/// `anthropic/, openai/, github/ or ssh/`. Each refusal writes its sentence
-/// out, and its tests check it against this.
+/// `anthropic/, openai/, github/, ssh/ or google/`. Each refusal writes its
+/// sentence out, and its tests check it against this.
 pub fn credential_name_provider_prefixes() -> String {
     let prefixes: Vec<String> = CREDENTIAL_NAME_PROVIDERS
         .iter()
@@ -48,6 +48,8 @@ mod tests {
             "OpenAI/work",
             "GITHUB/work",
             "ssh/",
+            "google/work",
+            "Google/personal",
             "github/work/nested",
         ] {
             assert!(reserves_provider_prefix(name), "{name}");
@@ -71,10 +73,10 @@ mod tests {
 
     #[test]
     fn only_the_exact_stored_provider_ids_select_a_provider() {
-        for provider in ["anthropic", "openai", "github", "ssh"] {
+        for provider in ["anthropic", "openai", "github", "ssh", "google"] {
             assert!(is_credential_name_provider(provider));
         }
-        for value in ["Anthropic", "OPENAI", "gitlab", "", "ssh "] {
+        for value in ["Anthropic", "OPENAI", "Google", "gitlab", "", "ssh "] {
             assert!(!is_credential_name_provider(value), "{value}");
         }
     }
@@ -83,7 +85,7 @@ mod tests {
     fn a_refusal_lists_every_provider_prefix() {
         assert_eq!(
             credential_name_provider_prefixes(),
-            "anthropic/, openai/, github/ or ssh/"
+            "anthropic/, openai/, github/, ssh/ or google/"
         );
     }
 }

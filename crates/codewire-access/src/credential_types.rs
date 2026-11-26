@@ -7,7 +7,7 @@
 
 use crate::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, CredentialAuthKind,
-    GITHUB_HOSTS, HttpProvider, OPENAI_API_HOST,
+    GEMINI_API_HOST, GITHUB_HOSTS, HttpProvider, OPENAI_API_HOST,
 };
 
 /// What choosing a type runs.
@@ -73,7 +73,7 @@ pub struct CredentialType {
 }
 
 /// Every type, in picker order.
-pub const CREDENTIAL_TYPES: [CredentialType; 7] = [
+pub const CREDENTIAL_TYPES: [CredentialType; 8] = [
     CredentialType {
         word: "codex",
         label: "Codex",
@@ -162,6 +162,21 @@ pub const CREDENTIAL_TYPES: [CredentialType; 7] = [
         agent: AgentHolds::StandIn("OPENAI_API_KEY"),
         hosts: &[OPENAI_API_HOST],
         detail: "paste a key from platform.openai.com",
+        how: "API key from stdin",
+    },
+    CredentialType {
+        word: "gemini",
+        label: "Gemini API key",
+        short: "Gemini",
+        provider: "google",
+        form: CredentialAuthKind::ApiKey,
+        slots: &["gemini"],
+        verb: CredentialVerb::Add,
+        flow: CredentialFlow::Paste,
+        http: Some(HttpProvider::GeminiApiKey),
+        agent: AgentHolds::Placeholder("GEMINI_API_KEY"),
+        hosts: &[GEMINI_API_HOST],
+        detail: "paste a key from aistudio.google.com",
         how: "API key from stdin",
     },
     CredentialType {

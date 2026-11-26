@@ -75,6 +75,7 @@ fn the_picker_shows_every_type_as_approved() {
                 "paste a key from console.anthropic.com"
             ),
             ("OpenAI API key", "paste a key from platform.openai.com"),
+            ("Gemini API key", "paste a key from aistudio.google.com"),
             ("SSH key", "generate one, or import an OpenSSH key file"),
         ]
     );
@@ -82,8 +83,8 @@ fn the_picker_shows_every_type_as_approved() {
         .iter()
         .map(|row| row.word)
         .collect::<Vec<_>>();
-    assert_eq!(TYPE_HELP, format!("{} or ssh", words[..6].join(", ")));
-    assert_eq!(words[6], "ssh");
+    assert_eq!(TYPE_HELP, format!("{} or ssh", words[..7].join(", ")));
+    assert_eq!(words[7], "ssh");
 }
 
 /// A flag the type's flow doesn't take is refused, naming the flag and the

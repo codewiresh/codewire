@@ -132,10 +132,13 @@ async fn handle_with_receipt(
                 .await;
             }
             validate_key_arguments(&args)?;
-            let provider = args
+            let word = args
                 .provider
                 .clone()
                 .context("credential provider is required")?;
+            let provider = codewire_access::credential_type(&word)
+                .map_or(word.as_str(), |row| row.provider)
+                .to_owned();
             let name = args
                 .name
                 .as_deref()
@@ -278,7 +281,7 @@ fn rotation_metadata(
         anyhow::bail!(super::credentials::output::refusal::ROTATE_SSH);
     }
     anyhow::ensure!(
-        matches!(current.provider.as_str(), "openai" | "anthropic")
+        matches!(current.provider.as_str(), "openai" | "anthropic" | "google")
             && current.authentication_kind == rpc::CredentialAuthenticationKind::ApiKey,
         super::credentials::output::refusal::ROTATE_CONNECTED
     );

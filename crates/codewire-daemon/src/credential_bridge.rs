@@ -234,11 +234,15 @@ impl CredentialBridge {
         let mut launch = config.clone();
         launch.interception = config.interception.as_ref().map(|interception| {
             let interception = interception.with_anthropic(placeholders.anthropic().cloned());
-            match placeholders.github() {
+            let interception = match placeholders.github() {
                 Some(github) => interception.with_github(
                     github.clone(),
                     codewire_daemon_proto::HOSTED_EGRESS_TRUST_BUNDLE_PATH,
                 ),
+                None => interception,
+            };
+            match placeholders.gemini() {
+                Some(gemini) => interception.with_gemini(gemini.clone()),
                 None => interception,
             }
         });

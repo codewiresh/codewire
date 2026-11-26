@@ -170,7 +170,11 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         }
         let available = self.available_grants(&session).await?;
         let github_bound = crate::network::binds_github(&available);
-        let ProjectedGrants { anthropic, github } = projected_grants(&available, github_bound);
+        let ProjectedGrants {
+            anthropic,
+            github,
+            gemini,
+        } = projected_grants(&available, github_bound);
         let mut projected = ProjectedPlaceholders::default();
         if let Some(grant) = anthropic {
             projected =
@@ -179,6 +183,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         if let Some(grant) = github {
             projected =
                 projected.with_github(self.projected_placeholder(placeholders, grant).await?);
+        }
+        if let Some(grant) = gemini {
+            projected =
+                projected.with_gemini(self.projected_placeholder(placeholders, grant).await?);
         }
         Ok(projected)
     }
@@ -212,6 +220,9 @@ struct ProjectedGrants<'a> {
     /// The `github` slot's, only while GitHub's hosts are bound: unbound,
     /// Git and `gh` keep their loopback route and take no placeholder.
     github: Option<&'a DerivedGrant>,
+    /// The `gemini` slot's, projected as `GEMINI_API_KEY` behind the front
+    /// door (#6555).
+    gemini: Option<&'a DerivedGrant>,
 }
 
 /// The projected slots' grants among `available`; `github_bound` says
@@ -228,6 +239,7 @@ fn projected_grants(available: &AvailableGrants, github_bound: bool) -> Projecte
         github: github_bound
             .then(|| granted(CapabilitySlot::github()))
             .flatten(),
+        gemini: granted(CapabilitySlot::gemini()),
     }
 }
 

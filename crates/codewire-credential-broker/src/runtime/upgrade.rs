@@ -148,6 +148,7 @@ where
         }
         let handshake = take_handshake(&mut request.headers)?;
         let presented = match Presented::of(&request.headers) {
+            Presented::DisallowedPlaceholder => return Err(BrokerRequestError::InvalidRequest),
             Presented::Conflict => {
                 return Ok(BrokerUpgradeOutcome::Response(
                     credential_conflict_response(),

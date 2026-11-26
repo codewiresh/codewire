@@ -26,13 +26,17 @@ pub enum PlaceholderSlot {
     /// The `github` slot: Git's credential helper and `GH_TOKEN`, only while
     /// GitHub's hosts are bound (seed format 12).
     GitHub,
+    /// `GEMINI_API_KEY`, a Gemini API key behind the front door (seed format
+    /// 13, #6555).
+    GeminiApiKey,
 }
 
 impl PlaceholderSlot {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::AnthropicApiKey,
         Self::AnthropicSubscriptionToken,
         Self::GitHub,
+        Self::GeminiApiKey,
     ];
 
     fn code(self) -> u8 {
@@ -40,6 +44,7 @@ impl PlaceholderSlot {
             Self::AnthropicApiKey => 1,
             Self::AnthropicSubscriptionToken => 2,
             Self::GitHub => 3,
+            Self::GeminiApiKey => 4,
         }
     }
 
@@ -155,6 +160,7 @@ mod registry_tests {
                 "claude-token",
             ),
             (PlaceholderSlot::GitHub, 3, "github"),
+            (PlaceholderSlot::GeminiApiKey, 4, "gemini"),
         ];
         assert_eq!(PlaceholderSlot::ALL, slots.map(|(slot, ..)| slot));
         for (slot, code, _) in slots {

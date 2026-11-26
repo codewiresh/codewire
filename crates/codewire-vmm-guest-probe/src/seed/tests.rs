@@ -21,7 +21,7 @@ fn seed_round_trip_is_exact_and_stable() {
     assert_eq!(&encoded[..8], MAGIC);
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "ae9e5fd2e3a18a9202525ef4286c341654b47e9b1c919670d693c32b3a1c666b"
+        "2de83688a74c48e611aa359113c499cf31af4c77e2b3955f7e704bfd34261b4e"
     );
     assert_eq!(Seed::decode(&encoded).unwrap(), seed);
     assert_eq!(seed.encode(), encoded);
@@ -248,7 +248,7 @@ fn current_seed_binds_one_boot_setup_with_source_compatible_constructor() {
     let encoded = seed.encode();
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "9b12890fe33a552a53bb451ca559763fa2ed9e86c5cc4bde1ff6d27a9c07a341"
+        "73cf033378aed1e996bd817a5fab7b05a6f12ad425ca4f76f637ee6d8b996ae8"
     );
     assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
     assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
@@ -823,9 +823,9 @@ fn a_region_with_an_unknown_slot_code_is_refused() {
         .unwrap()
         .encode();
     let entry = 1 + codewire_access::CREDENTIAL_PLACEHOLDER_LENGTH;
-    // The last entry is GitHub's, code 3; make it code 4.
+    // The third entry is GitHub's, code 3; make it an unknown code (code 4 is GeminiApiKey).
     assert_eq!(encoded[PLACEHOLDERS_OFFSET + 1 + 2 * entry], 3);
-    for code in [0, 4, u8::MAX] {
+    for code in [0, 5, u8::MAX] {
         encoded[PLACEHOLDERS_OFFSET + 1 + 2 * entry] = code;
         refresh_checksum(&mut encoded);
         assert_eq!(
@@ -875,12 +875,12 @@ fn a_malformed_placeholder_region_is_refused() {
     for (case, change) in [
         (
             "count past the slot kinds",
-            &(|bytes: &mut [u8; SEED_LEN]| bytes[PLACEHOLDERS_OFFSET] = 4)
+            &(|bytes: &mut [u8; SEED_LEN]| bytes[PLACEHOLDERS_OFFSET] = 5)
                 as &dyn Fn(&mut [u8; SEED_LEN]),
         ),
-        // Code 4 names no slot: decode refuses it rather than skip it.
+        // Code 5 names no slot: decode refuses it rather than skip it.
         ("an unknown kind", &|bytes: &mut [u8; SEED_LEN]| {
-            bytes[PLACEHOLDERS_OFFSET + 1] = 4
+            bytes[PLACEHOLDERS_OFFSET + 1] = 5
         }),
         ("a duplicate kind", &|bytes: &mut [u8; SEED_LEN]| {
             bytes[PLACEHOLDERS_OFFSET + 1 + entry] = bytes[PLACEHOLDERS_OFFSET + 1]

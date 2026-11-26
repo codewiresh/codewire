@@ -4,5 +4,6 @@ api.github.com
 api.openai.com
 auth.openai.com
 chatgpt.com
+generativelanguage.googleapis.com
 github.com
 platform.claude.com

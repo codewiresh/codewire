@@ -92,12 +92,13 @@ const RESOLVE_IN_IMAGE: ResolveFlags = ResolveFlags::IN_ROOT
 
 /// This boot's active plan with [`TRUST_ENVIRONMENT`] when it has a CA,
 /// [`CODEX_TRUST_ENVIRONMENT`] too while `clients` holds Codex, and
-/// [`GITHUB_TRUST_ENVIRONMENT`] while the boot binds GitHub's hosts.
+/// [`GITHUB_TRUST_ENVIRONMENT`] (`SSL_CERT_DIR`) while the boot binds a host
+/// whose clients read the hashed CA directory (GitHub or Gemini, #6555).
 pub(super) fn with_trust_environment(
     plan: crate::workspace_plan::WorkspacePlan,
     certificate: Option<&EgressCaCertificate>,
     clients: ManagedCredentialClients,
-    github: bool,
+    ca_dir: bool,
 ) -> Result<crate::workspace_plan::WorkspacePlan> {
     if certificate.is_none() {
         return Ok(plan);
@@ -107,14 +108,14 @@ pub(super) fn with_trust_environment(
     } else {
         &[]
     };
-    let github_environment: &[(&str, &str)] = if github {
+    let ca_dir_environment: &[(&str, &str)] = if ca_dir {
         &GITHUB_TRUST_ENVIRONMENT
     } else {
         &[]
     };
     let (plan, kept) = plan
         .with_environment_defaults(
-            &[TRUST_ENVIRONMENT.as_slice(), codex, github_environment].concat(),
+            &[TRUST_ENVIRONMENT.as_slice(), codex, ca_dir_environment].concat(),
         )
         .context("point the workspace at the egress CA")?;
     for name in kept {
@@ -124,7 +125,8 @@ pub(super) fn with_trust_environment(
     }
     // Git reads this variable after its configuration, so it replaces the
     // projection's `sslCAInfo` for GitHub too.
-    if github
+    if ca_dir
+        && clients.contains(ManagedCredentialClient::GitHub)
         && plan
             .environment
             .iter()
@@ -144,7 +146,9 @@ pub(super) fn publish(seed: &crate::Seed, merged_root: &Path) -> Result<()> {
     let certificate = seed.egress_ca();
     publish_ca_directory(
         Path::new(CONTAINER_EGRESS_CA_DIR),
-        certificate.filter(|_| super::interception::binds_github(seed)),
+        certificate.filter(|_| {
+            super::interception::binds_github(seed) || super::interception::binds_gemini(seed)
+        }),
     )?;
     let Some(certificate) = certificate else {
         for path in [CONTAINER_EGRESS_CA_PATH, CONTAINER_TRUST_BUNDLE_PATH] {
@@ -382,8 +386,9 @@ mod tests {
         assert_eq!(plan.environment.len(), plain.environment.len() + 2);
     }
 
-    /// While the boot binds GitHub's hosts, `SSL_CERT_DIR` names the image's
-    /// own directory, then the CA's; an image or project value is kept.
+    /// While the boot binds GitHub's or Gemini's hosts, `SSL_CERT_DIR` names
+    /// the image's own directory, then the CA's; an image or project value is
+    /// kept.
     #[test]
     fn a_boot_binding_github_adds_the_ca_directory_after_the_images() {
         let plain = super::super::tests::test_workspace_plan();
@@ -400,6 +405,18 @@ mod tests {
         );
         assert_eq!(environment_of(&plan, "SSL_CERT_FILE"), None);
         assert_eq!(plan.environment.len(), plain.environment.len() + 2);
+        // Gemini alone also enables SSL_CERT_DIR.
+        let gemini_plan = with_trust_environment(
+            plain.clone(),
+            Some(&certificate()),
+            ManagedCredentialClients::from_profile_slots(["gemini"]).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            environment_of(&gemini_plan, "SSL_CERT_DIR").as_deref(),
+            Some("/etc/ssl/certs:/run/codewire-host/egress-ca.d")
+        );
         let mut image = plain;
         image
             .environment

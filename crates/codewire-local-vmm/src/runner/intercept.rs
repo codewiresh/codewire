@@ -325,6 +325,7 @@ pub(crate) fn boot_placeholders(
                 1 => PlaceholderSlot::AnthropicApiKey,
                 2 => PlaceholderSlot::AnthropicSubscriptionToken,
                 3 => PlaceholderSlot::GitHub,
+                4 => PlaceholderSlot::GeminiApiKey,
                 _ => return Err(RunnerError::InvalidRequest),
             };
             let placeholder = CredentialPlaceholder::parse(&entry.placeholder)
@@ -350,16 +351,32 @@ pub(crate) fn boot_interception(
         .entries()
         .iter()
         .any(|(slot, _)| *slot == PlaceholderSlot::GitHub);
+    let gemini = placeholders
+        .entries()
+        .iter()
+        .any(|(slot, _)| *slot == PlaceholderSlot::GeminiApiKey);
     let clients = if github {
         clients
     } else {
         clients.without_github()
+    };
+    let clients = if gemini {
+        clients
+    } else {
+        clients.without_gemini()
     };
     let intercepts = boot_intercepts(intercept, clients);
     let binds_github = codewire_access::GITHUB_HOSTS
         .iter()
         .all(|host| intercepts.binds(host, codewire_access::INTERCEPT_PORT));
     if github && !binds_github {
+        return Err(RunnerError::InvalidRequest);
+    }
+    let binds_gemini = intercepts.binds(
+        codewire_access::GEMINI_API_HOST,
+        codewire_access::INTERCEPT_PORT,
+    );
+    if gemini && !binds_gemini {
         return Err(RunnerError::InvalidRequest);
     }
     Ok((intercepts, placeholders))
@@ -508,10 +525,13 @@ mod tests {
         assert!(boot_placeholders(false, Vec::new()).unwrap().is_empty());
         let github = boot_placeholders(true, vec![entry(3, &placeholder())]).unwrap();
         assert_eq!(github.entries()[0].0, PlaceholderSlot::GitHub);
+        let gemini = boot_placeholders(true, vec![entry(4, &placeholder())]).unwrap();
+        assert_eq!(gemini.entries()[0].0, PlaceholderSlot::GeminiApiKey);
         for (intercept, entries) in [
             (false, vec![entry(1, &placeholder())]),
-            (true, vec![entry(4, &placeholder())]),
+            (true, vec![entry(5, &placeholder())]),
             (false, vec![entry(3, &placeholder())]),
+            (false, vec![entry(4, &placeholder())]),
             (true, vec![entry(1, "codewire-managed")]),
             (
                 true,

@@ -318,6 +318,9 @@ pub enum HttpProvider {
     /// login. The broker injects its access token as a bearer and refreshes it
     /// at Claude's token endpoint; the refresh token never leaves Codewire.
     AnthropicClaudeSignIn,
+    /// The Gemini slot's API key: injected as `x-goog-api-key` on
+    /// `generativelanguage.googleapis.com` behind the front door only (#6555).
+    GeminiApiKey,
     GitHubOAuth,
     /// Isolated GitHub App user-to-server authorization only. This is never
     /// selected by a Sandbox profile or exposed as a managed client route.
@@ -362,6 +365,7 @@ impl HttpProvider {
                 "ANTHROPIC_AUTH_TOKEN",
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
+            Self::GeminiApiKey => &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
             Self::GitHubOAuth => &[
                 "GH_HOST",
                 "GH_TOKEN",
@@ -385,6 +389,7 @@ impl HttpProvider {
             Self::AnthropicApiKey => "anthropic-api-key",
             Self::AnthropicSubscriptionToken => "anthropic-subscription-token",
             Self::AnthropicClaudeSignIn => "anthropic-claude-sign-in",
+            Self::GeminiApiKey => "gemini-api-key",
             Self::GitHubOAuth => "github-oauth",
             Self::GitHubAppAuthorization => "github-app-authorization",
             Self::CodexDeviceEnrollment => "codex-device-enrollment",
@@ -405,6 +410,7 @@ impl HttpProvider {
             "anthropic-api-key" => Some(Self::AnthropicApiKey),
             "anthropic-subscription-token" => Some(Self::AnthropicSubscriptionToken),
             "anthropic-claude-sign-in" => Some(Self::AnthropicClaudeSignIn),
+            "gemini-api-key" => Some(Self::GeminiApiKey),
             "github-oauth" => Some(Self::GitHubOAuth),
             _ => None,
         }
@@ -427,6 +433,7 @@ impl HttpProvider {
             ("anthropic", "anthropic", CredentialAuthKind::ClaudeSignIn) => {
                 Some(Self::AnthropicClaudeSignIn)
             }
+            ("gemini", "google", CredentialAuthKind::ApiKey) => Some(Self::GeminiApiKey),
             ("github", "github", CredentialAuthKind::OAuth) => Some(Self::GitHubOAuth),
             _ => None,
         }

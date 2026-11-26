@@ -38,6 +38,7 @@ use crate::codex_oauth::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
     CanonicalCodexOAuthBundle, CodexOAuthCredential,
 };
+use crate::gemini::{GeminiApiKeyAdapter, GeminiStreamingResponse};
 use crate::github::GitHubOAuthAdapter;
 use crate::github_app::{
     GitHubAppAuthorizationError, GitHubAppAuthorizationOwner, GitHubAppRefreshError,
@@ -1033,6 +1034,7 @@ pub struct OpenAiBroker<P, U> {
     anthropic_adapter: AnthropicApiKeyAdapter,
     anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter,
     anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter,
+    gemini_adapter: GeminiApiKeyAdapter,
     github_adapter: GitHubOAuthAdapter,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
@@ -1313,6 +1315,7 @@ where
                 .map_err(map_adapter_error)?,
             anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter::new()
                 .map_err(map_adapter_error)?,
+            gemini_adapter: GeminiApiKeyAdapter::new().map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
@@ -2117,18 +2120,21 @@ fn validate_http_lease_coordinates(
 enum ProviderStreamingResponse {
     OpenAi(OpenAiStreamingResponse),
     Anthropic(AnthropicStreamingResponse),
+    Gemini(GeminiStreamingResponse),
 }
 impl ProviderStreamingResponse {
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, CredentialBrokerError> {
         match self {
             Self::OpenAi(redactor) => redactor.push(chunk),
             Self::Anthropic(redactor) => redactor.push(chunk),
+            Self::Gemini(redactor) => redactor.push(chunk),
         }
     }
     fn finish(self) -> Result<Vec<u8>, CredentialBrokerError> {
         match self {
             Self::OpenAi(redactor) => redactor.finish(),
             Self::Anthropic(redactor) => redactor.finish(),
+            Self::Gemini(redactor) => redactor.finish(),
         }
     }
 }

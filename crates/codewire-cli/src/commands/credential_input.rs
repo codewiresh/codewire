@@ -698,11 +698,12 @@ pub(super) fn profile_set_credential(
 
 /// The provider whose credentials a profile slot takes, so `set SLOT NAME`
 /// needs no `PROVIDER/` (#4928): codex and openai take OpenAI's, anthropic
-/// Anthropic's, ssh the SSH keys.
+/// Anthropic's, gemini Google's, ssh the SSH keys.
 pub(super) fn slot_provider(slot: &str) -> Option<&'static str> {
     match slot {
         "codex" | "openai" => Some("openai"),
         "anthropic" => Some("anthropic"),
+        "gemini" => Some("google"),
         "ssh" => Some("ssh"),
         _ => None,
     }
@@ -714,11 +715,14 @@ pub(super) fn supported_profile_slot(
     kind: CredentialAuthKind,
 ) -> anyhow::Result<CapabilitySlot> {
     anyhow::ensure!(
-        matches!(value, "codex" | "openai" | "github" | "anthropic" | "ssh"),
-        "unsupported provider; use codex, openai, github, anthropic or ssh"
+        matches!(
+            value,
+            "codex" | "openai" | "github" | "anthropic" | "gemini" | "ssh"
+        ),
+        "unsupported provider; use codex, openai, github, anthropic, gemini or ssh"
     );
     let slot = CapabilitySlot::parse(value)
-        .context("unknown provider; use codex, openai, github, anthropic or ssh")?;
+        .context("unknown provider; use codex, openai, github, anthropic, gemini or ssh")?;
     let catalog = builtin_provider_catalog();
     let policy = catalog
         .get(provider)
@@ -778,7 +782,8 @@ pub(super) fn expiry_arg(value: &str) -> Result<u64, String> {
 }
 
 /// The slots a profile has.
-pub(super) const PROFILE_SLOTS: [&str; 5] = ["codex", "openai", "github", "anthropic", "ssh"];
+pub(super) const PROFILE_SLOTS: [&str; 6] =
+    ["codex", "openai", "github", "anthropic", "gemini", "ssh"];
 
 /// What `cw credentials add` takes for a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -836,14 +841,13 @@ pub(super) const PROVIDER_WORDS_FOR_TESTS: [&str; 12] = [
 ];
 
 /// How a credentials command names one credential.
-pub(super) const SELECTOR_HELP: &str =
-    "Credential name, PROVIDER/NAME (anthropic, openai, github or ssh), name:NAME or id:UUID";
+pub(super) const SELECTOR_HELP: &str = "Credential name, PROVIDER/NAME (anthropic, openai, github, ssh or google), name:NAME or id:UUID";
 
 /// A profile slot, in `set` and `unset`.
 pub(super) const SLOT_HELP: &str = "Which of the profile's providers";
 
 /// The providers whose credentials a profile may hold.
-const PROFILE_PROVIDERS: [&str; 4] = ["openai", "anthropic", "github", "ssh"];
+const PROFILE_PROVIDERS: [&str; 5] = ["openai", "anthropic", "github", "google", "ssh"];
 
 /// The kinds a profile's `slot` takes, by name, from the provider catalog.
 fn slot_takes(slot: &CapabilitySlot) -> Vec<String> {
@@ -889,6 +893,9 @@ pub(super) fn paste_prompt(provider: &str, kind: CredentialAuthKind) -> String {
         }
         ("openai", CredentialAuthKind::ApiKey) => {
             "Paste your OpenAI API key (from platform.openai.com/api-keys)".to_owned()
+        }
+        ("google", CredentialAuthKind::ApiKey) => {
+            "Paste your Gemini API key (from aistudio.google.com/apikey)".to_owned()
         }
         ("github", CredentialAuthKind::AccessToken) => {
             "Paste your GitHub access token (from github.com/settings/tokens)".to_owned()

@@ -22,7 +22,7 @@ use crate::commands::{CredentialGenerateArgs, CredentialsCommand, OutputFormat};
 /// The type positional's help, the same for both verbs: every type's word,
 /// in picker order.
 pub(in crate::commands) const TYPE_HELP: &str =
-    "codex, github, claude, claude-token, anthropic, openai or ssh";
+    "codex, github, claude, claude-token, anthropic, openai, gemini or ssh";
 pub(in crate::commands) const KEY_FILE_HELP: &str = "OpenSSH private-key file to import, for ssh";
 pub(in crate::commands) const YES_HELP: &str = "Confirm reconnecting an existing named credential";
 /// `add`'s and `connect`'s one help line: what each of the registry's flows

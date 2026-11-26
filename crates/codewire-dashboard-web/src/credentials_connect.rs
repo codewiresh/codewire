@@ -701,7 +701,10 @@ pub(crate) async fn rotate_api_key(
     // A Claude subscription token shares the Anthropic slot but is replaced
     // with a new token, never rotated as an API key.
     if current.revocation_generation != expected_generation
-        || !matches!(credential_form(&current)?, "openai" | "anthropic")
+        || !matches!(
+            credential_form(&current)?,
+            "openai" | "anthropic" | "gemini"
+        )
     {
         return Err(ConnectError::aborted("credential metadata changed"));
     }
@@ -810,7 +813,7 @@ pub(crate) async fn bound_profile_attention(
     }
 }
 
-async fn get_profile_revision(
+pub(crate) async fn get_profile_revision(
     state: &AppState,
     cookie: HeaderValue,
     profile_id: &str,
@@ -1066,7 +1069,7 @@ fn build_settings_data_at(
         match slot {
             "codex" => choices.codex.push(choice),
             "openai" => choices.openai.push(choice),
-            "github" => {}
+            "github" | "gemini" => {}
             "anthropic" => choices.anthropic.push(choice),
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
@@ -1090,14 +1093,14 @@ fn build_settings_data_at(
             oauth_provider: match form {
                 "codex" => "codex",
                 "github" => "github",
-                "openai" | "anthropic" | "claude" | "claude-sign-in" | "ssh" => "",
+                "openai" | "anthropic" | "gemini" | "claude" | "claude-sign-in" | "ssh" => "",
                 _ => unreachable!("credential_form returns a closed form"),
             },
             authentication: authentication_label(form),
             account_hint: credential.account_hint.unwrap_or_default(),
             status,
             status_tone,
-            api_key: matches!(form, "openai" | "anthropic"),
+            api_key: matches!(form, "openai" | "anthropic" | "gemini"),
             oauth: matches!(form, "codex" | "github"),
             subscription_token: form == "claude",
             claude_sign_in: form == "claude-sign-in",
@@ -1129,7 +1132,7 @@ fn build_settings_data_at(
             || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
-            || profile.entries.len() > 4
+            || profile.entries.len() > 5
         {
             return Err(invalid_metadata());
         }
@@ -1399,6 +1402,7 @@ pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, C
         ("anthropic", kind) if kind == CredentialAuthenticationKind::ClaudeSignIn => {
             Ok("claude-sign-in")
         }
+        ("google", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("gemini"),
         ("ssh", kind) if kind == CredentialAuthenticationKind::SshKey => Ok("ssh"),
         _ => Err(invalid_metadata()),
     }
@@ -1436,6 +1440,7 @@ fn attention_notice(form: &str) -> &'static str {
         "github" => "GitHub needs Reconnect",
         "openai" => "OpenAI API key needs replacing",
         "anthropic" => "Anthropic API key needs replacing",
+        "gemini" => "Gemini API key needs replacing",
         "claude" => "Claude subscription token needs replacing",
         "claude-sign-in" => "Claude sign-in needs Reconnect",
         "ssh" => "SSH key needs replacing",
@@ -1451,7 +1456,7 @@ fn attention_notice(form: &str) -> &'static str {
 fn attention_view(form: &str, credential_id: &str) -> CredentialAttentionView {
     let action = match form {
         "codex" | "github" => "reconnect",
-        "openai" | "anthropic" => "rotate",
+        "openai" | "anthropic" | "gemini" => "rotate",
         "claude" => "replace",
         "claude-sign-in" | "ssh" => "",
         _ => unreachable!("closed form"),
@@ -1472,6 +1477,7 @@ fn provider_label(form: &str) -> &'static str {
         "openai" => "OpenAI API",
         "github" => "GitHub",
         "anthropic" | "claude" | "claude-sign-in" => "Anthropic",
+        "gemini" => "Google",
         "ssh" => "SSH",
         _ => unreachable!("closed form"),
     }
@@ -1480,7 +1486,7 @@ fn provider_label(form: &str) -> &'static str {
 fn authentication_label(form: &str) -> &'static str {
     match form {
         "codex" | "github" => "OAuth",
-        "openai" | "anthropic" => "API key",
+        "openai" | "anthropic" | "gemini" => "API key",
         "claude" => "Claude subscription token",
         "claude-sign-in" => "Claude",
         "ssh" => "SSH key",
@@ -1494,6 +1500,7 @@ fn slot_label(slot: &str) -> Option<&'static str> {
         "openai" => Some("OpenAI API"),
         "github" => Some("GitHub"),
         "anthropic" => Some("Anthropic"),
+        "gemini" => Some("Gemini"),
         "ssh" => Some("SSH"),
         _ => None,
     }

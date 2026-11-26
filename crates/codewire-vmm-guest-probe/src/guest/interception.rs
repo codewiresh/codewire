@@ -31,8 +31,12 @@ pub(super) fn from_seed(seed: &Seed) -> Option<Interception> {
     };
     let placeholder = (!clients.anthropic_sign_in()).then(|| find(slot)).flatten();
     let interception = Interception::new(placeholder);
-    Some(match find(PlaceholderSlot::GitHub) {
+    let interception = match find(PlaceholderSlot::GitHub) {
         Some(github) => interception.with_github(github, WORKSPACE_TRUST_BUNDLE_PATH),
+        None => interception,
+    };
+    Some(match find(PlaceholderSlot::GeminiApiKey) {
+        Some(gemini) => interception.with_gemini(gemini),
         None => interception,
     })
 }
@@ -46,6 +50,17 @@ pub(super) fn binds_github(seed: &Seed) -> bool {
             .entries()
             .iter()
             .any(|(slot, _)| *slot == PlaceholderSlot::GitHub)
+}
+
+/// Whether this boot binds the Gemini API host: its seed carries the CA and,
+/// beside it, Gemini's placeholder (#6555).
+pub(super) fn binds_gemini(seed: &Seed) -> bool {
+    seed.egress_ca().is_some()
+        && seed
+            .credential_placeholders()
+            .entries()
+            .iter()
+            .any(|(slot, _)| *slot == PlaceholderSlot::GeminiApiKey)
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ pub(super) fn names_per_provider_needed(
         CredentialOperation::Credential(CredentialsCommand::Add(args)) => {
             let provider = match args.provider.as_deref()? {
                 CLAUDE_SUBSCRIPTION_ALIAS => "anthropic",
-                provider => provider,
+                word => codewire_access::credential_type(word).map_or(word, |row| row.provider),
             };
             (
                 provider,

@@ -4,9 +4,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
+#[cfg(not(feature = "platform"))]
+use codewire_access::GEMINI_API_HOST;
 use codewire_access::HttpProvider;
 #[cfg(feature = "platform")]
-use codewire_access::{AvailableGrants, CapabilitySlot, FRONT_DOOR_HOSTS, GITHUB_HOSTS};
+use codewire_access::{
+    AvailableGrants, CapabilitySlot, FRONT_DOOR_HOSTS, GEMINI_API_HOST, GITHUB_HOSTS,
+};
 use codewire_egress_policy::intercept::InterceptBinding;
 use futures::StreamExt as _;
 use http::{HeaderMap, Method};
@@ -649,6 +653,7 @@ fn provider_host(target: &url::Url) -> &'static str {
         Some(CLAUDE_TOKEN_HOST) => CLAUDE_TOKEN_HOST,
         Some(GITHUB_API_HOST) => GITHUB_API_HOST,
         Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
+        Some(GEMINI_API_HOST) => GEMINI_API_HOST,
         Some(host) if routed_host(host) => "chatgpt-routed-origin",
         _ => "other",
     }
@@ -670,6 +675,7 @@ pub(crate) enum RouteHost {
     CodexToken,
     GitHubApi,
     GitHub,
+    GeminiApi,
 }
 
 impl RouteHost {
@@ -682,6 +688,7 @@ impl RouteHost {
             Self::CodexToken => OPENAI_AUTH_HOST,
             Self::GitHubApi => GITHUB_API_HOST,
             Self::GitHub => GITHUB_GIT_HOST,
+            Self::GeminiApi => GEMINI_API_HOST,
         }
     }
 
@@ -696,6 +703,7 @@ impl RouteHost {
             ("anthropic", "claude-oauth-token") => &[Self::ClaudeToken],
             ("github", "github-api") => &[Self::GitHubApi],
             ("github", "github-https") => &[Self::GitHub],
+            ("gemini", "gemini-api") => &[Self::GeminiApi],
             _ => &[],
         }
     }
@@ -729,6 +737,7 @@ impl RouteHost {
                     .filter(move |served| served.host == host)
                     .filter_map(|served| served.leaf_name())
                     .chain((github_bound && GITHUB_HOSTS.contains(&host)).then_some(host))
+                    .chain((host == GEMINI_API_HOST).then_some(host))
             })
             .collect()
     }
@@ -785,6 +794,7 @@ fn selected_hosts(
             HttpProvider::AnthropicClaudeSignIn => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
             // The code exchange and the one OAuth profile read.
             HttpProvider::ClaudeSignInEnrollment => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
+            HttpProvider::GeminiApiKey => &[GEMINI_API_HOST][..],
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppTokenRevocation => &[GITHUB_API_HOST][..],
@@ -848,6 +858,9 @@ fn validate_target(
                     && method == Method::POST
                     && target.path() == CLAUDE_TOKEN_PATH
                     && target.query().is_none())
+        }
+        Some(GEMINI_API_HOST) => {
+            selected.contains(&HttpProvider::GeminiApiKey) && transparent_method(method)
         }
         Some(GITHUB_API_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -1371,7 +1384,7 @@ mod tests {
     /// what a credential reaches, so it fails here first (#6286).
     #[test]
     fn each_forms_hosts_are_pinned_and_match_its_registry_row() {
-        let golden: [(HttpProvider, &[&str]); 11] = [
+        let golden: [(HttpProvider, &[&str]); 12] = [
             (HttpProvider::OpenAiApiKey, &["api.openai.com"]),
             (
                 HttpProvider::CodexOAuth,
@@ -1385,6 +1398,10 @@ mod tests {
             (
                 HttpProvider::AnthropicClaudeSignIn,
                 &["api.anthropic.com", "platform.claude.com"],
+            ),
+            (
+                HttpProvider::GeminiApiKey,
+                &["generativelanguage.googleapis.com"],
             ),
             (HttpProvider::GitHubOAuth, &["api.github.com", "github.com"]),
             (

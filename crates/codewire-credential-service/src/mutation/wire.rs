@@ -578,7 +578,7 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
         Error::ClaudeSignInExpired => (ConnectCode::FailedPrecondition, CLAUDE_SIGN_IN_EXPIRED),
         Error::NameReservesProvider => (
             ConnectCode::InvalidArgument,
-            "a new credential name may not start with anthropic/, openai/, github/ or ssh/",
+            "a new credential name may not start with anthropic/, openai/, github/, ssh/ or google/",
         ),
     };
     // Closed classifications only: provider stderr, material, SQL and source

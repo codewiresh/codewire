@@ -60,7 +60,7 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         }
         LocalCredentialError::CredentialNameReservesProvider => {
             StoreRefusal::CredentialNameReservesProvider.attach(Status::invalid_argument(
-                "a new local credential name may not start with anthropic/, openai/, github/ or ssh/",
+                "a new local credential name may not start with anthropic/, openai/, github/, ssh/ or google/",
             ))
         }
         LocalCredentialError::CredentialNotFound

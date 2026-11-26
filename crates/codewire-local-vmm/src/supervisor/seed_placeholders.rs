@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use codewire_access::{
-    CapabilitySlot, CredentialPlaceholder, GITHUB_HOSTS, ManagedCredentialClient,
+    CapabilitySlot, CredentialPlaceholder, GEMINI_API_HOST, GITHUB_HOSTS, ManagedCredentialClient,
     ManagedCredentialClients, front_door_hosts,
 };
 use codewire_local_credentials::{AuthorityFeature, PlatformCredentialBinding};
@@ -25,6 +25,7 @@ use crate::supervisor_config::OUTDATED_CREDENTIAL_SERVICE;
 const API_KEY_SLOT: u32 = 1;
 const SUBSCRIPTION_TOKEN_SLOT: u32 = 2;
 const GITHUB_SLOT: u32 = 3;
+const GEMINI_API_KEY_SLOT: u32 = 4;
 /// The supervisor's bound on a platform boot's placeholder call, past the
 /// authority's own 10-second deadline for the platform question.
 const PLATFORM_PLACEHOLDERS_CALL_BOUND: Duration = Duration::from_secs(15);
@@ -56,7 +57,7 @@ impl Supervisor {
         clients: ManagedCredentialClients,
     ) -> Result<Vec<v1::SeedCredentialPlaceholder>, SupervisorError> {
         let wanted = WantedSlots::for_boot(egress.intercept, clients);
-        if wanted.anthropic.is_none() && !wanted.github {
+        if wanted.anthropic.is_none() && !wanted.github && !wanted.gemini {
             return Ok(Vec::new());
         }
         if let Some(platform) = egress.platform.clone() {
@@ -215,6 +216,8 @@ struct WantedSlots {
     anthropic: Option<u32>,
     /// Whether the selection would bind GitHub's hosts.
     github: bool,
+    /// Whether the selection would bind Gemini's API host (#6555).
+    gemini: bool,
 }
 
 impl WantedSlots {
@@ -223,6 +226,7 @@ impl WantedSlots {
             return Self {
                 anthropic: None,
                 github: false,
+                gemini: false,
             };
         }
         let anthropic = (clients.contains(ManagedCredentialClient::Anthropic)
@@ -234,34 +238,43 @@ impl WantedSlots {
                 API_KEY_SLOT
             }
         });
-        let github = front_door_hosts(clients)
-            .iter()
-            .any(|host| GITHUB_HOSTS.contains(&host.host));
-        Self { anthropic, github }
+        let hosts = front_door_hosts(clients);
+        let github = hosts.iter().any(|host| GITHUB_HOSTS.contains(&host.host));
+        let gemini = hosts.iter().any(|host| host.host == GEMINI_API_HOST);
+        Self {
+            anthropic,
+            github,
+            gemini,
+        }
     }
 
     fn slots(self) -> Vec<CapabilitySlot> {
         let anthropic = self.anthropic.map(|_| CapabilitySlot::anthropic());
         let github = self.github.then(CapabilitySlot::github);
-        anthropic.into_iter().chain(github).collect()
+        let gemini = self.gemini.then(CapabilitySlot::gemini);
+        anthropic.into_iter().chain(github).chain(gemini).collect()
     }
 }
 
 /// The seed's entries from what the authority granted: exactly one
-/// placeholder for the wanted Anthropic form, or the start is refused; at
-/// most one for GitHub, whose absence only leaves GitHub unbound. A slot that
-/// was not asked for refuses the start.
+/// placeholder for the wanted Anthropic form and for Gemini (which has no
+/// loopback fallback), or the start is refused; at most one for GitHub, whose
+/// absence only leaves GitHub unbound. A slot that was not asked for refuses
+/// the start.
 fn seed_entries(
     wanted: WantedSlots,
     granted: Vec<(CapabilitySlot, CredentialPlaceholder)>,
 ) -> Result<Vec<v1::SeedCredentialPlaceholder>, SupervisorError> {
     let mut anthropic = Vec::new();
     let mut github = Vec::new();
+    let mut gemini = Vec::new();
     for (slot, placeholder) in granted {
         if slot == CapabilitySlot::anthropic() && wanted.anthropic.is_some() {
             anthropic.push(placeholder);
         } else if slot == CapabilitySlot::github() && wanted.github {
             github.push(placeholder);
+        } else if slot == CapabilitySlot::gemini() && wanted.gemini {
+            gemini.push(placeholder);
         } else {
             return Err(SupervisorError::EnvironmentAccessUnavailable);
         }
@@ -277,6 +290,12 @@ fn seed_entries(
         Ok([placeholder]) => entries.push(seed_entry(GITHUB_SLOT, placeholder)),
         Err(none) if none.is_empty() => {}
         Err(_) => return Err(SupervisorError::EnvironmentAccessUnavailable),
+    }
+    if wanted.gemini {
+        let Ok([placeholder]) = <[_; 1]>::try_from(gemini) else {
+            return Err(SupervisorError::EnvironmentAccessUnavailable);
+        };
+        entries.push(seed_entry(GEMINI_API_KEY_SLOT, placeholder));
     }
     Ok(entries)
 }
@@ -304,6 +323,7 @@ mod tests {
         WantedSlots {
             anthropic: Some(slot),
             github: false,
+            gemini: false,
         }
     }
 
@@ -346,6 +366,7 @@ mod tests {
         let both = WantedSlots {
             anthropic: Some(API_KEY_SLOT),
             github: true,
+            gemini: false,
         };
         assert_eq!(
             both.slots(),
@@ -371,6 +392,7 @@ mod tests {
         let github_only = WantedSlots {
             anthropic: None,
             github: true,
+            gemini: false,
         };
         assert!(seed_entries(github_only, Vec::new()).unwrap().is_empty());
         let two = vec![
@@ -398,6 +420,7 @@ mod tests {
         let both = WantedSlots {
             anthropic: Some(API_KEY_SLOT),
             github: true,
+            gemini: false,
         };
         let granted = |slots: &[CapabilitySlot]| {
             slots

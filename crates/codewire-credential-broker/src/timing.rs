@@ -287,6 +287,7 @@ pub(crate) fn slot_label(slot: &str) -> &'static str {
         "openai" => "openai",
         "anthropic" => "anthropic",
         "github" => "github",
+        "gemini" => "gemini",
         _ => "invalid",
     }
 }
@@ -299,6 +300,7 @@ pub(crate) fn route_label(route: &str) -> &'static str {
         "claude-oauth-token" => "claude-oauth-token",
         "github-api" => "github-api",
         "github-https" => "github-https",
+        "gemini-api" => "gemini-api",
         _ => "invalid",
     }
 }

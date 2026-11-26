@@ -889,14 +889,15 @@ async fn add_credential(
         args.key_file.is_none(),
         "--key-file is only valid for add ssh"
     );
-    let provider = ProviderId::parse(trimmed_required(
+    let word = trimmed_required(
         args.provider
             .as_deref()
             .context("credential provider is required")?,
         "provider",
-    )?)
-    .context("invalid credential provider")?;
-    let authentication_kind = api_key_enrollment_kind(provider.as_str())?;
+    )?;
+    let authentication_kind = api_key_enrollment_kind(word)?;
+    let provider_name = codewire_access::credential_type(word).map_or(word, |row| row.provider);
+    let provider = ProviderId::parse(provider_name).context("invalid credential provider")?;
     let catalog = builtin_provider_catalog();
     let definition = catalog
         .get(&provider)
@@ -929,7 +930,7 @@ async fn add_credential(
     let material = prompt_credential_material(input.provider.as_str(), input.authentication_kind)?;
     let provider = input.provider.to_string();
     let (command, what, name) = (
-        format!("add {}", input.provider),
+        format!("add {word}"),
         output::kind_label(
             input.provider.as_str(),
             authentication_kind_label(input.authentication_kind),
@@ -2446,7 +2447,9 @@ mod tests {
                 "--local add {provider}"
             );
             if api_key {
-                let id = ProviderId::parse(provider).unwrap();
+                let provider_id =
+                    codewire_access::credential_type(provider).map_or(provider, |row| row.provider);
+                let id = ProviderId::parse(provider_id).unwrap();
                 assert!(
                     catalog.get(&id).is_some_and(|definition| definition
                         .supports_authentication_kind(CredentialAuthKind::ApiKey)),

@@ -52,6 +52,9 @@ pub const CODEX_TOKEN_HOST: &str = "auth.openai.com";
 /// GitHub over Git and the GitHub API. Served only for a GitHub connection,
 /// and only once [`GITHUB_INTERCEPTED`] is on.
 pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
+/// The Gemini API (`generativelanguage.googleapis.com`). Front-door-only:
+/// served only when the `gemini` slot is selected (#6555).
+pub const GEMINI_API_HOST: &str = "generativelanguage.googleapis.com";
 /// Whether GitHub's hosts are served at all. On: a placeholder sent outside
 /// GitHub's route is refused on that route (#5087, #5149), and both
 /// placements deliver the `github` slot's placeholder and trust (#4001). A
@@ -142,6 +145,9 @@ pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost>
     if GITHUB_INTERCEPTED && clients.contains(ManagedCredentialClient::GitHub) {
         hosts.extend(GITHUB_HOSTS.map(exact));
     }
+    if clients.contains(ManagedCredentialClient::Gemini) {
+        hosts.push(exact(GEMINI_API_HOST));
+    }
     hosts
 }
 
@@ -152,6 +158,13 @@ pub fn binds_github(clients: ManagedCredentialClients) -> bool {
     front_door_hosts(clients)
         .iter()
         .any(|host| GITHUB_HOSTS.contains(&host.host))
+}
+
+/// Whether the front door serves the Gemini API host for `clients` (#6555).
+pub fn binds_gemini(clients: ManagedCredentialClients) -> bool {
+    front_door_hosts(clients)
+        .iter()
+        .any(|host| host.host == GEMINI_API_HOST)
 }
 
 #[cfg(test)]
@@ -173,7 +186,7 @@ mod tests {
 
     /// Every selection of the slots, in each Anthropic form it can take.
     fn every_selection() -> Vec<(Vec<&'static str>, ManagedCredentialClients)> {
-        let slots = ["anthropic", "openai", "codex", "ssh", "github"];
+        let slots = ["anthropic", "openai", "codex", "ssh", "github", "gemini"];
         let mut selections = Vec::new();
         for bits in 0..(1_u8 << slots.len()) {
             let chosen: Vec<&str> = (0..slots.len())

@@ -236,12 +236,13 @@ enum LeasePlan {
 /// Every host a route table may bind, and every name under the routed
 /// suffix: what a policy allowing them all gives a broker at launch, so an
 /// untouched forward is sent (#5555).
-pub(super) const EVERY_BOUND_HOST: [&str; 7] = [
+pub(super) const EVERY_BOUND_HOST: [&str; 8] = [
     "*.chatgpt.com",
     "api.anthropic.com",
     "platform.claude.com",
     "api.openai.com",
     "chatgpt.com",
+    "generativelanguage.googleapis.com",
     "github.com",
     "api.github.com",
 ];
@@ -341,6 +342,7 @@ impl BrokerLeaseProvider for Authority {
             "codex" if self.codex_sign_in => ("openai", CredentialAuthKind::OAuth),
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
             "anthropic" => ("anthropic", CredentialAuthKind::ApiKey),
+            "gemini" => ("google", CredentialAuthKind::ApiKey),
             "github" => ("github", CredentialAuthKind::OAuth),
             _ => return Err(BrokerLeaseError::Denied),
         };
@@ -507,6 +509,7 @@ impl BrokerUpstreamTransport for Upstream {
             .filter(|_| target.path() == super::super::routed::ACCOUNTS_CHECK_PATH);
         let echoed = headers
             .get("x-api-key")
+            .or_else(|| headers.get("x-goog-api-key"))
             .or_else(|| headers.get("authorization"))
             .map(|value| value.as_bytes().to_vec())
             .unwrap_or_default();
@@ -2936,4 +2939,200 @@ async fn an_untouched_forward_asks_for_an_uncompressed_answer() {
             [&b"2023-06-01"[..]]
         );
     }
+}
+
+fn gemini_request(
+    intercepted_host: &str,
+    query: &str,
+    credential: &[(&str, String)],
+) -> v1::CredentialBridgeRequest {
+    let mut headers = vec![v1::CredentialHttpHeader {
+        name: "content-type".into(),
+        value: b"application/json".to_vec(),
+    }];
+    headers.extend(
+        credential
+            .iter()
+            .map(|(name, value)| v1::CredentialHttpHeader {
+                name: (*name).into(),
+                value: value.as_bytes().to_vec(),
+            }),
+    );
+    v1::CredentialBridgeRequest {
+        request_id: Uuid::new_v4().to_string(),
+        method: "POST".into(),
+        path: "/v1beta/models/gemini-2.5-pro:streamGenerateContent".into(),
+        query: query.into(),
+        headers,
+        body: b"{}".to_vec(),
+        capability_slot: "gemini".into(),
+        route: "gemini-api".into(),
+        intercepted_host: intercepted_host.into(),
+        destination_ip: String::new(),
+        streamed_body: false,
+        intercept_decision: Vec::new(),
+    }
+}
+
+/// Gemini is front-door-only: any loopback request is refused before a lease,
+/// swaps inject `x-goog-api-key` only and redact reflected keys, query/header
+/// bypasses fail closed (`400`), and untouched forwards follow the hosted
+/// `selected_credential_only` and local network-policy rules (#6555).
+#[tokio::test]
+async fn gemini_front_door_swap_loopback_refusal_and_fail_closed_checks() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        echo_credential: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+
+    // 1. Loopback is explicitly refused before any lease or upstream call.
+    assert!(matches!(
+        broker
+            .execute(gemini_request(
+                "",
+                "alt=sse",
+                &[("x-goog-api-key", OURS.into())]
+            ))
+            .await,
+        Err(BrokerRequestError::InvalidRequest)
+    ));
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+
+    // 2. Valid front-door swap injects the real key in `x-goog-api-key` only,
+    // never in URL query params, and redacts any reflected real key.
+    let (status, headers, body) = collect(
+        broker
+            .execute_front_door(gemini_request(
+                "generativelanguage.googleapis.com",
+                "alt=sse",
+                &[("x-goog-api-key", OURS.into())],
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recorded.leases(), 1);
+    let outbound = recorded.outbound();
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(
+        outbound[0].1,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    );
+    assert_eq!(
+        header(&outbound[0], "x-goog-api-key"),
+        [crate::http_test_support::TOKEN]
+    );
+    assert!(
+        !body
+            .windows(crate::http_test_support::TOKEN.len())
+            .any(|window| window == crate::http_test_support::TOKEN),
+        "real key must be redacted from response body"
+    );
+    assert!(
+        !headers
+            .get("x-echo")
+            .unwrap()
+            .as_bytes()
+            .windows(crate::http_test_support::TOKEN.len())
+            .any(|window| window == crate::http_test_support::TOKEN),
+        "real key must be redacted from response headers"
+    );
+
+    // 3. Raw and percent-encoded `cwp1_` in query params fail closed (400)
+    // before any lease or untouched forward.
+    let encoded_placeholder = format!("key=cwp1%5F{}", &OURS[5..]);
+    let foreign_query = format!("key={THEIRS}");
+    for query in [format!("key={OURS}"), encoded_placeholder, foreign_query] {
+        assert!(
+            matches!(
+                broker
+                    .execute_front_door(gemini_request(
+                        "generativelanguage.googleapis.com",
+                        &query,
+                        &[],
+                    ))
+                    .await,
+                Err(BrokerRequestError::InvalidRequest)
+            ),
+            "{query}"
+        );
+    }
+    // 4. Disallowed credential headers carrying `cwp1_` fail closed (400).
+    for disallowed in [
+        ("authorization", format!("Bearer {OURS}")),
+        ("x-api-key", OURS.into()),
+        ("cookie", format!("k={OURS}")),
+    ] {
+        assert!(
+            matches!(
+                broker
+                    .execute_front_door(gemini_request(
+                        "generativelanguage.googleapis.com",
+                        "alt=sse",
+                        std::slice::from_ref(&disallowed),
+                    ))
+                    .await,
+                Err(BrokerRequestError::InvalidRequest)
+            ),
+            "{disallowed:?}"
+        );
+    }
+    // 5. Swapping beside `?key=` or `?access_token=` returns 400 credential_conflict.
+    for query in ["key=user-key", "access_token=ya29.user", "%6bey=user-key"] {
+        let (status, headers, _) = collect(
+            broker
+                .execute_front_door(gemini_request(
+                    "generativelanguage.googleapis.com",
+                    query,
+                    &[("x-goog-api-key", OURS.into())],
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(
+            headers
+                .get(codewire_access::REFUSAL_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("credential_conflict"),
+            "{query}"
+        );
+    }
+    // None of steps 3–5 leased or sent anything upstream.
+    assert_eq!(recorded.leases(), 1);
+    assert_eq!(recorded.outbound().len(), 1);
+
+    // 6. Untouched forward (no `cwp1_`): refused with `selected_credential_only`
+    // in a hosted Sandbox, and `NameNotAllowed` locally when policy omits the host.
+    let hosted = recorded
+        .broker_without_answer()
+        .with_untouched_forwards_refused();
+    assert!(matches!(
+        hosted
+            .execute_front_door(gemini_request(
+                "generativelanguage.googleapis.com",
+                "alt=sse",
+                &[("x-goog-api-key", "AIzaUserOwnKey".into())],
+            ))
+            .await,
+        Err(BrokerRequestError::SelectedCredentialOnly)
+    ));
+    let locked_local = recorded.broker_without_answer();
+    assert!(matches!(
+        locked_local
+            .execute_front_door(gemini_request(
+                "generativelanguage.googleapis.com",
+                "alt=sse",
+                &[("x-goog-api-key", "AIzaUserOwnKey".into())],
+            ))
+            .await,
+        Err(BrokerRequestError::NameNotAllowed)
+    ));
+    assert_eq!(recorded.leases(), 1);
+    assert_eq!(recorded.outbound().len(), 1);
 }

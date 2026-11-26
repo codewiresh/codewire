@@ -185,7 +185,7 @@ names don't change: `profiles`, `rotate` and `--cloud` stay.
 | on this computer | where a local VM's credentials are kept | local store, local authority, credential authority |
 | in your Codewire account | where a cloud Sandbox's credentials are kept | platform, cloud store |
 | sign-in, sign in | the browser flow for Codex, GitHub and Claude (sign-in) | OAuth, enrollment |
-| API key | an Anthropic or OpenAI key | raw key |
+| API key | an Anthropic, OpenAI or Gemini key | raw key |
 | token | Claude (token), from `claude setup-token` | subscription token |
 | SSH key | a key for SSH and Git | |
 | revoke | stop a credential working and keep its name | disable |
@@ -194,6 +194,6 @@ names don't change: `profiles`, `rotate` and `--cloud` stay.
 | cancelled | stopped by the person, nothing changed: "Cancelled; nothing was changed." | canceled |
 
 The kinds, in lists and messages: `Claude (sign-in)`, `Claude (token)`,
-`Anthropic API key`, `OpenAI API key`, `Codex`, `GitHub` and `SSH key`.
+`Anthropic API key`, `OpenAI API key`, `Gemini API key`, `Codex`, `GitHub` and `SSH key`.
 GitHub's account connection, which every cloud profile includes, is the one
 place "connection" names a credential.

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 
 use axum::http::{HeaderMap, Method, Uri, header::HOST, uri::Authority};
-use codewire_access::{Refusal, Unforwarded};
+use codewire_access::{GEMINI_API_HOST, Refusal, Unforwarded};
 
 pub use codewire_access::{
     MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, MANAGED_GITHUB_GIT_PREFIX,
@@ -150,13 +150,14 @@ fn asks_for_upgrade(headers: &HeaderMap) -> bool {
         })
 }
 
-/// The slot and route a TLS front door's intercepted host selects by itself.
-/// Only GitHub's two hosts do; every other bound host reaches its route
-/// through a managed path prefix.
+/// The slot and route a TLS front door's intercepted host selects by itself:
+/// GitHub's two hosts and front-door-only providers (Gemini, #6555), which
+/// have no loopback managed path prefix.
 pub fn intercepted_host_route(host: &str) -> Option<(&'static str, &'static str)> {
     match host {
         GITHUB_GIT_HOST => Some(("github", "github-https")),
         GITHUB_API_HOST => Some(("github", "github-api")),
+        GEMINI_API_HOST => Some(("gemini", "gemini-api")),
         _ => None,
     }
 }

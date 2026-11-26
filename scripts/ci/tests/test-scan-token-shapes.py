@@ -293,12 +293,12 @@ class Scanner(unittest.TestCase):
         source = self.temporary / "source"
         for directory in ("lower/usr/bin", "upper/etc", "work", "merged"):
             (source / directory).mkdir(parents=True)
-        shipped_key = "AI" + "za" + random(35)
+        shipped_key = "glpat-" + random(24)
         shipped_token = github()
         (source / "lower/usr/bin/tool").write_bytes(
             os.urandom(9000) + f" {self.secret(shipped_key)} {self.secret(shipped_token)} ".encode() + os.urandom(9000)
         )
-        (source / "upper/etc/config").write_text(f"key {self.secret('AI' + 'za' + random(35))}\n")
+        (source / "upper/etc/config").write_text(f"key {self.secret('glpat-' + random(24))}\n")
         disk = self.root / "root.raw"
         subprocess.run([tool("mkfs.ext4"), "-q", "-F", "-d", str(source), str(disk), "16M"], check=True, timeout=120)
         spill_parent = Path(tempfile.mkdtemp(prefix="scan-token-shapes-test-", dir="/dev/shm"))
@@ -312,9 +312,9 @@ class Scanner(unittest.TestCase):
             shutil.rmtree(spill_parent)
         self.assertEqual(status, 1)
         left = {(line[0], line[2]) for line in self.findings(lines)}
-        self.assertEqual(left, {("google-api-key", f"{disk}:/upper/etc/config"), ("google-api-key", str(disk))})
+        self.assertEqual(left, {("gitlab", f"{disk}:/upper/etc/config"), ("gitlab", str(disk))})
         self.assertIn(["baseline-image", "github", f"{disk}:/lower/usr/bin/tool", "2"], lines)
-        self.assertIn(["baseline", "google-api-key", "2"], lines)
+        self.assertIn(["baseline", "gitlab", "2"], lines)
         recorded = baseline.read_text()
         self.assertRegex(recorded, r"sha256\text4-uuid:[0-9a-f-]{36}:/lower/usr/bin/tool\t[0-9a-f]{64}")
         self.assertNotIn("/upper/", recorded)
@@ -325,7 +325,7 @@ class Scanner(unittest.TestCase):
         (source / "lower/usr/bin").mkdir(parents=True)
         (source / "upper").mkdir()
         (source / "lower/usr/bin/tool").write_bytes(
-            os.urandom(9000) + f" {self.secret(github())} {self.secret('AI' + 'za' + random(35))} ".encode()
+            os.urandom(9000) + f" {self.secret(github())} {self.secret('glpat-' + random(24))} ".encode()
         )
         disk = self.root / "vm/root.raw"
         disk.parent.mkdir()
@@ -357,8 +357,8 @@ class Scanner(unittest.TestCase):
         disk, blobs = "/vm/root.raw", "/engine/content/blobs"
         name = "ab" * 32
         content = scanner.ImageContent({disk: "/lower"}, frozenset({blobs}))
-        content.raw_files[("google-api-key", "raw", disk, 4096, 39)] = f"{disk}:/lower/usr/bin/gh"
-        content.raw_files[("google-api-key", "raw", disk, 8192, 39)] = None
+        content.raw_files[("gitlab", "raw", disk, 4096, 30)] = f"{disk}:/lower/usr/bin/gh"
+        content.raw_files[("gitlab", "raw", disk, 8192, 30)] = None
         content.file_digests.update({f"{disk}:/lower/usr/bin/gh": "11" * 32, f"{blobs}/{name}": name})
         places = {
             (f"{disk}:/lower/usr/bin/gh", 10): True,
@@ -378,18 +378,21 @@ class Scanner(unittest.TestCase):
             ("/dev/fd/63", 0): False,
             ("/vm/supervisor.log.1.gz!decompressed", 0): False,
         }
-        findings = {("google-api-key", "raw", path, offset, 39) for path, offset in places}
+        findings = {("gitlab", "raw", path, offset, 30) for path, offset in places}
         results = scanner.Results({}, scanner.Baseline(frozenset(findings)), content)
         for (path, offset), excused in places.items():
-            self.assertEqual(results.excusal(("google-api-key", "raw", path, offset, 39)) is not None, excused, path)
-        self.assertIsNone(results.excusal(("google-api-key", "raw", disk, 4097, 39)), "another offset")
-        bound = ("github", "raw", f"{disk}:/lower/usr/bin/gh", 10, 40)
-        pinned = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "11" * 32}), content)
-        self.assertEqual(pinned.excusal(bound), (f"{disk}:/lower/usr/bin/gh", True))
-        changed = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "22" * 32}), content)
-        self.assertIsNone(changed.excusal(bound), "a rewritten image file")
-        unpinned = scanner.Results({}, scanner.Baseline(frozenset({bound})), content)
-        self.assertIsNone(unpinned.excusal(bound), "no recorded SHA-256")
+            self.assertEqual(results.excusal(("gitlab", "raw", path, offset, 30)) is not None, excused, path)
+        self.assertIsNone(results.excusal(("gitlab", "raw", disk, 4097, 30)), "another offset")
+        for bound in (
+            ("github", "raw", f"{disk}:/lower/usr/bin/gh", 10, 40),
+            ("google-api-key", "raw", f"{disk}:/lower/usr/bin/gh", 10, 39),
+        ):
+            pinned = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "11" * 32}), content)
+            self.assertEqual(pinned.excusal(bound), (f"{disk}:/lower/usr/bin/gh", True))
+            changed = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "22" * 32}), content)
+            self.assertIsNone(changed.excusal(bound), "a rewritten image file")
+            unpinned = scanner.Results({}, scanner.Baseline(frozenset({bound})), content)
+            self.assertIsNone(unpinned.excusal(bound), "no recorded SHA-256")
 
     def test_a_raw_finding_maps_only_when_every_block_is_one_image_file_named_plainly(self):
         scanner = load_scanner()

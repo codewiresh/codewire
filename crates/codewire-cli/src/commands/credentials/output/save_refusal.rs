@@ -199,7 +199,7 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
         ),
         Outcome::NameReservesProvider => (
             format!(
-                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your {what} wasn't saved"
+                "a credential's name can't start with anthropic/, openai/, github/, ssh/ or google/, so your {what} wasn't saved"
             ),
             Some(renamed),
         ),
@@ -388,8 +388,8 @@ mod tests {
             (
                 Answer::Refused,
                 Some("CREDENTIAL_NAME_RESERVES_PROVIDER"),
-                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your GitHub sign-in wasn't saved",
-                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your GitHub sign-in wasn't saved",
+                "a credential's name can't start with anthropic/, openai/, github/, ssh/ or google/, so your GitHub sign-in wasn't saved",
+                "a credential's name can't start with anthropic/, openai/, github/, ssh/ or google/, so your GitHub sign-in wasn't saved",
             ),
             (
                 Answer::AlreadyExists,

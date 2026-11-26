@@ -691,7 +691,7 @@ fn validate_api_key(
                 })
                 && material[token..].iter().all(|byte| *byte == b'=')
         }
-        "anthropic" => material.iter().all(u8::is_ascii_graphic),
+        "anthropic" | "google" => material.iter().all(u8::is_ascii_graphic),
         _ => false,
     };
     if valid {

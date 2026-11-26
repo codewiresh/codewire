@@ -45,6 +45,7 @@ pub(crate) const FRAMING_HEADERS: &[&str] = &[
 const STRIPPED_REQUEST_HEADERS: &[&str] = &[
     "authorization",
     "x-api-key",
+    "x-goog-api-key",
     "cookie",
     "proxy-authorization",
     "accept-encoding",

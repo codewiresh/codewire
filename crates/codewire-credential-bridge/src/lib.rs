@@ -920,9 +920,12 @@ impl CredentialBridge {
         // read: whether the body streams depends on the epoch.
         self.wait_for_active_epoch(tokio::time::Instant::now() + SUCCESSOR_EPOCH_WAIT)
             .await;
+        // Only GitHub's intercepted hosts stream request bodies; other
+        // host-routed front-door providers (such as Gemini) buffer within the
+        // standard 4 MiB bridge request bound.
         let streams = match intercepted_host.and_then(intercepted_host_route) {
-            Some(_) => request_body::carries_body(request.method()),
-            None => request_body::streamable(classified.route, request.method()),
+            Some(("github", _)) => request_body::carries_body(request.method()),
+            Some(_) | None => request_body::streamable(classified.route, request.method()),
         } && self.streams_request_body().await;
         let mut frame = v1::CredentialBridgeRequest {
             capability_slot: classified.capability_slot.to_owned(),

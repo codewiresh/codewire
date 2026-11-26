@@ -240,7 +240,11 @@ fn name_hosted_egress_ca(
         .interception
         .as_ref()
         .is_some_and(|interception| interception.github().is_some());
-    if github {
+    let gemini = config
+        .interception
+        .as_ref()
+        .is_some_and(|interception| interception.gemini().is_some());
+    if github || gemini {
         trust.push((
             "SSL_CERT_DIR",
             format!("{IMAGE_CERTIFICATE_DIRECTORY}:{HOSTED_EGRESS_TRUST_CA_DIR}"),

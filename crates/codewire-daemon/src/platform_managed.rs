@@ -73,7 +73,9 @@ impl Agent {
             ManagedCredentialClient::Codex => Some(Route::Codex),
             ManagedCredentialClient::OpenAi => Some(Route::OpenAi),
             ManagedCredentialClient::Anthropic => Some(Route::Anthropic),
-            ManagedCredentialClient::Ssh | ManagedCredentialClient::GitHub => None,
+            ManagedCredentialClient::Ssh
+            | ManagedCredentialClient::GitHub
+            | ManagedCredentialClient::Gemini => None,
         }
     }
 }

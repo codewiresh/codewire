@@ -432,7 +432,7 @@ impl PlatformCredentialStore {
     }
 
     /// Prepare an explicit owner-requested API-key rotation, not an automatic
-    /// refresh. Only OpenAI/Anthropic API-key identities are admitted. Like local
+    /// refresh. Only OpenAI/Anthropic/Google API-key identities are admitted. Like local
     /// rotation, this may reactivate a revoked/expired identity; an omitted hard
     /// expiry clears it. The exact original record remains fenced at publication.
     /// Payload grammar is validated by the isolated provider enrollment adapter.
@@ -445,7 +445,10 @@ impl PlatformCredentialStore {
         expires_at_unix: Option<u64>,
     ) -> Result<PreparedCredentialReplacement, Error> {
         if expected.metadata.authentication_kind != CredentialAuthKind::ApiKey
-            || !matches!(expected.metadata.provider.as_str(), "openai" | "anthropic")
+            || !matches!(
+                expected.metadata.provider.as_str(),
+                "openai" | "anthropic" | "google"
+            )
         {
             return Err(Error::UnsupportedCredential);
         }

@@ -85,7 +85,16 @@ PROVIDER_ISSUERS = {
 }
 # Shapes a walk binds: a baseline never excuses one, cut or whole.
 BOUND_SHAPES = frozenset(
-    {"anthropic", "openai", "openai-legacy", "github", "github-pat", "refresh-token-field", "jwt-openai"}
+    {
+        "anthropic",
+        "openai",
+        "openai-legacy",
+        "github",
+        "github-pat",
+        "google-api-key",
+        "refresh-token-field",
+        "jwt-openai",
+    }
 )
 BASELINE_HEADER = "# scan-token-shapes baseline"
 BLOB_NAME = re.compile(r"[0-9a-f]{64}")

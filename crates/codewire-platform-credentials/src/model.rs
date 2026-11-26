@@ -333,7 +333,7 @@ mod tests {
             )
             .unwrap();
         }
-        for provider in ["openai", "anthropic"] {
+        for provider in ["openai", "anthropic", "google"] {
             let api_key = CredentialRecord::registered(
                 &org,
                 registration(provider, CredentialAuthKind::ApiKey),

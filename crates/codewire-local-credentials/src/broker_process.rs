@@ -274,6 +274,7 @@ mod tests {
             HttpProvider::OpenAiApiKey,
             HttpProvider::CodexOAuth,
             HttpProvider::AnthropicApiKey,
+            HttpProvider::GeminiApiKey,
             HttpProvider::GitHubOAuth,
         ] {
             assert_eq!(HttpProvider::parse(provider.as_str()), Some(provider));

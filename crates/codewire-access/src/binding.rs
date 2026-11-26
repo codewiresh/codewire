@@ -10,7 +10,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::{CLAUDE_TOKEN_HOST, FRONT_DOOR_HOSTS, GITHUB_HOSTS};
+use crate::{CLAUDE_TOKEN_HOST, FRONT_DOOR_HOSTS, GEMINI_API_HOST, GITHUB_HOSTS};
 
 /// The most hosts one binding names.
 pub const MAX_BOUND_HOSTS: usize = 16;
@@ -175,12 +175,13 @@ impl ReservedHosts {
 }
 
 /// Whether a built-in credential names `host`: the front door's provider
-/// table, Claude's token host, GitHub's hosts and every name under
-/// `chatgpt.com`.
+/// table, Claude's token host, GitHub's hosts, Gemini's API host and every
+/// name under `chatgpt.com`.
 pub fn is_provider_host(host: &str) -> bool {
     FRONT_DOOR_HOSTS.iter().any(|entry| entry.host == host)
         || host == CLAUDE_TOKEN_HOST
         || GITHUB_HOSTS.contains(&host)
+        || host == GEMINI_API_HOST
         || host.ends_with(".chatgpt.com")
 }
 

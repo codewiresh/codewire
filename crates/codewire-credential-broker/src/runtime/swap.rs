@@ -22,8 +22,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use codewire_access::{
-    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialPlaceholder,
-    Refusal,
+    BrokerOperationId, BrokerRouteId, CREDENTIAL_PLACEHOLDER_TAG, CapabilitySlot,
+    CredentialAuthKind, CredentialPlaceholder, Refusal,
 };
 use futures::{Stream, StreamExt as _, stream};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -32,13 +32,15 @@ use tokio::time::Instant;
 use super::anthropic_route::anthropic_operation;
 use super::routed::{self, ACCOUNTS_CHECK_PATH, Carried, FrontDoorSession};
 use super::{
-    BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerResponseBody,
-    BrokerUpstreamBody, BrokerUpstreamRequest, BrokerUpstreamTransport, OPENAI_OPERATION,
-    OPENAI_ROUTE, OpenAiBroker, Phase, ValidatedGuestRequest, map_adapter_error, map_lease_error,
-    map_upstream_error, timing, validate_http_lease_coordinates,
+    BrokerHttpResponse, BrokerLeaseProvider, BrokerRedactedBody, BrokerRequestError,
+    BrokerResponseBody, BrokerUpstreamBody, BrokerUpstreamRequest, BrokerUpstreamTransport,
+    OPENAI_OPERATION, OPENAI_ROUTE, OpenAiBroker, Phase, ProviderStreamingResponse,
+    ValidatedGuestRequest, map_adapter_error, map_lease_error, map_upstream_error, timing,
+    validate_http_lease_coordinates,
 };
 use crate::BrokerCredentialLease as _;
 use crate::anthropic::ValidatedAnthropicRequest;
+use crate::gemini::ValidatedGeminiRequest;
 use crate::openai::ValidatedOpenAiRequest;
 use crate::transparent::without_framing;
 
@@ -59,6 +61,7 @@ where
         request: ValidatedGuestRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let presented = match Presented::of(&request.headers) {
+            Presented::DisallowedPlaceholder => return Err(BrokerRequestError::InvalidRequest),
             Presented::Conflict => return Ok(credential_conflict_response()),
             Presented::Foreign => None,
             Presented::Placeholder(placeholder) => Some(placeholder),
@@ -130,6 +133,7 @@ where
         session: &Arc<FrontDoorSession>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let presented = match Presented::of(&request.headers) {
+            Presented::DisallowedPlaceholder => return Err(BrokerRequestError::InvalidRequest),
             Presented::Conflict => return Ok(credential_conflict_response()),
             Presented::Foreign => None,
             Presented::Placeholder(placeholder) => Some(placeholder),
@@ -290,6 +294,131 @@ where
         .await
     }
 
+    /// A front-door Gemini API request under the swap rule (#6555).
+    ///
+    /// Only `x-goog-api-key` carrying this environment's `cwp1_` placeholder
+    /// triggers a swap. Any `cwp1_` tag in a raw or percent-decoded query
+    /// parameter or in a disallowed credential header fails closed (`400`)
+    /// before any lease or untouched-forward check; a swap beside a `key` or
+    /// `access_token` query parameter or another credential header is refused
+    /// as `400 credential_conflict`.
+    pub(super) async fn execute_gemini_swap(
+        &self,
+        request: ValidatedGuestRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        if query_carries_placeholder_tag(request.query.as_deref()) {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
+        let presented = match Presented::of_for(&request.headers, SwapCarrier::GeminiApiKey) {
+            Presented::DisallowedPlaceholder => return Err(BrokerRequestError::InvalidRequest),
+            Presented::Conflict => return Ok(credential_conflict_response()),
+            Presented::Foreign => None,
+            Presented::Placeholder(placeholder) => Some(placeholder),
+        };
+        if presented.is_some() && query_has_google_credential_param(request.query.as_deref()) {
+            return Ok(credential_conflict_response());
+        }
+        let validated = self
+            .gemini_adapter
+            .validate_request(
+                &request.method,
+                &request.path,
+                request.query.as_deref(),
+                request.headers,
+                request.body,
+            )
+            .map_err(map_adapter_error)?;
+        let Some(presented) = presented else {
+            return self.forward_gemini(validated).await;
+        };
+        if self.placeholders.known_foreign(&request.slot, &presented) {
+            return self.forward_gemini(validated).await;
+        }
+        let operation = BrokerOperationId::parse(crate::gemini::OPERATION)
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let lease = self
+            .leases
+            .lease_operation(
+                request.request_id,
+                request.slot.clone(),
+                operation.clone(),
+                request.route.clone(),
+            )
+            .await
+            .map_err(map_lease_error)?;
+        validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
+        if lease.placeholder_failed() {
+            drop(lease);
+            return Err(BrokerRequestError::AuthorityUnavailable);
+        }
+        self.placeholders
+            .remember(&request.slot, lease.placeholder());
+        if !lease
+            .placeholder()
+            .is_some_and(|ours| ours.ct_eq(&presented))
+        {
+            drop(lease);
+            return self.forward_gemini(validated).await;
+        }
+        self.serve_gemini(lease, validated).await
+    }
+
+    async fn serve_gemini(
+        &self,
+        lease: P::Lease,
+        validated: ValidatedGeminiRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let prepared = self
+            .gemini_adapter
+            .prepare_validated(lease, validated)
+            .map_err(map_adapter_error)?;
+        let (method, target, headers, body, policy) = prepared.into_parts();
+        let response = timing::timed(
+            Phase::Provider,
+            self.upstream.execute(BrokerUpstreamRequest {
+                method,
+                target,
+                headers,
+                body,
+                body_stream: None,
+                pinned: None,
+            }),
+        )
+        .await
+        .map_err(map_upstream_error)?;
+        let (status, headers, body) = response.into_parts();
+        if status.is_informational() {
+            return Err(BrokerRequestError::UpstreamFailed);
+        }
+        let (headers, redactor) = policy.begin(&headers).map_err(map_adapter_error)?;
+        Ok(BrokerHttpResponse::new(
+            status,
+            headers,
+            Box::pin(BrokerRedactedBody {
+                upstream: body,
+                redactor: Some(ProviderStreamingResponse::Gemini(redactor)),
+                finished: false,
+            }),
+        ))
+    }
+
+    async fn forward_gemini(
+        &self,
+        validated: ValidatedGeminiRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let (method, target, headers, body) =
+            validated.into_forwarded().map_err(map_adapter_error)?;
+        self.forward(
+            method,
+            target,
+            &headers,
+            body,
+            None,
+            crate::gemini::MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
     /// A front-door Anthropic request that carries no placeholder of this
     /// environment's: sent to the pinned origin as the environment sent it,
     /// framing aside, and its reply returned unredacted, since nothing of
@@ -403,39 +532,63 @@ pub(super) fn credential_conflict_response() -> BrokerHttpResponse {
     )
 }
 
-/// Headers that carry a credential. Only `authorization` and `x-api-key` can
-/// carry a placeholder the broker swaps; the other two only count against a
-/// placeholder sent beside them.
-pub(super) const CREDENTIAL_HEADERS: [HeaderName; 4] = [
+/// Headers that carry a credential. Each route's [`SwapCarrier`] selects which
+/// headers may trigger a swap; every other header in this list counts toward
+/// conflicts and fails closed when carrying a placeholder on a disallowed route.
+pub(super) const CREDENTIAL_HEADERS: [HeaderName; 5] = [
     header::AUTHORIZATION,
     HeaderName::from_static("x-api-key"),
+    HeaderName::from_static("x-goog-api-key"),
     header::PROXY_AUTHORIZATION,
     header::COOKIE,
 ];
 
+/// Which credential headers a route accepts as a swap carrier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SwapCarrier {
+    /// `authorization` and `x-api-key` (Anthropic, Codex, GitHub).
+    Standard,
+    /// `x-goog-api-key` only (`generativelanguage.googleapis.com`).
+    GeminiApiKey,
+}
+
 /// What credential a front-door request presents.
 #[derive(Debug)]
 pub(super) enum Presented {
-    /// One placeholder-shaped value, in a swap shape, and no other credential
-    /// header. Whether it is this environment's is decided after the lease.
+    /// One placeholder-shaped value, in a swap shape admitted for this route,
+    /// and no other credential header. Whether it is this environment's is
+    /// decided after the lease.
     Placeholder(CredentialPlaceholder),
     /// No placeholder in a swap shape: forwarded untouched, without a lease.
     Foreign,
     /// A placeholder beside another credential header, or more than one.
     Conflict,
+    /// A `cwp1_` placeholder in a credential header disallowed on this route:
+    /// refused (`400`), never swapped and never forwarded.
+    DisallowedPlaceholder,
 }
 
 impl Presented {
     pub(super) fn of(headers: &HeaderMap) -> Self {
+        Self::of_for(headers, SwapCarrier::Standard)
+    }
+
+    pub(super) fn of_for(headers: &HeaderMap, carrier: SwapCarrier) -> Self {
         let mut credential_values = 0_usize;
         let mut placeholders = Vec::new();
+        let mut disallowed = false;
         for name in &CREDENTIAL_HEADERS {
             for value in headers.get_all(name) {
                 credential_values += 1;
-                if let Some(placeholder) = swap_shape(name, value.as_bytes()) {
+                if let Some(placeholder) = swap_shape_for(carrier, name, value.as_bytes()) {
                     placeholders.push(placeholder);
+                } else if disallowed_placeholder_for(carrier, name, value.as_bytes()) {
+                    disallowed = true;
                 }
             }
+        }
+        if disallowed {
+            return Self::DisallowedPlaceholder;
         }
         match (placeholders.len(), credential_values) {
             (0, _) => Self::Foreign,
@@ -445,29 +598,100 @@ impl Presented {
     }
 }
 
-/// The placeholder `value` carries in one of the swap shapes for `name`.
-fn swap_shape(name: &HeaderName, value: &[u8]) -> Option<CredentialPlaceholder> {
+fn contains_placeholder_tag(bytes: &[u8]) -> bool {
+    let needle = CREDENTIAL_PLACEHOLDER_TAG.as_bytes();
+    bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+fn disallowed_placeholder_for(carrier: SwapCarrier, name: &HeaderName, value: &[u8]) -> bool {
+    match carrier {
+        // Non-Gemini routes never accept `x-goog-api-key` as a swap trigger and
+        // refuse a `cwp1_` placeholder placed there.
+        SwapCarrier::Standard => {
+            name.as_str() == "x-goog-api-key" && contains_placeholder_tag(value)
+        }
+        // On Gemini, any `cwp1_` placeholder in any disallowed credential
+        // header (or malformed `x-goog-api-key`) fails closed (`400`).
+        SwapCarrier::GeminiApiKey => {
+            if contains_placeholder_tag(value) {
+                return true;
+            }
+            if *name == header::AUTHORIZATION
+                && let Ok(text) = std::str::from_utf8(value)
+                && let Some((scheme, rest)) = text.split_once(' ')
+                && scheme.eq_ignore_ascii_case("basic")
+                && let Ok(decoded) = STANDARD.decode(rest)
+            {
+                return contains_placeholder_tag(&decoded);
+            }
+            false
+        }
+    }
+}
+
+/// Whether raw or percent-decoded query parameter names or values carry the
+/// `cwp1_` placeholder tag (matching `marked_encoded` in `token_host.rs`).
+pub(super) fn query_carries_placeholder_tag(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    contains_placeholder_tag(query.as_bytes())
+        || url::form_urlencoded::parse(query.as_bytes()).any(|(name, value)| {
+            contains_placeholder_tag(name.as_bytes()) || contains_placeholder_tag(value.as_bytes())
+        })
+}
+
+/// Whether any decoded query parameter carries a Google API credential
+/// parameter (`key` or `access_token`), which conflicts with a swapped header.
+pub(super) fn query_has_google_credential_param(query: Option<&str>) -> bool {
+    query.is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| {
+            name.eq_ignore_ascii_case("key") || name.eq_ignore_ascii_case("access_token")
+        })
+    })
+}
+
+/// The placeholder `value` carries in one of the swap shapes admitted for
+/// `(carrier, name)`.
+fn swap_shape_for(
+    carrier: SwapCarrier,
+    name: &HeaderName,
+    value: &[u8],
+) -> Option<CredentialPlaceholder> {
     let value = std::str::from_utf8(value).ok()?;
-    let candidate = if *name == header::AUTHORIZATION {
-        match value.split_once(' ') {
-            None => value.to_owned(),
-            // Exactly one space after the scheme, as RFC 9110 writes it; a
-            // value with more is not a swap shape and is forwarded untouched.
-            Some((scheme, rest)) => {
-                if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("token") {
-                    rest.to_owned()
-                } else if scheme.eq_ignore_ascii_case("basic") {
-                    let decoded = String::from_utf8(STANDARD.decode(rest).ok()?).ok()?;
-                    decoded.split_once(':')?.1.to_owned()
-                } else {
-                    return None;
-                }
+    let candidate = match carrier {
+        SwapCarrier::GeminiApiKey => {
+            if name.as_str() == "x-goog-api-key" {
+                value.to_owned()
+            } else {
+                return None;
             }
         }
-    } else if name.as_str() == "x-api-key" {
-        value.to_owned()
-    } else {
-        return None;
+        SwapCarrier::Standard => {
+            if *name == header::AUTHORIZATION {
+                match value.split_once(' ') {
+                    None => value.to_owned(),
+                    // Exactly one space after the scheme, as RFC 9110 writes it; a
+                    // value with more is not a swap shape and is forwarded untouched.
+                    Some((scheme, rest)) => {
+                        if scheme.eq_ignore_ascii_case("bearer")
+                            || scheme.eq_ignore_ascii_case("token")
+                        {
+                            rest.to_owned()
+                        } else if scheme.eq_ignore_ascii_case("basic") {
+                            let decoded = String::from_utf8(STANDARD.decode(rest).ok()?).ok()?;
+                            decoded.split_once(':')?.1.to_owned()
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+            } else if name.as_str() == "x-api-key" {
+                value.to_owned()
+            } else {
+                return None;
+            }
+        }
     };
     CredentialPlaceholder::looks_like(&candidate)
         .then(|| CredentialPlaceholder::parse(&candidate).ok())

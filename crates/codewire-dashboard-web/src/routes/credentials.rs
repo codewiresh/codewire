@@ -9,7 +9,6 @@ use axum::{
 };
 use chrono::{NaiveDateTime, Utc};
 use codewire_access::AccessProfileName;
-use codewire_proto::codewire::v1::AccessProfileEntry;
 use connectrpc::ErrorCode;
 use serde::Deserialize;
 use tokio_stream::{StreamExt as _, wrappers::ReceiverStream};
@@ -33,9 +32,8 @@ use crate::{
     state::AppState,
     templates::CredentialSettingsTemplate,
     view::{
-        CredentialApiKeySubmission, CredentialOAuthSubmission, CredentialProfileCreateSubmission,
-        CredentialProfileDeleteSubmission, CredentialProfileRenameSubmission,
-        CredentialProfileUpdateSubmission, CredentialRenameSubmission,
+        CredentialApiKeySubmission, CredentialOAuthSubmission, CredentialProfileDeleteSubmission,
+        CredentialProfileRenameSubmission, CredentialRenameSubmission,
         CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
         CredentialSshGenerateSubmission, CredentialSshImportSubmission,
         CredentialSubscriptionTokenSubmission, GitHubAppAuthorizationSubmission,
@@ -45,7 +43,9 @@ use crate::{
 
 pub(super) mod claude_sign_in;
 mod lifecycle;
+mod profiles;
 pub(super) use lifecycle::{delete_credential_action, revoke_credential_action};
+pub(super) use profiles::{create_profile_action, update_profile_action};
 
 const PATH: &str = "/settings/credentials/";
 pub(super) const GITHUB_APP_CALLBACK_PATH: &str = "/api/v1/github/oauth/callback";
@@ -334,63 +334,6 @@ fn git_identity_redirect(
     redirect(format!("{target}#git-identity"), headers)
 }
 
-pub(super) async fn create_profile_action(
-    State(state): State<AppState>,
-    CredentialQuery(query): CredentialQuery,
-    headers: HeaderMap,
-    Form(form): Form<CredentialProfileCreateSubmission>,
-) -> Response {
-    let dialog = "create-profile";
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    let name = form.name.trim();
-    if !valid_name(name) {
-        return page_error_redirect("profile-invalid", dialog, &query, &headers);
-    }
-    let entries = match entries(form.codex, form.openai, form.anthropic, form.ssh) {
-        Ok(entries) => entries,
-        Err(()) => return page_error_redirect("profile-invalid", dialog, &query, &headers),
-    };
-    match credentials_connect::create_profile(&state, cookie, name.into(), entries).await {
-        Ok(()) => page_redirect("profile-created", false, &query, &headers),
-        Err(error) => mutation_error(error.code, false, dialog, &query, &headers),
-    }
-}
-
-pub(super) async fn update_profile_action(
-    State(state): State<AppState>,
-    CredentialQuery(query): CredentialQuery,
-    headers: HeaderMap,
-    Form(form): Form<CredentialProfileUpdateSubmission>,
-) -> Response {
-    let dialog = row_action_dialog("profile", &form.profile_id, "edit");
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    if exact_id(&form.profile_id).is_err() || !valid_revision(form.expected_revision) {
-        return page_error_redirect("profile-invalid", &dialog, &query, &headers);
-    }
-    let entries = match entries(form.codex, form.openai, form.anthropic, form.ssh) {
-        Ok(entries) => entries,
-        Err(()) => return page_error_redirect("profile-invalid", &dialog, &query, &headers),
-    };
-    match credentials_connect::update_profile(
-        &state,
-        cookie,
-        form.profile_id,
-        form.expected_revision,
-        entries,
-    )
-    .await
-    {
-        Ok(()) => page_redirect("profile-updated", false, &query, &headers),
-        Err(error) => mutation_error(error.code, false, &dialog, &query, &headers),
-    }
-}
-
 /// Relabel a profile. The dialog's observed revision and name fence a stale
 /// view; both names use Create profile's rules and every binding is kept.
 pub(super) async fn rename_profile_action(
@@ -466,6 +409,7 @@ pub(super) async fn add_api_key_action(
     let dialog = match form.provider.as_str() {
         "openai" => "add-openai-api-key",
         "anthropic" => "add-anthropic-api-key",
+        "google" => "add-gemini-api-key",
         _ => "add-credential",
     };
     let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
@@ -475,7 +419,7 @@ pub(super) async fn add_api_key_action(
     let name = form.name.trim();
     let value = form.value.into_bytes();
     let expiry = parse_expiration_utc(&form.expiration_utc);
-    if !matches!(form.provider.as_str(), "openai" | "anthropic")
+    if !matches!(form.provider.as_str(), "openai" | "anthropic" | "google")
         || !valid_credential_name(name)
         || value.is_empty()
         || value.len() > 1024
@@ -1268,32 +1212,6 @@ async fn mutation_cookie(
 ) -> Result<axum::http::HeaderValue, Response> {
     super::settings::mutation_cookie_with_continuation(state, headers, csrf, &page_path(context))
         .await
-}
-
-fn entries(
-    codex: String,
-    openai: String,
-    anthropic: String,
-    ssh: String,
-) -> Result<Vec<AccessProfileEntry>, ()> {
-    let mut entries = Vec::new();
-    for (slot, credential_id) in [
-        ("codex", codex),
-        ("openai", openai),
-        ("anthropic", anthropic),
-        ("ssh", ssh),
-    ] {
-        if credential_id.is_empty() {
-            continue;
-        }
-        exact_id(&credential_id)?;
-        entries.push(AccessProfileEntry {
-            capability_slot: slot.into(),
-            credential_id,
-            ..Default::default()
-        });
-    }
-    Ok(entries)
 }
 
 fn valid_name(name: &str) -> bool {
@@ -2618,25 +2536,6 @@ mod tests {
             assert!(!valid_name(name), "invalid profile name: {name}");
         }
         assert!(valid_credential_name("Work API"));
-    }
-
-    #[test]
-    fn entries_are_closed_and_use_exact_credential_ids() {
-        let id = "00000000-0000-4000-8000-000000000001";
-        let profile_entries =
-            entries(id.into(), String::new(), String::new(), String::new()).unwrap();
-        assert_eq!(profile_entries.len(), 1);
-        assert_eq!(profile_entries[0].capability_slot, "codex");
-        assert_eq!(profile_entries[0].credential_id, id);
-        assert!(
-            entries(
-                "not-an-id".into(),
-                String::new(),
-                String::new(),
-                String::new(),
-            )
-            .is_err()
-        );
     }
 
     #[test]

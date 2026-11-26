@@ -164,6 +164,7 @@ where
             ("anthropic", _) => self.execute_swap(request).await,
             ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request, session).await,
             ("codex", Some(RouteHost::CodexToken)) => self.execute_codex_token(request).await,
+            ("gemini", Some(RouteHost::GeminiApi)) => self.execute_gemini_swap(request).await,
             ("openai" | "codex", Some(RouteHost::OpenAiApi)) => Err(self.openai_api_refusal()),
             _ => Err(BrokerRequestError::InvalidRequest),
         }
@@ -176,8 +177,8 @@ where
 /// every field of it. A front-door request must name one of its route's
 /// hosts, or for Codex a name under a routed suffix, which takes the
 /// ChatGPT host's route and is served only at its session's recorded origin.
-/// Claude's token route exists only behind the front door: a loopback
-/// request for it is refused.
+/// Claude's token route and front-door-only providers (such as Gemini, #6555)
+/// exist only behind the front door: a loopback request for them is refused.
 pub(super) fn intercepted(
     entry: BridgeEntry,
     request: &v1::CredentialBridgeRequest,
@@ -190,7 +191,10 @@ pub(super) fn intercepted(
     };
     match entry {
         BridgeEntry::Loopback
-            if request.intercepted_host.is_empty() && request.route != CLAUDE_TOKEN_ROUTE =>
+            if request.intercepted_host.is_empty()
+                && request.route != CLAUDE_TOKEN_ROUTE
+                && request.capability_slot != "gemini"
+                && request.route != crate::gemini::ROUTE =>
         {
             Ok((None, None))
         }

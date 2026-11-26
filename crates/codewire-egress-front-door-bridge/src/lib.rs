@@ -39,9 +39,10 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
-    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, GITHUB_HOSTS,
-    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
-    OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure, one_label_under,
+    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, GEMINI_API_HOST,
+    GITHUB_HOSTS, MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX,
+    ManagedCredentialClients, OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure,
+    one_label_under,
 };
 use codewire_credential_bridge::{
     CredentialBridge, FrontDoorRequestId, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
@@ -223,7 +224,7 @@ impl RouteTable {
     /// environment's table is cut from ([`Self::serving`]): what cw-egress
     /// reports it serves at admission (#6290).
     pub fn built_in() -> Self {
-        Self::with_optional_hosts(true, true)
+        Self::with_optional_hosts_full(true, true, true)
     }
 
     /// The routes for an environment whose stock clients are `clients`: one
@@ -267,12 +268,20 @@ impl RouteTable {
     /// The defaults, with Claude's token host on every path when
     /// `claude_token_host` and GitHub's two hosts when `github`.
     pub(crate) fn with_optional_hosts(claude_token_host: bool, github: bool) -> Self {
+        Self::with_optional_hosts_full(claude_token_host, github, false)
+    }
+
+    /// The defaults, with optional intercepted hosts: Claude's token host,
+    /// GitHub's two hosts, and Gemini's API host (front-door-only, routed by
+    /// host with no loopback prefix, #6555).
+    fn with_optional_hosts_full(claude_token_host: bool, github: bool, gemini: bool) -> Self {
         let claude_token = claude_token_host
             .then(|| HostRoute::new(CLAUDE_TOKEN_HOST, "/", MANAGED_ANTHROPIC_OAUTH_PREFIX));
         let github = github
             .then(|| GITHUB_HOSTS.map(HostRoute::by_host))
             .into_iter()
             .flatten();
+        let gemini = gemini.then(|| HostRoute::by_host(GEMINI_API_HOST));
         Self::new(
             [HostRoute::new(
                 ANTHROPIC_API_HOST,
@@ -286,7 +295,8 @@ impl RouteTable {
                 HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
                 HostRoute::new(CODEX_TOKEN_HOST, "/", CODEX_PREFIX),
             ])
-            .chain(github),
+            .chain(github)
+            .chain(gemini),
         )
         .and_then(|table| {
             // Codex's account routing can name an origin under chatgpt.com;

@@ -18,7 +18,7 @@ mod subject_hash;
 /// The most DER bytes the seed holds: everything between the credential
 /// placeholders, after the longest daemon token, and the checksum. An ECDSA
 /// P-256 CA constrained to a handful of hosts is about 600 bytes.
-pub const MAX_EGRESS_CA_DER_BYTES: usize = 3084;
+pub const MAX_EGRESS_CA_DER_BYTES: usize = 3035;
 
 /// The DER of one X.509 CA certificate. It parses as a certificate, with
 /// nothing after it, whose basic constraints mark it a CA, so neither a key
@@ -146,18 +146,19 @@ mod tests {
     }
 
     /// The seed's header grew by the runtime move's digest (#4980), which
-    /// took 32 bytes from the CA's room (cw-security, 2026-11-16), and seed
-    /// format 12's GitHub placeholder entry took 49 more (#4001).
+    /// took 32 bytes from the CA's room (cw-security, 2026-11-16), seed
+    /// format 12's GitHub placeholder entry took 49 more (#4001), and seed
+    /// format 13's Gemini placeholder entry took 49 more (#6555).
     #[test]
-    fn the_seed_holds_exactly_3084_bytes_of_ca() {
-        assert_eq!(MAX_EGRESS_CA_DER_BYTES, 3084);
+    fn the_seed_holds_exactly_3035_bytes_of_ca() {
+        assert_eq!(MAX_EGRESS_CA_DER_BYTES, 3035);
         assert_eq!(
-            EgressCaCertificate::from_der(vec![0x30; 3085]),
-            Err(EgressCaError::TooLarge { actual: 3085 })
+            EgressCaCertificate::from_der(vec![0x30; 3036]),
+            Err(EgressCaError::TooLarge { actual: 3036 })
         );
         assert_ne!(
-            EgressCaCertificate::from_der(vec![0x30; 3084]),
-            Err(EgressCaError::TooLarge { actual: 3084 })
+            EgressCaCertificate::from_der(vec![0x30; 3035]),
+            Err(EgressCaError::TooLarge { actual: 3035 })
         );
     }
 

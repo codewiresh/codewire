@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-24
+updated: 2026-11-26
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -117,7 +117,7 @@ terminal it needs `--key-file`. A flag the type doesn't take, such as
 | `github` | Device-code sign-in to the Codewire GitHub App; prints the installation link |
 | `claude` | Claude (sign-in): your Claude subscription; browser sign-in, paste the code shown |
 | `claude-token` | Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded |
-| `anthropic`, `openai` | API key from stdin |
+| `anthropic`, `openai`, `gemini` | API key from stdin |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
 
 <!-- /credential-types -->

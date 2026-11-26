@@ -392,7 +392,7 @@ fn github_enrollment_refusal(error: connectrpc::ConnectError) -> ClientError {
 }
 
 /// A new name that `PROVIDER/NAME` would read as another credential.
-const GITHUB_NAME_RESERVES_PROVIDER: &str = "a credential's name can't start with anthropic/, openai/, github/ or ssh/, which reads as a provider; choose another name; no platform credential was changed";
+const GITHUB_NAME_RESERVES_PROVIDER: &str = "a credential's name can't start with anthropic/, openai/, github/, ssh/ or google/, which reads as a provider; choose another name; no platform credential was changed";
 
 fn codewire_reason(error: &ClientError) -> Option<&str> {
     error

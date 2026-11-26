@@ -60,7 +60,9 @@ pub enum LocalCredentialError {
     CredentialNameAmbiguous { providers: Vec<ProviderId> },
     /// A new or renamed credential's name starts with a provider id and `/`,
     /// which `PROVIDER/NAME` would read as another credential.
-    #[error("a new local credential name may not start with anthropic/, openai/, github/ or ssh/")]
+    #[error(
+        "a new local credential name may not start with anthropic/, openai/, github/, ssh/ or google/"
+    )]
     CredentialNameReservesProvider,
     #[error("local credential is not available")]
     CredentialUnavailable,

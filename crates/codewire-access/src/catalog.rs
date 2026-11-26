@@ -149,6 +149,14 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
                 ),
             )]),
         },
+        ProviderDefinition {
+            id: ProviderId::parse("google").expect("built-in Google provider ID"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::ApiKey]),
+            capabilities: BTreeMap::from([(
+                CapabilitySlot::gemini(),
+                policy(&[CredentialAuthKind::ApiKey], &[("generate", "gemini-api")]),
+            )]),
+        },
     ])
     .expect("built-in provider catalog")
 }

@@ -18,7 +18,7 @@ use std::fmt;
 use crate::{AccessError, CapabilitySlot, CredentialPlaceholder};
 
 /// The slots whose placeholders a Sandbox projects, in wire order.
-pub const PROJECTED_PLACEHOLDER_SLOTS: [&str; 2] = ["anthropic", "github"];
+pub const PROJECTED_PLACEHOLDER_SLOTS: [&str; 3] = ["anthropic", "github", "gemini"];
 
 /// One intercepted epoch's projected placeholders, at most one per slot of
 /// [`PROJECTED_PLACEHOLDER_SLOTS`]. `Debug` names the slots, never a value.
@@ -26,6 +26,7 @@ pub const PROJECTED_PLACEHOLDER_SLOTS: [&str; 2] = ["anthropic", "github"];
 pub struct ProjectedPlaceholders {
     anthropic: Option<CredentialPlaceholder>,
     github: Option<CredentialPlaceholder>,
+    gemini: Option<CredentialPlaceholder>,
 }
 
 impl ProjectedPlaceholders {
@@ -44,6 +45,8 @@ impl ProjectedPlaceholders {
                 &mut set.anthropic
             } else if slot == CapabilitySlot::github().as_str() {
                 &mut set.github
+            } else if slot == CapabilitySlot::gemini().as_str() {
+                &mut set.gemini
             } else {
                 return Err(invalid);
             };
@@ -93,13 +96,24 @@ impl ProjectedPlaceholders {
         self.github.as_ref()
     }
 
+    /// The `gemini` slot's placeholder, projected as `GEMINI_API_KEY` behind
+    /// the front door (#6555).
+    pub fn with_gemini(mut self, placeholder: CredentialPlaceholder) -> Self {
+        self.gemini = Some(placeholder);
+        self
+    }
+
+    pub fn gemini(&self) -> Option<&CredentialPlaceholder> {
+        self.gemini.as_ref()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.anthropic.is_none() && self.github.is_none()
+        self.anthropic.is_none() && self.github.is_none() && self.gemini.is_none()
     }
 
     /// Each `(slot, placeholder)`, in wire order.
     pub fn entries(&self) -> impl Iterator<Item = (&'static str, &CredentialPlaceholder)> {
-        let [anthropic, github] = PROJECTED_PLACEHOLDER_SLOTS;
+        let [anthropic, github, gemini] = PROJECTED_PLACEHOLDER_SLOTS;
         self.anthropic
             .iter()
             .map(move |placeholder| (anthropic, placeholder))
@@ -107,6 +121,11 @@ impl ProjectedPlaceholders {
                 self.github
                     .iter()
                     .map(move |placeholder| (github, placeholder)),
+            )
+            .chain(
+                self.gemini
+                    .iter()
+                    .map(move |placeholder| (gemini, placeholder)),
             )
     }
 
@@ -121,7 +140,9 @@ impl ProjectedPlaceholders {
     /// Whether both sets hold the same placeholders, compared in constant
     /// time.
     pub fn ct_eq(&self, other: &Self) -> bool {
-        same(&self.anthropic, &other.anthropic) & same(&self.github, &other.github)
+        same(&self.anthropic, &other.anthropic)
+            & same(&self.github, &other.github)
+            & same(&self.gemini, &other.gemini)
     }
 }
 

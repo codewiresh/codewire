@@ -114,6 +114,7 @@ fn each_row_names_the_family_the_broker_selects() {
         | HttpProvider::AnthropicApiKey
         | HttpProvider::AnthropicSubscriptionToken
         | HttpProvider::AnthropicClaudeSignIn
+        | HttpProvider::GeminiApiKey
         | HttpProvider::GitHubOAuth => true,
         HttpProvider::GitHubAppAuthorization
         | HttpProvider::CodexDeviceEnrollment
@@ -127,6 +128,7 @@ fn each_row_names_the_family_the_broker_selects() {
         HttpProvider::AnthropicApiKey,
         HttpProvider::AnthropicSubscriptionToken,
         HttpProvider::AnthropicClaudeSignIn,
+        HttpProvider::GeminiApiKey,
         HttpProvider::GitHubOAuth,
         HttpProvider::GitHubAppAuthorization,
         HttpProvider::CodexDeviceEnrollment,
@@ -162,7 +164,10 @@ fn an_agents_variable_is_one_its_family_reserves() {
 /// exactly the slots of the rows whose placeholder the environment holds.
 #[test]
 fn projected_placeholder_slots_are_the_rows_with_a_placeholder() {
-    assert_eq!(PROJECTED_PLACEHOLDER_SLOTS, ["anthropic", "github"]);
+    assert_eq!(
+        PROJECTED_PLACEHOLDER_SLOTS,
+        ["anthropic", "github", "gemini"]
+    );
     let slots: BTreeSet<&str> = CREDENTIAL_TYPES
         .iter()
         .filter(|row| {
@@ -193,7 +198,10 @@ fn each_type_runs_one_subcommands_flow() {
         words(CredentialVerb::Connect),
         ["codex", "github", "claude", "claude-token"]
     );
-    assert_eq!(words(CredentialVerb::Add), ["anthropic", "openai", "ssh"]);
+    assert_eq!(
+        words(CredentialVerb::Add),
+        ["anthropic", "openai", "gemini", "ssh"]
+    );
 }
 
 /// The glossary names each type once, by its label.

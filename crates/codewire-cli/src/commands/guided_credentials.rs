@@ -366,7 +366,7 @@ async fn enroll_for_profile(
                 }),
             }
         }
-        "openai" => CredentialsCommand::Add(CredentialAddArgs {
+        "openai" | "gemini" => CredentialsCommand::Add(CredentialAddArgs {
             provider: Some(slot.into()),
             name: None,
             account_hint: None,
@@ -376,7 +376,11 @@ async fn enroll_for_profile(
             output: crate::commands::OutputFormat::Text,
             guided: false,
         }),
-        _ => anyhow::bail!("unsupported provider; use codex, openai, github, anthropic or ssh"),
+        _ => {
+            anyhow::bail!(
+                "unsupported provider; use codex, openai, github, anthropic, gemini or ssh"
+            )
+        }
     };
     let mut args = CredentialsArgs {
         profile: None,
@@ -591,10 +595,14 @@ mod tests {
             [
                 ("anthropic", "Anthropic API key"),
                 ("openai", "OpenAI API key"),
+                ("gemini", "Gemini API key"),
                 ("ssh", "SSH key"),
             ]
         );
-        assert_eq!(set_slots(), ["codex", "openai", "anthropic", "ssh"]);
+        assert_eq!(
+            set_slots(),
+            ["codex", "openai", "anthropic", "gemini", "ssh"]
+        );
     }
 
     /// `connect` takes the registry's `connect` types, in its order (#6286).

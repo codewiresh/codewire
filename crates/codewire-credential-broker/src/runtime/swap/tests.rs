@@ -163,3 +163,127 @@ async fn a_forwarded_reply_past_its_bound_is_refused() {
         Some(Err(BrokerRequestError::ResponseTooLarge))
     ));
 }
+
+/// Swap carriers are scoped per route: Gemini accepts `x-goog-api-key` alone
+/// and refuses `cwp1_` in any other credential header; non-Gemini routes never
+/// swap `x-goog-api-key` and refuse `cwp1_` placed there (#6555).
+#[test]
+fn gemini_swap_carrier_is_scoped_per_route_and_fails_closed() {
+    let basic = STANDARD.encode(format!("user:{OURS}"));
+    // Gemini swaps exact `x-goog-api-key` placeholder alone.
+    assert_eq!(
+        placeholder(Presented::of_for(
+            &headers(&[("x-goog-api-key", OURS.to_owned())]),
+            SwapCarrier::GeminiApiKey,
+        ))
+        .as_deref(),
+        Some(OURS)
+    );
+    // Non-Gemini routes never accept `x-goog-api-key` as a swap trigger and
+    // refuse a `cwp1_` placeholder in it, while counting a foreign value as a
+    // conflict beside a standard placeholder.
+    assert!(matches!(
+        Presented::of(&headers(&[("x-goog-api-key", OURS.to_owned())])),
+        Presented::DisallowedPlaceholder
+    ));
+    assert!(matches!(
+        Presented::of(&headers(&[
+            ("x-api-key", OURS.to_owned()),
+            ("x-goog-api-key", "foreign-key".to_owned()),
+        ])),
+        Presented::Conflict
+    ));
+    // Gemini refuses any `cwp1_` placeholder in a disallowed credential header
+    // or malformed `x-goog-api-key` (never forwarded).
+    for pairs in [
+        vec![("authorization", format!("Bearer {OURS}"))],
+        vec![("authorization", format!("Basic {basic}"))],
+        vec![("x-api-key", OURS.to_owned())],
+        vec![("cookie", format!("session={OURS}"))],
+        vec![("proxy-authorization", format!("Bearer {OURS}"))],
+        vec![("x-goog-api-key", format!("Bearer {OURS}"))],
+        vec![("x-goog-api-key", format!(" {OURS}"))],
+    ] {
+        assert!(
+            matches!(
+                Presented::of_for(&headers(&pairs), SwapCarrier::GeminiApiKey),
+                Presented::DisallowedPlaceholder
+            ),
+            "{pairs:?}"
+        );
+    }
+    // Gemini refuses a placeholder beside another credential header as Conflict.
+    for pairs in [
+        vec![
+            ("x-goog-api-key", OURS.to_owned()),
+            ("authorization", "Bearer user-key".to_owned()),
+        ],
+        vec![
+            ("x-goog-api-key", OURS.to_owned()),
+            ("x-api-key", "user-key".to_owned()),
+        ],
+        vec![
+            ("x-goog-api-key", OURS.to_owned()),
+            ("cookie", "s=1".to_owned()),
+        ],
+        vec![
+            ("x-goog-api-key", OURS.to_owned()),
+            ("x-goog-api-key", "second".to_owned()),
+        ],
+    ] {
+        assert!(
+            matches!(
+                Presented::of_for(&headers(&pairs), SwapCarrier::GeminiApiKey),
+                Presented::Conflict
+            ),
+            "{pairs:?}"
+        );
+    }
+    // Foreign credentials without `cwp1_` follow the untouched-forward rule.
+    for pairs in [
+        vec![],
+        vec![("x-goog-api-key", "user-own-key".to_owned())],
+        vec![("authorization", "Bearer user-own-token".to_owned())],
+    ] {
+        assert!(
+            matches!(
+                Presented::of_for(&headers(&pairs), SwapCarrier::GeminiApiKey),
+                Presented::Foreign
+            ),
+            "{pairs:?}"
+        );
+    }
+}
+
+/// Raw and percent-decoded query parameters carrying `cwp1_` fail closed, and
+/// `key` / `access_token` query parameters conflict with a swapped Gemini header.
+#[test]
+fn gemini_query_placeholder_and_conflict_checks_decode_percent_escapes() {
+    for raw in [
+        format!("key={OURS}"),
+        format!("key=cwp1%5F{}", &OURS[5..]),
+        format!("alt=sse&other=%63wp1%5F{}", &OURS[5..]),
+        "cwp1%5Fname=1".to_string(),
+    ] {
+        assert!(query_carries_placeholder_tag(Some(&raw)), "{raw}");
+    }
+    for clean in [None, Some(""), Some("alt=sse"), Some("key=user-key")] {
+        assert!(!query_carries_placeholder_tag(clean), "{clean:?}");
+    }
+    for conflict in [
+        "key=user-key",
+        "alt=sse&key=user-key",
+        "access_token=ya29.user",
+        "%6bey=user-key",
+        "access%5Ftoken=tok",
+        "KEY=user-key",
+    ] {
+        assert!(
+            query_has_google_credential_param(Some(conflict)),
+            "{conflict}"
+        );
+    }
+    for ok in [None, Some(""), Some("alt=sse"), Some("apikey=1")] {
+        assert!(!query_has_google_credential_param(ok), "{ok:?}");
+    }
+}

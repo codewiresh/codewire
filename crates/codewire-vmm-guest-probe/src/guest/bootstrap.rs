@@ -368,7 +368,7 @@ pub(super) fn with_boot_selection(plan: WorkspacePlan, seed: &Seed) -> Result<Wo
         plan,
         seed.egress_ca(),
         seed.managed_credential_clients(),
-        interception::binds_github(seed),
+        interception::binds_github(seed) || interception::binds_gemini(seed),
     )
 }
 

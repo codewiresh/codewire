@@ -161,16 +161,18 @@ pub enum ManagedCredentialClient {
     Anthropic,
     Ssh,
     GitHub,
+    Gemini,
 }
 
 impl ManagedCredentialClient {
-    const fn bit(self) -> u8 {
+    const fn bit(self) -> u16 {
         match self {
             Self::Codex => 1,
             Self::OpenAi => 2,
             Self::Anthropic => 4,
             Self::Ssh => 8,
             Self::GitHub => 16,
+            Self::Gemini => 128,
         }
     }
 
@@ -205,6 +207,7 @@ impl ManagedCredentialClient {
             // refused with the GitHub provider's own names
             // (`HttpProvider::reserved_environment_keys`).
             Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
+            Self::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
         }
     }
 }
@@ -256,12 +259,12 @@ const MANAGED_CLIENT_ENCODINGS: [&str; 32] = [
 
 /// The Anthropic client's subscription-token form, valid only with the
 /// Anthropic client itself. It is never set from slot names alone.
-const ANTHROPIC_SUBSCRIPTION_TOKEN_BIT: u8 = 32;
+const ANTHROPIC_SUBSCRIPTION_TOKEN_BIT: u16 = 32;
 /// The Anthropic client's sign-in form, under the same rule, and never with
 /// the subscription-token form.
-const ANTHROPIC_SIGN_IN_BIT: u8 = 64;
+const ANTHROPIC_SIGN_IN_BIT: u16 = 64;
 /// Every bit a selection may set.
-const ALL_CLIENT_BITS: u8 = 127;
+const ALL_CLIENT_BITS: u16 = 0x00ff;
 
 /// The 16 selections with the Anthropic client in its subscription-token form,
 /// in the same finite v2 hexadecimal bitset. Every earlier encoding keeps its
@@ -278,16 +281,36 @@ const ANTHROPIC_SIGN_IN_ENCODINGS: [&str; 16] = [
     "v2:56", "v2:57", "v2:5c", "v2:5d", "v2:5e", "v2:5f",
 ];
 
+/// Selections carrying [`ManagedCredentialClient::Gemini`] use a finite `v3:`
+/// hexadecimal bitset while every earlier `v1:` and `v2:` token keeps its
+/// exact bytes (#6555). Each fits the native seed's 32-byte field.
+const V3_GEMINI_ENCODINGS: [&str; 32] = [
+    "v3:80", "v3:81", "v3:82", "v3:83", "v3:84", "v3:85", "v3:86", "v3:87", "v3:88", "v3:89",
+    "v3:8a", "v3:8b", "v3:8c", "v3:8d", "v3:8e", "v3:8f", "v3:90", "v3:91", "v3:92", "v3:93",
+    "v3:94", "v3:95", "v3:96", "v3:97", "v3:98", "v3:99", "v3:9a", "v3:9b", "v3:9c", "v3:9d",
+    "v3:9e", "v3:9f",
+];
+
+const V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS: [&str; 16] = [
+    "v3:a4", "v3:a5", "v3:a6", "v3:a7", "v3:ac", "v3:ad", "v3:ae", "v3:af", "v3:b4", "v3:b5",
+    "v3:b6", "v3:b7", "v3:bc", "v3:bd", "v3:be", "v3:bf",
+];
+
+const V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS: [&str; 16] = [
+    "v3:c4", "v3:c5", "v3:c6", "v3:c7", "v3:cc", "v3:cd", "v3:ce", "v3:cf", "v3:d4", "v3:d5",
+    "v3:d6", "v3:d7", "v3:dc", "v3:dd", "v3:de", "v3:df",
+];
+
 /// Index into [`ANTHROPIC_SUBSCRIPTION_ENCODINGS`] or
 /// [`ANTHROPIC_SIGN_IN_ENCODINGS`] of a selection with the Anthropic client in
-/// that form: the four other client bits.
-const fn anthropic_form_index(bits: u8) -> usize {
+/// that form: the four other low client bits.
+const fn anthropic_form_index(bits: u16) -> usize {
     ((bits & 0b0000_0011) | ((bits & 0b0001_1000) >> 1)) as usize
 }
 
 /// Inverse of [`anthropic_form_index`] for the form bit `form`.
-const fn anthropic_form_bits(form: u8, index: usize) -> u8 {
-    let index = index as u8;
+const fn anthropic_form_bits(form: u16, index: usize) -> u16 {
+    let index = index as u16;
     ManagedCredentialClient::Anthropic.bit() | form | (index & 0b0011) | ((index & 0b1100) << 1)
 }
 
@@ -295,24 +318,25 @@ const fn anthropic_form_bits(form: u8, index: usize) -> u8 {
 /// or an upstream transport selection. The caller supplies an authenticated,
 /// exact bound profile revision; neither names nor this encoding prove authority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ManagedCredentialClients(u8);
+pub struct ManagedCredentialClients(u16);
 
 impl ManagedCredentialClients {
     /// Validate exact closed profile slot names, including duplicates.
-    /// Processing fails by the sixth item at the latest; no unbounded collection
-    /// of caller strings or credential metadata is retained.
+    /// Processing fails by the seventh item at the latest; no unbounded
+    /// collection of caller strings or credential metadata is retained.
     pub fn from_profile_slots<'a>(
         slots: impl IntoIterator<Item = &'a str>,
     ) -> Result<Self, ProjectionError> {
-        let mut seen = 0_u8;
-        let mut clients = 0_u8;
+        let mut seen = 0_u16;
+        let mut clients = 0_u16;
         for slot in slots {
             let bit = match slot {
-                "codex" => 1,
-                "openai" => 2,
-                "anthropic" => 4,
-                "ssh" => 8,
-                "github" => 16,
+                "codex" => ManagedCredentialClient::Codex.bit(),
+                "openai" => ManagedCredentialClient::OpenAi.bit(),
+                "anthropic" => ManagedCredentialClient::Anthropic.bit(),
+                "ssh" => ManagedCredentialClient::Ssh.bit(),
+                "github" => ManagedCredentialClient::GitHub.bit(),
+                "gemini" => ManagedCredentialClient::Gemini.bit(),
                 _ => return Err(ProjectionError::InvalidManagedClientSelection),
             };
             if seen & bit != 0 {
@@ -376,7 +400,7 @@ impl ManagedCredentialClients {
         }
     }
 
-    /// One of 64 canonical tokens for private bootstrap metadata. Empty
+    /// One of 128 canonical tokens for private bootstrap metadata. Empty
     /// selection is explicit; unversioned or reordered forms are not aliases.
     pub fn encode(self) -> &'static str {
         debug_assert!(
@@ -385,7 +409,15 @@ impl ManagedCredentialClients {
                     || self.contains(ManagedCredentialClient::Anthropic))
                 && !(self.anthropic_subscription_token() && self.anthropic_sign_in())
         );
-        if self.anthropic_subscription_token() {
+        if self.contains(ManagedCredentialClient::Gemini) {
+            if self.anthropic_subscription_token() {
+                V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
+            } else if self.anthropic_sign_in() {
+                V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
+            } else {
+                V3_GEMINI_ENCODINGS[usize::from(self.0 & 0x1f)]
+            }
+        } else if self.anthropic_subscription_token() {
             ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
         } else if self.anthropic_sign_in() {
             ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
@@ -400,19 +432,38 @@ impl ManagedCredentialClients {
             .iter()
             .position(|candidate| *candidate == value)
         {
-            return Ok(Self(bits as u8));
+            return Ok(Self(bits as u16));
         }
-        let form = |encodings: &[&str; 16], bit| {
+        if let Some(low) = V3_GEMINI_ENCODINGS
+            .iter()
+            .position(|candidate| *candidate == value)
+        {
+            return Ok(Self(ManagedCredentialClient::Gemini.bit() | (low as u16)));
+        }
+        let form = |encodings: &[&str; 16], extra: u16| {
             encodings
                 .iter()
                 .position(|candidate| *candidate == value)
-                .map(|index| Self(anthropic_form_bits(bit, index)))
+                .map(|index| Self(anthropic_form_bits(extra, index)))
         };
+        let gemini = ManagedCredentialClient::Gemini.bit();
         form(
             &ANTHROPIC_SUBSCRIPTION_ENCODINGS,
             ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
         )
         .or_else(|| form(&ANTHROPIC_SIGN_IN_ENCODINGS, ANTHROPIC_SIGN_IN_BIT))
+        .or_else(|| {
+            form(
+                &V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+                gemini | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
+            )
+        })
+        .or_else(|| {
+            form(
+                &V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS,
+                gemini | ANTHROPIC_SIGN_IN_BIT,
+            )
+        })
         .ok_or(ProjectionError::InvalidManagedClientSelection)
     }
 
@@ -427,6 +478,12 @@ impl ManagedCredentialClients {
         Self(self.0 & !ManagedCredentialClient::GitHub.bit())
     }
 
+    /// This selection without the Gemini client: a boot without a Gemini
+    /// placeholder binds no Gemini host.
+    pub fn without_gemini(self) -> Self {
+        Self(self.0 & !ManagedCredentialClient::Gemini.bit())
+    }
+
     /// Provider names owned only while their client is selected. Generic
     /// runtime and GitHub names remain their adapters' responsibility.
     pub fn reserved_environment_keys(self) -> BTreeSet<&'static str> {
@@ -436,6 +493,7 @@ impl ManagedCredentialClients {
             ManagedCredentialClient::Anthropic,
             ManagedCredentialClient::Ssh,
             ManagedCredentialClient::GitHub,
+            ManagedCredentialClient::Gemini,
         ]
         .into_iter()
         .filter(|client| self.contains(*client))
@@ -685,6 +743,7 @@ pub struct ManagedCredentialClientProjection {
 pub struct Interception {
     anthropic: Option<CredentialPlaceholder>,
     github: Option<GitHubInterception>,
+    gemini: Option<CredentialPlaceholder>,
     hosted_ca_installed: bool,
 }
 
@@ -702,6 +761,7 @@ impl Interception {
         Self {
             anthropic,
             github: None,
+            gemini: None,
             hosted_ca_installed: false,
         }
     }
@@ -716,6 +776,7 @@ impl Interception {
         Self {
             anthropic,
             github: self.github.clone(),
+            gemini: self.gemini.clone(),
             hosted_ca_installed: self.hosted_ca_installed,
         }
     }
@@ -743,6 +804,16 @@ impl Interception {
         self.github.as_ref().map(|github| github.trust_bundle)
     }
 
+    /// The same interception with the `gemini` slot's placeholder (#6555).
+    pub fn with_gemini(mut self, placeholder: CredentialPlaceholder) -> Self {
+        self.gemini = Some(placeholder);
+        self
+    }
+
+    pub fn gemini(&self) -> Option<&CredentialPlaceholder> {
+        self.gemini.as_ref()
+    }
+
     /// A hosted daemon installed its egress CA before serving (#6072), so
     /// its launches name it. A local guest's PID 1 names its own.
     pub fn with_hosted_ca_installed(mut self) -> Self {
@@ -762,6 +833,7 @@ impl PartialEq for Interception {
             && same_placeholder(self.anthropic(), other.anthropic())
             && same_placeholder(self.github(), other.github())
             && self.github_trust_bundle() == other.github_trust_bundle()
+            && same_placeholder(self.gemini(), other.gemini())
     }
 }
 
@@ -794,12 +866,13 @@ impl ManagedCredentialClients {
             return projection;
         };
         let projection = projection.intercepted(self, interception.anthropic());
-        match &interception.github {
+        let projection = match &interception.github {
             Some(github) => {
                 projection.intercepted_github(self, Some(&github.placeholder), github.trust_bundle)
             }
             None => projection,
-        }
+        };
+        projection.intercepted_gemini(self, interception.gemini())
     }
 }
 
@@ -922,6 +995,30 @@ impl ManagedCredentialClientProjection {
         self.gh = Some(GhConfigProjection::direct());
         self
     }
+
+    /// [`Self::intercepted`] for the Gemini API-key client (#6555): projects
+    /// `GEMINI_API_KEY` only when front-door interception carries a
+    /// placeholder for the `gemini` slot. Without interception or without a
+    /// placeholder, nothing is projected (front-door-only, no loopback route).
+    pub fn intercepted_gemini(
+        mut self,
+        clients: ManagedCredentialClients,
+        gemini: Option<&CredentialPlaceholder>,
+    ) -> Self {
+        if !clients.contains(ManagedCredentialClient::Gemini) {
+            return self;
+        }
+        match gemini {
+            Some(placeholder) => {
+                self.environment
+                    .insert("GEMINI_API_KEY".into(), placeholder.as_str().into());
+            }
+            None => {
+                self.environment.remove("GEMINI_API_KEY");
+            }
+        }
+        self
+    }
 }
 
 /// A Git credential helper, as a shell snippet Git runs itself, that answers
@@ -1014,7 +1111,8 @@ impl CodexProviderProjection {
             }
             ManagedCredentialClient::Anthropic
             | ManagedCredentialClient::Ssh
-            | ManagedCredentialClient::GitHub => return None,
+            | ManagedCredentialClient::GitHub
+            | ManagedCredentialClient::Gemini => return None,
         };
         Some(projection.expect("fixed managed HTTP port is unprivileged"))
     }

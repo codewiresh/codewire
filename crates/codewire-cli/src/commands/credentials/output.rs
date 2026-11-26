@@ -345,6 +345,9 @@ pub(in crate::commands) fn at_provider(
         ("anthropic", "api_key", _) => {
             "The key still works at Anthropic until you revoke it at https://console.anthropic.com/settings/keys.".to_owned()
         }
+        ("google", "api_key", _) => {
+            "The key still works at Google until you revoke it at https://aistudio.google.com/apikey.".to_owned()
+        }
         // A Claude subscription token (`claude setup-token`).
         ("anthropic", "oauth", _) => {
             "The token keeps working at Anthropic until it expires, or until you revoke it in your Claude account.".to_owned()
