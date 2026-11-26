@@ -138,6 +138,33 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Begin an Antigravity sign-in: Google's authorize URL and the opaque
+    /// handle the caller keeps private and returns to
+    /// [`Self::complete_antigravity_sign_in`].
+    pub async fn start_antigravity_sign_in(
+        &self,
+        request: StartAntigravitySignInRequest,
+    ) -> Result<StartAntigravitySignInResponse, ClientError> {
+        self.credential_mutations
+            .start_antigravity_sign_in_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// Submit the pasted callback URL or `code#state` of a started Antigravity
+    /// sign-in. The reply contains only committed metadata; no token is returned.
+    pub async fn complete_antigravity_sign_in(
+        &self,
+        request: CompleteAntigravitySignInRequest,
+    ) -> Result<CompleteAntigravitySignInResponse, ClientError> {
+        self.credential_mutations
+            .complete_antigravity_sign_in_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn list_credentials(
         &self,
         request: ListCredentialsRequest,
@@ -1481,6 +1508,12 @@ mod tests {
             ("CREDENTIAL_MUTATION_UNCERTAIN", UNKNOWN, UNKNOWN),
             ("CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID", UNKNOWN, UNKNOWN),
             ("CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED", UNKNOWN, UNKNOWN),
+            (
+                "CREDENTIAL_ANTIGRAVITY_SIGN_IN_CODE_INVALID",
+                UNKNOWN,
+                UNKNOWN,
+            ),
+            ("CREDENTIAL_ANTIGRAVITY_SIGN_IN_EXPIRED", UNKNOWN, UNKNOWN),
             // After the challenge the service names a new credential after the
             // GitHub login, which has no `/`, so only the requested name can
             // reserve a provider.

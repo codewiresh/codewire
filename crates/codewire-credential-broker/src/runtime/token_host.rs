@@ -5,7 +5,10 @@
 //! Codewire value in a request and answer in RFC 6749's shape the same way.
 
 use bytes::Bytes;
-use codewire_access::{CODEX_MANAGED_REFRESH_TOKEN, CREDENTIAL_PLACEHOLDER_TAG, DerivedGrant};
+use codewire_access::{
+    ANTIGRAVITY_MANAGED_REFRESH_TOKEN, CODEX_MANAGED_REFRESH_TOKEN, CREDENTIAL_PLACEHOLDER_TAG,
+    DerivedGrant,
+};
 use futures::stream;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -205,12 +208,16 @@ pub(super) fn carries_codewire_value(
     body: Option<&Value>,
 ) -> bool {
     fn marked(text: &[u8]) -> bool {
-        [CREDENTIAL_PLACEHOLDER_TAG, CODEX_MANAGED_REFRESH_TOKEN]
-            .iter()
-            .any(|needle| {
-                text.windows(needle.len())
-                    .any(|window| window == needle.as_bytes())
-            })
+        [
+            CREDENTIAL_PLACEHOLDER_TAG,
+            CODEX_MANAGED_REFRESH_TOKEN,
+            ANTIGRAVITY_MANAGED_REFRESH_TOKEN,
+        ]
+        .iter()
+        .any(|needle| {
+            text.windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        })
     }
     // Percent escapes and `+` undone: neither needle has `&`, `=` or `+`.
     fn marked_encoded(text: &[u8]) -> bool {

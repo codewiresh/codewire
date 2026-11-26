@@ -2,7 +2,7 @@
 
 use codewire_access::CredentialAuthKind;
 use codewire_credential_broker::{
-    ClaudeOAuthImport, CodexOAuthImport, GitHubAppAuthorizationImport,
+    AntigravityOAuthImport, ClaudeOAuthImport, CodexOAuthImport, GitHubAppAuthorizationImport,
 };
 use codewire_protected_store::ProtectedValue;
 
@@ -14,6 +14,7 @@ pub(super) enum Completed {
     Codex(Option<CodexOAuthImport>),
     GithubApp(GitHubAppAuthorizationImport),
     Claude(Option<ClaudeOAuthImport>),
+    Antigravity(Option<AntigravityOAuthImport>),
 }
 
 #[derive(Clone, Copy)]
@@ -29,13 +30,14 @@ impl Completed {
             Self::Codex(_) => "openai",
             Self::GithubApp(_) => "github",
             Self::Claude(_) => "anthropic",
+            Self::Antigravity(_) => "google",
         }
     }
 
     /// The kind the login is stored as: a Claude sign-in is its own kind.
     pub(super) fn authentication_kind(&self) -> CredentialAuthKind {
         match self {
-            Self::Codex(_) | Self::GithubApp(_) => CredentialAuthKind::OAuth,
+            Self::Codex(_) | Self::GithubApp(_) | Self::Antigravity(_) => CredentialAuthKind::OAuth,
             Self::Claude(_) => CredentialAuthKind::ClaudeSignIn,
         }
     }
@@ -50,6 +52,10 @@ impl Completed {
                 .take_import()
                 .map_err(super::github_app::github_app_error)?,
             Self::Claude(value) => {
+                let (bundle, hint) = value.take().ok_or(Error::EnrollmentFailed)?.into_parts();
+                (bundle.into_bytes(), hint)
+            }
+            Self::Antigravity(value) => {
                 let (bundle, hint) = value.take().ok_or(Error::EnrollmentFailed)?.into_parts();
                 (bundle.into_bytes(), hint)
             }

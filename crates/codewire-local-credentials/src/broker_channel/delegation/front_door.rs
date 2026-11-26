@@ -143,6 +143,7 @@ fn front_door_frame(frame: &bridge::CredentialBridgeGuestMessage) -> bool {
                     | Payload::Ssh(_)
                     | Payload::CodexLogin(_)
                     | Payload::ClaudeLogin(_)
+                    | Payload::AntigravityLogin(_)
             )
         )
 }

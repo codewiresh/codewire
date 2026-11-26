@@ -10,6 +10,7 @@
 
 use std::io;
 
+use crate::antigravity_home::AntigravityHome;
 use crate::claude_home::ClaudeHome;
 use crate::codex_home::CodexHome;
 
@@ -70,6 +71,27 @@ pub fn clear_claude_login(home: &ClaudeHome) -> io::Result<()> {
     }
 }
 
+/// Remove Codewire's placeholder-backed Antigravity token file from `home`.
+/// User-owned token files are kept.
+pub fn clear_antigravity_login(home: &AntigravityHome) -> io::Result<()> {
+    match home.remove_codewire_login() {
+        Ok(removal) => {
+            tracing::info!(
+                antigravity_login = ?removal,
+                "Codewire's Antigravity login cleared"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "Codewire's Antigravity login could not be cleared"
+            );
+            Err(error)
+        }
+    }
+}
+
 /// Remove each agent's Codewire login that no writer keeps for this boot and
 /// owner, whatever the reason the writer is absent: the agent is not selected,
 /// there is no bridge, or the home is of another placement. A failure is
@@ -77,14 +99,19 @@ pub fn clear_claude_login(home: &ClaudeHome) -> io::Result<()> {
 pub(crate) fn clear_unkept_logins(
     codex: &CodexHome,
     claude: &ClaudeHome,
+    antigravity: &AntigravityHome,
     codex_kept: bool,
     claude_kept: bool,
+    antigravity_kept: bool,
 ) {
     if !codex_kept {
         let _ = clear_codex_login(codex);
     }
     if !claude_kept {
         let _ = clear_claude_login(claude);
+    }
+    if !antigravity_kept {
+        let _ = clear_antigravity_login(antigravity);
     }
 }
 
@@ -153,11 +180,12 @@ pub(crate) fn clear_logins_on_environment_change(
 pub fn clear_logins_for_bound_environment(config: &crate::Config, environment_id: uuid::Uuid) {
     let codex = CodexHome::default();
     let claude = ClaudeHome::new(&config.home_root, &config.workspace_root);
+    let antigravity = AntigravityHome::new(&config.home_root);
     clear_logins_on_environment_change(
         &config.home_root,
         &environment_id.hyphenated().to_string(),
         None,
-        || clear_logins(&codex, &claude),
+        || clear_logins(&codex, &claude).and(clear_antigravity_login(&antigravity)),
     );
 }
 

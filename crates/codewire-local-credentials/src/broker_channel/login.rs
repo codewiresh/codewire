@@ -50,6 +50,22 @@ where
         .await
     }
 
+    /// Lease the Antigravity slot's active personal Google OAuth sign-in so
+    /// the broker can deliver its placeholder-only login file behind
+    /// front-door interception. Real Google tokens never leave the broker.
+    pub async fn lease_antigravity_login(
+        &mut self,
+        request_id: Uuid,
+    ) -> Result<CredentialOperationLease, BrokerLeaseChannelError> {
+        self.lease_login(
+            request_id,
+            CapabilitySlot::antigravity(),
+            codewire_access::antigravity_login_permission(),
+            local_antigravity_login_admissible,
+        )
+        .await
+    }
+
     async fn lease_login(
         &mut self,
         request_id: Uuid,
@@ -82,6 +98,8 @@ pub(crate) fn local_login_refused(
         !local_codex_login_admissible(credential, grant)
     } else if *permission == codewire_access::claude_login_permission() {
         !local_claude_login_admissible(credential, grant)
+    } else if *permission == codewire_access::antigravity_login_permission() {
+        !local_antigravity_login_admissible(credential, grant)
     } else {
         false
     }
@@ -113,6 +131,19 @@ pub(crate) fn local_claude_login_admissible(
     grant.capability_slot == CapabilitySlot::anthropic()
         && credential.provider.as_str() == "anthropic"
         && credential.authentication_kind == CredentialAuthKind::ClaudeSignIn
+        && own_active_login_in_profile(credential, grant)
+}
+
+/// The Antigravity sign-in on a local VM: the host owner's own Active Google
+/// OAuth sign-in in the Antigravity slot of the VM's selected local profile.
+/// Never a Gemini API key.
+pub(crate) fn local_antigravity_login_admissible(
+    credential: &CredentialMetadata,
+    grant: &DerivedGrant,
+) -> bool {
+    grant.capability_slot == CapabilitySlot::antigravity()
+        && credential.provider.as_str() == "google"
+        && credential.authentication_kind == CredentialAuthKind::OAuth
         && own_active_login_in_profile(credential, grant)
 }
 

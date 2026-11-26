@@ -29,7 +29,8 @@ pub use binding::{
     change_needs_value, is_provider_host,
 };
 pub use catalog::{
-    CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
+    ANTIGRAVITY_LOGIN_OPERATION, ANTIGRAVITY_LOGIN_ROUTE, CLAUDE_LOGIN_OPERATION,
+    CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE, antigravity_login_permission,
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
 };
 pub use credential_name::{
@@ -41,10 +42,12 @@ pub use credential_types::{
     credential_type_of, credential_types_docs_table, credential_types_for,
 };
 pub use front_door::{
-    ANTHROPIC_API_HOST, CHATGPT_HOST, CHATGPT_WILDCARD, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST,
-    FRONT_DOOR_HOSTS, FrontDoorHost, GEMINI_API_HOST, GITHUB_HOSTS, GITHUB_INTERCEPTED,
-    INTERCEPT_PORT, OPENAI_API_HOST, ROUTED_SUFFIXES, binds_gemini, binds_github, front_door_hosts,
-    one_label_under, routed_suffix,
+    ANTHROPIC_API_HOST, ANTIGRAVITY_API_HOSTS, ANTIGRAVITY_DAILY_HOST, ANTIGRAVITY_HOSTS,
+    ANTIGRAVITY_OAUTH_HOST, ANTIGRAVITY_PROD_HOST, CHATGPT_HOST, CHATGPT_WILDCARD,
+    CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, FRONT_DOOR_HOSTS, FrontDoorHost, GEMINI_API_HOST,
+    GITHUB_HOSTS, GITHUB_INTERCEPTED, INTERCEPT_PORT, OPENAI_API_HOST, ROUTED_SUFFIXES,
+    binds_antigravity, binds_gemini, binds_github, front_door_hosts, one_label_under,
+    routed_suffix,
 };
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile, UngrantedGitHub,
@@ -57,9 +60,9 @@ pub use id::{
     ProviderId,
 };
 pub use managed_refresh::{
-    CLAUDE_MANAGED_REFRESH_NONCE_BYTES, CLAUDE_MANAGED_REFRESH_NONCE_LENGTH,
-    CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX, CODEX_MANAGED_REFRESH_TOKEN,
-    is_managed_claude_refresh_token, managed_claude_refresh_token,
+    ANTIGRAVITY_MANAGED_REFRESH_TOKEN, CLAUDE_MANAGED_REFRESH_NONCE_BYTES,
+    CLAUDE_MANAGED_REFRESH_NONCE_LENGTH, CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
+    CODEX_MANAGED_REFRESH_TOKEN, is_managed_claude_refresh_token, managed_claude_refresh_token,
 };
 pub use model::{
     AccessProfile, CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS, CapabilityPolicy,

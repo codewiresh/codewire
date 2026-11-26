@@ -67,6 +67,7 @@ SHAPES = [
     ("github-pat", rb"github_pat_", rb"[A-Za-z0-9_]", rb"{82}", False),
     ("google-api-key", rb"AIza", rb"[A-Za-z0-9_\-]", rb"{35}", True),
     ("google-oauth", rb"ya29\.", rb"[A-Za-z0-9_\-]", rb"{20,}", False),
+    ("google-refresh-token", rb"1//0", rb"[A-Za-z0-9_\-]", rb"{20,}", False),
     ("gitlab", rb"glpat-", rb"[A-Za-z0-9_\-]", rb"{20,}", False),
     ("slack", rb"xox[abposr]-", rb"[A-Za-z0-9\-]", rb"{10,}", False),
     ("aws-access-key-id", rb"(?:AKIA|ASIA)", rb"[A-Z0-9]", rb"{16}", True),
@@ -92,8 +93,11 @@ BOUND_SHAPES = frozenset(
         "github",
         "github-pat",
         "google-api-key",
+        "google-oauth",
+        "google-refresh-token",
         "refresh-token-field",
         "jwt-openai",
+        "jwt-google",
     }
 )
 BASELINE_HEADER = "# scan-token-shapes baseline"
@@ -154,7 +158,7 @@ PREFIX = re.compile(
 # one is: bytes.find runs at memory speed, a regex tried at every byte does
 # not.
 LITERALS = (
-    b"sk-", b"sk_live_", b"rk_live_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_", b"github_pat_", b"AIza", b"ya29.",
+    b"sk-", b"sk_live_", b"rk_live_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_", b"github_pat_", b"AIza", b"ya29.", b"1//0",
     b"glpat-", b"xox", b"AKIA", b"ASIA", b"hf_", b"cwp1_", b"eyJ", b'"refresh_token"', b"refresh_token",
     b"REFRESH_TOKEN",
 )

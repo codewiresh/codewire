@@ -359,6 +359,10 @@ enum CloudApproval {
         sign_in: String,
         pasted: codewire_protected_store::ProtectedValue,
     },
+    Antigravity {
+        sign_in: String,
+        pasted: codewire_protected_store::ProtectedValue,
+    },
     ClaudeToken(codewire_protected_store::ProtectedValue),
     Codex,
     Github,
@@ -372,7 +376,8 @@ fn cloud_connected_kind(
         CredentialConnectProviderArg::Claude => rpc::CredentialAuthenticationKind::ClaudeSignIn,
         CredentialConnectProviderArg::Codex
         | CredentialConnectProviderArg::Github
-        | CredentialConnectProviderArg::ClaudeToken => rpc::CredentialAuthenticationKind::Oauth,
+        | CredentialConnectProviderArg::ClaudeToken
+        | CredentialConnectProviderArg::Antigravity => rpc::CredentialAuthenticationKind::Oauth,
     }
 }
 
@@ -463,6 +468,18 @@ impl ConnectStore for CloudConnectStore<'_> {
                 interrupt.listen();
                 CloudApproval::Claude { sign_in, pasted }
             }
+            CredentialConnectProviderArg::Antigravity => {
+                let (sign_in, pasted) = start_antigravity_sign_in(
+                    self.client,
+                    login_screen::SignInScreen::cloud(
+                        provider_label(target.provider),
+                        &target.name,
+                    ),
+                )
+                .await?;
+                interrupt.listen();
+                CloudApproval::Antigravity { sign_in, pasted }
+            }
             CredentialConnectProviderArg::ClaudeToken => {
                 CloudApproval::ClaudeToken(read_claude_token(login_screen::SignInScreen::cloud(
                     provider_label(target.provider),
@@ -520,6 +537,25 @@ impl ConnectStore for CloudConnectStore<'_> {
                             rpc::ClientError::new(
                                 rpc::ErrorCode::Internal,
                                 "platform omitted Claude sign-in metadata",
+                            )
+                        })
+                    })
+                    .map(|credential| (credential, Vec::new())),
+                CloudApproval::Antigravity { sign_in, pasted } => client
+                    .complete_antigravity_sign_in(rpc::CompleteAntigravitySignInRequest {
+                        name: request.name,
+                        sign_in,
+                        authorization_code: pasted.expose_secret().to_vec(),
+                        credential_id: request.credential_id,
+                        expected_revocation_generation: request.expected_revocation_generation,
+                        ..Default::default()
+                    })
+                    .await
+                    .and_then(|response| {
+                        response.credential.into_option().ok_or_else(|| {
+                            rpc::ClientError::new(
+                                rpc::ErrorCode::Internal,
+                                "Codewire omitted Antigravity sign-in metadata",
                             )
                         })
                     })
@@ -904,6 +940,27 @@ async fn start_claude_sign_in(
         "platform returned an invalid Claude sign-in"
     );
     let pasted = login_screen::claude_sign_in_code(screen, &started.authorize_url)?;
+    Ok((started.sign_in, pasted))
+}
+
+fn is_valid_antigravity_authorize_url(url: &str) -> bool {
+    url.strip_prefix(codewire_credential_broker::provider_oauth::antigravity::GOOGLE_AUTHORIZE_URL)
+        .is_some_and(|rest| rest.starts_with('?'))
+}
+
+async fn start_antigravity_sign_in(
+    client: &CodewireClient,
+    screen: login_screen::SignInScreen<'_>,
+) -> anyhow::Result<(String, codewire_protected_store::ProtectedValue)> {
+    let started = client
+        .start_antigravity_sign_in(rpc::StartAntigravitySignInRequest::default())
+        .await
+        .context("start the Antigravity sign-in")?;
+    anyhow::ensure!(
+        is_valid_antigravity_authorize_url(&started.authorize_url) && !started.sign_in.is_empty(),
+        "Codewire returned an invalid Antigravity sign-in"
+    );
+    let pasted = login_screen::antigravity_sign_in_code(screen, &started.authorize_url)?;
     Ok((started.sign_in, pasted))
 }
 
@@ -2922,5 +2979,39 @@ mod tests {
         assert!(lookup_name(&client(&server), reading).await.is_err());
         server.verify().await;
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn antigravity_cli_authorize_url_check_matches_sign_in_start() {
+        use async_trait::async_trait;
+        use codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn;
+        use codewire_credential_broker::{
+            BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
+            BrokerUpstreamTransport,
+        };
+
+        struct UnusedTransport;
+        #[async_trait]
+        impl BrokerUpstreamTransport for UnusedTransport {
+            async fn execute(
+                &self,
+                _: BrokerUpstreamRequest,
+            ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+                unreachable!("start does not call upstream")
+            }
+        }
+
+        let started = AntigravitySignIn::new(std::sync::Arc::new(UnusedTransport))
+            .start()
+            .unwrap();
+        assert!(is_valid_antigravity_authorize_url(started.authorize_url()));
+        for invalid in [
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=x",
+            "https://accounts.google.com/o/oauth2/auth",
+            "http://accounts.google.com/o/oauth2/auth?client_id=x",
+            "https://evil.example/o/oauth2/auth?client_id=x",
+        ] {
+            assert!(!is_valid_antigravity_authorize_url(invalid), "{invalid}");
+        }
     }
 }

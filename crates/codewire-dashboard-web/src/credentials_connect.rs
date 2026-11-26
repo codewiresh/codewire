@@ -1069,7 +1069,7 @@ fn build_settings_data_at(
         match slot {
             "codex" => choices.codex.push(choice),
             "openai" => choices.openai.push(choice),
-            "github" | "gemini" => {}
+            "github" | "gemini" | "antigravity" => {}
             "anthropic" => choices.anthropic.push(choice),
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
@@ -1093,7 +1093,8 @@ fn build_settings_data_at(
             oauth_provider: match form {
                 "codex" => "codex",
                 "github" => "github",
-                "openai" | "anthropic" | "gemini" | "claude" | "claude-sign-in" | "ssh" => "",
+                "openai" | "anthropic" | "gemini" | "antigravity" | "claude" | "claude-sign-in"
+                | "ssh" => "",
                 _ => unreachable!("credential_form returns a closed form"),
             },
             authentication: authentication_label(form),
@@ -1106,8 +1107,10 @@ fn build_settings_data_at(
             claude_sign_in: form == "claude-sign-in",
             // A subscription token has no refresh and no provider answer
             // marks it: only its recorded expiry asks its owner for a new one.
-            reconnect_needed: (matches!(form, "codex" | "github" | "claude-sign-in")
-                && credential.status == CredentialStatus::RefreshFailed)
+            reconnect_needed: (matches!(
+                form,
+                "codex" | "github" | "claude-sign-in" | "antigravity"
+            ) && credential.status == CredentialStatus::RefreshFailed)
                 || (form == "claude" && credential.status == CredentialStatus::Active && withheld),
             revoked,
             expires,
@@ -1403,6 +1406,7 @@ pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, C
             Ok("claude-sign-in")
         }
         ("google", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("gemini"),
+        ("google", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("antigravity"),
         ("ssh", kind) if kind == CredentialAuthenticationKind::SshKey => Ok("ssh"),
         _ => Err(invalid_metadata()),
     }
@@ -1441,6 +1445,7 @@ fn attention_notice(form: &str) -> &'static str {
         "openai" => "OpenAI API key needs replacing",
         "anthropic" => "Anthropic API key needs replacing",
         "gemini" => "Gemini API key needs replacing",
+        "antigravity" => "Antigravity sign-in needs Reconnect",
         "claude" => "Claude subscription token needs replacing",
         "claude-sign-in" => "Claude sign-in needs Reconnect",
         "ssh" => "SSH key needs replacing",
@@ -1450,15 +1455,16 @@ fn attention_notice(form: &str) -> &'static str {
 
 /// The notice for a withheld capability, linked to the Credentials page
 /// dialog that the page offers this credential for it (`approved_dialog` in
-/// `routes/credentials.rs` opens exactly these). A Claude sign-in reconnects
-/// from `cw`, and an SSH key is replaced by adding another and choosing it in
-/// the profile, so neither has a single dialog and both link to the list.
+/// `routes/credentials.rs` opens exactly these). A Claude sign-in or
+/// Antigravity sign-in reconnects from `cw`, and an SSH key is replaced by
+/// adding another and choosing it in the profile, so none has a single dialog
+/// and each links to the list.
 fn attention_view(form: &str, credential_id: &str) -> CredentialAttentionView {
     let action = match form {
         "codex" | "github" => "reconnect",
         "openai" | "anthropic" | "gemini" => "rotate",
         "claude" => "replace",
-        "claude-sign-in" | "ssh" => "",
+        "claude-sign-in" | "antigravity" | "ssh" => "",
         _ => unreachable!("closed form"),
     };
     CredentialAttentionView {
@@ -1477,7 +1483,7 @@ fn provider_label(form: &str) -> &'static str {
         "openai" => "OpenAI API",
         "github" => "GitHub",
         "anthropic" | "claude" | "claude-sign-in" => "Anthropic",
-        "gemini" => "Google",
+        "gemini" | "antigravity" => "Google",
         "ssh" => "SSH",
         _ => unreachable!("closed form"),
     }
@@ -1489,6 +1495,7 @@ fn authentication_label(form: &str) -> &'static str {
         "openai" | "anthropic" | "gemini" => "API key",
         "claude" => "Claude subscription token",
         "claude-sign-in" => "Claude",
+        "antigravity" => "Antigravity",
         "ssh" => "SSH key",
         _ => unreachable!("closed form"),
     }
@@ -1501,6 +1508,7 @@ fn slot_label(slot: &str) -> Option<&'static str> {
         "github" => Some("GitHub"),
         "anthropic" => Some("Anthropic"),
         "gemini" => Some("Gemini"),
+        "antigravity" => Some("Antigravity"),
         "ssh" => Some("SSH"),
         _ => None,
     }

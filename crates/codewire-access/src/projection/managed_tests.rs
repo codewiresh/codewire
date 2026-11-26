@@ -1887,6 +1887,49 @@ fn every_shipped_managed_clients_encoding_is_pinned_and_round_trips() {
 }
 
 #[test]
+fn antigravity_v3_encodings_round_trip_and_never_collide() {
+    let slots = [
+        "codex",
+        "openai",
+        "anthropic",
+        "ssh",
+        "github",
+        "gemini",
+        "antigravity",
+    ];
+    let mut seen = BTreeSet::new();
+    for bits in 0..(1_u16 << slots.len()) {
+        let chosen = (0..slots.len())
+            .filter(|bit| bits & (1 << bit) != 0)
+            .map(|bit| slots[bit]);
+        let base = ManagedCredentialClients::from_profile_slots(chosen).unwrap();
+        let forms = [
+            Some(base),
+            base.with_anthropic_subscription_token().ok(),
+            base.with_anthropic_sign_in().ok(),
+        ];
+        for selection in forms.into_iter().flatten() {
+            let encoded = selection.encode();
+            assert!(encoded.len() < 32, "{encoded} exceeds 32-byte seed slot");
+            assert_eq!(
+                ManagedCredentialClients::decode(encoded).unwrap(),
+                selection
+            );
+            assert!(seen.insert(encoded), "{encoded} encodes two selections");
+        }
+    }
+    assert_eq!(seen.len(), 256);
+    let agy = ManagedCredentialClients::from_profile_slots(["antigravity"]).unwrap();
+    assert_eq!(agy.encode(), "v3:100");
+    assert!(!agy.uses_loopback_http());
+    assert!(agy.reserved_environment_keys().is_empty());
+    assert_eq!(
+        agy.without_antigravity(),
+        ManagedCredentialClients::default()
+    );
+}
+
+#[test]
 fn gemini_projects_only_behind_interception_and_reserves_google_names() {
     let selected = ManagedCredentialClients::from_profile_slots(["gemini"]).unwrap();
     assert_eq!(selected.encode(), "v3:80");

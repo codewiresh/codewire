@@ -195,6 +195,7 @@ message CredentialBridgeHostMessage {
     // named reason (#6406). An older daemon refuses a first frame that is not
     // Open, which ends this unadmitted epoch either way.
     CredentialBridgeEpochRefused epoch_refused = 16;
+    AntigravityLoginResponse antigravity_login = 17;
   }
 }
 
@@ -317,6 +318,7 @@ message CredentialBridgeGuestMessage {
     // "request-body-stream".
     CredentialBridgeRequestBody request_body = 12;
     CredentialBridgeRequestEnd request_end = 13;
+    AntigravityLoginRequest antigravity_login = 14;
   }
 }
 
@@ -458,6 +460,32 @@ message ClaudeLoginResponse {
     // token, a credential needing Reconnect, a revoked, organization-owned or
     // another user's credential, or Anthropic not selected) or UNAVAILABLE
     // (retry later).
+    CredentialBridgeFailureReason failure = 3;
+  }
+}
+
+// The workspace daemon asks for the placeholder-backed Antigravity login file
+// payload, sealed to a fresh recipient key it holds, to write
+// ~/.gemini/antigravity-cli/antigravity-oauth-token. Sent only on an
+// intercepted epoch whose Open lists "antigravity-login". Real Google tokens
+// never leave the broker: the sealed plaintext carries only the environment's
+// cwp1_ placeholder, optional account email hint and refresh time.
+message AntigravityLoginRequest {
+  string request_id = 1;
+  bytes recipient_public_key = 2;
+  // At most 30 seconds after the request is made, never extended by a relay.
+  uint64 deadline_unix_ms = 3;
+}
+
+message AntigravityLoginResponse {
+  string request_id = 1;
+  oneof result {
+    // Recipient-sealed cwp1_ placeholder, optional account email hint and
+    // refresh time. Real Google OAuth tokens are never carried.
+    bytes sealed_login = 2 [debug_redact = true];
+    // Only DENIED (no deliverable login: interception inactive, credential
+    // needing Reconnect, revoked, organization-owned or another user's
+    // credential, or Antigravity not selected) or UNAVAILABLE (retry later).
     CredentialBridgeFailureReason failure = 3;
   }
 }

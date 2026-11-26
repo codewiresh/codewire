@@ -2,6 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
+use codewire_credential_broker::provider_oauth::antigravity::{
+    ANTIGRAVITY_SIGN_IN_CODE_INVALID, ANTIGRAVITY_SIGN_IN_EXPIRED,
+};
 use codewire_credential_broker::provider_oauth::claude::{
     CLAUDE_SIGN_IN_CODE_INVALID, CLAUDE_SIGN_IN_EXPIRED,
 };
@@ -366,6 +369,53 @@ impl CredentialMutationService for Service {
         })
     }
 
+    async fn start_antigravity_sign_in(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::StartAntigravitySignInRequest>,
+    ) -> ServiceResult<proto::StartAntigravitySignInResponse> {
+        let mut started = self
+            .owner
+            .start_antigravity_sign_in(authority(&ctx)?)
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::StartAntigravitySignInResponse {
+            authorize_url: started.authorize_url,
+            sign_in: std::mem::take(&mut *started.handle),
+            expires_at_unix: started.expires_at_unix,
+            ..Default::default()
+        })
+    }
+
+    async fn complete_antigravity_sign_in(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::CompleteAntigravitySignInRequest>,
+    ) -> ServiceResult<proto::CompleteAntigravitySignInResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        // The handle and the pasted code/URL are write-only here. Never
+        // Debug/serialize the request into an error or log.
+        let handle = zeroize::Zeroizing::new(std::mem::take(&mut request.sign_in));
+        let code = zeroize::Zeroizing::new(std::mem::take(&mut request.authorization_code));
+        let metadata = self
+            .owner
+            .complete_antigravity_sign_in(
+                authority,
+                request.name,
+                handle,
+                code,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::CompleteAntigravitySignInResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
     async fn revoke_credential(
         &self,
         ctx: RequestContext,
@@ -576,6 +626,13 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
             (ConnectCode::InvalidArgument, CLAUDE_SIGN_IN_CODE_INVALID)
         }
         Error::ClaudeSignInExpired => (ConnectCode::FailedPrecondition, CLAUDE_SIGN_IN_EXPIRED),
+        Error::AntigravitySignInCodeInvalid => (
+            ConnectCode::InvalidArgument,
+            ANTIGRAVITY_SIGN_IN_CODE_INVALID,
+        ),
+        Error::AntigravitySignInExpired => {
+            (ConnectCode::FailedPrecondition, ANTIGRAVITY_SIGN_IN_EXPIRED)
+        }
         Error::NameReservesProvider => (
             ConnectCode::InvalidArgument,
             "a new credential name may not start with anthropic/, openai/, github/, ssh/ or google/",
@@ -597,6 +654,8 @@ fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc
         Error::PublicationUnknown => "CREDENTIAL_MUTATION_UNCERTAIN",
         Error::ClaudeSignInCodeInvalid => "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID",
         Error::ClaudeSignInExpired => "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED",
+        Error::AntigravitySignInCodeInvalid => "CREDENTIAL_ANTIGRAVITY_SIGN_IN_CODE_INVALID",
+        Error::AntigravitySignInExpired => "CREDENTIAL_ANTIGRAVITY_SIGN_IN_EXPIRED",
         Error::NameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
         _ => "",
     };
@@ -703,6 +762,16 @@ mod tests {
                 connectrpc::ErrorCode::FailedPrecondition,
             ),
             (
+                Error::AntigravitySignInCodeInvalid,
+                "CREDENTIAL_ANTIGRAVITY_SIGN_IN_CODE_INVALID",
+                connectrpc::ErrorCode::InvalidArgument,
+            ),
+            (
+                Error::AntigravitySignInExpired,
+                "CREDENTIAL_ANTIGRAVITY_SIGN_IN_EXPIRED",
+                connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
                 Error::NameReservesProvider,
                 "CREDENTIAL_NAME_RESERVES_PROVIDER",
                 connectrpc::ErrorCode::InvalidArgument,
@@ -747,6 +816,7 @@ mod tests {
     /// The service as `router` builds it, over an owner whose GitHub App is
     /// `codewire-synthetic`, or that has none. No database is reached.
     async fn service(github_slug: Option<&str>) -> Service {
+        use codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn;
         use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
         use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
         use codewire_credential_broker::provider_oauth::github::{
@@ -773,7 +843,8 @@ mod tests {
             pool,
             store,
             CodexDeviceLogin::new(device.clone()),
-            ClaudeSignIn::new(device),
+            ClaudeSignIn::new(device.clone()),
+            AntigravitySignIn::new(device),
             github_login,
             None,
         )))

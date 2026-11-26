@@ -288,6 +288,7 @@ pub(crate) fn slot_label(slot: &str) -> &'static str {
         "anthropic" => "anthropic",
         "github" => "github",
         "gemini" => "gemini",
+        "antigravity" => "antigravity",
         _ => "invalid",
     }
 }
@@ -301,6 +302,8 @@ pub(crate) fn route_label(route: &str) -> &'static str {
         "github-api" => "github-api",
         "github-https" => "github-https",
         "gemini-api" => "gemini-api",
+        "antigravity-api" => "antigravity-api",
+        "antigravity-oauth-token" => "antigravity-oauth-token",
         _ => "invalid",
     }
 }
@@ -459,6 +462,17 @@ pub(crate) fn claude_login_refused(reason: &'static str) {
         event = "claude_login_refused",
         reason,
         "credential broker Claude login refused"
+    );
+}
+
+/// [`codex_login_refused`] for the placeholder-only Antigravity login.
+pub(crate) fn antigravity_login_refused(reason: &'static str) {
+    report_login_refusal("antigravity", reason);
+    tracing::info!(
+        target: TARGET,
+        event = "antigravity_login_refused",
+        reason,
+        "credential broker Antigravity login refused"
     );
 }
 
@@ -635,11 +649,16 @@ pub(crate) mod tests {
         "openai",
         "anthropic",
         "github",
+        "gemini",
+        "antigravity",
         "openai-api",
         "anthropic-api",
         "claude-oauth-token",
         "github-api",
         "github-https",
+        "gemini-api",
+        "antigravity-api",
+        "antigravity-oauth-token",
         "invalid",
         "response",
         "invalid_request",
@@ -671,6 +690,10 @@ pub(crate) mod tests {
         "claude_login_in_flight",
         "claude_login_refused",
         "credential broker Claude login refused",
+        "antigravity_login",
+        "antigravity_login_in_flight",
+        "antigravity_login_refused",
+        "credential broker Antigravity login refused",
         "deadline_passed",
         "deadline_too_far",
         "deadline_passed_before_seal",
@@ -701,7 +724,9 @@ pub(crate) mod tests {
             Some("proxied_request") => REQUEST_FIELDS,
             Some("epoch_admission") => EPOCH_FIELDS,
             Some("capacity_rejected") => CAPACITY_FIELDS,
-            Some("codex_login_refused" | "claude_login_refused") => LOGIN_REFUSED_FIELDS,
+            Some("codex_login_refused" | "claude_login_refused" | "antigravity_login_refused") => {
+                LOGIN_REFUSED_FIELDS
+            }
             other => panic!("unknown timing event {other:?}"),
         }
         .iter()

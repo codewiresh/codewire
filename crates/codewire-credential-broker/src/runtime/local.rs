@@ -130,6 +130,19 @@ where
         .map_err(map_local_lease_error)
     }
 
+    async fn lease_antigravity_login(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Self::Lease, BrokerLeaseError> {
+        let mut client = self.clone();
+        codewire_local_credentials::LocalCredentialBrokerLeaseClient::lease_antigravity_login(
+            &mut client,
+            request_id,
+        )
+        .await
+        .map_err(map_local_lease_error)
+    }
+
     async fn begin_credential_refresh(
         &self,
         request: BrokerCredentialRefreshRequest,
@@ -192,6 +205,15 @@ where
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalClaudeOAuthBundle,
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        commit_local_refresh(self, permit, material.into_bytes()).await
+    }
+
+    /// A rotated Antigravity sign-in publishes through the same local journal.
+    async fn commit_antigravity_oauth_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        material: CanonicalAntigravityOAuthBundle,
     ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         commit_local_refresh(self, permit, material.into_bytes()).await
     }

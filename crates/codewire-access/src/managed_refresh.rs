@@ -11,6 +11,14 @@
 pub const CODEX_MANAGED_REFRESH_TOKEN: &str = "codewire-managed-no-refresh-token";
 const _: () = assert!(!CODEX_MANAGED_REFRESH_TOKEN.is_empty());
 
+/// The public managed refresh marker Codewire writes into Antigravity's
+/// `~/.gemini/antigravity-cli/antigravity-oauth-token` file when interception
+/// is active (#6555). Never a real Google refresh token; the broker recognises
+/// it on `POST https://oauth2.googleapis.com/token` and returns the
+/// environment's placeholder.
+pub const ANTIGRAVITY_MANAGED_REFRESH_TOKEN: &str = CODEX_MANAGED_REFRESH_TOKEN;
+const _: () = assert!(!ANTIGRAVITY_MANAGED_REFRESH_TOKEN.is_empty());
+
 /// The start of the refresh token Codewire writes into Claude Code's
 /// `claudeAiOauth`, which a fresh nonce of [`CLAUDE_MANAGED_REFRESH_NONCE_LENGTH`]
 /// lowercase hexadecimal characters follows. It is never empty: Claude Code

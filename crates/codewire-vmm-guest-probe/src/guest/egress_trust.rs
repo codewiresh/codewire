@@ -147,7 +147,9 @@ pub(super) fn publish(seed: &crate::Seed, merged_root: &Path) -> Result<()> {
     publish_ca_directory(
         Path::new(CONTAINER_EGRESS_CA_DIR),
         certificate.filter(|_| {
-            super::interception::binds_github(seed) || super::interception::binds_gemini(seed)
+            super::interception::binds_github(seed)
+                || super::interception::binds_gemini(seed)
+                || super::interception::binds_antigravity(seed)
         }),
     )?;
     let Some(certificate) = certificate else {

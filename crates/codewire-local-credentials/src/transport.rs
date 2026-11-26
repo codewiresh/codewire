@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 35;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 36;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -111,6 +111,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         35,
         "GetEnvironmentCredentialPlaceholders with platform asks the platform for a platform boot's seed placeholders (#4001)",
     ),
+    (
+        36,
+        "admits and leases an Antigravity sign-in, and revokes an active Google OAuth credential at Google (#6555)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -172,10 +176,13 @@ pub enum AuthorityFeature {
     /// ignores the field and evaluates a local binding instead, so it is
     /// never asked, and the boot falls back as for a refused call.
     PlatformCredentialPlaceholders,
+    /// An Antigravity sign-in (`google` OAuth): stored, leased as a
+    /// placeholder-only Antigravity login, and revoked at Google (#6555).
+    AntigravitySignIn,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -190,6 +197,7 @@ impl AuthorityFeature {
         Self::FrontDoorDelegation,
         Self::DeleteGate,
         Self::PlatformCredentialPlaceholders,
+        Self::AntigravitySignIn,
     ];
 
     /// The protocol that introduced it.
@@ -209,6 +217,7 @@ impl AuthorityFeature {
             Self::FrontDoorDelegation => 28,
             Self::DeleteGate => 34,
             Self::PlatformCredentialPlaceholders => 35,
+            Self::AntigravitySignIn => 36,
         }
     }
 

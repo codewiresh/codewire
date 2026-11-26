@@ -1441,18 +1441,41 @@ fn a_login_no_writer_keeps_is_cleared_at_start() {
         fixture.root.path().join("claude-home"),
         Path::new("/workspace"),
     );
+    let antigravity =
+        crate::antigravity_home::AntigravityHome::new(fixture.root.path().join("antigravity-home"));
     fixture
         .writer()
         .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
         .unwrap();
     let auth = fixture.home().auth_path();
-    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, true, true);
+    crate::login_cleanup::clear_unkept_logins(
+        &fixture.home(),
+        &claude,
+        &antigravity,
+        true,
+        true,
+        true,
+    );
     assert!(auth.exists(), "a login its writer keeps stays");
-    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, false, true);
+    crate::login_cleanup::clear_unkept_logins(
+        &fixture.home(),
+        &claude,
+        &antigravity,
+        false,
+        true,
+        true,
+    );
     assert!(!auth.exists());
 
     fs::write(&auth, users_login()).unwrap();
-    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, false, false);
+    crate::login_cleanup::clear_unkept_logins(
+        &fixture.home(),
+        &claude,
+        &antigravity,
+        false,
+        false,
+        false,
+    );
     assert_eq!(fs::read(&auth).unwrap(), users_login());
 }
 

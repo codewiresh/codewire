@@ -34,6 +34,7 @@ pub(in crate::commands) fn withheld_line(
     let fix = match (credential.provider.as_str(), credential.authentication_kind) {
         ("anthropic", "claude_sign_in") => connect("claude"),
         ("openai", "oauth") => connect("codex"),
+        ("google", "oauth") => connect("antigravity"),
         ("github", _) => connect("github"),
         _ => format!(
             "Replace it with `cw credentials {placement} --profile {profile} set {slot} NAME`."

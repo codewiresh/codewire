@@ -321,6 +321,10 @@ pub enum HttpProvider {
     /// The Gemini slot's API key: injected as `x-goog-api-key` on
     /// `generativelanguage.googleapis.com` behind the front door only (#6555).
     GeminiApiKey,
+    /// Google OAuth sign-in for Antigravity (`agy`): front-door-only swap on
+    /// pinned `/v1internal:` paths and managed refresh on `oauth2.googleapis.com`
+    /// (#6555). Never directly delivers real Google tokens.
+    AntigravityOAuth,
     GitHubOAuth,
     /// Isolated GitHub App user-to-server authorization only. This is never
     /// selected by a Sandbox profile or exposed as a managed client route.
@@ -347,6 +351,15 @@ pub enum HttpProvider {
     /// never a Sandbox route.
     #[serde(skip)]
     GitHubAppTokenRevocation,
+    /// Codewire's Antigravity sign-in enrollment: `POST https://oauth2.googleapis.com/token`
+    /// only. Never profile-selected and never a Sandbox route (#6555).
+    #[serde(skip)]
+    AntigravitySignInEnrollment,
+    /// Revoking an Antigravity Google OAuth token at `POST https://oauth2.googleapis.com/revoke`
+    /// (RFC 7009, body-only `token`, no `client_secret`) on revoke/delete (#6555).
+    /// Never profile-selected and never a Sandbox route.
+    #[serde(skip)]
+    AntigravityTokenRevocation,
 }
 
 impl HttpProvider {
@@ -366,6 +379,7 @@ impl HttpProvider {
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             Self::GeminiApiKey => &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
+            Self::AntigravityOAuth => &[],
             Self::GitHubOAuth => &[
                 "GH_HOST",
                 "GH_TOKEN",
@@ -377,7 +391,9 @@ impl HttpProvider {
             | Self::CodexDeviceEnrollment
             | Self::ClaudeSignInEnrollment
             | Self::CodexTokenRevocation
-            | Self::GitHubAppTokenRevocation => &[],
+            | Self::GitHubAppTokenRevocation
+            | Self::AntigravitySignInEnrollment
+            | Self::AntigravityTokenRevocation => &[],
         }
     }
 
@@ -390,12 +406,15 @@ impl HttpProvider {
             Self::AnthropicSubscriptionToken => "anthropic-subscription-token",
             Self::AnthropicClaudeSignIn => "anthropic-claude-sign-in",
             Self::GeminiApiKey => "gemini-api-key",
+            Self::AntigravityOAuth => "antigravity-oauth",
             Self::GitHubOAuth => "github-oauth",
             Self::GitHubAppAuthorization => "github-app-authorization",
             Self::CodexDeviceEnrollment => "codex-device-enrollment",
             Self::ClaudeSignInEnrollment => "claude-sign-in-enrollment",
             Self::CodexTokenRevocation => "codex-token-revocation",
             Self::GitHubAppTokenRevocation => "github-app-token-revocation",
+            Self::AntigravitySignInEnrollment => "antigravity-sign-in-enrollment",
+            Self::AntigravityTokenRevocation => "antigravity-token-revocation",
         }
     }
 
@@ -411,6 +430,7 @@ impl HttpProvider {
             "anthropic-subscription-token" => Some(Self::AnthropicSubscriptionToken),
             "anthropic-claude-sign-in" => Some(Self::AnthropicClaudeSignIn),
             "gemini-api-key" => Some(Self::GeminiApiKey),
+            "antigravity-oauth" => Some(Self::AntigravityOAuth),
             "github-oauth" => Some(Self::GitHubOAuth),
             _ => None,
         }
@@ -434,6 +454,7 @@ impl HttpProvider {
                 Some(Self::AnthropicClaudeSignIn)
             }
             ("gemini", "google", CredentialAuthKind::ApiKey) => Some(Self::GeminiApiKey),
+            ("antigravity", "google", CredentialAuthKind::OAuth) => Some(Self::AntigravityOAuth),
             ("github", "github", CredentialAuthKind::OAuth) => Some(Self::GitHubOAuth),
             _ => None,
         }

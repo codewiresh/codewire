@@ -63,5 +63,14 @@ pub(super) fn binds_gemini(seed: &Seed) -> bool {
             .any(|(slot, _)| *slot == PlaceholderSlot::GeminiApiKey)
 }
 
+/// Whether this boot binds Antigravity's Google hosts: its seed carries the CA
+/// and selects the Antigravity client (#6555).
+pub(super) fn binds_antigravity(seed: &Seed) -> bool {
+    seed.egress_ca().is_some()
+        && seed
+            .managed_credential_clients()
+            .contains(codewire_access::ManagedCredentialClient::Antigravity)
+}
+
 #[cfg(test)]
 mod tests;

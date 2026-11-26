@@ -348,6 +348,16 @@ pub(in crate::commands) fn at_provider(
         ("google", "api_key", _) => {
             "The key still works at Google until you revoke it at https://aistudio.google.com/apikey.".to_owned()
         }
+        ("google", "oauth", ProviderAnswer::Confirmed) => {
+            "Google confirmed it revoked the Antigravity sign-in.".to_owned()
+        }
+        ("google", "oauth", ProviderAnswer::NotConfirmed(because)) => format!(
+            "Google didn't confirm revoking the Antigravity sign-in: {}. You can remove it in your Google Account permissions (https://myaccount.google.com/permissions).",
+            not_confirmed_because("Google", because)
+        ),
+        ("google", "oauth", ProviderAnswer::NotAsked) => {
+            "The Antigravity sign-in stays valid at Google until you remove it in your Google Account permissions (https://myaccount.google.com/permissions).".to_owned()
+        }
         // A Claude subscription token (`claude setup-token`).
         ("anthropic", "oauth", _) => {
             "The token keeps working at Anthropic until it expires, or until you revoke it in your Claude account.".to_owned()

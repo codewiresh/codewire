@@ -6,6 +6,7 @@
 //! API keys and explicitly imported SSH keys; provider material
 //! never enters response DTOs.
 
+mod antigravity;
 mod claude;
 mod enrollment;
 mod github;
@@ -26,6 +27,7 @@ use codewire_access::{
     reserves_provider_prefix,
 };
 use codewire_credential_broker::provider_oauth::DeviceLoginError;
+use codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn;
 use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
@@ -80,6 +82,10 @@ pub enum CredentialMutationError {
     ClaudeSignInCodeInvalid,
     /// The Claude sign-in was started too long ago.
     ClaudeSignInExpired,
+    /// The pasted Antigravity callback URL or code is malformed or from another sign-in.
+    AntigravitySignInCodeInvalid,
+    /// The Antigravity sign-in was started too long ago.
+    AntigravitySignInExpired,
     /// A new or renamed credential's name starts with a provider id and `/`.
     NameReservesProvider,
 }
@@ -91,6 +97,7 @@ struct Shared {
     store: Arc<PlatformCredentialStore>,
     codex_login: CodexDeviceLogin,
     claude_sign_in: ClaudeSignIn,
+    antigravity_sign_in: AntigravitySignIn,
     /// Present exactly when the GitHub App is configured.
     github_login: Option<GitHubDeviceLogin>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
@@ -123,6 +130,7 @@ impl CredentialMutationOwner {
         store: Arc<PlatformCredentialStore>,
         codex_login: CodexDeviceLogin,
         claude_sign_in: ClaudeSignIn,
+        antigravity_sign_in: AntigravitySignIn,
         github_login: Option<GitHubDeviceLogin>,
         github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     ) -> Self {
@@ -133,6 +141,7 @@ impl CredentialMutationOwner {
                 store,
                 codex_login,
                 claude_sign_in,
+                antigravity_sign_in,
                 github_login,
                 github_app_authorization,
                 revocation: None,

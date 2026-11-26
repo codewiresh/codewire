@@ -71,6 +71,12 @@ const (
 	// CredentialMutationServiceCompleteClaudeSignInProcedure is the fully-qualified name of the
 	// CredentialMutationService's CompleteClaudeSignIn RPC.
 	CredentialMutationServiceCompleteClaudeSignInProcedure = "/codewire.v1.CredentialMutationService/CompleteClaudeSignIn"
+	// CredentialMutationServiceStartAntigravitySignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's StartAntigravitySignIn RPC.
+	CredentialMutationServiceStartAntigravitySignInProcedure = "/codewire.v1.CredentialMutationService/StartAntigravitySignIn"
+	// CredentialMutationServiceCompleteAntigravitySignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's CompleteAntigravitySignIn RPC.
+	CredentialMutationServiceCompleteAntigravitySignInProcedure = "/codewire.v1.CredentialMutationService/CompleteAntigravitySignIn"
 	// CredentialMutationServiceRenameCredentialProcedure is the fully-qualified name of the
 	// CredentialMutationService's RenameCredential RPC.
 	CredentialMutationServiceRenameCredentialProcedure = "/codewire.v1.CredentialMutationService/RenameCredential"
@@ -341,6 +347,18 @@ type CredentialMutationServiceClient interface {
 	// No token is returned; the credential broker refreshes the login.
 	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
 	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
+	// Antigravity sign-in: Google OAuth login for Antigravity (`agy`), by pasted
+	// callback URL or `code#state`. Start creates this sign-in's PKCE verifier
+	// and state and returns Google's fixed authorize URL and an opaque handle;
+	// nothing is sent or stored. Complete checks that state against the handle,
+	// exchanges the code as Antigravity's public Desktop OAuth client, checks the
+	// granted scopes against the exact allow-list, validates any id_token
+	// issuer/audience to extract only the account email hint, and stores the
+	// login as the google provider's OAUTH kind. Personal-only: organization API
+	// keys and organizations are denied. No token is returned; real Google tokens
+	// never leave the broker.
+	StartAntigravitySignIn(context.Context, *connect.Request[v1.StartAntigravitySignInRequest]) (*connect.Response[v1.StartAntigravitySignInResponse], error)
+	CompleteAntigravitySignIn(context.Context, *connect.Request[v1.CompleteAntigravitySignInRequest]) (*connect.Response[v1.CompleteAntigravitySignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -402,6 +420,18 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 			connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
 			connect.WithClientOptions(opts...),
 		),
+		startAntigravitySignIn: connect.NewClient[v1.StartAntigravitySignInRequest, v1.StartAntigravitySignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceStartAntigravitySignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("StartAntigravitySignIn")),
+			connect.WithClientOptions(opts...),
+		),
+		completeAntigravitySignIn: connect.NewClient[v1.CompleteAntigravitySignInRequest, v1.CompleteAntigravitySignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceCompleteAntigravitySignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteAntigravitySignIn")),
+			connect.WithClientOptions(opts...),
+		),
 		renameCredential: connect.NewClient[v1.RenameCredentialRequest, v1.RenameCredentialResponse](
 			httpClient,
 			baseURL+CredentialMutationServiceRenameCredentialProcedure,
@@ -450,6 +480,8 @@ type credentialMutationServiceClient struct {
 	addClaudeSubscriptionTokenCredential *connect.Client[v1.AddClaudeSubscriptionTokenCredentialRequest, v1.AddClaudeSubscriptionTokenCredentialResponse]
 	startClaudeSignIn                    *connect.Client[v1.StartClaudeSignInRequest, v1.StartClaudeSignInResponse]
 	completeClaudeSignIn                 *connect.Client[v1.CompleteClaudeSignInRequest, v1.CompleteClaudeSignInResponse]
+	startAntigravitySignIn               *connect.Client[v1.StartAntigravitySignInRequest, v1.StartAntigravitySignInResponse]
+	completeAntigravitySignIn            *connect.Client[v1.CompleteAntigravitySignInRequest, v1.CompleteAntigravitySignInResponse]
 	renameCredential                     *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
 	rotateApiKeyCredential               *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
 	generateSshCredential                *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
@@ -493,6 +525,16 @@ func (c *credentialMutationServiceClient) StartClaudeSignIn(ctx context.Context,
 // CompleteClaudeSignIn calls codewire.v1.CredentialMutationService.CompleteClaudeSignIn.
 func (c *credentialMutationServiceClient) CompleteClaudeSignIn(ctx context.Context, req *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
 	return c.completeClaudeSignIn.CallUnary(ctx, req)
+}
+
+// StartAntigravitySignIn calls codewire.v1.CredentialMutationService.StartAntigravitySignIn.
+func (c *credentialMutationServiceClient) StartAntigravitySignIn(ctx context.Context, req *connect.Request[v1.StartAntigravitySignInRequest]) (*connect.Response[v1.StartAntigravitySignInResponse], error) {
+	return c.startAntigravitySignIn.CallUnary(ctx, req)
+}
+
+// CompleteAntigravitySignIn calls codewire.v1.CredentialMutationService.CompleteAntigravitySignIn.
+func (c *credentialMutationServiceClient) CompleteAntigravitySignIn(ctx context.Context, req *connect.Request[v1.CompleteAntigravitySignInRequest]) (*connect.Response[v1.CompleteAntigravitySignInResponse], error) {
+	return c.completeAntigravitySignIn.CallUnary(ctx, req)
 }
 
 // RenameCredential calls codewire.v1.CredentialMutationService.RenameCredential.
@@ -563,6 +605,18 @@ type CredentialMutationServiceHandler interface {
 	// No token is returned; the credential broker refreshes the login.
 	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
 	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
+	// Antigravity sign-in: Google OAuth login for Antigravity (`agy`), by pasted
+	// callback URL or `code#state`. Start creates this sign-in's PKCE verifier
+	// and state and returns Google's fixed authorize URL and an opaque handle;
+	// nothing is sent or stored. Complete checks that state against the handle,
+	// exchanges the code as Antigravity's public Desktop OAuth client, checks the
+	// granted scopes against the exact allow-list, validates any id_token
+	// issuer/audience to extract only the account email hint, and stores the
+	// login as the google provider's OAUTH kind. Personal-only: organization API
+	// keys and organizations are denied. No token is returned; real Google tokens
+	// never leave the broker.
+	StartAntigravitySignIn(context.Context, *connect.Request[v1.StartAntigravitySignInRequest]) (*connect.Response[v1.StartAntigravitySignInResponse], error)
+	CompleteAntigravitySignIn(context.Context, *connect.Request[v1.CompleteAntigravitySignInRequest]) (*connect.Response[v1.CompleteAntigravitySignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -620,6 +674,18 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
 		connect.WithHandlerOptions(opts...),
 	)
+	credentialMutationServiceStartAntigravitySignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceStartAntigravitySignInProcedure,
+		svc.StartAntigravitySignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("StartAntigravitySignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceCompleteAntigravitySignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceCompleteAntigravitySignInProcedure,
+		svc.CompleteAntigravitySignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteAntigravitySignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
 	credentialMutationServiceRenameCredentialHandler := connect.NewUnaryHandler(
 		CredentialMutationServiceRenameCredentialProcedure,
 		svc.RenameCredential,
@@ -672,6 +738,10 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 			credentialMutationServiceStartClaudeSignInHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceCompleteClaudeSignInProcedure:
 			credentialMutationServiceCompleteClaudeSignInHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceStartAntigravitySignInProcedure:
+			credentialMutationServiceStartAntigravitySignInHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceCompleteAntigravitySignInProcedure:
+			credentialMutationServiceCompleteAntigravitySignInHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRenameCredentialProcedure:
 			credentialMutationServiceRenameCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRotateApiKeyCredentialProcedure:
@@ -719,6 +789,14 @@ func (UnimplementedCredentialMutationServiceHandler) StartClaudeSignIn(context.C
 
 func (UnimplementedCredentialMutationServiceHandler) CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.CompleteClaudeSignIn is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) StartAntigravitySignIn(context.Context, *connect.Request[v1.StartAntigravitySignInRequest]) (*connect.Response[v1.StartAntigravitySignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.StartAntigravitySignIn is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) CompleteAntigravitySignIn(context.Context, *connect.Request[v1.CompleteAntigravitySignInRequest]) (*connect.Response[v1.CompleteAntigravitySignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.CompleteAntigravitySignIn is not implemented"))
 }
 
 func (UnimplementedCredentialMutationServiceHandler) RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error) {

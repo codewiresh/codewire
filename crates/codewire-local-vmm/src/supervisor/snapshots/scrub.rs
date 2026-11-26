@@ -10,9 +10,13 @@ use super::*;
 
 /// The directories, in a state disk, where the guest daemon writes the
 /// creator's delivered logins.
-pub(super) const LOGIN_DIRECTORIES: [(&[&str], LoginKind); 2] = [
+pub(super) const LOGIN_DIRECTORIES: [(&[&str], LoginKind); 3] = [
     (&["agent-homes", "codex"], LoginKind::Codex),
     (&["home", ".claude"], LoginKind::Claude),
+    (
+        &["home", ".gemini", "antigravity-cli"],
+        LoginKind::Antigravity,
+    ),
 ];
 
 /// Guest state on the state disk bound to the source environment's id,
@@ -25,6 +29,7 @@ pub(super) const ENVIRONMENT_BOUND_TREES: [&[&str]; 1] = [&["codewire", "cw-runt
 pub(super) enum LoginKind {
     Codex,
     Claude,
+    Antigravity,
 }
 
 /// What capture does with one entry of a login directory, by the
@@ -43,7 +48,7 @@ pub(super) enum LoginEntry {
 
 impl LoginKind {
     pub(super) fn entry(self, name: &str) -> LoginEntry {
-        use codewire_daemon::delivered_logins::{claude, codex};
+        use codewire_daemon::delivered_logins::{antigravity, claude, codex};
         let (file, temporary, in_progress) = match self {
             Self::Codex => (
                 codex::CODEX_AUTH_FILE_NAME,
@@ -54,6 +59,11 @@ impl LoginKind {
                 claude::CLAUDE_CREDENTIALS_FILE_NAME,
                 claude::is_codewire_temporary(name),
                 claude::is_codewire_write_in_progress(name),
+            ),
+            Self::Antigravity => (
+                antigravity::ANTIGRAVITY_TOKEN_FILE_NAME,
+                antigravity::is_codewire_temporary(name),
+                antigravity::is_codewire_write_in_progress(name),
             ),
         };
         if name == file {
@@ -68,14 +78,18 @@ impl LoginKind {
     }
 
     pub(super) fn codewire(self, name: &str, contents: &[u8]) -> bool {
-        use codewire_daemon::delivered_logins::{claude, codex};
+        use codewire_daemon::delivered_logins::{antigravity, claude, codex};
         match (self, self.entry(name)) {
             (_, LoginEntry::Other) => false,
             (_, LoginEntry::WriteInProgress) => true,
             (Self::Codex, LoginEntry::File) => codex::is_codewire_auth_file(contents),
             (Self::Claude, LoginEntry::File) => claude::holds_codewire_login(contents),
+            (Self::Antigravity, LoginEntry::File) => antigravity::is_codewire_token_file(contents),
             (Self::Codex, LoginEntry::Temporary) => codex::is_codewire_leftover(name, contents),
             (Self::Claude, LoginEntry::Temporary) => claude::is_codewire_leftover(name, contents),
+            (Self::Antigravity, LoginEntry::Temporary) => {
+                antigravity::is_codewire_leftover(name, contents)
+            }
         }
     }
 }

@@ -75,7 +75,7 @@ async fn clear_files(
         .await
         .map_err(BlockClearingError::Files)?;
     let mut report = ClearingReport::default();
-    for kind in [LoginKind::Codex, LoginKind::Claude] {
+    for kind in [LoginKind::Codex, LoginKind::Claude, LoginKind::Antigravity] {
         report.logins_removed += clear_logins(tools, disk, kind, block_size).await?;
     }
     for components in ENVIRONMENT_BOUND_TREES {
@@ -101,8 +101,8 @@ async fn clear_logins(
     kind: LoginKind,
     block_size: u64,
 ) -> Result<usize, BlockClearingError> {
-    let directory = [kind.directory()];
-    let entries = match files::lookup_directory(tools, disk, &directory)
+    let directory = kind.components();
+    let entries = match files::lookup_directory(tools, disk, directory)
         .await
         .map_err(BlockClearingError::Files)?
     {
@@ -136,13 +136,13 @@ async fn clear_logins(
                     "an agent's login is too large to read",
                 ));
             }
-            let contents = files::read_file(tools, disk, &directory, name)
+            let contents = files::read_file(tools, disk, directory, name)
                 .await
                 .map_err(BlockClearingError::Files)?;
             kind.is_codewire(name, &contents)
         };
         if codewire {
-            files::zero_and_remove(tools, disk, &directory, name, entry.size, block_size)
+            files::zero_and_remove(tools, disk, directory, name, entry.size, block_size)
                 .await
                 .map_err(BlockClearingError::Files)?;
             removed += 1;

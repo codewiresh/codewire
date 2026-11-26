@@ -3853,7 +3853,7 @@ fn environment_grant(permit: &CredentialRefreshPermit) -> &DerivedGrant {
 fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() {
     let catalog = codewire_access::builtin_provider_catalog();
     let mut admitted = BTreeSet::new();
-    for name in ["openai", "anthropic", "github", "ssh"] {
+    for name in ["openai", "anthropic", "github", "google", "ssh"] {
         for kind in [
             CredentialAuthKind::OAuth,
             CredentialAuthKind::ApiKey,
@@ -3888,6 +3888,8 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         ("anthropic", "ApiKey"),
         ("anthropic", "ClaudeSignIn"),
         ("github", "OAuth"),
+        ("google", "ApiKey"),
+        ("google", "OAuth"),
     ]
     .into_iter()
     .map(|(provider, kind)| (provider, kind.to_owned()))
@@ -3896,7 +3898,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 35);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 36);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first

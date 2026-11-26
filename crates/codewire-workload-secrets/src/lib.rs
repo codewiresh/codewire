@@ -12,6 +12,7 @@
 // Predates this workspace lint; #4125 tracks removing the allow.
 #![allow(clippy::unwrap_used)]
 
+mod antigravity_login;
 mod claude_login;
 mod codex_login;
 mod composition_plan;
@@ -19,6 +20,10 @@ mod launch;
 #[cfg(unix)]
 pub mod launcher;
 
+pub use antigravity_login::{
+    AntigravityLogin, AntigravityLoginError, MAX_ANTIGRAVITY_ACCOUNT_HINT_BYTES,
+    MAX_SEALED_ANTIGRAVITY_LOGIN_BYTES, OpenedAntigravityLogin, seal_antigravity_login,
+};
 pub use claude_login::{
     ClaudeLogin, ClaudeLoginError, MAX_CLAUDE_LOGIN_SCOPE_BYTES, MAX_CLAUDE_LOGIN_SCOPES,
     MAX_CLAUDE_LOGIN_TIER_BYTES, MAX_CLAUDE_LOGIN_TOKEN_BYTES, MAX_SEALED_CLAUDE_LOGIN_BYTES,

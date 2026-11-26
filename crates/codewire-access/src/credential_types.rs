@@ -6,8 +6,8 @@
 //! tests, and tests check each against these rows.
 
 use crate::{
-    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST, CredentialAuthKind,
-    GEMINI_API_HOST, GITHUB_HOSTS, HttpProvider, OPENAI_API_HOST,
+    ANTHROPIC_API_HOST, ANTIGRAVITY_HOSTS, CHATGPT_HOST, CLAUDE_TOKEN_HOST, CODEX_TOKEN_HOST,
+    CredentialAuthKind, GEMINI_API_HOST, GITHUB_HOSTS, HttpProvider, OPENAI_API_HOST,
 };
 
 /// What choosing a type runs.
@@ -73,7 +73,7 @@ pub struct CredentialType {
 }
 
 /// Every type, in picker order.
-pub const CREDENTIAL_TYPES: [CredentialType; 8] = [
+pub const CREDENTIAL_TYPES: [CredentialType; 9] = [
     CredentialType {
         word: "codex",
         label: "Codex",
@@ -178,6 +178,21 @@ pub const CREDENTIAL_TYPES: [CredentialType; 8] = [
         hosts: &[GEMINI_API_HOST],
         detail: "paste a key from aistudio.google.com",
         how: "API key from stdin",
+    },
+    CredentialType {
+        word: "antigravity",
+        label: "Antigravity",
+        short: "Antigravity",
+        provider: "google",
+        form: CredentialAuthKind::OAuth,
+        slots: &["antigravity"],
+        verb: CredentialVerb::Connect,
+        flow: CredentialFlow::SignIn,
+        http: Some(HttpProvider::AntigravityOAuth),
+        agent: AgentHolds::InDeliveredLogin,
+        hosts: &ANTIGRAVITY_HOSTS,
+        detail: "sign in with Google for Antigravity",
+        how: "Antigravity: Google browser sign-in; paste the callback URL or code shown",
     },
     CredentialType {
         word: "ssh",

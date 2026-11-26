@@ -87,6 +87,7 @@ pub enum RefusalProvider {
     OpenAi,
     GitHub,
     Gemini,
+    Antigravity,
 }
 
 impl RefusalProvider {
@@ -97,6 +98,7 @@ impl RefusalProvider {
             "openai" | "codex" => Some(Self::OpenAi),
             "github" => Some(Self::GitHub),
             "gemini" => Some(Self::Gemini),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -107,6 +109,7 @@ impl RefusalProvider {
             Self::OpenAi => "OpenAI",
             Self::GitHub => "GitHub",
             Self::Gemini => "Gemini",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -116,6 +119,7 @@ impl RefusalProvider {
             Self::OpenAi => "an OpenAI",
             Self::GitHub => "a GitHub",
             Self::Gemini => "a Gemini",
+            Self::Antigravity => "an Antigravity",
         }
     }
 }

@@ -244,7 +244,10 @@ fn name_hosted_egress_ca(
         .interception
         .as_ref()
         .is_some_and(|interception| interception.gemini().is_some());
-    if github || gemini {
+    let antigravity = config
+        .managed_credential_clients
+        .contains(ManagedCredentialClient::Antigravity);
+    if github || gemini || antigravity {
         trust.push((
             "SSL_CERT_DIR",
             format!("{IMAGE_CERTIFICATE_DIRECTORY}:{HOSTED_EGRESS_TRUST_CA_DIR}"),

@@ -12,8 +12,9 @@
 //! opening, so the relay never holds anything that could open the login.
 
 use codewire_workload_secrets::{
-    CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS, MAX_SEALED_CLAUDE_LOGIN_BYTES,
-    MAX_SEALED_CODEX_LOGIN_BYTES, OpenedClaudeLogin, OpenedCodexLogin, ProjectionRecipient,
+    CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS, MAX_SEALED_ANTIGRAVITY_LOGIN_BYTES,
+    MAX_SEALED_CLAUDE_LOGIN_BYTES, MAX_SEALED_CODEX_LOGIN_BYTES, OpenedAntigravityLogin,
+    OpenedClaudeLogin, OpenedCodexLogin, ProjectionRecipient,
 };
 
 use super::*;
@@ -29,6 +30,7 @@ const _: () = assert!(LOGIN_REQUEST_LIFETIME.as_millis() < MAX_CODEX_LOGIN_LIFET
 pub(super) enum LoginKind {
     Codex,
     Claude,
+    Antigravity,
 }
 
 impl LoginKind {
@@ -36,6 +38,9 @@ impl LoginKind {
         match self {
             Self::Codex => codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
             Self::Claude => codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+            Self::Antigravity => {
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_ANTIGRAVITY_LOGIN
+            }
         }
     }
 
@@ -43,6 +48,7 @@ impl LoginKind {
         match self {
             Self::Codex => MAX_SEALED_CODEX_LOGIN_BYTES,
             Self::Claude => MAX_SEALED_CLAUDE_LOGIN_BYTES,
+            Self::Antigravity => MAX_SEALED_ANTIGRAVITY_LOGIN_BYTES,
         }
     }
 
@@ -58,6 +64,11 @@ impl LoginKind {
                 recipient_public_key: recipient,
                 deadline_unix_ms: deadline,
             }),
+            Self::Antigravity => GuestPayload::AntigravityLogin(v1::AntigravityLoginRequest {
+                request_id,
+                recipient_public_key: recipient,
+                deadline_unix_ms: deadline,
+            }),
         }
     }
 }
@@ -69,6 +80,7 @@ type GuestPayload = v1::credential_bridge_guest_message::Payload;
 pub(super) struct LoginCapabilities {
     codex: bool,
     claude: bool,
+    antigravity: bool,
 }
 
 impl LoginCapabilities {
@@ -81,6 +93,7 @@ impl LoginCapabilities {
         Self {
             codex: listed(LoginKind::Codex),
             claude: listed(LoginKind::Claude),
+            antigravity: listed(LoginKind::Antigravity),
         }
     }
 
@@ -88,6 +101,7 @@ impl LoginCapabilities {
         match kind {
             LoginKind::Codex => self.codex,
             LoginKind::Claude => self.claude,
+            LoginKind::Antigravity => self.antigravity,
         }
     }
 }
@@ -130,6 +144,11 @@ impl CredentialBridge {
         self.supports_login(LoginKind::Claude).await
     }
 
+    /// Whether the currently admitted epoch's host serves [`Self::antigravity_login`].
+    pub async fn supports_antigravity_login(&self) -> bool {
+        self.supports_login(LoginKind::Antigravity).await
+    }
+
     async fn supports_login(&self, kind: LoginKind) -> bool {
         self.inner
             .lock()
@@ -157,6 +176,15 @@ impl CredentialBridge {
         let (sealed, recipient, context) = self.sealed_login(LoginKind::Claude).await?;
         recipient
             .open_claude_login(&sealed, &context, login_now_unix_ms()?)
+            .map_err(|_| LoginFailure::Unavailable)
+    }
+
+    /// Ask the broker for the placeholder-only Antigravity login payload,
+    /// sent only on an intercepted epoch whose host listed "antigravity-login".
+    pub async fn antigravity_login(&self) -> Result<OpenedAntigravityLogin, LoginFailure> {
+        let (sealed, recipient, context) = self.sealed_login(LoginKind::Antigravity).await?;
+        recipient
+            .open_antigravity_login(&sealed, &context, login_now_unix_ms()?)
             .map_err(|_| LoginFailure::Unavailable)
     }
 
@@ -287,6 +315,21 @@ impl CredentialBridge {
             None => None,
         };
         self.apply_login_response(epoch, LoginKind::Claude, &response.request_id, result)
+            .await
+    }
+
+    pub(super) async fn apply_antigravity_login_response(
+        &self,
+        epoch: u64,
+        response: v1::AntigravityLoginResponse,
+    ) -> Result<(), Status> {
+        use v1::antigravity_login_response::Result as LoginResult;
+        let result = match response.result {
+            Some(LoginResult::SealedLogin(bytes)) => Some(Ok(bytes)),
+            Some(LoginResult::Failure(reason)) => Some(Err(reason)),
+            None => None,
+        };
+        self.apply_login_response(epoch, LoginKind::Antigravity, &response.request_id, result)
             .await
     }
 

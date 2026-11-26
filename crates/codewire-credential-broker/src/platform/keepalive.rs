@@ -39,18 +39,21 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use super::{publish_started_refresh, refresh_store_error};
+use crate::antigravity_oauth::AntigravityOAuthCredential;
 use crate::claude_oauth::ClaudeOAuthCredential;
 use crate::codex_oauth::CodexOAuthCredential;
 use crate::github_app::{GitHubAppUserOAuthBundle, GitHubOAuthCredential};
 use crate::refresh_failure::RefreshFailure;
 use crate::runtime::{
-    exchange_claude_oauth_refresh, exchange_codex_oauth_refresh, exchange_github_app_refresh,
+    exchange_antigravity_oauth_refresh, exchange_claude_oauth_refresh,
+    exchange_codex_oauth_refresh, exchange_github_app_refresh,
 };
 use crate::{BrokerRefreshError, BrokerUpstreamTransport, GitHubAppAuthorizationOwner};
 
 const CODEX_PROVIDER: &str = "openai";
 const GITHUB_PROVIDER: &str = "github";
 const CLAUDE_PROVIDER: &str = "anthropic";
+const ANTIGRAVITY_PROVIDER: &str = "google";
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Metadata page size for one candidate query.
@@ -79,6 +82,9 @@ pub const DEFAULT_GITHUB_KEEPALIVE_AGE: Duration = Duration::from_secs(30 * 24 *
 /// the refresh token's lifetime when Claude reports it. Claude publishes no
 /// refresh-token lifetime, so the default follows Codex's.
 pub const DEFAULT_CLAUDE_KEEPALIVE_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Google Desktop OAuth (Antigravity) material older than this is refreshed,
+/// well inside Google's six-month inactivity expiry for unused refresh tokens.
+pub const DEFAULT_ANTIGRAVITY_KEEPALIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Keep-alive timing. Ages are measured from the material's own refresh time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +93,7 @@ pub struct OAuthKeepAliveConfig {
     pub codex_age: Duration,
     pub github_age: Duration,
     pub claude_age: Duration,
+    pub antigravity_age: Duration,
 }
 
 impl Default for OAuthKeepAliveConfig {
@@ -96,6 +103,7 @@ impl Default for OAuthKeepAliveConfig {
             codex_age: DEFAULT_CODEX_KEEPALIVE_AGE,
             github_age: DEFAULT_GITHUB_KEEPALIVE_AGE,
             claude_age: DEFAULT_CLAUDE_KEEPALIVE_AGE,
+            antigravity_age: DEFAULT_ANTIGRAVITY_KEEPALIVE_AGE,
         }
     }
 }
@@ -103,8 +111,8 @@ impl Default for OAuthKeepAliveConfig {
 impl OAuthKeepAliveConfig {
     /// Accepted ranges: interval 10 s to 1 day; Codex age 1 minute to 8 days
     /// (never later than Codex CLI's own habit); GitHub age 1 minute to 90 days;
-    /// Claude age 1 minute to 8 days. Short values exist for local
-    /// observation, not production tuning.
+    /// Claude age 1 minute to 8 days; Antigravity age 1 minute to 90 days.
+    /// Short values exist for local observation, not production tuning.
     pub fn validate(self) -> Result<Self, OAuthKeepAliveConfigError> {
         let minute = Duration::from_secs(60);
         if !(Duration::from_secs(10)..=DAY).contains(&self.interval) {
@@ -118,6 +126,9 @@ impl OAuthKeepAliveConfig {
         }
         if !(minute..=8 * DAY).contains(&self.claude_age) {
             return Err(OAuthKeepAliveConfigError::ClaudeAge);
+        }
+        if !(minute..=90 * DAY).contains(&self.antigravity_age) {
+            return Err(OAuthKeepAliveConfigError::AntigravityAge);
         }
         Ok(self)
     }
@@ -134,6 +145,8 @@ pub enum OAuthKeepAliveConfigError {
     GitHubAge,
     #[error("OAuth keep-alive Claude age is out of range")]
     ClaudeAge,
+    #[error("OAuth keep-alive Antigravity age is out of range")]
+    AntigravityAge,
 }
 
 /// One owner per credential-service process. It holds the trusted store and
@@ -171,6 +184,7 @@ enum Plan {
     Codex(CodexOAuthCredential),
     GitHub(Arc<GitHubAppAuthorizationOwner>, GitHubAppUserOAuthBundle),
     Claude(ClaudeOAuthCredential),
+    Antigravity(AntigravityOAuthCredential),
 }
 
 enum Outcome {
@@ -226,6 +240,7 @@ impl OAuthKeepAlive {
             codex_age_seconds = self.config.codex_age.as_secs(),
             github_age_seconds = self.config.github_age.as_secs(),
             claude_age_seconds = self.config.claude_age.as_secs(),
+            antigravity_age_seconds = self.config.antigravity_age.as_secs(),
             github_app = self.github_app.is_some(),
             "OAuth credential keep-alive started"
         );
@@ -304,6 +319,11 @@ impl OAuthKeepAlive {
             CLAUDE_PROVIDER,
             CredentialAuthKind::ClaudeSignIn,
             MIN_CLAUDE_SELECTION_AGE.min(self.config.claude_age),
+        );
+        add(
+            ANTIGRAVITY_PROVIDER,
+            CredentialAuthKind::OAuth,
+            self.config.antigravity_age,
         );
         forms
     }
@@ -474,6 +494,19 @@ impl OAuthKeepAlive {
                     decision => return Outcome::Decided(decision),
                 }
             }
+            (ANTIGRAVITY_PROVIDER, CredentialAuthKind::OAuth) => {
+                match AntigravityOAuthCredential::parse(material.expose_secret()) {
+                    Ok(credential) => match codex_decision(
+                        credential.refreshed_at_unix(),
+                        now,
+                        self.config.antigravity_age.as_secs(),
+                    ) {
+                        Decision::Due => Plan::Antigravity(credential),
+                        decision => return Outcome::Decided(decision),
+                    },
+                    Err(_) => return Outcome::Decided(Decision::Never),
+                }
+            }
             _ => return Outcome::Decided(Decision::Never),
         };
         drop(material);
@@ -488,6 +521,7 @@ impl OAuthKeepAlive {
             Plan::Codex(_) => CODEX_PROVIDER,
             Plan::GitHub(..) => GITHUB_PROVIDER,
             Plan::Claude(_) => CLAUDE_PROVIDER,
+            Plan::Antigravity(_) => ANTIGRAVITY_PROVIDER,
         };
         let Ok(refreshed_at_unix) = unix_now() else {
             return Outcome::Skipped;
@@ -525,28 +559,37 @@ impl OAuthKeepAlive {
                 return Outcome::Failed;
             }
         };
-        let exchanged =
-            match plan {
-                Plan::Codex(credential) => {
-                    exchange_codex_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
-                        .await
-                        .map(|bundle| ProtectedValue::from_slice(bundle.as_bytes()))
-                }
-                Plan::GitHub(owner, bundle) => exchange_github_app_refresh(&owner, bundle)
+        let exchanged = match plan {
+            Plan::Codex(credential) => {
+                exchange_codex_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
+                    .await
+                    .map(|bundle| ProtectedValue::from_slice(bundle.as_bytes()))
+            }
+            Plan::GitHub(owner, bundle) => {
+                exchange_github_app_refresh(&owner, bundle)
                     .await
                     .map(|bundle| {
                         let mut bytes = bundle.into_bytes();
                         ProtectedValue::new(std::mem::take(&mut *bytes))
-                    }),
-                Plan::Claude(credential) => {
-                    exchange_claude_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
-                        .await
-                        .map(|bundle| {
-                            let mut bytes = bundle.into_bytes();
-                            ProtectedValue::new(std::mem::take(&mut *bytes))
-                        })
-                }
-            };
+                    })
+            }
+            Plan::Claude(credential) => {
+                exchange_claude_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
+                    .await
+                    .map(|bundle| {
+                        let mut bytes = bundle.into_bytes();
+                        ProtectedValue::new(std::mem::take(&mut *bytes))
+                    })
+            }
+            Plan::Antigravity(credential) => {
+                exchange_antigravity_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
+                    .await
+                    .map(|bundle| {
+                        let mut bytes = bundle.into_bytes();
+                        ProtectedValue::new(std::mem::take(&mut *bytes))
+                    })
+            }
+        };
         match exchanged {
             Ok(value) => {
                 let published = match value {
@@ -835,6 +878,7 @@ mod tests {
             codex_age: Duration::from_secs(60),
             github_age: Duration::from_secs(60),
             claude_age: Duration::from_secs(60),
+            antigravity_age: Duration::from_secs(60),
         };
         assert_eq!(short.validate(), Ok(short));
     }

@@ -5,6 +5,8 @@ pub mod access;
 pub mod activity;
 #[cfg(target_os = "linux")]
 mod agent_login;
+#[cfg(target_os = "linux")]
+pub mod antigravity_home;
 pub mod app_ports;
 pub mod auth_rotation;
 #[cfg(target_os = "linux")]

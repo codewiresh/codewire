@@ -376,9 +376,20 @@ async fn enroll_for_profile(
             output: crate::commands::OutputFormat::Text,
             guided: false,
         }),
+        "antigravity" => CredentialsCommand::Connect(CredentialConnectArgs {
+            credential_type: None,
+            provider: Some(CredentialConnectProviderArg::Antigravity),
+            name: None,
+            yes: false,
+            output: crate::commands::OutputFormat::Text,
+            expires_at: None,
+            key_file: None,
+            account_hint: None,
+            guided: false,
+        }),
         _ => {
             anyhow::bail!(
-                "unsupported provider; use codex, openai, github, anthropic, gemini or ssh"
+                "unsupported provider; use codex, openai, github, anthropic, gemini, antigravity or ssh"
             )
         }
     };
@@ -409,6 +420,7 @@ pub(super) fn assignment_slot(command: &CredentialsCommand) -> Option<String> {
             CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken => {
                 "anthropic"
             }
+            CredentialConnectProviderArg::Antigravity => "antigravity",
             CredentialConnectProviderArg::Github => return None,
         },
         CredentialsCommand::Generate(a) if a.guided => "ssh",
@@ -601,7 +613,14 @@ mod tests {
         );
         assert_eq!(
             set_slots(),
-            ["codex", "openai", "anthropic", "gemini", "ssh"]
+            [
+                "codex",
+                "openai",
+                "anthropic",
+                "gemini",
+                "antigravity",
+                "ssh"
+            ]
         );
     }
 

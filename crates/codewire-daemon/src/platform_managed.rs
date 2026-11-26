@@ -75,7 +75,8 @@ impl Agent {
             ManagedCredentialClient::Anthropic => Some(Route::Anthropic),
             ManagedCredentialClient::Ssh
             | ManagedCredentialClient::GitHub
-            | ManagedCredentialClient::Gemini => None,
+            | ManagedCredentialClient::Gemini
+            | ManagedCredentialClient::Antigravity => None,
         }
     }
 }

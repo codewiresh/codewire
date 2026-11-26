@@ -153,6 +153,7 @@ impl super::OAuthRefreshMaterial {
         match self {
             Self::Codex(_) => "codex",
             Self::Claude(_) => "anthropic",
+            Self::Antigravity(_) => "antigravity",
         }
     }
 }

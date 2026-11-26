@@ -46,6 +46,24 @@ pub fn claude_login_permission() -> GrantPermission {
     }
 }
 
+/// Operation of the dedicated Antigravity login delivery permission (#6555).
+/// Delivers only the environment's `cwp1_` placeholder, the public managed
+/// refresh marker, and non-secret `id_token_email`, and only when front-door
+/// interception is active — never a real Google access, refresh, or ID token.
+pub const ANTIGRAVITY_LOGIN_OPERATION: &str = "antigravity-login";
+/// Route of the dedicated Antigravity login delivery permission. Not an HTTP route.
+pub const ANTIGRAVITY_LOGIN_ROUTE: &str = "antigravity-login";
+
+/// The Antigravity slot's dedicated permission for placeholder login delivery.
+pub fn antigravity_login_permission() -> GrantPermission {
+    GrantPermission {
+        operation: BrokerOperationId::parse(ANTIGRAVITY_LOGIN_OPERATION)
+            .expect("built-in Antigravity login operation ID"),
+        route: BrokerRouteId::parse(ANTIGRAVITY_LOGIN_ROUTE)
+            .expect("built-in Antigravity login route ID"),
+    }
+}
+
 /// Return the provider credential forms and capabilities admitted by the
 /// current Codewire credential stack.
 ///
@@ -151,11 +169,31 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
         },
         ProviderDefinition {
             id: ProviderId::parse("google").expect("built-in Google provider ID"),
-            authentication_kinds: BTreeSet::from([CredentialAuthKind::ApiKey]),
-            capabilities: BTreeMap::from([(
-                CapabilitySlot::gemini(),
-                policy(&[CredentialAuthKind::ApiKey], &[("generate", "gemini-api")]),
-            )]),
+            authentication_kinds: BTreeSet::from([
+                CredentialAuthKind::ApiKey,
+                CredentialAuthKind::OAuth,
+            ]),
+            capabilities: BTreeMap::from([
+                (
+                    CapabilitySlot::gemini(),
+                    policy(&[CredentialAuthKind::ApiKey], &[("generate", "gemini-api")]),
+                ),
+                (
+                    CapabilitySlot::antigravity(),
+                    CapabilityPolicy {
+                        authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                        permissions: BTreeSet::from([
+                            GrantPermission {
+                                operation: BrokerOperationId::parse("generate")
+                                    .expect("built-in generate operation ID"),
+                                route: BrokerRouteId::parse("antigravity-api")
+                                    .expect("built-in Antigravity route ID"),
+                            },
+                            antigravity_login_permission(),
+                        ]),
+                    },
+                ),
+            ]),
         },
     ])
     .expect("built-in provider catalog")

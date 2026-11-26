@@ -88,6 +88,10 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         );
         let codex_login = CodexDeviceLogin::new(Arc::new(provider.clone()));
         let claude_sign_in = ClaudeSignIn::new(Arc::new(provider.clone()));
+        let antigravity_sign_in =
+            codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn::new(
+                Arc::new(provider.clone()),
+            );
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
             crate::authority::TimedKekProvider::wrap(Arc::new(TestKekProvider)),
@@ -150,6 +154,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             store.clone(),
             codex_login,
             claude_sign_in,
+            antigravity_sign_in,
             Some(github_login),
             Some(github_app_authorization.clone()),
         ));

@@ -9,7 +9,7 @@ use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, DerivedGrant,
     GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, Refusal, UpstreamFailure, WithheldReason,
-    claude_login_permission, codex_login_permission,
+    antigravity_login_permission, claude_login_permission, codex_login_permission,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_workload_secrets::{
@@ -31,6 +31,8 @@ use crate::anthropic::{
     AnthropicApiKeyAdapter, AnthropicClaudeSignInAdapter, AnthropicStreamingResponse,
     AnthropicSubscriptionTokenAdapter,
 };
+use crate::antigravity::{AntigravityApiAdapter, AntigravityStreamingResponse};
+use crate::antigravity_oauth::{AntigravityOAuthCredential, CanonicalAntigravityOAuthBundle};
 use crate::claude_oauth::{
     CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS, CanonicalClaudeOAuthBundle, ClaudeOAuthCredential,
 };
@@ -62,10 +64,16 @@ const OAUTH_REFRESH_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_REFRESH_PROVIDER: &str = "openai";
 const CLAUDE_REFRESH_PROVIDER: &str = "anthropic";
 const GITHUB_REFRESH_PROVIDER: &str = "github";
+const ANTIGRAVITY_REFRESH_PROVIDER: &str = "google";
 #[cfg(feature = "local-broker-synthetic-smoke")]
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
 mod anthropic_route;
+mod antigravity_login;
+mod antigravity_route;
+#[cfg(test)]
+mod antigravity_tests;
+mod antigravity_token;
 mod claude_login;
 mod claude_token;
 mod codex_login;
@@ -85,7 +93,8 @@ use forced_refresh::{
 };
 use guest_request::ValidatedGuestRequest;
 pub(crate) use token_exchange::{
-    exchange_claude_oauth_refresh, exchange_codex_oauth_refresh, exchange_github_app_refresh,
+    exchange_antigravity_oauth_refresh, exchange_claude_oauth_refresh,
+    exchange_codex_oauth_refresh, exchange_github_app_refresh,
 };
 mod request_binding;
 use request_binding::validate_request_binding;
@@ -149,6 +158,8 @@ pub enum BrokerCredentialRefreshKind {
     GitHubAppUserOAuth,
     /// A Claude sign-in (the Anthropic slot's `ClaudeSignIn` kind).
     ClaudeOAuth,
+    /// An Antigravity sign-in (the Antigravity slot's Google `OAuth` kind).
+    AntigravityOAuth,
 }
 
 /// Refresh ownership or completion of a previously staged result.
@@ -224,6 +235,16 @@ pub trait BrokerLeaseProvider: Send + Sync {
         Err(BrokerLeaseError::Denied)
     }
 
+    /// Lease the Antigravity slot's active personal Google OAuth sign-in so
+    /// the broker can deliver its placeholder-only login file behind
+    /// front-door interception. Real Google tokens never leave the broker.
+    async fn lease_antigravity_login(
+        &self,
+        _request_id: Uuid,
+    ) -> Result<Self::Lease, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
+
     /// Serialize a refresh for the exact credential generation selected by an
     /// already-admitted operation. This boundary carries metadata only.
     async fn begin_credential_refresh(
@@ -267,6 +288,16 @@ pub trait BrokerLeaseProvider: Send + Sync {
         &self,
         permit: Self::StartedRefresh,
         _material: CanonicalClaudeOAuthBundle,
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        Err(CommitFailure::returned(permit, BrokerRefreshError::Denied))
+    }
+
+    /// Narrow Antigravity sign-in publication hook. The only accepted material
+    /// is the canonical Google OAuth sign-in envelope.
+    async fn commit_antigravity_oauth_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        _material: CanonicalAntigravityOAuthBundle,
     ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         Err(CommitFailure::returned(permit, BrokerRefreshError::Denied))
     }
@@ -1035,6 +1066,7 @@ pub struct OpenAiBroker<P, U> {
     anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter,
     anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter,
     gemini_adapter: GeminiApiKeyAdapter,
+    antigravity_adapter: AntigravityApiAdapter,
     github_adapter: GitHubOAuthAdapter,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
@@ -1175,6 +1207,9 @@ enum OAuthPurpose {
     /// The Claude login's direct delivery exception, leased only through
     /// [`BrokerLeaseProvider::lease_claude_login`].
     ClaudeLogin,
+    /// The placeholder-only Antigravity login, leased only through
+    /// [`BrokerLeaseProvider::lease_antigravity_login`].
+    AntigravityLogin,
 }
 
 impl OAuthPurpose {
@@ -1188,6 +1223,7 @@ impl OAuthPurpose {
             },
             Self::CodexLogin => codex_login_permission(),
             Self::ClaudeLogin => claude_login_permission(),
+            Self::AntigravityLogin => antigravity_login_permission(),
         }
     }
 }
@@ -1237,10 +1273,28 @@ impl RefreshingOAuth for ClaudeOAuthCredential {
     }
 }
 
+impl RefreshingOAuth for AntigravityOAuthCredential {
+    const AUTHENTICATION_KIND: CredentialAuthKind = CredentialAuthKind::OAuth;
+    const REFRESH_KIND: BrokerCredentialRefreshKind = BrokerCredentialRefreshKind::AntigravityOAuth;
+
+    fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool {
+        AntigravityOAuthCredential::should_refresh_within(self, now_unix, minimum_validity_seconds)
+    }
+
+    fn has_expired(&self, now_unix: u64) -> bool {
+        AntigravityOAuthCredential::has_expired(self, now_unix)
+    }
+
+    fn into_refresh(self) -> OAuthRefreshMaterial {
+        OAuthRefreshMaterial::Antigravity(self)
+    }
+}
+
 /// The admitted material one started refresh exchanges at its provider.
 enum OAuthRefreshMaterial {
     Codex(CodexOAuthCredential),
     Claude(ClaudeOAuthCredential),
+    Antigravity(AntigravityOAuthCredential),
 }
 
 impl OAuthRefreshMaterial {
@@ -1248,6 +1302,7 @@ impl OAuthRefreshMaterial {
         match self {
             Self::Codex(_) => CODEX_REFRESH_PROVIDER,
             Self::Claude(_) => CLAUDE_REFRESH_PROVIDER,
+            Self::Antigravity(_) => ANTIGRAVITY_REFRESH_PROVIDER,
         }
     }
 }
@@ -1316,6 +1371,7 @@ where
             anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter::new()
                 .map_err(map_adapter_error)?,
             gemini_adapter: GeminiApiKeyAdapter::new().map_err(map_adapter_error)?,
+            antigravity_adapter: AntigravityApiAdapter::new().map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
@@ -1747,6 +1803,7 @@ where
             }
             OAuthPurpose::CodexLogin => self.leases.lease_codex_login(request_id).await,
             OAuthPurpose::ClaudeLogin => self.leases.lease_claude_login(request_id).await,
+            OAuthPurpose::AntigravityLogin => self.leases.lease_antigravity_login(request_id).await,
         }
         .map_err(map_lease_error)
     }
@@ -1759,7 +1816,9 @@ where
         match purpose {
             OAuthPurpose::Operation { .. } => self.oauth_adapter.credential_from_lease(lease),
             OAuthPurpose::CodexLogin => self.oauth_adapter.login_credential_from_lease(lease),
-            OAuthPurpose::ClaudeLogin => return Err(BrokerRequestError::Denied),
+            OAuthPurpose::ClaudeLogin | OAuthPurpose::AntigravityLogin => {
+                return Err(BrokerRequestError::Denied);
+            }
         }
         .map_err(map_adapter_error)
     }
@@ -1915,6 +1974,16 @@ where
                 match exchange_claude_oauth_refresh(&*upstream, credential, refreshed_at_unix).await
                 {
                     Ok(bundle) => Ok(leases.commit_claude_oauth_refresh(permit, bundle).await),
+                    Err(failed) => Err((permit, failed)),
+                }
+            }
+            OAuthRefreshMaterial::Antigravity(credential) => {
+                match exchange_antigravity_oauth_refresh(&*upstream, credential, refreshed_at_unix)
+                    .await
+                {
+                    Ok(bundle) => Ok(leases
+                        .commit_antigravity_oauth_refresh(permit, bundle)
+                        .await),
                     Err(failed) => Err((permit, failed)),
                 }
             }
@@ -2121,6 +2190,7 @@ enum ProviderStreamingResponse {
     OpenAi(OpenAiStreamingResponse),
     Anthropic(AnthropicStreamingResponse),
     Gemini(GeminiStreamingResponse),
+    Antigravity(AntigravityStreamingResponse),
 }
 impl ProviderStreamingResponse {
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, CredentialBrokerError> {
@@ -2128,6 +2198,7 @@ impl ProviderStreamingResponse {
             Self::OpenAi(redactor) => redactor.push(chunk),
             Self::Anthropic(redactor) => redactor.push(chunk),
             Self::Gemini(redactor) => redactor.push(chunk),
+            Self::Antigravity(redactor) => redactor.push(chunk),
         }
     }
     fn finish(self) -> Result<Vec<u8>, CredentialBrokerError> {
@@ -2135,6 +2206,7 @@ impl ProviderStreamingResponse {
             Self::OpenAi(redactor) => redactor.finish(),
             Self::Anthropic(redactor) => redactor.finish(),
             Self::Gemini(redactor) => redactor.finish(),
+            Self::Antigravity(redactor) => redactor.finish(),
         }
     }
 }

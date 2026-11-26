@@ -109,7 +109,9 @@ where
                 .anthropic_sign_in_adapter
                 .login_credential_from_lease(lease)
                 .map_err(map_adapter_error),
-            OAuthPurpose::CodexLogin => Err(BrokerRequestError::Denied),
+            OAuthPurpose::CodexLogin | OAuthPurpose::AntigravityLogin => {
+                Err(BrokerRequestError::Denied)
+            }
         }
     }
 

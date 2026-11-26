@@ -442,7 +442,7 @@ where
 
     /// One forwarded request, framing aside both ways, its reply bounded at
     /// `max_bytes` and not redacted.
-    async fn forward(
+    pub(super) async fn forward(
         &self,
         method: http::Method,
         target: url::Url,
@@ -550,6 +550,9 @@ pub(super) enum SwapCarrier {
     Standard,
     /// `x-goog-api-key` only (`generativelanguage.googleapis.com`).
     GeminiApiKey,
+    /// `authorization: Bearer <cwp1_...>` only (`daily-cloudcode-pa.googleapis.com`,
+    /// `cloudcode-pa.googleapis.com`).
+    AntigravityBearer,
 }
 
 /// What credential a front-door request presents.
@@ -610,9 +613,10 @@ fn disallowed_placeholder_for(carrier: SwapCarrier, name: &HeaderName, value: &[
         SwapCarrier::Standard => {
             name.as_str() == "x-goog-api-key" && contains_placeholder_tag(value)
         }
-        // On Gemini, any `cwp1_` placeholder in any disallowed credential
-        // header (or malformed `x-goog-api-key`) fails closed (`400`).
-        SwapCarrier::GeminiApiKey => {
+        // On Gemini and Antigravity, any `cwp1_` placeholder in any disallowed
+        // credential header (or non-admitted Authorization form, including
+        // Basic-decoded) fails closed (`400`).
+        SwapCarrier::GeminiApiKey | SwapCarrier::AntigravityBearer => {
             if contains_placeholder_tag(value) {
                 return true;
             }
@@ -663,6 +667,16 @@ fn swap_shape_for(
         SwapCarrier::GeminiApiKey => {
             if name.as_str() == "x-goog-api-key" {
                 value.to_owned()
+            } else {
+                return None;
+            }
+        }
+        SwapCarrier::AntigravityBearer => {
+            if *name == header::AUTHORIZATION
+                && let Some((scheme, rest)) = value.split_once(' ')
+                && scheme.eq_ignore_ascii_case("bearer")
+            {
+                rest.to_owned()
             } else {
                 return None;
             }

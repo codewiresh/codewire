@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteClaudeSignInRequest, CompleteClaudeSignInResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, StartClaudeSignInRequest, StartClaudeSignInResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteAntigravitySignInRequest, CompleteAntigravitySignInResponse, CompleteClaudeSignInRequest, CompleteClaudeSignInResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, StartAntigravitySignInRequest, StartAntigravitySignInResponse, StartClaudeSignInRequest, StartClaudeSignInResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -540,6 +540,12 @@ class CredentialMutationService(Protocol):
     async def complete_claude_sign_in(self, request: CompleteClaudeSignInRequest, ctx: RequestContext[CompleteClaudeSignInRequest, CompleteClaudeSignInResponse]) -> CompleteClaudeSignInResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    async def start_antigravity_sign_in(self, request: StartAntigravitySignInRequest, ctx: RequestContext[StartAntigravitySignInRequest, StartAntigravitySignInResponse]) -> StartAntigravitySignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def complete_antigravity_sign_in(self, request: CompleteAntigravitySignInRequest, ctx: RequestContext[CompleteAntigravitySignInRequest, CompleteAntigravitySignInResponse]) -> CompleteAntigravitySignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     async def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -641,6 +647,26 @@ class CredentialMutationServiceASGIApplication(ConnectASGIApplication[Credential
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.complete_claude_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/StartAntigravitySignIn": Endpoint.unary(
+                    method=MethodInfo(
+                        name="StartAntigravitySignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=StartAntigravitySignInRequest,
+                        output=StartAntigravitySignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.start_antigravity_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteAntigravitySignIn": Endpoint.unary(
+                    method=MethodInfo(
+                        name="CompleteAntigravitySignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteAntigravitySignInRequest,
+                        output=CompleteAntigravitySignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.complete_antigravity_sign_in,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": Endpoint.unary(
                     method=MethodInfo(
@@ -880,6 +906,46 @@ class CredentialMutationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def start_antigravity_sign_in(
+        self,
+        request: StartAntigravitySignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> StartAntigravitySignInResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StartAntigravitySignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=StartAntigravitySignInRequest,
+                output=StartAntigravitySignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def complete_antigravity_sign_in(
+        self,
+        request: CompleteAntigravitySignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteAntigravitySignInResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteAntigravitySignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteAntigravitySignInRequest,
+                output=CompleteAntigravitySignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def rename_credential(
         self,
         request: RenameCredentialRequest,
@@ -1022,6 +1088,12 @@ class CredentialMutationServiceSync(Protocol):
     def complete_claude_sign_in(self, request: CompleteClaudeSignInRequest, ctx: RequestContext[CompleteClaudeSignInRequest, CompleteClaudeSignInResponse]) -> CompleteClaudeSignInResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def start_antigravity_sign_in(self, request: StartAntigravitySignInRequest, ctx: RequestContext[StartAntigravitySignInRequest, StartAntigravitySignInResponse]) -> StartAntigravitySignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def complete_antigravity_sign_in(self, request: CompleteAntigravitySignInRequest, ctx: RequestContext[CompleteAntigravitySignInRequest, CompleteAntigravitySignInResponse]) -> CompleteAntigravitySignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1121,6 +1193,26 @@ class CredentialMutationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.complete_claude_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/StartAntigravitySignIn": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="StartAntigravitySignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=StartAntigravitySignInRequest,
+                        output=StartAntigravitySignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.start_antigravity_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteAntigravitySignIn": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="CompleteAntigravitySignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteAntigravitySignInRequest,
+                        output=CompleteAntigravitySignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.complete_antigravity_sign_in,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": EndpointSync.unary(
                     method=MethodInfo(
@@ -1348,6 +1440,44 @@ class CredentialMutationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialMutationService",
                 input=CompleteClaudeSignInRequest,
                 output=CompleteClaudeSignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def start_antigravity_sign_in(
+        self,
+        request: StartAntigravitySignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> StartAntigravitySignInResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StartAntigravitySignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=StartAntigravitySignInRequest,
+                output=StartAntigravitySignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def complete_antigravity_sign_in(
+        self,
+        request: CompleteAntigravitySignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteAntigravitySignInResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteAntigravitySignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteAntigravitySignInRequest,
+                output=CompleteAntigravitySignInResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -1336,13 +1336,15 @@ fn a_login_no_writer_keeps_is_cleared_at_start() {
     fixture.writer().apply(first(), T0).unwrap();
     let home = ClaudeHome::new(fixture.home(), Path::new("/workspace"));
     let codex = crate::codex_home::CodexHome::at(fixture.root.path().join("codex-home"));
-    crate::login_cleanup::clear_unkept_logins(&codex, &home, true, true);
+    let antigravity =
+        crate::antigravity_home::AntigravityHome::new(fixture.root.path().join("antigravity-home"));
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, &antigravity, true, true, true);
     assert_eq!(fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"], ACCESS);
-    crate::login_cleanup::clear_unkept_logins(&codex, &home, true, false);
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, &antigravity, true, false, true);
     assert_eq!(fixture.json(), unrelated());
 
     fixture.store(&users_login());
-    crate::login_cleanup::clear_unkept_logins(&codex, &home, false, false);
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, &antigravity, false, false, false);
     assert_eq!(fixture.json(), users_login());
 }
 

@@ -113,7 +113,9 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
             // delivery exceptions"), carry no projection: each passes straight
             // to the platform broker, which decides it for the delegation's
             // creator, and its answer passes back through `complete` unchanged.
-            Some(Payload::CodexLogin(_) | Payload::ClaudeLogin(_)) => return Ok(frame),
+            Some(
+                Payload::CodexLogin(_) | Payload::ClaudeLogin(_) | Payload::AntigravityLogin(_),
+            ) => return Ok(frame),
             _ => return Err(denied()),
         };
         if self.pending.lock().await.contains_key(request_id) {

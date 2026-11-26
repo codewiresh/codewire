@@ -166,6 +166,13 @@ fn authority_feature_needed(
             provider: Some(CredentialConnectProviderArg::ClaudeToken),
             ..
         })) => Some((AuthorityFeature::ClaudeToken, "a Claude token")),
+        CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+            provider: Some(CredentialConnectProviderArg::Antigravity),
+            ..
+        })) => Some((
+            AuthorityFeature::AntigravitySignIn,
+            "an Antigravity sign-in",
+        )),
         CredentialOperation::Credential(CredentialsCommand::Add(add))
             if add.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION_ALIAS) =>
         {
@@ -429,6 +436,20 @@ impl ConnectStore for LocalConnectStore<'_> {
                     reach: Vec::new(),
                 })
             }
+            CredentialConnectProviderArg::Antigravity => {
+                let (bundle, account_hint) =
+                    super::provider_login::antigravity_sign_in(sign_in, interrupt)
+                        .await?
+                        .into_parts();
+                let mut bytes = bundle.into_bytes();
+                let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+                    .context("prepare protected Antigravity sign-in")?;
+                Ok(LocalApproval {
+                    material,
+                    account_hint,
+                    reach: Vec::new(),
+                })
+            }
             CredentialConnectProviderArg::Codex => {
                 let (bundle, account_hint) =
                     super::provider_login::codex_device_login(sign_in, interrupt)
@@ -509,9 +530,12 @@ impl ConnectStore for LocalConnectStore<'_> {
         let provider = ProviderId::parse(provider_id(target.provider))?;
         let authentication_kind = connected_kind(target.provider);
         // A copy to revoke if the store definitely refuses the save.
-        let revocable = matches!(connecting, CredentialConnectProviderArg::Codex)
-            .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
-            .flatten();
+        let revocable = matches!(
+            connecting,
+            CredentialConnectProviderArg::Codex | CredentialConnectProviderArg::Antigravity
+        )
+        .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
+        .flatten();
         let name = target.name.clone();
         // The verified GitHub login, to tell its own account from others'.
         let verified_login = approval.account_hint.clone();
@@ -700,7 +724,8 @@ fn connected_kind(provider: CredentialConnectProviderArg) -> CredentialAuthKind 
         CredentialConnectProviderArg::Claude => CredentialAuthKind::ClaudeSignIn,
         CredentialConnectProviderArg::Codex
         | CredentialConnectProviderArg::Github
-        | CredentialConnectProviderArg::ClaudeToken => CredentialAuthKind::OAuth,
+        | CredentialConnectProviderArg::ClaudeToken
+        | CredentialConnectProviderArg::Antigravity => CredentialAuthKind::OAuth,
     }
 }
 
@@ -760,9 +785,18 @@ async fn revoke_unsaved(
     provider: CredentialConnectProviderArg,
     material: Option<ProtectedValue>,
 ) -> Option<codewire_credential_broker::provider_oauth::ProviderRevocation> {
-    let material = material.filter(|_| matches!(provider, CredentialConnectProviderArg::Codex))?;
-    eprintln!("Asking OpenAI to revoke the Codex sign-in you approved…");
-    Some(super::provider_login::revoke_unsaved_codex(material).await)
+    let material = material?;
+    match provider {
+        CredentialConnectProviderArg::Codex => {
+            eprintln!("Asking OpenAI to revoke the Codex sign-in you approved…");
+            Some(super::provider_login::revoke_unsaved_codex(material).await)
+        }
+        CredentialConnectProviderArg::Antigravity => {
+            eprintln!("Asking Google to revoke the Antigravity sign-in you approved…");
+            Some(super::provider_login::revoke_unsaved_antigravity(material).await)
+        }
+        _ => None,
+    }
 }
 
 fn say_discarded(

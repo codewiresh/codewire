@@ -75,6 +75,7 @@ pub fn check_interception_bindings(interception: bool) -> anyhow::Result<()> {
         "openai",
         "anthropic",
         "gemini",
+        "antigravity",
         "ssh",
         "github",
     ])
@@ -386,7 +387,15 @@ mod tests {
     /// step P, #6195).
     #[test]
     fn the_bindings_are_the_hosts_the_local_front_door_routes() {
-        let slots = ["codex", "openai", "anthropic", "gemini", "ssh", "github"];
+        let slots = [
+            "codex",
+            "openai",
+            "anthropic",
+            "gemini",
+            "antigravity",
+            "ssh",
+            "github",
+        ];
         for bits in 0..(1_u8 << slots.len()) {
             let chosen = (0..slots.len())
                 .filter(|bit| bits & (1 << bit) != 0)

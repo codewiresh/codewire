@@ -27,6 +27,7 @@ const PROFILE_ID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const CODEX_ID: &str = "11111111-1111-4111-8111-111111111111";
 const GEMINI_ID: &str = "22222222-2222-4222-8222-222222222222";
 const GEMINI_NEW_ID: &str = "33333333-3333-4333-8333-333333333333";
+const ANTIGRAVITY_ID: &str = "44444444-4444-4444-8444-444444444444";
 const GET_PROFILE_RPC: &str = "/codewire.v1.AccessProfileService/GetAccessProfile";
 const UPDATE_PROFILE_RPC: &str = "/codewire.v1.AccessProfileService/UpdateAccessProfile";
 const SHOWN_REVISION: u64 = 3;
@@ -195,6 +196,7 @@ fn entries_are_closed_and_use_exact_credential_ids() {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     )
     .unwrap();
     assert_eq!(profile_entries.len(), 1);
@@ -206,14 +208,28 @@ fn entries_are_closed_and_use_exact_credential_ids() {
         String::new(),
         id.into(),
         String::new(),
+        String::new(),
     )
     .unwrap();
     assert_eq!(gemini_entries.len(), 1);
     assert_eq!(gemini_entries[0].capability_slot, "gemini");
     assert_eq!(gemini_entries[0].credential_id, id);
+    let antigravity_entries = entries(
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        id.into(),
+        String::new(),
+    )
+    .unwrap();
+    assert_eq!(antigravity_entries.len(), 1);
+    assert_eq!(antigravity_entries[0].capability_slot, "antigravity");
+    assert_eq!(antigravity_entries[0].credential_id, id);
     assert!(
         entries(
             "not-an-id".into(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -225,9 +241,13 @@ fn entries_are_closed_and_use_exact_credential_ids() {
 
 #[tokio::test]
 async fn omitting_gemini_field_preserves_existing_binding_while_empty_string_clears_it() {
-    let existing = vec![entry("codex", CODEX_ID), entry("gemini", GEMINI_ID)];
+    let existing = vec![
+        entry("codex", CODEX_ID),
+        entry("gemini", GEMINI_ID),
+        entry("antigravity", ANTIGRAVITY_ID),
+    ];
 
-    // 1. Form without `gemini` (matches current template): preserves existing gemini binding.
+    // 1. Form without `gemini` or `antigravity` (matches current template): preserves both.
     let (up, calls) = upstream(existing.clone()).await;
     let dashboard = serve(crate::app(config(&up.origin))).await;
     let (status, location) = post_update(
@@ -248,16 +268,20 @@ async fn omitting_gemini_field_preserves_existing_binding_while_empty_string_cle
             .unwrap()
             .iter()
             .any(|(path, _)| path == GET_PROFILE_RPC),
-        "omitted gemini field must read the observed revision"
+        "omitted gemini/antigravity fields must read the observed revision"
     );
     let sent = update_requests(&calls);
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].entries,
-        vec![entry("codex", CODEX_ID), entry("gemini", GEMINI_ID)]
+        vec![
+            entry("codex", CODEX_ID),
+            entry("gemini", GEMINI_ID),
+            entry("antigravity", ANTIGRAVITY_ID),
+        ]
     );
 
-    // 2. Explicit `gemini=""` (from future UI "None" choice): clears gemini without reading.
+    // 2. Explicit `gemini=""` and `antigravity=""`: clears both without reading.
     let (up, calls) = upstream(existing.clone()).await;
     let dashboard = serve(crate::app(config(&up.origin))).await;
     let (status, location) = post_update(
@@ -267,6 +291,7 @@ async fn omitting_gemini_field_preserves_existing_binding_while_empty_string_cle
             ("openai", ""),
             ("anthropic", ""),
             ("gemini", ""),
+            ("antigravity", ""),
             ("ssh", ""),
         ],
     )
@@ -279,13 +304,13 @@ async fn omitting_gemini_field_preserves_existing_binding_while_empty_string_cle
             .unwrap()
             .iter()
             .any(|(path, _)| path == GET_PROFILE_RPC),
-        "explicit gemini=\"\" must not preserve the previous binding"
+        "explicit gemini=\"\" and antigravity=\"\" must not preserve previous bindings"
     );
     let sent = update_requests(&calls);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].entries, vec![entry("codex", CODEX_ID)]);
 
-    // 3. Explicit `gemini=<new-id>`: replaces gemini with the validated ID.
+    // 3. Explicit `gemini=<new-id>` with omitted `antigravity`: replaces gemini and preserves antigravity.
     let (up, calls) = upstream(existing).await;
     let dashboard = serve(crate::app(config(&up.origin))).await;
     let (status, location) = post_update(
@@ -305,6 +330,10 @@ async fn omitting_gemini_field_preserves_existing_binding_while_empty_string_cle
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].entries,
-        vec![entry("codex", CODEX_ID), entry("gemini", GEMINI_NEW_ID)]
+        vec![
+            entry("codex", CODEX_ID),
+            entry("gemini", GEMINI_NEW_ID),
+            entry("antigravity", ANTIGRAVITY_ID),
+        ]
     );
 }

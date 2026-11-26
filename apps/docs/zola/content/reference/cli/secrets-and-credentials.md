@@ -118,6 +118,7 @@ terminal it needs `--key-file`. A flag the type doesn't take, such as
 | `claude` | Claude (sign-in): your Claude subscription; browser sign-in, paste the code shown |
 | `claude-token` | Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded |
 | `anthropic`, `openai`, `gemini` | API key from stdin |
+| `antigravity` | Antigravity: Google browser sign-in; paste the callback URL or code shown |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
 
 <!-- /credential-types -->

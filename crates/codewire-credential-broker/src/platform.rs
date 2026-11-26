@@ -19,7 +19,10 @@ mod decision;
 mod grant_checks;
 use grant_checks::{Checked, ensure_live, record_matches, same_grant_binding, select_grant};
 mod login_admission;
-use login_admission::{DeliveryPredicate, claude_login_admissible, codex_login_admissible};
+use login_admission::{
+    DeliveryPredicate, antigravity_login_admissible, claude_login_admissible,
+    codex_login_admissible,
+};
 pub mod keepalive;
 mod lease;
 pub use lease::PlatformCredentialLease;
@@ -42,7 +45,8 @@ use codewire_access::{
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
     GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
-    Placement, WithheldReason, claude_login_permission, codex_login_permission,
+    Placement, WithheldReason, antigravity_login_permission, claude_login_permission,
+    codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -56,8 +60,9 @@ use crate::commit_failure::{taken_bundle, valid_bundle};
 use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
     BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerLeaseError,
-    BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError, CanonicalClaudeOAuthBundle,
-    CanonicalCodexOAuthBundle, CommitFailure, GitHubAppUserOAuthBundle,
+    BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
+    CanonicalAntigravityOAuthBundle, CanonicalClaudeOAuthBundle, CanonicalCodexOAuthBundle,
+    CommitFailure, GitHubAppUserOAuthBundle,
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
@@ -881,6 +886,11 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                     && metadata.authentication_kind == CredentialAuthKind::ClaudeSignIn
                     && request.grant.capability_slot.as_str() == "anthropic"
             }
+            BrokerCredentialRefreshKind::AntigravityOAuth => {
+                metadata.provider.as_str() == "google"
+                    && metadata.authentication_kind == CredentialAuthKind::OAuth
+                    && request.grant.capability_slot.as_str() == "antigravity"
+            }
         };
         if !expected_form || !same_grant_binding(&admission.grant, &request.grant) {
             return Err(BrokerRefreshError::Denied);
@@ -893,6 +903,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         }
         if admission.permission == claude_login_permission() {
             claude_login_admissible(&self.session, Some(&admission))
+                .map_err(refresh_lease_error)?;
+        }
+        if admission.permission == antigravity_login_permission() {
+            antigravity_login_admissible(&self.session, Some(&admission))
                 .map_err(refresh_lease_error)?;
         }
         let requested_deadline = request
@@ -1085,7 +1099,10 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
     ) -> Result<Self::Lease, BrokerLeaseError> {
         let permission = GrantPermission { operation, route };
         // A login permission is leased only with its delivery predicate.
-        if permission == codex_login_permission() || permission == claude_login_permission() {
+        if permission == codex_login_permission()
+            || permission == claude_login_permission()
+            || permission == antigravity_login_permission()
+        {
             return Err(BrokerLeaseError::Denied);
         }
         self.lease(request_id, slot, permission, None).await
@@ -1110,6 +1127,21 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
             CapabilitySlot::anthropic(),
             claude_login_permission(),
             Some(claude_login_admissible),
+        )
+        .await
+    }
+
+    /// Placeholder-only Antigravity login lease; see
+    /// [`antigravity_login_admissible`].
+    async fn lease_antigravity_login(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Self::Lease, BrokerLeaseError> {
+        self.lease(
+            request_id,
+            CapabilitySlot::antigravity(),
+            antigravity_login_permission(),
+            Some(antigravity_login_admissible),
         )
         .await
     }
@@ -1171,6 +1203,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
                             BrokerCredentialRefreshKind::CodexOAuth => "openai",
                             BrokerCredentialRefreshKind::GitHubAppUserOAuth => "github",
                             BrokerCredentialRefreshKind::ClaudeOAuth => "anthropic",
+                            BrokerCredentialRefreshKind::AntigravityOAuth => "google",
                         },
                         failure = "abandoned",
                         "started credential refresh passed its execution deadline without an outcome"
@@ -1319,6 +1352,19 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         material: CanonicalClaudeOAuthBundle,
     ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         if permit.request.kind != BrokerCredentialRefreshKind::ClaudeOAuth {
+            return Err(CommitFailure::returned(permit, BrokerRefreshError::Denied));
+        }
+        let mut bytes = material.into_bytes();
+        let (permit, value) = taken_bundle(permit, &mut bytes)?;
+        Ok(self.commit_refresh_value(permit, value).await?)
+    }
+
+    async fn commit_antigravity_oauth_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        material: CanonicalAntigravityOAuthBundle,
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        if permit.request.kind != BrokerCredentialRefreshKind::AntigravityOAuth {
             return Err(CommitFailure::returned(permit, BrokerRefreshError::Denied));
         }
         let mut bytes = material.into_bytes();

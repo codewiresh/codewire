@@ -52,6 +52,7 @@ impl ValidatedGuestRequest {
                 | ("anthropic", "anthropic-api" | "claude-oauth-token")
                 | ("github", "github-api" | "github-https")
                 | ("gemini", "gemini-api")
+                | ("antigravity", "antigravity-api" | "antigravity-oauth-token")
         ) || request.body.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
             || request.headers.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADERS
             || request.path.len() > 2048

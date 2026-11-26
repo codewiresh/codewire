@@ -26,6 +26,7 @@ pub(super) async fn send_login_response<S: CredentialBridgeResponseSink>(
     let max_sealed_bytes = match kind {
         LoginKind::Codex => MAX_SEALED_CODEX_LOGIN_BYTES,
         LoginKind::Claude => MAX_SEALED_CLAUDE_LOGIN_BYTES,
+        LoginKind::Antigravity => MAX_SEALED_ANTIGRAVITY_LOGIN_BYTES,
     };
     let result = match response {
         Ok(sealed) if !sealed.is_empty() && sealed.len() <= max_sealed_bytes => Ok(sealed),
@@ -67,6 +68,18 @@ pub(super) async fn send_login_response<S: CredentialBridgeResponseSink>(
                     Err(reason) => LoginResult::Failure(reason),
                 }),
             })
+        }
+        LoginKind::Antigravity => {
+            use v1::antigravity_login_response::Result as LoginResult;
+            v1::credential_bridge_host_message::Payload::AntigravityLogin(
+                v1::AntigravityLoginResponse {
+                    request_id,
+                    result: Some(match result {
+                        Ok(sealed) => LoginResult::SealedLogin(sealed),
+                        Err(reason) => LoginResult::Failure(reason),
+                    }),
+                },
+            )
         }
     };
     sender.send(payload).await.map_err(|_| ())

@@ -53,6 +53,8 @@ pub(crate) enum CredentialConnectProviderArg {
     Claude,
     #[value(help = super::CLAUDE_TOKEN_HELP)]
     ClaudeToken,
+    #[value(help = super::ANTIGRAVITY_SIGN_IN_HELP)]
+    Antigravity,
 }
 
 /// `add claude-subscription`, the setup token's name before #4945.
@@ -147,6 +149,7 @@ pub(in crate::commands) fn provider_id(provider: CredentialConnectProviderArg) -
         CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken => {
             "anthropic"
         }
+        CredentialConnectProviderArg::Antigravity => "google",
     }
 }
 
@@ -157,6 +160,7 @@ pub(in crate::commands) fn connected_noun(provider: CredentialConnectProviderArg
         CredentialConnectProviderArg::Github => "GitHub sign-in",
         CredentialConnectProviderArg::Claude => "Claude sign-in",
         CredentialConnectProviderArg::ClaudeToken => "Claude token",
+        CredentialConnectProviderArg::Antigravity => "Antigravity sign-in",
     }
 }
 
@@ -205,6 +209,22 @@ pub(in crate::commands) fn discarded_sign_in(
         (CredentialConnectProviderArg::ClaudeToken, _) => {
             "The Claude token you pasted stays valid until it expires; Codewire can't revoke it.".to_owned()
         }
+        (CredentialConnectProviderArg::Antigravity, Some(ProviderRevocation::Confirmed)) => {
+            "Google revoked the Antigravity sign-in you approved.".to_owned()
+        }
+        (CredentialConnectProviderArg::Antigravity, Some(ProviderRevocation::Failed(failure))) => {
+            let reason = match failure {
+                RevocationFailure::Refused(status) => {
+                    format!("Google refused the request (HTTP {status})")
+                }
+                RevocationFailure::Unreadable => "the sign-in couldn't be read".to_owned(),
+                _ => "Google couldn't be reached".to_owned(),
+            };
+            format!(
+                "Google didn't confirm revoking the Antigravity sign-in you approved: {reason}. You can remove it in your Google Account permissions (https://myaccount.google.com/permissions)."
+            )
+        }
+        (CredentialConnectProviderArg::Antigravity, None) => return None,
     };
     Some(line)
 }

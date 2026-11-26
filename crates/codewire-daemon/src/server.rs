@@ -490,10 +490,14 @@ fn spawn_login_writers(
         crate::claude_home::login::ClaudeLoginWriter,
         std::time::Duration,
     )>,
+    antigravity: Option<(
+        crate::antigravity_home::AntigravityLoginWriter,
+        std::time::Duration,
+    )>,
     bridge: Option<codewire_credential_bridge::CredentialBridge>,
     readiness: Option<&crate::login_readiness::LoginReadiness>,
     shutdown: &watch::Receiver<bool>,
-) -> [Option<AbortOnDropHandle<()>>; 2] {
+) -> [Option<AbortOnDropHandle<()>>; 3] {
     let track = |agent| readiness.map(|readiness| readiness.track(agent));
     let codex = codex.zip(bridge.clone()).map(|((writer, period), bridge)| {
         AbortOnDropHandle::new(tokio::spawn(
@@ -506,18 +510,31 @@ fn spawn_login_writers(
             ),
         ))
     });
-    let claude = claude.zip(bridge).map(|((writer, period), bridge)| {
+    let claude = claude
+        .zip(bridge.clone())
+        .map(|((writer, period), bridge)| {
+            AbortOnDropHandle::new(tokio::spawn(
+                crate::claude_home::login::run_claude_login_writer(
+                    writer,
+                    bridge,
+                    period,
+                    shutdown.clone(),
+                    track("claude"),
+                ),
+            ))
+        });
+    let antigravity = antigravity.zip(bridge).map(|((writer, period), bridge)| {
         AbortOnDropHandle::new(tokio::spawn(
-            crate::claude_home::login::run_claude_login_writer(
+            crate::antigravity_home::run_antigravity_login_writer(
                 writer,
                 bridge,
                 period,
                 shutdown.clone(),
-                track("claude"),
+                track("antigravity"),
             ),
         ))
     });
-    [codex, claude]
+    [codex, claude, antigravity]
 }
 
 #[allow(clippy::too_many_arguments)] // Each entry point passes its own subset.
@@ -546,34 +563,42 @@ where
     config.validate_host()?;
     let (app_ports, pod_uid) = bound.unzip();
     #[cfg(target_os = "linux")]
-    let (codex_login, claude_login, workspace_trust) = match logins {
+    let (codex_login, claude_login, antigravity_login, workspace_trust) = match logins {
         Some(logins) => {
-            // A local VM keeps Claude Code's login for the same workload user
-            // as Codex's native home; a hosted daemon keeps its own.
+            // A local VM keeps Claude Code's and Antigravity's logins for the
+            // same workload user as Codex's native home; a hosted daemon keeps
+            // its own.
             let owner = logins.codex_home.owner();
             let codex = crate::codex_home::login::login_writer(&config, logins.codex_home.clone());
             let claude = crate::claude_home::login::login_writer(&config, owner);
+            let antigravity = crate::antigravity_home::login_writer(&config, owner);
             // A login no writer keeps for this boot and owner is not live
             // material: clear one left on disk.
             let mut claude_home =
                 crate::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root);
+            let mut antigravity_home =
+                crate::antigravity_home::AntigravityHome::new(&config.home_root);
             if let Some(owner) = owner {
                 claude_home = claude_home.for_owner(owner);
+                antigravity_home = antigravity_home.for_owner(owner);
             }
             crate::login_cleanup::clear_unkept_logins(
                 &logins.codex_home,
                 &claude_home,
+                &antigravity_home,
                 codex.is_some(),
                 claude.is_some(),
+                antigravity.is_some(),
             );
             (
                 codex.map(|writer| (writer, logins.check_period)),
                 claude.map(|writer| (writer, logins.check_period)),
+                antigravity.map(|writer| (writer, logins.check_period)),
                 // A Sandbox's workspace, never a trusted host's.
                 Some(crate::claude_home::WorkspaceTrust::new(claude_home)),
             )
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
     #[cfg(not(target_os = "linux"))]
     let _ = logins;
@@ -665,6 +690,7 @@ where
     let _login_writers = spawn_login_writers(
         codex_login,
         claude_login,
+        antigravity_login,
         bridge_owner.shared_bridge(),
         login_readiness.as_ref(),
         &shutdown_rx,

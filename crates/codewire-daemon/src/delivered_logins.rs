@@ -223,3 +223,67 @@ pub mod claude {
             || (is_codewire_temporary(name) && holds_codewire_login(contents))
     }
 }
+
+/// Antigravity CLI's placeholder-backed token file (`~/.gemini/antigravity-cli/antigravity-oauth-token`).
+pub mod antigravity {
+    use serde_json::{Map, Value};
+
+    use super::Document;
+
+    /// Parent directory under the user's home.
+    pub const ANTIGRAVITY_CONFIG_PARENT_DIR: &str = ".gemini";
+    /// Subdirectory under `~/.gemini` where `agy` reads its token file.
+    pub const ANTIGRAVITY_CONFIG_DIR_NAME: &str = "antigravity-cli";
+    /// Antigravity CLI's OAuth token file name.
+    pub const ANTIGRAVITY_TOKEN_FILE_NAME: &str = "antigravity-oauth-token";
+    /// Public non-secret refresh marker written into the token file (#6555).
+    pub use codewire_access::ANTIGRAVITY_MANAGED_REFRESH_TOKEN;
+    const _: () = assert!(!ANTIGRAVITY_MANAGED_REFRESH_TOKEN.is_empty());
+
+    /// `contents` parsed when it is an Antigravity token file Codewire wrote.
+    pub(crate) fn codewire_document(contents: &[u8]) -> Option<Document> {
+        Document::parse(contents).filter(Document::is_codewire_antigravity)
+    }
+
+    impl Document {
+        pub(crate) fn antigravity_token(&self) -> Option<&Map<String, Value>> {
+            self.object()?.get("token")?.as_object()
+        }
+
+        /// Codewire's: `auth_method` `"consumer"` with exactly the managed
+        /// refresh marker in `token.refresh_token`.
+        pub(crate) fn is_codewire_antigravity(&self) -> bool {
+            self.object()
+                .and_then(|object| object.get("auth_method"))
+                .and_then(Value::as_str)
+                == Some("consumer")
+                && self
+                    .antigravity_token()
+                    .and_then(|token| token.get("refresh_token"))
+                    .and_then(Value::as_str)
+                    == Some(ANTIGRAVITY_MANAGED_REFRESH_TOKEN)
+        }
+    }
+
+    /// Whether `contents` is an Antigravity token file Codewire wrote.
+    pub fn is_codewire_token_file(contents: &[u8]) -> bool {
+        codewire_document(contents).is_some()
+    }
+
+    /// Whether `name` in `~/.gemini/antigravity-cli` is one of Codewire's
+    /// temporaries beside `antigravity-oauth-token`.
+    pub fn is_codewire_temporary(name: &str) -> bool {
+        name.starts_with(&format!(".{ANTIGRAVITY_TOKEN_FILE_NAME}.codewire."))
+    }
+
+    /// Whether the temporary `name` is a write in progress (removed unread).
+    pub fn is_codewire_write_in_progress(name: &str) -> bool {
+        is_codewire_temporary(name) && name.ends_with(".new")
+    }
+
+    /// Whether the temporary `name` holding `contents` is Codewire's.
+    pub fn is_codewire_leftover(name: &str, contents: &[u8]) -> bool {
+        is_codewire_write_in_progress(name)
+            || (is_codewire_temporary(name) && is_codewire_token_file(contents))
+    }
+}

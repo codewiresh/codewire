@@ -12,6 +12,8 @@
 #![allow(clippy::unwrap_used)]
 
 pub mod anthropic;
+pub mod antigravity;
+mod antigravity_oauth;
 mod bridge;
 mod claude_oauth;
 mod codex_oauth;
@@ -44,6 +46,10 @@ pub mod ssh_agent;
 pub mod timing;
 mod transparent;
 
+pub use antigravity_oauth::{
+    AntigravityIssuedTokens, AntigravityOAuthImport, AntigravityOAuthMaterialError,
+    CanonicalAntigravityOAuthBundle, import_antigravity_tokens,
+};
 pub use claude_oauth::{
     CanonicalClaudeOAuthBundle, ClaudeIssuedTokens, ClaudeOAuthImport, ClaudeOAuthMaterialError,
     ClaudeProfile, ClaudeSubscriptionType, import_claude_tokens,

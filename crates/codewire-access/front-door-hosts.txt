@@ -4,6 +4,9 @@ api.github.com
 api.openai.com
 auth.openai.com
 chatgpt.com
+cloudcode-pa.googleapis.com
+daily-cloudcode-pa.googleapis.com
 generativelanguage.googleapis.com
 github.com
+oauth2.googleapis.com
 platform.claude.com

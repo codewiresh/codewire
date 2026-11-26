@@ -1338,6 +1338,14 @@ impl CredentialBridgeResponseSender {
             .await
     }
 
+    pub async fn send_antigravity_login(
+        &self,
+        response: bridge_v1::AntigravityLoginResponse,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::AntigravityLogin(response))
+            .await
+    }
+
     pub async fn send_response_start(
         &self,
         response: bridge_v1::CredentialBridgeResponseStart,

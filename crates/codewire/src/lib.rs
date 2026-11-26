@@ -143,6 +143,7 @@ pub use codewire_proto::codewire::v1::{
     AddApiKeyCredentialRequest, AddApiKeyCredentialResponse,
     AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse,
     AddSshCredentialRequest, AddSshCredentialResponse, CodexDeviceChallenge,
+    CompleteAntigravitySignInRequest, CompleteAntigravitySignInResponse,
     CompleteClaudeSignInRequest, CompleteClaudeSignInResponse, Credential,
     CredentialAuthenticationKind, CredentialStatus, DeleteCredentialRequest,
     DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest,
@@ -154,8 +155,9 @@ pub use codewire_proto::codewire::v1::{
     ProviderRevocationFailure, ProviderRevocationOutcome, RenameCredentialRequest,
     RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
     RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,
-    StartClaudeSignInRequest, StartClaudeSignInResponse, enroll_codex_response,
-    enroll_github_response, get_credential_request,
+    StartAntigravitySignInRequest, StartAntigravitySignInResponse, StartClaudeSignInRequest,
+    StartClaudeSignInResponse, enroll_codex_response, enroll_github_response,
+    get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,

@@ -653,6 +653,9 @@ impl CredentialBridge {
             Some(Payload::ClaudeLogin(response)) => {
                 self.apply_claude_login_response(epoch, response).await
             }
+            Some(Payload::AntigravityLogin(response)) => {
+                self.apply_antigravity_login_response(epoch, response).await
+            }
             Some(
                 payload @ (Payload::UpgradeAccepted(_)
                 | Payload::StreamData(_)

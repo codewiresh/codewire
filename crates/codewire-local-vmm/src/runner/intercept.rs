@@ -365,6 +365,11 @@ pub(crate) fn boot_interception(
     } else {
         clients.without_gemini()
     };
+    let clients = if intercept {
+        clients
+    } else {
+        clients.without_antigravity()
+    };
     let intercepts = boot_intercepts(intercept, clients);
     let binds_github = codewire_access::GITHUB_HOSTS
         .iter()

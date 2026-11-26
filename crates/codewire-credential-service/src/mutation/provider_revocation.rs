@@ -15,7 +15,9 @@ use std::time::Duration;
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, Owner,
 };
-use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationFailure, codex};
+use codewire_credential_broker::provider_oauth::{
+    ProviderRevocation, RevocationFailure, antigravity, codex,
+};
 use codewire_credential_broker::{
     BrokerUpstreamTransport, GitHubAppAuthorizationOwner, GitHubAppUserOAuthBundle,
 };
@@ -38,6 +40,8 @@ const PROVIDER_WAIT: Duration = Duration::from_secs(10);
 pub struct RevocationTransports {
     /// `HttpProvider::CodexTokenRevocation`.
     pub codex: Arc<dyn BrokerUpstreamTransport>,
+    /// `HttpProvider::AntigravityTokenRevocation`.
+    pub antigravity: Arc<dyn BrokerUpstreamTransport>,
     /// `HttpProvider::GitHubAppTokenRevocation`, when the GitHub App is
     /// configured.
     pub github: Option<Arc<dyn BrokerUpstreamTransport>>,
@@ -64,6 +68,7 @@ enum Held {
     NotRead,
     Unreadable,
     Codex(ProtectedValue),
+    Antigravity(ProtectedValue),
     GitHubApp(GitHubAppUserOAuthBundle),
 }
 
@@ -190,7 +195,7 @@ async fn held_for_revocation(
     }
     let provider = record.metadata.provider.as_str();
     if record.metadata.authentication_kind != CredentialAuthKind::OAuth
-        || !matches!(provider, "openai" | "github")
+        || !matches!(provider, "openai" | "github" | "google")
     {
         return (Held::NoEndpoint, None);
     }
@@ -216,6 +221,8 @@ async fn held_for_revocation(
     };
     let held = if provider == "openai" {
         Held::Codex(material)
+    } else if provider == "google" {
+        Held::Antigravity(material)
     } else if !GitHubAppUserOAuthBundle::is_tagged(material.expose_secret()) {
         // A connection from before the App holds a raw token the App cannot
         // revoke; its owner revokes it at GitHub.
@@ -240,6 +247,9 @@ async fn ask_provider(shared: &Shared, held: Held) -> ProviderOutcome {
         }
         Held::Codex(material) => ProviderOutcome::Asked(
             codex::revoke_stored(&transports.codex, material.expose_secret()).await,
+        ),
+        Held::Antigravity(material) => ProviderOutcome::Asked(
+            antigravity::revoke_stored(&transports.antigravity, material.expose_secret()).await,
         ),
         Held::GitHubApp(bundle) => match (&shared.github_app_authorization, &transports.github) {
             (Some(owner), Some(github)) => owner
@@ -274,6 +284,9 @@ pub(super) async fn ask_unstored(
 ) {
     let answer = match provider {
         "openai" => Some(codex::revoke_stored(&transports.codex, material.expose_secret()).await),
+        "google" => Some(
+            antigravity::revoke_stored(&transports.antigravity, material.expose_secret()).await,
+        ),
         "github" => match (
             github_app,
             &transports.github,

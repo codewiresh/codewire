@@ -13,8 +13,8 @@ use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
 use codewire_workload_secrets::{
-    MAX_SEALED_CLAUDE_LOGIN_BYTES, MAX_SEALED_CODEX_LOGIN_BYTES,
-    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES,
+    MAX_SEALED_ANTIGRAVITY_LOGIN_BYTES, MAX_SEALED_CLAUDE_LOGIN_BYTES,
+    MAX_SEALED_CODEX_LOGIN_BYTES, MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES,
 };
 use futures::StreamExt as _;
 use thiserror::Error;
@@ -199,6 +199,7 @@ impl FinishedBodies {
 enum LoginKind {
     Codex,
     Claude,
+    Antigravity,
 }
 
 impl LoginKind {
@@ -206,6 +207,7 @@ impl LoginKind {
         match self {
             Self::Codex => "codex_login",
             Self::Claude => "claude_login",
+            Self::Antigravity => "antigravity_login",
         }
     }
 
@@ -213,6 +215,7 @@ impl LoginKind {
         match self {
             Self::Codex => "codex_login_in_flight",
             Self::Claude => "claude_login_in_flight",
+            Self::Antigravity => "antigravity_login_in_flight",
         }
     }
 }
@@ -221,6 +224,7 @@ impl LoginKind {
 enum LoginRequest {
     Codex(v1::CodexLoginRequest),
     Claude(v1::ClaudeLoginRequest),
+    Antigravity(v1::AntigravityLoginRequest),
 }
 
 impl LoginRequest {
@@ -228,6 +232,7 @@ impl LoginRequest {
         match self {
             Self::Codex(_) => LoginKind::Codex,
             Self::Claude(_) => LoginKind::Claude,
+            Self::Antigravity(_) => LoginKind::Antigravity,
         }
     }
 
@@ -235,6 +240,7 @@ impl LoginRequest {
         match self {
             Self::Codex(request) => &request.request_id,
             Self::Claude(request) => &request.request_id,
+            Self::Antigravity(request) => &request.request_id,
         }
     }
 
@@ -245,6 +251,7 @@ impl LoginRequest {
         match self {
             Self::Codex(request) => broker.codex_login(request).await,
             Self::Claude(request) => broker.claude_login(request).await,
+            Self::Antigravity(request) => broker.antigravity_login(request).await,
         }
     }
 }
@@ -299,6 +306,15 @@ pub(crate) trait BrokerRequestExecutor: Send + Sync {
     async fn claude_login(
         &self,
         _request: v1::ClaudeLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    /// The placeholder-only Antigravity login, admitted only behind
+    /// front-door interception (real Google tokens never leave the broker).
+    async fn antigravity_login(
+        &self,
+        _request: v1::AntigravityLoginRequest,
     ) -> Result<Vec<u8>, BrokerRequestError> {
         Err(BrokerRequestError::Denied)
     }
@@ -381,6 +397,13 @@ where
         request: v1::ClaudeLoginRequest,
     ) -> Result<Vec<u8>, BrokerRequestError> {
         OpenAiBroker::claude_login(self, request).await
+    }
+
+    async fn antigravity_login(
+        &self,
+        request: v1::AntigravityLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        OpenAiBroker::antigravity_login(self, request).await
     }
 
     async fn execute_request(
@@ -472,6 +495,9 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
             }
             v1::credential_bridge_host_message::Payload::ClaudeLogin(response) => {
                 self.send_claude_login(response).await
+            }
+            v1::credential_bridge_host_message::Payload::AntigravityLogin(response) => {
+                self.send_antigravity_login(response).await
             }
             v1::credential_bridge_host_message::Payload::ResponseStart(response) => {
                 self.send_response_start(response).await
@@ -759,11 +785,13 @@ where
                     }
                     Some(
                         payload @ (v1::credential_bridge_guest_message::Payload::CodexLogin(_)
-                        | v1::credential_bridge_guest_message::Payload::ClaudeLogin(_)),
+                        | v1::credential_bridge_guest_message::Payload::ClaudeLogin(_)
+                        | v1::credential_bridge_guest_message::Payload::AntigravityLogin(_)),
                     ) => {
                         let login = match payload {
                             v1::credential_bridge_guest_message::Payload::CodexLogin(request) => LoginRequest::Codex(request),
                             v1::credential_bridge_guest_message::Payload::ClaudeLogin(request) => LoginRequest::Claude(request),
+                            v1::credential_bridge_guest_message::Payload::AntigravityLogin(request) => LoginRequest::Antigravity(request),
                             _ => unreachable!("matched a login payload"),
                         };
                         let kind = login.kind();

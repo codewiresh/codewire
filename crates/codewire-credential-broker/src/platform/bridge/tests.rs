@@ -1149,7 +1149,12 @@ async fn admitted_streams_list_codex_login_and_answer_it_under_the_lease_budget(
             .collect();
         assert_eq!(
             capabilities,
-            ["codex-login", "claude-login", "request-body-stream"]
+            [
+                "codex-login",
+                "claude-login",
+                "antigravity-login",
+                "request-body-stream",
+            ]
         );
         let mut output = response.into_inner();
         authority_calls_reach(&fixture, 2).await;

@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use codewire_credential_broker::BrokerUpstreamTransport;
-use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationFailure, codex};
+use codewire_credential_broker::provider_oauth::{
+    ProviderRevocation, RevocationFailure, antigravity, codex,
+};
 use codewire_local_credentials::{
     LocalProviderRevocation, LocalProviderRevocationFailure, LocalProviderRevocationOutcome,
     LocalRevocationLeaseClient, run_revocation_executor,
@@ -50,7 +52,16 @@ pub(crate) async fn run_local_provider_revocation_executor(
         .context("connect revocation lease channel")?;
     // The value is dropped, and so zeroized, as soon as the revoke returns.
     run_revocation_executor(&mut client, |material| async move {
-        match codex_revocation_transport().await {
+        let is_antigravity = antigravity::is_stored_bundle(material.expose_secret());
+        let family = if is_antigravity {
+            codewire_access::HttpProvider::AntigravityTokenRevocation
+        } else {
+            codewire_access::HttpProvider::CodexTokenRevocation
+        };
+        match revocation_transport(family).await {
+            Ok(transport) if is_antigravity => local_outcome(
+                antigravity::revoke_stored(&transport, material.expose_secret()).await,
+            ),
             Ok(transport) => {
                 local_outcome(codex::revoke_stored(&transport, material.expose_secret()).await)
             }
@@ -71,14 +82,14 @@ fn executor_request_id(authority_fd: i32, request_id: &str) -> anyhow::Result<Uu
         .ok_or_else(|| anyhow::anyhow!("invalid revocation request identity"))
 }
 
-/// The one route a revocation may use: OpenAI's RFC 7009 endpoint.
+/// The one route a revocation may use: OpenAI's or Google's RFC 7009 endpoint.
 #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-async fn codex_revocation_transport() -> anyhow::Result<Arc<dyn BrokerUpstreamTransport>> {
+async fn revocation_transport(
+    family: codewire_access::HttpProvider,
+) -> anyhow::Result<Arc<dyn BrokerUpstreamTransport>> {
     Ok(Arc::new(
         codewire_credential_broker::ProviderHttpsTransport::resolve(
-            &std::collections::BTreeSet::from([
-                codewire_access::HttpProvider::CodexTokenRevocation,
-            ]),
+            &std::collections::BTreeSet::from([family]),
         )
         .await?,
     ))
@@ -86,7 +97,9 @@ async fn codex_revocation_transport() -> anyhow::Result<Arc<dyn BrokerUpstreamTr
 
 /// The non-shipping product smoke answers in process.
 #[cfg(feature = "local-broker-synthetic-smoke")]
-async fn codex_revocation_transport() -> anyhow::Result<Arc<dyn BrokerUpstreamTransport>> {
+async fn revocation_transport(
+    _family: codewire_access::HttpProvider,
+) -> anyhow::Result<Arc<dyn BrokerUpstreamTransport>> {
     Ok(Arc::new(
         codewire_credential_broker::SyntheticOpenAiSmokeTransport,
     ))

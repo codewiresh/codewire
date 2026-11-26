@@ -123,7 +123,7 @@ const TAIL_BYTES: usize = 4096;
 /// The line a local broker writes when it refuses to deliver an agent's login.
 pub const AGENT_LOGIN_REFUSED_MARKER: &str = "CW_BROKER_LOGIN_REFUSED";
 /// The agents whose login a broker may refuse.
-pub const AGENT_LOGIN_REFUSAL_AGENTS: &[&str] = &["claude", "codex"];
+pub const AGENT_LOGIN_REFUSAL_AGENTS: &[&str] = &["antigravity", "claude", "codex"];
 /// Every reason a broker gives for refusing an agent's login. A broker that
 /// adds a reason adds it here: its own test refuses a reason missing from
 /// this list, and this log ignores one.

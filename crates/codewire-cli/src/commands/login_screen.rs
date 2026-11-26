@@ -326,6 +326,19 @@ pub(super) fn claude_sign_in_code(
     super::credential_input::prompt_claude_code(copy)
 }
 
+/// The Antigravity sign-in page, in both placements: Google's authorize link,
+/// then the callback URL or `code#state` read from a no-echo prompt or stdin,
+/// never argv ([`super::credential_input::prompt_antigravity_code`]).
+pub(super) fn antigravity_sign_in_code(
+    sign_in: SignInScreen<'_>,
+    authorize_url: &str,
+) -> anyhow::Result<codewire_protected_store::ProtectedValue> {
+    open_sign_in_link(sign_in, authorize_url);
+    eprintln!();
+    let copy = screen_caps().keys.then_some(authorize_url);
+    super::credential_input::prompt_antigravity_code(copy)
+}
+
 /// `cw login`'s device sign-in: the page, the code and the wait for `polled`.
 /// Scripts read the three stdout lines from a pipe, so they stay as they
 /// are; at a terminal the link is clickable and `c` copies it while the

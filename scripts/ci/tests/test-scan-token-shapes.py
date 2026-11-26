@@ -115,6 +115,7 @@ class Scanner(unittest.TestCase):
             "github-pat": "github" + "_pat_" + random(82, ALNUM + "_"),
             "google-api-key": "AI" + "za" + random(35),
             "google-oauth": "ya" + "29." + random(60),
+            "google-refresh-token": "1/" + "/0" + random(40),
             "gitlab": "gl" + "pat-" + random(20),
             "slack": "xo" + "xb-" + random(40, ALNUM + "-"),
             "aws-access-key-id": "AK" + "IA" + random(16, string.ascii_uppercase + string.digits),
@@ -386,6 +387,9 @@ class Scanner(unittest.TestCase):
         for bound in (
             ("github", "raw", f"{disk}:/lower/usr/bin/gh", 10, 40),
             ("google-api-key", "raw", f"{disk}:/lower/usr/bin/gh", 10, 39),
+            ("google-oauth", "raw", f"{disk}:/lower/usr/bin/gh", 10, 65),
+            ("google-refresh-token", "raw", f"{disk}:/lower/usr/bin/gh", 10, 44),
+            ("jwt-google", "raw", f"{disk}:/lower/usr/bin/gh", 10, 80),
         ):
             pinned = scanner.Results({}, scanner.Baseline(frozenset({bound}), {f"{disk}:/lower/usr/bin/gh": "11" * 32}), content)
             self.assertEqual(pinned.excusal(bound), (f"{disk}:/lower/usr/bin/gh", True))

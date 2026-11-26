@@ -213,6 +213,17 @@ impl ProjectionRecipient {
     ) -> Result<crate::OpenedClaudeLogin, crate::ClaudeLoginError> {
         crate::claude_login::open(&self.0, ciphertext, expected, now_unix_ms)
     }
+
+    /// Open one placeholder-only Antigravity login sealed for this recipient,
+    /// consuming it even on failure.
+    pub fn open_antigravity_login(
+        self,
+        ciphertext: &[u8],
+        expected: &crate::CodexLoginContext,
+        now_unix_ms: u64,
+    ) -> Result<crate::OpenedAntigravityLogin, crate::AntigravityLoginError> {
+        crate::antigravity_login::open(&self.0, ciphertext, expected, now_unix_ms)
+    }
 }
 
 impl fmt::Debug for ProjectionRecipient {

@@ -55,6 +55,25 @@ pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
 /// The Gemini API (`generativelanguage.googleapis.com`). Front-door-only:
 /// served only when the `gemini` slot is selected (#6555).
 pub const GEMINI_API_HOST: &str = "generativelanguage.googleapis.com";
+/// Antigravity Cloud Code daily endpoint (`daily-cloudcode-pa.googleapis.com`).
+/// Front-door-only: served only when the `antigravity` slot is selected (#6555).
+pub const ANTIGRAVITY_DAILY_HOST: &str = "daily-cloudcode-pa.googleapis.com";
+/// Antigravity Cloud Code production endpoint (`cloudcode-pa.googleapis.com`).
+/// Front-door-only: served only when the `antigravity` slot is selected (#6555).
+pub const ANTIGRAVITY_PROD_HOST: &str = "cloudcode-pa.googleapis.com";
+/// Google OAuth token endpoint (`oauth2.googleapis.com`), served for managed
+/// refresh when the `antigravity` slot is selected (#6555).
+pub const ANTIGRAVITY_OAUTH_HOST: &str = "oauth2.googleapis.com";
+/// The Antigravity API hosts where pinned `POST /v1internal:` calls swap the
+/// environment's placeholder for the leased Google access token (#6555).
+pub const ANTIGRAVITY_API_HOSTS: [&str; 2] = [ANTIGRAVITY_DAILY_HOST, ANTIGRAVITY_PROD_HOST];
+/// Every front-door host served for an Antigravity sign-in (#6555).
+/// `www.googleapis.com` is permanently excluded.
+pub const ANTIGRAVITY_HOSTS: [&str; 3] = [
+    ANTIGRAVITY_DAILY_HOST,
+    ANTIGRAVITY_PROD_HOST,
+    ANTIGRAVITY_OAUTH_HOST,
+];
 /// Whether GitHub's hosts are served at all. On: a placeholder sent outside
 /// GitHub's route is refused on that route (#5087, #5149), and both
 /// placements deliver the `github` slot's placeholder and trust (#4001). A
@@ -148,6 +167,9 @@ pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost>
     if clients.contains(ManagedCredentialClient::Gemini) {
         hosts.push(exact(GEMINI_API_HOST));
     }
+    if clients.contains(ManagedCredentialClient::Antigravity) {
+        hosts.extend(ANTIGRAVITY_HOSTS.map(exact));
+    }
     hosts
 }
 
@@ -165,6 +187,13 @@ pub fn binds_gemini(clients: ManagedCredentialClients) -> bool {
     front_door_hosts(clients)
         .iter()
         .any(|host| host.host == GEMINI_API_HOST)
+}
+
+/// Whether the front door serves Antigravity's hosts for `clients` (#6555).
+pub fn binds_antigravity(clients: ManagedCredentialClients) -> bool {
+    front_door_hosts(clients)
+        .iter()
+        .any(|host| ANTIGRAVITY_HOSTS.contains(&host.host))
 }
 
 #[cfg(test)]
@@ -186,9 +215,17 @@ mod tests {
 
     /// Every selection of the slots, in each Anthropic form it can take.
     fn every_selection() -> Vec<(Vec<&'static str>, ManagedCredentialClients)> {
-        let slots = ["anthropic", "openai", "codex", "ssh", "github", "gemini"];
+        let slots = [
+            "anthropic",
+            "openai",
+            "codex",
+            "ssh",
+            "github",
+            "gemini",
+            "antigravity",
+        ];
         let mut selections = Vec::new();
-        for bits in 0..(1_u8 << slots.len()) {
+        for bits in 0..(1_u16 << slots.len()) {
             let chosen: Vec<&str> = (0..slots.len())
                 .filter(|bit| bits & (1 << bit) != 0)
                 .map(|bit| slots[bit])

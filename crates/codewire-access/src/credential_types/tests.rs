@@ -115,12 +115,15 @@ fn each_row_names_the_family_the_broker_selects() {
         | HttpProvider::AnthropicSubscriptionToken
         | HttpProvider::AnthropicClaudeSignIn
         | HttpProvider::GeminiApiKey
+        | HttpProvider::AntigravityOAuth
         | HttpProvider::GitHubOAuth => true,
         HttpProvider::GitHubAppAuthorization
         | HttpProvider::CodexDeviceEnrollment
         | HttpProvider::ClaudeSignInEnrollment
         | HttpProvider::CodexTokenRevocation
-        | HttpProvider::GitHubAppTokenRevocation => false,
+        | HttpProvider::GitHubAppTokenRevocation
+        | HttpProvider::AntigravitySignInEnrollment
+        | HttpProvider::AntigravityTokenRevocation => false,
     };
     for provider in [
         HttpProvider::OpenAiApiKey,
@@ -129,12 +132,15 @@ fn each_row_names_the_family_the_broker_selects() {
         HttpProvider::AnthropicSubscriptionToken,
         HttpProvider::AnthropicClaudeSignIn,
         HttpProvider::GeminiApiKey,
+        HttpProvider::AntigravityOAuth,
         HttpProvider::GitHubOAuth,
         HttpProvider::GitHubAppAuthorization,
         HttpProvider::CodexDeviceEnrollment,
         HttpProvider::ClaudeSignInEnrollment,
         HttpProvider::CodexTokenRevocation,
         HttpProvider::GitHubAppTokenRevocation,
+        HttpProvider::AntigravitySignInEnrollment,
+        HttpProvider::AntigravityTokenRevocation,
     ] {
         assert_eq!(
             CREDENTIAL_TYPES
@@ -196,7 +202,7 @@ fn each_type_runs_one_subcommands_flow() {
     };
     assert_eq!(
         words(CredentialVerb::Connect),
-        ["codex", "github", "claude", "claude-token"]
+        ["codex", "github", "claude", "claude-token", "antigravity"]
     );
     assert_eq!(
         words(CredentialVerb::Add),

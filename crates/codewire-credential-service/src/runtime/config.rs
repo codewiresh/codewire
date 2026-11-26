@@ -312,6 +312,7 @@ const KEEPALIVE_INTERVAL: &str = "CREDENTIAL_OAUTH_KEEPALIVE_INTERVAL_SECONDS";
 const KEEPALIVE_CODEX_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_CODEX_AGE_SECONDS";
 const KEEPALIVE_GITHUB_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_GITHUB_AGE_SECONDS";
 const KEEPALIVE_CLAUDE_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_CLAUDE_AGE_SECONDS";
+const KEEPALIVE_ANTIGRAVITY_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ANTIGRAVITY_AGE_SECONDS";
 
 /// Optional OAuth keep-alive inputs. It is enabled with the broker defaults
 /// unless `CREDENTIAL_OAUTH_KEEPALIVE_ENABLED=false`. A present value must be
@@ -344,6 +345,7 @@ pub(super) fn oauth_keepalive_config(
         codex_age: seconds(KEEPALIVE_CODEX_AGE, defaults.codex_age)?,
         github_age: seconds(KEEPALIVE_GITHUB_AGE, defaults.github_age)?,
         claude_age: seconds(KEEPALIVE_CLAUDE_AGE, defaults.claude_age)?,
+        antigravity_age: seconds(KEEPALIVE_ANTIGRAVITY_AGE, defaults.antigravity_age)?,
     }
     .validate()
     .map_err(|error| {
@@ -352,6 +354,7 @@ pub(super) fn oauth_keepalive_config(
             OAuthKeepAliveConfigError::CodexAge => KEEPALIVE_CODEX_AGE,
             OAuthKeepAliveConfigError::GitHubAge => KEEPALIVE_GITHUB_AGE,
             OAuthKeepAliveConfigError::ClaudeAge => KEEPALIVE_CLAUDE_AGE,
+            OAuthKeepAliveConfigError::AntigravityAge => KEEPALIVE_ANTIGRAVITY_AGE,
         })
     })?;
     Ok(enabled.then_some(config))
@@ -781,6 +784,7 @@ mod tests {
                 (KEEPALIVE_CODEX_AGE, "60"),
                 (KEEPALIVE_GITHUB_AGE, "120"),
                 (KEEPALIVE_CLAUDE_AGE, "180"),
+                (KEEPALIVE_ANTIGRAVITY_AGE, "240"),
             ]))
             .unwrap(),
             Some(OAuthKeepAliveConfig {
@@ -788,6 +792,7 @@ mod tests {
                 codex_age: Duration::from_secs(60),
                 github_age: Duration::from_secs(120),
                 claude_age: Duration::from_secs(180),
+                antigravity_age: Duration::from_secs(240),
             })
         );
         for (name, value) in [

@@ -111,6 +111,10 @@ impl CapabilitySlot {
         Self::parse("gemini").expect("canonical Gemini capability slot")
     }
 
+    pub fn antigravity() -> Self {
+        Self::parse("antigravity").expect("canonical Antigravity capability slot")
+    }
+
     pub fn git_ssh() -> Self {
         Self::parse("git_ssh").expect("canonical Git SSH capability slot")
     }

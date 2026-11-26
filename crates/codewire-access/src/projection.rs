@@ -162,6 +162,7 @@ pub enum ManagedCredentialClient {
     Ssh,
     GitHub,
     Gemini,
+    Antigravity,
 }
 
 impl ManagedCredentialClient {
@@ -173,6 +174,7 @@ impl ManagedCredentialClient {
             Self::Ssh => 8,
             Self::GitHub => 16,
             Self::Gemini => 128,
+            Self::Antigravity => 256,
         }
     }
 
@@ -208,6 +210,7 @@ impl ManagedCredentialClient {
             // (`HttpProvider::reserved_environment_keys`).
             Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
             Self::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
+            Self::Antigravity => &[],
         }
     }
 }
@@ -264,7 +267,16 @@ const ANTHROPIC_SUBSCRIPTION_TOKEN_BIT: u16 = 32;
 /// the subscription-token form.
 const ANTHROPIC_SIGN_IN_BIT: u16 = 64;
 /// Every bit a selection may set.
-const ALL_CLIENT_BITS: u16 = 0x00ff;
+const ALL_CLIENT_BITS: u16 = 0x01ff;
+
+mod v3_tables;
+use v3_tables::{
+    V3_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS, V3_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+    V3_ANTIGRAVITY_ENCODINGS, V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS,
+    V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS, V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS,
+    V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS, V3_GEMINI_ANTIGRAVITY_ENCODINGS,
+    V3_GEMINI_ENCODINGS,
+};
 
 /// The 16 selections with the Anthropic client in its subscription-token form,
 /// in the same finite v2 hexadecimal bitset. Every earlier encoding keeps its
@@ -279,26 +291,6 @@ const ANTHROPIC_SUBSCRIPTION_ENCODINGS: [&str; 16] = [
 const ANTHROPIC_SIGN_IN_ENCODINGS: [&str; 16] = [
     "v2:44", "v2:45", "v2:46", "v2:47", "v2:4c", "v2:4d", "v2:4e", "v2:4f", "v2:54", "v2:55",
     "v2:56", "v2:57", "v2:5c", "v2:5d", "v2:5e", "v2:5f",
-];
-
-/// Selections carrying [`ManagedCredentialClient::Gemini`] use a finite `v3:`
-/// hexadecimal bitset while every earlier `v1:` and `v2:` token keeps its
-/// exact bytes (#6555). Each fits the native seed's 32-byte field.
-const V3_GEMINI_ENCODINGS: [&str; 32] = [
-    "v3:80", "v3:81", "v3:82", "v3:83", "v3:84", "v3:85", "v3:86", "v3:87", "v3:88", "v3:89",
-    "v3:8a", "v3:8b", "v3:8c", "v3:8d", "v3:8e", "v3:8f", "v3:90", "v3:91", "v3:92", "v3:93",
-    "v3:94", "v3:95", "v3:96", "v3:97", "v3:98", "v3:99", "v3:9a", "v3:9b", "v3:9c", "v3:9d",
-    "v3:9e", "v3:9f",
-];
-
-const V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS: [&str; 16] = [
-    "v3:a4", "v3:a5", "v3:a6", "v3:a7", "v3:ac", "v3:ad", "v3:ae", "v3:af", "v3:b4", "v3:b5",
-    "v3:b6", "v3:b7", "v3:bc", "v3:bd", "v3:be", "v3:bf",
-];
-
-const V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS: [&str; 16] = [
-    "v3:c4", "v3:c5", "v3:c6", "v3:c7", "v3:cc", "v3:cd", "v3:ce", "v3:cf", "v3:d4", "v3:d5",
-    "v3:d6", "v3:d7", "v3:dc", "v3:dd", "v3:de", "v3:df",
 ];
 
 /// Index into [`ANTHROPIC_SUBSCRIPTION_ENCODINGS`] or
@@ -337,6 +329,7 @@ impl ManagedCredentialClients {
                 "ssh" => ManagedCredentialClient::Ssh.bit(),
                 "github" => ManagedCredentialClient::GitHub.bit(),
                 "gemini" => ManagedCredentialClient::Gemini.bit(),
+                "antigravity" => ManagedCredentialClient::Antigravity.bit(),
                 _ => return Err(ProjectionError::InvalidManagedClientSelection),
             };
             if seen & bit != 0 {
@@ -400,7 +393,7 @@ impl ManagedCredentialClients {
         }
     }
 
-    /// One of 128 canonical tokens for private bootstrap metadata. Empty
+    /// One of 256 canonical tokens for private bootstrap metadata. Empty
     /// selection is explicit; unversioned or reordered forms are not aliases.
     pub fn encode(self) -> &'static str {
         debug_assert!(
@@ -409,62 +402,97 @@ impl ManagedCredentialClients {
                     || self.contains(ManagedCredentialClient::Anthropic))
                 && !(self.anthropic_subscription_token() && self.anthropic_sign_in())
         );
-        if self.contains(ManagedCredentialClient::Gemini) {
-            if self.anthropic_subscription_token() {
-                V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
-            } else if self.anthropic_sign_in() {
-                V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
-            } else {
-                V3_GEMINI_ENCODINGS[usize::from(self.0 & 0x1f)]
+        let gemini = self.contains(ManagedCredentialClient::Gemini);
+        let antigravity = self.contains(ManagedCredentialClient::Antigravity);
+        let sub = self.anthropic_subscription_token();
+        let sign_in = self.anthropic_sign_in();
+        match (antigravity, gemini, sub, sign_in) {
+            (false, false, false, false) => MANAGED_CLIENT_ENCODINGS[usize::from(self.0)],
+            (false, false, true, false) => {
+                ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
             }
-        } else if self.anthropic_subscription_token() {
-            ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
-        } else if self.anthropic_sign_in() {
-            ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
-        } else {
-            MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
+            (false, false, false, true) => {
+                ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (false, true, false, false) => V3_GEMINI_ENCODINGS[usize::from(self.0 & 0x1f)],
+            (false, true, true, false) => {
+                V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (false, true, false, true) => {
+                V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (true, false, false, false) => V3_ANTIGRAVITY_ENCODINGS[usize::from(self.0 & 0x1f)],
+            (true, false, true, false) => {
+                V3_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (true, false, false, true) => {
+                V3_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (true, true, false, false) => {
+                V3_GEMINI_ANTIGRAVITY_ENCODINGS[usize::from(self.0 & 0x1f)]
+            }
+            (true, true, true, false) => {
+                V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (true, true, false, true) => {
+                V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
+            }
+            (_, _, true, true) => {
+                unreachable!("subscription token and sign-in are mutually exclusive")
+            }
         }
     }
 
     /// Accept only the current exact private encoding, without legacy fallback.
     pub fn decode(value: &str) -> Result<Self, ProjectionError> {
-        if let Some(bits) = MANAGED_CLIENT_ENCODINGS
-            .iter()
-            .position(|candidate| *candidate == value)
-        {
-            return Ok(Self(bits as u16));
-        }
-        if let Some(low) = V3_GEMINI_ENCODINGS
-            .iter()
-            .position(|candidate| *candidate == value)
-        {
-            return Ok(Self(ManagedCredentialClient::Gemini.bit() | (low as u16)));
-        }
-        let form = |encodings: &[&str; 16], extra: u16| {
-            encodings
-                .iter()
-                .position(|candidate| *candidate == value)
-                .map(|index| Self(anthropic_form_bits(extra, index)))
-        };
         let gemini = ManagedCredentialClient::Gemini.bit();
-        form(
-            &ANTHROPIC_SUBSCRIPTION_ENCODINGS,
-            ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
-        )
-        .or_else(|| form(&ANTHROPIC_SIGN_IN_ENCODINGS, ANTHROPIC_SIGN_IN_BIT))
-        .or_else(|| {
-            form(
+        let antigravity = ManagedCredentialClient::Antigravity.bit();
+        for (table, high) in [
+            (&MANAGED_CLIENT_ENCODINGS, 0_u16),
+            (&V3_GEMINI_ENCODINGS, gemini),
+            (&V3_ANTIGRAVITY_ENCODINGS, antigravity),
+            (&V3_GEMINI_ANTIGRAVITY_ENCODINGS, gemini | antigravity),
+        ] {
+            if let Some(low) = table.iter().position(|candidate| *candidate == value) {
+                return Ok(Self(high | (low as u16)));
+            }
+        }
+        for (table, extra) in [
+            (
+                &ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+                ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
+            ),
+            (&ANTHROPIC_SIGN_IN_ENCODINGS, ANTHROPIC_SIGN_IN_BIT),
+            (
                 &V3_GEMINI_ANTHROPIC_SUBSCRIPTION_ENCODINGS,
                 gemini | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
-            )
-        })
-        .or_else(|| {
-            form(
+            ),
+            (
                 &V3_GEMINI_ANTHROPIC_SIGN_IN_ENCODINGS,
                 gemini | ANTHROPIC_SIGN_IN_BIT,
-            )
-        })
-        .ok_or(ProjectionError::InvalidManagedClientSelection)
+            ),
+            (
+                &V3_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+                antigravity | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
+            ),
+            (
+                &V3_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS,
+                antigravity | ANTHROPIC_SIGN_IN_BIT,
+            ),
+            (
+                &V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+                gemini | antigravity | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
+            ),
+            (
+                &V3_GEMINI_ANTIGRAVITY_ANTHROPIC_SIGN_IN_ENCODINGS,
+                gemini | antigravity | ANTHROPIC_SIGN_IN_BIT,
+            ),
+        ] {
+            if let Some(index) = table.iter().position(|candidate| *candidate == value) {
+                return Ok(Self(anthropic_form_bits(extra, index)));
+            }
+        }
+        Err(ProjectionError::InvalidManagedClientSelection)
     }
 
     pub fn contains(self, client: ManagedCredentialClient) -> bool {
@@ -484,6 +512,12 @@ impl ManagedCredentialClients {
         Self(self.0 & !ManagedCredentialClient::Gemini.bit())
     }
 
+    /// This selection without the Antigravity client: a non-intercepted boot
+    /// binds no Antigravity host and delivers no Antigravity login (#6555).
+    pub fn without_antigravity(self) -> Self {
+        Self(self.0 & !ManagedCredentialClient::Antigravity.bit())
+    }
+
     /// Provider names owned only while their client is selected. Generic
     /// runtime and GitHub names remain their adapters' responsibility.
     pub fn reserved_environment_keys(self) -> BTreeSet<&'static str> {
@@ -494,6 +528,7 @@ impl ManagedCredentialClients {
             ManagedCredentialClient::Ssh,
             ManagedCredentialClient::GitHub,
             ManagedCredentialClient::Gemini,
+            ManagedCredentialClient::Antigravity,
         ]
         .into_iter()
         .filter(|client| self.contains(*client))
@@ -1112,7 +1147,8 @@ impl CodexProviderProjection {
             ManagedCredentialClient::Anthropic
             | ManagedCredentialClient::Ssh
             | ManagedCredentialClient::GitHub
-            | ManagedCredentialClient::Gemini => return None,
+            | ManagedCredentialClient::Gemini
+            | ManagedCredentialClient::Antigravity => return None,
         };
         Some(projection.expect("fixed managed HTTP port is unprivileged"))
     }

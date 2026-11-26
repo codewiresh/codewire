@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use codewire_daemon_proto::codewire::bridge::v1;
 
+use super::antigravity_token::ANTIGRAVITY_TOKEN_ROUTE;
 use super::claude_token::CLAUDE_TOKEN_ROUTE;
 use super::routed::FrontDoorSession;
 use super::{
@@ -165,6 +166,13 @@ where
             ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request, session).await,
             ("codex", Some(RouteHost::CodexToken)) => self.execute_codex_token(request).await,
             ("gemini", Some(RouteHost::GeminiApi)) => self.execute_gemini_swap(request).await,
+            (
+                "antigravity",
+                Some(host @ (RouteHost::AntigravityDaily | RouteHost::AntigravityProd)),
+            ) => self.execute_antigravity_swap(host, request).await,
+            ("antigravity", Some(RouteHost::AntigravityOAuth)) => {
+                self.execute_antigravity_token(request).await
+            }
             ("openai" | "codex", Some(RouteHost::OpenAiApi)) => Err(self.openai_api_refusal()),
             _ => Err(BrokerRequestError::InvalidRequest),
         }
@@ -194,7 +202,10 @@ pub(super) fn intercepted(
             if request.intercepted_host.is_empty()
                 && request.route != CLAUDE_TOKEN_ROUTE
                 && request.capability_slot != "gemini"
-                && request.route != crate::gemini::ROUTE =>
+                && request.route != crate::gemini::ROUTE
+                && request.capability_slot != "antigravity"
+                && request.route != crate::antigravity::ROUTE
+                && request.route != ANTIGRAVITY_TOKEN_ROUTE =>
         {
             Ok((None, None))
         }

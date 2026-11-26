@@ -78,6 +78,25 @@ pub(super) fn claude_login_admissible(
     )
 }
 
+/// Placeholder-only Antigravity login admission: the environment creator's own
+/// Active personal Google OAuth sign-in in the `antigravity` slot (never a
+/// Gemini API key). Real Google tokens never leave the broker.
+pub(super) fn antigravity_login_admissible(
+    session: &PlatformRuntimeSession,
+    admission: Option<&Admission>,
+) -> Result<(), BrokerLeaseError> {
+    personal_login_admissible(
+        session,
+        admission,
+        &PersonalLogin {
+            permission: antigravity_login_permission(),
+            slot: CapabilitySlot::antigravity(),
+            provider: "google",
+            kind: CredentialAuthKind::OAuth,
+        },
+    )
+}
+
 /// The one personal login form a delivery predicate admits.
 struct PersonalLogin {
     permission: GrantPermission,

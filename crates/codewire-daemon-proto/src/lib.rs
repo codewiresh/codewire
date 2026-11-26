@@ -506,6 +506,10 @@ pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES: usize = 32;
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN: &str = "codex-login";
 /// The broker serves `ClaudeLoginRequest` on this epoch, under the same rule.
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN: &str = "claude-login";
+/// The broker serves `AntigravityLoginRequest` on this epoch (placeholder-only
+/// login behind front-door interception; real Google tokens never leave the
+/// broker).
+pub const CREDENTIAL_BRIDGE_CAPABILITY_ANTIGRAVITY_LOGIN: &str = "antigravity-login";
 /// The host accepts a GitHub Git request whose body streams in
 /// `CredentialBridgeRequestBody` frames under `CredentialBridgeRequestCredit`,
 /// with no request or response size limit. Without it a guest sends the whole
@@ -517,6 +521,7 @@ pub const CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM: &str = "request-body
 pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] = &[
     CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
     CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+    CREDENTIAL_BRIDGE_CAPABILITY_ANTIGRAVITY_LOGIN,
     CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
 ];
 /// The session is a front door's: a TLS front door outside the environment
@@ -925,6 +930,7 @@ mod tests {
         for capability in [
             CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
             CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+            CREDENTIAL_BRIDGE_CAPABILITY_ANTIGRAVITY_LOGIN,
             CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
         ] {
             assert!(valid_credential_bridge_capability(capability));

@@ -585,15 +585,19 @@ pub async fn run_daemon() -> Result<()> {
         Path::new(WORKSPACE_PATH),
     )
     .for_owner(workload);
+    let antigravity_home =
+        codewire_daemon::antigravity_home::AntigravityHome::new(&plan.identity.home)
+            .for_owner(workload);
     // A state disk carried into another environment may hold the source's
     // delivered logins, which an active writer would keep until they lapse.
-    // The first boot as a new environment clears both before any writer or
-    // workload runs.
+    // The first boot as a new environment clears all of them before any writer
+    // or workload runs.
     clear_logins_on_environment_change(
         Path::new(LOGIN_ENVIRONMENT_PATH),
         seed.vm_id(),
         &codex_home,
         &claude_home,
+        &antigravity_home,
     );
     // As a hosted daemon does before it listens: while the Anthropic client is
     // selected, Claude Code's onboarding is marked complete and the workspace
@@ -630,8 +634,14 @@ pub async fn run_daemon() -> Result<()> {
         let publisher = publisher.clone();
         async move {
             while resumes.recv().await.is_some() {
-                if let Err(error) =
-                    rekey_daemon(&rotation, &codex_home, &claude_home, publisher.as_ref()).await
+                if let Err(error) = rekey_daemon(
+                    &rotation,
+                    &codex_home,
+                    &claude_home,
+                    &antigravity_home,
+                    publisher.as_ref(),
+                )
+                .await
                 {
                     // PID 1 times out waiting for the acknowledgement, and
                     // the runner kills the restored VM before it thaws.
@@ -677,6 +687,7 @@ async fn rekey_daemon(
     rotation: &codewire_daemon::auth_rotation::AuthRotation,
     codex_home: &codewire_daemon::codex_home::CodexHome,
     claude_home: &codewire_daemon::claude_home::ClaudeHome,
+    antigravity_home: &codewire_daemon::antigravity_home::AntigravityHome,
     publisher: Option<&Arc<std::sync::Mutex<crate::cw_runtime_publisher::RuntimeCache>>>,
 ) -> Result<()> {
     let seed = tokio::task::spawn_blocking(checkpoint::read_seed_direct)
@@ -692,7 +703,9 @@ async fn rekey_daemon(
         .await
         .context("rotate the daemon's authority")?;
     let removed = sync_login_environment(Path::new(LOGIN_ENVIRONMENT_PATH), seed.vm_id(), || {
-        codewire_daemon::login_cleanup::clear_logins(codex_home, claude_home)
+        codewire_daemon::login_cleanup::clear_logins(codex_home, claude_home).and(
+            codewire_daemon::login_cleanup::clear_antigravity_login(antigravity_home),
+        )
     })?;
     if let Some(publisher) = publisher {
         publisher
@@ -5669,9 +5682,12 @@ fn clear_logins_on_environment_change(
     environment_id: uuid::Uuid,
     codex: &codewire_daemon::codex_home::CodexHome,
     claude: &codewire_daemon::claude_home::ClaudeHome,
+    antigravity: &codewire_daemon::antigravity_home::AntigravityHome,
 ) {
     if let Err(error) = sync_login_environment(marker, environment_id, || {
-        codewire_daemon::login_cleanup::clear_logins(codex, claude)
+        codewire_daemon::login_cleanup::clear_logins(codex, claude).and(
+            codewire_daemon::login_cleanup::clear_antigravity_login(antigravity),
+        )
     }) {
         eprintln!(
             "codewire guest: delivered logins were not cleared for this environment: {error:#}"

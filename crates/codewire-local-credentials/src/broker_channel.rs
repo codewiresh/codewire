@@ -278,12 +278,12 @@ where
             operation: operation.clone(),
             route: route.clone(),
         };
-        // The Codex and Claude login permissions name the listed direct
-        // delivery exceptions: neither is ever leased as an ordinary provider
-        // operation, only through [`Self::lease_codex_login`] and
-        // [`Self::lease_claude_login`].
+        // The Codex, Claude and Antigravity login permissions are never leased
+        // as ordinary provider operations, only through their dedicated login
+        // lease methods.
         if requested_permission == codewire_access::codex_login_permission()
             || requested_permission == codewire_access::claude_login_permission()
+            || requested_permission == codewire_access::antigravity_login_permission()
         {
             return Err(BrokerLeaseChannelError::Denied);
         }

@@ -27,6 +27,7 @@ use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
 use codewire_credential_broker::platform::keepalive::OAuthKeepAlive;
+use codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn;
 use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
@@ -251,6 +252,7 @@ async fn run_connected(
         HttpProvider::AnthropicSubscriptionToken,
         HttpProvider::AnthropicClaudeSignIn,
         HttpProvider::GeminiApiKey,
+        HttpProvider::AntigravityOAuth,
         HttpProvider::GitHubOAuth,
     ]))
     .await
@@ -295,6 +297,15 @@ async fn run_connected(
     let claude_sign_in = ClaudeSignIn::new(Arc::new(
         ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
             HttpProvider::ClaudeSignInEnrollment,
+        ]))
+        .await
+        .map_err(|_| RuntimeError::Provider)?,
+    ));
+    // Antigravity sign-in has its own family: Google's OAuth token endpoint
+    // only, never the Cloud Code API routes.
+    let antigravity_sign_in = AntigravitySignIn::new(Arc::new(
+        ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+            HttpProvider::AntigravitySignInEnrollment,
         ]))
         .await
         .map_err(|_| RuntimeError::Provider)?,
@@ -373,6 +384,7 @@ async fn run_connected(
     // that admits only that one request (#4717); GitHub's needs the App.
     let revocation = RevocationTransports {
         codex: revocation_transport(HttpProvider::CodexTokenRevocation).await?,
+        antigravity: revocation_transport(HttpProvider::AntigravityTokenRevocation).await?,
         github: if github_app_authorization.is_some() {
             Some(revocation_transport(HttpProvider::GitHubAppTokenRevocation).await?)
         } else {
@@ -385,6 +397,7 @@ async fn run_connected(
             store,
             codex_login,
             claude_sign_in,
+            antigravity_sign_in,
             github_login,
             github_app_authorization,
         )

@@ -9,6 +9,7 @@
 //! Provider material exists only in zeroizing memory until the caller moves it
 //! into its protected store.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod github;

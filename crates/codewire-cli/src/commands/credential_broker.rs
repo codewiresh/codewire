@@ -417,6 +417,7 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     let mut capabilities = vec![
         codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
         codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_ANTIGRAVITY_LOGIN,
     ];
     if !args.platform_delegated {
         capabilities.push(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM);

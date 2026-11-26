@@ -190,7 +190,7 @@ class CredentialBridgeInterceptionHint(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., origin: _Optional[str] = ...) -> None: ...
 
 class CredentialBridgeHostMessage(_message.Message):
-    __slots__ = ("open", "response_start", "response_body", "response_end", "response_failure", "environment_projection", "ssh", "codex_login", "claude_login", "upgrade_accepted", "stream_data", "stream_credit", "stream_close", "interception_hint", "request_credit", "epoch_refused")
+    __slots__ = ("open", "response_start", "response_body", "response_end", "response_failure", "environment_projection", "ssh", "codex_login", "claude_login", "upgrade_accepted", "stream_data", "stream_credit", "stream_close", "interception_hint", "request_credit", "epoch_refused", "antigravity_login")
     OPEN_FIELD_NUMBER: _ClassVar[int]
     RESPONSE_START_FIELD_NUMBER: _ClassVar[int]
     RESPONSE_BODY_FIELD_NUMBER: _ClassVar[int]
@@ -207,6 +207,7 @@ class CredentialBridgeHostMessage(_message.Message):
     INTERCEPTION_HINT_FIELD_NUMBER: _ClassVar[int]
     REQUEST_CREDIT_FIELD_NUMBER: _ClassVar[int]
     EPOCH_REFUSED_FIELD_NUMBER: _ClassVar[int]
+    ANTIGRAVITY_LOGIN_FIELD_NUMBER: _ClassVar[int]
     open: CredentialBridgeOpen
     response_start: CredentialBridgeResponseStart
     response_body: CredentialBridgeResponseBody
@@ -223,7 +224,8 @@ class CredentialBridgeHostMessage(_message.Message):
     interception_hint: CredentialBridgeInterceptionHint
     request_credit: CredentialBridgeRequestCredit
     epoch_refused: CredentialBridgeEpochRefused
-    def __init__(self, open: _Optional[_Union[CredentialBridgeOpen, _Mapping]] = ..., response_start: _Optional[_Union[CredentialBridgeResponseStart, _Mapping]] = ..., response_body: _Optional[_Union[CredentialBridgeResponseBody, _Mapping]] = ..., response_end: _Optional[_Union[CredentialBridgeResponseEnd, _Mapping]] = ..., response_failure: _Optional[_Union[CredentialBridgeResponseFailure, _Mapping]] = ..., environment_projection: _Optional[_Union[EnvironmentProjectionResponse, _Mapping]] = ..., ssh: _Optional[_Union[CredentialSshResponse, _Mapping]] = ..., codex_login: _Optional[_Union[CodexLoginResponse, _Mapping]] = ..., claude_login: _Optional[_Union[ClaudeLoginResponse, _Mapping]] = ..., upgrade_accepted: _Optional[_Union[CredentialBridgeUpgradeAccepted, _Mapping]] = ..., stream_data: _Optional[_Union[CredentialBridgeStreamData, _Mapping]] = ..., stream_credit: _Optional[_Union[CredentialBridgeStreamCredit, _Mapping]] = ..., stream_close: _Optional[_Union[CredentialBridgeStreamClose, _Mapping]] = ..., interception_hint: _Optional[_Union[CredentialBridgeInterceptionHint, _Mapping]] = ..., request_credit: _Optional[_Union[CredentialBridgeRequestCredit, _Mapping]] = ..., epoch_refused: _Optional[_Union[CredentialBridgeEpochRefused, _Mapping]] = ...) -> None: ...
+    antigravity_login: AntigravityLoginResponse
+    def __init__(self, open: _Optional[_Union[CredentialBridgeOpen, _Mapping]] = ..., response_start: _Optional[_Union[CredentialBridgeResponseStart, _Mapping]] = ..., response_body: _Optional[_Union[CredentialBridgeResponseBody, _Mapping]] = ..., response_end: _Optional[_Union[CredentialBridgeResponseEnd, _Mapping]] = ..., response_failure: _Optional[_Union[CredentialBridgeResponseFailure, _Mapping]] = ..., environment_projection: _Optional[_Union[EnvironmentProjectionResponse, _Mapping]] = ..., ssh: _Optional[_Union[CredentialSshResponse, _Mapping]] = ..., codex_login: _Optional[_Union[CodexLoginResponse, _Mapping]] = ..., claude_login: _Optional[_Union[ClaudeLoginResponse, _Mapping]] = ..., upgrade_accepted: _Optional[_Union[CredentialBridgeUpgradeAccepted, _Mapping]] = ..., stream_data: _Optional[_Union[CredentialBridgeStreamData, _Mapping]] = ..., stream_credit: _Optional[_Union[CredentialBridgeStreamCredit, _Mapping]] = ..., stream_close: _Optional[_Union[CredentialBridgeStreamClose, _Mapping]] = ..., interception_hint: _Optional[_Union[CredentialBridgeInterceptionHint, _Mapping]] = ..., request_credit: _Optional[_Union[CredentialBridgeRequestCredit, _Mapping]] = ..., epoch_refused: _Optional[_Union[CredentialBridgeEpochRefused, _Mapping]] = ..., antigravity_login: _Optional[_Union[AntigravityLoginResponse, _Mapping]] = ...) -> None: ...
 
 class CredentialBridgeEpochRefused(_message.Message):
     __slots__ = ("protocol_version", "environment_id", "environment_generation", "refusal")
@@ -328,7 +330,7 @@ class CredentialBridgeCancel(_message.Message):
     def __init__(self, request_id: _Optional[str] = ...) -> None: ...
 
 class CredentialBridgeGuestMessage(_message.Message):
-    __slots__ = ("ready", "request", "cancel", "environment_projection", "ssh", "codex_login", "claude_login", "upgrade", "stream_data", "stream_credit", "stream_close", "request_body", "request_end")
+    __slots__ = ("ready", "request", "cancel", "environment_projection", "ssh", "codex_login", "claude_login", "upgrade", "stream_data", "stream_credit", "stream_close", "request_body", "request_end", "antigravity_login")
     READY_FIELD_NUMBER: _ClassVar[int]
     REQUEST_FIELD_NUMBER: _ClassVar[int]
     CANCEL_FIELD_NUMBER: _ClassVar[int]
@@ -342,6 +344,7 @@ class CredentialBridgeGuestMessage(_message.Message):
     STREAM_CLOSE_FIELD_NUMBER: _ClassVar[int]
     REQUEST_BODY_FIELD_NUMBER: _ClassVar[int]
     REQUEST_END_FIELD_NUMBER: _ClassVar[int]
+    ANTIGRAVITY_LOGIN_FIELD_NUMBER: _ClassVar[int]
     ready: CredentialBridgeReady
     request: CredentialBridgeRequest
     cancel: CredentialBridgeCancel
@@ -355,7 +358,8 @@ class CredentialBridgeGuestMessage(_message.Message):
     stream_close: CredentialBridgeStreamClose
     request_body: CredentialBridgeRequestBody
     request_end: CredentialBridgeRequestEnd
-    def __init__(self, ready: _Optional[_Union[CredentialBridgeReady, _Mapping]] = ..., request: _Optional[_Union[CredentialBridgeRequest, _Mapping]] = ..., cancel: _Optional[_Union[CredentialBridgeCancel, _Mapping]] = ..., environment_projection: _Optional[_Union[EnvironmentProjectionRequest, _Mapping]] = ..., ssh: _Optional[_Union[CredentialSshRequest, _Mapping]] = ..., codex_login: _Optional[_Union[CodexLoginRequest, _Mapping]] = ..., claude_login: _Optional[_Union[ClaudeLoginRequest, _Mapping]] = ..., upgrade: _Optional[_Union[CredentialBridgeUpgrade, _Mapping]] = ..., stream_data: _Optional[_Union[CredentialBridgeStreamData, _Mapping]] = ..., stream_credit: _Optional[_Union[CredentialBridgeStreamCredit, _Mapping]] = ..., stream_close: _Optional[_Union[CredentialBridgeStreamClose, _Mapping]] = ..., request_body: _Optional[_Union[CredentialBridgeRequestBody, _Mapping]] = ..., request_end: _Optional[_Union[CredentialBridgeRequestEnd, _Mapping]] = ...) -> None: ...
+    antigravity_login: AntigravityLoginRequest
+    def __init__(self, ready: _Optional[_Union[CredentialBridgeReady, _Mapping]] = ..., request: _Optional[_Union[CredentialBridgeRequest, _Mapping]] = ..., cancel: _Optional[_Union[CredentialBridgeCancel, _Mapping]] = ..., environment_projection: _Optional[_Union[EnvironmentProjectionRequest, _Mapping]] = ..., ssh: _Optional[_Union[CredentialSshRequest, _Mapping]] = ..., codex_login: _Optional[_Union[CodexLoginRequest, _Mapping]] = ..., claude_login: _Optional[_Union[ClaudeLoginRequest, _Mapping]] = ..., upgrade: _Optional[_Union[CredentialBridgeUpgrade, _Mapping]] = ..., stream_data: _Optional[_Union[CredentialBridgeStreamData, _Mapping]] = ..., stream_credit: _Optional[_Union[CredentialBridgeStreamCredit, _Mapping]] = ..., stream_close: _Optional[_Union[CredentialBridgeStreamClose, _Mapping]] = ..., request_body: _Optional[_Union[CredentialBridgeRequestBody, _Mapping]] = ..., request_end: _Optional[_Union[CredentialBridgeRequestEnd, _Mapping]] = ..., antigravity_login: _Optional[_Union[AntigravityLoginRequest, _Mapping]] = ...) -> None: ...
 
 class CredentialSshRequest(_message.Message):
     __slots__ = ("request_id", "deadline_unix_ms", "identities", "sign")
@@ -482,6 +486,26 @@ class ClaudeLoginRequest(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., recipient_public_key: _Optional[bytes] = ..., deadline_unix_ms: _Optional[int] = ...) -> None: ...
 
 class ClaudeLoginResponse(_message.Message):
+    __slots__ = ("request_id", "sealed_login", "failure")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    SEALED_LOGIN_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    sealed_login: bytes
+    failure: CredentialBridgeFailureReason
+    def __init__(self, request_id: _Optional[str] = ..., sealed_login: _Optional[bytes] = ..., failure: _Optional[_Union[CredentialBridgeFailureReason, str]] = ...) -> None: ...
+
+class AntigravityLoginRequest(_message.Message):
+    __slots__ = ("request_id", "recipient_public_key", "deadline_unix_ms")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    RECIPIENT_PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    recipient_public_key: bytes
+    deadline_unix_ms: int
+    def __init__(self, request_id: _Optional[str] = ..., recipient_public_key: _Optional[bytes] = ..., deadline_unix_ms: _Optional[int] = ...) -> None: ...
+
+class AntigravityLoginResponse(_message.Message):
     __slots__ = ("request_id", "sealed_login", "failure")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     SEALED_LOGIN_FIELD_NUMBER: _ClassVar[int]

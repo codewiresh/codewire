@@ -17,6 +17,10 @@ use codewire_access::HttpProvider;
 use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
+use codewire_credential_broker::provider_oauth::antigravity::{
+    self, ANTIGRAVITY_SIGN_IN_CODE_INVALID, ANTIGRAVITY_SIGN_IN_EXPIRED, AntigravitySignIn,
+    AntigravitySignInError,
+};
 use codewire_credential_broker::provider_oauth::claude::{
     CLAUDE_SIGN_IN_CODE_INVALID, CLAUDE_SIGN_IN_EXPIRED, ClaudeSignIn, ClaudeSignInError,
 };
@@ -30,7 +34,8 @@ use codewire_credential_broker::provider_oauth::{
     DeviceChallenge, DeviceLoginError, ProviderRevocation, RevocationFailure,
 };
 use codewire_credential_broker::{
-    BrokerUpstreamTransport, ClaudeOAuthImport, CodexOAuthImport, GitHubAppAuthorizationImport,
+    AntigravityOAuthImport, BrokerUpstreamTransport, ClaudeOAuthImport, CodexOAuthImport,
+    GitHubAppAuthorizationImport,
 };
 use codewire_protected_store::ProtectedValue;
 
@@ -53,6 +58,30 @@ pub(crate) async fn revoke_unsaved_codex(material: ProtectedValue) -> ProviderRe
         UNSAVED_REVOCATION_BOUND,
     )
     .await
+}
+
+/// Asks Google, once, to revoke an Antigravity sign-in it approved that this
+/// process will not save (#6555), over the one revocation route.
+pub(crate) async fn revoke_unsaved_antigravity(material: ProtectedValue) -> ProviderRevocation {
+    let runtime = tokio::runtime::Handle::current();
+    let (resolved, lookup) = tokio::sync::oneshot::channel();
+    let _detached = std::thread::Builder::new()
+        .name("cw-revocation-lookup".into())
+        .spawn(move || {
+            let _ =
+                resolved.send(runtime.block_on(resolve(HttpProvider::AntigravityTokenRevocation)));
+        });
+    let ask = async move {
+        match lookup.await {
+            Ok(Ok(transport)) => {
+                antigravity::revoke_stored(&transport, material.expose_secret()).await
+            }
+            _ => ProviderRevocation::Failed(RevocationFailure::Unavailable),
+        }
+    };
+    tokio::time::timeout(UNSAVED_REVOCATION_BOUND, ask)
+        .await
+        .unwrap_or(ProviderRevocation::Failed(RevocationFailure::Unavailable))
 }
 
 async fn revoke_unsaved_codex_over(
@@ -163,6 +192,41 @@ fn claude_sign_in_error(error: ClaudeSignInError) -> anyhow::Error {
         | ClaudeSignInError::Unavailable
         | ClaudeSignInError::InvalidResponse) => {
             anyhow::Error::new(error).context("complete the Claude sign-in")
+        }
+    }
+}
+
+/// Sign in to Google for Antigravity (`agy`): the same sign-in the platform
+/// service runs, here in the host CLI, which alone holds this sign-in's
+/// verifier. The person opens the authorize page and pastes back the callback
+/// URL or `code#state`.
+pub(crate) async fn antigravity_sign_in(
+    sign_in: SignInScreen<'_>,
+    interrupt: &mut Interrupt,
+) -> anyhow::Result<AntigravityOAuthImport> {
+    let upstream = resolve(HttpProvider::AntigravitySignInEnrollment)
+        .await
+        .context("resolve the Antigravity sign-in endpoint")?;
+    let login = AntigravitySignIn::new(upstream);
+    let started = login.start().map_err(antigravity_sign_in_error)?;
+    let pasted = super::login_screen::antigravity_sign_in_code(sign_in, started.authorize_url())?;
+    let pasted = std::str::from_utf8(pasted.expose_secret())
+        .map_err(|_| anyhow::anyhow!(ANTIGRAVITY_SIGN_IN_CODE_INVALID))?;
+    interrupt.listen();
+    login
+        .complete(started.handle(), pasted)
+        .await
+        .map_err(antigravity_sign_in_error)
+}
+
+fn antigravity_sign_in_error(error: AntigravitySignInError) -> anyhow::Error {
+    match error {
+        AntigravitySignInError::InvalidCode => anyhow::anyhow!(ANTIGRAVITY_SIGN_IN_CODE_INVALID),
+        AntigravitySignInError::Expired => anyhow::anyhow!(ANTIGRAVITY_SIGN_IN_EXPIRED),
+        error @ (AntigravitySignInError::Denied
+        | AntigravitySignInError::Unavailable
+        | AntigravitySignInError::InvalidResponse) => {
+            anyhow::Error::new(error).context("complete the Antigravity sign-in")
         }
     }
 }

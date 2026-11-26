@@ -715,6 +715,8 @@ pub(crate) struct CredentialProfileCreateSubmission {
     #[serde(default)]
     pub(crate) gemini: String,
     #[serde(default)]
+    pub(crate) antigravity: String,
+    #[serde(default)]
     pub(crate) ssh: String,
 }
 
@@ -732,6 +734,8 @@ pub(crate) struct CredentialProfileUpdateSubmission {
     pub(crate) anthropic: String,
     #[serde(default)]
     pub(crate) gemini: Option<String>,
+    #[serde(default)]
+    pub(crate) antigravity: Option<String>,
     #[serde(default)]
     pub(crate) ssh: String,
 }

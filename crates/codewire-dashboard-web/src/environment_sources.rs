@@ -228,13 +228,13 @@ fn profile_option(
         .map(|entry| &entry.credential_id)
         .collect::<BTreeSet<_>>()
         .len();
-    if profile.entries.len() > 5 {
+    if profile.entries.len() > 6 {
         return Err(invalid_options());
     }
     for entry in &profile.entries {
         if !matches!(
             entry.capability_slot.as_str(),
-            "codex" | "openai" | "anthropic" | "gemini" | "ssh"
+            "codex" | "openai" | "anthropic" | "gemini" | "antigravity" | "ssh"
         ) || !slots.insert(entry.capability_slot.as_str())
             || crate::environment_source_forms::exact_id(&entry.credential_id).is_err()
         {

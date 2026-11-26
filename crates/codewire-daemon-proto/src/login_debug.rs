@@ -6,7 +6,8 @@
 use std::fmt;
 
 use crate::codewire::bridge::v1::{
-    ClaudeLoginResponse, CodexLoginResponse, CredentialBridgeFailureReason, claude_login_response,
+    AntigravityLoginResponse, ClaudeLoginResponse, CodexLoginResponse,
+    CredentialBridgeFailureReason, antigravity_login_response, claude_login_response,
     codex_login_response,
 };
 
@@ -71,6 +72,31 @@ impl fmt::Debug for claude_login_response::Result {
     }
 }
 
+impl fmt::Debug for AntigravityLoginResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AntigravityLoginResponse")
+            .field("request_id", &self.request_id)
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+impl fmt::Debug for antigravity_login_response::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SealedLogin(_) => formatter
+                .debug_tuple("SealedLogin")
+                .field(&"[REDACTED]")
+                .finish(),
+            Self::Failure(reason) => formatter
+                .debug_tuple("Failure")
+                .field(&Failure(*reason))
+                .finish(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +129,19 @@ mod tests {
         let result = claude_login_response::Result::SealedLogin(MARKER.to_vec());
         assert_redacted(&format!("{result:?}"));
         let response = ClaudeLoginResponse {
+            request_id: "request-1".to_owned(),
+            result: Some(result),
+        };
+        let printed = format!("{response:?}");
+        assert_redacted(&printed);
+        assert!(printed.contains("request-1"));
+    }
+
+    #[test]
+    fn an_antigravity_login_response_never_prints_its_sealed_login() {
+        let result = antigravity_login_response::Result::SealedLogin(MARKER.to_vec());
+        assert_redacted(&format!("{result:?}"));
+        let response = AntigravityLoginResponse {
             request_id: "request-1".to_owned(),
             result: Some(result),
         };

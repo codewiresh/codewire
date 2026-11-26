@@ -1197,6 +1197,7 @@ async fn forward_host(
         // Opaque recipient-sealed ciphertext; this relay cannot open either.
         Some(Payload::CodexLogin(value)) => sender.send_codex_login(value).await,
         Some(Payload::ClaudeLogin(value)) => sender.send_claude_login(value).await,
+        Some(Payload::AntigravityLogin(value)) => sender.send_antigravity_login(value).await,
         // A front-door session's frames are unknown frames toward a daemon.
         Some(
             Payload::Open(_)

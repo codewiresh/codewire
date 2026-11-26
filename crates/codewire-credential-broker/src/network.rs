@@ -4,18 +4,22 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
-#[cfg(not(feature = "platform"))]
-use codewire_access::GEMINI_API_HOST;
 use codewire_access::HttpProvider;
 #[cfg(feature = "platform")]
 use codewire_access::{
+    ANTIGRAVITY_DAILY_HOST, ANTIGRAVITY_HOSTS, ANTIGRAVITY_OAUTH_HOST, ANTIGRAVITY_PROD_HOST,
     AvailableGrants, CapabilitySlot, FRONT_DOOR_HOSTS, GEMINI_API_HOST, GITHUB_HOSTS,
+};
+#[cfg(not(feature = "platform"))]
+use codewire_access::{
+    ANTIGRAVITY_DAILY_HOST, ANTIGRAVITY_OAUTH_HOST, ANTIGRAVITY_PROD_HOST, GEMINI_API_HOST,
 };
 use codewire_egress_policy::intercept::InterceptBinding;
 use futures::StreamExt as _;
 use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
 
+use crate::provider_oauth::antigravity::{GOOGLE_REVOKE_PATH, GOOGLE_TOKEN_PATH};
 use crate::provider_oauth::claude::{CLAUDE_PROFILE_PATH, CLAUDE_TOKEN_HOST, CLAUDE_TOKEN_PATH};
 use crate::provider_oauth::{
     CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH, CODEX_TOKEN_REVOCATION_PATH,
@@ -297,6 +301,12 @@ fn slot_hosts(slot: &str) -> &'static [&'static str] {
         "codex" => &[CHATGPT_HOST, OPENAI_AUTH_HOST, OPENAI_HOST],
         "anthropic" => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST],
         "github" => &[GITHUB_API_HOST, GITHUB_GIT_HOST],
+        "gemini" => &[GEMINI_API_HOST],
+        "antigravity" => &[
+            ANTIGRAVITY_DAILY_HOST,
+            ANTIGRAVITY_PROD_HOST,
+            ANTIGRAVITY_OAUTH_HOST,
+        ],
         _ => &[],
     }
 }
@@ -436,7 +446,9 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         let client = pinned_client.as_ref().unwrap_or(&self.client);
         let is_refresh = (target.host_str() == Some(OPENAI_AUTH_HOST)
             && target.path() == OPENAI_TOKEN_PATH)
-            || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH);
+            || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH)
+            || (target.host_str() == Some(ANTIGRAVITY_OAUTH_HOST)
+                && target.path() == GOOGLE_TOKEN_PATH);
         let provider_host = provider_host(&target);
         let request = client
             .request(method.clone(), target.as_str())
@@ -654,6 +666,9 @@ fn provider_host(target: &url::Url) -> &'static str {
         Some(GITHUB_API_HOST) => GITHUB_API_HOST,
         Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
         Some(GEMINI_API_HOST) => GEMINI_API_HOST,
+        Some(ANTIGRAVITY_DAILY_HOST) => ANTIGRAVITY_DAILY_HOST,
+        Some(ANTIGRAVITY_PROD_HOST) => ANTIGRAVITY_PROD_HOST,
+        Some(ANTIGRAVITY_OAUTH_HOST) => ANTIGRAVITY_OAUTH_HOST,
         Some(host) if routed_host(host) => "chatgpt-routed-origin",
         _ => "other",
     }
@@ -676,6 +691,9 @@ pub(crate) enum RouteHost {
     GitHubApi,
     GitHub,
     GeminiApi,
+    AntigravityDaily,
+    AntigravityProd,
+    AntigravityOAuth,
 }
 
 impl RouteHost {
@@ -689,6 +707,9 @@ impl RouteHost {
             Self::GitHubApi => GITHUB_API_HOST,
             Self::GitHub => GITHUB_GIT_HOST,
             Self::GeminiApi => GEMINI_API_HOST,
+            Self::AntigravityDaily => ANTIGRAVITY_DAILY_HOST,
+            Self::AntigravityProd => ANTIGRAVITY_PROD_HOST,
+            Self::AntigravityOAuth => ANTIGRAVITY_OAUTH_HOST,
         }
     }
 
@@ -704,6 +725,8 @@ impl RouteHost {
             ("github", "github-api") => &[Self::GitHubApi],
             ("github", "github-https") => &[Self::GitHub],
             ("gemini", "gemini-api") => &[Self::GeminiApi],
+            ("antigravity", "antigravity-api") => &[Self::AntigravityDaily, Self::AntigravityProd],
+            ("antigravity", "antigravity-oauth-token") => &[Self::AntigravityOAuth],
             _ => &[],
         }
     }
@@ -738,6 +761,7 @@ impl RouteHost {
                     .filter_map(|served| served.leaf_name())
                     .chain((github_bound && GITHUB_HOSTS.contains(&host)).then_some(host))
                     .chain((host == GEMINI_API_HOST).then_some(host))
+                    .chain(ANTIGRAVITY_HOSTS.contains(&host).then_some(host))
             })
             .collect()
     }
@@ -795,6 +819,13 @@ fn selected_hosts(
             // The code exchange and the one OAuth profile read.
             HttpProvider::ClaudeSignInEnrollment => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
             HttpProvider::GeminiApiKey => &[GEMINI_API_HOST][..],
+            HttpProvider::AntigravityOAuth => &[
+                ANTIGRAVITY_DAILY_HOST,
+                ANTIGRAVITY_PROD_HOST,
+                ANTIGRAVITY_OAUTH_HOST,
+            ][..],
+            HttpProvider::AntigravitySignInEnrollment
+            | HttpProvider::AntigravityTokenRevocation => &[ANTIGRAVITY_OAUTH_HOST][..],
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppTokenRevocation => &[GITHUB_API_HOST][..],
@@ -861,6 +892,20 @@ fn validate_target(
         }
         Some(GEMINI_API_HOST) => {
             selected.contains(&HttpProvider::GeminiApiKey) && transparent_method(method)
+        }
+        Some(ANTIGRAVITY_DAILY_HOST | ANTIGRAVITY_PROD_HOST) => {
+            selected.contains(&HttpProvider::AntigravityOAuth) && transparent_method(method)
+        }
+        Some(ANTIGRAVITY_OAUTH_HOST) => {
+            (selected.contains(&HttpProvider::AntigravityOAuth) && transparent_method(method))
+                || (selected.contains(&HttpProvider::AntigravitySignInEnrollment)
+                    && method == Method::POST
+                    && target.path() == GOOGLE_TOKEN_PATH
+                    && target.query().is_none())
+                || (selected.contains(&HttpProvider::AntigravityTokenRevocation)
+                    && method == Method::POST
+                    && target.path() == GOOGLE_REVOKE_PATH
+                    && target.query().is_none())
         }
         Some(GITHUB_API_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -1384,7 +1429,7 @@ mod tests {
     /// what a credential reaches, so it fails here first (#6286).
     #[test]
     fn each_forms_hosts_are_pinned_and_match_its_registry_row() {
-        let golden: [(HttpProvider, &[&str]); 12] = [
+        let golden: [(HttpProvider, &[&str]); 15] = [
             (HttpProvider::OpenAiApiKey, &["api.openai.com"]),
             (
                 HttpProvider::CodexOAuth,
@@ -1403,6 +1448,14 @@ mod tests {
                 HttpProvider::GeminiApiKey,
                 &["generativelanguage.googleapis.com"],
             ),
+            (
+                HttpProvider::AntigravityOAuth,
+                &[
+                    "daily-cloudcode-pa.googleapis.com",
+                    "cloudcode-pa.googleapis.com",
+                    "oauth2.googleapis.com",
+                ],
+            ),
             (HttpProvider::GitHubOAuth, &["api.github.com", "github.com"]),
             (
                 HttpProvider::GitHubAppAuthorization,
@@ -1413,7 +1466,15 @@ mod tests {
                 HttpProvider::ClaudeSignInEnrollment,
                 &["api.anthropic.com", "platform.claude.com"],
             ),
+            (
+                HttpProvider::AntigravitySignInEnrollment,
+                &["oauth2.googleapis.com"],
+            ),
             (HttpProvider::CodexTokenRevocation, &["auth.openai.com"]),
+            (
+                HttpProvider::AntigravityTokenRevocation,
+                &["oauth2.googleapis.com"],
+            ),
             (HttpProvider::GitHubAppTokenRevocation, &["api.github.com"]),
         ];
         for (provider, hosts) in golden {
@@ -1433,6 +1494,68 @@ mod tests {
                 row.hosts.iter().copied().collect::<BTreeSet<_>>(),
                 "{}",
                 row.word
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_enrollment_and_revocation_pin_exact_oauth2_host_and_paths() {
+        let enrollment = BTreeSet::from([HttpProvider::AntigravitySignInEnrollment]);
+        assert!(
+            validate_target(
+                &url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+                &Method::POST,
+                &enrollment,
+            )
+            .is_ok()
+        );
+        for (method, target) in [
+            (Method::GET, "https://oauth2.googleapis.com/token"),
+            (Method::POST, "https://oauth2.googleapis.com/token?x=1"),
+            (Method::POST, "https://oauth2.googleapis.com/revoke"),
+            (Method::POST, "https://oauth2.googleapis.com/tokeninfo"),
+            (
+                Method::POST,
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+            ),
+            (
+                Method::POST,
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+            ),
+            (Method::POST, "https://evil.example/token"),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &enrollment).is_err(),
+                "enrollment must refuse {method} {target}"
+            );
+        }
+
+        let revocation = BTreeSet::from([HttpProvider::AntigravityTokenRevocation]);
+        assert!(
+            validate_target(
+                &url::Url::parse("https://oauth2.googleapis.com/revoke").unwrap(),
+                &Method::POST,
+                &revocation,
+            )
+            .is_ok()
+        );
+        for (method, target) in [
+            (Method::GET, "https://oauth2.googleapis.com/revoke"),
+            (Method::POST, "https://oauth2.googleapis.com/revoke?token=t"),
+            (Method::POST, "https://oauth2.googleapis.com/token"),
+            (
+                Method::POST,
+                "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+            ),
+            (
+                Method::POST,
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+            ),
+            (Method::POST, "https://evil.example/revoke"),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &revocation).is_err(),
+                "revocation must refuse {method} {target}"
             );
         }
     }

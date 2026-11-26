@@ -689,6 +689,10 @@ impl Harness {
             let device = Arc::new(DeviceProvider::default());
             let codex_login = CodexDeviceLogin::new(device.clone());
             let claude_sign_in = ClaudeSignIn::new(device.clone());
+            let antigravity_sign_in =
+                codewire_credential_broker::provider_oauth::antigravity::AntigravitySignIn::new(
+                    device.clone(),
+                );
             let github_login = GitHubDeviceLogin::new(
                 GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), GITHUB_APP_SLUG.into())
                     .map_err(|_| anyhow::anyhow!("synthetic GitHub App configuration"))?,
@@ -710,11 +714,12 @@ impl Harness {
                 ))
             });
             let mut owner =
-                CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),github_app)
+                CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,antigravity_sign_in,Some(github_login),github_app)
                     .with_mutation_timeout(mutation_timeout);
             if let Some(revocation) = revocation {
                 owner = owner.with_provider_revocation(RevocationTransports {
                     codex: revocation.clone(),
+                    antigravity: revocation.clone(),
                     github: Some(revocation),
                 });
             }

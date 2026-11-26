@@ -148,6 +148,7 @@ macro_rules! cases {
 #[rustfmt::skip]
 fn cases() -> BTreeMap<&'static str, Check> {
     cases! {
+        "codewire.bridge.v1.AntigravityLoginResponse" => bridge::v1::AntigravityLoginResponse,
         "codewire.bridge.v1.ClaudeLoginResponse" => bridge::v1::ClaudeLoginResponse,
         "codewire.bridge.v1.CodexLoginResponse" => bridge::v1::CodexLoginResponse,
         "codewire.bridge.v1.CredentialBridgePlaceholder" => bridge::v1::CredentialBridgePlaceholder,
@@ -166,6 +167,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.v1.AddClaudeSubscriptionTokenCredentialRequest" => v1::AddClaudeSubscriptionTokenCredentialRequest,
         "codewire.v1.AddSshCredentialRequest" => v1::AddSshCredentialRequest,
         "codewire.v1.CodexDeviceChallenge" => v1::CodexDeviceChallenge,
+        "codewire.v1.CompleteAntigravitySignInRequest" => v1::CompleteAntigravitySignInRequest,
         "codewire.v1.CompleteClaudeSignInRequest" => v1::CompleteClaudeSignInRequest,
         "codewire.v1.CompleteGithubAppAuthorizationRequest" => v1::CompleteGithubAppAuthorizationRequest,
         "codewire.v1.CreateApiKeyResponse" => v1::CreateApiKeyResponse,
@@ -192,6 +194,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.v1.SetProjectSecretRequest" => v1::SetProjectSecretRequest,
         "codewire.v1.SetSecretRequest" => v1::SetSecretRequest,
         "codewire.v1.SetUserSecretRequest" => v1::SetUserSecretRequest,
+        "codewire.v1.StartAntigravitySignInResponse" => v1::StartAntigravitySignInResponse,
         "codewire.v1.StartClaudeSignInResponse" => v1::StartClaudeSignInResponse,
         "codewire.v1.StreamExecRequest" => v1::StreamExecRequest,
         "codewire.v1.SubmitFeedbackRequest" => v1::SubmitFeedbackRequest,

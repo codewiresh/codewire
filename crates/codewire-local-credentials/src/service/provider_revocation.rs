@@ -79,9 +79,9 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
         if !was_active {
             return Ok((record, None));
         }
-        let codex = record.metadata.provider.as_str() == "openai"
+        let revocable = matches!(record.metadata.provider.as_str(), "openai" | "google")
             && record.metadata.authentication_kind == CredentialAuthKind::OAuth;
-        let Some(spawner) = self.spawner.as_ref().filter(|_| codex) else {
+        let Some(spawner) = self.spawner.as_ref().filter(|_| revocable) else {
             return Ok((
                 record,
                 Some(outcome(v1::ProviderRevocationOutcome::NotAvailable)),

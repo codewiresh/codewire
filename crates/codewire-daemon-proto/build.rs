@@ -37,6 +37,7 @@ fn main() {
 /// marked `debug_redact` (src/ssh.rs, src/login_debug.rs, src/desktop.rs,
 /// src/placeholder_debug.rs, src/env_debug.rs).
 const SKIP_DEBUG: &[&str] = &[
+    ".codewire.bridge.v1.AntigravityLoginResponse",
     ".codewire.bridge.v1.ClaudeLoginResponse",
     ".codewire.bridge.v1.CodexLoginResponse",
     ".codewire.bridge.v1.CredentialBridgePlaceholder",

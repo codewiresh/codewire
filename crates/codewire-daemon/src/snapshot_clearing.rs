@@ -14,7 +14,7 @@ use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
-use crate::{claude_home, codex_home};
+use crate::{antigravity_home, claude_home, codex_home};
 
 pub mod block;
 
@@ -43,13 +43,15 @@ pub struct ClearingReport {
 enum LoginKind {
     Codex,
     Claude,
+    Antigravity,
 }
 
 impl LoginKind {
-    fn directory(self) -> &'static str {
+    fn components(self) -> &'static [&'static str] {
         match self {
-            Self::Codex => ".codex",
-            Self::Claude => ".claude",
+            Self::Codex => &[".codex"],
+            Self::Claude => &[".claude"],
+            Self::Antigravity => &[".gemini", "antigravity-cli"],
         }
     }
 
@@ -62,6 +64,10 @@ impl LoginKind {
                 name == claude_home::CLAUDE_CREDENTIALS_FILE_NAME
                     || claude_home::is_codewire_temporary(name)
             }
+            Self::Antigravity => {
+                name == antigravity_home::ANTIGRAVITY_TOKEN_FILE_NAME
+                    || antigravity_home::is_codewire_temporary(name)
+            }
         }
     }
 
@@ -70,6 +76,7 @@ impl LoginKind {
         match self {
             Self::Codex => codex_home::is_codewire_write_in_progress(name),
             Self::Claude => claude_home::is_codewire_write_in_progress(name),
+            Self::Antigravity => antigravity_home::is_codewire_write_in_progress(name),
         }
     }
 
@@ -83,6 +90,10 @@ impl LoginKind {
                 claude_home::holds_codewire_login(contents)
             }
             Self::Claude => claude_home::is_codewire_leftover(name, contents),
+            Self::Antigravity if name == antigravity_home::ANTIGRAVITY_TOKEN_FILE_NAME => {
+                antigravity_home::is_codewire_token_file(contents)
+            }
+            Self::Antigravity => antigravity_home::is_codewire_leftover(name, contents),
         }
     }
 }
@@ -92,8 +103,30 @@ impl LoginKind {
 /// `workspace/` folder, so clearing from the root covers both.
 pub fn clear_workspace_volume(root: &Path) -> io::Result<ClearingReport> {
     let mut report = ClearingReport::default();
-    for kind in [LoginKind::Codex, LoginKind::Claude] {
-        report.logins_removed += clear_logins(&root.join(kind.directory()), kind)?;
+    for kind in [LoginKind::Codex, LoginKind::Claude, LoginKind::Antigravity] {
+        let mut directory = root.to_path_buf();
+        let mut present = true;
+        for component in kind.components() {
+            directory.push(component);
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(metadata) if metadata.is_symlink() => {
+                    return Err(undecided("an agent's home is a symbolic link"));
+                }
+                Ok(_) => {
+                    present = false;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    present = false;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if present {
+            report.logins_removed += clear_logins(&directory, kind)?;
+        }
     }
     for components in ENVIRONMENT_BOUND_TREES {
         if remove_tree(root, components)? {

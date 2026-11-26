@@ -848,9 +848,9 @@ fn credential_database_pool_checks_released_connections() {
 }
 
 /// Only this long-lived service's broker upstream keeps provider connections
-/// alive. Its GitHub App authorization, Codex device-login, Claude sign-in and
-/// provider-revocation (#4717) transports and the per-environment local
-/// broker open one connection per request.
+/// alive. Its GitHub App authorization, Codex device-login, Claude sign-in,
+/// Antigravity sign-in and provider-revocation (#4717) transports and the
+/// per-environment local broker open one connection per request.
 #[test]
 fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     let service = include_str!("../runtime.rs");
@@ -864,7 +864,7 @@ fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     assert!(service.contains("let upstream = ProviderHttpsTransport::resolve_pooled("));
     assert_eq!(
         service.matches("ProviderHttpsTransport::resolve(").count(),
-        4
+        5
     );
     // The local broker builds its transports from one lookup of every host
     // (#5286); `available` gives each one connection per request.

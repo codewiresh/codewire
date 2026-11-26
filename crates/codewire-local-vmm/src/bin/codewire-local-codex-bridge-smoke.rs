@@ -2126,6 +2126,7 @@ function generalEgress(){
                     Some(Payload::Ssh(_)) => stage("unexpected-ssh-request"),
                     Some(Payload::CodexLogin(_)) => stage("unexpected-codex-login"),
                     Some(Payload::ClaudeLogin(_)) => stage("unexpected-claude-login"),
+                    Some(Payload::AntigravityLogin(_)) => stage("unexpected-antigravity-login"),
                     Some(
                         Payload::Upgrade(_)
                         | Payload::StreamData(_)

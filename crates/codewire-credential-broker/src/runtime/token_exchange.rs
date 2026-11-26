@@ -87,7 +87,7 @@ where
         .map_err(|_| local)?,
     );
     let target = Url::parse(OPENAI_TOKEN_URL).map_err(|_| local)?;
-    let response = post_token_refresh(upstream, target, body).await?;
+    let response = post_token_refresh(upstream, target, body, "application/json").await?;
     let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
         .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))?;
     drop(response);
@@ -97,14 +97,16 @@ where
     Ok(parsed)
 }
 
-/// One refresh request to a provider's fixed token endpoint: the JSON `body`
-/// is sent once, and only a success's bounded, identity-encoded body returns.
-/// A non-success answer is classified from allowlisted identifiers only; its
-/// body, including any provider description, is zeroized on drop.
+/// One refresh request to a provider's fixed token endpoint: `body` is sent
+/// once with `content_type`, and only a success's bounded, identity-encoded
+/// body returns. A non-success answer is classified from allowlisted
+/// identifiers only; its body, including any provider description, is zeroized
+/// on drop.
 async fn post_token_refresh<U>(
     upstream: &U,
     target: Url,
     mut body: Zeroizing<Vec<u8>>,
+    content_type: &'static str,
 ) -> Result<Zeroizing<Vec<u8>>, OAuthRefreshError>
 where
     U: BrokerUpstreamTransport + ?Sized,
@@ -116,7 +118,7 @@ where
     );
     headers.insert(
         http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
+        HeaderValue::from_static(content_type),
     );
     let upstream = upstream
         .execute(BrokerUpstreamRequest {
@@ -208,8 +210,46 @@ where
                 credential.scopes(),
             )
             .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::RequestBuild))?;
-            let response = post_token_refresh(upstream, target, body).await?;
+            let response = post_token_refresh(upstream, target, body, "application/json").await?;
             crate::provider_oauth::claude::parse_refresh_response(&response)
+                .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))
+        },
+    )
+    .await;
+    match exchange {
+        Ok(Ok(tokens)) => credential
+            .refreshed(tokens, refreshed_at_unix)
+            .and_then(|refreshed| refreshed.to_bundle())
+            .map_err(|_| (RefreshFailure::Material, BrokerRequestError::Denied)),
+        Ok(Err(OAuthRefreshError::Uncertain(error, failure))) => Err((failure, error)),
+        Ok(Err(OAuthRefreshError::Permanent(failure))) => {
+            Err((failure, BrokerRequestError::Denied))
+        }
+        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
+    }
+}
+
+/// One bounded Antigravity (Google OAuth) refresh-token exchange plus
+/// rotated-material and strict scope allow-list validation. Google's token
+/// endpoint expects `application/x-www-form-urlencoded`.
+pub(crate) async fn exchange_antigravity_oauth_refresh<U>(
+    upstream: &U,
+    credential: AntigravityOAuthCredential,
+    refreshed_at_unix: u64,
+) -> Result<CanonicalAntigravityOAuthBundle, (RefreshFailure, BrokerRequestError)>
+where
+    U: BrokerUpstreamTransport + ?Sized,
+{
+    let exchange = tokio::time::timeout(
+        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+        async {
+            let (target, body) =
+                crate::provider_oauth::antigravity::refresh_request(credential.refresh_token())
+                    .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::RequestBuild))?;
+            let response =
+                post_token_refresh(upstream, target, body, "application/x-www-form-urlencoded")
+                    .await?;
+            crate::provider_oauth::antigravity::parse_refresh_response(&response)
                 .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))
         },
     )
