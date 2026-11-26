@@ -195,8 +195,12 @@ class MirrorTest(unittest.TestCase):
         self.assertLess(fetch, run, "the mirror is not fetched and checked before the container starts")
         self.assertTrue("docker run --rm --init --network none " in build, "the build's container can reach a network")
         servers = [line for line in build.splitlines() if "Server = " in line]
-        self.assertEqual(servers, ['printf "Server = file://%s/\\$repo/os/\\$arch\\n" "$MIRROR" > /etc/pacman.d/mirrorlist'],
+        self.assertEqual(servers, ['printf "Server = file:///var/cache/kernel-builder-mirror/\\$repo/os/\\$arch\\n" > /etc/pacman.d/mirrorlist'],
                          "pacman reads a server other than the checked mirror")
+        # pacman downloads as alpm, which cannot pass the caller's 0700 scratch
+        # above $MIRROR (cli-release 80974); the copy is root-owned, 0755 down.
+        copy = build.index('umask 022\ncp -R --no-preserve=all "$MIRROR" /var/cache/kernel-builder-mirror\n')
+        self.assertLess(copy, build.index("Server = "), "pacman reads the mirror before it is copied where alpm can read it")
         self.assertFalse("archive.archlinux.org/repos" in build, "the build still names the archive")
         for refresh in ("--refresh-keys", "--recv-keys", "--keyserver"):
             self.assertFalse(refresh in build, f"the build fetches keys from the network ({refresh})")

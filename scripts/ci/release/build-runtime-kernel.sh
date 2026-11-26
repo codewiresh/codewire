@@ -86,7 +86,12 @@ inner='
 set -euo pipefail
 # The snapshot files, already checked against the lock, are the only server.
 # pacman still checks every package signature as it installs it (#5619).
-printf "Server = file://%s/\$repo/os/\$arch\n" "$MIRROR" > /etc/pacman.d/mirrorlist
+# pacman downloads as its sandboxed DownloadUser (alpm), which cannot pass the
+# 0700 scratch above $MIRROR, so the files are copied to a root-owned path that
+# alpm can read all the way down.
+umask 022
+cp -R --no-preserve=all "$MIRROR" /var/cache/kernel-builder-mirror
+printf "Server = file:///var/cache/kernel-builder-mirror/\$repo/os/\$arch\n" > /etc/pacman.d/mirrorlist
 fetch() {
   pacman "$@" --noconfirm --noprogressbar >/dev/null
 }
