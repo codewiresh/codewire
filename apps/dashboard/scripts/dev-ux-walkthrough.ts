@@ -184,7 +184,7 @@ async function personalApiKeys(page: Page): Promise<void> {
   const header = page.locator(".cw-settings-content > .cw-page-header");
   await pageTitle(header, "API keys");
   await expect(header.locator(".cw-page-title-row .cw-badge")).toHaveText(/^\d+ keys?$/);
-  await expect(header.locator(".cw-page-description")).toHaveText("Codewire API keys you created, for the CLI and SDK. Each key belongs to one organization.");
+  await expect(header.locator(".cw-page-description")).toHaveText("Your API keys and user tokens for the CLI and SDK. Each key belongs to one organization.");
   await expect(button(header, "Create key")).toBeEnabled();
   const organization = page.locator("#create-personal-api-key-org");
   await expect(organization).toHaveAttribute("required", "");
