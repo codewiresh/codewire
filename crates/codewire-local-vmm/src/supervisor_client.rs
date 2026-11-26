@@ -1326,6 +1326,12 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "start_host_port_unavailable" => {
             " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw --local ports ENV` lists its ports: stop that program, or withdraw the port with `cw --local ports ENV --unpublish PORT` and publish another)"
         }
+        "create_platform_placeholders_unsupported" | "start_platform_placeholders_unsupported" => {
+            " (this VM's credentials come from your Codewire account, and the local credential service that is running is from an earlier cw, which can't keep them out of the VM, so it wasn't started; stop your local VMs so cw replaces that service, then try again)"
+        }
+        "create_platform_placeholders_unavailable" | "start_platform_placeholders_unavailable" => {
+            " (this VM's credentials come from your Codewire account, and cw couldn't get the stand-ins that keep them out of the VM, so it wasn't started; check your connection and that `cw login` is current, then try again)"
+        }
         "create_intercept_unavailable" | "start_intercept_unavailable" => {
             " (the egress-intercept file in the local VM state root switches agent interception on, and this cw cannot start the TLS front door yet)"
         }

@@ -990,7 +990,9 @@ request adds.
     `platform_placeholders_unsupported` and the step to stop the local VMs
     so cw replaces the credential service, the supervisor's log has the
     skip and a `platform_seed_refused` line, and no VM starts, so no login
-    file is written (not yet observed). Against a current authority it
+    file is written. Observed on macOS on 2026-11-26, with a walk-only
+    stand-in for the older authority, except the step: the CLI printed only
+    the code. The step on its line is not yet observed. Against a current authority it
     intercepts through the delegation, on Linux and macOS alike (#4909,
     #6191, `agent-vm-platform-profile`);
   - **only the boot's pairing secret pairs a credential broker with the

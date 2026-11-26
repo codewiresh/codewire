@@ -1143,6 +1143,31 @@ fn an_unreachable_registry_says_a_tag_is_always_checked() {
     );
 }
 
+/// A platform boot refused rather than started with its real logins says
+/// why in plain words and what to do next (#6280).
+#[test]
+fn a_refused_platform_boot_says_why_and_what_to_do() {
+    for code in [
+        "create_platform_placeholders_unsupported",
+        "start_platform_placeholders_unsupported",
+    ] {
+        let hint = operation_error_hint(code);
+        assert!(hint.contains("from an earlier cw"), "{code}: {hint}");
+        assert!(
+            hint.contains("stop your local VMs so cw replaces that service"),
+            "{code}: {hint}"
+        );
+    }
+    for code in [
+        "create_platform_placeholders_unavailable",
+        "start_platform_placeholders_unavailable",
+    ] {
+        let hint = operation_error_hint(code);
+        assert!(hint.contains("wasn't started"), "{code}: {hint}");
+        assert!(hint.contains("then try again"), "{code}: {hint}");
+    }
+}
+
 #[test]
 fn interception_refusals_name_the_switch_file() {
     for code in [
