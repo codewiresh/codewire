@@ -33,6 +33,7 @@ use tokio::sync::Notify;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::*;
+use crate::BrokerCredentialLease;
 use support::{SyntheticKek, TestDatabase, registration, value};
 
 /// Bounds a wait on an event in these tests: a task's end, a gate, a
@@ -1414,6 +1415,82 @@ fn a_platform_lease_carries_no_placeholder() {
         material: ProtectedValue::from_slice(b"synthetic-platform-material").unwrap(),
         placeholder: None,
         placeholder_failed: false,
+        uses: None,
     };
     assert!(BrokerCredentialLease::placeholder(&lease).is_none());
+}
+
+/// A hosted lease swapped into a request names its credential at each send
+/// that follows (#6189); a lease from any other epoch names none.
+#[tokio::test]
+async fn a_hosted_lease_swapped_in_is_one_use_per_send() {
+    #[derive(Clone)]
+    struct Refusing;
+    #[async_trait]
+    impl crate::BrokerUpstreamTransport for Refusing {
+        async fn execute(
+            &self,
+            _request: crate::BrokerUpstreamRequest,
+        ) -> Result<crate::BrokerUpstreamResponse, crate::BrokerUpstreamError> {
+            Err(crate::BrokerUpstreamError::DestinationDenied)
+        }
+    }
+    use crate::BrokerUpstreamTransport as _;
+    let send = |transport: crate::credential_uses::RecordingUses<Refusing>| async move {
+        let request = crate::BrokerUpstreamRequest::new(
+            http::Method::POST,
+            url::Url::parse("https://api.openai.com/v1/responses").unwrap(),
+            http::HeaderMap::new(),
+            Vec::new(),
+        );
+        assert!(transport.execute(request).await.is_err());
+    };
+    let fake = crate::http_test_support::Lease::new(
+        "openai",
+        CredentialAuthKind::ApiKey,
+        "openai",
+        "responses",
+        "openai-api",
+    );
+    let lease = |uses| PlatformCredentialLease {
+        record: CredentialRecord {
+            metadata: fake.metadata.clone(),
+            version: CredentialVersion {
+                revocation_generation: 7,
+                material_generation: 2,
+            },
+        },
+        grant: fake.grant.clone(),
+        permission: fake.permission.clone(),
+        material: ProtectedValue::from_slice(b"synthetic-platform-material").unwrap(),
+        placeholder: None,
+        placeholder_failed: false,
+        uses,
+    };
+    let uses = crate::credential_uses::CredentialUses::new();
+    let binding = Uuid::new_v4();
+    let epoch = crate::credential_uses::EpochUses::new(uses.clone(), binding);
+    let transport = crate::credential_uses::RecordingUses(Refusing);
+    crate::credential_uses::scoped(async {
+        lease(Some(epoch)).with_material(|_| ());
+        send(transport.clone()).await;
+        send(transport.clone()).await;
+    })
+    .await;
+    crate::credential_uses::scoped(async {
+        lease(None).with_material(|_| ());
+        send(transport.clone()).await;
+    })
+    .await;
+
+    let taken = uses.take();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].binding, binding);
+    let [only] = taken[0].uses.as_slice() else {
+        panic!("one fold");
+    };
+    assert_eq!(only.credential, fake.metadata.id.as_str());
+    assert_eq!(only.provider, "openai");
+    assert_eq!(only.host.as_deref(), Some("api.openai.com"));
+    assert_eq!(only.count, 2);
 }

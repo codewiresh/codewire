@@ -69,6 +69,8 @@ pub struct CredentialServiceConfig {
     /// The namespace hosted Sandbox Pods run in, which the interception CA
     /// check and sweep read Pods from (#5030). `None` leaves both off.
     pub(super) sandbox_namespace: Option<String>,
+    /// Where credential uses are reported (#6189); `None` reports none.
+    pub(super) credential_uses: Option<super::credential_uses::OrchestrationAudit>,
     /// The database pool's cap ([`DATABASE_MAX_CONNECTIONS`]).
     pub(super) database_max_connections: u32,
     /// How long a stopping process lets admitted mutations finish
@@ -207,6 +209,7 @@ impl CredentialServiceConfig {
             hosted_placeholders: hosted_placeholders_config(&lookup)?,
             relay_namespace,
             sandbox_namespace: sandbox_namespace(&lookup)?,
+            credential_uses: super::credential_uses::config(&lookup)?,
             database_max_connections: database_max_connections(&lookup)?,
             shutdown_drain: shutdown_drain(&lookup)?,
         };

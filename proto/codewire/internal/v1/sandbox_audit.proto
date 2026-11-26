@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// SandboxAuditService takes what other platform services saw happen to a
+// hosted Sandbox, for its audit log (SPEC.md "Sandbox audit log", "The other
+// sources"). It is served on orchestration's internal-connect listener only.
+// Each method accepts exactly one caller, identified by TokenReview of that
+// caller's own projected token for its own audience, in orchestration's
+// namespace.
+service SandboxAuditService {
+  // The credential service's credential uses through its broker, as count
+  // deltas for one workspace binding: the Pod UID a hosted bridge epoch
+  // served. Only the credential service may call it, with a token for the
+  // codewire.internal.credential-service.v1 audience. Orchestration files
+  // each use under the environment its own binding of that Pod names, never
+  // one the report gives; a Pod it has no binding for is dropped and
+  // counted. An older orchestration answers UNIMPLEMENTED, which the caller
+  // drops quietly.
+  rpc ReportCredentialUses(ReportCredentialUsesRequest) returns (ReportCredentialUsesResponse);
+}
+
+message ReportCredentialUsesRequest {
+  // The workspace Pod UID whose binding the broker served.
+  string pod_uid = 1;
+  // At most 256 folds.
+  repeated CredentialUse uses = 2;
+}
+
+// One credential's uses at one host within one hour. It never carries a
+// value, a placeholder, a method, a path, a header or a body.
+message CredentialUse {
+  // The credential's ID, never its value.
+  string credential_id = 1;
+  // The credential's provider, such as "openai". Orchestration keeps the use
+  // only when it is the provider of the credential it holds under that ID;
+  // the name it files is its own, never the caller's.
+  string provider = 2;
+  // The host the requests went to, after the host check: ASCII, lowercase,
+  // at most 253 characters. Empty when host_withheld is set.
+  string host = 3;
+  // The name failed the host check; its uses count, its text is not kept.
+  bool host_withheld = 4;
+  // The first and last use, in the same UTC hour.
+  uint64 first_unix_ms = 5;
+  uint64 last_unix_ms = 6;
+  // How many uses since the last report, at least 1.
+  uint64 count = 7;
+}
+
+message ReportCredentialUsesResponse {}

@@ -1156,14 +1156,22 @@ is not admission. Subsequent admission replies are protocol errors.
 ### Kubernetes Pod identity
 
 The optional `codewire-server-core/kubernetes-identity` verifier has fixed
-purposes: credential relay, credential workspace, workspace binding, egress
-and egress node. Their audiences are distinct. A caller cannot choose an
-arbitrary audience or substitute a token issued for another purpose. They are
-`codewire.internal.credential-relay.v1`,
+purposes: credential relay, credential workspace, workspace binding, egress,
+egress node and credential service. Their audiences are distinct. A caller
+cannot choose an arbitrary audience or substitute a token issued for another
+purpose. They are `codewire.internal.credential-relay.v1`,
 `codewire.internal.credential-workspace.v1`,
-`codewire.internal.workspace-binding.v1`, `codewire.internal.egress.v1` and
-`codewire.internal.egress-node.v1`. These are Kubernetes projected Pod
+`codewire.internal.workspace-binding.v1`, `codewire.internal.egress.v1`,
+`codewire.internal.egress-node.v1` and
+`codewire.internal.credential-service.v1`. These are Kubernetes projected Pod
 tokens, not another Codewire user bearer flavor.
+
+Credential use reports (#6189): the credential service presents its
+credential-service token to orchestration's `SandboxAuditService` on the
+internal listener. Only the `codewire-credential-service` ServiceAccount may
+present that audience, and orchestration also requires the Pod to be in its
+own namespace. The report names a workspace Pod; orchestration files its uses
+under that Pod's own binding, never an environment the report names.
 
 Egress (#4000): a broker-mode workspace Pod presents its egress token, for
 the sandbox ServiceAccount, to cw-egress on its node, which forwards it to

@@ -1192,3 +1192,66 @@ async fn admitted_streams_list_codex_login_and_answer_it_under_the_lease_budget(
         fixture.finish().await;
     }
 }
+
+/// Only a hosted epoch of a service that reports uses folds them, under the
+/// workspace Pod its identity was reviewed as (#6189).
+#[tokio::test]
+async fn a_hosted_epoch_files_its_uses_under_its_workspace_pod() {
+    let context = GrantContext {
+        environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
+        environment_generation: 7,
+        placement: GrantPlacement::Platform,
+        user_id: OwnerId::parse("synthetic-owner").unwrap(),
+        organization_id: Some(OwnerId::parse("synthetic-org").unwrap()),
+        allow_personal_credentials: true,
+        authorized_credentials: Default::default(),
+    };
+    let pod = |name: &str| PlatformPodIdentity {
+        namespace: "synthetic-workloads".into(),
+        name: name.into(),
+        uid: Uuid::new_v4(),
+    };
+    let workspace = pod("workspace");
+    let binding = workspace.uid;
+    let expiry = crate::platform::unix_now().unwrap() + 3600;
+    let hosted = PlatformRuntimeSession::new(
+        pod("relay"),
+        workspace,
+        context.clone(),
+        Owner::User(context.user_id.clone()),
+        expiry,
+    )
+    .unwrap();
+    let owner_local = PlatformRuntimeSession::owner_local(
+        GrantContext {
+            environment_id: EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap(),
+            placement: GrantPlacement::PlatformToLocal,
+            ..context.clone()
+        },
+        Owner::User(context.user_id.clone()),
+        None,
+        [7; 32],
+        expiry,
+    )
+    .unwrap();
+    let uses = CredentialUses::new();
+
+    let epoch = epoch_uses(Some(&uses), &hosted).expect("a hosted epoch folds its uses");
+    let transport = RecordingUses(Upstream::default());
+    let request = || {
+        crate::BrokerUpstreamRequest::new(
+            http::Method::GET,
+            url::Url::parse("https://api.github.com/user").unwrap(),
+            http::HeaderMap::new(),
+            Vec::new(),
+        )
+    };
+    crate::credential_uses::scoped(async {
+        crate::credential_uses::swapped(&epoch, "synthetic-credential", "github");
+        assert!(transport.execute(request()).await.is_err());
+    })
+    .await;
+    assert_eq!(uses.take()[0].binding, binding);
+    assert!(epoch_uses(Some(&uses), &owner_local).is_none());
+    assert!(epoch_uses(None, &hosted).is_none());
+}

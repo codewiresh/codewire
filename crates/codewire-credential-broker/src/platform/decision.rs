@@ -321,6 +321,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 material,
                 placeholder: None,
                 placeholder_failed: false,
+                uses: None,
             });
         }
     }

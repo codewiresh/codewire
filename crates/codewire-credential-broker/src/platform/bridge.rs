@@ -47,6 +47,7 @@ use super::{
     EpochDecision, EpochPlaceholders, LeaseBudget, PlatformBrokerLeaseProvider,
     PlatformRuntimeAuthority, PlatformRuntimeError, RuntimeIdentity,
 };
+use crate::credential_uses::{CredentialUses, EpochUses, RecordingUses};
 use crate::timing::{self, Phase};
 use crate::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerLeaseError, BrokerUpstreamTransport,
@@ -198,6 +199,9 @@ struct ServiceState<A, U> {
     /// The interception CAs, where this service holds them (#4001).
     interception: Option<Arc<interception::Interception>>,
     front_door_idle: std::time::Duration,
+    /// Where hosted epochs' credential uses fold for the Sandbox audit log
+    /// (#6189). Off unless the credential service reports them.
+    credential_uses: Option<Arc<CredentialUses>>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<Arc<super::ssh::Service>>,
 }
@@ -265,6 +269,7 @@ where
                 front_doors: Arc::default(),
                 interception: None,
                 front_door_idle: FRONT_DOOR_IDLE,
+                credential_uses: None,
                 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
                 ssh: None,
             }),
@@ -363,6 +368,22 @@ where
             return Err(PlatformRuntimeError::Denied);
         }
         state.hosted_placeholders = true;
+        Ok(self)
+    }
+
+    /// Fold each hosted epoch's credential uses into `uses`, under the
+    /// workspace binding the epoch serves (#6189; SPEC.md "Sandbox audit
+    /// log"). Explicit process composition only, before cloning or serving;
+    /// an owner-local epoch records none.
+    pub fn with_credential_uses(
+        mut self,
+        uses: Arc<CredentialUses>,
+    ) -> Result<Self, PlatformRuntimeError> {
+        let state = Arc::get_mut(&mut self.state).ok_or(PlatformRuntimeError::Denied)?;
+        if state.credential_uses.is_some() || state.shutdown.is_cancelled() {
+            return Err(PlatformRuntimeError::Denied);
+        }
+        state.credential_uses = Some(uses);
         Ok(self)
     }
 
@@ -803,6 +824,7 @@ where
                 delegated_front_door,
             )
             .then(EpochPlaceholders::default),
+            uses: epoch_uses(self.state.credential_uses.as_ref(), &provider.session),
             ..provider
         };
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
@@ -867,8 +889,8 @@ where
         // the Sandbox projects GitHub's placeholder, Git's requests that
         // carry none get GitHub's challenge instead, so Git asks its helper
         // for it (#4001).
-        let broker =
-            OpenAiBroker::new(provider, self.state.upstream.clone()).map_err(|_| unavailable())?;
+        let broker = OpenAiBroker::new(provider, RecordingUses(self.state.upstream.clone()))
+            .map_err(|_| unavailable())?;
         let broker = if projected
             .as_ref()
             .is_some_and(|projected| projected.github().is_some())
@@ -916,7 +938,7 @@ impl<A, U> PlatformCredentialBridgeService<A, U> {
 }
 
 struct Admission<A, U> {
-    broker: OpenAiBroker<PlatformBrokerLeaseProvider<A>, U>,
+    broker: OpenAiBroker<PlatformBrokerLeaseProvider<A>, RecordingUses<U>>,
     admitted: AdmittedCredentialBridge<RelayTransport>,
     sink: ResponseSink,
     receiver: mpsc::Receiver<Result<v1::CredentialBridgeHostMessage, Status>>,
@@ -1112,6 +1134,20 @@ where
 /// Whether an epoch joinable in `scope` seals its agent logins with
 /// placeholders: every joinable one, an intercepted hosted epoch (#4001) and
 /// a delegation that declared a front door (#4909).
+/// A hosted epoch's uses, filed under the workspace Pod its identity was
+/// reviewed as: the binding the credential service reports, never a name.
+fn epoch_uses(
+    uses: Option<&Arc<CredentialUses>>,
+    session: &super::PlatformRuntimeSession,
+) -> Option<EpochUses> {
+    match (uses, &session.identity) {
+        (Some(uses), RuntimeIdentity::Hosted { workspace, .. }) => {
+            Some(EpochUses::new(Arc::clone(uses), workspace.uid))
+        }
+        _ => None,
+    }
+}
+
 fn seals_placeholders(scope: Option<&FrontDoorScope>) -> bool {
     scope.is_some()
 }

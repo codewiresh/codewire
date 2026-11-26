@@ -65,6 +65,9 @@ pub struct KubernetesDriver {
     egress_node_reviewer: KubernetesPodIdentityVerifier,
     /// TokenReview of a guest's forwarded egress token (#4000).
     egress_guest_reviewer: KubernetesPodIdentityVerifier,
+    /// TokenReview of the credential service reporting credential uses
+    /// (#6189).
+    credential_service_reviewer: KubernetesPodIdentityVerifier,
 }
 
 impl KubernetesDriver {
@@ -89,6 +92,10 @@ impl KubernetesDriver {
             egress_guest_reviewer: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
                 PodIdentityPurpose::Egress,
+            ),
+            credential_service_reviewer: KubernetesPodIdentityVerifier::new(
+                Some(client.clone()),
+                PodIdentityPurpose::CredentialService,
             ),
             client,
             pool_memory: Mutex::default(),
@@ -365,6 +372,16 @@ impl RuntimeAttestation for KubernetesDriver {
         namespace: &str,
     ) -> Result<VerifiedPodIdentity, PodIdentityError> {
         self.egress_node_reviewer
+            .authenticate_in(headers, namespace)
+            .await
+    }
+
+    async fn review_credential_service(
+        &self,
+        headers: &axum::http::HeaderMap,
+        namespace: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        self.credential_service_reviewer
             .authenticate_in(headers, namespace)
             .await
     }

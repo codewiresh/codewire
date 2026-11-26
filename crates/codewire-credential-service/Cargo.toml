@@ -22,7 +22,10 @@ kind-e2e = [
 ]
 enrollment = [
     "dep:codewire-proto",
+    # The credential use reports to orchestration's internal listener (#6189).
+    "codewire-proto/client",
     "dep:connectrpc",
+    "connectrpc/client",
     "dep:futures",
     "dep:tokio-util",
 ]

@@ -9,12 +9,13 @@ use tokio::sync::Notify;
 
 use super::*;
 
-const PURPOSES: [PodIdentityPurpose; 5] = [
+const PURPOSES: [PodIdentityPurpose; 6] = [
     PodIdentityPurpose::CredentialRelay,
     PodIdentityPurpose::CredentialWorkspace,
     PodIdentityPurpose::WorkspaceBinding,
     PodIdentityPurpose::Egress,
     PodIdentityPurpose::EgressNode,
+    PodIdentityPurpose::CredentialService,
 ];
 const CANARY: &str = "synthetic-sensitive-pod-token-canary";
 
@@ -279,6 +280,46 @@ async fn the_egress_node_is_only_cw_egress_service_account_and_a_sandbox_cannot_
         .authenticate(&headers(&future_token()))
         .await,
         Err(PodIdentityError::PermissionDenied)
+    );
+}
+
+#[tokio::test]
+async fn only_the_credential_service_account_reports_credential_uses() {
+    let purpose = PodIdentityPurpose::CredentialService;
+    assert_eq!(purpose.service_account(), "codewire-credential-service");
+    let verify =
+        |status| KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(status), purpose);
+    assert!(
+        verify(status(purpose))
+            .authenticate_in(&headers(&future_token()), "runtime")
+            .await
+            .is_ok()
+    );
+    // Orchestration itself, cw-egress or a Sandbox holding a token for this
+    // audience is not the credential service.
+    for account in [
+        CREDENTIAL_RELAY_SERVICE_ACCOUNT,
+        EGRESS_NODE_SERVICE_ACCOUNT,
+        SANDBOX_SERVICE_ACCOUNT,
+    ] {
+        let mut other = status(purpose);
+        other.user.as_mut().unwrap().username =
+            Some(format!("system:serviceaccount:runtime:{account}"));
+        assert_eq!(
+            verify(other)
+                .authenticate_in(&headers(&future_token()), "runtime")
+                .await,
+            Err(PodIdentityError::PermissionDenied)
+        );
+    }
+    // The credential service's token for its relay purpose is not this one.
+    let mut relay_audience = status(purpose);
+    relay_audience.audiences = Some(vec![CREDENTIAL_RELAY_TOKEN_AUDIENCE.into()]);
+    assert_eq!(
+        verify(relay_audience)
+            .authenticate_in(&headers(&future_token()), "runtime")
+            .await,
+        Err(PodIdentityError::Unauthenticated)
     );
 }
 

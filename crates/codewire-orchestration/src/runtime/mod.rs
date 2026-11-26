@@ -692,6 +692,21 @@ pub trait RuntimeAttestation: Send + Sync {
         codewire_server_core::pod_identity::PodIdentityError,
     >;
 
+    /// Authenticate the credential service reporting credential uses to
+    /// `SandboxAuditService` (#6189): the credential-service audience, its
+    /// service account, and a Pod in `namespace`. A runtime with no
+    /// TokenReview answers unavailable.
+    async fn review_credential_service(
+        &self,
+        _headers: &axum::http::HeaderMap,
+        _namespace: &str,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    > {
+        Err(codewire_server_core::pod_identity::PodIdentityError::Unavailable)
+    }
+
     /// Authenticate a guest's egress token that cw-egress forwarded: the
     /// egress audience and the sandbox service account, in `namespace`.
     async fn review_egress_guest(

@@ -1001,7 +1001,7 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::environment_mesh::internal_service_layer(&cfg.session_secret)?,
         );
     let internal_app = egress::mount(
-        internal_app,
+        codewire_orchestration::audit_reports::mount(internal_app, &api_state),
         &api_state,
         &cfg.database_url,
         egress_settings,

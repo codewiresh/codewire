@@ -16,6 +16,7 @@ mod bridge;
 mod claude_oauth;
 mod codex_oauth;
 mod commit_failure;
+pub mod credential_uses;
 pub mod github;
 pub mod github_app;
 #[cfg(all(feature = "host-agent-synthetic-smoke", target_os = "linux"))]

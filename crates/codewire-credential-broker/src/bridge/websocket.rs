@@ -303,7 +303,8 @@ where
     let send_credit = upgrade
         .initial_credit_bytes
         .min(CREDENTIAL_BRIDGE_STREAM_WINDOW_BYTES);
-    let (headers, stream, grant) = match broker.execute_upgrade(upgrade).await {
+    let upgraded = crate::credential_uses::scoped(broker.execute_upgrade(upgrade)).await;
+    let (headers, stream, grant) = match upgraded {
         Err(error) => return finish_with_failure(sender, request_id, error).await,
         Ok(BrokerUpgradeOutcome::Response(response)) => {
             return send_response(sender, &request_id, response, None).await;

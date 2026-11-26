@@ -93,6 +93,18 @@ pub const HOSTED_EGRESS_TRUST_CA_DIR: &str = "/codewire/run/egress-trust/ca.d";
 pub const EGRESS_NODE_TOKEN_AUDIENCE: &str = "codewire.internal.egress-node.v1";
 /// The only service account that may present an egress-node token.
 pub const EGRESS_NODE_SERVICE_ACCOUNT: &str = "codewire-egress";
+/// Exact projected-token purpose for the credential service calling
+/// orchestration's `SandboxAuditService` to report credential uses (#6189).
+/// Orchestration accepts it only for [`CREDENTIAL_SERVICE_SERVICE_ACCOUNT`]
+/// in its own (server) namespace.
+pub const CREDENTIAL_SERVICE_TOKEN_AUDIENCE: &str = "codewire.internal.credential-service.v1";
+/// The only service account that may present a credential-service token.
+pub const CREDENTIAL_SERVICE_SERVICE_ACCOUNT: &str = "codewire-credential-service";
+/// The most credential-use folds one binding holds between two reports, and
+/// so the most one `ReportCredentialUses` call carries (#6189). The broker
+/// bounds its folds by it and orchestration refuses a larger report whole, so
+/// both read this one value.
+pub const CREDENTIAL_USES_PER_REPORT: usize = 256;
 /// cw-egress's stream port, on the Pod network, reached through its
 /// node-local Service.
 pub const EGRESS_STREAM_PORT: u16 = 8089;
@@ -813,6 +825,7 @@ mod tests {
             WORKSPACE_BINDING_TOKEN_AUDIENCE,
             EGRESS_TOKEN_AUDIENCE,
             EGRESS_NODE_TOKEN_AUDIENCE,
+            CREDENTIAL_SERVICE_TOKEN_AUDIENCE,
         ];
         for (index, audience) in audiences.iter().enumerate() {
             assert!(audience.starts_with("codewire.internal.") && audience.ends_with(".v1"));
@@ -835,7 +848,12 @@ mod tests {
         );
         for account in [CREDENTIAL_RELAY_SERVICE_ACCOUNT, SANDBOX_SERVICE_ACCOUNT] {
             assert_ne!(EGRESS_NODE_SERVICE_ACCOUNT, account);
+            assert_ne!(CREDENTIAL_SERVICE_SERVICE_ACCOUNT, account);
         }
+        assert_ne!(
+            CREDENTIAL_SERVICE_SERVICE_ACCOUNT,
+            EGRESS_NODE_SERVICE_ACCOUNT
+        );
         assert_eq!(
             CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS,
             WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS

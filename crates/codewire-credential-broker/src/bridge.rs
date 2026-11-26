@@ -1063,7 +1063,7 @@ where
             }
         }
     };
-    let (response, timings) = timing::measure(execute).await;
+    let (response, timings) = timing::measure(crate::credential_uses::scoped(execute)).await;
     timing::proxied_request(request_id, slot, route, &response, &timings);
     let response = match response {
         Ok(response) => response,

@@ -1978,8 +1978,14 @@ refusals are in `cw --local policy log` ("Networking and egress").
   selection, a revision or an enforcement status. The credential service
   reports each credential use to orchestration's internal service with the
   binding it served. Orchestration files the use under that binding's
-  environment, never under a name the report gives. A `cw shell` that
-  reaches a Sandbox over its tailnet is admitted by the coordinator, not
+  environment, never under a name the report gives. It takes the
+  credential's name from its own records, and drops and counts a use of a
+  credential the Sandbox's owner does not hold under the reported provider.
+  The credential service folds uses per binding, credential, host and hour
+  and sends each binding's new counts at most every 5 seconds, and when a
+  call fails or an older orchestration answers it as unimplemented, it drops
+  those counts and counts the drop, never touching the request. A `cw shell`
+  that reaches a Sandbox over its tailnet is admitted by the coordinator, not
   orchestration: the coordinator reports each client it admits, with the
   environment it checked access to, the user or API key, the role it
   resolved, the client IP and, later, the close, to orchestration's

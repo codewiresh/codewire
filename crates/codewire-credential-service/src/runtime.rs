@@ -6,6 +6,7 @@
 //! schema migrations and authority provisioning belong to their existing owners.
 
 mod config;
+mod credential_uses;
 mod hardening;
 
 #[cfg(test)]
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use codewire_access::{HttpProvider, builtin_provider_catalog};
 use codewire_credential_broker::GitHubAppAuthorizationOwner;
+use codewire_credential_broker::credential_uses::CredentialUses;
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
@@ -337,14 +339,13 @@ async fn run_connected(
             .map_err(|_| RuntimeError::Configuration("GitHub App authorization owner"))?,
         None => bridge,
     };
-    let bridge = if config.hosted_placeholders {
-        placeholder_keys_granted(&pool).await?;
-        bridge
-            .with_hosted_placeholders()
-            .map_err(|_| RuntimeError::Configuration("hosted placeholders"))?
-    } else {
-        bridge
-    };
+    let bridge = hosted_epochs(
+        bridge,
+        config.hosted_placeholders,
+        config.credential_uses,
+        &pool,
+    )
+    .await?;
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
     // Without a sandbox namespace no Pod can be checked, so the interception
     // CAs' methods answer UNAVAILABLE (#4001).
@@ -406,6 +407,41 @@ async fn run_connected(
         shutdown,
     )
     .await
+}
+
+/// What hosted epochs get beyond their leases: their environment's
+/// placeholders (#4001), when turned on, and their credential uses reported
+/// for the Sandbox audit log (#6189), when orchestration's address is set.
+async fn hosted_epochs<A, U>(
+    bridge: PlatformCredentialBridgeService<A, U>,
+    hosted_placeholders: bool,
+    credential_uses: Option<credential_uses::OrchestrationAudit>,
+    pool: &PgPool,
+) -> Result<PlatformCredentialBridgeService<A, U>, RuntimeError>
+where
+    A: PlatformBridgeAuthenticator + 'static,
+    U: BrokerUpstreamTransport + Clone + 'static,
+{
+    let bridge = if hosted_placeholders {
+        placeholder_keys_granted(pool).await?;
+        bridge
+            .with_hosted_placeholders()
+            .map_err(|_| RuntimeError::Configuration("hosted placeholders"))?
+    } else {
+        bridge
+    };
+    let Some(audit) = credential_uses else {
+        return Ok(bridge);
+    };
+    let uses = CredentialUses::new();
+    let bridge = bridge
+        .with_credential_uses(uses.clone())
+        .map_err(|_| RuntimeError::Configuration("credential use reporting"))?;
+    // Best effort for the process's life: what was folded since the last
+    // report is lost when the process ends.
+    credential_uses::spawn(credential_uses::Reporter::new(uses, audit));
+    tracing::info!("credential uses are reported for the Sandbox audit log");
+    Ok(bridge)
 }
 
 /// A resolved transport for one revocation family (#4717).

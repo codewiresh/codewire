@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_daemon_proto::{
     CREDENTIAL_RELAY_SERVICE_ACCOUNT, CREDENTIAL_RELAY_TOKEN_AUDIENCE,
+    CREDENTIAL_SERVICE_SERVICE_ACCOUNT, CREDENTIAL_SERVICE_TOKEN_AUDIENCE,
     CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, EGRESS_NODE_SERVICE_ACCOUNT, EGRESS_NODE_TOKEN_AUDIENCE,
     EGRESS_TOKEN_AUDIENCE, SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE,
 };
@@ -46,6 +47,10 @@ pub enum PodIdentityPurpose {
     /// cw-egress calling orchestration's `EgressService`. The caller must
     /// also check the namespace: the review pins only the account name.
     EgressNode,
+    /// The credential service reporting credential uses to orchestration's
+    /// `SandboxAuditService` (#6189). The caller must also check the
+    /// namespace: the review pins only the account name.
+    CredentialService,
 }
 
 impl PodIdentityPurpose {
@@ -56,6 +61,7 @@ impl PodIdentityPurpose {
             Self::WorkspaceBinding => WORKSPACE_BINDING_TOKEN_AUDIENCE,
             Self::Egress => EGRESS_TOKEN_AUDIENCE,
             Self::EgressNode => EGRESS_NODE_TOKEN_AUDIENCE,
+            Self::CredentialService => CREDENTIAL_SERVICE_TOKEN_AUDIENCE,
         }
     }
 
@@ -70,6 +76,7 @@ impl PodIdentityPurpose {
             }
             Self::CredentialRelay => CREDENTIAL_RELAY_SERVICE_ACCOUNT,
             Self::EgressNode => EGRESS_NODE_SERVICE_ACCOUNT,
+            Self::CredentialService => CREDENTIAL_SERVICE_SERVICE_ACCOUNT,
         }
     }
 }

@@ -2074,7 +2074,9 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/api/identity.rs|\
       crates/codewire-orchestration/src/api/identity/*|\
       crates/codewire-orchestration/src/audit.rs|\
-      crates/codewire-orchestration/src/audit/*)
+      crates/codewire-orchestration/src/audit/*|\
+      crates/codewire-orchestration/src/audit_reports.rs|\
+      crates/codewire-orchestration/src/audit_reports/*)
         # Store/teardown and restricted public-profile tests need PostgreSQL;
         # the ordinary orchestration and Temporal lanes do not execute them.
         select_token database

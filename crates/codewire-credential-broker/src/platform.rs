@@ -21,6 +21,8 @@ use grant_checks::{Checked, ensure_live, record_matches, same_grant_binding, sel
 mod login_admission;
 use login_admission::{DeliveryPredicate, claude_login_admissible, codex_login_admissible};
 pub mod keepalive;
+mod lease;
+pub use lease::PlatformCredentialLease;
 mod placeholders;
 mod refresh_errors;
 mod runtime_errors;
@@ -38,10 +40,9 @@ use async_trait::async_trait;
 use codewire_access::{
     AvailableGrants, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialMetadata, CredentialPlaceholder, CredentialStatus, DerivedGrant,
-    EnvironmentAccessBinding, GrantContext, GrantPermission, GrantPlacement, Owner,
-    PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement, WithheldReason, claude_login_permission,
-    codex_login_permission,
+    CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
+    GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
+    Placement, WithheldReason, claude_login_permission, codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -54,9 +55,9 @@ use uuid::Uuid;
 use crate::commit_failure::{taken_bundle, valid_bundle};
 use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
-    BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
-    BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    CanonicalClaudeOAuthBundle, CanonicalCodexOAuthBundle, CommitFailure, GitHubAppUserOAuthBundle,
+    BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerLeaseError,
+    BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError, CanonicalClaudeOAuthBundle,
+    CanonicalCodexOAuthBundle, CommitFailure, GitHubAppUserOAuthBundle,
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
@@ -342,6 +343,9 @@ pub struct PlatformBrokerLeaseProvider<A> {
     /// has them, and only while the credential service's hosted placeholders
     /// setting is on; created at admission and dropped with the epoch.
     placeholders: Option<EpochPlaceholders>,
+    /// Where this hosted epoch's credential uses fold, under its workspace
+    /// binding (#6189). Only a hosted epoch of a service that reports them.
+    uses: Option<crate::credential_uses::EpochUses>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<ssh::Epoch>,
 }
@@ -412,40 +416,6 @@ impl LeaseBudget {
     }
 }
 
-/// Non-cloneable, non-serializable, zeroizing operation material.
-pub struct PlatformCredentialLease {
-    record: CredentialRecord,
-    grant: DerivedGrant,
-    permission: GrantPermission,
-    material: ProtectedValue,
-    placeholder: Option<CredentialPlaceholder>,
-    placeholder_failed: bool,
-}
-
-impl BrokerCredentialLease for PlatformCredentialLease {
-    fn credential_metadata(&self) -> &CredentialMetadata {
-        &self.record.metadata
-    }
-    fn grant(&self) -> &DerivedGrant {
-        &self.grant
-    }
-    fn permission(&self) -> &GrantPermission {
-        &self.permission
-    }
-    fn material_generation(&self) -> u64 {
-        self.record.version.material_generation
-    }
-    fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
-        operation(self.material.expose_secret())
-    }
-    fn placeholder(&self) -> Option<&CredentialPlaceholder> {
-        self.placeholder.as_ref()
-    }
-    fn placeholder_failed(&self) -> bool {
-        self.placeholder_failed
-    }
-}
-
 /// Private process-local reservation. Possession does not authorize sending.
 pub struct PlatformRefreshReservation {
     instance_id: Uuid,
@@ -487,6 +457,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             material: None,
             decision: None,
             placeholders: None,
+            uses: None,
             #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
             ssh: None,
         })
@@ -718,6 +689,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             (Some(epoch), None) => self.lease_decided(epoch, &slot, &permission).await,
             _ => self.lease_checked(slot, permission, admissible).await,
         }?;
+        lease.uses = self.uses.clone();
         if let Some(placeholders) = &self.placeholders
             && placeholders::leases_carry_placeholders(&self.session.identity)
         {
@@ -859,6 +831,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 material,
                 placeholder: None,
                 placeholder_failed: false,
+                uses: None,
             })
         }
         .await;

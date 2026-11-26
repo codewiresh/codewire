@@ -1504,6 +1504,12 @@ database_lane_orchestration_workers() {
       'audit::bound_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "Sandbox audit credential use reports" sandbox-audit-credential-uses \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'audit_reports::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "abandoned lease sweep matrix" abandoned-lease-sweep \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

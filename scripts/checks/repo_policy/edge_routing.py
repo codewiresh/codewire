@@ -156,6 +156,9 @@ INTERNAL_CONNECT_SERVICES = {
     ),
     # cw-egress on each node asking which sandboxes it may serve (#4000).
     "codewire.internal.v1.EgressService": "egress::mount(",
+    # The credential service reporting credential uses for the Sandbox audit
+    # log (#6189).
+    "codewire.internal.v1.SandboxAuditService": "audit_reports::mount(",
 }
 
 # The second closed listener class: every tenant workload can open TCP to it,
