@@ -501,9 +501,11 @@ moved, and `SANDBOX_RUNTIME_PROFILE=standard` still means every organization.
 ### Building the workspace disk in CI
 
 A `standard` workspace boots its image from a disk built from that image
-(`SANDBOX_STANDARD_IMAGE_DISK`). Dev accepts only a disk CI built and signed,
-or until then a digest the deploy repository's hosted policy waives by name.
-So CI builds, pushes and signs one disk for each workspace image it pins.
+(`SANDBOX_STANDARD_IMAGE_DISK`). Dev accepts only a disk CI built and signed:
+every Dev delivery verifies the disk's main-CI signature, of family
+`workspace-disk`, from a source the delivered source contains, and refuses the
+delivery otherwise. So CI builds, pushes and signs one disk for each workspace
+image it pins.
 
 - **Where and when.** The disk jobs are in `deploy-dev.yaml`, beside the
   pod-runtime image: Deploy Dev's publisher identity is the one that holds
@@ -544,8 +546,8 @@ So CI builds, pushes and signs one disk for each workspace image it pins.
   scratch at its end, failure included. Deploy Dev's publish job checks the
   sha256, then pushes `codewire/workspace-disk` with the `fp-` tag and signs
   it. The pin of `SANDBOX_STANDARD_IMAGE_DISK` to the `line` value comes
-  after that. The hosted policy's check of the disk's signature replaces the
-  waivers in the same change.
+  after that. The delivery's check of the disk's signature replaced the
+  hosted policy's waivers, and no waiver remains.
 
 ## Managed Runtime Gates
 
