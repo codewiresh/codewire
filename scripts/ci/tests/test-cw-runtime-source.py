@@ -86,6 +86,9 @@ class CachedTarget(unittest.TestCase):
         for unit_root in (self.root / "runtime", self.root / finalizer.source.TARGET / "runtime"):
             for name in (".fingerprint/codewire-proto-0123456789abcdef", ".fingerprint/serde-0123456789abcdef",
                          "build/codewire-proto-0123456789abcdef/out", "build/ring-0123456789abcdef/out",
+                         "build/codewire-cli-bin/0123456789abcdef/out/cw",
+                         "build/codewire-cli-bin/0123456789abcdef/fingerprint/bin-cw",
+                         "build/serde/0123456789abcdef/out/libserde.rlib",
                          "deps/libcodewire_cli-0123456789abcdef.rlib", "deps/codewire_cli-0123456789abcdef.d",
                          "deps/cw-0123456789abcdef", "deps/libserde-0123456789abcdef.rlib", "cw", "cw.d"):
                 write(unit_root / name, b"unit")
@@ -898,6 +901,118 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             replacement = target / "replacement"
             write(replacement, binary.read_bytes(), 0o500)
             output = self.base / "race-export"
+            with self.admits(capsule) as admitted:
+                original = admitted.selected.runtime_transports
+                def replace_after_copy(*args, **kwargs):
+                    exported = output / "cw"
+                    self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+                    os.replace(replacement, alias)
+                    return original(*args, **kwargs)
+                with mock.patch.object(admitted.selected, "runtime_transports", side_effect=replace_after_copy), \
+                        self.assertRaises(FAILURES):
+                    finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                self.assertFalse((output / "producer.json").exists())
+                self.assertNotEqual((alias.stat().st_dev, alias.stat().st_ino), (binary.stat().st_dev, binary.stat().st_ino))
+
+    def test_cargo_build_dir_alias_normalizes_exact_bytes_without_mutating_original_inode(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            unit_out = target / "build" / finalizer.COMPILER_PACKAGE / "0123456789abcdef" / "out"
+            unit_out.mkdir(parents=True, mode=0o700)
+            # Sibling unit directories in the same package (without a matching cw)
+            # are skipped cleanly without leaking descriptors.
+            sibling_out = target / "build" / finalizer.COMPILER_PACKAGE / "fedcba9876543210" / "out"
+            sibling_out.mkdir(parents=True, mode=0o700)
+            write(sibling_out / "other", b"not cw\n", 0o400)
+            alias = unit_out / "cw"
+            os.link(binary, alias)
+            before = source.asset.stamp(binary.stat())
+            self.assertEqual(before["nlink"], 2)
+            self.assertFalse((target / "deps").exists())
+            with self.admits(capsule) as admitted:
+                receipt = finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                             self.base / "cargo-v2-export", target, cargo)
+                admitted.revalidate()
+            exported = self.base / "cargo-v2-export/cw"
+            self.assertEqual(source.asset.stamp(binary.stat()), before)
+            self.assertEqual(source.asset.stamp(alias.stat()), before)
+            self.assertEqual(exported.read_bytes(), binary.read_bytes())
+            self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+            self.assertNotEqual((exported.stat().st_dev, exported.stat().st_ino), (before["dev"], before["ino"]))
+            self.assertEqual(receipt["payload"]["sha256"], sha(binary.read_bytes()))
+            self.assertEqual(receipt["payload"]["size"], before["size"])
+            self.assertEqual(set(os.listdir(self.base / "cargo-v2-export")), finalizer.FILES)
+            checked = finalizer.verify_export(self.base / "cargo-v2-export", capsule.model,
+                                              capsule.outputs["request.json"].sha256)
+            self.assertEqual(checked, receipt)
+
+    def test_cargo_build_dir_alias_refuses_unknown_links_metadata_and_directories(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            raw = binary.read_bytes()
+            cases = ("wrong-package", "uppercase-hash", "non-hex-hash", "wrong-name", "extra", "writable",
+                     "binary-symlink", "build-symlink", "package-symlink", "unit-symlink", "out-symlink",
+                     "out-writable", "bound")
+            for kind in cases:
+                if (target / "build").is_symlink():
+                    (target / "build").unlink()
+                elif (target / "build").exists():
+                    shutil.rmtree(target / "build")
+                for leftover in (target / "moved-dir", target / "outside-alias", binary):
+                    if os.path.lexists(leftover):
+                        if leftover.is_dir() and not leftover.is_symlink():
+                            shutil.rmtree(leftover)
+                        else:
+                            leftover.unlink()
+                write(binary, raw, 0o500)
+                if kind == "wrong-package":
+                    alias = target / "build/other-package/0123456789abcdef/out/cw"
+                elif kind == "uppercase-hash":
+                    alias = target / "build" / finalizer.COMPILER_PACKAGE / "0123456789ABCDEF/out/cw"
+                elif kind == "non-hex-hash":
+                    alias = target / "build" / finalizer.COMPILER_PACKAGE / "not-a-hex-hash!!/out/cw"
+                elif kind == "wrong-name":
+                    alias = target / "build" / finalizer.COMPILER_PACKAGE / "0123456789abcdef/out/cw-other"
+                else:
+                    alias = target / "build" / finalizer.COMPILER_PACKAGE / "0123456789abcdef/out/cw"
+                alias.parent.mkdir(parents=True, mode=0o700)
+                os.link(binary, alias)
+                if kind == "extra":
+                    os.link(binary, target / "outside-alias")
+                elif kind == "writable":
+                    binary.chmod(0o522)
+                elif kind == "binary-symlink":
+                    binary.unlink()
+                    binary.symlink_to(alias)
+                elif kind in ("build-symlink", "package-symlink", "unit-symlink", "out-symlink"):
+                    victim = {"build-symlink": target / "build",
+                              "package-symlink": target / "build" / finalizer.COMPILER_PACKAGE,
+                              "unit-symlink": target / "build" / finalizer.COMPILER_PACKAGE / "0123456789abcdef",
+                              "out-symlink": alias.parent}[kind]
+                    moved = target / "moved-dir"
+                    victim.rename(moved)
+                    victim.symlink_to(moved)
+                elif kind == "out-writable":
+                    alias.parent.chmod(0o777)
+                elif kind == "bound":
+                    spare = target / "build" / finalizer.COMPILER_PACKAGE / "fedcba9876543210/out"
+                    spare.mkdir(parents=True, mode=0o700)
+                output = self.base / ("refused-v2-" + kind)
+                with self.subTest(kind=kind), self.admits(capsule) as admitted, \
+                        mock.patch.object(finalizer, "MAX_COMPILER_DEPS", 1 if kind == "bound" else source.MAX_FILES), \
+                        self.assertRaises(FAILURES):
+                    finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                self.assertFalse(output.exists())
+
+    def test_replaced_cargo_build_dir_alias_refuses_before_receipt_after_exclusive_copy(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "build" / finalizer.COMPILER_PACKAGE / "0123456789abcdef/out/cw"
+            alias.parent.mkdir(parents=True, mode=0o700)
+            os.link(binary, alias)
+            replacement = target / "replacement"
+            write(replacement, binary.read_bytes(), 0o500)
+            output = self.base / "race-v2-export"
             with self.admits(capsule) as admitted:
                 original = admitted.selected.runtime_transports
                 def replace_after_copy(*args, **kwargs):

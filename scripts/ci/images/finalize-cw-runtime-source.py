@@ -234,10 +234,13 @@ def completion(value, expected=None):
     return value
 
 
+COMPILER_PACKAGE = "codewire-cli-bin"
+
+
 def command(profile):
     source.require(profile in PROFILES, "producer profile refused")
     return ["/usr/local/cargo/bin/cargo", "zigbuild", "--locked", *PROFILES[profile],
-            "-p", "codewire-cli-bin", "--bin", "cw", "--target", source.TARGET,
+            "-p", COMPILER_PACKAGE, "--bin", "cw", "--target", source.TARGET,
             "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", cargo_jobs()]
 
 
@@ -323,7 +326,9 @@ def prepare_target(root, stamp, profile):
         marker.write_text(stamp, encoding="ascii")
         return "cold"
     # Host units (build scripts, proc macros) sit under the profile folder and
-    # target units under the target's; each holds .fingerprint, build and deps.
+    # target units under the target's; Cargo 1.100.0 stores each crate under
+    # build/<package>/<hash>/{out,fingerprint,run} (older layouts used
+    # .fingerprint, build and deps).
     for unit_root in (root / profile, root / source.TARGET / profile):
         for folder in (unit_root, unit_root / ".fingerprint", unit_root / "build", unit_root / "deps"):
             if not folder.is_dir():
@@ -360,16 +365,30 @@ def pin(raw):
     return {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
 
-# Cargo may retain one hardlink at deps/cw-<16 lowercase hex>. Only this
-# compiled-output holder accounts for that exact alias; source/Git/export
+# Cargo may retain one hardlink at build/codewire-cli-bin/<16 lowercase hex>/out/cw
+# (Cargo 1.100.0+ build-dir layout) or deps/cw-<16 lowercase hex> (older layout).
+# Only this compiled-output holder accounts for that exact alias; source/Git/export
 # HeldSourceFile keeps its original single-link contract.
 MAX_COMPILER_DEPS = source.MAX_FILES
+
+
+def _optional_child_parent(parent, child_path, name):
+    """Open child_path as an anchored Parent if `name` exists in `parent`, else None.
+
+    A missing entry returns None; a symlink, non-directory or untrusted directory
+    is opened through Parent and refused rather than skipped.
+    """
+    try:
+        os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return source.asset.Parent(child_path)
 
 
 class HeldCompilerOutput(source.HeldSourceFile):
     def __init__(self, path, maximum):
         self.path, self.maximum = source.asset.path_arg(str(path)), maximum
-        self.parent, self.fd, self.deps, self.aliases = None, None, None, ()
+        self.parent, self.fd, self.alias_parent, self.alias_name = None, None, None, None
         try:
             source.require(self.path.name == "cw", "compiler output name refused")
             self.parent = source.asset.Parent(self.path.parent)
@@ -384,33 +403,7 @@ class HeldCompilerOutput(source.HeldSourceFile):
                            "compiler output is not a bounded owned regular file")
             self.metadata = source.asset.stamp(info)
             if info.st_nlink == 2:
-                try:
-                    self.deps = source.asset.Parent(self.path.parent / "deps")
-                except FileNotFoundError:
-                    raise source.Refused("compiler output has an unaccounted link") from None
-                fresh = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                                dir_fd=self.deps.fd)
-                aliases = []
-                try:
-                    source.require(source.asset.stamp(os.fstat(fresh), source.asset.DIR_FIELDS)
-                                   == source.asset.stamp(os.fstat(self.deps.fd), source.asset.DIR_FIELDS),
-                                   "compiler alias directory changed")
-                    with os.scandir(fresh) as entries:
-                        for count, entry in enumerate(entries, 1):
-                            source.asset.active()
-                            source.require(count <= MAX_COMPILER_DEPS, "compiler alias inventory exceeds its bound")
-                            name = entry.name
-                            if not (name.startswith("cw-") and source.release.is_hex(name[3:], 16)):
-                                continue
-                            alias = os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False)
-                            if (alias.st_dev, alias.st_ino) == (info.st_dev, info.st_ino):
-                                source.require(source.asset.stamp(alias) == self.metadata,
-                                               "compiler alias differs from the held output")
-                                aliases.append(name)
-                    source.require(len(aliases) == 1, "compiler output has an unaccounted link")
-                    self.aliases = tuple(aliases)
-                finally:
-                    os.close(fresh)
+                self.alias_parent, self.alias_name = self._find_alias(info)
             self.data = self.read()
             self.sha256 = hashlib.sha256(self.data).hexdigest()
             self.revalidate(content=True)
@@ -418,23 +411,115 @@ class HeldCompilerOutput(source.HeldSourceFile):
             self.close()
             raise
 
+    def _find_alias(self, info):
+        matches = []
+        count = 0
+
+        def next_entry():
+            nonlocal count
+            source.asset.active()
+            count += 1
+            source.require(count <= MAX_COMPILER_DEPS, "compiler alias inventory exceeds its bound")
+
+        def match_alias(alias_parent, name):
+            try:
+                alias = os.stat(name, dir_fd=alias_parent.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if (alias.st_dev, alias.st_ino) != (info.st_dev, info.st_ino):
+                return False
+            source.require(source.asset.stamp(alias) == self.metadata,
+                           "compiler alias differs from the held output")
+            matches.append((alias_parent, name))
+            return True
+
+        try:
+            # Cargo 1.100.0+ build-dir layout: build/codewire-cli-bin/<16-hex>/out/cw
+            build_path = self.path.parent / "build"
+            build_dir = _optional_child_parent(self.parent, build_path, "build")
+            if build_dir is not None:
+                package_path = build_path / COMPILER_PACKAGE
+                try:
+                    package_dir = _optional_child_parent(build_dir, package_path, COMPILER_PACKAGE)
+                finally:
+                    build_dir.close()
+                if package_dir is not None:
+                    fresh = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=package_dir.fd)
+                    try:
+                        source.require(source.asset.stamp(os.fstat(fresh), source.asset.DIR_FIELDS)
+                                       == source.asset.stamp(os.fstat(package_dir.fd), source.asset.DIR_FIELDS),
+                                       "compiler alias directory changed")
+                        with os.scandir(fresh) as entries:
+                            for entry in entries:
+                                next_entry()
+                                unit_name = entry.name
+                                if not source.release.is_hex(unit_name, 16):
+                                    continue
+                                unit_path = package_path / unit_name
+                                unit_dir = source.asset.Parent(unit_path)
+                                try:
+                                    out_dir = _optional_child_parent(unit_dir, unit_path / "out", "out")
+                                finally:
+                                    unit_dir.close()
+                                if out_dir is None:
+                                    continue
+                                if not match_alias(out_dir, "cw"):
+                                    out_dir.close()
+                    finally:
+                        os.close(fresh)
+                        package_dir.close()
+
+            # Legacy Cargo layout (<= 1.99.x): deps/cw-<16-hex>
+            deps_dir = _optional_child_parent(self.parent, self.path.parent / "deps", "deps")
+            if deps_dir is not None:
+                fresh = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=deps_dir.fd)
+                matched_in_deps = False
+                try:
+                    source.require(source.asset.stamp(os.fstat(fresh), source.asset.DIR_FIELDS)
+                                   == source.asset.stamp(os.fstat(deps_dir.fd), source.asset.DIR_FIELDS),
+                                   "compiler alias directory changed")
+                    with os.scandir(fresh) as entries:
+                        for entry in entries:
+                            next_entry()
+                            name = entry.name
+                            if not (name.startswith("cw-") and source.release.is_hex(name[3:], 16)):
+                                continue
+                            if match_alias(deps_dir, name):
+                                matched_in_deps = True
+                finally:
+                    os.close(fresh)
+                    if not matched_in_deps:
+                        deps_dir.close()
+
+            source.require(len(matches) == 1, "compiler output has an unaccounted link")
+            return matches[0]
+        except BaseException:
+            closed = set()
+            for alias_parent, _ in matches:
+                if id(alias_parent) not in closed:
+                    alias_parent.close()
+                    closed.add(id(alias_parent))
+            raise
+
     def revalidate(self, content=False):
-        if self.deps is not None:
-            self.deps.revalidate()
-            for name in self.aliases:
-                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
-                               == self.metadata, "held compiler alias changed")
+        if self.alias_parent is not None:
+            self.alias_parent.revalidate()
+            source.require(source.asset.stamp(os.stat(self.alias_name, dir_fd=self.alias_parent.fd,
+                                                      follow_symlinks=False))
+                           == self.metadata, "held compiler alias changed")
         super().revalidate(content=content)
-        if self.deps is not None:
-            for name in self.aliases:
-                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
-                               == self.metadata, "held compiler alias changed")
-            self.deps.revalidate()
+        if self.alias_parent is not None:
+            source.require(source.asset.stamp(os.stat(self.alias_name, dir_fd=self.alias_parent.fd,
+                                                      follow_symlinks=False))
+                           == self.metadata, "held compiler alias changed")
+            self.alias_parent.revalidate()
 
     def close(self):
-        if self.deps is not None:
-            self.deps.close()
-            self.deps = None
+        if self.alias_parent is not None:
+            self.alias_parent.close()
+            self.alias_parent = None
         super().close()
 
 
