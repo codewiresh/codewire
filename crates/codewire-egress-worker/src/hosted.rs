@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::session::{HostedChecks, run_hosted_network_session};
+use crate::session::{HostedChecks, SessionAddresses, run_hosted_network_session};
 use crate::worker::{
     HANDSHAKE_TIMEOUT, IpcEgressBroker, NETWORK_BOOTSTRAP_FD, NetworkWorkerError,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_READY_MESSAGE,
@@ -263,10 +263,12 @@ async fn prepare(
                 .and_then(transferred_tokio_unix_stream)
         })
         .collect::<Result<Vec<_>, NetworkWorkerError>>()?;
+    // The hosted session's /30 (`run_hosted_network_session`).
     let broker = Arc::new(IpcEgressBroker::new(
         streams,
         prepared.broker_binding,
         prepared.broker_key,
+        SessionAddresses::STANDARD,
     )?);
     broker.verify_binding().await?;
     write_worker_control_message(bootstrap, WORKER_BROKER_READY_MESSAGE)

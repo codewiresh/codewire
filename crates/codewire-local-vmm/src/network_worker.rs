@@ -171,7 +171,12 @@ pub async fn run_inherited_worker(
         })
         .collect::<Result<Vec<_>, NetworkWorkerError>>()
         .and_then(|streams| {
-            IpcEgressBroker::new(streams, prepared.broker_binding, prepared.broker_key)
+            IpcEgressBroker::new(
+                streams,
+                prepared.broker_binding,
+                prepared.broker_key,
+                addresses,
+            )
         });
     let broker = match broker_streams {
         Ok(broker) => Arc::new(broker),

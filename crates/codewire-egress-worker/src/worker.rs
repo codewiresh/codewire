@@ -7,7 +7,7 @@
 //! AF_UNIX descriptors, never the guest daemon token or provider credentials.
 
 use std::io::{self, Read as _};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::pin::Pin;
@@ -107,8 +107,6 @@ const RECEIVE_FLAGS: libc::c_int = 0;
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
-const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkWorkerStartupFailure {
     InvalidIdentity,
@@ -569,6 +567,10 @@ pub fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::R
 
 pub struct IpcEgressBroker {
     client: BrokerIpcClient,
+    /// The session's /30: its guest is the one source admitted, and its
+    /// worker the one resolver. A broker-mode standard guest's `eth0` is on
+    /// the next /30 (#5602).
+    addresses: SessionAddresses,
 }
 
 impl IpcEgressBroker {
@@ -576,10 +578,12 @@ impl IpcEgressBroker {
         streams: Vec<tokio::net::UnixStream>,
         binding: BrokerIpcBinding,
         key: BrokerIpcKey,
+        addresses: SessionAddresses,
     ) -> Result<Self, NetworkWorkerError> {
         Ok(Self {
             client: BrokerIpcClient::new(streams, binding, key)
                 .map_err(|_| NetworkWorkerError::InheritedDescriptor)?,
+            addresses,
         })
     }
 
@@ -591,16 +595,6 @@ impl IpcEgressBroker {
             .await
             .map_err(|_| NetworkWorkerError::Protocol)
     }
-
-    fn admit_guest_flow(flow: TcpFlow) -> io::Result<SocketAddr> {
-        if flow.source.ip() != IpAddr::V4(GUEST_IP)
-            || flow.source.port() == 0
-            || flow.destination.port() == 0
-        {
-            return Err(denied());
-        }
-        Ok(flow.destination)
-    }
 }
 
 #[async_trait]
@@ -610,7 +604,7 @@ impl EgressBroker for IpcEgressBroker {
     }
 
     async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
-        let destination = Self::admit_guest_flow(flow)?;
+        let destination = admit_guest_flow(self.addresses, flow)?;
         self.client
             .authorize_tcp(destination)
             .await
@@ -618,7 +612,7 @@ impl EgressBroker for IpcEgressBroker {
     }
 
     async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
-        let destination = Self::admit_guest_flow(flow)?;
+        let destination = admit_guest_flow(self.addresses, flow)?;
         // The client admits a TCP stream to exactly `destination`, or, only on
         // an intercepted reply, a Unix stream to the front door (#3999). Both
         // carry the guest's bytes the same way.
@@ -640,12 +634,7 @@ impl EgressBroker for IpcEgressBroker {
     }
 
     async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
-        if question.source.ip() != IpAddr::V4(GUEST_IP)
-            || question.source.port() == 0
-            || question.server != SocketAddr::new(IpAddr::V4(WORKER_IP), 53)
-        {
-            return Err(denied());
-        }
+        admit_guest_question(self.addresses, question)?;
         let family = match question.record_type {
             DnsRecordType::A => DnsRecordFamily::Ipv4,
             DnsRecordType::Aaaa => DnsRecordFamily::Ipv6,
@@ -689,6 +678,29 @@ impl EgressBroker for IpcEgressBroker {
             }),
         }
     }
+}
+
+/// A guest flow the broker is asked about comes from the session's own guest,
+/// with real ports; its destination is what the broker decides on.
+fn admit_guest_flow(addresses: SessionAddresses, flow: TcpFlow) -> io::Result<SocketAddr> {
+    if flow.source.ip() != IpAddr::V4(addresses.guest)
+        || flow.source.port() == 0
+        || flow.destination.port() == 0
+    {
+        return Err(denied());
+    }
+    Ok(flow.destination)
+}
+
+/// A guest DNS question comes from the session's own guest, to its worker.
+fn admit_guest_question(addresses: SessionAddresses, question: &DnsQuestion) -> io::Result<()> {
+    if question.source.ip() != IpAddr::V4(addresses.guest)
+        || question.source.port() == 0
+        || question.server != SocketAddr::new(IpAddr::V4(addresses.worker), 53)
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 fn ipc_broker_error(error: BrokerIpcError) -> io::Error {
@@ -1438,9 +1450,49 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
 
+    const GUEST_IP: Ipv4Addr = SessionAddresses::STANDARD.guest;
+    const WORKER_IP: Ipv4Addr = SessionAddresses::STANDARD.worker;
+
+    /// The broker admits a flow from its own session's guest only. A
+    /// broker-mode standard guest's `eth0` is on the next /30, so its
+    /// platform dials, the workspace binding first, come from 192.0.2.6
+    /// (#5602).
+    #[test]
+    fn a_session_admits_flows_from_its_own_guest_only() {
+        let binding = SocketAddr::from(([10, 44, 173, 213], 8087));
+        let from = |guest: Ipv4Addr, port: u16| TcpFlow {
+            source: SocketAddr::new(IpAddr::V4(guest), port),
+            destination: binding,
+        };
+        let broker = SessionAddresses::HOSTED_BROKER;
+        assert_eq!(broker.guest, Ipv4Addr::new(192, 0, 2, 6));
+        assert_eq!(
+            admit_guest_flow(broker, from(broker.guest, 40_000)).unwrap(),
+            binding
+        );
+        assert!(admit_guest_flow(broker, from(GUEST_IP, 40_000)).is_err());
+        let standard = SessionAddresses::STANDARD;
+        assert_eq!(
+            admit_guest_flow(standard, from(GUEST_IP, 40_000)).unwrap(),
+            binding
+        );
+        assert!(admit_guest_flow(standard, from(broker.guest, 40_000)).is_err());
+        assert!(admit_guest_flow(broker, from(broker.guest, 0)).is_err());
+        assert!(
+            admit_guest_flow(
+                broker,
+                TcpFlow {
+                    source: SocketAddr::new(IpAddr::V4(broker.guest), 40_000),
+                    destination: SocketAddr::from(([10, 44, 173, 213], 0)),
+                },
+            )
+            .is_err()
+        );
+    }
+
     use crate::session::MAX_INBOUND_STREAM_FLOWS;
     use std::io::Write as _;
-    use std::net::Ipv6Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
