@@ -21,4 +21,4 @@ resources:
 
 images:
   - name: git.example.com/codewire/egress
-    digest: sha256:80d4e02e5b9bfc5cce023205e41760771fefcc15a490f9a10ec47df6dd1444ed
+    digest: sha256:e3f0d6915c11167db5f63ae58303c3bca662b93b49b2e76305ea1ea3d39b91d4
