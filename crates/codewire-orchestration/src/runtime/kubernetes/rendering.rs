@@ -104,6 +104,12 @@ fn is_first_party_workspace_image(image_ref: &str) -> bool {
 }
 
 impl KubernetesRenderConfig {
+    /// Whether this deployment can have running `standard` Pods, either by
+    /// default or through per-organization selection (#6333).
+    pub fn may_have_standard_pods(&self) -> bool {
+        self.standard_runtime.is_some() || self.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
+    }
+
     /// The runtime an isolation runs on here.
     pub fn runtime_spec(&self, isolation: Isolation) -> RuntimeProfileSpec {
         match isolation {

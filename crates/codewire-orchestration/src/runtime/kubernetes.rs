@@ -43,8 +43,8 @@ use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
 use crate::sandbox::template::render_sandbox_template;
 use crate::sandbox::template::{
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_STANDARD,
-    TemplateOpts, confidential_init_data,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
+    confidential_init_data,
 };
 use crate::sandbox::warm_pool::pool_revision;
 use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
@@ -1225,10 +1225,9 @@ impl RuntimeAccess for KubernetesDriver {
         env: &BTreeMap<String, String>,
     ) -> anyhow::Result<RuntimeExec> {
         let client = self.sandbox_client(placement);
-        // Only a deployment on `standard` has Pods whose container is outside
-        // their VM (an environment falls back from it, never to it), so on any
-        // other a command attaches with no lookup.
-        if self.rendering.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
+        // Only a deployment that offers `standard` (by default or per-organization,
+        // #6333) has Pods whose workspace container sits outside their VM.
+        if self.rendering.may_have_standard_pods()
             && client.is_standard_pod(target.member_name).await?
         {
             let credential = target.daemon_credential.ok_or_else(|| {

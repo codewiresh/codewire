@@ -674,3 +674,20 @@ fn an_existing_sandbox_renders_its_own_mode_and_the_check_expects_the_broker_one
         "{error:#}"
     );
 }
+
+#[test]
+fn may_have_standard_pods_includes_per_org_standard_on_commodity_default() {
+    assert!(!config().may_have_standard_pods());
+    let per_org = KubernetesRenderConfig {
+        runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
+        standard_runtime: stale_disk_runtime(),
+        ..config()
+    };
+    assert!(per_org.may_have_standard_pods());
+    let default_standard = KubernetesRenderConfig {
+        runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        standard_runtime: None,
+        ..config()
+    };
+    assert!(default_standard.may_have_standard_pods());
+}

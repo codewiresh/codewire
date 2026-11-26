@@ -82,10 +82,7 @@ impl ImageCacheConfig {
             desired: DesiredSet::from_rendered(
                 &sandbox.daemon_image,
                 &sandbox.dind_image,
-                sandbox.standard_runtime.as_ref().filter(|_| {
-                    sandbox.runtime_profile.trim()
-                        == crate::sandbox::template::RUNTIME_PROFILE_STANDARD
-                }),
+                sandbox.standard_runtime.as_ref(),
             ),
         }))
     }
@@ -488,5 +485,33 @@ mod tests {
         let mut no_namespace = sandbox_cfg();
         no_namespace.sandbox_namespace.clear();
         assert!(ImageCacheConfig::from_values(None, None, &no_namespace).is_err());
+    }
+
+    #[test]
+    fn standard_runtime_images_are_cached_on_commodity_default() {
+        let mut cfg = sandbox_cfg();
+        let d = "1".repeat(64);
+        let d2 = "2".repeat(64);
+        let b = "4".repeat(32);
+        let rt = format!("registry.example.invalid/codewire/pod-runtime@sha256:{d}");
+        let disk = format!(
+            "registry.example.invalid/codewire/workspace-disk@sha256:{d2} {d} {b} registry.example.invalid/codewire/workspace@sha256:{d2}"
+        );
+        cfg.standard_runtime =
+            crate::sandbox::template::StandardRuntime::parse(&rt, &disk).unwrap();
+        let images = ImageCacheConfig::from_values(None, None, &cfg)
+            .unwrap()
+            .unwrap()
+            .desired
+            .images;
+        for expected in [
+            &rt,
+            &format!("registry.example.invalid/codewire/workspace-disk@sha256:{d2}"),
+        ] {
+            assert!(
+                images.iter().any(|img| img == expected),
+                "missing {expected}"
+            );
+        }
     }
 }
