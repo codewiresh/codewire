@@ -60,6 +60,10 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // platform dials keep broker mode's literal routes, with no egress loop.
     #[cfg(target_os = "linux")]
     let carried = hosted_egress::guest_carried(config.broker().is_some())?;
+    // Either way it carries the daemon, which only a standard guest's can
+    // suspend (#5529).
+    #[cfg(target_os = "linux")]
+    let standard_guest = hosted_egress::standard_guest()?;
     #[cfg(target_os = "linux")]
     let egress = config
         .broker()
@@ -164,7 +168,7 @@ pub(crate) async fn run_bound_hosted_daemon_with(
             #[cfg(target_os = "linux")]
             platform,
             #[cfg(target_os = "linux")]
-            carried,
+            standard_guest,
             paths,
             bound,
             daemon_config,
@@ -214,9 +218,10 @@ struct BoundServe {
     measured: bool,
     #[cfg(target_os = "linux")]
     platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
-    /// A standard VM's guest carries this daemon, which can then suspend.
+    /// A standard VM's guest carries this daemon, in either egress mode,
+    /// which can then suspend.
     #[cfg(target_os = "linux")]
-    carried: bool,
+    standard_guest: bool,
     paths: codewire_daemon::hosted_state::HostedStatePaths,
     bound: hosted_binding::BoundWorkspace,
     daemon_config: codewire_daemon::Config,
@@ -238,7 +243,7 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         platform,
         #[cfg(target_os = "linux")]
-        carried,
+        standard_guest,
         paths,
         bound,
         daemon_config,
@@ -284,9 +289,9 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         // One token cache for the identity socket and the token files.
         let identity_tokens = crate::hosted_identity::tokens(client.clone());
         // Held closed while the daemon suspends, which only a daemon a
-        // standard VM's guest carries does (#5529).
+        // standard VM's guest carries does, guest-carried or broker (#5529).
         let quiet = codewire_workspace_access::quiet::PlatformQuiet::new();
-        if carried {
+        if standard_guest {
             codewire_daemon::suspend::install(std::sync::Arc::new(
                 crate::hosted_suspend::HostedSuspend::new(quiet.clone(), client.clone()),
             ));

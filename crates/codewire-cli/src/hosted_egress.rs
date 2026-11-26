@@ -126,6 +126,18 @@ const KERNEL_COMMAND_LINE: &str = "/proc/cmdline";
 /// from anywhere, so a query that is not blocked is answered.
 const PUBLIC_RESOLVER: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53);
 
+/// Whether this daemon runs in a standard Pod's guest, in either egress
+/// mode: its kernel booted with one of the parameters only that runtime's
+/// VMM sets ([`codewire_vmm_guest_probe::hosted_control::hosted_guest`]).
+/// Only such a daemon can suspend (#5529).
+pub(crate) fn standard_guest() -> anyhow::Result<bool> {
+    let command_line =
+        std::fs::read_to_string(KERNEL_COMMAND_LINE).context("read the kernel command line")?;
+    Ok(codewire_vmm_guest_probe::hosted_control::hosted_guest(
+        &command_line,
+    ))
+}
+
 /// Whether this daemon runs guest-carried, in a standard Pod's guest
 /// (#5602): its kernel booted with the parameter only that runtime's VMM
 /// sets. It then keeps broker mode's literal platform addresses and runs no

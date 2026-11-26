@@ -45,6 +45,14 @@ pub(crate) async fn environment_daemon_suspend_for_worker(
                 tonic::Code::Unimplemented | tonic::Code::FailedPrecondition
             ) =>
         {
+            // Which of the daemon's fixed reasons: one from before suspend,
+            // or one outside the workload a pause freezes.
+            tracing::info!(
+                environment_id,
+                code = ?status.code(),
+                reason = status.message(),
+                "daemon can't suspend"
+            );
             Ok(DaemonSuspend::CantSuspend)
         }
         Err(status) => Err(AppError::InternalMsg(
