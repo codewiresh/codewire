@@ -422,10 +422,18 @@ async fn bind_test_environment_access(
     core: &Supervisor,
     authority: &mut LocalCredentialClient,
 ) -> EnvironmentAccessBinding {
+    bind_test_environment_profile(core, authority, BTreeMap::new()).await
+}
+
+async fn bind_test_environment_profile(
+    core: &Supervisor,
+    authority: &mut LocalCredentialClient,
+    entries: BTreeMap<codewire_access::CapabilitySlot, codewire_access::CredentialId>,
+) -> EnvironmentAccessBinding {
     let profile = authority
         .create_profile(
             &codewire_access::AccessProfileName::parse("work").unwrap(),
-            &BTreeMap::new(),
+            &entries,
         )
         .await
         .unwrap();
@@ -5944,6 +5952,71 @@ async fn client_bootstrap_requires_the_exact_profile_binding_without_material_ac
     drop(authority);
     server.abort();
     let _ = server.await;
+}
+
+/// An intercepting boot that starts while its profile's Claude sign-in is
+/// withheld gets that sign-in's placeholder in its seed, in the API-key
+/// form, so the start goes on: with the sign-in alone in the profile, and
+/// beside a usable Codex sign-in that keeps a broker running (#6600).
+#[tokio::test]
+async fn an_intercepting_boot_with_a_withheld_claude_sign_in_seeds_its_placeholder() {
+    use codewire_access::{CapabilitySlot, CredentialAuthKind, ProviderId};
+    for with_codex in [false, true] {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
+        let (mut authority, server) = start_test_credential_authority(&core).await;
+        let mut add = async |provider: &str, kind| {
+            authority
+                .add_credential(
+                    codewire_local_credentials::NewCredential {
+                        provider: ProviderId::parse(provider).unwrap(),
+                        authentication_kind: kind,
+                        display_name: provider.to_owned(),
+                        account_hint: None,
+                        expires_at_unix: None,
+                    },
+                    codewire_protected_store::ProtectedValue::from_slice(b"synthetic-sign-in")
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .metadata
+                .id
+        };
+        let claude = add("anthropic", CredentialAuthKind::ClaudeSignIn).await;
+        let mut entries = BTreeMap::from([(CapabilitySlot::anthropic(), claude.clone())]);
+        if with_codex {
+            let codex = add("openai", CredentialAuthKind::OAuth).await;
+            entries.insert(CapabilitySlot::codex(), codex);
+        }
+        bind_test_environment_profile(&core, &mut authority, entries).await;
+        authority.revoke_credential(&claude).await.unwrap();
+
+        let environment = core.environment("dev").unwrap().clone();
+        let clients = core
+            .managed_credential_clients_for_boot(&environment, 2)
+            .await
+            .unwrap();
+        assert!(!clients.anthropic_sign_in(), "withheld: the API-key form");
+        let egress = super::boot_egress::BootEgress {
+            network_policy: crate::network_policy_store::SelectedPolicy::Open,
+            network_policy_document: Vec::new(),
+            network_policy_label: Default::default(),
+            intercept: true,
+            interception: Default::default(),
+            platform: None,
+        };
+        let seed = core
+            .seed_placeholders(&egress, &environment, 2, clients)
+            .await
+            .unwrap();
+        assert_eq!(seed.len(), 1, "{with_codex}");
+        assert_eq!(seed[0].slot, 1, "the API-key slot");
+        assert!(seed[0].placeholder.starts_with("cwp1_"));
+        drop(authority);
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[tokio::test]

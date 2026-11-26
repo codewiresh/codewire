@@ -2536,10 +2536,16 @@ below).
 - **Who can ask for one.** The authority's
   `GetEnvironmentCredentialPlaceholders` call returns, for each requested
   slot the environment's selected binding grants, the placeholder that
-  generation's leases carry. It returns none for an ungranted slot, refuses a
-  binding that is no longer the environment's, and logs nothing. It is served
-  on the authority's owner-only socket, and the local supervisor is its
-  caller.
+  generation's leases carry. A slot withheld only by its credential's
+  lifecycle (revoked, expired or needing reconnect, #5545) gets the
+  placeholder its leases carry once that credential is reconnected in place,
+  so a boot that starts while it is withheld still starts (#6600). Until the
+  reconnect its leases stay refused with the reason, and the call reads no
+  credential material for it. It returns none for a slot the binding doesn't
+  select or authorize, and none for an SSH key, withheld or not. It refuses a
+  binding that is no longer the environment's and a selection whose
+  credential is missing or doesn't match, and logs nothing. It is served on
+  the authority's owner-only socket, and the local supervisor is its caller.
 - **What the guest gets.** With interception on, the Anthropic projection
   carries no `ANTHROPIC_BASE_URL`, so Claude Code talks to the real
   `api.anthropic.com` through the front door. `ANTHROPIC_AUTH_TOKEN` (API key)

@@ -7,7 +7,7 @@ use std::time::Duration;
 use codewire_access::{
     AccessProfileName, BrokerOperationId, BrokerRouteId, CREDENTIAL_PLACEHOLDER_TAG,
     CapabilityPolicy, CredentialAuthKind, GrantPermission, ProviderCatalog, ProviderDefinition,
-    ProviderId,
+    ProviderId, WithheldReason,
 };
 use codewire_daemon_proto::codewire::bridge::v1::{
     CredentialBridgeGuestMessage, CredentialBridgeHostMessage, CredentialSshResponse,
@@ -104,6 +104,8 @@ struct KeyEntry {
 struct Store {
     entries: Arc<Mutex<BTreeMap<ProtectedEntryId, Vec<u8>>>>,
     key: Arc<Mutex<KeyEntry>>,
+    /// Reads of every entry but the placeholder key's: credential material.
+    material_reads: Arc<Mutex<usize>>,
 }
 
 impl Store {
@@ -143,6 +145,8 @@ impl ProtectedStore for Store {
             if let Some(delay) = delay {
                 std::thread::sleep(delay);
             }
+        } else {
+            *self.material_reads.lock().unwrap() += 1;
         }
         self.entries
             .lock()
@@ -1253,4 +1257,270 @@ fn a_boots_slot_placeholders_are_its_leases_and_only_for_granted_slots() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// The built-in catalog's Anthropic, Gemini and Codex slots, each with its
+/// own API key, in one profile bound to one environment.
+struct WithheldFixture {
+    _temp: TempDir,
+    store: Store,
+    authority: LocalCredentialAuthority<Store>,
+    anthropic: CredentialId,
+    gemini: CredentialId,
+    environment: EnvironmentId,
+    selected: EnvironmentAccessBinding,
+}
+
+fn withheld_fixture() -> WithheldFixture {
+    let temp = TempDir::new().unwrap();
+    let store = Store::default();
+    let authority = LocalCredentialAuthority::open(
+        &temp.path().join("authority"),
+        store.clone(),
+        codewire_access::builtin_provider_catalog(),
+    )
+    .unwrap();
+    let add = |provider: &str, name: &str| {
+        authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse(provider).unwrap(),
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: name.into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(format!("synthetic-{name}").as_bytes()).unwrap(),
+            )
+            .unwrap()
+            .metadata
+            .id
+    };
+    let anthropic = add("anthropic", "claude");
+    let gemini = add("google", "gemini");
+    let codex_key = add("openai", "codex");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("work").unwrap(),
+            BTreeMap::from([
+                (CapabilitySlot::anthropic(), anthropic.clone()),
+                (CapabilitySlot::gemini(), gemini.clone()),
+                (codex(), codex_key),
+            ]),
+        )
+        .unwrap()
+        .profile;
+    let environment = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+    let selected = EnvironmentAccessBinding {
+        environment_id: environment.clone(),
+        profile_id: profile.id,
+        profile_revision: profile.revision,
+    };
+    authority
+        .create_environment_access_binding(selected.clone())
+        .unwrap();
+    WithheldFixture {
+        _temp: temp,
+        store,
+        authority,
+        anthropic,
+        gemini,
+        environment,
+        selected,
+    }
+}
+
+impl WithheldFixture {
+    fn withhold(&self, credential: &CredentialId, reason: WithheldReason) {
+        let sql = match reason {
+            WithheldReason::Revoked => {
+                self.authority.revoke_credential(credential).unwrap();
+                return;
+            }
+            WithheldReason::Expired => "UPDATE credentials SET expires_at_unix = 1 WHERE id = ?1",
+            WithheldReason::NeedsReconnect => {
+                "UPDATE credentials SET status = 'refresh_failed' WHERE id = ?1"
+            }
+        };
+        let changed = self
+            .authority
+            .connection()
+            .unwrap()
+            .execute(sql, [credential.as_str()])
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    /// `cw credentials --local connect` under the same name: new material
+    /// behind the same id.
+    fn reconnect(&self, credential: &CredentialId) {
+        let current = self.authority.get_credential(credential).unwrap();
+        self.authority
+            .rotate_credential_material(
+                credential,
+                current.metadata.revocation_generation,
+                ProtectedValue::from_slice(b"synthetic-reconnected").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    fn seed(
+        &self,
+        generation: u64,
+        slots: &[CapabilitySlot],
+    ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, LocalCredentialError> {
+        self.authority.environment_slot_placeholders(
+            &self.environment,
+            generation,
+            &self.selected,
+            slots,
+        )
+    }
+
+    fn material_reads(&self) -> usize {
+        *self.store.material_reads.lock().unwrap()
+    }
+}
+
+/// A slot withheld only by its credential's lifecycle still gets its
+/// placeholder in a boot's seed: the one its leases carry once the
+/// credential is reconnected in place. Until then the lease stays refused
+/// with the reason, and neither reads credential material (#6600).
+#[test]
+fn a_withheld_slot_gets_the_placeholder_its_reconnected_leases_carry() {
+    let anthropic = CapabilitySlot::anthropic();
+    let gemini = CapabilitySlot::gemini();
+    for reason in [
+        WithheldReason::Revoked,
+        WithheldReason::Expired,
+        WithheldReason::NeedsReconnect,
+    ] {
+        let fixture = withheld_fixture();
+        fixture.withhold(&fixture.anthropic, reason);
+        fixture.withhold(&fixture.gemini, reason);
+        let reads = fixture.material_reads();
+        let seed = fixture
+            .seed(7, &[anthropic.clone(), gemini.clone(), codex()])
+            .unwrap();
+        let slots: Vec<_> = seed.iter().map(|(slot, _)| slot.clone()).collect();
+        assert_eq!(
+            slots,
+            [anthropic.clone(), gemini.clone(), codex()],
+            "{reason:?}"
+        );
+        for slot in [&anthropic, &gemini] {
+            let lease = fixture
+                .authority
+                .lease_environment_credential_operation(&request(
+                    &fixture.environment,
+                    7,
+                    slot.clone(),
+                ));
+            assert!(
+                matches!(lease, Err(LocalCredentialError::CredentialWithheld(withheld)) if withheld == reason),
+                "{reason:?} {slot:?}"
+            );
+        }
+        assert_eq!(fixture.material_reads(), reads, "{reason:?}");
+
+        fixture.reconnect(&fixture.anthropic);
+        fixture.reconnect(&fixture.gemini);
+        for (slot, credential, withheld) in [
+            (&anthropic, &fixture.anthropic, &seed[0].1),
+            (&gemini, &fixture.gemini, &seed[1].1),
+        ] {
+            let reconnected = unleased_from(
+                &fixture.authority,
+                &fixture.environment,
+                8,
+                slot,
+                credential,
+            )
+            .unwrap();
+            assert!(reconnected.ct_eq(withheld), "{reason:?} {slot:?}");
+        }
+    }
+}
+
+/// Only a lifecycle withholds a slot's grant and keeps its placeholder:
+/// an unselected slot gets none, and a stale binding, a selection whose
+/// credential is missing, and a withheld SSH key are each refused.
+#[test]
+fn a_withheld_placeholder_is_refused_wherever_the_selection_is() {
+    let fixture = withheld_fixture();
+    fixture.withhold(&fixture.anthropic, WithheldReason::Revoked);
+    assert!(fixture.seed(7, &[openai()]).unwrap().is_empty());
+
+    let other = fixture
+        .authority
+        .create_profile(
+            AccessProfileName::parse("other").unwrap(),
+            BTreeMap::from([(CapabilitySlot::anthropic(), fixture.anthropic.clone())]),
+        )
+        .unwrap()
+        .profile;
+    let stale = EnvironmentAccessBinding {
+        profile_id: other.id,
+        profile_revision: other.revision,
+        ..fixture.selected.clone()
+    };
+    assert!(matches!(
+        fixture.authority.environment_slot_placeholders(
+            &fixture.environment,
+            7,
+            &stale,
+            &[CapabilitySlot::anthropic()]
+        ),
+        Err(LocalCredentialError::StaleEnvironmentBinding)
+    ));
+
+    let missing = withheld_fixture();
+    missing.withhold(&missing.anthropic, WithheldReason::Revoked);
+    missing
+        .authority
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE credentials SET material_state = 'pending_delete' WHERE id = ?1",
+            [missing.anthropic.as_str()],
+        )
+        .unwrap();
+    assert!(missing.seed(7, &[CapabilitySlot::anthropic()]).is_err());
+
+    let ssh_key = fixture
+        .authority
+        .add_ssh_credential("ssh".into(), None, generate_ed25519().unwrap(), || Ok(()))
+        .unwrap()
+        .metadata
+        .id;
+    let profile = fixture
+        .authority
+        .create_profile(
+            AccessProfileName::parse("ssh").unwrap(),
+            BTreeMap::from([(ssh(), ssh_key.clone())]),
+        )
+        .unwrap()
+        .profile;
+    let ssh_environment = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+    let ssh_binding = EnvironmentAccessBinding {
+        environment_id: ssh_environment.clone(),
+        profile_id: profile.id,
+        profile_revision: profile.revision,
+    };
+    fixture
+        .authority
+        .create_environment_access_binding(ssh_binding.clone())
+        .unwrap();
+    fixture.authority.revoke_credential(&ssh_key).unwrap();
+    assert!(matches!(
+        fixture.authority.environment_slot_placeholders(
+            &ssh_environment,
+            7,
+            &ssh_binding,
+            &[ssh()]
+        ),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
 }

@@ -231,6 +231,10 @@ enum LeasePlan {
     NewerSignIn,
     /// The sign-in, last refreshed just now (#4974).
     RefreshedJustNow,
+    /// The slot's credential is withheld for this reason (#5545).
+    Withheld(codewire_access::WithheldReason),
+    /// The anthropic slot holds a Claude sign-in.
+    ClaudeSignIn,
 }
 
 /// Every host a route table may bind, and every name under the routed
@@ -338,7 +342,13 @@ impl BrokerLeaseProvider for Authority {
         if self.deny || self.denied == Some(slot.as_str()) || matches!(planned, LeasePlan::Denied) {
             return Err(BrokerLeaseError::Denied);
         }
+        if let LeasePlan::Withheld(reason) = planned {
+            return Err(BrokerLeaseError::ReconnectRequired(reason));
+        }
         let (provider, kind) = match slot.as_str() {
+            "anthropic" if matches!(planned, LeasePlan::ClaudeSignIn) => {
+                ("anthropic", CredentialAuthKind::ClaudeSignIn)
+            }
             "codex" if self.codex_sign_in => ("openai", CredentialAuthKind::OAuth),
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
             "anthropic" => ("anthropic", CredentialAuthKind::ApiKey),
@@ -360,6 +370,9 @@ impl BrokerLeaseProvider for Authority {
         if kind == CredentialAuthKind::OAuth && slot.as_str() == "codex" {
             lease.material = codex_sign_in();
         }
+        if kind == CredentialAuthKind::ClaudeSignIn {
+            lease.material = claude_sign_in();
+        }
         if let Some(credential) = *self.credential.lock().unwrap() {
             let credential = codewire_access::CredentialId::parse(credential).unwrap();
             lease.metadata.id = credential.clone();
@@ -374,7 +387,10 @@ impl BrokerLeaseProvider for Authority {
             LeasePlan::NewRevocation => lease.metadata.revocation_generation += 1,
             LeasePlan::NewerSignIn => lease.material_generation += 1,
             LeasePlan::RefreshedJustNow => lease.material = codex_sign_in_refreshed_ago(0),
-            LeasePlan::Ordinary | LeasePlan::Denied => {}
+            LeasePlan::Ordinary
+            | LeasePlan::Denied
+            | LeasePlan::Withheld(_)
+            | LeasePlan::ClaudeSignIn => {}
         }
         Ok(lease)
     }
@@ -798,6 +814,76 @@ async fn a_denied_lease_sends_nothing_upstream() {
     }
     assert_eq!(recorded.leases(), 1);
     assert!(recorded.outbound().is_empty());
+}
+
+/// A boot that starts with its Anthropic credential withheld carries that
+/// credential's placeholder (#6600). While it is withheld, the placeholder is
+/// answered 403 with the reason and nothing is sent; once the same credential
+/// is reconnected, the same placeholder is swapped on the next request. A
+/// Claude sign-in reconnected under the API-key form's placeholder is sent
+/// with its own bearer token and none of the guest's credential headers.
+#[tokio::test]
+async fn a_withheld_placeholder_is_refused_until_its_credential_is_reconnected() {
+    use codewire_access::WithheldReason;
+    for (reason, refusal) in [
+        (WithheldReason::Revoked, "credential_revoked"),
+        (WithheldReason::Expired, "credential_expired"),
+        (WithheldReason::NeedsReconnect, "credential_needs_reconnect"),
+    ] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            ..Recorded::default()
+        };
+        recorded.plan.lock().unwrap().extend([
+            LeasePlan::Withheld(reason),
+            LeasePlan::Ordinary,
+            LeasePlan::ClaudeSignIn,
+        ]);
+        let broker = recorded.broker();
+        let api_key_form = || {
+            anthropic(
+                "api.anthropic.com",
+                &[("authorization", format!("Bearer {OURS}"))],
+            )
+        };
+        let (status, headers, _) =
+            collect(broker.execute_front_door(api_key_form()).await.unwrap()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{reason:?}");
+        assert_eq!(
+            headers
+                .get(codewire_access::REFUSAL_HEADER)
+                .map(|value| value.as_bytes()),
+            Some(refusal.as_bytes())
+        );
+        assert!(recorded.outbound().is_empty(), "{reason:?}");
+
+        for _reconnected in 0..2 {
+            let (status, _, _) =
+                collect(broker.execute_front_door(api_key_form()).await.unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{reason:?}");
+        }
+        let outbound = recorded.outbound();
+        assert_eq!(outbound.len(), 2, "{reason:?}");
+        for sent in &outbound {
+            assert!(
+                sent.2.iter().all(|(_, value)| !value
+                    .windows(OURS.len())
+                    .any(|window| window == OURS.as_bytes())),
+                "the placeholder never leaves"
+            );
+        }
+        assert_eq!(
+            header(&outbound[0], "x-api-key"),
+            [crate::http_test_support::TOKEN]
+        );
+        assert!(header(&outbound[0], "authorization").is_empty());
+        let signed_in = &outbound[1];
+        assert!(header(signed_in, "x-api-key").is_empty());
+        let authorization = header(signed_in, "authorization");
+        assert_eq!(authorization.len(), 1);
+        assert!(authorization[0].starts_with(b"Bearer "));
+        assert_eq!(recorded.leases(), 3);
+    }
 }
 
 /// A request to a provider the transport has no address for is refused as

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use codewire_access::{
     CapabilitySlot, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
-    GrantContext, GrantPermission, GrantPlacement, OwnerId, ProviderCatalog,
+    GrantContext, GrantPermission, GrantPlacement, OwnerId, ProviderCatalog, Withheld,
     derive_available_grants,
 };
 use codewire_protected_store::ProtectedStore;
@@ -71,6 +71,30 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .into_iter()
             .find(|grant| grant.capability_slot == *slot)
             .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)
+    }
+
+    /// The credential whose lifecycle (revoked, expired or needing
+    /// reconnect) is the only reason the environment's current binding
+    /// derives no grant for `slot`, or `None` when the slot is granted or
+    /// has no grant for another reason. Not an admission: it leases nothing
+    /// and reads no material, and every failure that refuses a lease's
+    /// derivation refuses it too.
+    pub(crate) fn withheld_environment_slot_at(
+        &self,
+        connection: &Connection,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        slot: &CapabilitySlot,
+    ) -> Result<Option<Withheld>, LocalCredentialError> {
+        let binding = load_environment_access_binding(connection, environment_id)?.binding;
+        let mut available = derive_local_available_grants(
+            connection,
+            &binding,
+            environment_generation,
+            &self.owner_id,
+            &self.catalog,
+        )?;
+        Ok(available.reconnect_required.remove(slot))
     }
 }
 

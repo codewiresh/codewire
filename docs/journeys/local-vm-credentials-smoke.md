@@ -117,7 +117,9 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
     before its next step, exactly `KIND 'NAME' in profile PROFILE is revoked;
     agents in this VM can't use it.` and the command that fixes it. The VM's
     other capabilities keep working, and the revoked one's request is still
-    refused.
+    refused. With interception on, the boot's seed carries the withheld
+    credential's placeholder, so the start doesn't fail with
+    `start_access_unavailable` (#6600; not yet observed).
   - Re-enrolling the same credential serves the next request, with no stop
     or start in between. With another usable credential in the profile, the
     authority replaces the running broker with one that serves both (#5615;

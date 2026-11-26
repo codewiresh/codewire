@@ -46,8 +46,9 @@ use zeroize::Zeroizing;
 use crate::control::v1;
 use crate::{
     CredentialOperationAdmission, CredentialOperationLease, CredentialOperationLeaseRequest,
-    LocalCredentialAuthority, LocalCredentialError, check_selected_environment_binding,
-    database_error, deny_generic_ssh_lease,
+    LocalCredentialAuthority, LocalCredentialError, MaterialState,
+    check_selected_environment_binding, database_error, deny_generic_ssh_lease,
+    load_internal_credential,
 };
 
 /// The `authority_metadata` row that holds this root's ID: 32 lowercase hex
@@ -190,10 +191,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     /// This environment's placeholders for each of `slots` its `selected`
     /// binding grants at `environment_generation`, in `slots` order: what a
-    /// boot that intercepts its agent hosts puts in its seed (#3999). A slot
-    /// without a grant has none. Each goes through
-    /// [`Self::environment_credential_placeholder`], so it is exactly what
-    /// that generation's leases carry. Call it on a blocking thread.
+    /// boot that intercepts its agent hosts puts in its seed (#3999). Each
+    /// goes through [`Self::environment_credential_placeholder`], so it is
+    /// exactly what that generation's leases carry. A slot whose credential's
+    /// lifecycle withholds it gets [`Self::withheld_slot_placeholder`]'s;
+    /// any other slot without a grant has none. Call it on a blocking thread.
     pub fn environment_slot_placeholders(
         &self,
         environment_id: &EnvironmentId,
@@ -211,6 +213,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         let mut placeholders = Vec::new();
         for slot in slots {
             let Some(grant) = grants.iter().find(|grant| grant.capability_slot == *slot) else {
+                if let Some(placeholder) = self.withheld_slot_placeholder(
+                    environment_id,
+                    environment_generation,
+                    slot,
+                    selected,
+                )? {
+                    placeholders.push((slot.clone(), placeholder));
+                }
                 continue;
             };
             let placeholder = self.environment_credential_placeholder(
@@ -223,6 +233,50 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             placeholders.push((slot.clone(), placeholder));
         }
         Ok(placeholders)
+    }
+
+    /// The placeholder `slot`'s leases carry once its withheld credential
+    /// (revoked, expired or needing reconnect) is reconnected in place, or
+    /// `None` when nothing withholds the slot (#6600). A boot that starts
+    /// while it is withheld needs it in its seed; its leases stay refused
+    /// with the reason until the reconnect. Not an admission: it reads no
+    /// material and refuses an SSH key as a lease does, and
+    /// [`Self::environment_credential_placeholder`] stays for granted slots.
+    fn withheld_slot_placeholder(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        slot: &CapabilitySlot,
+        selected: &EnvironmentAccessBinding,
+    ) -> Result<Option<CredentialPlaceholder>, LocalCredentialError> {
+        let (entry, credential_id) = {
+            let connection = self.connection()?;
+            check_selected_environment_binding(&connection, environment_id, Some(selected))?;
+            let Some(withheld) = self.withheld_environment_slot_at(
+                &connection,
+                environment_id,
+                environment_generation,
+                slot,
+            )?
+            else {
+                return Ok(None);
+            };
+            let record = load_internal_credential(
+                &connection,
+                &withheld.credential,
+                Some(MaterialState::Ready),
+            )?;
+            deny_generic_ssh_lease(&record.public.metadata)?;
+            (placeholder_key_entry(&connection)?, withheld.credential)
+        };
+        let key = self.load_placeholder_key(&entry)?;
+        Ok(Some(CredentialPlaceholder::derive(
+            key,
+            environment_id,
+            selected.profile_revision,
+            slot,
+            &credential_id,
+        )))
     }
 
     /// Load this root's placeholder key now, creating it on first use, so
