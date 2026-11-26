@@ -23,6 +23,19 @@ pub struct FileIdentity {
     pub pin: InodePin,
 }
 
+impl FileIdentity {
+    /// Whether `other` describes the same on-volume file after a CSI PVC
+    /// remount or snapshot restore assigned a new kernel device number
+    /// (`st_dev`). Every on-volume attribute still has to match (#5602).
+    pub fn same_file_across_mount(&self, other: &Self) -> bool {
+        self.inode == other.inode
+            && self.size == other.size
+            && self.uid == other.uid
+            && self.mode == other.mode
+            && self.links == other.links
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocketIdentity {

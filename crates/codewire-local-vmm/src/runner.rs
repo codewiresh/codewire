@@ -118,9 +118,13 @@ pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
 pub use intercept::{FrontDoorFailure, FrontDoorStop, InterceptRefusal};
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
+mod disk_admission;
 mod egress_spawn;
 mod host_port_forward;
 mod mesh_ingress_pass;
+use disk_admission::{
+    admit_docker_disk, admit_root_disk, admit_state_disk, revalidate_persisted_cw_runtime_disk,
+};
 use mesh_ingress_pass::take_mesh_ingress_receiver_exit;
 mod network_worker_spawn;
 mod stage_times;
@@ -330,15 +334,17 @@ impl CloudHypervisorRunner {
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
+        let is_hosted = hosted.is_some();
         if let Some(disk) = persisted
             .as_ref()
             .and_then(|state| state.cw_runtime_disk.as_ref())
         {
-            CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
+            revalidate_persisted_cw_runtime_disk(&self.state_root, disk, is_hosted)?;
         }
-        let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
-        let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
-        let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
+        let state_disk = admit_state_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
+        let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
+        let (root_disk_path, root_disk) =
+            admit_root_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
         // Darwin writes its VMM configuration at launch, from the same paths.
         #[cfg(target_os = "macos")]
         let _ = root_disk_path;
@@ -3737,40 +3743,6 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     Ok(())
 }
 
-fn admit_docker_disk(
-    paths: &VmPaths,
-    request: &CreateVmRequest,
-    persisted: Option<&PersistedVmState>,
-) -> Result<Option<StateDiskIdentity>, RunnerError> {
-    let Some(requested_bytes) = request.docker_disk_bytes else {
-        if persisted
-            .and_then(|state| state.docker_disk.as_ref())
-            .is_some()
-            || paths.docker_disk.exists()
-        {
-            return Err(RunnerError::UnexpectedDockerDisk);
-        }
-        return Ok(None);
-    };
-    if !paths.docker_disk.exists() {
-        return Err(RunnerError::MissingPreformattedDockerDisk);
-    }
-    let identity = match persisted.and_then(|state| state.docker_disk.as_ref()) {
-        Some(expected) => {
-            expected.revalidate(&paths.docker_disk)?;
-            expected.clone()
-        }
-        None => StateDiskIdentity::capture(&paths.docker_disk)?,
-    };
-    if identity.file.size != requested_bytes {
-        return Err(RunnerError::DockerDiskSizeMismatch {
-            current: identity.file.size,
-            requested: requested_bytes,
-        });
-    }
-    Ok(Some(identity))
-}
-
 fn direct_share_plan(
     shares: &[DirectShareRequest],
 ) -> Result<Option<DirectSharePlan>, RunnerError> {
@@ -3802,64 +3774,6 @@ fn read_stopped_persisted_state(
         Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => Ok(Some(state)),
         Err(error) => Err(error.into()),
     }
-}
-
-fn admit_state_disk(
-    paths: &VmPaths,
-    request: &CreateVmRequest,
-    persisted: Option<&PersistedVmState>,
-) -> Result<StateDiskIdentity, RunnerError> {
-    if !paths.state_disk.exists() {
-        return Err(RunnerError::MissingPreformattedStateDisk);
-    }
-    let state_disk = if let Some(state) = persisted {
-        if request.generation <= state.generation {
-            return Err(RunnerError::GenerationNotAdvanced {
-                previous: state.generation,
-                requested: request.generation,
-            });
-        }
-        state.state_disk.revalidate(&paths.state_disk)?;
-        state.state_disk.clone()
-    } else {
-        StateDiskIdentity::capture(&paths.state_disk)?
-    };
-    if state_disk.file.size != request.state_disk_bytes {
-        return Err(RunnerError::StateDiskSizeMismatch {
-            current: state_disk.file.size,
-            requested: request.state_disk_bytes,
-        });
-    }
-    Ok(state_disk)
-}
-
-fn admit_root_disk(
-    paths: &VmPaths,
-    request: &CreateVmRequest,
-    persisted: Option<&PersistedVmState>,
-) -> Result<(PathBuf, StateDiskIdentity), RunnerError> {
-    let path = root_disk_path(paths, &request.root_generation)?;
-    if !path.exists() {
-        return Err(RunnerError::MissingPreformattedRootDisk);
-    }
-    let root_disk = match persisted {
-        Some(state) if state.root_generation.as_deref() == Some(&request.root_generation) => {
-            let expected = state
-                .root_disk
-                .as_ref()
-                .ok_or(RunnerError::PersistedRootGenerationMismatch)?;
-            expected.revalidate(&path)?;
-            expected.clone()
-        }
-        _ => StateDiskIdentity::capture(&path)?,
-    };
-    if root_disk.file.size != request.root_disk_bytes {
-        return Err(RunnerError::RootDiskSizeMismatch {
-            current: root_disk.file.size,
-            requested: request.root_disk_bytes,
-        });
-    }
-    Ok((path, root_disk))
 }
 
 fn admit_setup_disk(
@@ -6020,13 +5934,13 @@ mod tests {
         next.vm_id = vm_id;
         next.generation = 2;
         assert_eq!(
-            admit_state_disk(&paths, &next, Some(&persisted)).unwrap(),
+            admit_state_disk(&paths, &next, Some(&persisted), false).unwrap(),
             admitted
         );
 
         next.generation = 1;
         assert!(matches!(
-            admit_state_disk(&paths, &next, Some(&persisted)),
+            admit_state_disk(&paths, &next, Some(&persisted), false),
             Err(RunnerError::GenerationNotAdvanced {
                 previous: 1,
                 requested: 1
@@ -6042,7 +5956,7 @@ mod tests {
         disk.sync_all().unwrap();
         next.generation = 2;
         assert!(matches!(
-            admit_state_disk(&paths, &next, Some(&persisted)),
+            admit_state_disk(&paths, &next, Some(&persisted), false),
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
                 if path == paths.state_disk
         ));
@@ -6057,7 +5971,7 @@ mod tests {
         request.vm_id = vm_id;
         request.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES);
         assert!(matches!(
-            admit_docker_disk(&paths, &request, None),
+            admit_docker_disk(&paths, &request, None, false),
             Err(RunnerError::MissingPreformattedDockerDisk)
         ));
 
@@ -6069,19 +5983,21 @@ mod tests {
             .unwrap()
             .set_len(crate::state::MINIMUM_DOCKER_DISK_BYTES)
             .unwrap();
-        let admitted = admit_docker_disk(&paths, &request, None).unwrap().unwrap();
+        let admitted = admit_docker_disk(&paths, &request, None, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(admitted.file.size, crate::state::MINIMUM_DOCKER_DISK_BYTES);
 
         let mut wrong_size = request.clone();
         wrong_size.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024);
         assert!(matches!(
-            admit_docker_disk(&paths, &wrong_size, None),
+            admit_docker_disk(&paths, &wrong_size, None, false),
             Err(RunnerError::DockerDiskSizeMismatch { .. })
         ));
         let mut disabled = request.clone();
         disabled.docker_disk_bytes = None;
         assert!(matches!(
-            admit_docker_disk(&paths, &disabled, None),
+            admit_docker_disk(&paths, &disabled, None, false),
             Err(RunnerError::UnexpectedDockerDisk)
         ));
 
@@ -6112,7 +6028,7 @@ mod tests {
             .unwrap();
         fs::rename(&replacement, &paths.docker_disk).unwrap();
         assert!(matches!(
-            admit_docker_disk(&paths, &request, Some(&persisted)),
+            admit_docker_disk(&paths, &request, Some(&persisted), false),
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
                 if path == paths.docker_disk
         ));
@@ -6149,7 +6065,7 @@ mod tests {
         next.vm_id = vm_id;
         next.generation = 2;
         assert_eq!(
-            admit_root_disk(&paths, &next, Some(&persisted)).unwrap(),
+            admit_root_disk(&paths, &next, Some(&persisted), false).unwrap(),
             (root.root_disk.clone(), admitted.clone())
         );
 
@@ -6157,7 +6073,7 @@ mod tests {
         write_test_ext4(&replacement, filesystem_uuid);
         fs::rename(&replacement, &root.root_disk).unwrap();
         assert!(matches!(
-            admit_root_disk(&paths, &next, Some(&persisted)),
+            admit_root_disk(&paths, &next, Some(&persisted), false),
             Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
                 if path == root.root_disk
         ));
@@ -6290,13 +6206,13 @@ mod tests {
         next.generation = 2;
         next.root_generation = next_generation;
         assert_eq!(
-            admit_root_disk(&paths, &next, Some(&persisted)).unwrap(),
+            admit_root_disk(&paths, &next, Some(&persisted), false).unwrap(),
             (next_root.root_disk, next_identity)
         );
 
         next.root_disk_bytes += 1024 * 1024;
         assert!(matches!(
-            admit_root_disk(&paths, &next, Some(&persisted)),
+            admit_root_disk(&paths, &next, Some(&persisted), false),
             Err(RunnerError::RootDiskSizeMismatch {
                 current: MINIMUM_ROOT_DISK_BYTES,
                 requested
