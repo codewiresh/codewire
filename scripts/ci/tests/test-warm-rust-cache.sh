@@ -40,8 +40,8 @@ run() {
 }
 
 # Other refs and other events never touch the cache.
-out="$(run rust-compile push refs/heads/feature)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'another ref used the cache'
-out="$(run rust-compile schedule refs/heads/main)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'a scheduled run used the cache'
+out="$(run rust-compile push refs/heads/feature)"; grep -qF 'not a push to main, a merge-queue batch or a pull request' <<<"$out" || fail 'another ref used the cache'
+out="$(run rust-compile schedule refs/heads/main)"; grep -qF 'not a push to main, a merge-queue batch or a pull request' <<<"$out" || fail 'a scheduled run used the cache'
 [[ ! -e "$work/cache/v1" && ! -L "$work/workspace/target/ci-cache" ]] || fail 'a skipped job changed the cache'
 
 # A main push links its target and Cargo home into the cache.
@@ -50,9 +50,11 @@ out="$(run rust-compile push refs/heads/main)"; grep -qF 'using' <<<"$out" || fa
 [[ "$(readlink "$work/workspace/target/ci-rust-cargo-home")" == "$work/cache/v1/cargo-home" ]] || fail 'Cargo home is not linked'
 week="$(date -u +%G-W%V)"
 [[ "$(cat "$work/cache/v1/.key")" == "$week/0" ]] || fail 'the cache key is not this week'
-# A pull request uses the same cache.
+# A pull request and a merge-queue batch use the same cache on their guest.
 out="$(run rust-compile pull_request refs/pull/1/head)"; grep -qF 'using' <<<"$out" || fail 'a pull request did not use the cache'
 [[ "$(readlink "$work/workspace/target/ci-cache")" == "$work/cache/v1/ci-cache" ]] || fail 'a pull request target is not linked'
+out="$(run standard push refs/heads/mq/1795699609963)"; grep -qF 'using' <<<"$out" || fail 'a merge-queue batch did not use the cache'
+[[ "$(readlink "$work/workspace/target/ci-cache")" == "$work/cache/v1/ci-cache" ]] || fail 'a merge-queue batch target is not linked'
 
 # A build is kept for the next job; a new epoch (or week) wipes everything.
 mkdir -p "$work/cache/v1/ci-cache/host-debug"

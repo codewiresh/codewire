@@ -66,8 +66,8 @@ skip() {
 }
 
 case "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" in
-  'push|refs/heads/main' | pull_request\|*) ;;
-  *) skip 'not a push to main or a pull request' ;;
+  'push|refs/heads/main' | 'push|refs/heads/mq/'* | pull_request\|*) ;;
+  *) skip 'not a push to main, a merge-queue batch or a pull request' ;;
 esac
 
 # take_seat SEATS: print the seat this job holds, taking the first free one.
