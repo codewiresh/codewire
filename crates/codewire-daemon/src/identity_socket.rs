@@ -162,6 +162,21 @@ impl<S: IdentityTokenSource> IdentityTokens<S> {
         (self.now)()
     }
 
+    /// Underlying token source, for rotating the binding client after a
+    /// hibernate restore (#6647).
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// Drops all cached tokens so subsequent reads mint fresh tokens against
+    /// the current source (used on hibernate and post-restore re-bind, #6647).
+    pub fn clear_cache(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// The token for the canonical `audience`: the cached one until half
     /// its lifetime, otherwise one issued by the source and kept. A refusal
     /// is never cached.

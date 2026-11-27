@@ -18,14 +18,16 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_vmm_guest_probe::hosted_control::{
-    HOSTED_SUSPEND_ACCEPTED, HOSTED_SUSPEND_EXCHANGE, HOSTED_SUSPEND_REFUSED,
-    HOSTED_SUSPEND_REQUEST, HOSTED_SUSPEND_VSOCK_PORT, HostedMessage, HostedTokens,
+    HOSTED_HIBERNATE_REQUEST, HOSTED_REBIND_COMPLETE_REQUEST, HOSTED_SUSPEND_ACCEPTED,
+    HOSTED_SUSPEND_EXCHANGE, HOSTED_SUSPEND_REFUSED, HOSTED_SUSPEND_REQUEST,
+    HOSTED_SUSPEND_VSOCK_PORT, HostedMessage, HostedTokens,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::UnixListener;
 use uuid::Uuid;
 
 use super::PodRuntimeError;
+use super::hibernate::HibernateControl;
 
 /// What starts this runtime's record of a pause or resume. Guest output
 /// reaches the Pod log only escaped and prefixed with
@@ -319,10 +321,12 @@ pub(super) async fn stop_awake<V: PausableVm, T>(
     stop.await
 }
 
-/// Listens for the guest's suspend requests until the Pod ends.
+/// Listens for the guest's suspend, hibernate, and restore re-bind completion
+/// requests on vsock 7784 until the Pod ends (#5529, #6647).
 pub(super) fn listen<V: PausableVm>(
     vsock_socket: &Path,
     suspender: Arc<Suspender<V>>,
+    hibernate: Arc<HibernateControl>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let path = super::guest_log::host_socket(vsock_socket, HOSTED_SUSPEND_VSOCK_PORT);
     // A socket left by this Pod's last boot would refuse the bind.
@@ -331,12 +335,16 @@ pub(super) fn listen<V: PausableVm>(
         _ => {}
     }
     let listener = UnixListener::bind(&path)?;
-    Ok(tokio::spawn(serve(listener, suspender)))
+    Ok(tokio::spawn(serve(listener, suspender, hibernate)))
 }
 
 /// One request at a time, each at least [`ANSWER_INTERVAL`] after the last
 /// one ended: a second waits.
-async fn serve<V: PausableVm>(listener: UnixListener, suspender: Arc<Suspender<V>>) {
+async fn serve<V: PausableVm>(
+    listener: UnixListener,
+    suspender: Arc<Suspender<V>>,
+    hibernate: Arc<HibernateControl>,
+) {
     let mut next = tokio::time::Instant::now();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -345,40 +353,102 @@ async fn serve<V: PausableVm>(listener: UnixListener, suspender: Arc<Suspender<V
             continue;
         };
         tokio::time::sleep_until(next).await;
-        if let Err(error) = answer(stream, &suspender).await {
-            eprintln!("standard runtime: the guest's suspend request failed: {error}");
+        if let Err(error) = answer_with_hibernate(stream, &suspender, &hibernate).await {
+            eprintln!("standard runtime: the guest's sleep control request failed: {error}");
         }
         next = tokio::time::Instant::now() + ANSWER_INTERVAL;
     }
 }
 
-/// Reads one request; anything but exactly [`HOSTED_SUSPEND_REQUEST`] is
-/// closed unanswered. The answer leaves before the VM pauses.
-async fn answer<V, S>(mut stream: S, suspender: &Suspender<V>) -> Result<(), PodRuntimeError>
+#[cfg(test)]
+async fn answer<V, S>(stream: S, suspender: &Suspender<V>) -> Result<(), PodRuntimeError>
 where
     V: PausableVm,
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut request = [0_u8; HOSTED_SUSPEND_REQUEST.len()];
-    match tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, stream.read_exact(&mut request)).await {
-        Ok(Ok(_)) if &request == HOSTED_SUSPEND_REQUEST => {}
-        _ => return Ok(()),
+    answer_with_hibernate(stream, suspender, &HibernateControl::normal()).await
+}
+
+/// Reads one newline-terminated request line (at most 16 bytes):
+/// - `suspend\n`: pauses the VM (refused if hibernate is already armed).
+/// - `hibernate\n`: arms hibernate-on-SIGTERM (at most once; non-billing).
+/// - `rebind-ok\n`: signals post-restore re-bind complete (at most once, only
+///   while actively restoring).
+///
+/// Anything else is closed unanswered.
+pub(super) async fn answer_with_hibernate<V, S>(
+    mut stream: S,
+    suspender: &Suspender<V>,
+    hibernate: &HibernateControl,
+) -> Result<(), PodRuntimeError>
+where
+    V: PausableVm,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(line) = read_control_line(&mut stream).await else {
+        return Ok(());
+    };
+    if line.as_slice() == HOSTED_SUSPEND_REQUEST {
+        if hibernate.is_armed() {
+            write_control_reply(&mut stream, false).await;
+            return Ok(());
+        }
+        return suspender
+            .suspend(|accepted| async move {
+                write_control_reply(&mut stream, accepted).await;
+            })
+            .await
+            .map(drop);
     }
-    suspender
-        .suspend(|accepted| async move {
-            let reply = if accepted {
-                HOSTED_SUSPEND_ACCEPTED
-            } else {
-                HOSTED_SUSPEND_REFUSED
-            };
-            let sent = async {
-                stream.write_all(reply).await?;
-                stream.shutdown().await
-            };
-            let _ = tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, sent).await;
-        })
+    if line.as_slice() == HOSTED_HIBERNATE_REQUEST {
+        let accepted = hibernate.arm();
+        write_control_reply(&mut stream, accepted).await;
+        return Ok(());
+    }
+    if line.as_slice() == HOSTED_REBIND_COMPLETE_REQUEST {
+        let accepted = hibernate.signal_rebind_ok();
+        write_control_reply(&mut stream, accepted).await;
+        return Ok(());
+    }
+    Ok(())
+}
+
+async fn read_control_line<S: AsyncRead + Unpin>(stream: &mut S) -> Option<Vec<u8>> {
+    const MAX_CONTROL_LINE: usize = 16;
+    let mut line = Vec::with_capacity(MAX_CONTROL_LINE);
+    let read = async {
+        let mut byte = [0_u8; 1];
+        while line.len() < MAX_CONTROL_LINE {
+            match stream.read(&mut byte).await {
+                Ok(0) => return None,
+                Ok(_) => {
+                    line.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        return Some(line);
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    };
+    tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, read)
         .await
-        .map(drop)
+        .ok()
+        .flatten()
+}
+
+async fn write_control_reply<S: AsyncWrite + Unpin>(stream: &mut S, accepted: bool) {
+    let reply = if accepted {
+        HOSTED_SUSPEND_ACCEPTED
+    } else {
+        HOSTED_SUSPEND_REFUSED
+    };
+    let sent = async {
+        stream.write_all(reply).await?;
+        stream.shutdown().await
+    };
+    let _ = tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, sent).await;
 }
 
 #[cfg(test)]

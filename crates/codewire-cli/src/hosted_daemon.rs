@@ -93,7 +93,9 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     let platform = config
         .broker()
         .zip(refusal.clone())
-        .map(|(broker, refusal)| hosted_egress::daemon_platform(broker, refusal, derp_extra_roots));
+        .map(|(broker, refusal)| {
+            hosted_egress::daemon_platform(broker, refusal, derp_extra_roots.clone())
+        });
     #[cfg(target_os = "linux")]
     let route = egress
         .as_ref()
@@ -135,8 +137,9 @@ pub(crate) async fn run_bound_hosted_daemon_with(
                 client.set_guest_carried_self_check(passed);
                 Ok(None)
             } else if let Some(egress) = egress {
-                let trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
-                Ok(Some(trust))
+                let (trust, handle) =
+                    hosted_egress::start(egress, health.unwrap_or_default()).await?;
+                Ok(Some((trust, handle)))
             } else {
                 Ok(None)
             }
@@ -159,6 +162,8 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         .context("install hosted daemon binding")?;
     // The binding was accepted for exactly this Pod.
     let pod_uid = config.pod_uid().to_owned();
+    #[cfg(target_os = "linux")]
+    let binding_config = config.clone();
     let daemon_config = config.into_config(&bound.binding);
     #[cfg(target_os = "linux")]
     hosted_egress::refuse_carried_interception(carried, daemon_config.interception.is_some())?;
@@ -175,19 +180,35 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     // Nothing serves until the egress self-check has passed (cw-security,
     // #4000, #5602): `serve_after` never creates or polls the serving future
     // after a failed check, so nothing listens and no host key is recorded.
-    serve_after(check.finish(), |trust| {
-        let _ = &trust;
+    serve_after(check.finish(), |egress_started| {
+        #[cfg(target_os = "linux")]
+        let (trust, egress_handle) = match egress_started {
+            Some((trust, handle)) => (Some(trust), Some(handle)),
+            None => (None, None),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = &egress_started;
         serve_bound(BoundServe {
             #[cfg(target_os = "linux")]
             trust,
+            #[cfg(target_os = "linux")]
+            egress_handle,
             #[cfg(target_os = "linux")]
             refusal,
             #[cfg(target_os = "linux")]
             measured,
             #[cfg(target_os = "linux")]
+            carried,
+            #[cfg(target_os = "linux")]
+            derp_extra_roots,
+            #[cfg(target_os = "linux")]
             platform,
             #[cfg(target_os = "linux")]
             standard_guest,
+            #[cfg(target_os = "linux")]
+            binding_config,
+            #[cfg(target_os = "linux")]
+            timing,
             paths,
             bound,
             daemon_config,
@@ -345,15 +366,25 @@ struct BoundServe {
     #[cfg(target_os = "linux")]
     trust: Option<codewire_network_session::EgressTrust>,
     #[cfg(target_os = "linux")]
+    egress_handle: Option<hosted_egress::EgressHandle>,
+    #[cfg(target_os = "linux")]
     refusal: Option<codewire_daemon::platform_refusal::PlatformRefusal>,
     #[cfg(target_os = "linux")]
     measured: bool,
     #[cfg(target_os = "linux")]
+    carried: bool,
+    #[cfg(target_os = "linux")]
+    derp_extra_roots: codewire_tailnet::platform_dial::PlatformRoots,
+    #[cfg(target_os = "linux")]
     platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
     /// A standard VM's guest carries this daemon, in either egress mode,
-    /// which can then suspend.
+    /// which can then suspend and hibernate.
     #[cfg(target_os = "linux")]
     standard_guest: bool,
+    #[cfg(target_os = "linux")]
+    binding_config: codewire_daemon::WorkspaceBindingConfig,
+    #[cfg(target_os = "linux")]
+    timing: hosted_binding::BindTiming,
     paths: codewire_daemon::hosted_state::HostedStatePaths,
     bound: hosted_binding::BoundWorkspace,
     daemon_config: codewire_daemon::Config,
@@ -369,13 +400,23 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         trust,
         #[cfg(target_os = "linux")]
+        egress_handle,
+        #[cfg(target_os = "linux")]
         refusal,
         #[cfg(target_os = "linux")]
         measured,
         #[cfg(target_os = "linux")]
+        carried,
+        #[cfg(target_os = "linux")]
+        derp_extra_roots,
+        #[cfg(target_os = "linux")]
         platform,
         #[cfg(target_os = "linux")]
         standard_guest,
+        #[cfg(target_os = "linux")]
+        binding_config,
+        #[cfg(target_os = "linux")]
+        timing,
         paths,
         bound,
         daemon_config,
@@ -410,22 +451,19 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
         codewire_daemon::activity::touch();
         codewire_workspace_access::activity::set_hook(codewire_daemon::activity::touch);
         let _cpu_sampler = codewire_daemon::activity::spawn_cpu_sampler();
-        let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
         let daemon_port = daemon_config
             .listen_addr
             .parse::<std::net::SocketAddr>()
             .map(|address| address.port())
             .ok();
+        let exec_shell = codewire_daemon::env::default_shell_for(&daemon_config);
         // One token cache for the identity socket and the token files.
         let identity_tokens = crate::hosted_identity::tokens(client.clone());
-        // Held closed while the daemon suspends, which only a daemon a
-        // standard VM's guest carries does, guest-carried or broker (#5529).
+        // Held closed while the daemon suspends or hibernates, which only a
+        // daemon a standard VM's guest carries does, guest-carried or broker
+        // (#5529, #6647).
         let quiet = codewire_workspace_access::quiet::PlatformQuiet::new();
-        if standard_guest {
-            codewire_daemon::suspend::install(std::sync::Arc::new(
-                crate::hosted_suspend::HostedSuspend::new(quiet.clone(), client.clone()),
-            ));
-        }
         let access = hosted_access::serve(
             paths.clone(),
             hosted_access::BoundAccess {
@@ -434,25 +472,52 @@ async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
                 daemon_credential: bound.binding.daemon_credential().clone(),
                 grant: bound.access.clone(),
                 daemon_port,
-                exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
+                exec_shell: exec_shell.clone(),
                 measured,
                 platform,
                 identity_tokens: identity_tokens.clone(),
             },
-            connector,
+            connector.clone(),
             client.clone(),
             app_ports.clone(),
-            quiet,
+            quiet.clone(),
             access_shutdown_rx,
         );
-        tokio::spawn(async move {
-            // The sender lives as long as the access task, which ends with
-            // the daemon process.
-            let _keep = _access_shutdown;
+        let access_join = tokio::spawn(async move {
             if let Err(error) = access.await {
                 tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
             }
         });
+        if standard_guest {
+            codewire_daemon::suspend::install(std::sync::Arc::new(
+                crate::hosted_suspend::HostedSuspend::new(quiet.clone(), client.clone()),
+            ));
+            codewire_daemon::hibernate::install(std::sync::Arc::new(
+                crate::hosted_hibernate::HostedHibernate::new(
+                    crate::hosted_hibernate::HostedHibernateConfig {
+                        binding_config,
+                        paths: paths.clone(),
+                        timing,
+                        quiet,
+                        connector,
+                        app_ports: app_ports.clone(),
+                        exec_shell,
+                        daemon_port,
+                        measured,
+                        carried,
+                        refusal: refusal.clone(),
+                        derp_extra_roots,
+                        egress: egress_handle,
+                        identity_tokens: identity_tokens.clone(),
+                    },
+                    crate::hosted_hibernate::AccessTask::new(access_shutdown, access_join),
+                ),
+            ));
+        } else {
+            // Keep the shutdown sender alive for the life of the daemon when
+            // hibernate is not installed.
+            std::mem::forget(access_shutdown);
+        }
         crate::hosted_identity::spawn(&paths.identity_socket, identity_tokens);
     }
     // Only the Linux access server uses the connector, paths and client.

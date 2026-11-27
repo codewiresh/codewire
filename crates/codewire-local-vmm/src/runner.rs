@@ -139,6 +139,14 @@ mod progress;
 mod vz_launch;
 
 #[cfg(target_os = "linux")]
+type HostedRestoreHandover = (
+    codewire_vmm_guest_probe::hosted_control::HostedSettings,
+    codewire_vmm_guest_probe::hosted_control::HostedTokens,
+);
+#[cfg(not(target_os = "linux"))]
+type HostedRestoreHandover = ();
+
+#[cfg(target_os = "linux")]
 pub use checkpoint::Hibernation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use checkpoint::{
@@ -546,6 +554,35 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn start(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        self.start_inner(prepared, None).await
+    }
+
+    /// Starts a restored hosted `standard` VM (`docs/dev/SANDBOX-SLEEP.md`,
+    /// #6647): runs `CheckpointAction::Resume`, delivers the new Pod's
+    /// `RestoreSettings` and `Tokens` while `/workload` is still frozen, and
+    /// only then sends `CheckpointAction::Thaw`. Any failure terminates the
+    /// VMM immediately.
+    #[cfg(target_os = "linux")]
+    pub async fn start_hosted_restored(
+        &self,
+        prepared: PreparedVm,
+        restore_settings: codewire_vmm_guest_probe::hosted_control::HostedSettings,
+        restore_tokens: codewire_vmm_guest_probe::hosted_control::HostedTokens,
+    ) -> Result<RunningVm, RunnerError> {
+        if prepared.request.checkpoint.is_none() {
+            return Err(RunnerError::Checkpoint(
+                "start_hosted_restored requires a checkpoint restore request",
+            ));
+        }
+        self.start_inner(prepared, Some((restore_settings, restore_tokens)))
+            .await
+    }
+
+    async fn start_inner(
+        &self,
+        prepared: PreparedVm,
+        hosted_restore: Option<HostedRestoreHandover>,
+    ) -> Result<RunningVm, RunnerError> {
         #[cfg(target_os = "linux")]
         preflight()?;
         self.artifacts.revalidate()?;
@@ -571,11 +608,23 @@ impl CloudHypervisorRunner {
             &prepared.paths.seed_disk,
             prepared.request.cw_runtime_catalog_generation.as_deref(),
         )?;
-        self.launch(prepared).await
+        #[cfg(target_os = "linux")]
+        {
+            self.launch(prepared, hosted_restore).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = hosted_restore;
+            self.launch(prepared).await
+        }
     }
 
     #[cfg(target_os = "linux")]
-    async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+    async fn launch(
+        &self,
+        prepared: PreparedVm,
+        hosted_restore: Option<HostedRestoreHandover>,
+    ) -> Result<RunningVm, RunnerError> {
         let launching = std::time::Instant::now();
         let mut direct_share_startup = DirectShareStartup::start(
             self.artifacts
@@ -645,18 +694,87 @@ impl CloudHypervisorRunner {
             .await?;
             api.ping().await?;
             let vmm_ready = spawning.elapsed();
-            // A restored VM resumes frozen: it moves to this boot's identity
-            // and thaws before anything else reaches it (#3046 R4).
+            // A restored VM resumes frozen: it moves to this boot's identity,
+            // receives any hosted restore settings & tokens while still frozen
+            // (#6647), and thaws before anything else reaches it (#3046 R4).
             let restored = match &prepared.request.checkpoint {
                 Some(_) => {
-                    let mut report = checkpoint::resume_restored(
-                        &prepared.paths.vsock_socket,
-                        &prepared.token,
-                        prepared.request.vm_id,
-                        prepared.request.generation,
-                        self.guest_checkpoint_request_abi()?,
-                    )
-                    .await?;
+                    let abi = self.guest_checkpoint_request_abi()?;
+                    let mut report = {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if let Some((restore_settings, restore_tokens)) = hosted_restore {
+                                let frozen = checkpoint::resume_restored_frozen(
+                                    &prepared.paths.vsock_socket,
+                                    &prepared.token,
+                                    prepared.request.vm_id,
+                                    prepared.request.generation,
+                                    abi,
+                                )
+                                .await?;
+                                hosted::send_hosted_to(
+                                    &prepared.paths.vsock_socket,
+                                    &prepared.token,
+                                    prepared.request.vm_id,
+                                    prepared.request.generation,
+                                    &codewire_vmm_guest_probe::hosted_control::HostedMessage::RestoreSettings(
+                                        restore_settings,
+                                    ),
+                                )
+                                .await
+                                .map_err(|_| {
+                                    RunnerError::Checkpoint(
+                                        "could not deliver restored Pod settings before thaw",
+                                    )
+                                })?;
+                                hosted::send_hosted_to(
+                                    &prepared.paths.vsock_socket,
+                                    &prepared.token,
+                                    prepared.request.vm_id,
+                                    prepared.request.generation,
+                                    &codewire_vmm_guest_probe::hosted_control::HostedMessage::Tokens(
+                                        restore_tokens,
+                                    ),
+                                )
+                                .await
+                                .map_err(|_| {
+                                    RunnerError::Checkpoint(
+                                        "could not deliver restored Pod tokens before thaw",
+                                    )
+                                })?;
+                                checkpoint::thaw_restored(
+                                    frozen,
+                                    &prepared.paths.vsock_socket,
+                                    &prepared.token,
+                                    prepared.request.vm_id,
+                                    prepared.request.generation,
+                                    abi,
+                                )
+                                .await?
+                            } else {
+                                checkpoint::resume_restored(
+                                    &prepared.paths.vsock_socket,
+                                    &prepared.token,
+                                    prepared.request.vm_id,
+                                    prepared.request.generation,
+                                    abi,
+                                )
+                                .await?
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = hosted_restore;
+                            checkpoint::resume_restored(
+                                &prepared.paths.vsock_socket,
+                                &prepared.token,
+                                prepared.request.vm_id,
+                                prepared.request.generation,
+                                abi,
+                            )
+                            .await?
+                        }
+                    };
                     report.admit = prepared.restore_admit.unwrap_or_default();
                     report.shares = shares_started;
                     report.vmm = vmm_ready;

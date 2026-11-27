@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
+use super::hibernate::HibernateControl;
 use super::suspend::{PausableVm, Suspender};
 use super::*;
 use crate::runner::RunningVm;
@@ -262,11 +263,24 @@ pub(super) async fn hand_over(
     Ok(())
 }
 
-/// The guest's channels on the host: the Pod's two published ports in, each
-/// connection waking a suspended VM first; the guest's suspend requests
-/// ([`super::suspend`]); and the hosted workload's output out to this
-/// container's log ([`super::guest_log`]).
-pub(super) async fn open_guest_channels<V: PausableVm>(
+/// Guest-to-host control channels: vsock `7784` (suspend, hibernate,
+/// `rebind-ok`) and guest log forwarding. Opened immediately on both cold and
+/// restored boots without opening Pod TCP ports `7777`/`2222`.
+pub(super) fn open_control_channels<V: PausableVm>(
+    vsock_socket: &Path,
+    suspender: Arc<Suspender<V>>,
+    hibernate: Arc<HibernateControl>,
+) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
+    Ok(vec![
+        super::suspend::listen(vsock_socket, suspender, hibernate)?,
+        super::guest_log::forward(vsock_socket)?,
+    ])
+}
+
+/// The Pod's two published TCP ports (`7777` and `2222`), each waking a
+/// suspended VM first. On a restored boot these are opened ONLY after the
+/// restored daemon signals `rebind-ok\n` (`docs/dev/SANDBOX-SLEEP.md`, #6647).
+pub(super) async fn open_published_ports<V: PausableVm>(
     vsock_socket: &Path,
     suspender: Arc<Suspender<V>>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, PodRuntimeError> {
@@ -280,8 +294,6 @@ pub(super) async fn open_guest_channels<V: PausableVm>(
             Arc::clone(&suspender),
         )));
     }
-    tasks.push(super::suspend::listen(vsock_socket, suspender)?);
-    tasks.push(super::guest_log::forward(vsock_socket)?);
     Ok(tasks)
 }
 

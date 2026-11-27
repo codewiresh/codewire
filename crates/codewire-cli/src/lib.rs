@@ -28,6 +28,8 @@ mod hosted_daemon;
 pub mod hosted_egress;
 mod hosted_exec;
 #[cfg(target_os = "linux")]
+mod hosted_hibernate;
+#[cfg(target_os = "linux")]
 mod hosted_identity;
 #[cfg(target_os = "linux")]
 pub mod hosted_listener;

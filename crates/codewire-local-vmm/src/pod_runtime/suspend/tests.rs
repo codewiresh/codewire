@@ -370,7 +370,12 @@ async fn requests_are_answered_at_most_once_a_second() {
     let vsock_socket = directory.path().join("vsock");
     let (vm, current, records) = parts();
     let suspender = Arc::new(suspender(&vm, &current, &records));
-    let listening = listen(&vsock_socket, Arc::clone(&suspender)).unwrap();
+    let listening = listen(
+        &vsock_socket,
+        Arc::clone(&suspender),
+        Arc::new(HibernateControl::normal()),
+    )
+    .unwrap();
     let path = super::super::guest_log::host_socket(&vsock_socket, HOSTED_SUSPEND_VSOCK_PORT);
 
     let mut answered = Vec::new();
@@ -480,4 +485,67 @@ async fn a_connection_on_a_published_port_wakes_the_vm_before_it_reaches_the_gue
         serving.abort();
         guest.abort();
     }
+}
+
+async fn ask_with_hibernate(
+    suspender: &Suspender<FakeVm>,
+    hibernate: &HibernateControl,
+    request: &[u8],
+) -> Vec<u8> {
+    let (mut guest, host) = tokio::io::duplex(64);
+    guest.write_all(request).await.unwrap();
+    let answered = tokio::time::timeout(BOUND, answer_with_hibernate(host, suspender, hibernate));
+    let (result, reply) = tokio::join!(answered, async {
+        let mut reply = Vec::new();
+        let _ = tokio::time::timeout(BOUND, guest.read_to_end(&mut reply)).await;
+        reply
+    });
+    result.expect("the answer hung").unwrap();
+    reply
+}
+
+/// cw-security (#6647, #6652): on vsock 7784, `rebind-ok\n` is refused on a
+/// normal boot, accepted once on a restoring boot (never re-armable), and
+/// `suspend\n` is refused once `hibernate\n` is armed.
+#[tokio::test]
+async fn vsock_7784_enforces_hibernate_and_one_shot_rebind_ok() {
+    let (vm, current, records) = parts();
+    let suspender = suspender(&vm, &current, &records);
+
+    // Normal boot: rebind-ok is refused; hibernate arms once and blocks suspend.
+    let normal = HibernateControl::normal();
+    assert_eq!(
+        ask_with_hibernate(&suspender, &normal, HOSTED_REBIND_COMPLETE_REQUEST).await,
+        b"no\n"
+    );
+    assert_eq!(
+        ask_with_hibernate(&suspender, &normal, HOSTED_HIBERNATE_REQUEST).await,
+        b"ok\n"
+    );
+    assert!(normal.is_armed());
+    assert_eq!(
+        ask_with_hibernate(&suspender, &normal, HOSTED_HIBERNATE_REQUEST).await,
+        b"no\n"
+    );
+    assert_eq!(
+        ask_with_hibernate(&suspender, &normal, HOSTED_SUSPEND_REQUEST).await,
+        b"no\n"
+    );
+    assert!(vm.calls().is_empty());
+
+    // Restoring boot: hibernate refused before rebind-ok; rebind-ok accepted once only.
+    let restoring = HibernateControl::awaiting_rebind();
+    assert_eq!(
+        ask_with_hibernate(&suspender, &restoring, HOSTED_HIBERNATE_REQUEST).await,
+        b"no\n"
+    );
+    assert_eq!(
+        ask_with_hibernate(&suspender, &restoring, HOSTED_REBIND_COMPLETE_REQUEST).await,
+        b"ok\n"
+    );
+    assert!(restoring.is_rebound());
+    assert_eq!(
+        ask_with_hibernate(&suspender, &restoring, HOSTED_REBIND_COMPLETE_REQUEST).await,
+        b"no\n"
+    );
 }

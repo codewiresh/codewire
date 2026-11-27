@@ -281,26 +281,85 @@ async fn check_carried<P: SelfCheckProbes>(
     )
 }
 
+/// Live broker-mode egress TUN + abort handle so a restored `standard` Sandbox
+/// can stop the old Pod's egress stream and restart it against the new Pod's
+/// `cw-egress` address and `CODEWIRE_POD_UID` over the same `cwegress0` TUN
+/// (#6647).
+pub(crate) struct EgressHandle {
+    tun: Arc<AsyncFd<OwnedFd>>,
+    task: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl EgressHandle {
+    /// Stops the old Pod's egress stream immediately (leaving the TUN open).
+    pub(crate) fn stop_stream(&self) {
+        if let Some(handle) = self
+            .task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            handle.abort();
+        }
+    }
+
+    /// Restarts the broker egress loop for a restored Pod's new settings and
+    /// waits for its first self-check to pass before the daemon serves again.
+    pub(crate) async fn restart(
+        &self,
+        settings: EgressSettings,
+        refusal: codewire_daemon::platform_refusal::PlatformRefusal,
+    ) -> anyhow::Result<EgressTrust> {
+        self.stop_stream();
+        let (ready, ready_rx) = oneshot::channel();
+        let mut events = LoggedEvents::new(Some(ready)).reporting_to(refusal);
+        let config = HostedEgressConfig::HOSTED;
+        let connector = PodConnector::new(
+            settings.stream_addr,
+            EGRESS_TOKEN_PATH.into(),
+            settings.pod_uid,
+            config.self_check_bound + PROBE_TIMEOUT,
+        );
+        let dns = settings.cluster_dns;
+        let tun = Arc::clone(&self.tun);
+        let join = tokio::spawn(async move {
+            let routing_log = Mutex::new(RoundLog::default());
+            run(
+                &config,
+                &connector,
+                || after_routing(routing::verify, &routing_log, pod_probes(dns)),
+                tun,
+                &mut events,
+            )
+            .await
+        });
+        *self.task.lock().unwrap_or_else(PoisonError::into_inner) = Some(join.abort_handle());
+        tracing::info!("hosted daemon waiting for restored Pod egress self-check");
+        ready_rx
+            .await
+            .map_err(|_| anyhow!("the restored egress loop ended before its self-check passed"))
+    }
+}
+
 /// Attach the TUN, start the egress loop, and return once the first
-/// self-check has passed, with that session's egress trust, which the daemon
-/// installs before it serves (#4001). The loop runs for as long as the daemon
-/// does.
-///
-/// `refusal` is where the loop reports what redialling cannot heal, for
-/// GetHealth: cw-egress refusing this daemon's session version.
+/// self-check has passed, with that session's egress trust and a handle to
+/// restart the loop after a hibernate restore (#4001, #6647).
 pub(crate) async fn start(
     settings: EgressSettings,
     refusal: codewire_daemon::platform_refusal::PlatformRefusal,
-) -> anyhow::Result<EgressTrust> {
-    let (ready, ready_rx) = oneshot::channel();
-    spawn(
-        settings,
-        LoggedEvents::new(Some(ready)).reporting_to(refusal),
-    )?;
-    tracing::info!("hosted daemon waiting for its first egress self-check");
-    ready_rx
-        .await
-        .map_err(|_| anyhow!("the egress loop ended before its first self-check passed"))
+) -> anyhow::Result<(EgressTrust, EgressHandle)> {
+    let tun = codewire_vmm_guest_probe::tun::open(HOSTED_TUN_NAME)
+        .map_err(|error| anyhow!("attach the egress TUN {HOSTED_TUN_NAME}: {error}"))?;
+    #[allow(deprecated)]
+    // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case, as for the guest's TUN.
+    let tun: Arc<AsyncFd<OwnedFd>> =
+        Arc::new(AsyncFd::new(tun).context("register the egress TUN")?);
+    let handle = EgressHandle {
+        tun,
+        task: Mutex::new(None),
+    };
+    let trust = handle.restart(settings, refusal).await?;
+    Ok((trust, handle))
 }
 
 /// Attach the TUN and run the egress loop in the background, reporting to

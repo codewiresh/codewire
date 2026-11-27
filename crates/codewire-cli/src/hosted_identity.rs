@@ -4,7 +4,7 @@
 //! the identity token files.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use codewire_daemon::identity_socket::{
     self, IdentityRefusal, IdentityTokenSource, IdentityTokens, IssuedIdentityToken,
@@ -12,19 +12,36 @@ use codewire_daemon::identity_socket::{
 
 use crate::hosted_binding::BindingClient;
 
-pub(crate) struct BindingTokens(Arc<BindingClient>);
+pub(crate) struct BindingTokens(RwLock<Arc<BindingClient>>);
 
 /// The one token cache of the bound daemon.
 pub(crate) type SandboxTokens = Arc<IdentityTokens<BindingTokens>>;
 
 /// The cache, minting through the binding client.
 pub(crate) fn tokens(client: Arc<BindingClient>) -> SandboxTokens {
-    Arc::new(IdentityTokens::new(BindingTokens(client)))
+    Arc::new(IdentityTokens::new(BindingTokens(RwLock::new(client))))
+}
+
+/// Switches the shared identity socket and token-file cache to a restored
+/// Pod's binding client and flushes any cached tokens from the previous Pod
+/// (#6647).
+pub(crate) fn replace_client(tokens: &SandboxTokens, client: Arc<BindingClient>) {
+    *tokens
+        .source()
+        .0
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = client;
+    tokens.clear_cache();
 }
 
 impl IdentityTokenSource for BindingTokens {
     async fn issue(&self, resource: &str) -> Result<IssuedIdentityToken, IdentityRefusal> {
-        self.0.issue_identity_token(resource).await
+        let client = self
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        client.issue_identity_token(resource).await
     }
 }
 

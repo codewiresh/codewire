@@ -36,6 +36,7 @@ use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError};
 
 mod baked_catalog;
 mod guest_log;
+mod hibernate;
 mod hosted;
 mod suspend;
 pub use baked_catalog::prepare_baked_catalog;
@@ -69,8 +70,13 @@ const ROOT_DISK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// names the VM's files and channel, never the environment.
 const POD_VM_ID: Uuid = Uuid::from_u128(0x5ead_0001_0000_4000_8000_0000_0000_0001);
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a restored daemon has to re-bind and send `rebind-ok\n` before
+/// falling back to a clean cold boot from disks (#6647).
+const REBIND_TIMEOUT: Duration = Duration::from_secs(90);
 /// Inside the Pod's 60 s grace: the guest powers off, else the VMM stops.
 const STOP_TIMEOUT: Duration = Duration::from_secs(45);
+/// Grace budget for writing a hibernate memory image on SIGTERM.
+const HIBERNATE_TIMEOUT: Duration = Duration::from_secs(45);
 const EXIT_POLL: Duration = Duration::from_millis(500);
 const GENERATION_NAME: &str = "pod-generation";
 
@@ -138,6 +144,14 @@ pub struct PodSettings {
     /// `CODEWIRE_WORKSPACE_INIT`, which orchestration renders on every
     /// standard Pod (`image` or `systemd`). The runtime never defaults it.
     pub workspace_init: codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit,
+    /// `CODEWIRE_VM_RESTORE_GENERATION`: when set, this Pod attempts to
+    /// restore the matching hibernate memory image once, falling back to a
+    /// clean cold boot from disks on any mismatch or error (#6647).
+    pub restore_generation: Option<u64>,
+    /// `CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST`: the digest of this Pod's
+    /// runtime image (`sha256:<64 hex>`), recorded beside a hibernate image
+    /// and checked before restore (#6647).
+    pub runtime_image_digest: Option<String>,
 }
 
 /// How the guest's workload reaches the network (#5602).
@@ -249,6 +263,34 @@ impl PodSettings {
                     ));
                 }
             },
+            restore_generation: match variable(
+                codewire_daemon_proto::POD_RUNTIME_RESTORE_GENERATION_ENV,
+            )
+            .as_deref()
+            {
+                None | Some("") => None,
+                Some(raw) => Some(
+                    raw.parse::<u64>()
+                        .ok()
+                        .filter(|generation| *generation >= 1)
+                        .ok_or(PodRuntimeError::Setting(
+                            codewire_daemon_proto::POD_RUNTIME_RESTORE_GENERATION_ENV,
+                        ))?,
+                ),
+            },
+            runtime_image_digest: match variable(
+                codewire_daemon_proto::POD_RUNTIME_IMAGE_DIGEST_ENV,
+            )
+            .as_deref()
+            {
+                None | Some("") => None,
+                Some(raw) if hibernate::is_valid_runtime_image_digest(raw) => Some(raw.to_owned()),
+                Some(_) => {
+                    return Err(PodRuntimeError::Setting(
+                        codewire_daemon_proto::POD_RUNTIME_IMAGE_DIGEST_ENV,
+                    ));
+                }
+            },
         };
         if !settings
             .attachment(Path::new(IMAGE_DISK_DIRECTORY))
@@ -346,8 +388,59 @@ pub async fn run(
         baked_catalog::resolve_cw_runtime(&engine_root, &paths.cw_runtime_lock)?;
     let runner = runner.with_cw_runtime_root(cw_runtime_root)?;
     let cw_runtime_ms = phase.elapsed().as_millis();
+    tokio::pin!(stop);
+
+    if let Some(expected_gen) = settings.restore_generation {
+        let vmm_sha = runner.vmm_identity().1;
+        match hibernate::admit_hibernate_restore(&engine_root, settings, expected_gen, &vmm_sha) {
+            Ok(record) => {
+                let phase = std::time::Instant::now();
+                let restore_request = boot_request(
+                    settings,
+                    paths,
+                    &engine_root,
+                    &image,
+                    catalog.clone(),
+                    Some(record.to_restore_boot()),
+                )?;
+                let request_ms = phase.elapsed().as_millis();
+                let timings = BootTimings {
+                    started,
+                    runner_ms,
+                    image_ms,
+                    cw_runtime_ms,
+                    request_ms,
+                };
+                match restore_and_wait(
+                    &runner,
+                    &engine_root,
+                    restore_request,
+                    expected_gen,
+                    settings,
+                    paths,
+                    timings,
+                    stop.as_mut(),
+                )
+                .await
+                {
+                    RestoreOutcome::Finished(result) => return result,
+                    RestoreOutcome::Fallback(reason) => {
+                        hibernate::clear_hibernate_artifacts(&engine_root);
+                        eprintln!("{}", hibernate::format_fallback_line(expected_gen, reason));
+                    }
+                }
+            }
+            Err(reason) => {
+                eprintln!("{}", hibernate::format_fallback_line(expected_gen, reason));
+            }
+        }
+    } else {
+        // Cold boot: remove any leftover hibernate files from a prior boot.
+        hibernate::clear_hibernate_artifacts(&engine_root);
+    }
+
     let phase = std::time::Instant::now();
-    let request = boot_request(settings, paths, &engine_root, &image, catalog)?;
+    let request = boot_request(settings, paths, &engine_root, &image, catalog, None)?;
     let request_ms = phase.elapsed().as_millis();
     let timings = BootTimings {
         started,
@@ -356,7 +449,16 @@ pub async fn run(
         cw_runtime_ms,
         request_ms,
     };
-    boot_and_wait(&runner, request, settings, paths, timings, stop).await
+    boot_and_wait(
+        &runner,
+        &engine_root,
+        request,
+        settings,
+        paths,
+        timings,
+        stop,
+    )
+    .await
 }
 
 /// The published disk, admitted and checked against the image the project
@@ -442,13 +544,15 @@ fn admit_vm_state(engine_root: &Path, vm_state: VmState) -> Result<(), PodRuntim
 }
 
 /// The VM's disks on the sandbox's volume, its one-boot setup pack on a new
-/// root, and the runner's request for this boot.
+/// root, and the runner's request for this boot. When `checkpoint` is `Some`,
+/// builds a hibernate-restore request (no setup pack; existing disks).
 fn boot_request(
     settings: &PodSettings,
     paths: &PodPaths,
     engine_root: &Path,
     image: &AdmittedImage,
     cw_runtime_catalog_generation: String,
+    checkpoint: Option<crate::runner::RestoreBoot>,
 ) -> Result<CreateVmRequest, PodRuntimeError> {
     admit_vm_state(engine_root, settings.vm_state)?;
     // The disks are sparse files on the sandbox's volume, so their sizes must
@@ -470,7 +574,7 @@ fn boot_request(
     .to_string();
     let root =
         ensure_empty_root_generation(engine_root, POD_VM_ID, &storage_generation, ROOT_DISK_BYTES)?;
-    let setup = if root.created {
+    let setup = if root.created && checkpoint.is_none() {
         let pack = ensure_published_setup_pack(
             engine_root,
             POD_VM_ID,
@@ -509,7 +613,7 @@ fn boot_request(
         memory_mib: settings.memory_mib,
         setup,
         // The Pod's ports reach the guest through its own ingress, not the
-        // runner's host ports (see `hosted::open_guest_channels`).
+        // runner's host ports (see `hosted::open_published_ports`).
         host_ports: Vec::new(),
         mesh: None,
         direct_shares: Vec::new(),
@@ -525,14 +629,206 @@ fn boot_request(
         udp_peers: settings.udp_peers.clone(),
         intercepts: InterceptSet::default(),
         credential_placeholders: Default::default(),
-        checkpoint: None,
+        checkpoint,
     })
 }
 
+enum RestoreOutcome {
+    Finished(Result<(), PodRuntimeError>),
+    Fallback(hibernate::FallbackReason),
+}
+
+/// Attempts to restore a hibernated VM (`docs/dev/SANDBOX-SLEEP.md`, #6647):
+/// 1. Starts VMM from `checkpoints/in`, delivers `RestoreSettings` + `Tokens`
+///    while `/workload` is frozen, then thaws `/workload`.
+/// 2. Keeps Pod TCP ports `7777` & `2222` closed and `daemon/ready` absent
+///    until the restored daemon signals `rebind-ok\n` over vsock `7784`.
+/// 3. On `rebind-ok\n`, deletes the memory file & metadata, opens `7777` and
+///    `2222`, marks Ready, emits `vm-hibernate-record {"event":"restored"}`,
+///    and enters the steady-state run loop.
+/// 4. On any restore or re-bind failure, terminates the VMM cleanly and
+///    returns `RestoreOutcome::Fallback` so the caller cold-boots from disks.
+#[allow(clippy::too_many_arguments)]
+async fn restore_and_wait(
+    runner: &CloudHypervisorRunner,
+    engine_root: &Path,
+    request: CreateVmRequest,
+    restore_generation: u64,
+    settings: &PodSettings,
+    paths: &PodPaths,
+    timings: BootTimings,
+    mut stop: std::pin::Pin<&mut (impl std::future::Future<Output = ()> + ?Sized)>,
+) -> RestoreOutcome {
+    eprintln!(
+        "standard runtime: restoring hibernated VM (generation {restore_generation}) over image disk {}",
+        settings.image_disk_id
+    );
+    let hosted_settings =
+        match hosted::read_settings(|name| std::env::var(name).ok(), &paths.hosted) {
+            Ok(settings) => settings,
+            Err(error) => return RestoreOutcome::Finished(Err(error)),
+        };
+    let tokens = match hosted::read_tokens(&paths.hosted, settings.egress_mode) {
+        Ok(tokens) => tokens,
+        Err(error) => return RestoreOutcome::Finished(Err(error)),
+    };
+    let booting = std::time::Instant::now();
+    let prepared = match runner
+        .prepare_hosted(
+            request,
+            settings.egress_mode.hosted(),
+            settings.workspace_init,
+        )
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("standard runtime: hibernate restore prepare failed: {error}");
+            return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
+        }
+    };
+    let mut running = match runner
+        .start_hosted_restored(prepared, hosted_settings, tokens.clone())
+        .await
+    {
+        Ok(running) => running,
+        Err(error) => {
+            eprintln!("standard runtime: hibernate restore start failed: {error}");
+            return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
+        }
+    };
+    let suspender = Arc::new(suspend::Suspender::new(
+        running.suspend_control(),
+        running.generation(),
+        tokens,
+        {
+            let hosted = paths.hosted.clone();
+            let mode = settings.egress_mode;
+            Box::new(move || hosted::read_tokens(&hosted, mode))
+        },
+        Box::new(|record| eprintln!("{}", record.line())),
+    ));
+    let hibernate_control = Arc::new(hibernate::HibernateControl::awaiting_rebind());
+    let executable = match std::env::current_exe().and_then(fs::canonicalize) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = running.stop_discarding_guest_state().await;
+            return RestoreOutcome::Finished(Err(error.into()));
+        }
+    };
+    if let Err(error) = running
+        .start_network_worker(&executable, BOOT_TIMEOUT)
+        .await
+    {
+        eprintln!("standard runtime: restored VM network worker failed: {error}");
+        let _ = running.stop_discarding_guest_state().await;
+        return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
+    }
+    let control_tasks = match hosted::open_control_channels(
+        &running.paths().vsock_socket,
+        Arc::clone(&suspender),
+        Arc::clone(&hibernate_control),
+    ) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            eprintln!("standard runtime: restored VM control channels failed: {error}");
+            let _ = running.stop_discarding_guest_state().await;
+            return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
+        }
+    };
+
+    // Wait for `rebind-ok\n` while keeping Pod ports 7777 & 2222 closed.
+    let rebind_deadline = tokio::time::Instant::now() + REBIND_TIMEOUT;
+    let rebound = loop {
+        tokio::select! {
+            () = hibernate_control.wait_for_rebind() => break Ok(true),
+            () = &mut stop => {
+                // Pod deleted while still restoring: abort cleanly.
+                for task in control_tasks {
+                    task.abort();
+                }
+                let _ = running.stop_discarding_guest_state().await;
+                return RestoreOutcome::Finished(Ok(()));
+            }
+            () = tokio::time::sleep_until(rebind_deadline) => {
+                break Err("timed out waiting for restored daemon re-bind");
+            }
+            () = tokio::time::sleep(EXIT_POLL) => {
+                match running.try_exit() {
+                    Ok(ExitClass::StillRunning) => {}
+                    Ok(exit) => {
+                        eprintln!("standard runtime: restored VM exited before re-bind: {exit:?}");
+                        break Err("restored VM exited before re-bind");
+                    }
+                    Err(error) => {
+                        eprintln!("standard runtime: restored VM exit poll failed: {error}");
+                        break Err("restored VM exit poll failed");
+                    }
+                }
+            }
+        }
+    };
+
+    if let Err(reason) = rebound {
+        eprintln!("standard runtime: {reason}; falling back to cold boot");
+        for task in control_tasks {
+            task.abort();
+        }
+        let _ = running.stop_discarding_guest_state().await;
+        return RestoreOutcome::Fallback(hibernate::FallbackReason::RebindFailed);
+    }
+
+    // Re-bind succeeded: delete memory file & metadata BEFORE opening ports
+    // and marking Ready (`docs/dev/SANDBOX-SLEEP.md`, "After a restore").
+    hibernate::clear_hibernate_artifacts(engine_root);
+    let published_tasks =
+        match hosted::open_published_ports(&running.paths().vsock_socket, Arc::clone(&suspender))
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                for task in control_tasks {
+                    task.abort();
+                }
+                let _ = running.stop().await;
+                return RestoreOutcome::Finished(Err(error));
+            }
+        };
+    if let Err(error) = mark_ready(&paths.run_directory) {
+        for task in control_tasks.into_iter().chain(published_tasks) {
+            task.abort();
+        }
+        let _ = running.stop().await;
+        return RestoreOutcome::Finished(Err(error.into()));
+    }
+    eprintln!("{}", hibernate::format_restored_line(restore_generation));
+    eprintln!(
+        "standard runtime: restored VM is serving after {} ms (total_ms={})",
+        booting.elapsed().as_millis(),
+        timings.started.elapsed().as_millis(),
+    );
+
+    let result = run_until_stop(
+        runner,
+        engine_root,
+        running,
+        suspender,
+        hibernate_control,
+        control_tasks,
+        published_tasks,
+        settings,
+        paths,
+        stop,
+    )
+    .await;
+    RestoreOutcome::Finished(result)
+}
+
 /// Boots the VM, reports it ready, and runs it until `stop` resolves or the
-/// VM ends; only a guest shutdown is a clean end.
+/// VM ends; only a guest shutdown (or a clean hibernate on SIGTERM) is a clean end.
 async fn boot_and_wait(
     runner: &CloudHypervisorRunner,
+    engine_root: &Path,
     request: CreateVmRequest,
     settings: &PodSettings,
     paths: &PodPaths,
@@ -564,8 +860,8 @@ async fn boot_and_wait(
     let phase = std::time::Instant::now();
     hosted::hand_over(&running, hosted_settings, tokens.clone()).await?;
     let handover_ms = phase.elapsed().as_millis();
-    // Suspend (#5529): its pauses and wakes, and from here on every token
-    // delivery, which it holds while the VM is paused.
+    // Suspend (#5529) & hibernate (#6647): pauses/wakes, hibernate arming, and
+    // from here on every token delivery, which it holds while the VM is paused.
     let suspender = Arc::new(suspend::Suspender::new(
         running.suspend_control(),
         running.generation(),
@@ -577,13 +873,19 @@ async fn boot_and_wait(
         },
         Box::new(|record| eprintln!("{}", record.line())),
     ));
+    let hibernate_control = Arc::new(hibernate::HibernateControl::normal());
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let phase = std::time::Instant::now();
     running
         .start_network_worker(&executable, BOOT_TIMEOUT)
         .await?;
-    let _channels =
-        hosted::open_guest_channels(&running.paths().vsock_socket, Arc::clone(&suspender)).await?;
+    let control_tasks = hosted::open_control_channels(
+        &running.paths().vsock_socket,
+        Arc::clone(&suspender),
+        Arc::clone(&hibernate_control),
+    )?;
+    let published_tasks =
+        hosted::open_published_ports(&running.paths().vsock_socket, Arc::clone(&suspender)).await?;
     let network_ms = phase.elapsed().as_millis();
     let phase = std::time::Instant::now();
     let stage = running
@@ -592,6 +894,9 @@ async fn boot_and_wait(
     let guest_ms = phase.elapsed().as_millis();
     if stage.is_failure() {
         // The boot already failed; that error is the one to report.
+        for task in control_tasks.into_iter().chain(published_tasks) {
+            task.abort();
+        }
         let _ = running.stop().await;
         return Err(PodRuntimeError::GuestFailed(format!("{stage:?}")));
     }
@@ -612,9 +917,50 @@ async fn boot_and_wait(
     );
 
     tokio::pin!(stop);
+    run_until_stop(
+        runner,
+        engine_root,
+        running,
+        suspender,
+        hibernate_control,
+        control_tasks,
+        published_tasks,
+        settings,
+        paths,
+        stop,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_until_stop(
+    runner: &CloudHypervisorRunner,
+    engine_root: &Path,
+    mut running: crate::runner::RunningVm,
+    suspender: Arc<suspend::Suspender<crate::runner::SuspendControl>>,
+    hibernate_control: Arc<hibernate::HibernateControl>,
+    control_tasks: Vec<tokio::task::JoinHandle<()>>,
+    published_tasks: Vec<tokio::task::JoinHandle<()>>,
+    settings: &PodSettings,
+    paths: &PodPaths,
+    mut stop: std::pin::Pin<&mut (impl std::future::Future<Output = ()> + ?Sized)>,
+) -> Result<(), PodRuntimeError> {
     let exit = loop {
         tokio::select! {
             () = &mut stop => {
+                if hibernate_control.is_armed() {
+                    return perform_hibernate(
+                        runner,
+                        engine_root,
+                        &mut running,
+                        &suspender,
+                        control_tasks,
+                        published_tasks,
+                        settings,
+                        paths,
+                    )
+                    .await;
+                }
                 eprintln!("standard runtime: stopping the VM");
                 // A paused VM is woken first, so the guest shuts down cleanly.
                 break suspend::stop_awake(
@@ -634,12 +980,104 @@ async fn boot_and_wait(
             }
         }
     };
+    for task in control_tasks.into_iter().chain(published_tasks) {
+        task.abort();
+    }
     clear_ready(&paths.run_directory);
     eprintln!("standard runtime: the VM ended: {exit:?}");
     match exit {
         ExitClass::GuestShutdown => Ok(()),
         other => Err(PodRuntimeError::GuestFailed(format!("{other:?}"))),
     }
+}
+
+/// Runs `CloudHypervisorRunner::hibernate` on Kubernetes SIGTERM when
+/// `hibernate\n` armed the supervisor (`docs/dev/SANDBOX-SLEEP.md`, steps
+/// 2–5), writes the sibling metadata record and host-observed
+/// `vm-hibernate-record` log line, and exits cleanly.
+#[allow(clippy::too_many_arguments)]
+async fn perform_hibernate(
+    runner: &CloudHypervisorRunner,
+    engine_root: &Path,
+    running: &mut crate::runner::RunningVm,
+    suspender: &Arc<suspend::Suspender<crate::runner::SuspendControl>>,
+    control_tasks: Vec<tokio::task::JoinHandle<()>>,
+    published_tasks: Vec<tokio::task::JoinHandle<()>>,
+    settings: &PodSettings,
+    paths: &PodPaths,
+) -> Result<(), PodRuntimeError> {
+    clear_ready(&paths.run_directory);
+    for task in &published_tasks {
+        task.abort();
+    }
+    eprintln!("standard runtime: hibernating the VM");
+    if let Err(error) = suspender.wake().await {
+        eprintln!("standard runtime: hibernate could not wake paused VM: {error}");
+    }
+    let restore_generation = running.generation();
+    let vmm_sha = runner.vmm_identity().1;
+    let runtime_digest = settings.runtime_image_digest.clone().unwrap_or_default();
+    let failure_reason: Option<&'static str> = if hibernate::is_valid_runtime_image_digest(
+        &runtime_digest,
+    ) {
+        match tokio::time::timeout(HIBERNATE_TIMEOUT, runner.hibernate(running, Uuid::new_v4()))
+            .await
+        {
+            Ok(Ok(hib)) => {
+                let record = hibernate::build_record(
+                    settings,
+                    restore_generation,
+                    vmm_sha,
+                    runtime_digest,
+                    hib.restore,
+                );
+                match hibernate::write_hibernate_record(engine_root, &record) {
+                    Ok(()) => {
+                        eprintln!("{}", hibernate::format_hibernated_line(&record));
+                        None
+                    }
+                    Err(error) => {
+                        eprintln!("standard runtime: failed to write hibernate record: {error}");
+                        hibernate::clear_hibernate_artifacts(engine_root);
+                        Some("record-write-failed")
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                eprintln!("standard runtime: hibernate failed: {error}");
+                hibernate::clear_hibernate_artifacts(engine_root);
+                Some("hibernate-failed")
+            }
+            Err(_) => {
+                eprintln!("standard runtime: hibernate timed out");
+                hibernate::clear_hibernate_artifacts(engine_root);
+                Some("hibernate-timed-out")
+            }
+        }
+    } else {
+        eprintln!(
+            "standard runtime: hibernate skipped because CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST is unset"
+        );
+        Some("missing-runtime-image-digest")
+    };
+
+    let result = if let Some(reason) = failure_reason {
+        eprintln!("{}", hibernate::format_hibernate_failed_line(reason));
+        let exit = tokio::time::timeout(STOP_TIMEOUT, running.stop())
+            .await
+            .unwrap_or(Ok(ExitClass::StillRunning))?;
+        match exit {
+            ExitClass::GuestShutdown => Ok(()),
+            other => Err(PodRuntimeError::GuestFailed(format!("{other:?}"))),
+        }
+    } else {
+        Ok(())
+    };
+
+    for task in control_tasks.into_iter().chain(published_tasks) {
+        task.abort();
+    }
+    result
 }
 
 fn ensure_private_dir(path: &Path) -> Result<PathBuf, PodRuntimeError> {
@@ -907,7 +1345,27 @@ mod tests {
             PodSettings::from_environment(environment(&[("CODEWIRE_VM_STATE", "existing")]))
                 .unwrap();
         assert_eq!(existing.vm_state, VmState::Existing);
+        assert_eq!(settings.restore_generation, None);
+        assert_eq!(settings.runtime_image_digest, None);
+        let valid_digest = format!("sha256:{}", "a".repeat(64));
+        let restoring = PodSettings::from_environment(environment(&[
+            ("CODEWIRE_VM_RESTORE_GENERATION", "3"),
+            ("CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", &valid_digest),
+        ]))
+        .unwrap();
+        assert_eq!(restoring.restore_generation, Some(3));
+        assert_eq!(
+            restoring.runtime_image_digest.as_deref(),
+            Some(valid_digest.as_str())
+        );
         for (name, value) in [
+            ("CODEWIRE_VM_RESTORE_GENERATION", "0"),
+            ("CODEWIRE_VM_RESTORE_GENERATION", "abc"),
+            ("CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", "sha256:short"),
+            (
+                "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST",
+                &format!("sha256:{}", "A".repeat(64)),
+            ),
             ("CODEWIRE_VM_DOCKER_DISK_MIB", "lots"),
             ("CODEWIRE_VM_DOCKER_DISK_MIB", "512"),
             ("CODEWIRE_VM_VCPUS", "0"),

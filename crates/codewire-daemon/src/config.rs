@@ -632,6 +632,28 @@ impl WorkspaceBindingConfig {
         self
     }
 
+    /// Update the downward-API Pod UID and optional binding URL for a
+    /// post-hibernate restore in a new Pod (#6647). Refuses a non-canonical
+    /// Pod UID or invalid binding URL.
+    pub fn for_restored_pod(
+        &self,
+        pod_uid: String,
+        binding_url: Option<String>,
+    ) -> Result<Self, ConfigError> {
+        if !canonical_uid(&pod_uid) {
+            return Err(ConfigError::InvalidWorkspaceBinding);
+        }
+        let mut updated = self.clone();
+        updated.pod_uid = pod_uid;
+        if let Some(url) = binding_url {
+            if !valid_binding_url(&url) {
+                return Err(ConfigError::InvalidWorkspaceBinding);
+            }
+            updated.binding_url = url;
+        }
+        Ok(updated)
+    }
+
     pub fn listen_addr(&self) -> &str {
         &self.placement.listen_addr
     }

@@ -165,8 +165,8 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }
 "crates/codewire-cli/src/hosted_binding.rs" = { group = "hosted", count = 18 }
 "crates/codewire-cli/src/hosted_binding/tests.rs" = { group = "hosted", count = 3 }
-"crates/codewire-cli/src/hosted_daemon.rs" = { group = "hosted", count = 36 }
-"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 54 }
+"crates/codewire-cli/src/hosted_daemon.rs" = { group = "hosted", count = 54 }
+"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 55 }
 "crates/codewire-cli/src/process.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/public_fetch.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/http.rs" = { group = "linux-tests", count = 1 }

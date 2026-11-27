@@ -145,7 +145,7 @@ impl SuspendControl {
 
 /// One hosted control exchange with the guest of boot `vm_id`/`generation`
 /// over its hybrid vsock `socket`, keyed by the boot's daemon `token`.
-async fn send_hosted_to(
+pub(super) async fn send_hosted_to(
     socket: &Path,
     token: &str,
     vm_id: Uuid,

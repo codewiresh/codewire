@@ -918,17 +918,25 @@ fn admit_restored_image_disk(
     Err(refused.into())
 }
 
-/// Resume a VM restored from a VM checkpoint, its workload still frozen:
-/// the guest reseeds its RNG with host entropy and moves every boot-scoped
-/// secret to this boot's seed, then thaws. Any failure leaves the workload
-/// frozen; the caller kills the VMM.
-pub(super) async fn resume_restored(
+/// State between `CheckpointAction::Resume` (workload still frozen, boot
+/// identity moved) and `CheckpointAction::Thaw` (#6647).
+pub(super) struct FrozenRestore {
+    operation_id: Uuid,
+    resumed: CheckpointReply,
+    resume_elapsed: Duration,
+}
+
+/// Step 1 of restoring a VM: run `CheckpointAction::Resume` while `/workload`
+/// remains frozen, reseeding RNG, stepping clock, rotating boot identity, and
+/// (on hosted guests) deleting the old daemon credential and arming
+/// `RestoreSettings` (#6647).
+pub(super) async fn resume_restored_frozen(
     socket: &Path,
     token: &str,
     vm_id: Uuid,
     generation: u64,
     abi: u32,
-) -> Result<RestoreReport, RunnerError> {
+) -> Result<FrozenRestore, RunnerError> {
     let operation_id = Uuid::new_v4();
     let mut host_entropy = [0_u8; CHECKPOINT_HOST_ENTROPY_LEN];
     OsRng.fill_bytes(&mut host_entropy);
@@ -953,7 +961,23 @@ pub(super) async fn resume_restored(
             "the restored guest refused to move to this boot's identity",
         ));
     }
-    let resume = started.elapsed();
+    Ok(FrozenRestore {
+        operation_id,
+        resumed,
+        resume_elapsed: started.elapsed(),
+    })
+}
+
+/// Step 2 of restoring a VM: run `CheckpointAction::Thaw` after any pre-thaw
+/// hosted restore settings/tokens handover has completed (#6647).
+pub(super) async fn thaw_restored(
+    frozen: FrozenRestore,
+    socket: &Path,
+    token: &str,
+    vm_id: Uuid,
+    generation: u64,
+    abi: u32,
+) -> Result<RestoreReport, RunnerError> {
     let started = Instant::now();
     let thawed = hook_exchange(
         socket,
@@ -961,7 +985,7 @@ pub(super) async fn resume_restored(
         CheckpointRequest {
             abi,
             action: CheckpointAction::Thaw,
-            operation_id,
+            operation_id: frozen.operation_id,
             vm_id,
             generation,
             host_entropy: [0; CHECKPOINT_HOST_ENTROPY_LEN],
@@ -980,16 +1004,31 @@ pub(super) async fn resume_restored(
         ));
     }
     Ok(RestoreReport {
-        reseeded: resumed.resume.reseeded,
-        vmgenid_driver: resumed.resume.vmgenid_driver,
-        removed_logins: resumed.resume.removed_logins,
-        clock_skew_ms: resumed.clock_skew_ms,
+        reseeded: frozen.resumed.resume.reseeded,
+        vmgenid_driver: frozen.resumed.resume.vmgenid_driver,
+        removed_logins: frozen.resumed.resume.removed_logins,
+        clock_skew_ms: frozen.resumed.clock_skew_ms,
         admit: Duration::ZERO,
         shares: Duration::ZERO,
         vmm: Duration::ZERO,
-        resume,
+        resume: frozen.resume_elapsed,
         thaw: started.elapsed(),
     })
+}
+
+/// Resume a VM restored from a VM checkpoint, its workload still frozen:
+/// the guest reseeds its RNG with host entropy and moves every boot-scoped
+/// secret to this boot's seed, then thaws. Any failure leaves the workload
+/// frozen; the caller kills the VMM.
+pub(super) async fn resume_restored(
+    socket: &Path,
+    token: &str,
+    vm_id: Uuid,
+    generation: u64,
+    abi: u32,
+) -> Result<RestoreReport, RunnerError> {
+    let frozen = resume_restored_frozen(socket, token, vm_id, generation, abi).await?;
+    thaw_restored(frozen, socket, token, vm_id, generation, abi).await
 }
 
 /// Remove the VM checkpoint an earlier boot restored from: no VMM maps it
