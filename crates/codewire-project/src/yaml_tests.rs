@@ -293,3 +293,53 @@ fn idle_suspend_is_read_beside_the_spec_and_written_back() {
         .to_string();
     assert!(error.contains("idle_suspend"), "{error}");
 }
+
+/// `idle_hibernate` sits beside `idle_stop` and `idle_suspend`, outside the
+/// spec (#6647), and must be strictly longer than `idle_suspend` when both are on.
+#[test]
+fn idle_hibernate_is_read_beside_the_spec_validated_against_suspend_and_written_back() {
+    let document =
+        parse_project_yaml("idle_stop: 6h\nidle_suspend: 15m\nidle_hibernate: 6h\n").unwrap();
+    assert_eq!(document.idle_suspend_seconds, Some(900));
+    assert_eq!(document.idle_hibernate_seconds, Some(21_600));
+    assert_eq!(document.spec, ProjectSpec::default());
+    assert!(
+        !String::from_utf8(document.canonical_json().unwrap())
+            .unwrap()
+            .contains("idle"),
+    );
+    let (yaml, parsed) = reparse(&document);
+    assert!(
+        yaml.ends_with("idle_stop: 6h\nidle_suspend: 15m\nidle_hibernate: 6h\n"),
+        "{yaml}"
+    );
+    assert_eq!(parsed, document);
+
+    assert_eq!(
+        parse_project_yaml("idle_hibernate: on\n")
+            .unwrap()
+            .idle_hibernate_seconds,
+        Some(21_600)
+    );
+    assert_eq!(
+        parse_project_yaml("version: 1\n")
+            .unwrap()
+            .idle_hibernate_seconds,
+        None
+    );
+
+    let out_of_range = parse_project_yaml("idle_hibernate: 2m\n")
+        .unwrap_err()
+        .to_string();
+    assert!(out_of_range.contains("idle_hibernate"), "{out_of_range}");
+
+    // Equal to or shorter than idle_suspend when both are enabled is refused.
+    for bad in [
+        "idle_suspend: 30m\nidle_hibernate: 30m\n",
+        "idle_suspend: 1h\nidle_hibernate: 30m\n",
+    ] {
+        let error = parse_project_yaml(bad).unwrap_err().to_string();
+        assert!(error.contains("idle_hibernate"), "{bad}: {error}");
+        assert!(error.contains("idle_suspend"), "{bad}: {error}");
+    }
+}

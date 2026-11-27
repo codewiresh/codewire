@@ -73,8 +73,19 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             .as_ref()
             .map(crate::idle_suspend::IdleSuspendValue::seconds)
             .transpose()?,
+        idle_hibernate_seconds: raw
+            .idle_hibernate
+            .as_ref()
+            .map(crate::idle_hibernate::IdleHibernateValue::seconds)
+            .transpose()?,
         working_directory_explicit,
     };
+    if let (Some(suspend), Some(hibernate)) = (
+        document.idle_suspend_seconds,
+        document.idle_hibernate_seconds,
+    ) {
+        crate::validate_idle_hibernate_after_suspend(suspend, hibernate)?;
+    }
     document.spec.validate()?;
     Ok(document)
 }

@@ -57,11 +57,41 @@ const STATE_DISK_ENVIRONMENT_BOUND_TREES: [&[&str]; 4] = [
     &["codewire", "cw-runtime"],
 ];
 
+/// Host-side hibernate artifacts on a `standard` Sandbox's PVC that a product
+/// snapshot or fork must never keep (`docs/dev/SANDBOX-SLEEP.md`, #6647):
+/// - `runtime/vms/<POD_VM_ID>/checkpoints` holds the VMM memory image
+///   (`memory-ranges`, `config.json`, `state.json`, and any staging tree).
+/// - `runtime/hibernate` holds the sibling hibernate metadata record and
+///   one-shot generation guard.
+const STANDARD_VM_HOST_HIBERNATE_TREES: [&[&str]; 2] = [
+    &[
+        "runtime",
+        "vms",
+        "5ead0001-0000-4000-8000-000000000001",
+        "checkpoints",
+    ],
+    &["runtime", "hibernate"],
+];
+
 /// Clear the nested ext4 `state.raw` image on a `standard` Sandbox's mounted
-/// PVC at `root`. Any missing path, symlink, or e2fsprogs error fails closed.
+/// PVC at `root`, and remove any host-side hibernate memory image or metadata
+/// record so a snapshot or fork always boots clean from disk (#6647). Any
+/// missing state disk, symlink, or e2fsprogs error fails closed.
 pub async fn clear_standard_vm_volume(root: &Path) -> Result<ClearingReport, BlockClearingError> {
     let state_disk = resolve_state_disk(root)?;
-    let report = clear_state_disk(&SystemTools, &state_disk).await?;
+    let mut report = clear_state_disk(&SystemTools, &state_disk).await?;
+    for components in STANDARD_VM_HOST_HIBERNATE_TREES {
+        let removed = super::remove_tree(root, components).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                BlockClearingError::Undecided("standard VM hibernate path contains a symbolic link")
+            } else {
+                BlockClearingError::Wipe(codewire_ext4_scrub::Error::Io(error))
+            }
+        })?;
+        if removed {
+            report.trees_removed += 1;
+        }
+    }
     sync_path(&state_disk)?;
     if let Some(parent) = state_disk.parent() {
         sync_path(parent)?;
@@ -357,5 +387,49 @@ mod tests {
             clear_standard_vm_volume(&linked).await,
             Err(BlockClearingError::Undecided(_))
         ));
+    }
+
+    /// `docs/dev/SANDBOX-SLEEP.md` (#6647): product snapshots and forks never
+    /// keep a hibernate memory file or metadata record, and symlinks planted on
+    /// those paths fail closed without touching their target.
+    #[tokio::test]
+    async fn removes_hibernate_memory_files_and_refuses_symlinks() {
+        let scratch = tempfile::tempdir().unwrap();
+        let pvc = scratch.path().join("pvc");
+        fs::create_dir(&pvc).unwrap();
+        let _disk = make_standard_pvc_with_state_disk(&pvc);
+
+        // Plant sealed (0400) VMM memory files and sibling hibernate metadata.
+        let ckpt_in = pvc.join("runtime/vms/5ead0001-0000-4000-8000-000000000001/checkpoints/in");
+        fs::create_dir_all(&ckpt_in).unwrap();
+        for name in ["config.json", "state.json", "memory-ranges"] {
+            let path = ckpt_in.join(name);
+            fs::write(&path, b"hibernated-ram-and-state").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        let hib_dir = pvc.join("runtime/hibernate");
+        fs::create_dir_all(&hib_dir).unwrap();
+        fs::write(hib_dir.join("record.json"), b"{\"generation\":2}").unwrap();
+        fs::write(hib_dir.join("generation"), b"2\n").unwrap();
+
+        let report = clear_standard_vm_volume(&pvc).await.unwrap();
+        assert_eq!(report.trees_removed, 2);
+        assert!(
+            !pvc.join("runtime/vms/5ead0001-0000-4000-8000-000000000001/checkpoints")
+                .exists()
+        );
+        assert!(!hib_dir.exists());
+
+        // A symlink at checkpoints or hibernate fails closed and never touches its target.
+        let outside = scratch.path().join("outside-keep");
+        fs::create_dir(&outside).unwrap();
+        let victim = outside.join("keep.txt");
+        fs::write(&victim, b"untouched").unwrap();
+        symlink(&outside, &hib_dir).unwrap();
+        assert!(matches!(
+            clear_standard_vm_volume(&pvc).await,
+            Err(BlockClearingError::Undecided(_))
+        ));
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched");
     }
 }

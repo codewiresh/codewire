@@ -14,6 +14,7 @@ pub use codewire_access::AccessProfileReference;
 
 pub mod create_input;
 mod environment_name;
+mod idle_hibernate;
 mod idle_stop;
 mod idle_suspend;
 mod normalize;
@@ -32,6 +33,10 @@ mod selection_tests;
 mod yaml_tests;
 
 pub use environment_name::{EnvironmentPlacement, environment_name_taken};
+pub use idle_hibernate::{
+    IDLE_HIBERNATE_FIELD, IDLE_HIBERNATE_ON_SECONDS, format_idle_hibernate, parse_idle_hibernate,
+    validate_idle_hibernate_after_suspend, validate_idle_hibernate_seconds,
+};
 pub use idle_stop::{
     IDLE_STOP_FIELD, IDLE_STOP_ON_SECONDS, MAX_IDLE_STOP_SECONDS, MIN_IDLE_STOP_SECONDS,
     format_idle_stop, idle_stop_notice, idle_stop_reason, idle_stop_words, parse_idle_stop,
@@ -136,6 +141,9 @@ pub struct ProjectDocument {
     /// `idle_suspend` in seconds, 0 for off; `None` when the file does not
     /// say. Like `idle_stop`, never part of `spec` (#5529).
     pub idle_suspend_seconds: Option<i32>,
+    /// `idle_hibernate` in seconds, 0 for off; `None` when the file does not
+    /// say. Like `idle_stop` and `idle_suspend`, never part of `spec` (#6647).
+    pub idle_hibernate_seconds: Option<i32>,
     working_directory_explicit: bool,
 }
 
@@ -523,6 +531,8 @@ struct RawProject {
     idle_stop: Option<idle_stop::IdleStopValue>,
     #[serde(default)]
     idle_suspend: Option<idle_suspend::IdleSuspendValue>,
+    #[serde(default)]
+    idle_hibernate: Option<idle_hibernate::IdleHibernateValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]
