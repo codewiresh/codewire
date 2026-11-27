@@ -75,9 +75,12 @@ impl HostUdpBridge {
                 if !out_allowed.contains(&destination) || len > MAX_UDP_BRIDGE_PAYLOAD {
                     continue;
                 }
-                // Best-effort non-blocking UDP send; transient kernel buffer
-                // pressure drops the datagram rather than stalling the bridge.
-                let _ = out_socket.try_send_to(&buffer[..len], SocketAddr::V4(destination));
+                // Best-effort UDP send in the dedicated outbound task; the worker
+                // side enforces the bounded drop-on-full queue so TCP is never stalled,
+                // and send_to().await avoids getting stuck on sticky WouldBlock readiness.
+                let _ = out_socket
+                    .send_to(&buffer[..len], SocketAddr::V4(destination))
+                    .await;
             }
         });
 

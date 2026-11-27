@@ -244,8 +244,12 @@ pub async fn run_inherited_worker(
     let udp_bridge = if prepared.udp_peers.is_empty() {
         None
     } else {
-        let stream = receive_worker_udp_bridge_descriptor(bootstrap.as_raw_fd())
-            .and_then(transferred_tokio_unix_stream);
+        // Use TransferredStream (libc::read/write) rather than tokio::net::UnixStream
+        // because confined network workers deny SYS_sendto/SYS_recvfrom under seccomp.
+        let stream =
+            receive_worker_udp_bridge_descriptor(bootstrap.as_raw_fd()).and_then(|descriptor| {
+                transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)
+            });
         let stream = match stream {
             Ok(stream) => stream,
             Err(error) => {

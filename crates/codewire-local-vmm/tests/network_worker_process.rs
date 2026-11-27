@@ -39,7 +39,7 @@ use codewire_local_vmm::mesh_process::{
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
     WORKER_PREPARED_MESSAGE, WORKER_READY_MESSAGE, WORKER_STATUS_MAX_BYTES,
-    encode_product_worker_bootstrap, encode_worker_bootstrap,
+    WORKER_UDP_BRIDGE_READY_MESSAGE, encode_product_worker_bootstrap, encode_worker_bootstrap,
 };
 use codewire_vmm_guest_probe::{
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkGuestAck, NetworkHostHello,
@@ -50,6 +50,7 @@ use uuid::Uuid;
 const BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
+const UDP_BRIDGE_DESCRIPTOR_MARKER: u8 = b'U';
 const CONTROL_BYTES: usize = 64;
 /// How long these tests wait on a child process before calling it hung. No
 /// test here is about the wait itself: five seconds was missed on a starved
@@ -312,6 +313,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
     let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
     let mesh_ingress_port = 3_001;
+    let udp_peer: std::net::SocketAddrV4 = "198.51.100.35:41641".parse().unwrap();
     let worker_bootstrap = encode_product_worker_bootstrap(
         vm_id,
         generation,
@@ -319,7 +321,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         &broker_key,
         &mesh_ingress_key,
         &[mesh_ingress_port],
-        &[],
+        &[udp_peer],
         codewire_egress_policy::CompiledPolicy::open().digest(),
     )
     .unwrap();
@@ -360,6 +362,25 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         WORKER_BROKER_READY_MESSAGE
     );
 
+    let (mut runner_udp_bridge, worker_udp_bridge) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    runner_udp_bridge
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    runner_udp_bridge
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    send_descriptor(
+        worker_parent.as_raw_fd(),
+        worker_udp_bridge.as_raw_fd(),
+        UDP_BRIDGE_DESCRIPTOR_MARKER,
+    );
+    drop(worker_udp_bridge);
+    assert_eq!(
+        read_status_frame(&mut worker_parent),
+        WORKER_UDP_BRIDGE_READY_MESSAGE
+    );
+
     let (mut guest, worker_network) = std::os::unix::net::UnixStream::pair().unwrap();
     guest.set_read_timeout(Some(HANG_GUARD)).unwrap();
     guest.set_write_timeout(Some(HANG_GUARD)).unwrap();
@@ -392,6 +413,94 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         );
     }
     assert_eq!(ready_status.unwrap(), WORKER_READY_MESSAGE);
+
+    // Proof under real seccomp confinement (#6637): the confined network worker
+    // must forward allowlisted tailnet UDP :31000 frames over the transferred
+    // bridge descriptor using write(2)/read(2) (not denied sendto/recvfrom).
+    let mut guest_session = codewire_network_session::NetworkSession::new(
+        &network_key,
+        &hello.nonce,
+        codewire_network_session::NetworkRole::Guest,
+        hello.packet_bound,
+    )
+    .unwrap();
+    let guest_ip = codewire_egress_worker::session::SessionAddresses::STANDARD.guest;
+    let outbound_udp = codewire_egress_worker::session::udp_bridge::build_inbound_udp(
+        std::net::SocketAddrV4::new(guest_ip, codewire_egress_worker::session::TAILNET_UDP_PORT),
+        *udp_peer.ip(),
+        udp_peer.port(),
+        b"confined-disco-ping",
+        &[std::net::SocketAddrV4::new(
+            guest_ip,
+            codewire_egress_worker::session::TAILNET_UDP_PORT,
+        )],
+        codewire_egress_worker::session::MAX_UDP_BRIDGE_PAYLOAD,
+    )
+    .unwrap();
+    let encoded_outbound = guest_session.encode_packet(&outbound_udp).unwrap();
+    guest.write_all(&encoded_outbound).unwrap();
+
+    let mut frame_header = [0_u8; 8];
+    runner_udp_bridge
+        .read_exact(&mut frame_header)
+        .expect("confined worker must forward allowlisted UDP datagram to runner bridge");
+    assert_eq!(&frame_header[0..4], &udp_peer.ip().octets());
+    assert_eq!(
+        u16::from_be_bytes([frame_header[4], frame_header[5]]),
+        udp_peer.port()
+    );
+    let payload_len = usize::from(u16::from_be_bytes([frame_header[6], frame_header[7]]));
+    let mut forwarded = vec![0_u8; payload_len];
+    runner_udp_bridge.read_exact(&mut forwarded).unwrap();
+    assert_eq!(forwarded, b"confined-disco-ping");
+
+    // Inbound reply through the confined worker back to the guest session.
+    let reply_payload = b"confined-disco-pong";
+    let mut reply_frame = Vec::with_capacity(8 + reply_payload.len());
+    reply_frame.extend_from_slice(&udp_peer.ip().octets());
+    reply_frame.extend_from_slice(&udp_peer.port().to_be_bytes());
+    reply_frame.extend_from_slice(&u16::try_from(reply_payload.len()).unwrap().to_be_bytes());
+    reply_frame.extend_from_slice(reply_payload);
+    runner_udp_bridge.write_all(&reply_frame).unwrap();
+
+    let read_guest_frame = |guest: &mut std::os::unix::net::UnixStream| -> Vec<u8> {
+        let mut wire_header = [0_u8; codewire_network_session::NETWORK_FRAME_HEADER_LEN];
+        guest
+            .read_exact(&mut wire_header)
+            .expect("confined worker must deliver framed reply to guest");
+        let frame_len =
+            codewire_network_session::encoded_network_frame_len(&wire_header, hello.packet_bound)
+                .unwrap();
+        let mut wire_frame = vec![0_u8; frame_len];
+        wire_frame[..codewire_network_session::NETWORK_FRAME_HEADER_LEN]
+            .copy_from_slice(&wire_header);
+        guest
+            .read_exact(&mut wire_frame[codewire_network_session::NETWORK_FRAME_HEADER_LEN..])
+            .unwrap();
+        wire_frame
+    };
+    // Host frame 1 is always EgressTrust; frame 2 is our inbound UDP datagram.
+    let trust_frame = read_guest_frame(&mut guest);
+    assert!(matches!(
+        guest_session.decode_frame(&trust_frame).unwrap(),
+        codewire_network_session::NetworkFrame::EgressTrust(_)
+    ));
+    let wire_frame = read_guest_frame(&mut guest);
+    let inbound_packet = guest_session.decode_packet(&wire_frame).unwrap();
+    let parsed_inbound =
+        codewire_netstack::parse_canonical_ipv4_udp_datagram(&inbound_packet).unwrap();
+    assert_eq!(parsed_inbound.source, std::net::SocketAddr::V4(udp_peer));
+    assert_eq!(
+        parsed_inbound.destination,
+        std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+            guest_ip,
+            codewire_egress_worker::session::TAILNET_UDP_PORT,
+        ))
+    );
+    assert_eq!(
+        &inbound_packet[codewire_egress_worker::session::udp_bridge::IPV4_UDP_HEADER_LEN..],
+        reply_payload
+    );
 
     // The confined broker takes a new policy on its control channel and
     // acknowledges the digest it enforces from then on (#2537).
