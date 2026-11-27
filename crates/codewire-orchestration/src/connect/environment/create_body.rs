@@ -41,6 +41,8 @@ pub(super) fn create_body(
         expected_profile_revision: request.expected_profile_revision,
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
+        // The handler sets it from the request's authentication.
+        confirmed_with: Default::default(),
         omit_application_previews: request.omit_application_previews,
         network: (!request.network.is_empty()).then_some(request.network),
         source_snapshot_id: (!request.source_snapshot_id.is_empty())

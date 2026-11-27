@@ -657,3 +657,66 @@ async fn oauth_only_restricted_identity_login_preserves_shared_policy() -> Resul
     .await;
     db.finish(result).await
 }
+
+/// A user token (#5688) is admitted by the product's authenticated mount but
+/// never by the OAuth-only mount the credential delegation service uses, so
+/// it can't reach a local VM's owner-local delegation, whose bindings keep
+/// direct delivery.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_user_token_never_passes_the_oauth_only_mount() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        sqlx::query(
+            "INSERT INTO users (id,email,is_admin) VALUES \
+             ('user-token-owner','user-token-owner@example.test',false)",
+        )
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO oidc_clients (id,name,application_type,auth_method,redirect_uris) \
+             VALUES ('codewire-cli','Synthetic CLI','native','none','{}')",
+        )
+        .execute(&db.pool)
+        .await?;
+        let token = "synthetic-live-user-token";
+        sqlx::query(
+            "INSERT INTO oidc_user_tokens (id,token_hash,client_id,user_id,sign_in_id,scopes) \
+             VALUES ('synthetic-user-token',$1,'codewire-cli','user-token-owner', \
+             'synthetic-sign-in',ARRAY['codewire.api'])",
+        )
+        .bind(hash_oauth_token(token))
+        .execute(&db.pool)
+        .await?;
+        let bearer = || headers(Some(&format!("Bearer {token}")), None);
+        let (status, body) = call(
+            app(ConnectAuthLayer::authenticated(AuthState {
+                pool: db.pool.clone(),
+            })),
+            "Ping",
+            bearer(),
+            r#"{"message":"whoami"}"#,
+        )
+        .await?;
+        ensure!(
+            status == StatusCode::OK && body["message"] == "user-token-owner",
+            "the user token is live: {status} {body}"
+        );
+        let (status, body) = call(
+            app(ConnectAuthLayer::oauth_bearer_only(AuthState {
+                pool: db.pool.clone(),
+            })),
+            "Ping",
+            bearer(),
+            r#"{"message":"whoami"}"#,
+        )
+        .await?;
+        ensure!(
+            status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated",
+            "the OAuth-only mount admitted a user token: {status} {body}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

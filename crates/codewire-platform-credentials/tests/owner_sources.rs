@@ -16,7 +16,8 @@ use codewire_access::{
     OwnerId, WithheldReason, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    CredentialRecord, PlatformAccessProfileStore, PlatformProfileError as Error,
+    CredentialRecord, PersonalConfirmation, PlatformAccessProfileStore,
+    PlatformProfileError as Error,
 };
 use codewire_server_core::auth::{
     AuthState, OAuthBearerAuthority, OAuthBearerAuthorityError, authenticate_product_credential,
@@ -216,6 +217,7 @@ async fn owner_selection_rejects_wrong_placement_generation_binding_and_personal
     let result = async {
         let selection = seed(&db).await?;
         let selected = binding(&selection);
+        let confirmation = PersonalConfirmation::SignIn(selection.user.id().clone());
         for placement in [GrantPlacement::Local, GrantPlacement::Platform] {
             let mut context = selection.context.clone();
             context.placement = placement;
@@ -333,11 +335,7 @@ async fn owner_selection_rejects_wrong_placement_generation_binding_and_personal
         ensure!(store.get_binding_metadata(&selection.context).await == Err(Error::InvalidInput));
         ensure!(
             store
-                .create_binding(
-                    &selection.context,
-                    selected.clone(),
-                    Some(selection.user.id())
-                )
+                .create_binding(&selection.context, selected.clone(), &confirmation)
                 .await
                 == Err(Error::InvalidInput)
         );
@@ -347,7 +345,7 @@ async fn owner_selection_rejects_wrong_placement_generation_binding_and_personal
                     &selection.context,
                     &selected,
                     selected.clone(),
-                    Some(selection.user.id())
+                    &confirmation
                 )
                 .await
                 == Err(Error::InvalidInput)
@@ -360,7 +358,7 @@ async fn owner_selection_rejects_wrong_placement_generation_binding_and_personal
         let mut tx = store.begin_transaction().await?;
         ensure!(
             store
-                .create_pending_binding_in(&mut tx, &pending, selected, Some(selection.user.id()))
+                .create_pending_binding_in(&mut tx, &pending, selected, &confirmation)
                 .await
                 == Err(Error::InvalidInput)
         );

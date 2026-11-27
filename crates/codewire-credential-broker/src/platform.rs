@@ -84,6 +84,9 @@ pub struct PlatformRuntimeSession {
     identity: RuntimeIdentity,
     context: GrantContext,
     credential_owner: Owner,
+    /// Whether the binding admits the direct delivery exceptions: only when
+    /// its creator confirmed it with a sign-in, never a user token (#5688).
+    direct_delivery: bool,
     identity_expires_at_unix: u64,
 }
 
@@ -113,12 +116,14 @@ impl PlatformRuntimeSession {
         workspace: PlatformPodIdentity,
         context: GrantContext,
         credential_owner: Owner,
+        direct_delivery: bool,
         identity_expires_at_unix: u64,
     ) -> Result<Self, PlatformRuntimeError> {
         let session = Self {
             identity: RuntimeIdentity::Hosted { relay, workspace },
             context,
             credential_owner,
+            direct_delivery,
             identity_expires_at_unix,
         };
         session.validate()?;
@@ -145,6 +150,8 @@ impl PlatformRuntimeSession {
             },
             context,
             credential_owner,
+            // The owner's own OAuth sign-in: a user token never reaches it.
+            direct_delivery: true,
             identity_expires_at_unix,
         };
         session.validate()?;
@@ -238,6 +245,7 @@ impl PlatformRuntimeSession {
             && *allow_personal_credentials == other.context.allow_personal_credentials
             && (hosted || *authorized_credentials == other.context.authorized_credentials)
             && self.credential_owner == other.credential_owner
+            && self.direct_delivery == other.direct_delivery
     }
 
     /// Whether `current` is still this admitted session's exact binding, as
@@ -257,11 +265,13 @@ impl PlatformRuntimeSession {
             identity,
             context,
             credential_owner,
+            direct_delivery,
             identity_expires_at_unix: _,
         } = self;
         *identity == other.identity
             && *context == other.context
             && *credential_owner == other.credential_owner
+            && *direct_delivery == other.direct_delivery
     }
 
     #[cfg(test)]

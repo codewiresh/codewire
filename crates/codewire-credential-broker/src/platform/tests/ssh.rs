@@ -96,7 +96,9 @@ impl SshFixture {
                         profile_id: profile.id,
                         profile_revision: profile.revision,
                     },
-                    Some(&context.user_id),
+                    &codewire_platform_credentials::PersonalConfirmation::SignIn(
+                        context.user_id.clone(),
+                    ),
                 )
                 .await?;
             f.authority.change(|session| session.context = context);

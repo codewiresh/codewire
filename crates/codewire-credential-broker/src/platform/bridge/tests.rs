@@ -252,6 +252,7 @@ impl Fixture {
             pod("workspace"),
             context,
             Owner::User(owner),
+            true,
             crate::platform::unix_now().unwrap() + 3600,
         )
         .unwrap();
@@ -1224,6 +1225,7 @@ async fn a_hosted_epoch_files_its_uses_under_its_workspace_pod() {
         workspace,
         context.clone(),
         Owner::User(context.user_id.clone()),
+        true,
         expiry,
     )
     .unwrap();

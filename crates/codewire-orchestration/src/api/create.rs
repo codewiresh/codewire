@@ -72,6 +72,9 @@ pub struct CreateEnvironmentBody {
     pub expected_profile_revision: Option<u64>,
     pub confirm_personal_credentials: bool,
     pub confirm_personal_secrets: bool,
+    /// The credential that gave those confirmations, from the request's
+    /// authentication, never its body.
+    pub confirmed_with: codewire_platform_credentials::ConfirmedWith,
     pub omit_application_previews: bool,
     /// The hosted Mesh network to join, by name, in the environment's
     /// organization. The creating user is recorded as the one who attached

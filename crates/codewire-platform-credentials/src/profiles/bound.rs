@@ -29,6 +29,7 @@ use super::*;
 /// the re-locks; those take no new lock. Every such value is constrained by
 /// the schema or written only by validated code.
 const BOUND_PROFILE: &str = "SELECT b.profile_id, b.profile_revision, b.personal_owner_confirmed_by, \
+    b.personal_owner_confirmed_by_user_token, \
     p.found AS profile_found, p.user_id AS profile_user, p.organization_id AS profile_organization, \
     q.found AS revision_profile_found, q.name AS profile_name, \
     q.current_revision AS profile_current_revision, \
@@ -62,6 +63,7 @@ struct BoundProfileRow {
     profile_id: String,
     profile_revision: i64,
     personal_owner_confirmed_by: Option<String>,
+    personal_owner_confirmed_by_user_token: Option<String>,
     profile_found: Option<bool>,
     profile_user: Option<String>,
     profile_organization: Option<String>,
@@ -114,6 +116,7 @@ pub(super) async fn load_bound_profile(
         row.profile_id,
         row.profile_revision,
         row.personal_owner_confirmed_by,
+        row.personal_owner_confirmed_by_user_token,
     )?;
     if row.profile_found != Some(true) {
         return Err(Error::NotFound);

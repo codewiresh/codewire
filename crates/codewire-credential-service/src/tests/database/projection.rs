@@ -770,7 +770,7 @@ async fn bind_two_capabilities(
                 profile_id: revised.id.clone(),
                 profile_revision: revised.revision,
             },
-            Some(&context.user_id),
+            &codewire_platform_credentials::PersonalConfirmation::SignIn(context.user_id.clone()),
         )
         .await?;
     super::recapture(f, Some(&revised)).await?;
@@ -929,6 +929,99 @@ async fn codex_login_follows_only_the_creators_own_confirmed_profile() -> Result
                     .is_err()
             );
         }
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+/// A binding its creator confirmed with a user token (#5688) keeps its proxied
+/// grants and gets no Codex login. Moving a connected binding's confirmation
+/// from the sign-in to a user token fences the live broker, and a user token's
+/// confirmation naming anyone but the creator admits nothing.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn a_user_token_confirmation_keeps_proxied_grants_but_no_codex_login() -> Result<()> {
+    let f = Fixture::create().await?;
+    let result = async {
+        let kek = Arc::new(support::SyntheticKek::default());
+        bind_two_capabilities(&f, kek.clone()).await?;
+        let (broker_pool, _) = f.db.broker_pool().await?;
+        let connect = async |authority: Arc<crate::KubernetesPlatformRuntimeAuthority>| {
+            anyhow::Ok(
+                PlatformBrokerLeaseProvider::connect(
+                    authority,
+                    Arc::new(PlatformCredentialStore::new(
+                        broker_pool.clone(),
+                        kek.clone(),
+                        builtin_provider_catalog(),
+                    )),
+                    PlatformAccessProfileStore::new(
+                        broker_pool.clone(),
+                        builtin_provider_catalog(),
+                    ),
+                )
+                .await?,
+            )
+        };
+        let proxied = async |broker: &PlatformBrokerLeaseProvider<
+            crate::KubernetesPlatformRuntimeAuthority,
+        >| {
+            anyhow::Ok(
+                broker
+                    .lease_operation(
+                        Uuid::new_v4(),
+                        CapabilitySlot::codex(),
+                        codewire_access::BrokerOperationId::parse("responses")?,
+                        codewire_access::BrokerRouteId::parse("openai-api")?,
+                    )
+                    .await,
+            )
+        };
+        let signed_in = connect(admitted(&f, Arc::new(ObservedProvider::default())).await?).await?;
+        drop(signed_in.lease_codex_login(Uuid::new_v4()).await?);
+
+        sqlx::query(
+            "UPDATE platform_environment_access_bindings SET \
+             personal_owner_confirmed_by_user_token=personal_owner_confirmed_by, \
+             personal_owner_confirmed_by=NULL",
+        )
+        .execute(&f.db.pool)
+        .await?;
+        ensure!(
+            matches!(
+                signed_in.lease_codex_login(Uuid::new_v4()).await,
+                Err(BrokerLeaseError::Denied)
+            ),
+            "the connected sign-in session is fenced"
+        );
+        let user_token =
+            connect(admitted(&f, Arc::new(ObservedProvider::default())).await?).await?;
+        ensure!(
+            proxied(&user_token).await?.is_ok(),
+            "the proxied grant is admitted"
+        );
+        ensure!(
+            matches!(
+                user_token.lease_codex_login(Uuid::new_v4()).await,
+                Err(BrokerLeaseError::Denied)
+            ),
+            "a user token's binding gets no Codex login"
+        );
+
+        f.db.user("synthetic-other-user").await?;
+        sqlx::query(
+            "UPDATE platform_environment_access_bindings \
+             SET personal_owner_confirmed_by_user_token='synthetic-other-user'",
+        )
+        .execute(&f.db.pool)
+        .await?;
+        ensure!(
+            admitted(&f, Arc::new(ObservedProvider::default()))
+                .await
+                .is_err(),
+            "another user's user-token confirmation admits nothing"
+        );
         Ok(())
     }
     .await;

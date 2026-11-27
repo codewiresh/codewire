@@ -11,7 +11,9 @@ use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, CredentialId, EnvironmentAccessBinding,
     EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
 };
-use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
+use codewire_platform_credentials::{
+    ConfirmedWith, PersonalConfirmation, PlatformAccessProfileStore, PlatformProfileError,
+};
 use codewire_project::{CredentialBinding, ProjectSpec, SecretBindings};
 use codewire_server_core::auth::{AuthUser, CredentialContext, refuse_user_token};
 use codewire_server_core::org_deletion::{
@@ -49,6 +51,10 @@ pub struct UpdateEnvironmentSourcesBody {
     pub confirm_personal_credentials: bool,
     #[serde(default)]
     pub confirm_personal_secrets: bool,
+    /// The credential that gave those confirmations, from the request's
+    /// authentication; no request body names it.
+    #[serde(skip)]
+    pub confirmed_with: ConfirmedWith,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -214,7 +220,7 @@ pub async fn admit_create_sources_in(
                 tx,
                 &context,
                 binding(&context.environment_id, &profile),
-                Some(&context.user_id),
+                &PersonalConfirmation::by(body.confirmed_with, context.user_id.clone()),
             )
             .await
             .map_err(profile_error)?;
@@ -374,7 +380,7 @@ pub async fn replace_environment_sources_in(
                     tx,
                     &context,
                     binding(&context.environment_id, profile),
-                    Some(&context.user_id),
+                    &PersonalConfirmation::by(body.confirmed_with, context.user_id.clone()),
                 )
                 .await
                 .map_err(profile_error)?;
@@ -386,7 +392,7 @@ pub async fn replace_environment_sources_in(
                     &context,
                     expected,
                     binding(&context.environment_id, profile),
-                    Some(&context.user_id),
+                    &PersonalConfirmation::by(body.confirmed_with, context.user_id.clone()),
                 )
                 .await
                 .map_err(profile_error)?;
@@ -499,18 +505,28 @@ async fn resolve_selection_in(
     Ok((selected, Some(profile)))
 }
 
-/// A user token gives no personal confirmation (#5688). The bindings it would
-/// make aren't yet kept from the direct delivery exceptions
-/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Who may bind a personal profile"),
-/// so selecting a personal profile or personal secrets still needs a sign-in.
-/// Every such selection needs the confirmation (`confirm_sources`), so
-/// refusing it here refuses each one before anything is created.
-pub(crate) fn refuse_user_token_confirmation(
+/// The credential that confirms a request's personal selection (#5688). A
+/// user token's binding is kept from the direct delivery exceptions
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Who may bind a personal profile").
+pub(crate) fn confirmed_with(credential: &CredentialContext) -> ConfirmedWith {
+    match credential {
+        CredentialContext::UserToken { .. } => ConfirmedWith::UserToken,
+        // API keys never reach a personal selection (`confirm_sources`).
+        CredentialContext::SessionCookie { .. }
+        | CredentialContext::OidcAccessToken { .. }
+        | CredentialContext::ApiKey { .. } => ConfirmedWith::SignIn,
+    }
+}
+
+/// A user token never confirms personal application secrets: they reach the
+/// workload as values, which only a sign-in may allow. Every selection of
+/// them needs the confirmation (`confirm_sources`), so refusing it here
+/// refuses each one before anything is created.
+pub(crate) fn refuse_user_token_personal_secrets(
     credential: &CredentialContext,
-    confirm_personal_credentials: bool,
     confirm_personal_secrets: bool,
 ) -> AppResult<()> {
-    if confirm_personal_credentials || confirm_personal_secrets {
+    if confirm_personal_secrets {
         refuse_user_token(credential)?;
     }
     Ok(())
@@ -938,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_token_gives_no_personal_confirmation() {
+    fn a_user_token_confirms_a_profile_but_never_personal_secrets() {
         let user_token = CredentialContext::UserToken {
             token_id: "t-1".into(),
             client_id: "codewire-cli".into(),
@@ -948,22 +964,22 @@ mod tests {
             client_id: "codewire-cli".into(),
             scopes: vec!["codewire.api".into()],
         };
-        for (credentials, secrets) in [(true, false), (false, true), (true, true)] {
-            let refused = refuse_user_token_confirmation(&user_token, credentials, secrets)
-                .expect_err("a user token's confirmation is refused");
-            assert!(
-                matches!(
-                    refused,
-                    AppError::Coded {
-                        code: "user_token_not_allowed",
-                        ..
-                    }
-                ),
-                "{refused:?}"
-            );
-            assert!(refuse_user_token_confirmation(&sign_in, credentials, secrets).is_ok());
-        }
-        assert!(refuse_user_token_confirmation(&user_token, false, false).is_ok());
+        assert_eq!(confirmed_with(&user_token), ConfirmedWith::UserToken);
+        assert_eq!(confirmed_with(&sign_in), ConfirmedWith::SignIn);
+        let refused = refuse_user_token_personal_secrets(&user_token, true)
+            .expect_err("a user token never confirms personal secrets");
+        assert!(
+            matches!(
+                refused,
+                AppError::Coded {
+                    code: "user_token_not_allowed",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert!(refuse_user_token_personal_secrets(&sign_in, true).is_ok());
+        assert!(refuse_user_token_personal_secrets(&user_token, false).is_ok());
     }
 
     #[test]
