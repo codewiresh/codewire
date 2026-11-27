@@ -105,16 +105,16 @@ test.describe("homepage", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Pricing" })).toBeVisible();
     await expect(page.locator('.nav a[href="/pricing"]')).toHaveAttribute("aria-current", "page");
     const total = page.locator('[data-pricing-cost="total"]');
-    await expect(total).toHaveText("€0.2091");
+    await expect(total).toHaveText("$0.2091");
 
     await page.getByRole("button", { name: "4 vCPU · 16 GB" }).click();
     await expect(page.getByRole("button", { name: "4 vCPU · 16 GB" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("button", { name: "2 vCPU · 8 GB" })).toHaveAttribute("aria-pressed", "false");
-    await expect(total).toHaveText("€0.4095");
+    await expect(total).toHaveText("$0.4095");
 
     await page.getByRole("button", { name: "Month" }).click();
     await expect(page.locator("[data-pricing-period-label]")).toHaveText("per month");
-    await expect(total).toHaveText("€298.94");
+    await expect(total).toHaveText("$298.94");
 
     // vCPU and memory move only over the sizes a sandbox can have.
     const cpu = page.getByLabel("vCPU", { exact: true });
@@ -143,7 +143,7 @@ test.describe("homepage", () => {
     const page = await context.newPage();
     try {
       await page.goto("/pricing");
-      await expect(page.locator('[data-pricing-cost="total"]')).toHaveText("€0.2091");
+      await expect(page.locator('[data-pricing-cost="total"]')).toHaveText("$0.2091");
       await expect(page.locator("[data-pricing-period-label]")).toHaveText("per hour");
       await expect(page.getByRole("button", { name: "Month" })).toBeHidden();
       await expect(page.getByRole("link", { name: "Start building" })).toHaveAttribute("href", "/signup");

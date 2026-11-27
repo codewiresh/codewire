@@ -36,19 +36,19 @@ test("each charged card edits its four rates in euros; Unlimited has no form", {
     await expect(input).toHaveValue(value);
     await expect(input).toHaveAttribute("type", "text");
     await expect(input).toHaveAttribute("inputmode", "decimal");
-    // The € sits inside the control, on its line.
+    // The $ sits inside the control, on its line.
     const group = (await input.locator("xpath=..").boundingBox())!;
     const box = (await input.boundingBox())!;
     expect(box.x).toBeGreaterThan(group.x);
     expect(box.x + box.width).toBeLessThanOrEqual(group.x + group.width + 1);
   }
-  await expect(regular.locator(".cw-input-group > span")).toHaveText(["€", "€", "€", "€"]);
+  await expect(regular.locator(".cw-input-group > span")).toHaveText(["$", "$", "$", "$"]);
   await expect(regular.getByRole("button", { name: "Review" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Discounted" }).getByLabel("Disk, per GiB-hour")).toHaveValue("0.0000435");
 
   const unlimited = page.getByRole("region", { name: "Unlimited" });
   await expect(unlimited.locator("form")).toHaveCount(0);
-  await expect(unlimited.locator("dd")).toHaveText(["€0", "€0", "€0", "€0"]);
+  await expect(unlimited.locator("dd")).toHaveText(["$0", "$0", "$0", "$0"]);
   await expect(unlimited.getByText("Unlimited is never charged.")).toBeVisible();
   await expectNoSidewaysScroll(page);
 });
@@ -64,7 +64,7 @@ test("the review lists the changed rates and asks to confirm a large increase", 
     "Storage while suspended or hibernated, per GiB-hour",
   ]);
   const cpu = table.getByRole("row", { name: /vCPU, per hour/ });
-  await expect(cpu.getByRole("cell")).toHaveText(["€0.0438", "€0.1More than double"]);
+  await expect(cpu.getByRole("cell")).toHaveText(["$0.0438", "$0.1More than double"]);
   await expect(cpu.locator('.cw-status[data-tone="warning"]')).toHaveText("More than double");
   await expect(table.getByRole("row", { name: /Memory/ }).locator(".cw-status")).toHaveCount(0);
 

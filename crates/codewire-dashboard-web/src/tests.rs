@@ -862,14 +862,14 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
                 selected: *value == "discounted",
             })
             .collect(),
-        credit_balance: "-€0.003385".into(),
+        credit_balance: "-$0.003385".into(),
         credit_negative: true,
         credit_balance_nano_eur: -3_385_000,
         auto_top_up_enabled: true,
         auto_top_up_cents: 2000,
         credit_entries: vec![crate::admin_connect::AdminCreditRow {
             kind: "Adjustment".into(),
-            amount: "€25.00".into(),
+            amount: "$25.00".into(),
             when: "2026-10-28".into(),
             note: "<script>alert('reason')</script>".into(),
         }],
@@ -1083,7 +1083,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
         // The rate card, starting at the organization's, and the balance.
         assert!(body.contains("<dt>Rate card</dt><dd>Discounted</dd>"));
         assert!(body.contains(
-            r#"<dt>Credit balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.003385</span></dd>"#
+            r#"<dt>Credit balance</dt><dd><span class="cw-badge" data-tone="warning">-$0.003385</span></dd>"#
         ));
         assert!(body.contains(r#"action="/admin/organizations/_actions/rate-card/set""#));
         assert!(body.contains(r#"action="/admin/organizations/_actions/features/set""#));
@@ -1096,7 +1096,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             body.contains(r#"<input type="hidden" name="idempotency_key" value="credit-key-1">"#)
         );
         assert!(body.contains(r#"<label class="cw-field"><span>Reason</span><input class="cw-input" type="text" name="reason" maxlength="500" required></label>"#));
-        assert!(body.contains("<tr><th scope=\"row\">Adjustment</th><td>€25.00</td>"));
+        assert!(body.contains("<tr><th scope=\"row\">Adjustment</th><td>$25.00</td>"));
         assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
         assert_eq!(
             body.contains(r#"action="/admin/organizations/_actions/quota/clear""#),
@@ -1230,7 +1230,7 @@ fn admin_organization_asks_before_a_negative_balance() {
     }
     .render()
     .expect("render admin organization page");
-    assert!(body.contains(r#"<p class="cw-alert cw-alert--warning" role="alert">This leaves the balance at -€1.14. Automatic top-up is on, so Visa •••• 4242 is charged €20.00 within seconds.</p>"#), "{body}");
+    assert!(body.contains(r#"<p class="cw-alert cw-alert--warning" role="alert">This leaves the balance at -$1.14. Automatic top-up is on, so Visa •••• 4242 is charged $20.00 within seconds.</p>"#), "{body}");
     for field in [
         r#"<input type="hidden" name="amount" value="-6">"#,
         r#"<input type="hidden" name="reason" value="billing test">"#,
@@ -1252,7 +1252,7 @@ fn admin_organization_asks_before_a_negative_balance() {
 #[test]
 fn a_negative_balance_question_says_what_top_up_sets_off() {
     use crate::admin_connect::negative_balance_question;
-    let refused = "This leaves the balance at -€1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept.";
+    let refused = "This leaves the balance at -$1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept.";
     assert_eq!(
         negative_balance_question(
             -1_140_000_000,
@@ -1261,7 +1261,7 @@ fn a_negative_balance_question_says_what_top_up_sets_off() {
             2000,
             Some(Some("Visa •••• 4242"))
         ),
-        "This leaves the balance at -€1.14. Automatic top-up is on, so Visa •••• 4242 is charged €20.00 within seconds."
+        "This leaves the balance at -$1.14. Automatic top-up is on, so Visa •••• 4242 is charged $20.00 within seconds."
     );
     // No card, or top-up off: nothing is charged, so work is refused.
     assert_eq!(
@@ -1276,7 +1276,7 @@ fn a_negative_balance_question_says_what_top_up_sets_off() {
     }
     // Billing can't say: both outcomes.
     assert!(negative_balance_question(-1, false, true, 5000, None).ends_with(
-        "Automatic top-up is on at €50.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
+        "Automatic top-up is on at $50.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
     ));
     // Unlimited is never charged or refused, whatever top-up and the card say (#6503).
     for (top_up, card) in [
@@ -1286,7 +1286,7 @@ fn a_negative_balance_question_says_what_top_up_sets_off() {
     ] {
         assert_eq!(
             negative_balance_question(-11_000_000_000, true, top_up, 2000, card),
-            "This leaves the balance at -€11.00. The organization is on Unlimited, so nothing is charged or refused."
+            "This leaves the balance at -$11.00. The organization is on Unlimited, so nothing is charged or refused."
         );
     }
 }
@@ -1310,7 +1310,7 @@ fn admin_overview_shows_the_month_s_cost_in_euros_from_compute_credit() {
     }
     .render()
     .expect("render admin overview page");
-    assert!(body.contains("<span>Monthly Cost</span><strong>€0.04</strong>"));
+    assert!(body.contains("<span>Monthly Cost</span><strong>$0.04</strong>"));
     assert!(body.contains("<span>CPU Hours</span><strong>4.0</strong>"));
-    assert!(!body.contains('$'), "a dollar sign on Admin → Overview");
+    assert!(!body.contains('€'), "a euro sign on Admin → Overview");
 }

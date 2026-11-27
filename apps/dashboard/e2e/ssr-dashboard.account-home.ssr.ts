@@ -31,7 +31,7 @@ test("organization cards keep tile values on one line, and one organization's ca
     await page.goto(fixture("account-overview-unlimited"));
     const balance = page.locator(".cw-stat").filter({ has: page.locator("dt", { hasText: "Balance" }) }).locator("dd");
     await expect(balance.locator('[aria-hidden="true"]')).toHaveText("∞");
-    await expect(page.locator(".cw-stat").filter({ has: page.locator("dt", { hasText: "This month" }) }).locator("dd")).toHaveText("< €0.01");
+    await expect(page.locator(".cw-stat").filter({ has: page.locator("dt", { hasText: "This month" }) }).locator("dd")).toHaveText("< $0.01");
     await tilesOnOneLine(page);
     const single = await widths(page);
     expect(single.cards).toHaveLength(1);
@@ -52,10 +52,10 @@ test("organization cards keep tile values on one line, and one organization's ca
   }
 });
 
-// The usage charts' euro scale (#4959): ticks from the top down to €0, the top
+// The usage charts' euro scale (#4959): ticks from the top down to $0, the top
 // at least the largest hour, each label level with its gridline, hidden from
 // screen readers, and the same on the account overview and the Billing page.
-const euros = (text: string) => Number((text.match(/€([0-9.]+)/) ?? ["", "NaN"])[1]);
+const euros = (text: string) => Number((text.match(/\$([0-9.]+)/) ?? ["", "NaN"])[1]);
 
 for (const name of ["account-overview-active", "account-overview-unlimited", "organization-billing"]) {
   test(`the usage chart's euro scale reads off every bar, ${name}`, { tag: "@mobile" }, async ({ page }) => {
@@ -73,7 +73,7 @@ for (const name of ["account-overview-active", "account-overview-unlimited", "or
       const bars = (await chart.locator(".cw-chart-bar title").allTextContents()).map(euros);
       expect(values[0], labels.join(" ")).toBeGreaterThanOrEqual(Math.max(...bars));
       // Each label is level with its line: the top gridline at 8 of 88, the
-      // €0 line at 80, in the chart's own height.
+      // $0 line at 80, in the chart's own height.
       const svg = (await chart.locator("svg").boundingBox())!;
       const centers = await scale.locator("span").evaluateAll((spans) =>
         spans.map((span) => {

@@ -202,7 +202,7 @@ fn answer(fake: &mut Fake, method: Method, uri: &Uri, body: &Bytes) -> (StatusCo
                 .unwrap_or(0);
             fake.charged.push(amount);
             ok(json!({
-                "id": "ii_cards", "object": "invoiceitem", "amount": amount, "currency": "eur",
+                "id": "ii_cards", "object": "invoiceitem", "amount": amount, "currency": "usd",
                 "customer": customer, "date": CREATED, "discountable": true, "livemode": false,
                 "period": {"end": CREATED, "start": CREATED}, "proration": false,
                 "quantity": 1, "quantity_decimal": "1"

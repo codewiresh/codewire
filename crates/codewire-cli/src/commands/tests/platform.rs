@@ -22,10 +22,10 @@ fn test_billing_overview() -> BillingOverview {
 
 #[test]
 fn euros_show_cents_or_the_fraction_a_rate_needs() {
-    assert_eq!(format_euros(42_500_000_000), "€42.50");
-    assert_eq!(format_euros(-1_000_000), "-€0.001");
-    assert_eq!(format_euros(87_000), "€0.000087");
-    assert_eq!(format_euros(0), "€0.00");
+    assert_eq!(format_euros(42_500_000_000), "$42.50");
+    assert_eq!(format_euros(-1_000_000), "-$0.001");
+    assert_eq!(format_euros(87_000), "$0.000087");
+    assert_eq!(format_euros(0), "$0.00");
 }
 
 #[test]
@@ -93,10 +93,10 @@ fn format_cost_text_shows_credit_rates_and_top_up() {
             "# codewire\n",
             "\n",
             "  Balance      This month   CPU hrs Mem GB·hrs Storage GB·hrs\n",
-            "  €42.50       €3.10        12.5    32.0       90.2\n",
+            "  $42.50       $3.10        12.5    32.0       90.2\n",
             "\n",
-            "  Rates: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk\n",
-            "  Automatic top-up: €20.00\n",
+            "  Rates: $0.0438 per vCPU-hour, $0.0141 per GiB-hour of memory, $0.000087 per GiB-hour of disk\n",
+            "  Automatic top-up: $20.00\n",
             "\n",
             "# missing (billing unavailable)\n",
             "\n",

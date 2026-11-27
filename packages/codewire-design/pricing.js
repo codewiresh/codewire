@@ -85,10 +85,10 @@
   // the controls need this script; without it the page shows the hourly price of the default size
   $$('[data-pricing-controls]', form).forEach((el) => { el.hidden = false; });
 
-  // two decimals from one euro up; below that, four significant digits
+  // two decimals from one dollar up; below that, four significant digits
   const euros = (v) => {
-    if (v >= 1) return '€' + v.toFixed(2);
-    return '€' + v.toFixed(Math.min(12, 3 - Math.floor(Math.log10(v)))).replace(/0+$/, '');
+    if (v >= 1) return '$' + v.toFixed(2);
+    return '$' + v.toFixed(Math.min(12, 3 - Math.floor(Math.log10(v)))).replace(/0+$/, '');
   };
   const press = (buttons, active) => buttons.forEach((b) => b.setAttribute('aria-pressed', String(b === active)));
   const render = () => {

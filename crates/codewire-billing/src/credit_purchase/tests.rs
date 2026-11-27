@@ -125,7 +125,7 @@ pub(crate) fn invoice(
         "billing_reason": "manual",
         "collection_method": "charge_automatically",
         "created": CREATED,
-        "currency": "eur",
+        "currency": "usd",
         "customer": customer,
         "default_tax_rates": [],
         "discounts": [],
@@ -290,7 +290,7 @@ fn respond(
             "id": "ii_fake",
             "object": "invoiceitem",
             "amount": form.get("amount").and_then(|amount| amount.parse::<i64>().ok()).unwrap_or(0),
-            "currency": "eur",
+            "currency": "usd",
             "customer": customer_of(form),
             "date": CREATED,
             "discountable": true,
@@ -685,7 +685,7 @@ async fn db_a_saved_card_is_charged_once_and_credited_at_once() {
     // on the top-up.
     let created = harness.only(Method::POST, "/v1/invoices");
     for (key, value) in [
-        ("currency", "eur"),
+        ("currency", "usd"),
         ("customer", fixture.customer_id.as_str()),
         ("metadata[kind]", "credit_top_up"),
         ("metadata[org_id]", fixture.organization_id.as_str()),
@@ -708,7 +708,7 @@ async fn db_a_saved_card_is_charged_once_and_credited_at_once() {
         Some("Codewire compute credit")
     );
     assert_eq!(item.form.get("amount").map(String::as_str), Some("10000"));
-    assert_eq!(item.form.get("currency").map(String::as_str), Some("eur"));
+    assert_eq!(item.form.get("currency").map(String::as_str), Some("usd"));
     let pay = harness.only(
         Method::POST,
         &format!("/v1/invoices/{}/pay", harness.invoice_id(1)),
@@ -1062,7 +1062,7 @@ fn completed_session(
             "status": "complete",
             "payment_status": "paid",
             "amount_total": amount,
-            "currency": "eur",
+            "currency": "usd",
             "customer": customer,
             "payment_intent": "pi_fake",
             "metadata": {
@@ -1114,7 +1114,7 @@ async fn db_without_a_card_stripe_takes_the_card_and_the_payment_together() {
         ("customer", "cus_fake_new"),
         ("payment_method_types[0]", "card"),
         ("line_items[0][quantity]", "1"),
-        ("line_items[0][price_data][currency]", "eur"),
+        ("line_items[0][price_data][currency]", "usd"),
         ("line_items[0][price_data][unit_amount]", "25000"),
         (
             "line_items[0][price_data][product_data][name]",

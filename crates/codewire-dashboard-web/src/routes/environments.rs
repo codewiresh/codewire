@@ -3613,7 +3613,7 @@ mod tests {
     fn the_start_panel_follows_billing_and_the_viewer() {
         use crate::view::SandboxStartView;
         let metered = |has_card| SandboxStartView {
-            hourly: Some("€0.2091".into()),
+            hourly: Some("$0.2091".into()),
             has_card,
             metered: true,
         };
@@ -3627,7 +3627,7 @@ mod tests {
         assert!(html.contains("<code>cw setup --local</code>"));
         assert!(html.contains("<code>cw create --local --name app --path .</code>"));
         assert!(html.contains("data-copy-prompt"));
-        assert!(html.contains(r#"<span class="cw-badge">€0.2091 / hour</span>"#));
+        assert!(html.contains(r#"<span class="cw-badge">$0.2091 / hour</span>"#));
         // A card added while the balance is empty is charged a top-up at once
         // when credit is enforced, so the panel never claims it costs nothing.
         assert!(html.contains("100 GB disk at that price."));
@@ -3642,7 +3642,7 @@ mod tests {
         assert!(!html.contains("Add a card</a>"));
         // A card on file: the price and Create Sandbox.
         let html = render_start(Some(metered(true)), true);
-        assert!(html.contains("€0.2091 / hour"));
+        assert!(html.contains("$0.2091 / hour"));
         assert!(!html.contains("charges nothing"));
         assert!(html.contains(r#"href="/test/new/" data-drawer-trigger>"#));
         // Unmetered, or billing unavailable: no price, Create Sandbox.

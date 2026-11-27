@@ -46,17 +46,17 @@
               <form class="cw-top-up-line" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up">
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
                 <input class="cw-switch" type="checkbox" role="switch" id="top-up-enabled" name="enabled" value="true" aria-describedby="top-up-help" data-submit-on-change{% if billing.auto_top_up_enabled %} checked{% endif %}>
-                <label class="cw-label" for="top-up-enabled">{% if billing.default_card.is_empty() %}Charge your card when the balance reaches €0{% else %}Charge {{ billing.default_card }} when the balance reaches €0{% endif %}</label>
+                <label class="cw-label" for="top-up-enabled">{% if billing.default_card.is_empty() %}Charge your card when the balance reaches $0{% else %}Charge {{ billing.default_card }} when the balance reaches $0{% endif %}</label>
                 <button class="cw-field-help-trigger" id="top-up-help-trigger" type="button" popovertarget="top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
-                <p class="cw-field-help-popover" id="top-up-help" popover="auto" role="tooltip" data-field-help-popover>{% if !billing.has_payment_method %}Starts when you save a card. {% if billing.balance_empty %}With the balance at {{ billing.credit_balance }}, saving the card charges €{{ billing.auto_top_up_euros }} at once.{% endif %}{% else %}Charges your default card €{{ billing.auto_top_up_euros }} whenever the balance reaches €0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.{% endif %}</p>
+                <p class="cw-field-help-popover" id="top-up-help" popover="auto" role="tooltip" data-field-help-popover>{% if !billing.has_payment_method %}Starts when you save a card. {% if billing.balance_empty %}With the balance at {{ billing.credit_balance }}, saving the card charges ${{ billing.auto_top_up_euros }} at once.{% endif %}{% else %}Charges your default card ${{ billing.auto_top_up_euros }} whenever the balance reaches $0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.{% endif %}</p>
                 <label class="cw-sr-only" for="top-up-amount">Top-up amount</label>
-                <select class="cw-select" id="top-up-amount" name="amount" data-submit-on-change>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>€{{ choice.euros }}</option>{% endfor %}</select>
+                <select class="cw-select" id="top-up-amount" name="amount" data-submit-on-change>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>${{ choice.euros }}</option>{% endfor %}</select>
                 <noscript><button class="cw-button cw-button--outline cw-button--small" type="submit">Save</button></noscript>
               </form>
           </section>
 
           <section class="cw-section" aria-labelledby="add-credit-heading">
-            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="add-credit-help-trigger" type="button" popovertarget="add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment{% if !billing.default_card.is_empty() %}, charged to {{ billing.default_card }}{% else %}. The card is saved for next time{% endif %}. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="add-credit-help-trigger" type="button" popovertarget="add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment{% if !billing.default_card.is_empty() %}, charged to {{ billing.default_card }}{% else %}. The card is saved for next time{% endif %}. From $5 to $1,000. Separate from automatic top-up.</p></div></header>
               <form class="cw-add-credit" method="post" action="/{{ organization.slug }}/billing/_actions/add-credit" aria-labelledby="add-credit-heading" data-add-credit{% if !billing.has_payment_method %} data-add-credit-new-card="add-credit-card"{% endif %}>
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
                 <input type="hidden" name="request" value="{{ billing.add_credit_request }}">
@@ -64,14 +64,14 @@
                   <fieldset class="cw-add-credit-amounts">
                     <legend class="cw-sr-only">Amount</legend>
                     <div class="cw-add-credit-chips">
-                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label>
-                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label>
-                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label>
-                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>$50</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>$100</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>$250</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>$500</span></label>
                     </div>
                   </fieldset>
-                  <label class="cw-sr-only" for="add-credit-amount">Other amount in euros</label>
-                  <input class="cw-input cw-add-credit-other" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <label class="cw-sr-only" for="add-credit-amount">Other amount in dollars</label>
+                  <input class="cw-input cw-add-credit-other" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other $" data-add-credit-other>
                   <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
                 </div>
                 {% if !billing.has_payment_method %}<div class="cw-card-form" id="add-credit-card" data-card-form hidden>
@@ -81,7 +81,7 @@
                     <input class="cw-switch" type="checkbox" role="switch" id="add-credit-top-up" name="top_up" value="true" data-card-top-up{% if billing.auto_top_up_enabled %} checked{% endif %}>
                     <label class="cw-label" for="add-credit-top-up">Automatic top-up</label>
                     <label class="cw-sr-only" for="add-credit-top-up-amount">Top-up amount</label>
-                    <select class="cw-select" id="add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>€{{ choice.euros }}</option>{% endfor %}</select>
+                    <select class="cw-select" id="add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>${{ choice.euros }}</option>{% endfor %}</select>
                   </div>
                   <p class="cw-muted" role="status" data-card-status hidden></p>
                 </div>{% endif %}

@@ -312,7 +312,7 @@ pub(crate) struct AdminOrganizationView {
     /// The card's name, as the page shows it.
     pub(crate) rate_card: String,
     pub(crate) rate_cards: Vec<RateCardOption>,
-    /// Signed, in euros.
+    /// Signed, in dollars.
     pub(crate) credit_balance: String,
     pub(crate) credit_negative: bool,
     /// The balance and automatic top-up an adjustment below zero is
@@ -400,7 +400,7 @@ pub(crate) async fn stats(
     Ok(stats_view(&stats))
 }
 
-/// Monthly Cost is the compute credit usage drew, in euros (#5318).
+/// Monthly Cost is the compute credit usage drew, in dollars (#5318).
 pub(crate) fn stats_view(stats: &GetStatsResponse) -> AdminStatsView {
     AdminStatsView {
         active_environments: stats.active_environments.to_string(),
@@ -1230,8 +1230,8 @@ fn quota_view(quota: EnvironmentQuota) -> QuotaView {
 pub(crate) const NANO_EUR_PER_CENT: i64 = 10_000_000;
 const NANO_EUR_PER_EURO: i64 = 1_000_000_000;
 
-/// A nano-euro amount in euros: two decimals, or up to six when the amount
-/// has more (a minute of usage is a fraction of a cent), never rounded up.
+/// A nano-dollar amount in US dollars: two decimals, or up to six when the
+/// amount has more (a minute of usage is a fraction of a cent), never rounded up.
 pub(crate) fn euro_text(nano_eur: i64) -> String {
     let sign = if nano_eur < 0 { "-" } else { "" };
     let magnitude = nano_eur.unsigned_abs();
@@ -1239,7 +1239,7 @@ pub(crate) fn euro_text(nano_eur: i64) -> String {
     let fraction = format!("{:09}", magnitude % NANO_EUR_PER_EURO as u64);
     let fraction = fraction[..6].trim_end_matches('0');
     let fraction = format!("{fraction:0<2}");
-    format!("{sign}€{whole}.{fraction}")
+    format!("{sign}${whole}.{fraction}")
 }
 
 /// An adjustment the server refused until the administrator confirms the
@@ -1247,7 +1247,7 @@ pub(crate) fn euro_text(nano_eur: i64) -> String {
 /// again (#4754).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreditConfirmationView {
-    /// As entered, in euros.
+    /// As entered, in dollars.
     pub(crate) amount: String,
     pub(crate) reason: String,
     pub(crate) idempotency_key: String,
@@ -1467,12 +1467,12 @@ mod tests {
     #[test]
     fn euro_amounts_round_trip_as_operators_write_them() {
         use super::{euro_amount_nano, euro_text};
-        assert_eq!(euro_text(50_000_000_000), "€50.00");
-        assert_eq!(euro_text(-1_500_000_000), "-€1.50");
-        assert_eq!(euro_text(0), "€0.00");
+        assert_eq!(euro_text(50_000_000_000), "$50.00");
+        assert_eq!(euro_text(-1_500_000_000), "-$1.50");
+        assert_eq!(euro_text(0), "$0.00");
         // A minute of the default sandbox is a fraction of a cent.
-        assert_eq!(euro_text(-3_385_000), "-€0.003385");
-        assert_eq!(euro_text(-3_385_999), "-€0.003385");
+        assert_eq!(euro_text(-3_385_000), "-$0.003385");
+        assert_eq!(euro_text(-3_385_999), "-$0.003385");
         assert_eq!(euro_amount_nano("25"), Some(25_000_000_000));
         assert_eq!(euro_amount_nano(" -10.5 "), Some(-10_500_000_000));
         assert_eq!(euro_amount_nano("+0.01"), Some(10_000_000));
@@ -1500,8 +1500,8 @@ mod tests {
 
     #[test]
     fn admin_display_values_are_bounded_and_safe() {
-        // Monthly Cost is compute credit, in euros (#5318).
-        assert_eq!(euro_text(40_000_000), "€0.04");
+        // Monthly Cost is compute credit, in dollars (#5318).
+        assert_eq!(euro_text(40_000_000), "$0.04");
         assert!(bounded("é".repeat(3_000), 4_096).len() <= 4_099);
         assert_eq!(severity_tone("error"), "danger");
         assert_eq!(severity_tone("unknown"), "muted");

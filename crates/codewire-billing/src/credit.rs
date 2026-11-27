@@ -937,9 +937,9 @@ mod tests {
     use super::*;
 
     const REGULAR: Rates = Rates {
-        cpu_per_vcpu_hour: 43_800_000,
-        memory_per_gib_hour: 14_100_000,
-        disk_per_gib_hour: 87_000,
+        cpu_per_vcpu_hour: 50_000_000,
+        memory_per_gib_hour: 16_000_000,
+        disk_per_gib_hour: 100_000,
         parked_storage_per_gib_hour: 0,
     };
     const HOUR: i64 = 3_600_000_000;
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(usage_nano_eur(priced, &[paused]), 10 * 5_000);
         assert_eq!(
             usage_nano_eur(priced, &[paused, window(2_000, 8_192, 10, HOUR)]),
-            10 * 5_000 + 201_270_000
+            10 * 5_000 + 229_000_000
         );
     }
 
@@ -996,25 +996,25 @@ mod tests {
     fn an_hour_of_each_unit_costs_its_rate() {
         assert_eq!(
             usage_nano_eur(REGULAR, &[window(1_000, 0, 0, HOUR)]),
-            43_800_000
+            50_000_000
         );
         assert_eq!(
             usage_nano_eur(REGULAR, &[window(0, 1_024, 0, HOUR)]),
-            14_100_000
+            16_000_000
         );
-        assert_eq!(usage_nano_eur(REGULAR, &[window(0, 0, 1, HOUR)]), 87_000);
+        assert_eq!(usage_nano_eur(REGULAR, &[window(0, 0, 1, HOUR)]), 100_000);
     }
 
     #[test]
     fn the_default_sandbox_costs_about_twenty_cents_an_hour() {
-        // 2 vCPU, 8 GiB and 10 GiB (owner, 2026-10-24: "about EUR 0.20").
+        // 2 vCPU, 8 GiB and 10 GiB: $0.229/hr at USD Regular rates.
         let hour = usage_nano_eur(REGULAR, &[window(2_000, 8_192, 10, HOUR)]);
-        assert_eq!(hour, 2 * 43_800_000 + 8 * 14_100_000 + 10 * 87_000);
-        assert_eq!(hour, 201_270_000);
+        assert_eq!(hour, 2 * 50_000_000 + 8 * 16_000_000 + 10 * 100_000);
+        assert_eq!(hour, 229_000_000);
         // Per second, summed over a minute of windows, it rounds down only
         // once per draw.
         let minute = usage_nano_eur(REGULAR, &[window(2_000, 8_192, 10, 60_000_000)]);
-        assert_eq!(minute, 201_270_000 / 60);
+        assert_eq!(minute, 229_000_000 / 60);
         let seconds: Vec<_> = (0..60)
             .map(|_| window(2_000, 8_192, 10, 1_000_000))
             .collect();
@@ -1024,14 +1024,14 @@ mod tests {
     #[test]
     fn discounted_and_unlimited_rates_scale_and_nothing_negative_is_charged() {
         let half = Rates {
-            cpu_per_vcpu_hour: 21_900_000,
-            memory_per_gib_hour: 7_050_000,
-            disk_per_gib_hour: 43_500,
+            cpu_per_vcpu_hour: 25_000_000,
+            memory_per_gib_hour: 8_000_000,
+            disk_per_gib_hour: 50_000,
             parked_storage_per_gib_hour: 0,
         };
         assert_eq!(
             usage_nano_eur(half, &[window(2_000, 8_192, 10, HOUR)]),
-            201_270_000 / 2
+            229_000_000 / 2
         );
         let zero = Rates {
             cpu_per_vcpu_hour: 0,
@@ -1057,7 +1057,7 @@ mod tests {
         let amount = usage_nano_eur(REGULAR, &[window(16_000, 32_768, 200, year)]);
         assert_eq!(
             amount,
-            365 * 24 * (16 * 43_800_000 + 32 * 14_100_000 + 200 * 87_000)
+            365 * 24 * (16 * 50_000_000 + 32 * 16_000_000 + 200 * 100_000)
         );
     }
 
@@ -1197,7 +1197,7 @@ mod tests {
             .unwrap();
         // Two hours of the default sandbox: the open one was last observed an
         // hour after it started.
-        assert_eq!(first, 2 * 201_270_000);
+        assert_eq!(first, 2 * 229_000_000);
         let entries = ledger(&pool, &fixture).await;
         assert_eq!(
             entries,
@@ -1255,7 +1255,7 @@ mod tests {
             .unwrap();
         // An hour of the default sandbox running, and an hour of its 10 GiB
         // paused, at the card's storage rate.
-        assert_eq!(drawn, 201_270_000 + 10 * rate);
+        assert_eq!(drawn, 229_000_000 + 10 * rate);
         let undrawn: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sandbox_running_sessions WHERE organization_id = $1 \
              AND credit_drawn_through IS DISTINCT FROM last_observed_at",
@@ -1308,7 +1308,7 @@ mod tests {
             .await
             .unwrap();
         // An hour running + an hour hibernated at 10 GiB (only disk at parked storage rate).
-        assert_eq!(drawn, 201_270_000 + 10 * rate);
+        assert_eq!(drawn, 229_000_000 + 10 * rate);
         let undrawn: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sandbox_running_sessions WHERE organization_id = $1 \
              AND credit_drawn_through IS DISTINCT FROM last_observed_at",
@@ -1385,7 +1385,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(balance, -201_270_000);
+        assert_eq!(balance, -229_000_000);
         cleanup(&pool, fixture).await;
     }
 
@@ -1399,12 +1399,12 @@ mod tests {
         let draw = || draw_organization(&pool, &fixture.organization_id);
 
         observe(&pool, &fixture, 60).await;
-        assert_eq!(draw().await.unwrap(), 201_270_000);
+        assert_eq!(draw().await.unwrap(), 229_000_000);
         // No new observation, nothing more to draw.
         assert_eq!(draw().await.unwrap(), 0);
         // Heartbeats resume: the time since the last draw is drawn, once.
         observe(&pool, &fixture, 90).await;
-        assert_eq!(draw().await.unwrap(), 201_270_000 / 2);
+        assert_eq!(draw().await.unwrap(), 229_000_000 / 2);
         assert_eq!(draw().await.unwrap(), 0);
 
         // A close later than the last observation draws through the close.
@@ -1416,7 +1416,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(draw().await.unwrap(), 201_270_000 / 2);
+        assert_eq!(draw().await.unwrap(), 229_000_000 / 2);
         assert_eq!(draw().await.unwrap(), 0);
         cleanup(&pool, fixture).await;
     }
@@ -1433,7 +1433,7 @@ mod tests {
             draw_organization(&pool, &fixture.organization_id),
         );
         let (left, right) = (left.unwrap(), right.unwrap());
-        assert_eq!(left + right, 201_270_000, "{left} {right}");
+        assert_eq!(left + right, 229_000_000, "{left} {right}");
         assert_eq!(ledger(&pool, &fixture).await.len(), 1);
         cleanup(&pool, fixture).await;
     }
@@ -1477,7 +1477,7 @@ mod tests {
         let drawn = draw_organization(&pool, &fixture.organization_id)
             .await
             .unwrap();
-        assert_eq!(drawn, 201_270_000 / 2);
+        assert_eq!(drawn, 229_000_000 / 2);
         let entries = ledger(&pool, &fixture).await;
         assert_eq!(
             entries.last(),

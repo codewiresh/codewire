@@ -256,7 +256,7 @@ fn credit_low_email(
     org_name: Option<&str>,
     billing_url: &str,
 ) -> Email {
-    let balance = format_cents(balance_cents, "eur");
+    let balance = format_cents(balance_cents, "usd");
     let name = organization_name(org_name);
     let email = match &name {
         Some(name) => Email::new(
@@ -271,8 +271,8 @@ fn credit_low_email(
     let organization = name.as_deref().unwrap_or("This organization");
     let email = match top_up_cents {
         Some(top_up) => email.paragraph(format!(
-            "{organization} has {balance} of compute credit left. Automatic top-up charges {} to the saved card when it reaches €0.",
-            format_cents(top_up, "eur")
+            "{organization} has {balance} of compute credit left. Automatic top-up charges {} to the saved card when it reaches $0.",
+            format_cents(top_up, "usd")
         )),
         None => email
             .paragraph(format!(
@@ -615,9 +615,9 @@ mod tests {
             amount_paid: 2000,
             subtotal: 2000,
             net_amount_due: 2000,
-            currency: "eur".into(),
+            currency: "usd".into(),
             charge_reasons: vec![
-                "Compute credit, added by automatic top-up when the balance reached €0".into(),
+                "Compute credit, added by automatic top-up when the balance reached $0".into(),
             ],
             ..Default::default()
         }
@@ -630,19 +630,19 @@ mod tests {
             .billing_url(Some("acme"));
         let on = credit_low_email(320, Some(2000), None, &billing).text();
         assert!(
-            on.contains("This organization has €3.20 of compute credit left. Automatic top-up charges €20.00 to the saved card when it reaches €0."),
+            on.contains("This organization has $3.20 of compute credit left. Automatic top-up charges $20.00 to the saved card when it reaches $0."),
             "{on}"
         );
         assert!(!on.contains("won't add more"), "{on}");
         assert!(on.contains("Add credit"), "{on}");
         let off = credit_low_email(320, None, None, &billing).text();
         assert!(
-            off.contains("€3.20 of compute credit left, and automatic top-up won't add more."),
+            off.contains("$3.20 of compute credit left, and automatic top-up won't add more."),
             "{off}"
         );
         let receipt = payment_receipt_email(&top_up_receipt()).text();
         assert!(
-            receipt.contains("added by automatic top-up when the balance reached €0"),
+            receipt.contains("added by automatic top-up when the balance reached $0"),
             "{receipt}"
         );
     }
@@ -685,12 +685,12 @@ mod tests {
         assert_eq!(low.heading, "Acme's compute credit is running low");
         assert_eq!(
             first_sentence(&low),
-            "Acme has €1.40 of compute credit left, and automatic top-up won't add more."
+            "Acme has $1.40 of compute credit left, and automatic top-up won't add more."
         );
         let low_top_up = credit_low_email(320, Some(2000), Some("Acme"), &billing);
         assert_eq!(
             first_sentence(&low_top_up),
-            "Acme has €3.20 of compute credit left. Automatic top-up charges €20.00 to the saved card when it reaches €0."
+            "Acme has $3.20 of compute credit left. Automatic top-up charges $20.00 to the saved card when it reaches $0."
         );
 
         let failed = payment_failed_email(1250, "eur", Some("Acme"), &billing);
@@ -722,7 +722,7 @@ mod tests {
             let low = credit_low_email(140, None, name, &billing);
             assert_eq!(low.subject, "Your compute credit is running low — Codewire");
             assert!(
-                first_sentence(&low).starts_with("This organization has €1.40"),
+                first_sentence(&low).starts_with("This organization has $1.40"),
                 "{name:?}"
             );
             let failed = payment_failed_email(1250, "eur", name, &billing);

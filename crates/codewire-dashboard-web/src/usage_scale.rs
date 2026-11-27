@@ -87,14 +87,14 @@ fn decimals(step: i128) -> u32 {
 
 fn tick_text(nano_eur: i128, decimals: u32) -> String {
     if nano_eur == 0 {
-        return "€0".to_owned();
+        return "$0".to_owned();
     }
     let whole = nano_eur / NANO_EUR_PER_EURO;
     if decimals == 0 {
-        return format!("€{whole}");
+        return format!("${whole}");
     }
     let fraction = nano_eur % NANO_EUR_PER_EURO / 10_i128.pow(9 - decimals);
-    format!("€{whole}.{fraction:0width$}", width = decimals as usize)
+    format!("${whole}.{fraction:0width$}", width = decimals as usize)
 }
 
 #[cfg(test)]
@@ -116,30 +116,30 @@ mod tests {
     #[test]
     fn ticks_are_round_euros_from_the_top_down_to_zero() {
         let scale = UsageScale::for_max(84 * CENT).expect("scale");
-        assert_eq!(labels(&scale), ["€1.00", "€0.50", "€0"]);
+        assert_eq!(labels(&scale), ["$1.00", "$0.50", "$0"]);
         assert_eq!(
             scale.ticks.iter().map(|tick| tick.y).collect::<Vec<_>>(),
             [8, 44, 80]
         );
 
         let scale = UsageScale::for_max(63 * CENT).expect("scale");
-        assert_eq!(labels(&scale), ["€0.75", "€0.50", "€0.25", "€0"]);
+        assert_eq!(labels(&scale), ["$0.75", "$0.50", "$0.25", "$0"]);
 
         let scale = UsageScale::for_max(100 * CENT).expect("scale");
-        assert_eq!(labels(&scale), ["€1.00", "€0.50", "€0"]);
+        assert_eq!(labels(&scale), ["$1.00", "$0.50", "$0"]);
 
         let scale = UsageScale::for_max(4 * 100 * CENT).expect("scale");
-        assert_eq!(labels(&scale), ["€4", "€2", "€0"]);
+        assert_eq!(labels(&scale), ["$4", "$2", "$0"]);
     }
 
     #[test]
     fn an_hour_under_a_cent_gets_a_scale_fine_enough_to_read() {
-        // Unlimited's fixture: €0.00105 an hour.
+        // Unlimited's fixture: $0.00105 an hour.
         let scale = UsageScale::for_max(1_050_000).expect("scale");
-        assert_eq!(labels(&scale), ["€0.0015", "€0.0010", "€0.0005", "€0"]);
+        assert_eq!(labels(&scale), ["$0.0015", "$0.0010", "$0.0005", "$0"]);
 
         let scale = UsageScale::for_max(1).expect("scale");
-        assert_eq!(labels(&scale), ["€0.000001", "€0"]);
+        assert_eq!(labels(&scale), ["$0.000001", "$0"]);
     }
 
     #[test]

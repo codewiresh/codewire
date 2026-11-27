@@ -445,17 +445,17 @@ async fn the_overview_reads_every_organization_once_and_at_once() {
             r#"<h3 id="first-org-name">first-org</h3><span class="cw-badge">Owner</span>"#
         )
     );
-    assert!(html.contains("<dt>Balance</dt><dd>€42.18</dd>"));
-    assert!(html.contains("<dt>This month</dt><dd>€17.82</dd>"));
+    assert!(html.contains("<dt>Balance</dt><dd>$42.18</dd>"));
+    assert!(html.contains("<dt>This month</dt><dd>$17.82</dd>"));
     assert!(html.contains("<dt>Running</dt><dd>1</dd>"));
     assert!(html.contains(
         r#"<title id="first-org-chart-title">Hourly Sandbox cost for first-org</title>"#
     ));
     assert_eq!(html.matches(r#"<rect class="cw-chart-bar""#).count(), 24);
-    // €0.84 on a €1.00 scale, its labels hidden from screen readers (#4959).
+    // $0.84 on a $1.00 scale, its labels hidden from screen readers (#4959).
     assert!(html.contains(r#"x="280" y="20" width="8" height="60" tabindex="0">"#));
     assert!(html.contains(
-        r#"<div class="cw-chart-scale" aria-hidden="true"><span>€1.00</span><span>€0.50</span><span>€0</span></div>"#
+        r#"<div class="cw-chart-scale" aria-hidden="true"><span>$1.00</span><span>$0.50</span><span>$0</span></div>"#
     ));
     assert!(html.contains(r#"<a class="cw-button cw-button--small cw-button--outline" href="/first-org/billing/">Billing</a>"#));
     // second-org: never had a Sandbox, and a member gets no Billing link.
@@ -639,7 +639,7 @@ fn an_unmetered_organization_shows_unlimited() {
         get_started: Some(get_started),
         organizations: vec![card(Some(CardStats {
             balance: Balance::Unlimited,
-            month: "€0.00".into(),
+            month: "$0.00".into(),
             running: 0,
         }))],
         shared_scale: false,
@@ -749,7 +749,7 @@ fn the_design_fixtures_are_what_the_home_renders() {
         now,
     );
     // An organization on the Unlimited rate card whose month so far is under
-    // a cent: ∞, "< €0.01", and its one card across the whole width (#4464).
+    // a cent: ∞, "< $0.01", and its one card across the whole width (#4464).
     let unlimited = build(
         true,
         &[organization("example-org", true)],

@@ -22,7 +22,7 @@
     <header class="cw-context-page-header"><a href="index.html">Back to fixtures</a><h1>Billing</h1><p>Compute credit, usage, invoices, and recent billing activity.</p></header>
     <div class="cw-billing-stack" id="billing-stack" hx-get="/example-org/_fragments/billing" hx-trigger="codewire:live:credit from:body, codewire:live:resync from:body" hx-swap="outerHTML">
           <header class="cw-balance-head" aria-label="Compute credit">
-            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">€42.18</p></div>
+            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">$42.18</p></div>
             <p class="cw-muted">About 2 days at current use</p>
           </header>
 
@@ -102,25 +102,25 @@
               <form class="cw-top-up-line" method="post" action="#auto-top-up">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-top-up-help" checked>
-                <label class="cw-label" for="billing-stack-top-up-enabled">Charge Visa •••• 4242 when the balance reaches €0</label>
+                <label class="cw-label" for="billing-stack-top-up-enabled">Charge Visa •••• 4242 when the balance reaches $0</label>
                 <button class="cw-field-help-trigger" id="billing-stack-top-up-help-trigger" type="button" popovertarget="billing-stack-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
-                <p class="cw-field-help-popover" id="billing-stack-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Charges your default card €20 whenever the balance reaches €0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.</p>
-                <label class="cw-sr-only" for="billing-stack-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+                <p class="cw-field-help-popover" id="billing-stack-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Charges your default card $20 whenever the balance reaches $0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.</p>
+                <label class="cw-sr-only" for="billing-stack-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-top-up-amount" name="amount"><option value="10">$10</option><option value="20" selected>$20</option><option value="50">$50</option><option value="100">$100</option></select>
               </form>
           </section>
 
           <section class="cw-section" aria-labelledby="billing-stack-add-credit-heading">
-            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-add-credit-help-trigger" type="button" popovertarget="billing-stack-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment, charged to Visa •••• 4242. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-add-credit-help-trigger" type="button" popovertarget="billing-stack-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment, charged to Visa •••• 4242. From $5 to $1,000. Separate from automatic top-up.</p></div></header>
               <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-add-credit-heading" data-add-credit>
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input type="hidden" name="request" value="design-fixture-request-0001">
                 <div class="cw-add-credit-row">
                   <fieldset class="cw-add-credit-amounts">
                     <legend class="cw-sr-only">Amount</legend>
-                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label></div>
+                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>$50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>$100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>$250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>$500</span></label></div>
                   </fieldset>
-                  <label class="cw-sr-only" for="billing-stack-add-credit-amount">Other amount in euros</label>
-                  <input class="cw-input cw-add-credit-other" id="billing-stack-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <label class="cw-sr-only" for="billing-stack-add-credit-amount">Other amount in dollars</label>
+                  <input class="cw-input cw-add-credit-other" id="billing-stack-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other $" data-add-credit-other>
                   <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
                 </div>
 
@@ -130,27 +130,27 @@
           <section class="cw-section" aria-labelledby="billing-stack-invoices-heading">
             <header class="cw-section-header"><div><h2 id="billing-stack-invoices-heading" class="cw-section-title">Invoices</h2><p class="cw-section-description">Every charge, with its receipt.</p></div></header>
               <div class="cw-table-wrap cw-table-shell--plain"><table class="cw-table"><caption class="cw-sr-only">Invoices</caption><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
-                <tr><td>2026-11-14</td><td>€50.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
-                <tr><td>2026-11-11</td><td>€20.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
+                <tr><td>2026-11-14</td><td>$50.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
+                <tr><td>2026-11-11</td><td>$20.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
               </tbody></table></div>
           </section>
           <!-- Example rates: the page shows the organization's live rate card. -->
           <section class="cw-section" aria-labelledby="billing-stack-usage-heading">
-            <header class="cw-section-header"><div><h2 id="billing-stack-usage-heading" class="cw-section-title">Sandbox Usage</h2><p class="cw-section-description">Credit drawn this month, per second of running Sandboxes: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk.</p></div></header>
+            <header class="cw-section-header"><div><h2 id="billing-stack-usage-heading" class="cw-section-title">Sandbox Usage</h2><p class="cw-section-description">Credit drawn this month, per second of running Sandboxes: $0.0438 per vCPU-hour, $0.0141 per GiB-hour of memory, $0.000087 per GiB-hour of disk.</p></div></header>
               <div class="cw-stat-grid cw-stat-grid--three cw-stat-grid--plain">
-                <div class="cw-stat"><span>Current Month</span><strong>€17.82</strong></div>
+                <div class="cw-stat"><span>Current Month</span><strong>$17.82</strong></div>
                 <div class="cw-stat"><span>CPU Hours</span><strong>312.4</strong></div>
                 <div class="cw-stat"><span>Memory GiB-Hours</span><strong>624.8</strong></div>
               </div>
               <figure class="cw-usage-chart">
                 <figcaption>Hourly cost, most recent 24 hours</figcaption>
                 <div class="cw-chart-plot">
-                  <div class="cw-chart-scale" aria-hidden="true"><span>€1.00</span><span>€0.50</span><span>€0</span></div>
+                  <div class="cw-chart-scale" aria-hidden="true"><span>$1.00</span><span>$0.50</span><span>$0</span></div>
                   <svg viewBox="0 0 304 88" preserveAspectRatio="none" role="img" aria-labelledby="billing-stack-usage-chart-title billing-stack-usage-chart-description">
                     <title id="billing-stack-usage-chart-title">Hourly Sandbox cost</title>
                     <desc id="billing-stack-usage-chart-description">Bar chart of hourly Sandbox cost. Exact values are available from each bar and the Sandbox table.</desc>
                     <path class="cw-chart-grid" d="M0 8H304"/><path class="cw-chart-grid" d="M0 44H304"/>
-                    <rect class="cw-chart-bar" x="8" y="78" width="8" height="2" tabindex="0"><title>23 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="20" y="78" width="8" height="2" tabindex="0"><title>22 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="32" y="78" width="8" height="2" tabindex="0"><title>21 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="44" y="78" width="8" height="2" tabindex="0"><title>20 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="56" y="78" width="8" height="2" tabindex="0"><title>19 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="68" y="78" width="8" height="2" tabindex="0"><title>18 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="80" y="78" width="8" height="2" tabindex="0"><title>17 hours ago: €0.00</title></rect><rect class="cw-chart-bar" x="92" y="65" width="8" height="15" tabindex="0"><title>16 hours ago: €0.21</title></rect><rect class="cw-chart-bar" x="104" y="50" width="8" height="30" tabindex="0"><title>15 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="116" y="50" width="8" height="30" tabindex="0"><title>14 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="128" y="35" width="8" height="45" tabindex="0"><title>13 hours ago: €0.63</title></rect><rect class="cw-chart-bar" x="140" y="35" width="8" height="45" tabindex="0"><title>12 hours ago: €0.63</title></rect><rect class="cw-chart-bar" x="152" y="50" width="8" height="30" tabindex="0"><title>11 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="164" y="50" width="8" height="30" tabindex="0"><title>10 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="176" y="35" width="8" height="45" tabindex="0"><title>9 hours ago: €0.63</title></rect><rect class="cw-chart-bar" x="188" y="20" width="8" height="60" tabindex="0"><title>8 hours ago: €0.84</title></rect><rect class="cw-chart-bar" x="200" y="20" width="8" height="60" tabindex="0"><title>7 hours ago: €0.84</title></rect><rect class="cw-chart-bar" x="212" y="50" width="8" height="30" tabindex="0"><title>6 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="224" y="65" width="8" height="15" tabindex="0"><title>5 hours ago: €0.21</title></rect><rect class="cw-chart-bar" x="236" y="65" width="8" height="15" tabindex="0"><title>4 hours ago: €0.21</title></rect><rect class="cw-chart-bar" x="248" y="50" width="8" height="30" tabindex="0"><title>3 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="260" y="50" width="8" height="30" tabindex="0"><title>2 hours ago: €0.42</title></rect><rect class="cw-chart-bar" x="272" y="65" width="8" height="15" tabindex="0"><title>1 hour ago: €0.21</title></rect><rect class="cw-chart-bar" x="284" y="50" width="8" height="30" tabindex="0"><title>this hour: €0.42</title></rect>
+                    <rect class="cw-chart-bar" x="8" y="78" width="8" height="2" tabindex="0"><title>23 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="20" y="78" width="8" height="2" tabindex="0"><title>22 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="32" y="78" width="8" height="2" tabindex="0"><title>21 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="44" y="78" width="8" height="2" tabindex="0"><title>20 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="56" y="78" width="8" height="2" tabindex="0"><title>19 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="68" y="78" width="8" height="2" tabindex="0"><title>18 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="80" y="78" width="8" height="2" tabindex="0"><title>17 hours ago: $0.00</title></rect><rect class="cw-chart-bar" x="92" y="65" width="8" height="15" tabindex="0"><title>16 hours ago: $0.21</title></rect><rect class="cw-chart-bar" x="104" y="50" width="8" height="30" tabindex="0"><title>15 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="116" y="50" width="8" height="30" tabindex="0"><title>14 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="128" y="35" width="8" height="45" tabindex="0"><title>13 hours ago: $0.63</title></rect><rect class="cw-chart-bar" x="140" y="35" width="8" height="45" tabindex="0"><title>12 hours ago: $0.63</title></rect><rect class="cw-chart-bar" x="152" y="50" width="8" height="30" tabindex="0"><title>11 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="164" y="50" width="8" height="30" tabindex="0"><title>10 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="176" y="35" width="8" height="45" tabindex="0"><title>9 hours ago: $0.63</title></rect><rect class="cw-chart-bar" x="188" y="20" width="8" height="60" tabindex="0"><title>8 hours ago: $0.84</title></rect><rect class="cw-chart-bar" x="200" y="20" width="8" height="60" tabindex="0"><title>7 hours ago: $0.84</title></rect><rect class="cw-chart-bar" x="212" y="50" width="8" height="30" tabindex="0"><title>6 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="224" y="65" width="8" height="15" tabindex="0"><title>5 hours ago: $0.21</title></rect><rect class="cw-chart-bar" x="236" y="65" width="8" height="15" tabindex="0"><title>4 hours ago: $0.21</title></rect><rect class="cw-chart-bar" x="248" y="50" width="8" height="30" tabindex="0"><title>3 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="260" y="50" width="8" height="30" tabindex="0"><title>2 hours ago: $0.42</title></rect><rect class="cw-chart-bar" x="272" y="65" width="8" height="15" tabindex="0"><title>1 hour ago: $0.21</title></rect><rect class="cw-chart-bar" x="284" y="50" width="8" height="30" tabindex="0"><title>this hour: $0.42</title></rect>
                     <path class="cw-chart-axis" d="M0 80H304"/>
                   </svg>
                 </div>
@@ -161,7 +161,7 @@
     <h2 class="cw-section-label">A new organization: no card, no credit</h2>
     <div class="cw-billing-stack" id="billing-stack-empty">
           <header class="cw-balance-head" aria-label="Compute credit">
-            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">€0.00</p></div>
+            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">$0.00</p></div>
 
           </header>
 
@@ -175,25 +175,25 @@
               <form class="cw-top-up-line" method="post" action="#auto-top-up">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-empty-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-empty-top-up-help" checked>
-                <label class="cw-label" for="billing-stack-empty-top-up-enabled">Charge your card when the balance reaches €0</label>
+                <label class="cw-label" for="billing-stack-empty-top-up-enabled">Charge your card when the balance reaches $0</label>
                 <button class="cw-field-help-trigger" id="billing-stack-empty-top-up-help-trigger" type="button" popovertarget="billing-stack-empty-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
-                <p class="cw-field-help-popover" id="billing-stack-empty-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once.</p>
-                <label class="cw-sr-only" for="billing-stack-empty-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+                <p class="cw-field-help-popover" id="billing-stack-empty-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Starts when you save a card. With the balance at $0.00, saving the card charges $20 at once.</p>
+                <label class="cw-sr-only" for="billing-stack-empty-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-top-up-amount" name="amount"><option value="10">$10</option><option value="20" selected>$20</option><option value="50">$50</option><option value="100">$100</option></select>
               </form>
           </section>
 
           <section class="cw-section" aria-labelledby="billing-stack-empty-add-credit-heading">
-            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-empty-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-empty-add-credit-help-trigger" type="button" popovertarget="billing-stack-empty-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-empty-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment. The card is saved for next time. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <header class="cw-section-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-empty-add-credit-heading" class="cw-section-title">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-empty-add-credit-help-trigger" type="button" popovertarget="billing-stack-empty-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-empty-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment. The card is saved for next time. From $5 to $1,000. Separate from automatic top-up.</p></div></header>
               <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-empty-add-credit-heading" data-add-credit data-add-credit-new-card="billing-stack-empty-add-credit-card">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
                 <input type="hidden" name="request" value="design-fixture-request-0001">
                 <div class="cw-add-credit-row">
                   <fieldset class="cw-add-credit-amounts">
                     <legend class="cw-sr-only">Amount</legend>
-                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label></div>
+                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>$50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>$100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>$250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>$500</span></label></div>
                   </fieldset>
-                  <label class="cw-sr-only" for="billing-stack-empty-add-credit-amount">Other amount in euros</label>
-                  <input class="cw-input cw-add-credit-other" id="billing-stack-empty-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <label class="cw-sr-only" for="billing-stack-empty-add-credit-amount">Other amount in dollars</label>
+                  <input class="cw-input cw-add-credit-other" id="billing-stack-empty-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other $" data-add-credit-other>
                   <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
                 </div>
                 <div class="cw-card-form" id="billing-stack-empty-add-credit-card" data-card-form hidden>
@@ -202,7 +202,7 @@
                   <div class="cw-top-up-line">
                     <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-empty-add-credit-top-up" name="top_up" value="true" data-card-top-up checked>
                     <label class="cw-label" for="billing-stack-empty-add-credit-top-up">Automatic top-up</label>
-                    <label class="cw-sr-only" for="billing-stack-empty-add-credit-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+                    <label class="cw-sr-only" for="billing-stack-empty-add-credit-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">$10</option><option value="20" selected>$20</option><option value="50">$50</option><option value="100">$100</option></select>
                   </div>
                   <p class="cw-muted" role="status" data-card-status hidden></p>
                 </div>
@@ -225,12 +225,12 @@
             <input class="cw-switch" type="checkbox" role="switch" id="add-card-top-up" name="top_up" value="true" checked aria-describedby="add-card-top-up-help" data-card-top-up>
             <label class="cw-label" for="add-card-top-up">Automatic top-up</label>
             <button class="cw-field-help-trigger" id="add-card-top-up-help-trigger" type="button" popovertarget="add-card-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
-            <p class="cw-field-help-popover" id="add-card-top-up-help" popover="auto" role="tooltip" data-field-help-popover><strong>Your balance is €0.00, so saving charges <span data-card-top-up-euros>€20</span> now.</strong> After that, this card is charged <span data-card-top-up-euros>€20</span> whenever your balance reaches €0. Turn it off anytime on Billing.</p>
-            <label class="cw-sr-only" for="add-card-top-up-amount">Top-up amount</label><select class="cw-select" id="add-card-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+            <p class="cw-field-help-popover" id="add-card-top-up-help" popover="auto" role="tooltip" data-field-help-popover><strong>Your balance is $0.00, so saving charges <span data-card-top-up-euros>$20</span> now.</strong> After that, this card is charged <span data-card-top-up-euros>$20</span> whenever your balance reaches $0. Turn it off anytime on Billing.</p>
+            <label class="cw-sr-only" for="add-card-top-up-amount">Top-up amount</label><select class="cw-select" id="add-card-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">$10</option><option value="20" selected>$20</option><option value="50">$50</option><option value="100">$100</option></select>
           </div>
           <p class="cw-muted" role="status" data-card-status hidden></p>
         </div>
-        <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close data-card-cancel>Cancel</button><button class="cw-button" type="submit" data-card-submit data-card-pays>Save card and pay €20</button></footer>
+        <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close data-card-cancel>Cancel</button><button class="cw-button" type="submit" data-card-submit data-card-pays>Save card and pay $20</button></footer>
       </form>
     </dialog>
     <div hidden data-card-setup data-card-stripe="data:text/javascript," data-card-key="pk_test_design_fixture" data-card-begin="#card-setup" data-card-finish="#card-setup-finish"><input type="hidden" name="_csrf" value="design-fixture-only"></div>

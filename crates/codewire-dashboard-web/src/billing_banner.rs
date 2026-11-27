@@ -15,7 +15,7 @@ use crate::{
 const STOP_AFTER_SECONDS: i64 = 24 * 3_600;
 /// Credit that lasts less than this many hours at the current rate is low.
 const LOW_HOURS: i128 = 24;
-/// Credit under €5 is low whatever runs, as for the low-credit email
+/// Credit under $5 is low whatever runs, as for the low-credit email
 /// (`credit_notices_due` in billing).
 const LOW_BALANCE_NANO_EUR: i64 = 500 * NANO_EUR_PER_CENT;
 /// How a member reads the card, whose brand and last four only owners and
@@ -57,7 +57,7 @@ impl CreditFacts {
         self.billing_enabled && !self.unmetered && self.enforced
     }
 
-    /// A card with automatic top-up refills the balance when it reaches €0.
+    /// A card with automatic top-up refills the balance when it reaches $0.
     fn tops_up(&self) -> bool {
         self.has_card && self.auto_top_up
     }
@@ -145,14 +145,14 @@ pub(crate) struct BannerViewer<'a> {
 /// 1. Out of credit while automatic top-up charges the card: warning, and the
 ///    charge and the card; it settles in seconds.
 /// 2. Out of credit: danger, and when Sandboxes are running, when they stop.
-/// 3. Low: metered, some credit, and under €5 or under 24 hours at the
+/// 3. Low: metered, some credit, and under $5 or under 24 hours at the
 ///    running Sandboxes' rate. Warning; with automatic top-up, the charge it
 ///    makes and when.
 /// 4. Otherwise none, as where credit isn't enforced.
 ///
 /// The card is named to owners and admins only. `sandboxes` is `None` when
 /// the inventory could not be read: out of credit then has no stop time, and
-/// low goes by the €5 line alone.
+/// low goes by the $5 line alone.
 pub(crate) fn billing_banner(
     facts: &CreditFacts,
     sandboxes: Option<&[SandboxLoad]>,
@@ -221,7 +221,7 @@ pub(crate) fn billing_banner(
     );
     let (text, action) = if facts.tops_up() {
         let charge = cents_text(facts.auto_top_up_cents);
-        let when = hours.map_or("when it reaches €0".to_owned(), |hours| {
+        let when = hours.map_or("when it reaches $0".to_owned(), |hours| {
             format!("in {} at current use", hours_text(hours))
         });
         (
@@ -340,7 +340,7 @@ mod tests {
     const BILLING: &str = "/example-org/billing/";
     const OUT: &str = "Out of compute credit. New Sandboxes and starts are refused.";
     /// The regular rate card, enforced: 2 vCPU, 8 GiB and 10 GiB cost about
-    /// €0.20 an hour. No card yet.
+    /// $0.20 an hour. No card yet.
     fn facts() -> CreditFacts {
         CreditFacts {
             balance_nano_eur: 50_000_000_000,
@@ -358,7 +358,7 @@ mod tests {
             exhausted_at: None,
         }
     }
-    /// A Visa with automatic top-up at €20.
+    /// A Visa with automatic top-up at $20.
     fn topped_up(balance_nano_eur: i64) -> CreditFacts {
         CreditFacts {
             balance_nano_eur,
@@ -367,7 +367,7 @@ mod tests {
             ..facts()
         }
     }
-    /// 2 vCPU, 8 GiB and 10 GiB: 0.20127 €/h at the rates above.
+    /// 2 vCPU, 8 GiB and 10 GiB: 0.20127 $/h at the rates above.
     fn standard(running: bool) -> SandboxLoad {
         SandboxLoad {
             running,
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn out_of_credit_while_top_up_charges_names_the_charge_and_the_card() {
-        // -€27.14 with €20 top-ups: billing charges €40 (#3381).
+        // -$27.14 with $20 top-ups: billing charges $40 (#3381).
         let charging = CreditFacts {
             top_up_charging_cents: 4_000,
             exhausted_at: Some(NOW),
@@ -482,7 +482,7 @@ mod tests {
             banner(&charging, &[standard(true)]),
             Some(BillingBannerView {
                 tone: "warning",
-                text: "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges €40.00 to Visa •••• 4242.".into(),
+                text: "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges $40.00 to Visa •••• 4242.".into(),
                 action: None,
             })
         );
@@ -491,7 +491,7 @@ mod tests {
             billing_banner(&charging, Some(&[]), &member(), NOW)
                 .unwrap()
                 .text,
-            "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges €40.00 to the saved card."
+            "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges $40.00 to the saved card."
         );
         assert_eq!(
             charging.create_refusal(),
@@ -506,7 +506,7 @@ mod tests {
     fn credit_back_above_zero_is_not_out_of_credit_before_billing_clears_its_mark() {
         // #4754: billing clears credit_exhausted_at only on its next minute's
         // tick, but creates are admitted on the live balance at once. On Dev
-        // the owner added €2 and still saw "Out of credit" for 33 s.
+        // the owner added $2 and still saw "Out of credit" for 33 s.
         let credited = CreditFacts {
             balance_nano_eur: 2 * EURO,
             has_card: true,
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn low_credit_counts_whole_hours_at_the_running_sandboxes_rate() {
-        // Seven hours and a bit at €0.20127 an hour.
+        // Seven hours and a bit at $0.20127 an hour.
         let low = CreditFacts {
             balance_nano_eur: 1_400_000_000,
             ..facts()
@@ -533,7 +533,7 @@ mod tests {
             banner(&low, &[standard(true), standard(false)]),
             Some(BillingBannerView {
                 tone: "warning",
-                text: "€1.40 of compute credit left, about 6 hours at current use.".into(),
+                text: "$1.40 of compute credit left, about 6 hours at current use.".into(),
                 action: action("Add a card"),
             })
         );
@@ -552,16 +552,16 @@ mod tests {
         };
         assert_eq!(
             text(&at(HOURLY), &[standard(true)]),
-            "€0.20127 of compute credit left, about 1 hour at current use."
+            "$0.20127 of compute credit left, about 1 hour at current use."
         );
         assert_eq!(
             text(&at(HOURLY - 1), &[standard(true)]),
-            "€0.201269 of compute credit left, less than an hour at current use."
+            "$0.201269 of compute credit left, less than an hour at current use."
         );
         // Two running Sandboxes halve the time.
         assert_eq!(
             text(&at(4 * HOURLY), &[standard(true), standard(true)]),
-            "€0.80508 of compute credit left, about 2 hours at current use."
+            "$0.80508 of compute credit left, about 2 hours at current use."
         );
         let seen_by_member = billing_banner(&low, Some(&[standard(true)]), &member(), NOW).unwrap();
         assert_eq!(seen_by_member.tone, "warning");
@@ -574,35 +574,35 @@ mod tests {
             balance_nano_eur,
             ..facts()
         };
-        // €5 or more, a day or more left: nothing to say. Two running
-        // Sandboxes put the day at €9.66, above the €5 line.
+        // $5 or more, a day or more left: nothing to say. Two running
+        // Sandboxes put the day at $9.66, above the $5 line.
         let two = [standard(true), standard(true)];
         assert_eq!(banner(&at(48 * HOURLY), &two), None);
         assert_eq!(
             text(&at(48 * HOURLY - 1), &two),
-            "€9.660959 of compute credit left, about 23 hours at current use."
+            "$9.660959 of compute credit left, about 23 hours at current use."
         );
-        // Under €5 is low whatever runs; nothing running says no time.
+        // Under $5 is low whatever runs; nothing running says no time.
         assert_eq!(banner(&at(5 * EURO), &[]), None);
         assert_eq!(
             text(&at(3_200_000_000), &[]),
-            "€3.20 of compute credit left."
+            "$3.20 of compute credit left."
         );
         assert_eq!(
             text(&at(3_200_000_000), &[standard(false)]),
-            "€3.20 of compute credit left."
+            "$3.20 of compute credit left."
         );
-        // Under €5 but days left at a small rate.
+        // Under $5 but days left at a small rate.
         assert_eq!(
             text(&at(4 * EURO), &[standard(true)]),
-            "€4.00 of compute credit left, about 19 hours at current use."
+            "$4.00 of compute credit left, about 19 hours at current use."
         );
-        // An inventory that could not be read: the €5 line alone.
+        // An inventory that could not be read: the $5 line alone.
         assert_eq!(
             billing_banner(&at(3 * EURO), None, &admin(), NOW)
                 .unwrap()
                 .text,
-            "€3.00 of compute credit left."
+            "$3.00 of compute credit left."
         );
         assert_eq!(billing_banner(&at(20 * EURO), None, &admin(), NOW), None);
     }
@@ -613,19 +613,19 @@ mod tests {
             banner(&topped_up(3_200_000_000), &[standard(true)]),
             Some(BillingBannerView {
                 tone: "warning",
-                text: "€3.20 of compute credit left. Automatic top-up charges €20.00 to Visa •••• 4242 in about 15 hours at current use.".into(),
+                text: "$3.20 of compute credit left. Automatic top-up charges $20.00 to Visa •••• 4242 in about 15 hours at current use.".into(),
                 action: None,
             })
         );
         assert_eq!(
             text(&topped_up(3_200_000_000), &[]),
-            "€3.20 of compute credit left. Automatic top-up charges €20.00 to Visa •••• 4242 when it reaches €0."
+            "$3.20 of compute credit left. Automatic top-up charges $20.00 to Visa •••• 4242 when it reaches $0."
         );
         assert_eq!(
             billing_banner(&topped_up(3_200_000_000), Some(&[]), &member(), NOW)
                 .unwrap()
                 .text,
-            "€3.20 of compute credit left. Automatic top-up charges €20.00 to the saved card when it reaches €0."
+            "$3.20 of compute credit left. Automatic top-up charges $20.00 to the saved card when it reaches $0."
         );
         // A card that Stripe could not read is still the saved card.
         let unread = CreditFacts {
@@ -634,7 +634,7 @@ mod tests {
         };
         assert_eq!(
             text(&unread, &[standard(true)]),
-            "€0.20127 of compute credit left. Automatic top-up charges €20.00 to the saved card in about 1 hour at current use."
+            "$0.20127 of compute credit left. Automatic top-up charges $20.00 to the saved card in about 1 hour at current use."
         );
         // Plenty left: nothing to say.
         assert_eq!(banner(&topped_up(50 * EURO), &[standard(true)]), None);
@@ -670,7 +670,7 @@ mod tests {
         ] {
             assert_eq!(banner(&quiet, &running), None, "{quiet:?}");
         }
-        // Free rates never run out, and €5 or more is not low.
+        // Free rates never run out, and $5 or more is not low.
         let free = CreditFacts {
             balance_nano_eur: 5 * EURO,
             cpu_nano_eur_per_vcpu_hour: 0,
@@ -760,8 +760,8 @@ mod tests {
             },
         );
         price_sandbox(&facts(), &mut row);
-        assert_eq!(row.hourly_rate, "€0.14487/h");
-        assert_eq!(row.cost, "€0.43461");
+        assert_eq!(row.hourly_rate, "$0.14487/h");
+        assert_eq!(row.cost, "$0.43461");
         // Never run: nothing spent, at the same rate.
         let mut fresh = crate::environment_connect::environment_row(
             codewire_proto::codewire::v1::Environment {
@@ -772,8 +772,8 @@ mod tests {
             },
         );
         price_sandbox(&facts(), &mut fresh);
-        assert_eq!(fresh.hourly_rate, "€0.07287/h");
-        assert_eq!(fresh.cost, "€0.00");
+        assert_eq!(fresh.hourly_rate, "$0.07287/h");
+        assert_eq!(fresh.cost, "$0.00");
         // Unlimited, or billing off: no price at all.
         for quiet in [
             CreditFacts {

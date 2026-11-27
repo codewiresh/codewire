@@ -142,11 +142,11 @@ test.describe.serial("server-rendered billing and administration", () => {
     await loginAsAdmin(page);
     const setCredit = async (cents: string) => {
       await page.goto("/admin/billing/");
-      const field = page.getByLabel(/Sign-up credit, in euro cents/);
+      const field = page.getByLabel(/Sign-up credit, in USD cents/);
       await field.fill(cents);
       await page.locator("form.cw-setting-row", { has: field }).getByRole("button", { name: "Save" }).click();
       await expect(page.getByText("Billing setting saved.")).toBeVisible();
-      await expect(page.getByLabel(/Sign-up credit, in euro cents/)).toHaveValue(cents);
+      await expect(page.getByLabel(/Sign-up credit, in USD cents/)).toHaveValue(cents);
     };
     const createOrganization = async (name: string, orgSlug: string) => {
       await page.goto("/organizations/new/");
@@ -170,7 +170,7 @@ test.describe.serial("server-rendered billing and administration", () => {
     await createOrganization("Credit On", `${slug}-credit-on`);
     expect(await grants(`${slug}-credit-on`)).toEqual([{ amount: "10000000000", key: "signup_credit" }]);
     await page.goto(`/${slug}-credit-on/billing/`);
-    await expect(page.locator(".cw-stat", { hasText: "Balance" }).locator("dd")).toHaveText("€10.00");
+    await expect(page.locator(".cw-stat", { hasText: "Balance" }).locator("dd")).toHaveText("$10.00");
 
     await setCredit("0");
     await createOrganization("Credit Off", `${slug}-credit-off`);

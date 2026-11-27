@@ -90,7 +90,7 @@ fn exhausted() -> GetBillingOverviewResponse {
     overview
 }
 
-/// €50 of credit with a card that tops it up.
+/// $50 of credit with a card that tops it up.
 fn healthy() -> GetBillingOverviewResponse {
     let mut overview = GetBillingOverviewResponse {
         billing_enabled: true,
@@ -396,9 +396,9 @@ async fn create_choices_replace_create_with_billing_while_out_of_credit() {
     }
 }
 
-/// Below €0 while automatic top-up charges the card, Create says it is waiting
+/// Below $0 while automatic top-up charges the card, Create says it is waiting
 /// on the charge and offers no Add credit, as `billing-banner` says for both
-/// €0 states (#4754). Orchestration refuses a create at €0 or below either way.
+/// $0 states (#4754). Orchestration refuses a create at $0 or below either way.
 #[tokio::test]
 async fn create_says_it_waits_on_the_top_up_while_one_charges() {
     let mut charging = GetBillingOverviewResponse {

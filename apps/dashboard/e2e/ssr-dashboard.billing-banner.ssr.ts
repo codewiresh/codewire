@@ -10,13 +10,13 @@ const states = [
   {
     fixture: "sandboxes-credit-low",
     tone: "warning",
-    text: "€1.40 of compute credit left, about 7 hours at current use.",
+    text: "$1.40 of compute credit left, about 7 hours at current use.",
     action: "Add credit",
   },
   {
     fixture: "sandboxes-credit-low-top-up",
     tone: "warning",
-    text: "€3.20 of compute credit left. Automatic top-up charges €20.00 to Visa •••• 4242 in about 15 hours at current use.",
+    text: "$3.20 of compute credit left. Automatic top-up charges $20.00 to Visa •••• 4242 in about 15 hours at current use.",
     action: null,
   },
   {
@@ -28,7 +28,7 @@ const states = [
   {
     fixture: "sandboxes-credit-charging",
     tone: "warning",
-    text: "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges €20.00 to Visa •••• 4242.",
+    text: "Out of compute credit: new Sandboxes and starts are refused until automatic top-up charges $20.00 to Visa •••• 4242.",
     action: null,
   },
 ];

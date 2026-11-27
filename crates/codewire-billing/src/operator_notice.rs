@@ -146,10 +146,13 @@ async fn send(
     email.send_to_operator(operator, &notice).await
 }
 
-/// "€5.00" for 500 euro cents; another currency is named by its code.
+/// "$5.00" for 500 USD cents, "€5.00" for 500 EUR cents; another currency is
+/// named by its code.
 fn amount(cents: i64, currency: &str) -> String {
     let value = format!("{}.{:02}", cents / 100, (cents % 100).abs());
-    if currency.eq_ignore_ascii_case("eur") {
+    if currency.eq_ignore_ascii_case("usd") {
+        format!("${value}")
+    } else if currency.eq_ignore_ascii_case("eur") {
         format!("€{value}")
     } else {
         format!("{value} {}", currency.to_ascii_uppercase())
@@ -296,7 +299,8 @@ mod tests {
 
     #[test]
     fn another_currency_is_named_by_its_code() {
-        assert_eq!(amount(12_345, "usd"), "123.45 USD");
+        assert_eq!(amount(12_345, "usd"), "$123.45");
+        assert_eq!(amount(12_345, "gbp"), "123.45 GBP");
         assert_eq!(amount(5, "eur"), "€0.05");
     }
 

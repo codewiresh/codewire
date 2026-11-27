@@ -1925,6 +1925,8 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "billing_credit_balances:cascade",
             // The ledger outlives its organization (0031, #4823).
             "billing_external_operations:cascade",
+            // Plan cycle allowances go with their organization (0062, #6659).
+            "billing_plan_allowances:cascade",
             "billing_top_ups:cascade",
             "environment_presets:no_action",
             "environment_quotas:no_action",

@@ -231,15 +231,15 @@ pub(crate) fn format_cost_text(reports: &[OrgCostReport]) -> String {
     output
 }
 
-/// A nano-euro amount in euros: two decimals, or up to six when the amount
-/// has more (a rate per hour is a fraction of a cent), never rounded up.
+/// A nano-dollar amount in US dollars: two decimals, or up to six when the
+/// amount has more (a rate per hour is a fraction of a cent), never rounded up.
 pub(crate) fn format_euros(nano_eur: i64) -> String {
     let sign = if nano_eur < 0 { "-" } else { "" };
     let magnitude = nano_eur.unsigned_abs();
     let whole = magnitude / 1_000_000_000;
     let fraction = format!("{:09}", magnitude % 1_000_000_000);
     let fraction = fraction[..6].trim_end_matches('0');
-    format!("{sign}€{whole}.{fraction:0<2}")
+    format!("{sign}${whole}.{fraction:0<2}")
 }
 
 /// An account's first states, in the same words everywhere they meet the

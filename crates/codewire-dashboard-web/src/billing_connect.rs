@@ -69,15 +69,15 @@ pub(crate) async fn signup_credit_nano_eur(state: &AppState) -> i64 {
 }
 
 /// The sign-up credit as the pricing page says it: whole euros without
-/// cents ("€10"), otherwise to the cent ("€7.50"). `None` when there is none.
+/// cents ("$10"), otherwise to the cent ("$7.50"). `None` when there is none.
 pub(crate) fn signup_credit_text(nano_eur: i64) -> Option<String> {
     const NANO_EUR_PER_CENT: i64 = 10_000_000;
     let cents = nano_eur / NANO_EUR_PER_CENT;
     (cents > 0).then(|| {
         if cents % 100 == 0 {
-            format!("€{}", cents / 100)
+            format!("${}", cents / 100)
         } else {
-            format!("€{}.{:02}", cents / 100, cents % 100)
+            format!("${}.{:02}", cents / 100, cents % 100)
         }
     })
 }
@@ -226,7 +226,7 @@ impl SavedCardView {
     }
 }
 
-/// One amount the automatic top-up offers, in euros.
+/// One amount the automatic top-up offers, in dollars.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TopUpChoice {
     pub(crate) euros: String,
@@ -285,7 +285,7 @@ pub(crate) struct BillingPageView {
     pub(crate) card_key: String,
     /// The default card as the page names it ("Visa •••• 4242"), or empty.
     pub(crate) default_card: String,
-    /// Prepaid compute credit (#3381), in euros.
+    /// Prepaid compute credit (#3381), in dollars.
     pub(crate) credit_balance: String,
     pub(crate) credit_negative: bool,
     /// No credit left: saving a card with top-up on charges it at once, so
@@ -300,7 +300,7 @@ pub(crate) struct BillingPageView {
     pub(crate) memory_rate: String,
     pub(crate) disk_rate: String,
     pub(crate) auto_top_up_enabled: bool,
-    /// The automatic top-up in euros, as the form shows it ("20").
+    /// The automatic top-up in dollars, as the form shows it ("20").
     pub(crate) auto_top_up_euros: String,
     pub(crate) top_up_choices: Vec<TopUpChoice>,
     /// The key of this page's Add credit attempt: a resubmitted form never
@@ -865,7 +865,7 @@ pub(crate) fn top_up_euros(cents: i32) -> String {
     }
 }
 
-/// A submitted top-up amount in euros ("20", "7.50") in cents: EUR 5 to
+/// A submitted top-up amount in dollars ("20", "7.50") in cents: EUR 5 to
 /// EUR 1,000 with at most two decimals.
 pub(crate) fn top_up_cents(text: &str) -> Option<i32> {
     let text = text.trim();
@@ -905,10 +905,10 @@ fn money(cents: i32, currency: &str) -> String {
     let cents = i64::from(cents);
     let sign = if cents < 0 { "-" } else { "" };
     let absolute = cents.abs();
-    if currency.eq_ignore_ascii_case("eur") || currency.trim().is_empty() {
-        format!("{sign}€{}.{:02}", absolute / 100, absolute % 100)
-    } else if currency.eq_ignore_ascii_case("usd") {
+    if currency.eq_ignore_ascii_case("usd") || currency.trim().is_empty() {
         format!("{sign}${}.{:02}", absolute / 100, absolute % 100)
+    } else if currency.eq_ignore_ascii_case("eur") {
+        format!("{sign}€{}.{:02}", absolute / 100, absolute % 100)
     } else {
         format!(
             "{sign}{}.{:02} {}",
@@ -1044,7 +1044,7 @@ mod tests {
             has_payment_method,
             cards_available: true,
             card_key: "pk_test_synthetic".into(),
-            credit_balance: "€4.20".into(),
+            credit_balance: "$4.20".into(),
             auto_top_up_enabled: true,
             auto_top_up_euros: "20".into(),
             top_up_choices: top_up_choices(2000),
@@ -1079,7 +1079,7 @@ mod tests {
         .map(|part| body.find(part).unwrap_or_else(|| panic!("{part}")))
         .collect();
         assert!(order.is_sorted(), "{order:?}");
-        assert!(body.contains(r#"<p class="cw-balance">€4.20</p>"#));
+        assert!(body.contains(r#"<p class="cw-balance">$4.20</p>"#));
         assert!(body.contains(r#"<p class="cw-muted">About 2 days at current use</p>"#));
         // Add card is the page's first action, at primary weight.
         assert!(body.contains(
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(line.contains(
             r#"<input class="cw-switch" type="checkbox" role="switch" id="top-up-enabled" name="enabled" value="true" aria-describedby="top-up-help" data-submit-on-change checked>"#
         ));
-        assert!(line.contains("Charge Visa •••• 4242 when the balance reaches €0"));
+        assert!(line.contains("Charge Visa •••• 4242 when the balance reaches $0"));
         assert!(
             line.contains(
                 r#"aria-label="About automatic top-up" data-field-help-trigger>i</button>"#
@@ -1125,7 +1125,7 @@ mod tests {
         for (euros, selected) in [("10", ""), ("20", " selected"), ("50", ""), ("100", "")] {
             assert!(
                 line.contains(&format!(
-                    r#"<option value="{euros}"{selected}>€{euros}</option>"#
+                    r#"<option value="{euros}"{selected}>${euros}</option>"#
                 )),
                 "{euros}"
             );
@@ -1134,14 +1134,14 @@ mod tests {
         // help says saving one charges at once when the balance is empty.
         let mut none = credit_view(false);
         none.balance_empty = true;
-        none.credit_balance = "€0.00".into();
+        none.credit_balance = "$0.00".into();
         let none = render(&none);
         let line = part(
             &none,
             r#"<section class="cw-section" aria-labelledby="top-up-heading">"#,
         );
-        assert!(line.contains("Charge your card when the balance reaches €0"));
-        assert!(line.contains("Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once."));
+        assert!(line.contains("Charge your card when the balance reaches $0"));
+        assert!(line.contains("Starts when you save a card. With the balance at $0.00, saving the card charges $20 at once."));
         assert!(!line.contains("disabled"));
         // An amount of its own is offered beside the presets.
         let choices = top_up_choices(2_500);
@@ -1159,7 +1159,7 @@ mod tests {
     fn add_card_names_the_charge_only_when_the_balance_is_empty() {
         let mut empty = credit_view(false);
         empty.balance_empty = true;
-        empty.credit_balance = "€0.00".into();
+        empty.credit_balance = "$0.00".into();
         let body = render(&empty);
         let dialog = &body[body
             .find(r#"<dialog class="cw-dialog" id="add-card-dialog""#)
@@ -1169,7 +1169,7 @@ mod tests {
         assert!(dialog.contains(
             r#"<input class="cw-switch" type="checkbox" role="switch" id="add-card-top-up" name="top_up" value="true" checked"#
         ));
-        assert!(dialog.contains("<strong>Your balance is €0.00, so saving charges"));
+        assert!(dialog.contains("<strong>Your balance is $0.00, so saving charges"));
         assert!(dialog.contains(r#"data-card-submit data-card-pays>Save card</button>"#));
         let funded = render(&credit_view(true));
         let dialog = &funded[funded.find(r#"id="add-card-dialog""#).unwrap()..];
@@ -1204,10 +1204,10 @@ mod tests {
         ));
         for (value, checked) in [("50", ""), ("100", " checked"), ("250", ""), ("500", "")] {
             assert!(add.contains(&format!(
-                r#"<label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="{value}"{checked}><span>€{value}</span></label>"#
+                r#"<label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="{value}"{checked}><span>${value}</span></label>"#
             )), "{value}");
         }
-        assert!(add.contains(r#"placeholder="Other €" data-add-credit-other>"#));
+        assert!(add.contains(r#"placeholder="Other $" data-add-credit-other>"#));
         // Without script the button says what it does without an amount.
         assert!(add.contains(
             r#"<button class="cw-button" type="submit" data-add-credit-submit>Pay</button>"#
@@ -1395,9 +1395,9 @@ mod tests {
     fn the_signup_credit_reads_as_euros_and_none_is_silent() {
         assert_eq!(signup_credit_text(0), None);
         assert_eq!(signup_credit_text(-1), None);
-        assert_eq!(signup_credit_text(10_000_000_000).as_deref(), Some("€10"));
-        assert_eq!(signup_credit_text(7_500_000_000).as_deref(), Some("€7.50"));
-        assert_eq!(signup_credit_text(10_000_000).as_deref(), Some("€0.01"));
+        assert_eq!(signup_credit_text(10_000_000_000).as_deref(), Some("$10"));
+        assert_eq!(signup_credit_text(7_500_000_000).as_deref(), Some("$7.50"));
+        assert_eq!(signup_credit_text(10_000_000).as_deref(), Some("$0.01"));
     }
 
     #[test]
@@ -1414,21 +1414,21 @@ mod tests {
             .unwrap()
         };
         let off = render(None);
-        for promise in ["of compute", "sign up", "€50"] {
+        for promise in ["of compute", "sign up", "$50"] {
             assert!(!off.contains(promise), "{promise}");
         }
         assert!(off.contains("<p class=\"copy\">Pay only while your sandboxes run.</p>"));
         assert!(off.contains("<h2 id=\"access-title\">Start building.</h2>"));
         assert!(off.contains("Local sandboxes are always free."));
 
-        let on = render(Some("€10"));
+        let on = render(Some("$10"));
         assert!(
-            on.contains("€10 of compute when you sign up. Then pay only while your sandboxes run.")
+            on.contains("$10 of compute when you sign up. Then pay only while your sandboxes run.")
         );
-        assert!(on.contains("Start with €10 of compute <span"));
-        assert!(on.contains("<h2 id=\"access-title\">Start with €10 of compute.</h2>"));
+        assert!(on.contains("Start with $10 of compute <span"));
+        assert!(on.contains("<h2 id=\"access-title\">Start with $10 of compute.</h2>"));
         assert!(
-            on.contains("€10 of compute when you sign up, and local sandboxes are always free.")
+            on.contains("$10 of compute when you sign up, and local sandboxes are always free.")
         );
     }
 
@@ -1457,7 +1457,7 @@ mod tests {
             let mut billing = BillingPageView {
                 billing_enabled: true,
                 can_manage: true,
-                credit_balance: "€42.50".into(),
+                credit_balance: "$42.50".into(),
                 usage_available: true,
                 invoices_available: true,
                 events_available: true,
@@ -1476,7 +1476,7 @@ mod tests {
             .expect("render degraded billing");
 
             assert!(body.contains(notice), "{name}");
-            assert!(body.contains("€42.50"), "{name}");
+            assert!(body.contains("$42.50"), "{name}");
             assert!(body.contains("/test/billing/_actions/card-setup"), "{name}");
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
         }

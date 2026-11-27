@@ -113,7 +113,7 @@
   const syncDialog = (form) => {
     if (!form.topUp || !form.amount || form.done) return;
     form.amount.disabled = !form.topUp.checked;
-    const euros = `€${form.amount.value}`;
+    const euros = `$${form.amount.value}`;
     form.region.querySelectorAll("[data-card-top-up-euros]").forEach((node) => { node.textContent = euros; });
     if (form.owner || !form.submit) return;
     form.submit.textContent = form.submit.hasAttribute("data-card-pays") && form.topUp.checked
@@ -148,7 +148,7 @@
       if (!setup.dataset.cardKey) throw new Error(OFF);
       form.stripe = window.Stripe(setup.dataset.cardKey);
       form.elements = form.stripe.elements({
-        mode: "setup", currency: "eur", paymentMethodTypes: ["card"], appearance: appearance(),
+        mode: "setup", currency: "usd", paymentMethodTypes: ["card"], appearance: appearance(),
       });
       // Cards only, as v4 shows them: no Link sign-up and no wallets.
       const payment = form.elements.create("payment", { wallets: { applePay: "never", googlePay: "never", link: "never" } });

@@ -324,12 +324,12 @@ async fn the_page_shows_each_card_and_edits_only_the_charged_ones() {
         "<a class=\"cw-nav-link\" href=\"/admin/pricing/\">Pricing</a>",
         "<h2 id=\"rate-card-regular-title\" class=\"cw-section-title\">Regular</h2><p class=\"cw-section-description\">Updated <time datetime=\"2026-11-23T00:00:00Z\">Nov 23, 2026, 00:00 UTC</time></p>",
         "<input type=\"hidden\" name=\"expected_updated_at\" value=\"1795392000.123456000\">",
-        "<label class=\"cw-label\" for=\"rate-regular-cpu\">vCPU, per hour<span class=\"cw-sr-only\">, in euros</span></label><span class=\"cw-input-group\"><span aria-hidden=\"true\">€</span><input id=\"rate-regular-cpu\" name=\"cpu\" type=\"text\" inputmode=\"decimal\" value=\"0.0438\"",
+        "<label class=\"cw-label\" for=\"rate-regular-cpu\">vCPU, per hour<span class=\"cw-sr-only\">, in dollars</span></label><span class=\"cw-input-group\"><span aria-hidden=\"true\">$</span><input id=\"rate-regular-cpu\" name=\"cpu\" type=\"text\" inputmode=\"decimal\" value=\"0.0438\"",
         "name=\"memory\" type=\"text\" inputmode=\"decimal\" value=\"0.0141\"",
         "name=\"disk\" type=\"text\" inputmode=\"decimal\" value=\"0.000087\"",
         "for=\"rate-regular-storage\">Storage while suspended or hibernated, per GiB-hour<",
         "<button class=\"cw-button\" type=\"submit\">Review</button>",
-        "<dt>vCPU, per hour</dt><dd>€0</dd>",
+        "<dt>vCPU, per hour</dt><dd>$0</dd>",
         "<p class=\"cw-muted\">Unlimited is never charged.</p>",
     ] {
         assert!(page.body.contains(text), "missing {text}");
@@ -387,13 +387,13 @@ async fn the_review_shows_now_and_new_for_changed_rates_only() {
     let page = post(
         &dashboard,
         REVIEW,
-        &review_form(&[("cpu", " €0.0538 "), ("storage", "0.0")]),
+        &review_form(&[("cpu", " $0.0538 "), ("storage", "0.0")]),
     )
     .await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     for text in [
         "<h2 id=\"price-review-title\" class=\"cw-section-title\">Review Regular's prices</h2>",
-        "<thead><tr><th scope=\"col\">Rate</th><th scope=\"col\">Now</th><th scope=\"col\">New</th></tr></thead><tbody><tr><th scope=\"row\">vCPU, per hour</th><td>€0.0438</td><td>€0.0538</td></tr></tbody>",
+        "<thead><tr><th scope=\"col\">Rate</th><th scope=\"col\">Now</th><th scope=\"col\">New</th></tr></thead><tbody><tr><th scope=\"row\">vCPU, per hour</th><td>$0.0438</td><td>$0.0538</td></tr></tbody>",
         "<input type=\"hidden\" name=\"rate_card\" value=\"regular\"><input type=\"hidden\" name=\"expected_updated_at\" value=\"1795392000.123456000\"><input type=\"hidden\" name=\"cpu_nano\" value=\"53800000\"><input type=\"hidden\" name=\"memory_nano\" value=\"14100000\"><input type=\"hidden\" name=\"disk_nano\" value=\"87000\"><input type=\"hidden\" name=\"storage_nano\" value=\"0\">",
         "<a class=\"cw-button cw-button--outline\" href=\"/admin/pricing/\">Back</a><button class=\"cw-button\" type=\"submit\">Save prices</button>",
     ] {
@@ -407,7 +407,7 @@ async fn the_review_shows_now_and_new_for_changed_rates_only() {
 
     let large = post(&dashboard, REVIEW, &review_form(&[("storage", "0.0001")])).await;
     assert!(large.body.contains(
-        "<th scope=\"row\">Storage while suspended or hibernated, per GiB-hour</th><td>€0</td><td>€0.0001<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
+        "<th scope=\"row\">Storage while suspended or hibernated, per GiB-hour</th><td>$0</td><td>$0.0001<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
     ));
     assert!(large.body.contains(
         "<label class=\"cw-choice\"><input class=\"cw-checkbox\" type=\"checkbox\" name=\"confirm_increase\" value=\"yes\" required><span>I confirm these increases.</span></label>"
@@ -444,7 +444,7 @@ async fn a_refused_amount_keeps_what_was_typed_and_marks_its_field() {
     );
     for text in [
         "name=\"cpu\" type=\"text\" inputmode=\"decimal\" value=\"0,05\" required maxlength=\"32\" autocomplete=\"off\" spellcheck=\"false\" aria-invalid=\"true\" aria-describedby=\"rate-regular-cpu-error\">",
-        "<p class=\"cw-field-error\" id=\"rate-regular-cpu-error\">Enter an amount from €0 to €10, with at most 9 decimal places.</p>",
+        "<p class=\"cw-field-error\" id=\"rate-regular-cpu-error\">Enter an amount from $0 to $10, with at most 9 decimal places.</p>",
         "value=\"10.000000001\" required maxlength=\"32\" autocomplete=\"off\" spellcheck=\"false\" aria-invalid=\"true\"",
         "name=\"memory\" type=\"text\" inputmode=\"decimal\" value=\"0.0141\" required maxlength=\"32\" autocomplete=\"off\" spellcheck=\"false\"></span>",
     ] {
@@ -457,7 +457,7 @@ async fn a_refused_amount_keeps_what_was_typed_and_marks_its_field() {
 #[tokio::test]
 async fn a_large_increase_needs_the_confirmation_checked_against_the_current_card() {
     let (_services, dashboard, calls) = start(ADMIN).await;
-    // €0.0438 to €0.1: more than double, sent without the checkbox.
+    // $0.0438 to $0.1: more than double, sent without the checkbox.
     let refused = post(&dashboard, UPDATE, &update_form("100000000")).await;
     assert_eq!(
         refused.status,
@@ -466,7 +466,7 @@ async fn a_large_increase_needs_the_confirmation_checked_against_the_current_car
         refused.body
     );
     assert!(refused.body.contains(
-        "<td>€0.0438</td><td>€0.1<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
+        "<td>$0.0438</td><td>$0.1<span class=\"cw-status cw-status--quiet\" data-tone=\"warning\">More than double</span></td>"
     ));
     assert!(refused.body.contains("I confirm these increases."));
     assert_eq!(calls.count("ListRateCards"), 1);

@@ -216,7 +216,7 @@ fn negative_balance_unconfirmed(balance_nano_eur: i64) -> AppError {
         status: axum::http::StatusCode::CONFLICT,
         code: "negative_balance_unconfirmed",
         detail: format!(
-            "this leaves the balance at -EUR {}.{:02} ({balance_nano_eur} nano-euros); confirm that balance to apply it",
+            "this leaves the balance at -USD {}.{:02} ({balance_nano_eur} nano-units); confirm that balance to apply it",
             cents / 100,
             cents % 100
         )
@@ -235,7 +235,7 @@ pub(crate) fn validate_adjustment<'a>(
     if amount_nano_eur == 0 || amount_nano_eur.unsigned_abs() > MAX_ADJUSTMENT_NANO_EUR as u64 {
         return Err(invalid(
             "/amount_nano_eur",
-            "must be non-zero and at most EUR 100,000 either way",
+            "must be non-zero and at most USD 100,000 either way",
         ));
     }
     let reason = reason.trim();

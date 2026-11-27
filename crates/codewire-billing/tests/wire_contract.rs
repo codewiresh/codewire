@@ -180,7 +180,7 @@ async fn configured_billing_wire_contract() {
                 .as_option()
                 .expect("rates")
                 .cpu_nano_eur_per_vcpu_hour,
-            43_800_000
+            50_000_000
         );
 
         // Automatic top-up: a member may not change it; the owner may, within

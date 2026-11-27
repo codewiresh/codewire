@@ -216,8 +216,8 @@ impl PriceReviewView {
             .filter(|rate| card.rates.get(*rate) != new.get(*rate))
             .map(|rate| PriceChangeView {
                 label: rate.label(),
-                now: format!("€{}", rate_euros(card.rates.get(rate))),
-                new: format!("€{}", rate_euros(new.get(rate))),
+                now: format!("${}", rate_euros(card.rates.get(rate))),
+                new: format!("${}", rate_euros(new.get(rate))),
                 large: large_increase(card.rates.get(rate), new.get(rate)),
             })
             .collect();
@@ -366,7 +366,11 @@ pub(crate) fn rate_euros(nano_eur: i64) -> String {
 /// [`MAX_RATE_NANO_EUR`]. Anything else is `None`.
 pub(crate) fn rate_nano(text: &str) -> Option<i64> {
     let text = text.trim();
-    let text = text.strip_prefix('€').unwrap_or(text).trim_start();
+    let text = text
+        .strip_prefix('$')
+        .or_else(|| text.strip_prefix('€'))
+        .unwrap_or(text)
+        .trim_start();
     let (whole, fraction) = match text.split_once('.') {
         Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
         Some(_) => return None,
@@ -529,11 +533,11 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("vCPU, per hour", "€0.0438", "€0.0538", false),
+                ("vCPU, per hour", "$0.0438", "$0.0538", false),
                 (
                     "Storage while suspended or hibernated, per GiB-hour",
-                    "€0",
-                    "€0.000000001",
+                    "$0",
+                    "$0.000000001",
                     true
                 ),
             ]

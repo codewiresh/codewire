@@ -98,7 +98,7 @@ const app = document.querySelector("[data-dashboard-app]");
     const choice = form.querySelector('input[name="choice"]:checked');
     const euros = typed ? creditEuros(typed) : choice ? creditEuros(choice.value) : null;
     const submit = form.querySelector("[data-add-credit-submit]");
-    if (submit) submit.textContent = euros ? `Pay €${euros}` : "Pay";
+    if (submit) submit.textContent = euros ? `Pay $${euros}` : "Pay";
   };
   const addCreditForms = () => document.querySelectorAll("form[data-add-credit]");
   addCreditForms().forEach(syncAddCredit);

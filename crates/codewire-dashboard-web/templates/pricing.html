@@ -162,9 +162,9 @@
         <div class="tw"><table>
           <thead><tr><th scope="col">Resource</th><th scope="col">Rate</th><th scope="col" class="r">Cost</th></tr></thead>
           <tbody>
-            <tr><td>vCPU</td><td class="m">€{{ rates.cpu }} per vCPU-hour</td><td class="m r" data-pricing-cost="cpu">{{ rates.cpu_cost }}</td></tr>
-            <tr><td>Memory</td><td class="m">€{{ rates.memory }} per GB-hour</td><td class="m r" data-pricing-cost="memory">{{ rates.memory_cost }}</td></tr>
-            <tr><td>Disk</td><td class="m">€{{ rates.disk }} per GB-hour</td><td class="m r" data-pricing-cost="disk">{{ rates.disk_cost }}</td></tr>
+            <tr><td>vCPU</td><td class="m">${{ rates.cpu }} per vCPU-hour</td><td class="m r" data-pricing-cost="cpu">{{ rates.cpu_cost }}</td></tr>
+            <tr><td>Memory</td><td class="m">${{ rates.memory }} per GB-hour</td><td class="m r" data-pricing-cost="memory">{{ rates.memory_cost }}</td></tr>
+            <tr><td>Disk</td><td class="m">${{ rates.disk }} per GB-hour</td><td class="m r" data-pricing-cost="disk">{{ rates.disk_cost }}</td></tr>
           </tbody>
         </table></div>
         <p class="mono grey fnote">Billed per second on the sandbox’s size while it runs. A month is 730 hours.</p>
@@ -183,7 +183,7 @@
         <div><dt>Do local VMs cost anything?</dt><dd>No. A local VM runs on your own machine and is never billed. <a href="/docs/install">Download the Codewire CLI</a> to run sandboxes as local VMs.</dd></div>
         <div><dt>Where do the sandboxes run?</dt><dd>On a private network of bare-metal machines in Amsterdam, Netherlands, and Frankfurt, Germany. Locations in the US are coming soon.</dd></div>
         <div><dt>How does billing work?</dt><dd>Your organization keeps a balance. Running sandboxes draw it down per second at the rates above. There are no plans, seats or minimums.</dd></div>
-        <div><dt>What do I get for free?</dt><dd>{% if let Some(credit) = signup_credit %}{{ credit }} of compute when you sign up, and local sandboxes are always free.{% else %}Local sandboxes are always free. In the cloud you pay only while your sandboxes run.{% endif %} Adding a card tops up €20 of credit when your balance is empty; automatic top-ups add €20 at a time. Change the amount or switch them off on the Billing page.</dd></div>
+        <div><dt>What do I get for free?</dt><dd>{% if let Some(credit) = signup_credit %}{{ credit }} of compute when you sign up, and local sandboxes are always free.{% else %}Local sandboxes are always free. In the cloud you pay only while your sandboxes run.{% endif %} Adding a card tops up $20 of credit when your balance is empty; automatic top-ups add $20 at a time. Change the amount or switch them off on the Billing page.</dd></div>
         <div><dt>What happens if my balance runs out?</dt><dd>Without a card, or if a top-up fails, new sandboxes and starts are refused at once, and running sandboxes stop after 24 hours. Their storage is kept.</dd></div>
         <div><dt>Do credits expire?</dt><dd>No.</dd></div>
         <div><dt>Do agents or teammates cost extra?</dt><dd>No. Agents are processes in your sandboxes, and members are free. You pay only for running sandboxes.</dd></div>

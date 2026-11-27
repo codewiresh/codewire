@@ -4,9 +4,9 @@ use super::*;
 use crate::credit::draw_organization;
 
 const REGULAR: Rates = Rates {
-    cpu_per_vcpu_hour: 43_800_000,
-    memory_per_gib_hour: 14_100_000,
-    disk_per_gib_hour: 87_000,
+    cpu_per_vcpu_hour: 50_000_000,
+    memory_per_gib_hour: 16_000_000,
+    disk_per_gib_hour: 100_000,
     parked_storage_per_gib_hour: 0,
 };
 
@@ -28,12 +28,12 @@ fn a_sandbox_costs_its_sessions_and_its_hour_is_at_its_largest_size() {
         REGULAR,
         &[window(2000, 8192, 10, 1800), window(4000, 8192, 10, 1800)],
     );
-    // Half an hour at 2 vCPU and half at 4: three vCPU-hours of 43.8 m
-    // halved, plus a full hour of 8 GiB and 10 GiB.
+    // Half an hour at 2 vCPU and half at 4: three vCPU-hours of 50 m,
+    // plus a full hour of 8 GiB and 10 GiB.
     assert_eq!(cost.running_seconds, 3600);
-    assert_eq!(cost.cost_nano_eur, 131_400_000 + 112_800_000 + 870_000);
+    assert_eq!(cost.cost_nano_eur, 150_000_000 + 128_000_000 + 1_000_000);
     assert_eq!((cost.cpu_millicores, cost.memory_mib), (4000, 8192));
-    assert_eq!(cost.hourly_nano_eur, 175_200_000 + 112_800_000 + 870_000);
+    assert_eq!(cost.hourly_nano_eur, 200_000_000 + 128_000_000 + 1_000_000);
 }
 
 #[test]
@@ -54,21 +54,21 @@ fn a_paused_stretch_costs_only_its_disk_and_isnt_running_time() {
     );
     assert_eq!(cost.running_seconds, 1800);
     // Half an hour running, then an hour of 10 GiB at the storage rate.
-    assert_eq!(cost.cost_nano_eur, 201_270_000 / 2 + 10 * 5_000);
-    assert_eq!(cost.hourly_nano_eur, 201_270_000);
+    assert_eq!(cost.cost_nano_eur, 229_000_000 / 2 + 10 * 5_000);
+    assert_eq!(cost.hourly_nano_eur, 229_000_000);
 }
 
 #[test]
 fn a_short_run_costs_a_fraction_of_a_cent_not_nothing() {
-    // #3954: a five-minute run showed EUR 0.00 in whole cents.
+    // #3954: a five-minute run showed $0.00 in whole cents.
     let cost = sandbox_cost(
         "env".into(),
         "Env".into(),
         REGULAR,
         &[window(2000, 8192, 80, 302)],
     );
-    // 2 x 43.8 m + 8 x 14.1 m + 80 x 0.087 m = 207.36 m an hour, for 302 s.
-    assert_eq!(cost.cost_nano_eur, 17_395_200);
+    // 2 x 50 m + 8 x 16 m + 80 x 0.1 m = 236 m an hour, for 302 s.
+    assert_eq!(cost.cost_nano_eur, 19_797_777);
 }
 
 async fn test_pool() -> Option<PgPool> {

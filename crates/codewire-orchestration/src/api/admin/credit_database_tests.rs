@@ -247,7 +247,7 @@ async fn db_an_adjustment_below_zero_applies_only_once_its_balance_is_confirmed(
         match &unasked {
             Err(AppError::Coded { code, detail, .. }) => {
                 ensure!(*code == "negative_balance_unconfirmed", "{unasked:?}");
-                ensure!(detail.contains("-EUR 1.00"), "{detail}");
+                ensure!(detail.contains("-USD 1.00"), "{detail}");
             }
             other => anyhow::bail!("not refused: {other:?}"),
         }

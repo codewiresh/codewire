@@ -94,13 +94,13 @@ async fn read(state: &AppState) -> Option<Rates> {
 /// Regular's rates as the pricing page shows them.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PricingRatesView {
-    /// Each rate in euros per unit-hour, exactly, for the calculator
+    /// Each rate in dollars per unit-hour, exactly, for the calculator
     /// ("0.0438").
     pub(crate) cpu: String,
     pub(crate) memory: String,
     pub(crate) disk: String,
     /// The default size's hourly cost of each resource and their total, as
-    /// the calculator writes them ("€0.0876").
+    /// the calculator writes them ("$0.0876").
     pub(crate) cpu_cost: String,
     pub(crate) memory_cost: String,
     pub(crate) disk_cost: String,
@@ -124,7 +124,7 @@ impl PricingRatesView {
     }
 }
 
-/// A rate in euros, exactly, with at least two decimals: "0.0438" for
+/// A rate in dollars, exactly, with at least two decimals: "0.0438" for
 /// 43,800,000 nano-euros.
 fn rate_euros(nano_eur: u64) -> String {
     let fraction = format!("{:09}", nano_eur % NANO_EUR_PER_EURO);
@@ -137,13 +137,13 @@ fn rate_euros(nano_eur: u64) -> String {
 fn cost_text(nano_eur: u64) -> String {
     if nano_eur >= NANO_EUR_PER_EURO {
         let cents = (nano_eur + NANO_EUR_PER_CENT / 2) / NANO_EUR_PER_CENT;
-        return format!("€{}.{:02}", cents / 100, cents % 100);
+        return format!("${}.{:02}", cents / 100, cents % 100);
     }
     if nano_eur == 0 {
-        return "€0".into();
+        return "$0".into();
     }
-    // The fourth significant digit of an amount under €1 is decimal
-    // 12 - floor(log10(nano-euros)), from the fourth to the twelfth.
+    // The fourth significant digit of an amount under $1 is decimal
+    // 12 - floor(log10(nano-dollars)), from the fourth to the twelfth.
     let decimals = 12 - nano_eur.ilog10();
     let digits = if decimals >= 9 {
         format!("{nano_eur:09}")
@@ -151,11 +151,11 @@ fn cost_text(nano_eur: u64) -> String {
         let step = 10u64.pow(9 - decimals);
         let rounded = (nano_eur + step / 2) / step;
         if rounded == 10u64.pow(decimals) {
-            return "€1".into();
+            return "$1".into();
         }
         format!("{rounded:0width$}", width = decimals as usize)
     };
-    format!("€0.{}", digits.trim_end_matches('0'))
+    format!("$0.{}", digits.trim_end_matches('0'))
 }
 
 /// The rates the `pricing.html` design fixture shows, as an example.
@@ -202,16 +202,16 @@ mod tests {
 
     #[test]
     fn costs_read_as_the_calculator_writes_them() {
-        assert_eq!(cost_text(87_600_000), "€0.0876");
-        assert_eq!(cost_text(112_800_000), "€0.1128");
-        assert_eq!(cost_text(8_700_000), "€0.0087");
-        assert_eq!(cost_text(209_100_000), "€0.2091");
-        assert_eq!(cost_text(123_456_789), "€0.1235");
-        assert_eq!(cost_text(87), "€0.000000087");
-        assert_eq!(cost_text(999_960_000), "€1");
-        assert_eq!(cost_text(298_935_000_000), "€298.94");
-        assert_eq!(cost_text(1_005_000_000), "€1.01");
-        assert_eq!(cost_text(0), "€0");
+        assert_eq!(cost_text(87_600_000), "$0.0876");
+        assert_eq!(cost_text(112_800_000), "$0.1128");
+        assert_eq!(cost_text(8_700_000), "$0.0087");
+        assert_eq!(cost_text(209_100_000), "$0.2091");
+        assert_eq!(cost_text(123_456_789), "$0.1235");
+        assert_eq!(cost_text(87), "$0.000000087");
+        assert_eq!(cost_text(999_960_000), "$1");
+        assert_eq!(cost_text(298_935_000_000), "$298.94");
+        assert_eq!(cost_text(1_005_000_000), "$1.01");
+        assert_eq!(cost_text(0), "$0");
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             [view.cpu_cost, view.memory_cost, view.disk_cost, view.total],
-            ["€0.0876", "€0.1128", "€0.0087", "€0.2091"]
+            ["$0.0876", "$0.1128", "$0.0087", "$0.2091"]
         );
     }
 
@@ -359,13 +359,13 @@ mod tests {
         assert!(html.contains(
             r#"data-rate-cpu="0.05" data-rate-memory="0.0141" data-rate-disk="0.000087""#
         ));
-        assert!(html.contains("€0.05 per vCPU-hour"));
-        assert!(html.contains(r#"data-pricing-cost="total">€0.2215</output>"#));
+        assert!(html.contains("$0.05 per vCPU-hour"));
+        assert!(html.contains(r#"data-pricing-cost="total">$0.2215</output>"#));
         assert!(!html.contains("Prices can’t be shown right now."));
 
         let html = pricing_page(None).await;
         assert!(html.contains("<p class=\"copy\">Prices can’t be shown right now.</p>"));
-        for price in ["data-pricing-estimator", "per vCPU-hour", "€0."] {
+        for price in ["data-pricing-estimator", "per vCPU-hour", "$0."] {
             assert!(!html.contains(price), "{price}");
         }
     }

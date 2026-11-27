@@ -113,7 +113,7 @@ pub(super) struct AddCreditSubmission {
     /// A chip's euros ("100"), or "custom".
     #[serde(default)]
     choice: String,
-    /// The amount typed in Other, in euros; it wins over a chip.
+    /// The amount typed in Other, in dollars; it wins over a chip.
     #[serde(default)]
     amount: String,
 }
@@ -141,7 +141,7 @@ fn without_client_secret(path: &str, raw_query: Option<&str>) -> Option<String> 
     })
 }
 
-/// The amounts the chips offer, in euros (owner, 2026-11-11, #3381).
+/// The amounts the chips offer, in dollars (owner, 2026-11-11, #3381).
 const CREDIT_CHIPS: [i32; 4] = [50, 100, 250, 500];
 
 /// The chosen amount in cents: an amount typed in Other, from EUR 5 to
@@ -605,7 +605,7 @@ fn billing_message(value: &str, amount: &str, default_card: &str) -> String {
         .parse::<i32>()
         .ok()
         .filter(|cents| (500..=100_000).contains(cents))
-        .map(|cents| format!("€{}", billing_connect::top_up_euros(cents)));
+        .map(|cents| format!("${}", billing_connect::top_up_euros(cents)));
     let card = if default_card.is_empty() {
         "Your card"
     } else {
@@ -720,9 +720,9 @@ fn billing_error(value: &str) -> &'static str {
         "card-setup-limit" => {
             "Too many tries at adding a card, so nothing was saved or charged. Try again later, or contact support."
         }
-        "invalid-top-up" => "Enter a top-up amount from €5 to €1,000, with at most two decimals.",
+        "invalid-top-up" => "Enter a top-up amount from $5 to $1,000, with at most two decimals.",
         "invalid-credit" => {
-            "Choose an amount, or enter one from €5 to €1,000 with at most two decimals."
+            "Choose an amount, or enter one from $5 to $1,000 with at most two decimals."
         }
         "credit-in-progress" => {
             "A payment for this organization's credit is already being processed. Try again in a minute."
@@ -807,7 +807,7 @@ mod tests {
         );
         assert_eq!(
             billing_message("card-credit-added", "10000", card),
-            "Visa •••• 4242 saved as your default card. €100 added to your credit; the receipt is on its way."
+            "Visa •••• 4242 saved as your default card. $100 added to your credit; the receipt is on its way."
         );
         assert_eq!(
             billing_message("card-top-up-declined", "", card),
@@ -830,15 +830,15 @@ mod tests {
     fn credit_messages_name_the_amount_only_when_it_is_one() {
         assert_eq!(
             billing_message("credit-added", "10000", ""),
-            "€100 added to your credit."
+            "$100 added to your credit."
         );
         assert_eq!(
             billing_message("credit-added", "1250", ""),
-            "€12.50 added to your credit."
+            "$12.50 added to your credit."
         );
         assert_eq!(
             billing_message("credit-paid", "25000", ""),
-            "Payment received. €250 is added to your credit in a moment."
+            "Payment received. $250 is added to your credit in a moment."
         );
         // A missing, malformed or out-of-range amount is never echoed.
         for amount in ["", "<b>1</b>", "499", "100001", "-500", "1e4"] {

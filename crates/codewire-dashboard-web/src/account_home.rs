@@ -114,13 +114,13 @@ pub(crate) enum Balance {
     Unlimited,
 }
 
-/// Money on the home's tiles: two decimals, never rounded up, and "< €0.01"
+/// Money on the home's tiles: two decimals, never rounded up, and "< $0.01"
 /// for an amount above zero but under a cent, so a value fits its tile on one
 /// line (owner, 2026-11-13, #4464). The Billing page keeps exact amounts.
 pub(crate) fn tile_euro_text(nano_eur: i64) -> String {
     match nano_eur {
-        1..NANO_EUR_PER_CENT => "< €0.01".to_owned(),
-        _ if nano_eur < 0 && nano_eur > -NANO_EUR_PER_CENT => "> -€0.01".to_owned(),
+        1..NANO_EUR_PER_CENT => "< $0.01".to_owned(),
+        _ if nano_eur < 0 && nano_eur > -NANO_EUR_PER_CENT => "> -$0.01".to_owned(),
         _ => euro_text(nano_eur / NANO_EUR_PER_CENT * NANO_EUR_PER_CENT),
     }
 }
@@ -430,8 +430,8 @@ mod tests {
         assert_eq!(
             card.stats,
             Some(CardStats {
-                balance: Balance::Amount("€42.18".into()),
-                month: "€17.82".into(),
+                balance: Balance::Amount("$42.18".into()),
+                month: "$17.82".into(),
                 running: 0,
             })
         );
@@ -486,16 +486,16 @@ mod tests {
     #[test]
     fn tile_amounts_have_two_decimals_and_name_less_than_a_cent() {
         for (nano_eur, text) in [
-            (0, "€0.00"),
-            (1, "< €0.01"),
-            (3_385_000, "< €0.01"),
-            (9_999_999, "< €0.01"),
-            (10_000_000, "€0.01"),
-            (13_937_000, "€0.01"),
-            (17_829_999_999, "€17.82"),
-            (-3_385_000, "> -€0.01"),
-            (-10_000_000, "-€0.01"),
-            (-1_509_000_000, "-€1.50"),
+            (0, "$0.00"),
+            (1, "< $0.01"),
+            (3_385_000, "< $0.01"),
+            (9_999_999, "< $0.01"),
+            (10_000_000, "$0.01"),
+            (13_937_000, "$0.01"),
+            (17_829_999_999, "$17.82"),
+            (-3_385_000, "> -$0.01"),
+            (-10_000_000, "-$0.01"),
+            (-1_509_000_000, "-$1.50"),
         ] {
             assert_eq!(tile_euro_text(nano_eur), text, "{nano_eur}");
         }
@@ -611,7 +611,7 @@ mod tests {
             NOW,
         );
         assert!(view.shared_scale);
-        // The busiest hour, €0.84, sets one euro scale for every card: €1.00
+        // The busiest hour, $0.84, sets one euro scale for every card: $1.00
         // at the top, 72 high.
         let ticks = &view.scale.as_ref().expect("a scale").ticks;
         assert_eq!(
@@ -619,7 +619,7 @@ mod tests {
                 .iter()
                 .map(|tick| tick.label.as_str())
                 .collect::<Vec<_>>(),
-            ["€1.00", "€0.50", "€0"]
+            ["$1.00", "$0.50", "$0"]
         );
         let busy = &view.organizations[0].bars;
         assert_eq!(busy.len(), 24);
@@ -629,7 +629,7 @@ mod tests {
                 x: 280,
                 y: 20,
                 height: 60,
-                label: "15:00 UTC, €0.84".into(),
+                label: "15:00 UTC, $0.84".into(),
             }
         );
         assert_eq!(
@@ -638,13 +638,13 @@ mod tests {
                 x: 4,
                 y: 65,
                 height: 15,
-                label: "16:00 UTC, €0.21".into(),
+                label: "16:00 UTC, $0.21".into(),
             }
         );
         assert_eq!(busy[1].height, 0);
-        assert_eq!(busy[1].label, "17:00 UTC, €0.00");
+        assert_eq!(busy[1].label, "17:00 UTC, $0.00");
         let quiet = &view.organizations[1].bars;
-        assert_eq!(quiet[18].height, 30, "€0.42 on the shared €1.00 scale");
+        assert_eq!(quiet[18].height, 30, "$0.42 on the shared $1.00 scale");
         // One chart alone is on its own scale and says nothing of others.
         let alone = build(
             true,

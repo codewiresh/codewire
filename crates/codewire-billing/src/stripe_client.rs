@@ -84,9 +84,9 @@ pub fn check_test_key_requirement(required: Option<&str>, key: Option<&str>) -> 
 }
 
 /// The one currency every Stripe call that names one uses: prices and credit
-/// are in euros, so a charge, an invoice item or a card setup session in any
-/// other currency is wrong (#3381).
-pub(crate) const BILLING_CURRENCY: stripe_types::Currency = stripe_types::Currency::EUR;
+/// are in US dollars, so a charge, an invoice item or a card setup session in
+/// any other currency is wrong (#3381, #6659).
+pub(crate) const BILLING_CURRENCY: stripe_types::Currency = stripe_types::Currency::USD;
 
 /// How an idempotent Stripe call is keyed; see the module documentation.
 /// Only the guard test reads it; outside tests it documents the contract.
@@ -1306,8 +1306,8 @@ impl StripeHandle {
                 ("Codewire compute credit", "Codewire compute credit")
             } else {
                 (
-                    "Codewire automatic top-up: compute credit reached €0",
-                    "Compute credit, added by automatic top-up when the balance reached €0",
+                    "Codewire automatic top-up: compute credit reached $0",
+                    "Compute credit, added by automatic top-up when the balance reached $0",
                 )
             };
         let metadata = std::collections::HashMap::from([
@@ -1659,7 +1659,7 @@ mod currency_tests {
         let form = only_request(&seen, "/v1/checkout/sessions");
         for (key, value) in [
             ("mode", "setup"),
-            ("currency", "eur"),
+            ("currency", "usd"),
             ("customer", "cus_synthetic"),
             ("success_url", "https://codewire.test/billing?setup=done"),
             (
@@ -1699,7 +1699,7 @@ mod currency_tests {
         let form = only_request(&seen, "/v1/invoiceitems");
         assert_eq!(
             form.get("currency").map(String::as_str),
-            Some("eur"),
+            Some("usd"),
             "{form:?}"
         );
         assert_eq!(
@@ -1720,13 +1720,13 @@ mod currency_tests {
         let form = only_request(&seen, "/v1/invoices");
         assert_eq!(
             form.get("currency").map(String::as_str),
-            Some("eur"),
+            Some("usd"),
             "{form:?}"
         );
         // An automatic top-up's id isn't a purchase's, so it keeps #4754's words.
         assert_eq!(
             form.get("description").map(String::as_str),
-            Some("Codewire automatic top-up: compute credit reached €0"),
+            Some("Codewire automatic top-up: compute credit reached $0"),
             "{form:?}"
         );
     }
