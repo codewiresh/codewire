@@ -13,7 +13,7 @@ const utcDay = (offset: number) => {
 };
 const openExpiry = async (page: Page) => {
   await page.getByRole("button", { name: "Add credential", exact: true }).click();
-  await page.getByRole("dialog", { name: "Add credential", exact: true }).getByRole("button", { name: "OpenAI API key", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add credential", exact: true }).getByRole("button", { name: "Add OpenAI key", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add OpenAI API key", exact: true });
   await dialog.getByText("Optional expiry", { exact: true }).click();
   return dialog;

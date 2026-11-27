@@ -826,8 +826,17 @@ const DESKTOP_START_MS = 90_000;
 const DESKTOP_CONNECT_MS = 30_000;
 async function desktop(page: Page, detailPath: string, rows: Locator, send: (command: string) => Promise<void>): Promise<void> {
   const panelOf = (owner: Page) => owner.locator("[data-desktop-panel]");
-  const show = (owner: Page, view: "Terminal" | "Desktop") =>
-    owner.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: view, exact: true }).click();
+  const show = async (owner: Page, view: "Terminal" | "Desktop") => {
+    if (view === "Desktop") {
+      const tab = owner.getByRole("tab", { name: "Desktop", exact: true });
+      if (await tab.count()) { await tab.click(); return; }
+      const choice = owner.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="desktop"]');
+      if (!(await choice.isVisible())) await button(owner, "New tab").click();
+      await choice.click();
+    } else {
+      await owner.locator('[data-terminal-tabs] [role="tab"]').first().click();
+    }
+  };
   const reaches = (owner: Page, state: string, timeout = DESKTOP_CONNECT_MS) =>
     expect(panelOf(owner)).toHaveAttribute("data-desktop-state", state, { timeout });
   const panel = panelOf(page);
@@ -1064,8 +1073,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
   // time it from acceptance rather than from this step's own start.
   await stage("create-to-terminal-enabled", async () => {
     await visit(page, detailPath);
-    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 240_000 });
-    await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
+    await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible({ timeout: 240_000 });
+    await expect(button(page, "New tab")).toBeEnabled({ timeout: 60_000 });
+    await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
   }, accepted);
   // The page above joined the start part-way: it may hold the start row, the
   // setup steps still to come, or no list at all if the Sandbox already ran.
@@ -1147,7 +1157,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await attachedTerminal(page, TERMINAL_ATTACH_MS);
   });
   await stage("terminal-tabs-second", async () => {
-    await button(page, "New terminal").click();
+    await button(page, "New tab").click();
+    await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
     await expect(page.getByRole("tab")).toHaveCount(2);
     secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondId).toBeTruthy();
@@ -1391,7 +1402,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
       ["one-row", () => expect(startListRows(page)).toHaveText([START_ROW])],
     ]);
     await expect(page.locator("[data-sandbox-state]")).toHaveText("running", { timeout: 240_000 });
-    await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
+    await expect(button(page, "New tab")).toBeEnabled({ timeout: 60_000 });
     if (shownAlone && await holds("lifecycle-live-state-start-list", [
       ["one-row-kept", async () => expect(await startListRows(page).allTextContents()).toEqual([START_ROW])],
     ])) passed("lifecycle-live-state-start-list", restarted);
@@ -1431,7 +1442,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     ["ready", async () => {
       await expect(notice(failing)).toBeHidden({ timeout: 120_000 });
       await expect(failing.locator("[data-sandbox-state]")).toHaveText("running");
-      await expect(button(failing, "New terminal")).toBeEnabled({ timeout: 60_000 });
+      await expect(button(failing, "New tab")).toBeEnabled({ timeout: 60_000 });
     }],
   ]);
   if (resumed) passed("setup-retry-resume", started);

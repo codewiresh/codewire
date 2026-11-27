@@ -22,6 +22,8 @@ use super::environments::{
     resolve_effective_plan,
 };
 
+#[cfg(test)]
+mod agent_chat_database_tests;
 pub mod capacity;
 pub mod credit;
 #[cfg(test)]
@@ -154,12 +156,13 @@ pub struct AdminOrg {
     pub billing_plan: String,
     pub billing_status: String,
     pub dedicated_cpu: bool,
+    pub agent_chat: bool,
 }
 
 /// Shared global organization query used by AdminService.
 pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult<Vec<AdminOrg>> {
     let rows = sqlx::query(
-        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, dedicated_cpu
+        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, dedicated_cpu, agent_chat
            FROM organizations
            ORDER BY name ASC"#,
     )
@@ -181,6 +184,7 @@ pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult
             billing_plan: r.try_get("billing_plan").map_err(AppError::from)?,
             billing_status: r.try_get("billing_status").map_err(AppError::from)?,
             dedicated_cpu: r.try_get("dedicated_cpu").map_err(AppError::from)?,
+            agent_chat: r.try_get("agent_chat").map_err(AppError::from)?,
         });
     }
 
@@ -875,6 +879,59 @@ pub(crate) async fn set_organization_dedicated_cpu_core(
     Ok(previous)
 }
 
+/// Enables or disables the Sandbox Agent Chat tab and managed agent sessions
+/// for one organization, and records a change in the audit log, in one
+/// transaction. Setting the value it already has changes nothing. Returns the
+/// previous value.
+pub(crate) async fn set_organization_agent_chat_core(
+    pool: &sqlx::PgPool,
+    actor_user_id: &str,
+    organization_id: &str,
+    agent_chat: bool,
+) -> AppResult<bool> {
+    let failure = |action: &'static str| {
+        move |error| {
+            tracing::error!(error = %error, action, "admin: organization agent chat");
+            AppError::InternalMsg("failed to update the organization's agent chat setting".into())
+        }
+    };
+    let mut transaction = pool.begin().await.map_err(failure("start the update"))?;
+    let previous: Option<bool> =
+        sqlx::query_scalar("SELECT agent_chat FROM organizations WHERE id = $1 FOR UPDATE")
+            .bind(organization_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(failure("read the organization"))?;
+    let previous = previous.ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    if previous == agent_chat {
+        return Ok(previous);
+    }
+    sqlx::query("UPDATE organizations SET agent_chat = $2, updated_at = NOW() WHERE id = $1")
+        .bind(organization_id)
+        .bind(agent_chat)
+        .execute(&mut *transaction)
+        .await
+        .map_err(failure("update the organization"))?;
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+           VALUES (gen_random_uuid()::text, NOW(), 'admin.organization.agent_chat_set', $1, $2, 'warn')"#,
+    )
+    .bind(actor_user_id)
+    .bind(serde_json::json!({
+        "organization_id": organization_id,
+        "previous": previous,
+        "agent_chat": agent_chat,
+    }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(failure("record the audit entry"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(failure("commit the update"))?;
+    Ok(previous)
+}
+
 /// Shared quota read used by AdminService.
 pub(crate) async fn get_organization_environment_quota_core(
     pool: &sqlx::PgPool,
@@ -1166,6 +1223,7 @@ pub struct AdminOrganizationOverview {
     pub slug: String,
     pub created_at: Option<chrono::NaiveDateTime>,
     pub dedicated_cpu: bool,
+    pub agent_chat: bool,
     pub members: Vec<AdminOrganizationMember>,
     pub billing: AdminOrganizationBilling,
     /// The rate card, credit balance and newest ledger entries (#3381).
@@ -1190,10 +1248,11 @@ pub(crate) async fn get_organization_overview_core(
         String,
         bool,
         bool,
+        bool,
     );
     let organization: Option<OrganizationRow> = sqlx::query_as(
         r#"SELECT id, name, slug, created_at, billing_plan, billing_status, billing_exempt,
-                  dedicated_cpu
+                  dedicated_cpu, agent_chat
            FROM organizations WHERE id = $1"#,
     )
     .bind(organization_id)
@@ -1209,6 +1268,7 @@ pub(crate) async fn get_organization_overview_core(
         billing_status,
         billing_exempt,
         dedicated_cpu,
+        agent_chat,
     )) = organization
     else {
         return Err(AppError::NotFound("organization not found".into()));
@@ -1303,6 +1363,7 @@ pub(crate) async fn get_organization_overview_core(
         slug,
         created_at,
         dedicated_cpu,
+        agent_chat,
         members,
         billing: AdminOrganizationBilling {
             billing_plan,

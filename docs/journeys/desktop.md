@@ -510,7 +510,8 @@ browser sign-in. Production serves the same dashboard image
   - phone width.
 - **Driving it:** on Kind, through the dashboard's own URL, signed in as the
   Sandbox's creator.
-  1. Open the Sandbox's page, choose Desktop and press Start desktop.
+  1. Open the Sandbox's page, open the Desktop tab from the Tab Home Page
+     (or click `+` and choose Desktop) and press Start desktop.
   2. Click into the desktop, open its terminal and type. Copy a marker on
      the computer and press "Paste to desktop"; select text in the desktop's
      terminal and press "Copy from desktop"; press "Release keyboard".
@@ -518,6 +519,10 @@ browser sign-in. Production serves the same dashboard image
   4. Go to another dashboard page and come back.
   5. Open the page of a Sandbox on the previous image, and of a stopped one.
   6. Set the browser to 390 px wide.
+  7. Close the running Desktop tab (`×`) and verify the Close Desktop tab?
+     dialog offers Cancel, Keep running (detaches the viewer and removes the
+     tab while the desktop keeps running), and Stop desktop (stops the desktop
+     and removes the tab). Not yet observed.
 
   On Dev every delivery walks steps 1 to 3 as the Dev smoke browser
   identity, on the walk's own Sandbox, in

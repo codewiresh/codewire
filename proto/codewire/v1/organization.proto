@@ -105,6 +105,7 @@ message Organization {
   optional OrganizationDeletionState deletion_state = 7;
   optional string deletion_operation_id = 8;
   optional string deletion_failure_code = 9;
+  bool agent_chat = 10;
 }
 
 message OrganizationMembership {

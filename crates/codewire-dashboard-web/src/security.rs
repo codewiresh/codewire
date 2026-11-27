@@ -377,6 +377,52 @@ pub(crate) fn clear_claude_sign_in_cookie(public_origin: &str) -> String {
     )
 }
 
+/// The Antigravity sign-in's handle (#6555), kept from Start to Complete.
+const ANTIGRAVITY_SIGN_IN_COOKIE: &str = "__Secure-codewire_antigravity_sign_in";
+const ANTIGRAVITY_SIGN_IN_COOKIE_PLAIN: &str = "codewire_antigravity_sign_in";
+/// The cookie reaches the sign-in's Start and Complete actions and nothing else.
+pub(crate) const ANTIGRAVITY_SIGN_IN_PATH: &str =
+    "/settings/credentials/_actions/credentials/antigravity-sign-in/";
+
+fn antigravity_sign_in_cookie_name(public_origin: &str) -> &'static str {
+    if public_origin.starts_with("https://") {
+        ANTIGRAVITY_SIGN_IN_COOKIE
+    } else {
+        ANTIGRAVITY_SIGN_IN_COOKIE_PLAIN
+    }
+}
+
+pub(crate) fn antigravity_sign_in_cookie(
+    public_origin: &str,
+    handle: &str,
+    max_age_seconds: u32,
+) -> Option<String> {
+    scoped_secret_cookie(
+        public_origin,
+        antigravity_sign_in_cookie_name(public_origin),
+        handle,
+        ANTIGRAVITY_SIGN_IN_PATH,
+        max_age_seconds,
+    )
+}
+
+/// The one handle the browser sent; none when the cookie is absent or repeated.
+pub(crate) fn antigravity_sign_in_handle<'a>(
+    headers: &'a HeaderMap,
+    public_origin: &str,
+) -> Option<&'a str> {
+    unique_cookie_value(headers, antigravity_sign_in_cookie_name(public_origin))
+        .filter(|handle| !handle.is_empty())
+}
+
+pub(crate) fn clear_antigravity_sign_in_cookie(public_origin: &str) -> String {
+    clear_scoped_cookie(
+        public_origin,
+        antigravity_sign_in_cookie_name(public_origin),
+        ANTIGRAVITY_SIGN_IN_PATH,
+    )
+}
+
 pub(crate) fn with_response_cookie(mut response: Response, cookie: String) -> Response {
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);

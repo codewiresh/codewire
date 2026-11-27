@@ -391,10 +391,13 @@ started the desktop and printed it.
 
 ## The dashboard viewer
 
-A hosted Sandbox's page has a Desktop panel beside its terminals, chosen
-with the page's Terminal and Desktop switch: Start, the viewer, Stop, and
-the states unavailable (with the recreate hint and no Start), stopped,
-starting, running, disconnected (Reconnect) and ended. Paste and copy are
+A hosted Sandbox's page opens its Desktop as a tab in the Sandbox's unified tab
+bar alongside terminal and agent tabs, chosen from the Tab Home Page (the
+default tab on an empty Sandbox or from the `+` button): Start, the viewer,
+Stop, and the states unavailable (with the recreate hint and no Start), stopped,
+starting, running, disconnected (Reconnect) and ended. Closing a running Desktop
+tab asks whether to detach the viewer while keeping the desktop running in the
+background or to stop the desktop. Paste and copy are
 explicit buttons, "Paste to desktop" and "Copy from desktop"; the clipboard
 never syncs by itself in either direction. Paste to desktop sends the text
 with its announcement, so the desktop holds it and a program's paste takes

@@ -42,7 +42,7 @@ class GetStatsResponse(_message.Message):
     def __init__(self, total_environments: _Optional[int] = ..., active_environments: _Optional[int] = ..., monthly_cpu_hours: _Optional[float] = ..., monthly_memory_gb_hours: _Optional[float] = ..., monthly_cost_cents: _Optional[int] = ..., monthly_usage_nano_eur: _Optional[int] = ...) -> None: ...
 
 class Organization(_message.Message):
-    __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status", "dedicated_cpu")
+    __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status", "dedicated_cpu", "agent_chat")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     SLUG_FIELD_NUMBER: _ClassVar[int]
@@ -50,6 +50,7 @@ class Organization(_message.Message):
     BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
     BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
     DEDICATED_CPU_FIELD_NUMBER: _ClassVar[int]
+    AGENT_CHAT_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     slug: str
@@ -57,7 +58,8 @@ class Organization(_message.Message):
     billing_plan: str
     billing_status: str
     dedicated_cpu: bool
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ...) -> None: ...
+    agent_chat: bool
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ..., agent_chat: _Optional[bool] = ...) -> None: ...
 
 class ListOrganizationsRequest(_message.Message):
     __slots__ = ()
@@ -598,6 +600,24 @@ class SetOrganizationDedicatedCpuResponse(_message.Message):
     dedicated_cpu: bool
     previous_dedicated_cpu: bool
     def __init__(self, organization_id: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ..., previous_dedicated_cpu: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationAgentChatRequest(_message.Message):
+    __slots__ = ("organization_id", "agent_chat")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    AGENT_CHAT_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    agent_chat: bool
+    def __init__(self, organization_id: _Optional[str] = ..., agent_chat: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationAgentChatResponse(_message.Message):
+    __slots__ = ("organization_id", "agent_chat", "previous_agent_chat")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    AGENT_CHAT_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_AGENT_CHAT_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    agent_chat: bool
+    previous_agent_chat: bool
+    def __init__(self, organization_id: _Optional[str] = ..., agent_chat: _Optional[bool] = ..., previous_agent_chat: _Optional[bool] = ...) -> None: ...
 
 class ListStandardRuntimeOrganizationsRequest(_message.Message):
     __slots__ = ()

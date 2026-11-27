@@ -1,10 +1,8 @@
 <section id="organization-content" class="cw-org-content" aria-live="polite"{% if page.has_one_time_key %} hx-history="false"{% endif %}>
-  <header class="cw-page-header">
-    <div>
+  <header class="cw-page-header cw-page-header--stacked">
+    <div class="cw-page-header-row">
       <div class="cw-page-title-row"><h1 class="cw-page-title">API keys</h1><span class="cw-badge">{{ page.keys.len() }}<span class="cw-sr-only">{% if page.keys.len() == 1 %} key{% else %} keys{% endif %}</span></span></div>
-      <p class="cw-page-description">Codewire API keys for {{ organization.name }}, for the CLI and SDK.</p>
-    </div>
-    <details class="cw-menu cw-org-details"{% if page.form.expanded %} open{% endif %}>
+      <details class="cw-menu cw-org-details"{% if page.form.expanded %} open{% endif %}>
       <summary class="cw-button">
         <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>
         <span>Create key</span>
@@ -50,7 +48,9 @@
           </form>
         </div>
       </section>
-    </details>
+      </details>
+    </div>
+    <p class="cw-page-description">Codewire API keys for {{ organization.name }}, for the CLI and SDK.</p>
   </header>
 
   {% if !page.message.is_empty() %}

@@ -1023,6 +1023,7 @@ mod tests {
             url: "/test/".into(),
             joined: String::new(),
             only_owner: false,
+            agent_chat: false,
         })
     }
 

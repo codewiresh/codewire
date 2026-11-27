@@ -270,20 +270,16 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
     // Runtime Running precedes setup completion; projection and workspace
     // replacement still belong to setup until this authenticated status
-    // arrives. Then the page opens its one terminal by itself. The bounded
-    // private RPC may time out after creating the shell: Retry re-lists once
-    // and re-attaches it, without repeating a non-idempotent launch.
-    await expect.poll(async () => (await page.getByRole("tab").count()) === 1
-      || (await page.locator("[data-terminal-empty]").innerText()).includes("could not be confirmed"), { timeout: 300_000 }).toBe(true);
-    const recoveredLaunch = await page.getByRole("tab").count() === 0;
-    if (recoveredLaunch) await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 15_000 });
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+    // arrives. Then the page opens its Tab Home Page; choose Terminal there.
+    await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible({ timeout: 300_000 });
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
+    await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
+    await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible({ timeout: 15_000 });
     const initialDeadline = await sourceDeletionDeadline();
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", initialDeadline, { timeout: 30_000 });
     expect(launchRequests).toBe(1);
     expect(stopRequests).toBe(0);
-    test.info().annotations.push({ type: "terminal-launch", description: recoveredLaunch ? "Recovered by one Retry re-list after unknown outcome" : "Directly acknowledged" });
+    test.info().annotations.push({ type: "terminal-launch", description: "Launched from Tab Home Page" });
     const terminalRoot = page.locator(".cw-terminal-page [data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
     // An attached terminal reads Connected and offers no control.
     const terminalConnection = page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-connection]");
@@ -396,7 +392,8 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     const resumed = `__DURABLE_RESUME__preserved-session__/tmp__${firstPid}__`;
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
 
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await page.getByRole("button", { name: "New tab", exact: true }).click();
+    await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
     await expect(page.getByRole("tab")).toHaveCount(2);
     const secondSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondSessionId).not.toBe(firstSessionId);
@@ -578,12 +575,13 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
-    // Every terminal was closed, so a new visit opens one by itself. That one
-    // live terminal stays open across Stop and Start (#2136).
+    // Every terminal was closed, so a new visit opens the Tab Home Page. Launch
+    // one live terminal to verify it stays open across Stop and Start (#2136).
     const launchesBeforeStop = launchRequests;
     await page.goto(filteredDetailPath);
-    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 60_000 });
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+    await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
+    await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
     await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected", { timeout: 60_000 });
     expect(launchRequests).toBe(launchesBeforeStop + 1);
     const lifecycleSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
@@ -610,7 +608,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // Stop reloads the page; a stopped Sandbox restores no tabs and says why.
     await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.", { timeout: 30_000 });
     await expect(page.getByRole("tab")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
     // A lifecycle action submitted for the wrong state is rejected by the
     // service and shown on the detail page; the state does not change (#2138).
     await page.locator('form[action$="/_actions/sandboxes/stop"]').evaluate((form: HTMLFormElement) => form.submit());
@@ -672,7 +670,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(page.getByText("Sandbox start requested.", { exact: true })).toHaveCount(0);
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText(/running/i, { timeout: 30_000 });
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled({ timeout: 300_000 });
     // Running is observed before the subsequent deadline write. Wait for that
     // source-owned write rather than assuming lifecycle completion implies it.
     await expect.poll(sourceDeletionDeadline, { timeout: 30_000 }).not.toBe(beforeStartDeadline);

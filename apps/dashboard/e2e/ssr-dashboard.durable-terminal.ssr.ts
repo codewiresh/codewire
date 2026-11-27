@@ -119,12 +119,18 @@ async function reloadFixture(page: Page) {
   await settleStartup(page);
 }
 
-// With no live session to re-attach, opening the page opens one terminal by
-// itself: session 1, launched once. Wait for it as a person waits for a shell.
+// With no live session to re-attach, opening a ready Sandbox opens the Tab
+// Home Page; choose Terminal there to launch session 1.
 async function automaticTerminal(page: Page, state: { launches: number; connections: Connection[] }) {
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible();
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect.poll(() => state.connections.length).toBe(1);
   expect(state.launches).toBe(1);
+}
+async function newTerminalTab(page: Page) {
+  await page.getByRole("button", { name: "New tab", exact: true }).click();
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
 }
 
 // The terminal menu (Terminal actions) holds Rename, the selected tab's Copy
@@ -234,17 +240,17 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
   const state = await transport(page);
   let release!: () => void;
   state.launchGate = new Promise<void>((resolve) => { release = resolve; });
-  // The held launch keeps the session controls busy, so wait for its text instead.
-  await gotoFixture(page);
-  // While the page's terminal opens, the message fills the one column the bars span.
+  await openFixture(page);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
+  // Empty ready Sandbox lands on the Tab Home Page before any terminal launches.
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible();
+  expect(state.launches).toBe(0);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
   await expect(page.locator("[data-terminal-message]")).toHaveText("Starting a terminal…");
-  const empty = await page.evaluate(() => [".cw-durable-terminal", ".cw-terminal-tabs-bar", ".cw-terminal-empty",
-    ".cw-workspace-statusbar"].map((selector) => document.querySelector(selector)!.getBoundingClientRect().width));
-  for (const width of empty.slice(1)) expect(Math.abs(width - empty[0]), `${empty}`).toBeLessThanOrEqual(1);
   release();
-  await automaticTerminal(page, state);
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.launches).toBe(1);
   output(state.connections[0], "usable-terminal-output\r\n");
   const terminal = page.locator("[data-terminal-root]");
   await expect(terminal.locator(".xterm-rows")).toContainText("usable-terminal-output");
@@ -292,17 +298,17 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
 test("the back arrow, the notices and the plus start on one left line", async ({ page }) => {
   const state = await transport(page);
   let release!: () => void;
-  state.launchGate = new Promise<void>((resolve) => { release = resolve; });
+  state.listGate = new Promise<void>((resolve) => { release = resolve; });
   await gotoFixture(page);
-  await expect(page.locator("[data-terminal-message]")).toHaveText("Starting a terminal…");
+  await expect(page.locator("[data-terminal-message]")).toHaveText("Refreshing terminal sessions…");
   await page.locator("#fixture-lifecycle-message").evaluate((node) => { (node as HTMLElement).hidden = false; });
   const glyph = "var(--icon-glyph-inset)";
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: width > 1024 ? 900 : 844 });
     await expectOnAnchorLines(page, `${width}`, ".cw-workspace", "var(--cw-workspace-gutter)", [
       { selector: ".cw-terminal-back > .cw-icon", at: "start", plus: glyph },
-      { selector: "#fixture-lifecycle-message", at: "start" },
-      { selector: ".cw-workspace-attention", at: "start" },
+      { selector: "#fixture-lifecycle-message", at: "text" },
+      { selector: ".cw-workspace-attention", at: "text" },
       { selector: "[data-terminal-new] > .cw-icon", at: "start", plus: glyph },
       // On a phone the actions wrap to their own row, which starts on the line.
       ...(width < 1024 ? [{ selector: ".cw-workspace-actions :is(a, button, summary)", at: "start" as const }] : []),
@@ -384,8 +390,8 @@ test("the header keeps its actions on one line and the selected tab carries the 
         expect(item.color).toBe(primary);
       } else expect(item.content).toBe("none");
     }
-    // Tabs scroll inside their strip; New terminal and the page stay put.
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeInViewport();
+    // Tabs scroll inside their strip; New tab and the page stay put.
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole("tab", { name: "Terminal 3", exact: true }).click();
     await expect(page.getByRole("tab", { name: "Terminal 3", exact: true })).toBeInViewport({ ratio: 1 });
@@ -533,7 +539,7 @@ test("the selected tab stays in view when the window narrows", async ({ page }) 
   await openFixture(page);
   await automaticTerminal(page, state);
   for (let count = 2; count <= 3; count += 1) {
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await newTerminalTab(page);
     await expect(page.getByRole("tab")).toHaveCount(count);
   }
   const selected = page.getByRole("tab", { selected: true });
@@ -568,7 +574,7 @@ test("workspace menus close after an in-place action and stay open behind a dial
   expect(box.x + box.width).toBeLessThanOrEqual(390);
   await page.keyboard.press("Escape");
   await expect(more).toHaveJSProperty("open", false);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect(page.getByRole("tab")).toHaveCount(2);
   expect(state.launches).toBe(1);
   expect(state.stops).toBe(0);
@@ -1122,7 +1128,7 @@ test("terminal tabs after the first launch explicitly, retain separate displays 
   await expect(page.getByRole("tab", { name: "Build", exact: true })).toBeVisible();
   expect(state.launches).toBe(1);
   expect(state.connections).toHaveLength(1);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.connections.length).toBe(2);
   output(state.connections[1], "second-terminal-output\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("second-terminal-output");
@@ -1162,15 +1168,15 @@ test("terminal tabs after the first launch explicitly, retain separate displays 
     await expect(copyStatus).toHaveText("Selection copied.");
   }
   for (let count = 3; count <= 8; count += 1) {
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await newTerminalTab(page);
     await expect(page.getByRole("tab")).toHaveCount(count);
   }
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeInViewport();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeInViewport();
   // The limit is explained where it applies, not only by a disabled button.
   const limit = page.locator("[data-terminal-limit]");
   await expect(limit).toHaveText("Up to 8 terminals can be open at once. Close one to open another.");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toHaveAccessibleDescription("Up to 8 terminals can be open at once. Close one to open another.");
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toHaveAccessibleDescription("Up to 8 terminals can be open at once. Close one to open another.");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   const stored = await page.evaluate(() => ({ ...sessionStorage }));
   const references = JSON.parse(stored[`${prefix}account-a:${org}:${environment}`]);
@@ -1190,11 +1196,11 @@ test("the tab limit note appears only at the limit", async ({ page }) => {
   await openFixture(page);
   await automaticTerminal(page, state);
   const limit = page.locator("[data-terminal-limit]");
-  const create = page.getByRole("button", { name: "New terminal", exact: true });
+  const create = page.getByRole("button", { name: "New tab", exact: true });
   for (let count = 2; count <= 8; count += 1) {
     await expect(limit).toBeHidden();
     await expect(create).not.toHaveAttribute("aria-describedby");
-    await create.click();
+    await newTerminalTab(page);
     await expect(page.getByRole("tab")).toHaveCount(count);
   }
   await expect(limit).toBeVisible();
@@ -1205,26 +1211,22 @@ test("the tab limit note appears only at the limit", async ({ page }) => {
   expect(state.stops).toBe(1);
 });
 
-test("an automatic terminal refused at the session limit says so beside Retry and leaves New terminal usable", async ({ page }) => {
+test("a terminal refused at the session limit says so and leaves the Tab Home Page usable", async ({ page }) => {
   const state = await transport(page);
   state.launchFailure = "limit";
   await openFixture(page);
-  const retry = page.getByRole("button", { name: "Retry", exact: true });
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox has reached its session limit. Stop a session you no longer need, then retry.");
-  // The failure replaces the invitation once; the status line does not repeat it.
-  await expect(page.locator("[data-terminal-message]")).toBeHidden();
-  await expect(retry).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible();
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
+  await expect(page.locator("[data-terminal-message]")).toHaveText("This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.");
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   expect(state.launches).toBe(1);
-  // Retry re-lists, then opens the terminal: one launch per click.
+  // Trying Terminal again once a slot frees opens the terminal in place of the Home tab.
   state.launchFailure = "";
-  await retry.click();
-  await expect(page.getByRole("tab")).toHaveCount(1);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
+  await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
   await expect.poll(() => state.connections.length).toBe(1);
   expect(state.launches).toBe(2);
-  expect(state.lists).toBe(2);
-  await expect(page.locator(".cw-terminal-empty")).toBeHidden();
 });
 
 test("the Close terminal dialog dismisses from its backdrop and Escape without stopping the shell", async ({ page }) => {
@@ -1387,7 +1389,7 @@ test("terminal names survive reload and reconnect, render literally, and clear o
   const build = page.getByRole("tab", { name: "<b>Build</b>", exact: true });
   await expect(build).toHaveText("<b>Build</b>");
   await expect(build.locator("b")).toHaveCount(0);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.connections.length).toBe(2);
   await renameTerminal(page, "Logs");
   await reloadFixture(page);
@@ -1418,14 +1420,14 @@ test("new terminal names do not collide with restored numeric labels", async ({ 
   const state = await transport(page);
   await openFixture(page);
   await automaticTerminal(page, state);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect(page.getByRole("tab")).toHaveCount(2);
   await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await closeSelected(page);
   await expect(page.getByRole("tab")).toHaveCount(1);
   await reloadFixture(page);
   await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect(page.getByRole("tab", { name: "Terminal 3", exact: true })).toBeVisible();
   await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId(3));
   expect(state.launches).toBe(3);
@@ -1584,8 +1586,8 @@ test("a dropped connection retains output, reload replays from zero, and Close r
   await expect(page.getByRole("tab")).toHaveCount(0);
   expect(state.stops).toBe(1);
   // Closing the last terminal on purpose does not open another in this page.
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("No terminal is open. Choose New terminal to start one; it keeps running until you close it or stop the Sandbox.");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("No tab is open. Choose New tab to start an agent, terminal, or desktop.");
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   expect(state.launches).toBe(1);
 });
 
@@ -1597,7 +1599,7 @@ test("a dropped connection that overtakes a restored terminal's replay loses no 
   const state = await transport(page);
   await openFixture(page);
   await automaticTerminal(page, state);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.connections.length).toBe(2);
   await reloadFixture(page);
   await expect.poll(() => state.connections.length).toBe(4);
@@ -1661,25 +1663,28 @@ test("unknown launch outcomes require inspection and stale CSRF requires reload 
   const state = await transport(page);
   state.launchFailure = "lost";
   await openFixture(page);
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("The terminal could not be confirmed as started. Retry looks for it before starting another.");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
+  await expect(page.locator("[data-terminal-message]")).toHaveText("The terminal change could not be confirmed. Refresh sessions to inspect the result before another change.");
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.launches).toBe(1);
   expect(state.connections.length).toBe(0);
-  // Retry re-lists first: the terminal that did start is re-attached, not doubled.
+  // Refresh sessions re-lists first: the terminal that did start is re-attached, not doubled.
   state.launchFailure = "";
-  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await (await terminalAction(page, "Refresh sessions")).click();
   await expect.poll(() => state.connections.length).toBe(1);
   expect(state.connections[0].url.searchParams.get("session_id")).toBe(sessionId(1));
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   expect(state.launches).toBe(1);
   output(state.connections[0], "keep-on-stale-csrf\r\n");
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await expect(page.getByRole("tabpanel")).toContainText("keep-on-stale-csrf");
   state.launchFailure = "csrf";
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect(page.getByRole("link", { name: "Reload page", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await expect(page.getByRole("tabpanel")).toContainText("keep-on-stale-csrf");
   await (await terminalAction(page, "Refresh sessions")).click();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.launches).toBe(2);
 });
 
@@ -1739,11 +1744,10 @@ test("missing stored sessions do not launch replacements", async ({ page }) => {
 test("ended terminals replay without resize and can be removed locally", async ({ page }) => {
   const state = await transport(page);
   state.sessions = ["exited", "failed", "interrupted"].map((status, index) => ({ sessionId: sessionId(index + 1), state: status }));
-  // No session is live, so the page tries its one automatic terminal; refuse
-  // it so only the ended terminals open here.
-  state.launchFailure = "limit";
   await openFixture(page);
-  await expect(page.locator("[data-terminal-empty]")).toContainText("session limit");
+  // No session is live, so the page lands on the Tab Home Page without launching a shell.
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close New tab", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(0);
   for (let index = 0; index < 3; index += 1) {
     await (await openMenu(page, "Terminal actions")).getByLabel("Existing terminal", { exact: true }).selectOption(sessionId(index + 1));
@@ -1760,7 +1764,7 @@ test("ended terminals replay without resize and can be removed locally", async (
     await expect(page.getByRole("tab")).toHaveCount(0);
   }
   expect(state.stops).toBe(0);
-  expect(state.launches).toBe(1);
+  expect(state.launches).toBe(0);
 });
 
 test("unknown Stop is not repeated and a missing tab can be removed without another Stop", async ({ page }) => {
@@ -1804,7 +1808,7 @@ test("initial terminal restoration waits for fresh status rather than rendered r
   await expect(page.locator("[data-terminal-empty]")).toHaveText("Checking Sandbox status before restoring terminals…");
   await expect(page.locator("[data-terminal-message]")).toBeHidden();
   await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   expect(state.connections).toHaveLength(0);
   expect(state.launches).toBe(0);
@@ -1821,7 +1825,7 @@ test("a Sandbox stopped at load says how to use its terminals instead of checkin
   await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.");
   // The explanation appears once, not also in the status line.
   await expect(page.locator("[data-terminal-message]")).toBeHidden();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   expect(state.launches).toBe(0);
 });
@@ -1840,21 +1844,21 @@ test("incomplete setup blocks launch and attachment until readiness, then re-att
   await (await terminalAction(page, "Refresh sessions")).click();
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect(page.locator("[data-terminal-connection]")).toContainText("setup is not complete");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
   await expect(closeButton(page)).toBeEnabled();
   expect(state.launches).toBe(0);
   expect(state.connections).toHaveLength(0);
   state.setupComplete = true;
   await sandboxChanged(page);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   // Readiness re-attaches the restored existing session; it never launches one.
   await expect.poll(() => state.connections.length).toBe(1);
   expect(state.connections[0].url.searchParams.get("session_id")).toBe(sessionId(9));
   await expectAttached(page);
   expect(state.lists).toBe(2);
   expect(state.launches).toBe(0);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.launches).toBe(1);
   await expect.poll(() => state.connections.length).toBe(2);
 });
@@ -1867,7 +1871,7 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   await openFixture(page);
   await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   expect(state.connections).toHaveLength(0);
   expect(state.launches).toBe(0);
@@ -1895,7 +1899,7 @@ test("a failed setup opens terminals under its banner, and setup holding the San
   await expect(notice).toHaveAttribute("data-tone", "danger");
   await expect(notice.locator("[data-sandbox-notice-text]")).toHaveText(text);
   await expect(notice.getByRole("button", { name: "Retry setup" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   await artifactScreenshot(page, "failed-setup-terminal.png");
   // A Retry holds setup's lease again: the failure is no longer recorded, the
   // open terminal waits with its session kept, and new terminals wait, as
@@ -1906,7 +1910,7 @@ test("a failed setup opens terminals under its banner, and setup holding the San
   state.setupFailed = false;
   state.notice = null;
   await checkReadinessNow(page);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await expect(page.locator("[data-terminal-connection]")).toContainText("setup is not complete");
   // The Retry's setup completes: the same session re-attaches, and nothing launches.
   state.setupComplete = true;
@@ -1915,7 +1919,7 @@ test("a failed setup opens terminals under its banner, and setup holding the San
   expect(state.connections[opened].url.searchParams.get("session_id")).toBe(session);
   await expectAttached(page);
   expect(state.launches).toBe(launches);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
 });
 
 test("a Sandbox still being created says its terminals open when ready", async ({ page }) => {
@@ -1928,7 +1932,7 @@ test("a Sandbox still being created says its terminals open when ready", async (
     deletionState: "unscheduled", shutdownAt: null };
   await openFixture(page);
   await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox is starting. Terminals open when it is ready.");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   // A starting Sandbox gets no list and no launch until it is ready.
   expect(state.lists).toBe(0);
   expect(state.launches).toBe(0);
@@ -1937,7 +1941,7 @@ test("a Sandbox still being created says its terminals open when ready", async (
   state.detail = null;
   await checkReadinessNow(page);
   await automaticTerminal(page, state);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
 });
 
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {
@@ -1949,7 +1953,7 @@ test("starting a stopped Sandbox enables terminals after its first ready status 
   await openFixture(page);
   await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("Start this Sandbox");
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   state.running = true;
   state.setupComplete = true;
@@ -1989,7 +1993,7 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   state.running = true;
   state.setupComplete = true;
   await sandboxChanged(page);
-  await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Loading workspace…");
   // The restoration readiness asked for waits on its own release.
   let releaseRestoration!: () => void;
   state.listGate = new Promise<void>((resolve) => { releaseRestoration = resolve; });
@@ -2013,7 +2017,7 @@ test("a session list the Sandbox refuses says so in place of the invitation, and
   await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox can't list its terminals right now. Retry, or restart the Sandbox.");
   await expect(retry).toBeVisible();
   // It names no disabled action as the way in, and the status line is not a second copy.
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await expect(page.locator("[data-terminal-message]")).toBeHidden();
   expect(state.launches).toBe(0);
   // A Retry that fails again keeps focus on Retry.
@@ -2241,19 +2245,19 @@ test("Sandbox lifecycle changes pause terminal controls without automatic launch
     }, { environmentId: id, available, running, setupComplete: true });
   };
   await status(false, false, org);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   await status(true, false);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
   await expect(page.getByRole("tabpanel")).toContainText("retained-on-sandbox-stop");
   await expect.poll(() => state.connections[0].closed).toBe(true);
   await status(false, true);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await (await terminalAction(page, "Refresh sessions")).click();
   await expect(page.locator("[data-terminal-refresh]")).toBeEnabled();
   expect(state.connections.length).toBe(1);
   await status(true, true);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   // Readiness returning re-attaches the same session from its rendered cursor.
   await expect.poll(() => state.connections.length).toBe(2);
   expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
@@ -2384,7 +2388,7 @@ test("a failed readiness read keeps open terminals attached and typing; a stoppe
   await sandboxChanged(page);
   await expect(connectionStatus(page, sessionId(2))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await expect(connectionStatus(page, sessionId(1))).toHaveText("Connected");
   expect(first.closed).toBeFalsy();
@@ -2524,7 +2528,7 @@ test("an account change found by revalidation pauses every terminal even while a
   await expect.poll(() => state.lists).toBe(2);
   let releaseLaunch!: () => void;
   state.launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.launches).toBe(1);
   state.accountId = "account-b";
   state.sessions = [];
@@ -2553,7 +2557,7 @@ test("readiness returning during a pending launch re-lists sessions before re-at
   await settleReadiness(page);
   let releaseLaunch!: () => void;
   state.launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await newTerminalTab(page);
   await expect.poll(() => state.launches).toBe(1);
   // The Sandbox reports stopped, then running again: it may have restarted.
   state.running = false;
@@ -2913,7 +2917,7 @@ test("live detail distinguishes pending desired state and preserves terminal and
   await expect(page.locator("[data-sandbox-state]")).toHaveText("stopped");
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(await terminal!.evaluate((node) => node.isConnected)).toBe(true);
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
@@ -2962,7 +2966,7 @@ test("displayed lifecycle state is not inferred from policy-gated terminal readi
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeHidden();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
   await expect(await sandboxAction(page, "Resize")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeDisabled();
   expect(state.launches).toBe(0);
 });
 
@@ -3060,7 +3064,7 @@ test("an account change found on return clears the old account's output", async 
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect.poll(() => state.lists).toBe(3);
   await expect.poll(() => state.connections[0].closed).toBe(true);
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled();
   await expect(page.locator(".xterm")).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem("codewire:terminal:v1:account"))).toBe("account-b");
   expect(state.launches).toBe(0);
@@ -3134,13 +3138,15 @@ for (const limit of ["frames", "bytes"] as const) {
 
 // Retry hides while it re-lists, so its status line holds focus; once it
 // works, focus goes to the terminal it opens (#4533).
-test("Retry hands focus to its status line while it re-lists, then to the terminal it opens", async ({ page }) => {
+test("Retry hands focus to its status line while it re-lists, then to the tab it opens", async ({ page }) => {
   const state = await transport(page);
-  state.launchFailure = "limit";
+  state.listStatus = 409;
+  state.listError = "sessions-refused";
   await openFixture(page);
   const retry = page.getByRole("button", { name: "Retry", exact: true });
   await expect(retry).toBeVisible();
-  state.launchFailure = "";
+  state.listStatus = 200;
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   let release!: () => void;
   state.listGate = new Promise<void>((resolve) => { release = resolve; });
   await retry.focus();
@@ -3151,7 +3157,99 @@ test("Retry hands focus to its status line while it re-lists, then to the termin
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect(page.getByRole("tab")).toBeFocused();
   expect(state.lists).toBe(2);
-  expect(state.launches).toBe(2);
+  expect(state.launches).toBe(0);
+});
+
+test("Tab Home Page shows Agent, Terminal, Desktop on one line with no static badges and reattaches detached sessions", { tag: "@mobile" }, async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  const home = page.locator("[data-home-tab-panel]:not([hidden])");
+  await expect(home).toBeVisible();
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toHaveAttribute("aria-selected", "true");
+  for (const label of ["Agent", "Terminal", "Desktop"]) {
+    const choice = home.getByRole("button", { name: new RegExp(`^${label}\\b`) });
+    await expect(choice).toBeVisible();
+    const iconBox = (await choice.locator("svg").boundingBox())!;
+    const titleBox = (await choice.locator(".cw-tab-home-choice-title").boundingBox())!;
+    expect(Math.abs((iconBox.y + iconBox.height / 2) - (titleBox.y + titleBox.height / 2))).toBeLessThanOrEqual(2);
+  }
+  await expect(home).not.toContainText("VNC");
+  await expect(home).not.toContainText("Durable PTY");
+  // Launch a terminal, then open a second New tab and verify no duplicate detached list for already-open sessions.
+  await home.locator('[data-home-open="terminal"]').click();
+  await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
+  // Add a second detached running session to inventory and refresh.
+  state.sessions.push({ sessionId: sessionId(9), state: "running" });
+  await (await terminalAction(page, "Refresh sessions")).click();
+  await page.getByRole("button", { name: "New tab", exact: true }).click();
+  const secondHome = page.locator("[data-home-tab-panel]:not([hidden])");
+  await expect(secondHome.locator("[data-home-reattach] h3")).toHaveText("Running in this Sandbox");
+  await secondHome.locator("[data-home-reattach]").getByRole("button", { name: "Reattach", exact: true }).click();
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId(9));
+});
+
+test("Tab Home Page hides only the Agent choice when the organization disables agent chat", async ({ page }) => {
+  await transport(page);
+  await page.route("**/reference/fixtures/terminal-tabs.html", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace('data-agent-chat-enabled="true"', 'data-agent-chat-enabled="false"');
+    await route.fulfill({ response, body });
+  });
+  await openFixture(page);
+  const home = page.locator("[data-home-tab-panel]:not([hidden])");
+  await expect(home).toBeVisible();
+  await expect(page.getByRole("tab", { name: "New tab", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(home.locator('[data-home-open="agent"]')).toBeHidden();
+  await expect(home.locator('[data-home-open="terminal"]')).toBeVisible();
+  await expect(home.locator('[data-home-open="desktop"]')).toBeVisible();
+  // Terminal and Desktop still work normally from the Tab Home Page.
+  await home.locator('[data-home-open="terminal"]').click();
+  await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeVisible();
+});
+
+test("Agent tab composer opens stable one-level-at-a-time cascading menus with real provider icons", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await transport(page);
+  await openFixture(page);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="agent"]').click();
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  await expect(agentPanel.locator(".cw-agent-empty-title")).toHaveText("Start an agent session");
+  await expect(agentPanel.locator("[data-agent-input]")).toHaveAttribute("placeholder", "What would you like to work on?");
+  // Equal left, right and bottom padding on the composer around the pill bar.
+  const pad = await agentPanel.locator(".cw-agent-composer").evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { left: parseFloat(s.paddingLeft), right: parseFloat(s.paddingRight), bottom: parseFloat(s.paddingBottom) };
+  });
+  expect(pad.left).toBe(pad.right);
+  expect(pad.left).toBe(pad.bottom);
+
+  const trigger = agentPanel.locator("[data-agent-menu-trigger]");
+  await trigger.click();
+  const menu1 = agentPanel.locator("[data-agent-menu-root]");
+  const menu2 = agentPanel.locator("[data-agent-menu-l2]");
+  const menu3 = agentPanel.locator(".cw-agent-menu-models");
+  await expect(menu1).toBeVisible();
+  await expect(menu2).toBeHidden();
+  await expect(menu3).toHaveCount(0);
+  const box1 = (await menu1.boundingBox())!;
+
+  await menu1.locator('[data-agent-menu-cat="agent"]').hover();
+  await expect(menu2).toBeVisible();
+  await expect(menu3).toBeHidden();
+  const box1AfterL2 = (await menu1.boundingBox())!;
+  expect(Math.abs(box1AfterL2.x - box1.x)).toBeLessThanOrEqual(1);
+
+  await expect(menu2.getByRole("menuitem", { name: "Pi", exact: true })).toBeDisabled();
+  await menu2.getByRole("menuitem", { name: "Claude Code", exact: true }).hover();
+  await expect(menu3).toBeVisible();
+  const box1AfterL3 = (await menu1.boundingBox())!;
+  expect(Math.abs(box1AfterL3.x - box1.x)).toBeLessThanOrEqual(1);
+
+  await menu3.getByRole("menuitemradio", { name: "Sonnet 5.5", exact: true }).click();
+  await expect(menu1).toBeHidden();
+  await expect(trigger.locator("[data-agent-trigger-model]")).toHaveText("Sonnet 5.5");
+  await expect(trigger.locator("use").first()).toHaveAttribute("href", /#icon-claude$/);
+  await expect(page.locator('[role="tab"][aria-selected="true"] use')).toHaveAttribute("href", /#icon-claude$/);
 });
 
 // Status reads the page made, counted as the browser sends them.

@@ -363,6 +363,7 @@ mod tests {
             url: format!("/{slug}/"),
             joined: String::new(),
             only_owner: false,
+            agent_chat: false,
         }
     }
 

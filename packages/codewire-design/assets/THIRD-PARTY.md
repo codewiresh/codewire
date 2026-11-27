@@ -11,9 +11,19 @@ the same artwork under `static/tools/`.
 `tools/pi.svg` is the five-rectangle mark from
 [Pi's repository](https://github.com/earendil-works/pi/blob/main/apps/p2/public/icons/favicon.svg),
 with monochrome fills for the page theme. Its `crispEdges` rendering and 4-by-4
-viewBox are retained in the homepage's inline marks.
+viewBox are retained in the homepage's inline marks and in `icons.svg#icon-pi`.
 
 These marks identify the compatible tools. They do not imply endorsement.
+
+## Claude, OpenAI, Gemini, and Antigravity
+
+`icons.svg#icon-claude`, `icons.svg#icon-openai`, and `icons.svg#icon-gemini`
+reuse the vector paths already carried on the Codewire homepage to identify
+Anthropic/Claude, OpenAI, and Google Gemini across credentials and workspace
+agent pickers. `icons.svg#icon-antigravity` is a four-colour arch mark
+identifying Google Antigravity (`agy`). These marks belong to their respective
+owners (Anthropic, OpenAI, and Google LLC) and identify the providers without
+implying endorsement.
 
 ## Google
 

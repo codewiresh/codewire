@@ -482,6 +482,7 @@ fn proto_membership(membership: OrgWithRole) -> AppResult<OrganizationMembership
         created_by: membership.created_by,
         created_at: Some(proto_timestamp(&membership.created_at)?).into(),
         updated_at: Some(proto_timestamp(&membership.updated_at)?).into(),
+        agent_chat: membership.agent_chat,
         ..Default::default()
     };
     let trial_ends_at = membership
@@ -527,6 +528,7 @@ fn proto_organization_with_members(
             .map(|state| proto_deletion_state(state).into()),
         deletion_operation_id: organization.deletion_operation_id,
         deletion_failure_code: organization.deletion_failure_code,
+        agent_chat: organization.agent_chat,
         ..Default::default()
     };
     Ok(GetOrganizationResponse {
@@ -667,6 +669,7 @@ mod tests {
             deletion_state: Some(OrganizationDeletionState::DeleteFailed),
             deletion_operation_id: Some("op_test".into()),
             deletion_failure_code: Some("billing_unavailable".into()),
+            agent_chat: false,
         })
         .unwrap();
         let json = serde_json::to_value(response).unwrap();

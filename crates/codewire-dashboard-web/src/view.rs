@@ -465,6 +465,8 @@ pub(crate) struct CredentialChoicesView {
     pub(crate) codex: Vec<CredentialChoiceView>,
     pub(crate) openai: Vec<CredentialChoiceView>,
     pub(crate) anthropic: Vec<CredentialChoiceView>,
+    pub(crate) gemini: Vec<CredentialChoiceView>,
+    pub(crate) antigravity: Vec<CredentialChoiceView>,
     pub(crate) ssh: Vec<CredentialChoiceView>,
 }
 
@@ -488,6 +490,8 @@ pub(crate) struct CredentialRowView {
     pub(crate) subscription_token: bool,
     /// A Claude sign-in, reconnected by signing in again.
     pub(crate) claude_sign_in: bool,
+    /// An Antigravity sign-in, reconnected by signing in with Google again.
+    pub(crate) antigravity_sign_in: bool,
     /// A rotating OAuth refresh failed, or a Claude subscription token was
     /// refused or expired; only the owner's Reconnect or Replace restores it.
     pub(crate) reconnect_needed: bool,
@@ -501,6 +505,29 @@ impl CredentialRowView {
             &self.account_hint
         } else {
             &self.name
+        }
+    }
+
+    /// The icon symbol ID in `icons.svg` for this credential's provider/agent.
+    pub(crate) fn icon_id(&self) -> &'static str {
+        if self.oauth_provider == "github" {
+            "icon-github"
+        } else if self.oauth_provider == "codex" {
+            "icon-codex"
+        } else if self.antigravity_sign_in {
+            "icon-antigravity"
+        } else if self.claude_sign_in || self.subscription_token {
+            "icon-claude"
+        } else {
+            match self.kind {
+                "OpenAI API key" => "icon-openai",
+                "Anthropic API key" => "icon-claude",
+                "Gemini API key" => "icon-gemini",
+                "Antigravity" => "icon-antigravity",
+                "Codex" => "icon-codex",
+                "GitHub" => "icon-github",
+                _ => "icon-key",
+            }
         }
     }
 }
@@ -524,6 +551,8 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) codex: String,
     pub(crate) openai: String,
     pub(crate) anthropic: String,
+    pub(crate) gemini: String,
+    pub(crate) antigravity: String,
     pub(crate) ssh: String,
 }
 
@@ -632,6 +661,10 @@ pub(crate) struct CredentialSettingsView {
     /// authorize page when the sign-in has just started.
     pub(crate) claude_sign_in_code: bool,
     pub(crate) claude_sign_in_url: String,
+    /// The Antigravity sign-in dialog shows its callback/code field (#6555),
+    /// with Google's authorize page when the sign-in has just started.
+    pub(crate) antigravity_sign_in_code: bool,
+    pub(crate) antigravity_sign_in_url: String,
     pub(crate) navigation_query: String,
     pub(crate) creation_return_url: String,
     pub(crate) git_identity: SettingsData,
@@ -1004,6 +1037,8 @@ pub(crate) struct OrganizationRow {
     pub(crate) joined: String,
     /// The user is its only owner, so cannot leave it.
     pub(crate) only_owner: bool,
+    /// Organization opted in to Agent chat tabs in the Sandbox view.
+    pub(crate) agent_chat: bool,
 }
 
 impl OrganizationRow {
@@ -1034,6 +1069,7 @@ mod organization_row_tests {
             url: String::new(),
             joined: String::new(),
             only_owner: false,
+            agent_chat: false,
         };
         assert_eq!(row("Alpha team").display_name(), "Alpha team");
         assert_eq!(row("  ").display_name(), "alpha-team");
@@ -1047,6 +1083,7 @@ pub(crate) struct OrganizationContext {
     pub(crate) name: String,
     pub(crate) slug: String,
     pub(crate) can_admin: bool,
+    pub(crate) agent_chat: bool,
     pub(crate) environments_url: String,
     pub(crate) presets_url: String,
     pub(crate) secrets_url: String,
@@ -1063,6 +1100,7 @@ impl OrganizationContext {
             name: row.name.clone(),
             slug: row.slug.clone(),
             can_admin: row.can_admin,
+            agent_chat: row.agent_chat,
             environments_url: format!("{local_base}/"),
             presets_url: format!("{local_base}/presets/"),
             secrets_url: format!("{local_base}/secrets/"),
@@ -2836,6 +2874,8 @@ mod secret_debug_tests {
         let page = CredentialSettingsView {
             claude_sign_in_code: false,
             claude_sign_in_url: String::new(),
+            antigravity_sign_in_code: false,
+            antigravity_sign_in_url: String::new(),
             navigation_query: String::new(),
             creation_return_url: String::new(),
             git_identity: SettingsData::default(),

@@ -79,7 +79,7 @@ test("Security replaces the authenticator and regenerates codes through focused 
     await button.click();
     await expect(password).toHaveValue("");
     await expect(code).toHaveValue("");
-    await proof.getByRole("button", { name: "Cancel", exact: true }).click();
+    await proof.getByRole("button", { name: "Close", exact: true }).click();
     await expect(proof).not.toBeVisible();
     await expect(button).toBeFocused();
     expect(posts).toHaveLength(submitted);

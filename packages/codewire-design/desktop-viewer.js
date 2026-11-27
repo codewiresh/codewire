@@ -64,7 +64,9 @@
       buttons.copy.disabled = busy || desktopText === "";
     }
 
+    let currentState = "loading";
     function show(state, text = messages[state] ?? "") {
+      currentState = state;
       panel.dataset.desktopState = state;
       status.textContent = text;
       status.hidden = text === "";
@@ -77,6 +79,7 @@
       buttons.release.hidden = !connected;
       screen.hidden = !["connecting", "connected"].includes(state);
       enable();
+      document.dispatchEvent(new CustomEvent("codewire:desktop-state", { detail: { environmentId, state } }));
     }
 
     function say(text) {
@@ -298,6 +301,15 @@
     });
     shown.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
+    document.addEventListener("codewire:desktop-stop", (event) => {
+      if (event.detail?.environmentId !== environmentId) return;
+      disconnect();
+      void act("/_actions/desktop/stop", "stopping");
+    });
+    document.addEventListener("codewire:desktop-state-request", (event) => {
+      if (event.detail?.environmentId !== environmentId) return;
+      document.dispatchEvent(new CustomEvent("codewire:desktop-state", { detail: { environmentId, state: currentState } }));
+    });
     show("loading");
     // Readiness may have reported before this script arrived. A report that
     // the Sandbox runs after all reads the desktop itself.
@@ -306,23 +318,5 @@
     if (sandboxRunning === rendered) read();
   }
 
-  // The workspace shows its terminals or its desktop. The terminal's own
-  // `hidden` belongs to its readiness check (a Sandbox being deleted), so the
-  // view is marked on the workspace and the stylesheet hides the terminal.
-  function switcher(control) {
-    const workspace = document.querySelector(".cw-workspace-main");
-    const desktop = document.querySelector("[data-desktop-panel]");
-    const buttons = control.querySelectorAll("[data-workspace-view]");
-    for (const button of buttons) {
-      button.addEventListener("click", () => {
-        const view = button.dataset.workspaceView;
-        for (const other of buttons) other.setAttribute("aria-pressed", String(other === button));
-        if (workspace) workspace.dataset.workspaceShowing = view;
-        if (desktop) desktop.hidden = view !== "desktop";
-      });
-    }
-  }
-
   for (const panel of document.querySelectorAll("[data-desktop-panel]")) boot(panel);
-  for (const control of document.querySelectorAll("[data-workspace-views]")) switcher(control);
 })();

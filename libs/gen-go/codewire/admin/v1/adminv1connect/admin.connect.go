@@ -83,6 +83,9 @@ const (
 	// AdminServiceSetOrganizationDedicatedCpuProcedure is the fully-qualified name of the
 	// AdminService's SetOrganizationDedicatedCpu RPC.
 	AdminServiceSetOrganizationDedicatedCpuProcedure = "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu"
+	// AdminServiceSetOrganizationAgentChatProcedure is the fully-qualified name of the AdminService's
+	// SetOrganizationAgentChat RPC.
+	AdminServiceSetOrganizationAgentChatProcedure = "/codewire.admin.v1.AdminService/SetOrganizationAgentChat"
 	// AdminServiceListStandardRuntimeOrganizationsProcedure is the fully-qualified name of the
 	// AdminService's ListStandardRuntimeOrganizations RPC.
 	AdminServiceListStandardRuntimeOrganizationsProcedure = "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations"
@@ -162,6 +165,10 @@ type AdminServiceClient interface {
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
 	// the value it already has changes nothing.
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
+	// SetOrganizationAgentChat enables or disables the Sandbox Agent Chat tab and
+	// managed agent sessions for one organization, and writes an audit entry.
+	// Setting the value it already has changes nothing.
+	SetOrganizationAgentChat(context.Context, *connect.Request[v1.SetOrganizationAgentChatRequest]) (*connect.Response[v1.SetOrganizationAgentChatResponse], error)
 	// ListStandardRuntimeOrganizations lists the organizations moved onto the
 	// `standard` runtime profile, by slug.
 	ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error)
@@ -318,6 +325,12 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
 			connect.WithClientOptions(opts...),
 		),
+		setOrganizationAgentChat: connect.NewClient[v1.SetOrganizationAgentChatRequest, v1.SetOrganizationAgentChatResponse](
+			httpClient,
+			baseURL+AdminServiceSetOrganizationAgentChatProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationAgentChat")),
+			connect.WithClientOptions(opts...),
+		),
 		listStandardRuntimeOrganizations: connect.NewClient[v1.ListStandardRuntimeOrganizationsRequest, v1.ListStandardRuntimeOrganizationsResponse](
 			httpClient,
 			baseURL+AdminServiceListStandardRuntimeOrganizationsProcedure,
@@ -371,6 +384,7 @@ type adminServiceClient struct {
 	setOrganizationRateCard           *connect.Client[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse]
 	getClusterCapacity                *connect.Client[v1.GetClusterCapacityRequest, v1.GetClusterCapacityResponse]
 	setOrganizationDedicatedCpu       *connect.Client[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse]
+	setOrganizationAgentChat          *connect.Client[v1.SetOrganizationAgentChatRequest, v1.SetOrganizationAgentChatResponse]
 	listStandardRuntimeOrganizations  *connect.Client[v1.ListStandardRuntimeOrganizationsRequest, v1.ListStandardRuntimeOrganizationsResponse]
 	setOrganizationStandardRuntime    *connect.Client[v1.SetOrganizationStandardRuntimeRequest, v1.SetOrganizationStandardRuntimeResponse]
 	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
@@ -467,6 +481,11 @@ func (c *adminServiceClient) SetOrganizationDedicatedCpu(ctx context.Context, re
 	return c.setOrganizationDedicatedCpu.CallUnary(ctx, req)
 }
 
+// SetOrganizationAgentChat calls codewire.admin.v1.AdminService.SetOrganizationAgentChat.
+func (c *adminServiceClient) SetOrganizationAgentChat(ctx context.Context, req *connect.Request[v1.SetOrganizationAgentChatRequest]) (*connect.Response[v1.SetOrganizationAgentChatResponse], error) {
+	return c.setOrganizationAgentChat.CallUnary(ctx, req)
+}
+
 // ListStandardRuntimeOrganizations calls
 // codewire.admin.v1.AdminService.ListStandardRuntimeOrganizations.
 func (c *adminServiceClient) ListStandardRuntimeOrganizations(ctx context.Context, req *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error) {
@@ -556,6 +575,10 @@ type AdminServiceHandler interface {
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
 	// the value it already has changes nothing.
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
+	// SetOrganizationAgentChat enables or disables the Sandbox Agent Chat tab and
+	// managed agent sessions for one organization, and writes an audit entry.
+	// Setting the value it already has changes nothing.
+	SetOrganizationAgentChat(context.Context, *connect.Request[v1.SetOrganizationAgentChatRequest]) (*connect.Response[v1.SetOrganizationAgentChatResponse], error)
 	// ListStandardRuntimeOrganizations lists the organizations moved onto the
 	// `standard` runtime profile, by slug.
 	ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error)
@@ -708,6 +731,12 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceSetOrganizationAgentChatHandler := connect.NewUnaryHandler(
+		AdminServiceSetOrganizationAgentChatProcedure,
+		svc.SetOrganizationAgentChat,
+		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationAgentChat")),
+		connect.WithHandlerOptions(opts...),
+	)
 	adminServiceListStandardRuntimeOrganizationsHandler := connect.NewUnaryHandler(
 		AdminServiceListStandardRuntimeOrganizationsProcedure,
 		svc.ListStandardRuntimeOrganizations,
@@ -775,6 +804,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceGetClusterCapacityHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationDedicatedCpuProcedure:
 			adminServiceSetOrganizationDedicatedCpuHandler.ServeHTTP(w, r)
+		case AdminServiceSetOrganizationAgentChatProcedure:
+			adminServiceSetOrganizationAgentChatHandler.ServeHTTP(w, r)
 		case AdminServiceListStandardRuntimeOrganizationsProcedure:
 			adminServiceListStandardRuntimeOrganizationsHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationStandardRuntimeProcedure:
@@ -860,6 +891,10 @@ func (UnimplementedAdminServiceHandler) GetClusterCapacity(context.Context, *con
 
 func (UnimplementedAdminServiceHandler) SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationDedicatedCpu is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetOrganizationAgentChat(context.Context, *connect.Request[v1.SetOrganizationAgentChatRequest]) (*connect.Response[v1.SetOrganizationAgentChatResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationAgentChat is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) ListStandardRuntimeOrganizations(context.Context, *connect.Request[v1.ListStandardRuntimeOrganizationsRequest]) (*connect.Response[v1.ListStandardRuntimeOrganizationsResponse], error) {

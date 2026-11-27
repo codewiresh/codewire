@@ -19,6 +19,7 @@ fn organization(can_admin: bool) -> OrganizationContext {
         url: "/acme/".into(),
         joined: String::new(),
         only_owner: false,
+        agent_chat: false,
     })
 }
 

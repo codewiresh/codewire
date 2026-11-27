@@ -26,6 +26,46 @@
   const retryMaxMs = 15000;
   const stableMs = 5000;
   const revalidateEvery = 3;
+  const svgNs = "http://www.w3.org/2000/svg";
+  const desktopLive = (state) => ["starting", "connecting", "connected", "lost"].includes(state);
+  const agentCatalog = [
+    {
+      id: "agy", name: "Antigravity", icon: "icon-antigravity", cmd: "agy", ready: true,
+      models: [
+        { id: "gemini-4-neon", label: "Gemini 4 Neon", icon: "icon-antigravity" },
+        { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", icon: "icon-antigravity" },
+        { id: "claude-opus-5.5", label: "Opus 5.5", icon: "icon-claude" },
+        { id: "claude-sonnet-5.5", label: "Sonnet 5.5", icon: "icon-claude" },
+      ],
+    },
+    {
+      id: "claude", name: "Claude Code", icon: "icon-claude", cmd: "claude", ready: true,
+      models: [
+        { id: "opus-5.5", label: "Opus 5.5", icon: "icon-claude" },
+        { id: "sonnet-5.5", label: "Sonnet 5.5", icon: "icon-claude" },
+        { id: "haiku-5.5", label: "Haiku 5.5", icon: "icon-claude" },
+      ],
+    },
+    {
+      id: "codex", name: "Codex", icon: "icon-codex", cmd: "codex", ready: true,
+      models: [
+        { id: "gpt-6.1-sol", label: "GPT-6.1 Sol", icon: "icon-codex" },
+        { id: "gpt-6.0-codex", label: "GPT-6.0 Codex", icon: "icon-codex" },
+      ],
+    },
+    { id: "pi", name: "Pi", icon: "icon-pi", cmd: "pi", ready: false, models: [] },
+  ];
+  const agentEfforts = ["Default", "Low", "Medium", "High", "Max"];
+
+  function spriteIcon(iconsBase, symbol) {
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("class", "cw-icon");
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS(svgNs, "use");
+    use.setAttribute("href", `${iconsBase}#${symbol}`);
+    svg.append(use);
+    return svg;
+  }
 
   function clearReferences() {
     try {
@@ -44,6 +84,13 @@
     const statuses = root.querySelector("[data-terminal-statuses]");
     const tabActions = root.querySelector("[data-terminal-tab-actions]");
     const template = root.querySelector("[data-terminal-tab-template]");
+    const homeTemplate = root.querySelector("[data-home-tab-template]");
+    const desktopTemplate = root.querySelector("[data-desktop-tab-template]");
+    const agentTemplate = root.querySelector("[data-agent-tab-template]");
+    const desktopPanel = root.querySelector("[data-desktop-panel]");
+    const desktopCloseDialog = root.querySelector("[data-desktop-close-dialog]");
+    const iconsHref = root.querySelector("use[href*='#']")?.getAttribute("href") || "/assets/codewire/icons-v2.svg#icon-plus";
+    const iconsBase = iconsHref.split("#")[0];
     const newButton = root.querySelector("[data-terminal-new]");
     const limitNote = root.querySelector("[data-terminal-limit]");
     const renameButton = root.querySelector("[data-terminal-rename]");
@@ -64,6 +111,7 @@
     const org = root.dataset.terminalOrgId;
     const environment = root.dataset.terminalEnvironmentId;
     const slug = root.dataset.terminalOrgSlug;
+    const agentChatEnabled = root.dataset.agentChatEnabled === "true";
     const csrf = root.querySelector('[name="_csrf"]')?.value;
     let account = null;
     let active = null;
@@ -74,7 +122,12 @@
     let needsReload = false;
     let epoch = 0;
     let number = 0;
+    let tabSeq = 0;
+    let sessionsVisible = false;
+    let desktopState = desktopPanel?.dataset.desktopState || "loading";
+    let desktopCloseReturn = null;
     let inventory = [];
+    const terminalTabs = () => [...tabs.values()].filter((tab) => tab.kind === "terminal");
     let closeTarget = null;
     // Where focus returns when the Close dialog closes: the tab's close
     // button, or the tab itself when Delete opened it from the keyboard.
@@ -133,9 +186,9 @@
       const ready = runtimeReady();
       const text = !ready ? readinessMessage()
         : failure ? failure.text
-          : needsReload ? "Reload this page to open a terminal."
-            : autoOpen !== "off" ? "Opening a terminal…"
-              : "No terminal is open. Choose New terminal to start one; it keeps running until you close it or stop the Sandbox.";
+          : needsReload ? "Reload this page to open a tab."
+            : autoOpen !== "off" ? (homeTemplate ? "Loading workspace…" : "Opening a terminal…")
+              : "No tab is open. Choose New tab to start an agent, terminal, or desktop.";
       // Unchanged text is not rewritten, so the live region speaks only on change.
       if (empty.textContent !== text) empty.textContent = text;
       emptyState.hidden = tabs.size > 0;
@@ -154,7 +207,10 @@
     }
     // Output, status-bar groups and tab actions are shown or withheld together.
     function showSessions(visible) {
-      panels.hidden = !visible;
+      sessionsVisible = visible;
+      const showingDesktop = tabs.get(active)?.kind === "desktop";
+      panels.hidden = !visible || showingDesktop;
+      if (desktopPanel) desktopPanel.hidden = !visible || !showingDesktop;
       statuses.hidden = !visible;
       tabActions.hidden = !visible;
     }
@@ -163,13 +219,15 @@
       if (!authorized || !account) return;
       try {
         sessionStorage.setItem(`${storagePrefix}account`, account);
+        const terms = terminalTabs();
         // Before this tab has shown a terminal there is nothing to remember.
         // An empty record would stop the next load re-attaching a live
         // session, such as one an interrupted automatic launch started.
-        if (!tabs.size && !references()) return;
+        if (!terms.length && !references()) return;
+        const activeTerm = tabs.get(active)?.kind === "terminal" ? active : (terms[0]?.id ?? null);
         sessionStorage.setItem(storageKey(), JSON.stringify({ version: 1, accountId: account,
-          organizationId: org, environmentId: environment, sessions: [...tabs.keys()], activeSessionId: active,
-          labels: [...tabs.values()].map((tab) => ({ sessionId: tab.id, label: tab.label })) }));
+          organizationId: org, environmentId: environment, sessions: terms.map((tab) => tab.id), activeSessionId: activeTerm,
+          labels: terms.map((tab) => ({ sessionId: tab.id, label: tab.label })) }));
       } catch { /* An unavailable store does not prevent an explicit terminal. */ }
     }
     function references() {
@@ -204,7 +262,7 @@
       // keyboard focus (#4533); every handler already ignores presses while pending.
       renameSave.disabled = !authorized || uncertain || needsReload || suspended;
       renameSave.setAttribute("aria-disabled", String(pending));
-      renameButton.disabled = renameSave.disabled || !tabs.has(active);
+      renameButton.disabled = renameSave.disabled || tabs.get(active)?.kind !== "terminal";
       renameButton.setAttribute("aria-disabled", String(pending));
       root.querySelector("[data-terminal-reload]").hidden = !needsReload;
       newButton.disabled = blocked || tabs.size >= maxTabs;
@@ -220,6 +278,12 @@
       existing.disabled = blocked || tabs.size >= maxTabs || existing.options.length <= 1;
       existingForm.querySelector("button").disabled = existing.disabled || !existing.value;
       for (const tab of tabs.values()) {
+        if (tab.kind === "home") {
+          const termBtn = tab.panel.querySelector('[data-home-open="terminal"]');
+          if (termBtn) termBtn.disabled = blocked;
+          continue;
+        }
+        if (tab.kind !== "terminal") continue;
         // An ended session has nothing to reconnect to; Replay still shows its output.
         const open = tab.socket?.readyState === WebSocket.OPEN;
         tab.toggle.disabled = blocked || !tab.available || tab.renderFailed || ended(tab.state);
@@ -262,21 +326,33 @@
       else if (box.right > view.right) strip.scrollLeft += box.right - view.right;
     }
     function choose(id, focus = false) {
-      if (!tabs.has(id)) return;
+      if (!tabs.has(id)) {
+        if (!tabs.size) {
+          active = null;
+          if (desktopPanel) desktopPanel.hidden = true;
+          panels.hidden = true;
+          updateControls();
+          store();
+        }
+        return;
+      }
       active = id;
+      const showingDesktop = tabs.get(id)?.kind === "desktop";
       for (const tab of tabs.values()) {
         const selected = tab.id === id;
         tab.button.setAttribute("aria-selected", String(selected));
         tab.button.tabIndex = selected ? 0 : -1;
-        tab.panel.hidden = !selected;
-        tab.status.hidden = !selected;
-        tab.actions.hidden = !selected;
+        if (tab.panel) tab.panel.hidden = !selected;
+        if (tab.status) tab.status.hidden = !selected;
+        if (tab.actions) tab.actions.hidden = !selected;
         if (selected) {
-          tab.presentation.fitAndResize();
+          if (tab.kind === "terminal") tab.presentation.fitAndResize();
           reveal(tab);
           if (focus) tab.button.focus();
         }
       }
+      panels.hidden = !sessionsVisible || showingDesktop;
+      if (desktopPanel) desktopPanel.hidden = !sessionsVisible || !showingDesktop;
       updateControls();
       store();
     }
@@ -308,7 +384,7 @@
     // revoked tab, nothing later replaces that line or offers Reconnect, which
     // could not succeed (#5944).
     function endAll(line) {
-      for (const tab of tabs.values()) {
+      for (const tab of terminalTabs()) {
         tab.ended = line;
         detach(tab);
       }
@@ -673,29 +749,475 @@
       tab.presentation.terminal.options.disableStdin = true;
     }
     function dispose(tab) {
-      if (renameTarget?.tab === tab) invalidateRename();
-      detach(tab);
-      tab.disposed = true;
-      tab.renderEpoch += 1;
-      tab.renderAbort.abort();
-      tab.input.dispose();
-      tab.presentation.dispose();
-      tab.panel.remove();
-      tab.item.remove();
-      tab.status.remove();
-      tab.actions.remove();
+      if (tab.kind === "terminal") {
+        if (renameTarget?.tab === tab) invalidateRename();
+        detach(tab);
+        tab.disposed = true;
+        tab.renderEpoch += 1;
+        tab.renderAbort.abort();
+        tab.input.dispose();
+        tab.presentation.dispose();
+        tab.panel.remove();
+        tab.item.remove();
+        tab.status.remove();
+        tab.actions.remove();
+      } else if (tab.kind === "desktop") {
+        tab.item.remove();
+        if (desktopPanel) desktopPanel.hidden = true;
+      } else {
+        tab.abort?.abort();
+        tab.panel?.remove();
+        tab.item.remove();
+      }
       tabs.delete(tab.id);
     }
     function clearPresentations() {
       invalidateRename();
-      for (const tab of tabs.values()) dispose(tab);
+      for (const tab of [...tabs.values()]) dispose(tab);
       active = null;
       dialog.close();
+      desktopCloseDialog?.close();
       closeTarget = null;
       closeReturn = null;
+      desktopCloseReturn = null;
     }
-    function add(session) {
-      if (tabs.has(session.sessionId) || tabs.size >= maxTabs) return tabs.get(session.sessionId);
+    function closeSimpleTab(tab, focusNext = true) {
+      const ids = [...tabs.keys()];
+      const index = ids.indexOf(tab.id);
+      dispose(tab);
+      const nextId = tabs.has(active) ? active : (ids[index + 1] ?? ids[index - 1] ?? tabs.keys().next().value);
+      choose(nextId, focusNext);
+      refreshHomes();
+      updateControls();
+    }
+    function refreshHomes() {
+      const desktopOpen = tabs.has("desktop");
+      const desktopRunningNow = desktopLive(desktopState);
+      const detachedTerminals = inventory.filter((session) => live(session.state) && !tabs.has(session.sessionId));
+      for (const tab of tabs.values()) {
+        if (tab.kind !== "home") continue;
+        const badge = tab.panel.querySelector("[data-home-desktop-state]");
+        if (badge) {
+          if (desktopOpen) { badge.textContent = "Open"; badge.hidden = false; }
+          else if (desktopRunningNow) { badge.textContent = "Running"; badge.hidden = false; }
+          else { badge.textContent = ""; badge.hidden = true; }
+        }
+        const section = tab.panel.querySelector("[data-home-reattach]");
+        const list = tab.panel.querySelector("[data-home-reattach-list]");
+        if (!section || !list) continue;
+        list.replaceChildren();
+        for (const session of detachedTerminals) {
+          const li = document.createElement("li");
+          li.className = "cw-tab-home-reattach-row";
+          const meta = document.createElement("span");
+          meta.className = "cw-tab-home-reattach-meta";
+          const name = document.createElement("span");
+          name.textContent = `Terminal ${session.sessionId.slice(-8)}`;
+          const sub = document.createElement("span");
+          sub.className = "cw-tab-home-reattach-sub";
+          sub.textContent = session.state;
+          meta.append(spriteIcon(iconsBase, "icon-prompt"), name, sub);
+          const btn = document.createElement("button");
+          btn.className = "cw-button cw-button--outline cw-button--small";
+          btn.type = "button";
+          btn.textContent = "Reattach";
+          btn.addEventListener("click", () => {
+            if (!authorized || pending || suspended || !runtimeReady()) return;
+            const termTab = add(session, tab.id);
+            choose(termTab.id, true);
+            void connect(termTab);
+            showInventory();
+          });
+          li.append(meta, btn);
+          list.append(li);
+        }
+        if (desktopRunningNow && !desktopOpen) {
+          const li = document.createElement("li");
+          li.className = "cw-tab-home-reattach-row";
+          const meta = document.createElement("span");
+          meta.className = "cw-tab-home-reattach-meta";
+          const name = document.createElement("span");
+          name.textContent = "Desktop";
+          const sub = document.createElement("span");
+          sub.className = "cw-tab-home-reattach-sub";
+          sub.textContent = "running";
+          meta.append(spriteIcon(iconsBase, "icon-monitor"), name, sub);
+          const btn = document.createElement("button");
+          btn.className = "cw-button cw-button--outline cw-button--small";
+          btn.type = "button";
+          btn.textContent = "Reattach";
+          btn.addEventListener("click", () => openDesktopFrom(tab.id));
+          li.append(meta, btn);
+          list.append(li);
+        }
+        section.hidden = list.childElementCount === 0;
+      }
+    }
+    function insertTabItem(item, replaceId) {
+      const existingTab = replaceId ? tabs.get(replaceId) : null;
+      if (existingTab?.item?.parentNode === tabList) {
+        tabList.insertBefore(item, existingTab.item);
+        dispose(existingTab);
+      } else {
+        tabList.append(item);
+      }
+    }
+    function addHomeTab(focus = false) {
+      if (!homeTemplate || tabs.size >= maxTabs) return null;
+      autoOpen = "off";
+      failure = null;
+      tabSeq += 1;
+      const id = `home-${tabSeq}`;
+      const parts = homeTemplate.content.cloneNode(true);
+      const item = parts.querySelector("[data-home-tab-item]");
+      const button = parts.querySelector("[data-home-tab]");
+      const panel = parts.querySelector("[data-home-tab-panel]");
+      const remove = item.querySelector("[data-home-remove-tab]");
+      button.id = `sandbox-tab-home-${tabSeq}`;
+      panel.id = `sandbox-panel-home-${tabSeq}`;
+      button.setAttribute("aria-controls", panel.id);
+      panel.setAttribute("aria-labelledby", button.id);
+      tabList.append(item);
+      panels.append(panel);
+      const tab = { id, kind: "home", label: "New tab", item, button, panel, remove };
+      tabs.set(id, tab);
+      button.addEventListener("click", () => choose(id));
+      remove.addEventListener("click", () => closeSimpleTab(tab, true));
+      const agentBtn = panel.querySelector('[data-home-open="agent"]');
+      if (agentBtn) {
+        if (!agentChatEnabled) agentBtn.hidden = true;
+        else agentBtn.addEventListener("click", () => openAgentFrom(id));
+      }
+      panel.querySelector('[data-home-open="terminal"]')?.addEventListener("click", () => { void mutate("launch", undefined, false, id); });
+      panel.querySelector('[data-home-open="desktop"]')?.addEventListener("click", () => openDesktopFrom(id));
+      showSessions(true);
+      choose(id, focus);
+      refreshHomes();
+      return tab;
+    }
+    function openDesktopFrom(replaceHomeId) {
+      if (!desktopTemplate || !desktopPanel) return;
+      if (tabs.has("desktop")) {
+        const home = replaceHomeId ? tabs.get(replaceHomeId) : null;
+        if (home?.kind === "home") dispose(home);
+        choose("desktop", true);
+        refreshHomes();
+        return;
+      }
+      if (!replaceHomeId && tabs.size >= maxTabs) return;
+      autoOpen = "off";
+      failure = null;
+      const parts = desktopTemplate.content.cloneNode(true);
+      const item = parts.querySelector("[data-desktop-tab-item]");
+      const button = parts.querySelector("[data-desktop-tab]");
+      const closeBtn = item.querySelector("[data-desktop-close-tab]");
+      button.id = "sandbox-tab-desktop";
+      button.setAttribute("aria-controls", desktopPanel.id || "desktop-tab-panel");
+      desktopPanel.setAttribute("aria-labelledby", button.id);
+      insertTabItem(item, replaceHomeId);
+      const tab = { id: "desktop", kind: "desktop", label: "Desktop", item, button, close: closeBtn };
+      tabs.set("desktop", tab);
+      button.addEventListener("click", () => choose("desktop"));
+      closeBtn.addEventListener("click", () => {
+        if (desktopLive(desktopState) && desktopCloseDialog) {
+          desktopCloseReturn = desktopCloseReturn ?? closeBtn;
+          desktopCloseDialog.showModal();
+          desktopCloseDialog.querySelector("[data-desktop-cancel-close]")?.focus();
+        } else {
+          closeSimpleTab(tab, true);
+        }
+      });
+      showSessions(true);
+      choose("desktop", true);
+      refreshHomes();
+    }
+    function openAgentFrom(replaceHomeId) {
+      if (!agentChatEnabled || !agentTemplate) return;
+      if (!replaceHomeId && tabs.size >= maxTabs) return;
+      autoOpen = "off";
+      failure = null;
+      tabSeq += 1;
+      const id = `agent-${tabSeq}`;
+      const parts = agentTemplate.content.cloneNode(true);
+      const item = parts.querySelector("[data-agent-tab-item]");
+      const button = parts.querySelector("[data-agent-tab]");
+      const panel = parts.querySelector("[data-agent-tab-panel]");
+      const remove = item.querySelector("[data-agent-remove-tab]");
+      button.id = `sandbox-tab-agent-${tabSeq}`;
+      panel.id = `sandbox-panel-agent-${tabSeq}`;
+      button.setAttribute("aria-controls", panel.id);
+      panel.setAttribute("aria-labelledby", button.id);
+      insertTabItem(item, replaceHomeId);
+      panels.append(panel);
+      const abort = new AbortController();
+      const tab = { id, kind: "agent", label: "New agent", item, button, panel, remove, abort };
+      tabs.set(id, tab);
+      button.addEventListener("click", () => choose(id));
+      remove.addEventListener("click", () => closeSimpleTab(tab, true));
+      wireAgentComposer(tab);
+      showSessions(true);
+      choose(id, true);
+      refreshHomes();
+      panel.querySelector("[data-agent-input]")?.focus();
+    }
+    function wireAgentComposer(tab) {
+      const { panel, item, abort } = tab;
+      const signal = abort.signal;
+      const form = panel.querySelector("[data-agent-composer]");
+      const input = panel.querySelector("[data-agent-input]");
+      const sendBtn = panel.querySelector("[data-agent-send]");
+      const note = panel.querySelector("[data-agent-note]");
+      const trigger = panel.querySelector("[data-agent-menu-trigger]");
+      const triggerIcon = panel.querySelector("[data-agent-trigger-icon]");
+      const triggerModel = panel.querySelector("[data-agent-trigger-model]");
+      const triggerEffort = panel.querySelector("[data-agent-trigger-effort]");
+      const tabIcon = item.querySelector("[data-agent-tab-icon]");
+      const menuRoot = panel.querySelector("[data-agent-menu-root]");
+      const l1 = panel.querySelector("[data-agent-menu-l1]");
+      const l1Model = panel.querySelector("[data-agent-l1-model]");
+      const l1Effort = panel.querySelector("[data-agent-l1-effort]");
+      const l2 = panel.querySelector("[data-agent-menu-l2]");
+      const anchor = panel.querySelector("[data-agent-popover-anchor]");
+      let selectedAgentId = agentCatalog[0].id;
+      let selectedModelId = agentCatalog[0].models[0].id;
+      let selectedEffort = agentEfforts[0];
+      let menuOpen = false;
+      let activeL1 = null;
+      let hoveredAgentId = null;
+      let searchQuery = "";
+
+      const currentAgent = () => agentCatalog.find((a) => a.id === selectedAgentId) || agentCatalog[0];
+      const currentModel = () => currentAgent().models.find((m) => m.id === selectedModelId) || currentAgent().models[0];
+
+      function syncTrigger() {
+        const model = currentModel();
+        const icon = model?.icon || currentAgent().icon;
+        triggerIcon?.setAttribute("href", `${iconsBase}#${icon}`);
+        tabIcon?.setAttribute("href", `${iconsBase}#${icon}`);
+        if (triggerModel) triggerModel.textContent = model?.label || currentAgent().name;
+        if (triggerEffort) triggerEffort.textContent = selectedEffort;
+        if (l1Model) l1Model.textContent = model?.label || currentAgent().name;
+        if (l1Effort) l1Effort.textContent = selectedEffort;
+      }
+      function fitSubmenu(el) {
+        if (!el || el.hidden) return;
+        el.classList.remove("cw-agent-menu-sub--left");
+        if (el.getBoundingClientRect().right > window.innerWidth - 12) {
+          el.classList.add("cw-agent-menu-sub--left");
+        }
+      }
+      function closeMenu(returnFocus = false) {
+        menuOpen = false;
+        activeL1 = null;
+        hoveredAgentId = null;
+        searchQuery = "";
+        menuRoot.hidden = true;
+        l2.hidden = true;
+        l2.replaceChildren();
+        trigger.setAttribute("aria-expanded", "false");
+        for (const row of l1.querySelectorAll("[data-agent-menu-cat]")) row.removeAttribute("data-focused");
+        if (returnFocus) trigger.focus();
+      }
+      function renderL3(l3) {
+        l3.replaceChildren();
+        const agent = agentCatalog.find((a) => a.id === hoveredAgentId && a.ready);
+        if (!agent) { l3.hidden = true; return; }
+        const pane = document.createElement("div");
+        pane.className = "cw-agent-menu-pane cw-agent-menu-models";
+        pane.setAttribute("role", "menu");
+        pane.setAttribute("aria-label", `${agent.name} models`);
+        for (const model of agent.models) {
+          const isSelected = selectedAgentId === agent.id && selectedModelId === model.id;
+          const row = document.createElement("button");
+          row.className = "cw-agent-menu-row";
+          row.type = "button";
+          row.setAttribute("role", "menuitemradio");
+          row.setAttribute("aria-checked", String(isSelected));
+          const left = document.createElement("span");
+          left.className = "cw-agent-menu-row-left";
+          const labelSpan = document.createElement("span");
+          labelSpan.textContent = model.label;
+          left.append(spriteIcon(iconsBase, model.icon), labelSpan);
+          row.append(left);
+          if (isSelected) {
+            const check = document.createElement("span");
+            check.className = "cw-agent-menu-check";
+            check.append(spriteIcon(iconsBase, "icon-check"));
+            row.append(check);
+          }
+          row.addEventListener("click", () => {
+            selectedAgentId = agent.id;
+            selectedModelId = model.id;
+            syncTrigger();
+            closeMenu(true);
+          });
+          pane.append(row);
+        }
+        l3.append(pane);
+        l3.hidden = false;
+        fitSubmenu(l3);
+      }
+      function renderL2() {
+        for (const row of l1.querySelectorAll("[data-agent-menu-cat]")) {
+          if (row.dataset.agentMenuCat === activeL1) row.setAttribute("data-focused", "true");
+          else row.removeAttribute("data-focused");
+        }
+        l2.replaceChildren();
+        if (!activeL1) { l2.hidden = true; return; }
+        const pane = document.createElement("div");
+        pane.className = "cw-agent-menu-pane";
+        pane.setAttribute("role", "menu");
+        if (activeL1 === "agent") {
+          pane.setAttribute("aria-label", "Agents");
+          const search = document.createElement("input");
+          search.className = "cw-agent-menu-search";
+          search.type = "search";
+          search.placeholder = "Search agents…";
+          search.setAttribute("aria-label", "Search agents");
+          search.value = searchQuery;
+          const listWrap = document.createElement("div");
+          const l3 = document.createElement("div");
+          l3.className = "cw-agent-menu-sub";
+          l3.hidden = true;
+          function renderAgents() {
+            listWrap.replaceChildren();
+            const q = searchQuery.trim().toLowerCase();
+            for (const agent of agentCatalog) {
+              if (q && !agent.name.toLowerCase().includes(q) && !agent.id.includes(q)) continue;
+              const isSelected = selectedAgentId === agent.id;
+              const row = document.createElement("button");
+              row.className = "cw-agent-menu-row";
+              row.type = "button";
+              row.setAttribute("role", "menuitem");
+              row.disabled = !agent.ready;
+              if (isSelected) row.setAttribute("aria-checked", "true");
+              if (hoveredAgentId === agent.id) row.setAttribute("data-focused", "true");
+              const left = document.createElement("span");
+              left.className = "cw-agent-menu-row-left";
+              const nameSpan = document.createElement("span");
+              nameSpan.textContent = agent.name;
+              left.append(spriteIcon(iconsBase, agent.icon), nameSpan);
+              row.append(left);
+              if (agent.ready) {
+                const right = document.createElement("span");
+                right.className = "cw-agent-menu-row-right";
+                right.append(spriteIcon(iconsBase, "icon-chevron-right"));
+                row.append(right);
+                const openModels = () => {
+                  if (hoveredAgentId === agent.id) return;
+                  hoveredAgentId = agent.id;
+                  for (const sibling of listWrap.querySelectorAll(".cw-agent-menu-row")) {
+                    sibling.removeAttribute("data-focused");
+                  }
+                  row.setAttribute("data-focused", "true");
+                  renderL3(l3);
+                };
+                row.addEventListener("mouseenter", openModels);
+                row.addEventListener("focus", openModels);
+                row.addEventListener("click", openModels);
+              }
+              listWrap.append(row);
+            }
+          }
+          search.addEventListener("input", () => {
+            searchQuery = search.value;
+            hoveredAgentId = null;
+            renderAgents();
+            renderL3(l3);
+          });
+          pane.append(search, listWrap, l3);
+          renderAgents();
+          l2.append(pane);
+          l2.hidden = false;
+          fitSubmenu(l2);
+        } else if (activeL1 === "effort") {
+          pane.setAttribute("aria-label", "Effort");
+          for (const effort of agentEfforts) {
+            const isSelected = selectedEffort === effort;
+            const row = document.createElement("button");
+            row.className = "cw-agent-menu-row";
+            row.type = "button";
+            row.setAttribute("role", "menuitemradio");
+            row.setAttribute("aria-checked", String(isSelected));
+            const left = document.createElement("span");
+            left.className = "cw-agent-menu-row-left";
+            const labelSpan = document.createElement("span");
+            labelSpan.textContent = effort;
+            left.append(labelSpan);
+            row.append(left);
+            if (isSelected) {
+              const check = document.createElement("span");
+              check.className = "cw-agent-menu-check";
+              check.append(spriteIcon(iconsBase, "icon-check"));
+              row.append(check);
+            }
+            row.addEventListener("click", () => {
+              selectedEffort = effort;
+              syncTrigger();
+              closeMenu(true);
+            });
+            pane.append(row);
+          }
+          l2.append(pane);
+          l2.hidden = false;
+          fitSubmenu(l2);
+        }
+      }
+      trigger.addEventListener("click", () => {
+        if (menuOpen) { closeMenu(false); return; }
+        menuOpen = true;
+        activeL1 = null;
+        hoveredAgentId = null;
+        searchQuery = "";
+        menuRoot.hidden = false;
+        l2.hidden = true;
+        l2.replaceChildren();
+        trigger.setAttribute("aria-expanded", "true");
+      });
+      for (const row of l1.querySelectorAll("[data-agent-menu-cat]")) {
+        const openCat = () => {
+          const cat = row.dataset.agentMenuCat;
+          if (activeL1 === cat) return;
+          activeL1 = cat;
+          hoveredAgentId = null;
+          renderL2();
+        };
+        row.addEventListener("mouseenter", openCat);
+        row.addEventListener("focus", openCat);
+        row.addEventListener("click", openCat);
+      }
+      document.addEventListener("click", (event) => {
+        if (menuOpen && !anchor.contains(event.target)) closeMenu(false);
+      }, { signal });
+      document.addEventListener("keydown", (event) => {
+        if (menuOpen && event.key === "Escape") { event.preventDefault(); closeMenu(true); }
+      }, { signal });
+      input.addEventListener("input", () => {
+        input.style.height = "auto";
+        input.style.height = `${Math.min(input.scrollHeight, 176)}px`;
+        sendBtn.disabled = input.value.trim().length === 0;
+        if (note) note.hidden = true;
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          if (!sendBtn.disabled) form.requestSubmit();
+        }
+      });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!input.value.trim()) return;
+        const agent = currentAgent();
+        if (note) {
+          note.textContent = `Managed ${agent.name} streaming connects in the next slice. Open a Terminal tab to run ${agent.cmd} now.`;
+          note.hidden = false;
+        }
+      });
+      syncTrigger();
+    }
+    function add(session, replaceHomeId) {
+      if (tabs.has(session.sessionId)) return tabs.get(session.sessionId);
+      if (!replaceHomeId && tabs.size >= maxTabs) return null;
       // This page has shown a terminal: it never opens one by itself again.
       autoOpen = "off";
       failure = null;
@@ -713,16 +1235,16 @@
       panel.dataset.terminalSessionId = session.sessionId;
       status.dataset.terminalSessionId = session.sessionId;
       let displayNumber = number;
-      while ([...tabs.values()].some((tab) => tab.label === `Terminal ${displayNumber}`)) displayNumber += 1;
+      while (terminalTabs().some((tab) => tab.label === `Terminal ${displayNumber}`)) displayNumber += 1;
       const defaultLabel = `Terminal ${displayNumber}`;
       button.id = `terminal-tab-${number}`;
       button.setAttribute("aria-controls", panel.id);
       panel.setAttribute("aria-labelledby", button.id);
-      tabList.append(item);
+      insertTabItem(item, replaceHomeId);
       panels.append(panel);
       statuses.append(status);
       tabActions.append(actions);
-      const tab = { id: session.sessionId, state: session.state, item, button, panel, status, actions,
+      const tab = { id: session.sessionId, kind: "terminal", state: session.state, item, button, panel, status, actions,
         label: defaultLabel, labelNode: button.querySelector("[data-terminal-tab-label]"),
         root: panel.querySelector("[data-terminal-root]"), connection: status.querySelector("[data-terminal-connection]"),
         connectionLabel: status.querySelector("[data-terminal-connection-label]"),
@@ -788,6 +1310,7 @@
       for (const session of inventory) {
         if (!tabs.has(session.sessionId)) existing.add(new Option(`${session.sessionId.slice(-8)} · ${session.state}`, session.sessionId));
       }
+      refreshHomes();
       updateControls();
     }
     async function request(action, sessionId) {
@@ -840,7 +1363,7 @@
       let launch = false;
       invalidateRename();
       showSessions(false);
-      for (const tab of tabs.values()) pauseForIdentity(tab);
+      for (const tab of terminalTabs()) pauseForIdentity(tab);
       updateControls();
       announce("Refreshing terminal sessions…");
       try {
@@ -861,7 +1384,7 @@
         const available = new Map(inventory.map((session) => [session.sessionId, session]));
         let missing = false;
         let savedSessions = false;
-        if (!tabs.size) {
+        if (!terminalTabs().length) {
           const saved = references();
           savedSessions = !!saved?.sessions.length;
           const selected = saved ? saved.sessions : inventory.filter((session) => live(session.state)).slice(0, maxTabs).map((session) => session.sessionId);
@@ -869,11 +1392,11 @@
           for (const id of selected) if (available.has(id)) {
             const tab = add(available.get(id));
             const savedLabel = saved?.labels.find((item) => item.sessionId === id);
-            if (savedLabel) label(tab, savedLabel.label);
+            if (tab && savedLabel) label(tab, savedLabel.label);
           }
-          active = saved?.activeSessionId ?? null;
+          if (!active) active = saved?.activeSessionId ?? null;
         }
-        for (const tab of tabs.values()) {
+        for (const tab of terminalTabs()) {
           const session = available.get(tab.id);
           tab.available = !!session;
           if (session) tab.state = session.state;
@@ -881,24 +1404,28 @@
           if (tab.id === reconnectId && tab.available) tab.wanted = true;
         }
         showSessions(true);
-        choose(tabs.has(active) ? active : tabs.keys().next().value);
+        if (tabs.size) choose(tabs.has(active) ? active : tabs.keys().next().value);
         store();
         announce(missing ? "A saved terminal is no longer available. Choose an existing terminal or start a new one." : "");
         relist = false;
-        for (const tab of tabs.values()) if (tab.available && tab.wanted) void connect(tab);
-        // The first list while the Sandbox is ready decides the page's one
-        // automatic terminal: started only when there is nothing to restore
-        // or re-attach. A saved terminal that is gone is reported, never
-        // replaced; live sessions are re-attached above instead.
+        for (const tab of terminalTabs()) if (tab.available && tab.wanted) void connect(tab);
+        // On a ready Sandbox with nothing restored or live, open the Tab Home
+        // Page instead of auto-launching an unused shell.
         if (autoOpen === "armed" && runtimeReady()) {
-          launch = !tabs.size && !savedSessions && !inventory.some((session) => live(session.state));
-          if (!launch) autoOpen = "off";
+          const emptyArrival = !tabs.size && !savedSessions && !inventory.some((session) => live(session.state));
+          if (emptyArrival && homeTemplate) {
+            autoOpen = "off";
+            addHomeTab(false);
+          } else {
+            launch = emptyArrival;
+            if (!launch) autoOpen = "off";
+          }
         }
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }
         else if (error.deleting) organizationDeleted();
-        else for (const tab of tabs.values()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
+        else for (const tab of terminalTabs()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
         if (tabs.size) {
           announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions."
             : error.deleting ? organizationDeleting
@@ -930,7 +1457,7 @@
     }
     // An automatic launch is the page's one terminal opened on arrival; it
     // takes the same path and checks as New terminal.
-    async function mutate(action, id, automatic = false) {
+    async function mutate(action, id, automatic = false, replaceHomeId = null) {
       if (!authorized || pending || uncertain || needsReload || suspended
         || !(action === "stop" ? runtimeControlReady() : runtimeReady())) return;
       const current = epoch;
@@ -945,7 +1472,8 @@
         if (action === "launch") {
           if (tabs.has(session.sessionId)) throw new Error("Unexpected session identity");
           inventory.push(session);
-          const tab = add(session);
+          const tab = add(session, replaceHomeId);
+          showSessions(true);
           choose(tab.id);
           void connect(tab);
         } else {
@@ -1000,12 +1528,15 @@
         }
       }
     }
-    newButton.addEventListener("click", () => { void mutate("launch"); });
+    newButton.addEventListener("click", () => {
+      if (homeTemplate) addHomeTab(true);
+      else void mutate("launch");
+    });
     // Rename starts from the terminal menu, F2 or a double-click on the
     // selected tab; focus returns to whichever started it.
     function startRename(returnTo) {
       const tab = tabs.get(active);
-      if (renameButton.disabled || !authorized || pending || uncertain || needsReload || suspended || !tab) return;
+      if (renameButton.disabled || !authorized || pending || uncertain || needsReload || suspended || tab?.kind !== "terminal") return;
       renameTarget = { tab, account, epoch };
       renameOpener = tab;
       renameReturn = returnTo;
@@ -1059,6 +1590,31 @@
       closeReturn = null;
       if (tab && target?.isConnected) target.focus();
     });
+    if (desktopCloseDialog) {
+      desktopCloseDialog.querySelector("[data-desktop-cancel-close]")?.addEventListener("click", () => desktopCloseDialog.close());
+      desktopCloseDialog.querySelector("[data-desktop-detach-close]")?.addEventListener("click", () => {
+        desktopCloseDialog.close();
+        const tab = tabs.get("desktop");
+        if (tab) closeSimpleTab(tab, true);
+      });
+      desktopCloseDialog.querySelector("[data-desktop-stop-close]")?.addEventListener("click", () => {
+        desktopCloseDialog.close();
+        document.dispatchEvent(new CustomEvent("codewire:desktop-stop", { detail: { environmentId: environment } }));
+        const tab = tabs.get("desktop");
+        if (tab) closeSimpleTab(tab, true);
+      });
+      desktopCloseDialog.addEventListener("close", () => {
+        const target = desktopCloseReturn;
+        desktopCloseReturn = null;
+        if (tabs.has("desktop") && target?.isConnected) target.focus();
+      });
+    }
+    document.addEventListener("codewire:desktop-state", (event) => {
+      if (event.detail?.environmentId !== environment || typeof event.detail?.state !== "string") return;
+      desktopState = event.detail.state;
+      refreshHomes();
+    });
+    document.dispatchEvent(new CustomEvent("codewire:desktop-state-request", { detail: { environmentId: environment } }));
     renameInput.addEventListener("input", () => renameInput.setCustomValidity(""));
     renameForm.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1095,18 +1651,27 @@
       const tab = tabs.get(active);
       const focused = event.target instanceof Element && event.target.closest("[role='tab']") === tab?.button;
       if (event.key === "F2" && focused && !event.altKey && !event.ctrlKey && !event.metaKey) {
-        event.preventDefault();
-        startRename(tab.button);
+        if (tab?.kind === "terminal") {
+          event.preventDefault();
+          startRename(tab.button);
+        }
         return;
       }
       // Delete closes the focused tab the way its close button does: a live
-      // terminal asks first, an ended one is removed from this browser.
+      // terminal or running desktop asks first; others close immediately.
       if (event.key === "Delete" && focused && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
         event.preventDefault();
-        if (!tab.close.hidden && !tab.close.disabled) {
-          closeReturn = tab.button;
+        if (tab.kind === "terminal") {
+          if (!tab.close.hidden && !tab.close.disabled) {
+            closeReturn = tab.button;
+            tab.close.click();
+          } else if (!tab.remove.hidden && !tab.remove.disabled) tab.remove.click();
+        } else if (tab.kind === "desktop") {
+          desktopCloseReturn = tab.button;
           tab.close.click();
-        } else if (!tab.remove.hidden && !tab.remove.disabled) tab.remove.click();
+        } else if (tab.remove) {
+          tab.remove.click();
+        }
         return;
       }
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -1131,8 +1696,9 @@
       invalidateRename();
       showSessions(false);
       tabList.hidden = true;
-      for (const tab of tabs.values()) detach(tab, "Disconnected", true);
+      for (const tab of terminalTabs()) detach(tab, "Disconnected", true);
       dialog.close();
+      desktopCloseDialog?.close();
     });
     window.addEventListener("pageshow", (event) => {
       if (!event.persisted) return;
@@ -1148,7 +1714,7 @@
       invalidateRename();
       showSessions(false);
       foregroundCheck = true;
-      for (const tab of tabs.values()) pauseForIdentity(tab);
+      for (const tab of terminalTabs()) pauseForIdentity(tab);
       updateControls();
       if (!document.hidden && !pending) void refresh();
     }
@@ -1173,7 +1739,7 @@
       }
       inventory = data.sessions;
       const available = new Map(inventory.map((session) => [session.sessionId, session]));
-      for (const tab of tabs.values()) {
+      for (const tab of terminalTabs()) {
         const session = available.get(tab.id);
         if (!session) {
           if (tab.available) {
@@ -1209,7 +1775,7 @@
       const ready = runtimeReady();
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
-      for (const tab of tabs.values()) {
+      for (const tab of terminalTabs()) {
         if (tab.revoked || tab.ended) continue;
         // Readiness loss pauses the transport without withdrawing intent. An
         // unknown status leaves an open terminal attached; a tab without a
@@ -1231,9 +1797,9 @@
       } else if (ready && !wasReady && initialStatusReceived) {
         // The Sandbox may have restarted: re-list before re-attaching so ended
         // sessions become unavailable. Readiness itself never launches a
-        // shell; a page still waiting to open its first terminal re-lists,
+        // shell; a page still waiting to open its first tab re-lists,
         // and that list decides.
-        const waiting = [...tabs.values()].filter((tab) => automatic(tab) && !tab.socket);
+        const waiting = terminalTabs().filter((tab) => automatic(tab) && !tab.socket);
         if (!waiting.length && !(autoOpen === "armed" && !tabs.size)) return;
         if (!pending) void refresh();
         else {

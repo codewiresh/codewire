@@ -1231,6 +1231,7 @@ mod tests {
             name: "Safe organization".into(),
             slug: "safe".into(),
             can_admin: true,
+            agent_chat: false,
             environments_url: "/environments".into(),
             presets_url: "/presets".into(),
             secrets_url: "/secrets".into(),

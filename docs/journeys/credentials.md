@@ -1444,7 +1444,11 @@ Proposed, not yet shipped (#6555). Written first. The rules are in
   - `scan-token-shapes.py` finds only `cwp1_` placeholders and zero
     `google-api-key` (`AIza…`) bytes at rest in the environment;
   - `delete` removes Codewire's copy and says the key itself is revoked only in
-    Google AI Studio.
+    Google AI Studio;
+  - in the dashboard, Settings → Credentials → Add credential shows **Gemini API
+    key** with the Gemini mark, opens its add dialog, stores the key, displays
+    the saved row with the Gemini mark, and offers a **Gemini** selector in the
+    Create profile and Edit profile dialogs.
 - **Observed:** not yet observed.
 
 ## 20. `cred-antigravity-sign-in`: connect Antigravity by signing in
@@ -1518,5 +1522,12 @@ Proposed, not yet shipped (#6555). Written first. The rules are in
   - `rotate` is refused and points to `connect antigravity`;
   - `delete` revokes in Codewire, reports whether Google confirmed revoking the
     token at `POST oauth2.googleapis.com/revoke` (body-only, no query, no
-    `client_secret`), and names Google Account third-party access settings.
+    `client_secret`), and names Google Account third-party access settings;
+  - in the dashboard, Settings → Credentials → Add credential shows **Connect
+    Antigravity** with the Antigravity mark, opens its two-step sign-in dialog
+    (credential name → Google sign-in link + callback URL or `code#state`
+    paste), stores the connection with the Google account email hint, shows
+    **Reconnect** on the row, displays real brand marks for every provider
+    (GitHub, Codex, Claude, Antigravity, Gemini, OpenAI, Anthropic, SSH), and
+    offers an **Antigravity** selector in Create profile and Edit profile.
 - **Observed:** not yet observed.

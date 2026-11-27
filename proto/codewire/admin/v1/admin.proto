@@ -125,6 +125,12 @@ service AdminService {
   rpc SetOrganizationDedicatedCpu(SetOrganizationDedicatedCpuRequest)
       returns (SetOrganizationDedicatedCpuResponse);
 
+  // SetOrganizationAgentChat enables or disables the Sandbox Agent Chat tab and
+  // managed agent sessions for one organization, and writes an audit entry.
+  // Setting the value it already has changes nothing.
+  rpc SetOrganizationAgentChat(SetOrganizationAgentChatRequest)
+      returns (SetOrganizationAgentChatResponse);
+
   // ListStandardRuntimeOrganizations lists the organizations moved onto the
   // `standard` runtime profile, by slug.
   rpc ListStandardRuntimeOrganizations(ListStandardRuntimeOrganizationsRequest)
@@ -193,6 +199,7 @@ message Organization {
   string billing_status = 6;
   // New sandboxes reserve a CPU per vCPU instead of sharing.
   bool dedicated_cpu = 7;
+  bool agent_chat = 8;
 }
 
 message ListOrganizationsRequest {}
@@ -591,6 +598,17 @@ message SetOrganizationDedicatedCpuResponse {
   string organization_id = 1;
   bool dedicated_cpu = 2;
   bool previous_dedicated_cpu = 3;
+}
+
+message SetOrganizationAgentChatRequest {
+  string organization_id = 1;
+  bool agent_chat = 2;
+}
+
+message SetOrganizationAgentChatResponse {
+  string organization_id = 1;
+  bool agent_chat = 2;
+  bool previous_agent_chat = 3;
 }
 
 message ListStandardRuntimeOrganizationsRequest {}

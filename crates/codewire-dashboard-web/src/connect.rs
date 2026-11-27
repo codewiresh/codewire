@@ -66,6 +66,7 @@ pub(crate) async fn organizations(
                 url: format!("/{}/", organization.slug),
                 joined: joined_date(membership.joined_at.into_option().map(|at| at.seconds)),
                 only_owner: membership.only_owner,
+                agent_chat: organization.agent_chat,
             })
         })
         .collect())

@@ -689,9 +689,9 @@ async fn native_draft_pages_revalidate_org_and_preserve_paging_reload_and_nonmut
     assert!(rendered.contains(&format!(
         "action=\"{PATH}_actions/set?cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}\""
     )));
-    // Cancel remains a local dialog dismissal; the separate return anchor is
+    // Close remains a local dialog dismissal; the separate return anchor is
     // usable without submitting any form, including with JavaScript disabled.
-    assert!(rendered.contains("type=\"button\" data-dialog-close>Cancel</button>"));
+    assert!(rendered.contains("type=\"button\" data-dialog-close"));
     assert!(
         rendered
             .find("Return to Create Sandbox</span></a>")
@@ -879,7 +879,7 @@ async fn native_draft_validation_reopens_only_owning_editor_without_private_mate
             );
             assert!(rendered.contains(&format!("cursor=AAA_PREVIOUS&#38;creation_draft={DRAFT}")));
             assert!(rendered.contains("id=\"fallback-add-secret-form\""));
-            assert!(rendered.contains("type=\"button\" data-dialog-close>Cancel</button>"));
+            assert!(rendered.contains("type=\"button\" data-dialog-close"));
             assert!(!rendered.contains("synthetic-private-canary"));
             assert!(!rendered.contains("synthetic-upstream-private-value"));
             for rpc in ["/SetUserSecret", "/RenameUserSecret", "/DeleteUserSecret"] {

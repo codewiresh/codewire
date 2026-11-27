@@ -819,17 +819,23 @@ mod tests {
         assert!(symbol.contains("fill=\"currentColor\""));
         assert!(symbol.contains("stroke=\"none\""));
         assert!(symbol.contains("fill-rule=\"evenodd\""));
-        for html in [
-            include_str!("../templates/settings-credentials.html"),
-            include_str!(
-                "../../../packages/codewire-design/reference/fixtures/settings-credentials.html"
-            ),
-        ] {
-            // Inventory and provider chooser, retaining their adjacent text labels.
-            assert_eq!(html.matches("#icon-codex").count(), 2);
+        let template = include_str!("../templates/settings-credentials.html");
+        let fixture = include_str!(
+            "../../../packages/codewire-design/reference/fixtures/settings-credentials.html"
+        );
+        for html in [template, fixture] {
+            assert!(html.contains("#icon-codex"));
+            assert!(html.contains("#icon-claude"));
+            assert!(html.contains("#icon-openai"));
+            assert!(html.contains("#icon-gemini"));
+            assert!(html.contains("#icon-antigravity"));
             assert!(html.contains("aria-hidden=\"true\"><use href="));
             assert!(html.contains("id=\"connect-codex-choice-name\">Codex</strong>"));
         }
+        // Fixture carries both the saved Codex row and the chooser choice.
+        assert_eq!(fixture.matches("#icon-codex").count(), 2);
+        // Template resolves each saved row's brand icon through CredentialRowView::icon_id().
+        assert!(template.contains("icons-v2.svg#{{ credential.icon_id() }}"));
     }
 
     #[test]
@@ -900,6 +906,10 @@ mod tests {
                 "data-terminal-panels",
                 "data-terminal-history-gap",
                 "data-terminal-close-dialog",
+                "data-desktop-close-dialog",
+                "data-home-tab-template",
+                "data-desktop-tab-template",
+                "data-agent-tab-template",
                 // The empty state's text and the Retry beside a failure.
                 "<div class=\"cw-terminal-empty\" data-terminal-empty-state><p role=\"status\" data-terminal-empty>",
                 "<button class=\"cw-button cw-button--outline cw-button--small\" type=\"button\" data-terminal-retry hidden>Retry</button>",
@@ -908,14 +918,32 @@ mod tests {
             ] {
                 assert!(html.contains(marker), "missing {marker}");
             }
-            assert!(html.contains("role=\"tablist\" aria-label=\"Terminal tabs\""));
+            assert!(html.contains("role=\"tablist\" aria-label=\"Sandbox tabs\""));
+            assert!(!html.contains("data-workspace-views"));
             assert!(html.contains("role=\"tabpanel\""));
             assert!(
                 html.contains("Leaving this page disconnects the browser; the shell keeps running")
             );
         }
-        // One tab's tab, output panel, status-bar group and menu actions. The
-        // fixture reads the same icon sprite from its source path.
+        // Every tab template stays byte-identical (barring icon sprite path)
+        // between production and the design fixture.
+        for attr in [
+            "data-terminal-tab-template",
+            "data-home-tab-template",
+            "data-desktop-tab-template",
+            "data-agent-tab-template",
+        ] {
+            let parts = |html: &'static str| {
+                html.split(&format!("<template {attr}>"))
+                    .nth(1)
+                    .unwrap()
+                    .split("</template>")
+                    .next()
+                    .unwrap()
+                    .replace("../../assets/icons.svg", ICONS_PATH)
+            };
+            assert_eq!(parts(production), parts(fixture), "{attr} drifted");
+        }
         let tab_parts = |html: &'static str| {
             html.split("<template data-terminal-tab-template>")
                 .nth(1)
@@ -925,7 +953,6 @@ mod tests {
                 .unwrap()
                 .replace("../../assets/icons.svg", ICONS_PATH)
         };
-        assert_eq!(tab_parts(production), tab_parts(fixture));
         for marker in [
             "data-terminal-tab-item",
             "role=\"tab\"",

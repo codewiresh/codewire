@@ -129,6 +129,7 @@ fn organization_rows(
             url: format!("/{}/", organization.slug),
             joined: String::new(),
             only_owner: false,
+            agent_chat: organization.agent_chat,
             slug: organization.slug,
             role,
             can_admin: matches!(role, "Owner" | "Admin")

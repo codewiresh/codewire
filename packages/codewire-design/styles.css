@@ -17,6 +17,16 @@
   --light-bg-field: #ffffff;
   --dark-bg-overlay: #141414;
   --light-bg-overlay: #ffffff;
+  --dark-bg-composer: #1b1b1b;
+  --light-bg-composer: #f6f6f4;
+  --dark-bg-composer-pill: #262626;
+  --light-bg-composer-pill: #e9e9e5;
+  --dark-bg-composer-pill-hover: #323232;
+  --light-bg-composer-pill-hover: #ddddda;
+  --dark-bg-composer-menu: #262626;
+  --light-bg-composer-menu: #ffffff;
+  --dark-bg-composer-selected: rgba(66, 133, 244, 0.16);
+  --light-bg-composer-selected: rgba(0, 72, 189, 0.1);
   --dark-bg-surface-hover: #191919;
   --light-bg-surface-hover: #ebebe8;
   --dark-bg-selected: #1e1e1e;
@@ -116,6 +126,11 @@
   --bg-surface: var(--dark-bg-surface);
   --bg-field: var(--dark-bg-field);
   --bg-overlay: var(--dark-bg-overlay);
+  --bg-composer: var(--dark-bg-composer);
+  --bg-composer-pill: var(--dark-bg-composer-pill);
+  --bg-composer-pill-hover: var(--dark-bg-composer-pill-hover);
+  --bg-composer-menu: var(--dark-bg-composer-menu);
+  --bg-composer-selected: var(--dark-bg-composer-selected);
   --bg-surface-hover: var(--dark-bg-surface-hover);
   --bg-selected: var(--dark-bg-selected);
   /* Primary buttons are the text colour: the site's cream (routes/public.css). */
@@ -208,6 +223,7 @@
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
+  --radius-xl: 1.5rem;
   --radius-pill: 999px;
 
   --control-height: 2.25rem;
@@ -306,8 +322,8 @@
 }
 
 /* Light: the system asks for it and the visitor has not chosen dark, or the visitor chose light. */
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; } }
-:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; } }
+:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; }
 
 /* Geist Mono, shared with the public site: one variable file with the box-drawing
    and block characters the terminal needs. */
@@ -1380,6 +1396,27 @@ fieldset.cw-field > legend {
   border-color: var(--info-border);
   background: var(--info-muted);
   color: var(--info);
+}
+
+/* Flush full-width banner: square corners, no border box, tinted by tone. */
+.cw-alert--banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-block-size: calc(var(--icon-button-size) + 2 * var(--space-2));
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: var(--info-muted);
+}
+
+.cw-alert--banner.cw-alert--error { background: var(--destructive-muted); }
+.cw-alert--banner.cw-alert--warning { background: var(--warning-muted); }
+.cw-alert--banner.cw-alert--success { background: var(--success-muted); }
+
+@media (max-width: 64rem) {
+  .cw-alert--banner { padding-inline: var(--space-3); }
 }
 
 .cw-form-actions {

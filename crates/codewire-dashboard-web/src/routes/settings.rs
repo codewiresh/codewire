@@ -1191,6 +1191,7 @@ mod tests {
             url: format!("/{slug}/"),
             joined: "Nov 13, 2026".into(),
             only_owner,
+            agent_chat: false,
         }
     }
 

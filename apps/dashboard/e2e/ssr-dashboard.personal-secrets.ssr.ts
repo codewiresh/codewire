@@ -11,10 +11,15 @@ const fits = async (page: Page, owner?: Locator) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   if (owner) expect(await owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
 };
-const footer = async (owner: Locator, primary: string) => {
+const footer = async (owner: Locator, primary: string, destructive = false) => {
   await expect(owner.locator("[data-dialog-close]")).toHaveCount(1);
-  await expect(owner.locator(".cw-dialog-header button")).toHaveCount(0);
-  await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  if (destructive) {
+    await expect(owner.locator(".cw-dialog-header button")).toHaveCount(0);
+    await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  } else {
+    await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
+    await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  }
   await expect(owner.locator('button[type="submit"]')).toHaveCount(1);
   const submit = owner.locator(".cw-dialog-actions").getByRole("button", { name: primary, exact: true });
   await expect(submit).toBeVisible();
@@ -73,12 +78,12 @@ test("Add secret keeps drafts only in the active DOM and never submits on dismis
   await owner.locator('[name="_csrf"]').evaluate((node: HTMLInputElement) => { node.value = "fresh-hidden-csrf"; });
   await artifactScreenshot(page, "add-secret-dialog.png");
   await fits(page, owner);
-  await action(owner, "Cancel").click();
+  await action(owner, "Close").click();
   await expect(action(dialog(page, "Discard changes?"), "Keep editing")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(owner.getByLabel("Value", { exact: true })).toHaveValue("synthetic-write-only-value");
   await expect(owner.getByLabel("Key", { exact: true })).toHaveValue("VALID_KEY");
-  await action(owner, "Cancel").click();
+  await action(owner, "Close").click();
   await discard(page);
   await expect(add).toBeFocused();
   await add.click();
@@ -87,7 +92,7 @@ test("Add secret keeps drafts only in the active DOM and never submits on dismis
   await expect(owner.locator('[name="_csrf"]')).toHaveValue("fresh-hidden-csrf");
   await expect(owner.locator('[name="account_id"]')).toHaveValue("fixture-personal-account");
   await expect(owner.locator('[name="mode"]')).toHaveValue("add");
-  await action(owner, "Cancel").click();
+  await action(owner, "Close").click();
   expect(posts).toBe(0);
 });
 
@@ -114,7 +119,7 @@ test("replacement and rename footers target only the original key and preserve p
     _csrf: "design-fixture-only", account_id: "fixture-personal-account", key: "DATABASE_URL", mode: "replace", value: "synthetic-replacement",
   } });
   // The intercepted 204 is not a product success acknowledgement.
-  await action(owner, "Cancel").click();
+  await action(owner, "Close").click();
   await discard(page);
   await expect(replace).toBeFocused();
   await action(row, "Rename").click();
@@ -140,7 +145,7 @@ test("Delete requires its own confirmation, Cancel is default and no value is se
   const remove = action(row, "Delete");
   await remove.click();
   const owner = dialog(page, "Delete APP_TOKEN?");
-  await footer(owner, "Delete secret");
+  await footer(owner, "Delete secret", true);
   await expect(action(owner, "Cancel")).toBeFocused();
   await expect(owner).toContainText("does not revoke access at an external service");
   await page.keyboard.press("Escape");

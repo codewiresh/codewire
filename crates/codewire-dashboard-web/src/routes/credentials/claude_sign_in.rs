@@ -85,6 +85,7 @@ async fn reopen(
         error,
         name,
         sign_in,
+        antigravity_sign_in: None,
     };
     render_page(state, headers, query, Some(rejected)).await
 }

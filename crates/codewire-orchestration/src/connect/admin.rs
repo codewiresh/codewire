@@ -31,6 +31,7 @@ use codewire_admin_proto::codewire::admin::v1::{
     OrganizationSandboxCounts as ProtoOrganizationSandboxCounts,
     OrganizationSubscription as ProtoOrganizationSubscription, SandboxCounts as ProtoSandboxCounts,
     SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse,
+    SetOrganizationAgentChatRequest, SetOrganizationAgentChatResponse,
     SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse,
     SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse,
     SetOrganizationRateCardRequest, SetOrganizationRateCardResponse,
@@ -420,6 +421,31 @@ impl AdminService for AdminConnectService {
         })
     }
 
+    async fn set_organization_agent_chat(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationAgentChatRequest>,
+    ) -> ServiceResult<SetOrganizationAgentChatResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let previous = admin::set_organization_agent_chat_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+            request.agent_chat,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationAgentChatResponse {
+            organization_id: organization_id.to_owned(),
+            agent_chat: request.agent_chat,
+            previous_agent_chat: previous,
+            ..Default::default()
+        })
+    }
+
     async fn list_standard_runtime_organizations(
         &self,
         ctx: RequestContext,
@@ -601,6 +627,7 @@ fn proto_organization(value: AdminOrg) -> AppResult<ProtoOrganization> {
         billing_plan: value.billing_plan,
         billing_status: value.billing_status,
         dedicated_cpu: value.dedicated_cpu,
+        agent_chat: value.agent_chat,
         ..Default::default()
     })
 }
@@ -720,6 +747,7 @@ fn proto_organization_overview(
             billing_plan: value.billing.billing_plan.clone(),
             billing_status: value.billing.billing_status.clone(),
             dedicated_cpu: value.dedicated_cpu,
+            agent_chat: value.agent_chat,
             ..Default::default()
         })
         .into(),

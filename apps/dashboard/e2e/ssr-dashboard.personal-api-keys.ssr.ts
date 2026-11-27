@@ -102,7 +102,7 @@ test("Create requires an explicit organization, one footer and preserves dirty d
   const trigger = action(page, "Create key");
   await trigger.click();
   const owner = page.getByRole("dialog", { name: "Create API key", exact: true });
-  await expect(owner.locator(".cw-dialog-header button")).toHaveCount(0);
+  await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
   await expect(owner.locator("[data-dialog-close]")).toHaveCount(1);
   await expect(owner.getByLabel("Organization", { exact: true })).toHaveValue("");
   await owner.getByLabel("Name", { exact: true }).fill("Native test key");
@@ -110,7 +110,7 @@ test("Create requires an explicit organization, one footer and preserves dirty d
   expect(posts).toHaveLength(0);
   await owner.getByLabel("Organization", { exact: true }).selectOption("fixture-org-beta");
   await owner.getByLabel("Expiration", { exact: true }).selectOption("30");
-  await action(owner, "Cancel").click();
+  await action(owner, "Close").click();
   const confirm = page.getByRole("dialog", { name: "Discard changes?", exact: true });
   await expect(action(confirm, "Keep editing")).toBeFocused();
   await action(confirm, "Keep editing").click();

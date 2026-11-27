@@ -56,6 +56,11 @@ const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// ordinary clock skew, never by a different lifetime.
 const CLAUDE_SUBSCRIPTION_TOKEN_EXPIRY_TOLERANCE_SECONDS: u64 = 24 * 60 * 60;
 
+mod antigravity_sign_in;
+pub(crate) use antigravity_sign_in::{
+    AntigravitySignInRefusal, antigravity_sign_in_refusal, complete_antigravity_sign_in,
+    pasted_antigravity_code, start_antigravity_sign_in,
+};
 mod claude_sign_in;
 pub(crate) use claude_sign_in::{
     ClaudeSignInRefusal, claude_sign_in_refusal, complete_claude_sign_in, pasted_claude_code,
@@ -1070,8 +1075,10 @@ fn build_settings_data_at(
         match slot {
             "codex" => choices.codex.push(choice),
             "openai" => choices.openai.push(choice),
-            "github" | "gemini" | "antigravity" => {}
+            "github" => {}
             "anthropic" => choices.anthropic.push(choice),
+            "gemini" => choices.gemini.push(choice),
+            "antigravity" => choices.antigravity.push(choice),
             "ssh" => choices.ssh.push(choice),
             _ => unreachable!("credential_slot returns a closed slot"),
         }
@@ -1105,6 +1112,7 @@ fn build_settings_data_at(
             oauth: matches!(form, "codex" | "github"),
             subscription_token: form == "claude-token",
             claude_sign_in: form == "claude",
+            antigravity_sign_in: form == "antigravity",
             // A subscription token has no refresh and no provider answer
             // marks it: only its recorded expiry asks its owner for a new one.
             reconnect_needed: (matches!(form, "codex" | "github" | "claude" | "antigravity")
@@ -1135,7 +1143,7 @@ fn build_settings_data_at(
             || codewire_access::AccessProfileName::parse(&profile.name).is_err()
             || profile.revision == 0
             || profile.revision > i64::MAX as u64
-            || profile.entries.len() > 5
+            || profile.entries.len() > 6
         {
             return Err(invalid_metadata());
         }
@@ -1195,6 +1203,8 @@ fn build_settings_data_at(
             codex: selected.remove("codex").unwrap_or_default(),
             openai: selected.remove("openai").unwrap_or_default(),
             anthropic: selected.remove("anthropic").unwrap_or_default(),
+            gemini: selected.remove("gemini").unwrap_or_default(),
+            antigravity: selected.remove("antigravity").unwrap_or_default(),
             ssh: selected.remove("ssh").unwrap_or_default(),
         });
     }

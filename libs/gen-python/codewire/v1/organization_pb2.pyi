@@ -59,7 +59,7 @@ ORGANIZATION_DELETION_STATE_DELETING: OrganizationDeletionState
 ORGANIZATION_DELETION_STATE_DELETE_FAILED: OrganizationDeletionState
 
 class Organization(_message.Message):
-    __slots__ = ("id", "name", "slug", "created_by", "created_at", "updated_at", "deletion_state", "deletion_operation_id", "deletion_failure_code")
+    __slots__ = ("id", "name", "slug", "created_by", "created_at", "updated_at", "deletion_state", "deletion_operation_id", "deletion_failure_code", "agent_chat")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     SLUG_FIELD_NUMBER: _ClassVar[int]
@@ -69,6 +69,7 @@ class Organization(_message.Message):
     DELETION_STATE_FIELD_NUMBER: _ClassVar[int]
     DELETION_OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     DELETION_FAILURE_CODE_FIELD_NUMBER: _ClassVar[int]
+    AGENT_CHAT_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     slug: str
@@ -78,7 +79,8 @@ class Organization(_message.Message):
     deletion_state: OrganizationDeletionState
     deletion_operation_id: str
     deletion_failure_code: str
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_by: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_state: _Optional[_Union[OrganizationDeletionState, str]] = ..., deletion_operation_id: _Optional[str] = ..., deletion_failure_code: _Optional[str] = ...) -> None: ...
+    agent_chat: bool
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_by: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_state: _Optional[_Union[OrganizationDeletionState, str]] = ..., deletion_operation_id: _Optional[str] = ..., deletion_failure_code: _Optional[str] = ..., agent_chat: _Optional[bool] = ...) -> None: ...
 
 class OrganizationMembership(_message.Message):
     __slots__ = ("organization", "role", "assignments", "billing_plan", "billing_status", "trial_ends_at", "joined_at", "only_owner")

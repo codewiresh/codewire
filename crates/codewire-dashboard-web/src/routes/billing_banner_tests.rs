@@ -444,6 +444,7 @@ fn a_card_on_file_asks_for_credit() {
         url: "/synthetic/".into(),
         joined: String::new(),
         only_owner: false,
+        agent_chat: false,
     });
     let mut form = super::super::environments::default_create_form(CSRF.into(), true);
     form.credit_refusal = Some(crate::billing_banner::CreditRefusal {

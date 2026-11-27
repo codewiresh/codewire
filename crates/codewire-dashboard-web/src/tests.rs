@@ -623,6 +623,7 @@ fn organization_template_escapes_upstream_data() {
         url: "/safe/".into(),
         joined: String::new(),
         only_owner: false,
+        agent_chat: false,
     }];
     let body = OrganizationListTemplate {
         organizations: &organizations,
@@ -853,6 +854,7 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
             updated: "2026-10-28".into(),
         }],
         dedicated_cpu: false,
+        agent_chat: false,
         rate_card: "Discounted".into(),
         rate_cards: crate::admin_connect::RATE_CARDS
             .iter()
@@ -1150,6 +1152,7 @@ fn admin_organization_switches_are_one_checkbox_list_that_follows_each_setting()
             systemd_environments: Some(!on),
             standard_runtime: Some(on),
             dedicated_cpu: !on,
+            agent_chat: on,
             ..unsafe_organization(false)
         }));
         assert!(
@@ -1164,6 +1167,7 @@ fn admin_organization_switches_are_one_checkbox_list_that_follows_each_setting()
             ("systemd", "Systemd workspaces", !on),
             ("standard", "Standard runtime", on),
             ("dedicated_cpu", "Dedicated CPU", !on),
+            ("agent_chat", "Agent chat", on),
         ] {
             assert!(
                 html.contains(&checkbox(name, label, value)),
@@ -1197,6 +1201,7 @@ fn admin_organization_switches_are_one_checkbox_list_that_follows_each_setting()
         assert!(!html.contains(&format!(r#"name="{name}_was""#)), "{name}");
     }
     assert!(html.contains(r#"name="dedicated_cpu_was""#));
+    assert!(html.contains(r#"name="agent_chat_was""#));
 }
 
 /// An adjustment below zero asks first (#4754): the page shows what it sets

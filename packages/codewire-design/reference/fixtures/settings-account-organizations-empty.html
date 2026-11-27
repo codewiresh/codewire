@@ -43,22 +43,22 @@
       </ul>
     </section>
     <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator" aria-labelledby="replace-authenticator-title">
-      <header class="cw-dialog-header"><h2 id="replace-authenticator-title">Replace authenticator</h2></header>
+      <header class="cw-dialog-header"><h2 id="replace-authenticator-title">Replace authenticator</h2><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-icon-button cw-dialog-close" type="submit" data-dialog-close aria-label="Close" title="Close"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></form></header>
       <div class="cw-dialog-body"><p>Confirm it's you before adding a new authenticator app. Your current authenticator and recovery codes keep working until the new one is verified.</p>
         <form id="replace-authenticator-form" class="cw-form" method="post" action="/settings/_actions/two-factor/replace/start"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account">
           <div class="cw-field"><label class="cw-label" for="replace-authenticator-password">Password</label><input class="cw-input" id="replace-authenticator-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
           <div class="cw-field"><label class="cw-label" for="replace-authenticator-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="replace-authenticator-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="replace-authenticator-proof-help" data-dialog-private><p class="cw-field-help" id="replace-authenticator-proof-help">The six-digit code your current authenticator shows now, or one unused recovery code.</p></div>
         </form></div>
-      <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="replace-authenticator-form">Continue</button></footer>
+      <footer class="cw-dialog-actions"><button class="cw-button" type="submit" form="replace-authenticator-form">Continue</button></footer>
     </dialog>
     <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="regenerate-recovery-codes" aria-labelledby="regenerate-recovery-codes-title">
-      <header class="cw-dialog-header"><h2 id="regenerate-recovery-codes-title">Regenerate recovery codes</h2></header>
+      <header class="cw-dialog-header"><h2 id="regenerate-recovery-codes-title">Regenerate recovery codes</h2><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-icon-button cw-dialog-close" type="submit" data-dialog-close aria-label="Close" title="Close"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></form></header>
       <div class="cw-dialog-body"><p>Confirm it's you to make ten new recovery codes. Your current recovery codes stop working as soon as the new ones are made. Your authenticator keeps working.</p>
         <form id="regenerate-recovery-codes-form" class="cw-form" method="post" action="/settings/_actions/two-factor/recovery-codes/regenerate"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account">
           <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-password">Password</label><input class="cw-input" id="regenerate-recovery-codes-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus data-dialog-private></div>
           <div class="cw-field"><label class="cw-label" for="regenerate-recovery-codes-proof">Current code or recovery code</label><input class="cw-input cw-input--mono" id="regenerate-recovery-codes-proof" name="proof" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" required aria-describedby="regenerate-recovery-codes-proof-help" data-dialog-private><p class="cw-field-help" id="regenerate-recovery-codes-proof-help">The six-digit code your authenticator shows now, or one unused recovery code.</p></div>
         </form></div>
-      <footer class="cw-dialog-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#security"><button class="cw-button cw-button--outline" type="submit" data-dialog-close>Cancel</button></form><button class="cw-button" type="submit" form="regenerate-recovery-codes-form">Regenerate codes</button></footer>
+      <footer class="cw-dialog-actions"><button class="cw-button" type="submit" form="regenerate-recovery-codes-form">Regenerate codes</button></footer>
     </dialog>
     <section id="sessions" class="cw-section" aria-labelledby="sessions-title">
       <header class="cw-section-header"><div><h2 id="sessions-title" class="cw-section-title">Active sessions</h2></div></header>

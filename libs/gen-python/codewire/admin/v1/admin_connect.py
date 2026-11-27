@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse, ListOrganizationsRequest, ListOrganizationsResponse, ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse, SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationSandboxCountsRequest, ListOrganizationSandboxCountsResponse, ListOrganizationsRequest, ListOrganizationsResponse, ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationAgentChatRequest, SetOrganizationAgentChatResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, SetOrganizationStandardRuntimeRequest, SetOrganizationStandardRuntimeResponse, SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -84,6 +84,9 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_organization_agent_chat(self, request: SetOrganizationAgentChatRequest, ctx: RequestContext[SetOrganizationAgentChatRequest, SetOrganizationAgentChatResponse]) -> SetOrganizationAgentChatResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_standard_runtime_organizations(self, request: ListStandardRuntimeOrganizationsRequest, ctx: RequestContext[ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse]) -> ListStandardRuntimeOrganizationsResponse:
@@ -284,6 +287,16 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_organization_dedicated_cpu,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationAgentChat": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationAgentChat",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationAgentChatRequest,
+                        output=SetOrganizationAgentChatResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_organization_agent_chat,
                 ),
                 "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations": Endpoint.unary(
                     method=MethodInfo(
@@ -737,6 +750,26 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def set_organization_agent_chat(
+        self,
+        request: SetOrganizationAgentChatRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationAgentChatResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationAgentChat",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationAgentChatRequest,
+                output=SetOrganizationAgentChatResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def list_standard_runtime_organizations(
         self,
         request: ListStandardRuntimeOrganizationsRequest,
@@ -889,6 +922,9 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_organization_agent_chat(self, request: SetOrganizationAgentChatRequest, ctx: RequestContext[SetOrganizationAgentChatRequest, SetOrganizationAgentChatResponse]) -> SetOrganizationAgentChatResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def list_standard_runtime_organizations(self, request: ListStandardRuntimeOrganizationsRequest, ctx: RequestContext[ListStandardRuntimeOrganizationsRequest, ListStandardRuntimeOrganizationsResponse]) -> ListStandardRuntimeOrganizationsResponse:
@@ -1087,6 +1123,16 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_organization_dedicated_cpu,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationAgentChat": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationAgentChat",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationAgentChatRequest,
+                        output=SetOrganizationAgentChatResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_organization_agent_chat,
                 ),
                 "/codewire.admin.v1.AdminService/ListStandardRuntimeOrganizations": EndpointSync.unary(
                     method=MethodInfo(
@@ -1518,6 +1564,25 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=SetOrganizationDedicatedCpuRequest,
                 output=SetOrganizationDedicatedCpuResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_organization_agent_chat(
+        self,
+        request: SetOrganizationAgentChatRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationAgentChatResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationAgentChat",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationAgentChatRequest,
+                output=SetOrganizationAgentChatResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

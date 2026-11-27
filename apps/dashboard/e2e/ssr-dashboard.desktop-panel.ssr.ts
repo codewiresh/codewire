@@ -125,6 +125,15 @@ const control = (page: Page, name: string) => panel(page).getByRole("button", { 
 // (core/websock.js), as a browser's are. Playwright's routed WebSocket
 // defines them on a base class, so they are copied down to WebSocket's own
 // prototype before the panel shows and the viewer opens its socket.
+async function openDesktopTab(page: Page) {
+  const choice = page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="desktop"]');
+  if (!(await choice.isVisible())) {
+    const add = page.getByRole("button", { name: "New tab", exact: true });
+    await expect(add).toBeEnabled({ timeout: 12_000 });
+    await add.click();
+  }
+  await choice.click();
+}
 async function showDesktop(page: Page) {
   await page.evaluate(() => {
     const own = WebSocket.prototype;
@@ -136,7 +145,7 @@ async function showDesktop(page: Page) {
       }
     }
   });
-  await page.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: "Desktop", exact: true }).click();
+  await openDesktopTab(page);
 }
 
 async function connected(page: Page, state: Awaited<ReturnType<typeof transport>>) {
@@ -144,21 +153,21 @@ async function connected(page: Page, state: Awaited<ReturnType<typeof transport>
   await expect.poll(() => state.streams.at(-1)?.ready).toBe(true);
 }
 
-test("the Desktop view stays chosen through the terminal's readiness checks", async ({ page }) => {
+test("the Desktop tab stays chosen through the terminal's readiness checks", async ({ page }) => {
   await transport(page);
   await openFixture(page);
-  const terminal = page.locator("[data-durable-terminal]");
-  await expect(terminal).toBeVisible();
+  const terminalPanels = page.locator("[data-terminal-panels]");
+  await expect(terminalPanels).toBeVisible();
   await showDesktop(page);
-  await expect(terminal).toBeHidden();
+  await expect(terminalPanels).toBeHidden();
   await expect(panel(page)).toBeVisible();
-  // The readiness check owns the terminal's `hidden`; a check must not bring
-  // the terminal back over the desktop.
+  // The readiness check must not bring the terminal back over the desktop tab.
   await checkReadinessNow(page);
   await checkReadinessNow(page);
-  await expect(terminal).toBeHidden();
-  await page.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: "Terminal", exact: true }).click();
-  await expect(terminal).toBeVisible();
+  await expect(terminalPanels).toBeHidden();
+  await expect(panel(page)).toBeVisible();
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await expect(terminalPanels).toBeVisible();
   await expect(panel(page)).toBeHidden();
 });
 
@@ -365,7 +374,7 @@ test("a viewer that refuses its socket closes it and says the state is unknown",
   await openFixture(page);
   // Without showDesktop's copy, the routed socket keeps its members on a base
   // class, which noVNC refuses: what the Dev walk met before #6049.
-  await page.getByRole("group", { name: "Sandbox view" }).getByRole("button", { name: "Desktop", exact: true }).click();
+  await openDesktopTab(page);
   await expect(panel(page)).toHaveAttribute("data-desktop-state", "unknown");
   await expect(panel(page).locator("[data-desktop-status]")).toHaveText("The desktop's state is unknown. Reload this page to check it.");
   await expect.poll(() => state.streams[0]?.closed).toBe(true);
@@ -376,11 +385,11 @@ test("a Sandbox started from the page reads its desktop without a reload", async
   const state = await transport(page);
   state.sandboxRunning = false;
   await openFixture(page);
-  await showDesktop(page);
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Start this Sandbox to use its terminals.", { timeout: 12_000 });
   await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox", { timeout: 12_000 });
-  await expect(control(page, "Start desktop")).toBeHidden();
   state.sandboxRunning = true;
   await checkReadinessNow(page);
+  await showDesktop(page);
   await expect(panel(page).locator("[data-desktop-status]")).toHaveText("The desktop is not running.");
   await expect(control(page, "Start desktop")).toBeVisible();
 });
@@ -396,16 +405,50 @@ test("a viewer that arrives after readiness said the Sandbox stopped says so, an
     await route.continue();
   });
   await openFixture(page);
-  await showDesktop(page);
   await expect(panel(page)).toHaveAttribute("data-desktop-state", "sandbox");
   await expect(control(page, "Start desktop")).toBeHidden();
   expect(state.gets).toBe(0);
+});
+
+test("closing a running Desktop tab asks whether to keep it running or stop it", async ({ page }) => {
+  const state = await transport(page);
+  state.desktop = "running";
+  await openFixture(page);
+  await showDesktop(page);
+  await connected(page, state);
+  const closeDialog = page.getByRole("dialog", { name: "Close Desktop tab?", exact: true });
+  await page.getByRole("button", { name: "Close Desktop", exact: true }).click();
+  await expect(closeDialog).toBeVisible();
+  await expect(closeDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await closeDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(closeDialog).toBeHidden();
+  await expect(page.getByRole("tab", { name: "Desktop", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Close Desktop", exact: true }).click();
+  await closeDialog.getByRole("button", { name: "Keep running", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Desktop", exact: true })).toHaveCount(0);
+  expect(state.stops).toBe(0);
+
+  await page.getByRole("button", { name: "New tab", exact: true }).click();
+  const home = page.locator("[data-home-tab-panel]:not([hidden])");
+  await expect(home.locator("[data-home-desktop-state]")).toHaveText("Running");
+  await expect(home.locator("[data-home-reattach]")).toContainText("Running in this Sandbox");
+  await home.locator("[data-home-reattach]").getByRole("button", { name: "Reattach", exact: true }).click();
+  await connected(page, state);
+
+  await page.getByRole("button", { name: "Close Desktop", exact: true }).click();
+  await closeDialog.getByRole("button", { name: "Stop desktop", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Desktop", exact: true })).toHaveCount(0);
+  await expect.poll(() => state.stops).toBe(1);
 });
 
 test("a desktop answered while the tab was hidden connects when the tab shows again", async ({ page }) => {
   const state = await transport(page);
   state.desktop = "running";
   await openFixture(page);
+  await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeEnabled({ timeout: 12_000 });
+  await page.getByRole("button", { name: "New tab", exact: true }).click();
+  await expect(page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="desktop"]')).toBeVisible();
   const setVisibility = (hidden: boolean) => page.evaluate((value) => {
     Object.defineProperty(document, "hidden", { configurable: true, get: () => value });
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (value ? "hidden" : "visible") });

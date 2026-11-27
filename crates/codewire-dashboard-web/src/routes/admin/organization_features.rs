@@ -35,6 +35,8 @@ pub(in crate::routes) struct FeaturesSubmission {
     standard: Option<String>,
     dedicated_cpu_was: Option<bool>,
     dedicated_cpu: Option<String>,
+    agent_chat_was: Option<bool>,
+    agent_chat: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub(super) enum Feature {
     Systemd,
     Standard,
     DedicatedCpu,
+    AgentChat,
 }
 
 /// The switches the administrator changed, with their new values: each one
@@ -64,6 +67,11 @@ pub(super) fn changes(form: &FeaturesSubmission) -> Vec<(Feature, bool)> {
             Feature::DedicatedCpu,
             form.dedicated_cpu_was,
             form.dedicated_cpu.is_some(),
+        ),
+        (
+            Feature::AgentChat,
+            form.agent_chat_was,
+            form.agent_chat.is_some(),
         ),
     ]
     .into_iter()
@@ -121,6 +129,10 @@ pub(in crate::routes) async fn set_organization_features(
                     enabled,
                 )
                 .await
+            }
+            Feature::AgentChat => {
+                admin_connect::set_organization_agent_chat(&state, cookie, organization_id, enabled)
+                    .await
             }
         };
         match result {

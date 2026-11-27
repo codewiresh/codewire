@@ -152,6 +152,7 @@
       <p class="cw-alert cw-alert--success" role="status">Credential connected.</p>
       <p class="cw-alert cw-alert--warning" role="status">This key expires in 3 days.</p>
       <p class="cw-alert cw-alert--error" role="alert">Codewire could not reach the credential service.</p>
+      <p class="cw-alert cw-alert--banner cw-alert--warning" role="status">Needs attention: Codex needs Reconnect.</p>
       <div class="gallery-stage"><p class="cw-toast" role="status">quiet-mesa deleted.</p></div>
       <div class="gallery-stage"><aside class="cw-banner" aria-label="Billing banner, no card"><p>Add a card to run cloud sandboxes. Local sandboxes stay free.</p><a class="cw-banner-action" href="#billing">Add a card</a></aside></div>
       <div class="gallery-stage"><aside class="cw-banner" data-tone="warning" aria-label="Billing banner, low credit"><p>$1.40 of compute credit left, about 7 hours at current use.</p><a class="cw-banner-action" href="#billing">Add credit</a></aside></div>
@@ -405,7 +406,7 @@
     <div class="cw-card-content">
       <div class="gallery-stage">
         <dialog class="cw-dialog" open aria-labelledby="g-dialog-title">
-          <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg><span>Back</span></button><h2 id="g-dialog-title">Connect Codex</h2></header>
+          <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg><span>Back</span></button><button class="cw-icon-button cw-dialog-close" type="button" aria-label="Close" title="Close"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button><h2 id="g-dialog-title">Connect Codex</h2></header>
           <div class="cw-dialog-body">
             <p>Name this credential, then approve it in OpenAI with a one-time code.</p>
             <form class="cw-form" id="g-dialog-form" action="#"><div class="cw-field"><label class="cw-label" for="g-dialog-name">Credential name</label><input class="cw-input" id="g-dialog-name"></div></form>

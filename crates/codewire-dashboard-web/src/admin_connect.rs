@@ -12,11 +12,12 @@ use codewire_admin_proto::codewire::admin::v1::{
     ListStandardRuntimeOrganizationsRequest, ListSubscriptionMigrationsRequest,
     ListSystemdOrganizationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
     RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
-    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
-    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest,
-    SetOrganizationStandardRuntimeRequest, SetOrganizationSystemdEnvironmentsRequest,
-    SetPlanArchivedRequest, SetPriceArchivedRequest, SuspendAccountRequest,
-    UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
+    SetOrganizationAgentChatRequest, SetOrganizationConfidentialEnvironmentsRequest,
+    SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
+    SetOrganizationRateCardRequest, SetOrganizationStandardRuntimeRequest,
+    SetOrganizationSystemdEnvironmentsRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
+    SuspendAccountRequest, UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest,
+    UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -309,6 +310,8 @@ pub(crate) struct AdminOrganizationView {
     pub(crate) subscriptions: Vec<AdminSubscriptionRow>,
     /// New sandboxes reserve a CPU per vCPU instead of sharing (#3635).
     pub(crate) dedicated_cpu: bool,
+    /// Organization opted in to Agent chat tabs in the Sandbox view.
+    pub(crate) agent_chat: bool,
     /// The card's name, as the page shows it.
     pub(crate) rate_card: String,
     pub(crate) rate_cards: Vec<RateCardOption>,
@@ -967,6 +970,7 @@ pub(crate) async fn organization(
     let usage = response.usage.into_option().unwrap_or_default();
     Ok(AdminOrganizationView {
         dedicated_cpu: organization.dedicated_cpu,
+        agent_chat: organization.agent_chat,
         confidential_environments: confidential
             .as_ref()
             .map(|ids| ids.contains(&organization.id)),
@@ -1101,6 +1105,22 @@ pub(crate) async fn set_organization_dedicated_cpu(
         .set_organization_dedicated_cpu(SetOrganizationDedicatedCpuRequest {
             organization_id: organization_id.to_owned(),
             dedicated_cpu,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn set_organization_agent_chat(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    agent_chat: bool,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_organization_agent_chat(SetOrganizationAgentChatRequest {
+            organization_id: organization_id.to_owned(),
+            agent_chat,
             ..Default::default()
         })
         .await?;

@@ -71,6 +71,7 @@
 /* A credential that needs reconnecting shows its Reconnect action under its name. */
 [data-dashboard-app] .cw-credential-reconnect { justify-self: start; }
 [data-dashboard-app] .cw-public-key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-3); align-items: center; }
+[data-dashboard-app] .cw-credential-row > .cw-public-key { padding-inline-start: calc(var(--icon-size) + var(--space-3)); }
 [data-dashboard-app] .cw-public-key > span,
 [data-dashboard-app] .cw-public-key > small { grid-column: 1 / -1; }
 [data-dashboard-app] .cw-profile-form { margin-top: 0; }
@@ -92,12 +93,19 @@
 [data-dashboard-app] .cw-two-factor-dialog .cw-dialog-body > p { margin: 0; }
 [data-dashboard-app] .cw-two-factor-dialog .cw-qr { margin-bottom: 0; }
 [data-dashboard-app] .cw-credential-types { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-[data-dashboard-app] .cw-credential-types li { display: grid; }
-[data-dashboard-app] .cw-credential-choice { display: grid; grid-template-columns: var(--icon-size) minmax(0, 1fr) var(--icon-size); align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-3) var(--space-4); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
-[data-dashboard-app] .cw-credential-choice:hover { border-color: var(--border-hover); background: var(--bg-surface-hover); }
-[data-dashboard-app] .cw-credential-choice > span { display: grid; gap: var(--space-1); min-width: 0; }
-[data-dashboard-app] .cw-credential-choice strong { font-size: var(--text-body); font-weight: var(--weight-medium); }
-[data-dashboard-app] .cw-credential-choice span > span { color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
+[data-dashboard-app] .cw-credential-types:has(> li.cw-credential-choice) { gap: 0; border-top: var(--border-width) solid var(--border-subtle); }
+[data-dashboard-app] .cw-credential-types > li:not(.cw-credential-choice) { display: grid; }
+[data-dashboard-app] li.cw-credential-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; color: var(--fg-primary); }
+[data-dashboard-app] li.cw-credential-choice + li.cw-credential-choice { border-top: var(--border-width) solid var(--border-subtle); }
+[data-dashboard-app] li.cw-credential-choice > div { display: grid; gap: var(--space-1); min-width: 0; }
+[data-dashboard-app] li.cw-credential-choice strong { font-size: var(--text-body); font-weight: var(--weight-medium); }
+[data-dashboard-app] li.cw-credential-choice > div > span { color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
+[data-dashboard-app] li.cw-credential-choice .cw-button { justify-self: end; white-space: nowrap; }
+[data-dashboard-app] button.cw-credential-choice { display: grid; grid-template-columns: var(--icon-size) minmax(0, 1fr) var(--icon-size); align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-3) var(--space-4); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); font: inherit; text-align: left; cursor: pointer; }
+[data-dashboard-app] button.cw-credential-choice:hover { border-color: var(--border-hover); background: var(--bg-surface-hover); }
+[data-dashboard-app] button.cw-credential-choice > span { display: grid; gap: var(--space-1); min-width: 0; }
+[data-dashboard-app] button.cw-credential-choice strong { font-size: var(--text-body); font-weight: var(--weight-medium); }
+[data-dashboard-app] button.cw-credential-choice span > span { color: var(--fg-secondary); font-size: var(--text-secondary); line-height: var(--leading-body); }
 
 /* Personal secrets and API keys. */
 [data-dashboard-app] :is(.cw-personal-secrets-page, .cw-personal-api-keys-page) > .cw-card { margin-top: var(--space-4); }
@@ -141,6 +149,8 @@
   [data-dashboard-app] .cw-public-key > span,
   [data-dashboard-app] .cw-public-key > small { grid-column: auto; }
   [data-dashboard-app] .cw-profile-row header { align-items: stretch; flex-direction: column; }
+  [data-dashboard-app] li.cw-credential-choice { grid-template-columns: minmax(0, 1fr); }
+  [data-dashboard-app] li.cw-credential-choice .cw-button { justify-self: start; }
 }
 
 /* Device authorization in a credential dialog replaces the form with its steps. */

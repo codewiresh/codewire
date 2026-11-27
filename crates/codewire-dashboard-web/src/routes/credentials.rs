@@ -41,6 +41,7 @@ use crate::{
     },
 };
 
+pub(super) mod antigravity_sign_in;
 pub(super) mod claude_sign_in;
 mod lifecycle;
 mod profiles;
@@ -121,6 +122,8 @@ struct RejectedAddition<'a> {
     /// A Claude sign-in's dialog reopened at its code step; with no error it
     /// is the step a started sign-in shows, not a rejection.
     sign_in: Option<claude_sign_in::CodeStep<'a>>,
+    /// An Antigravity sign-in's dialog reopened at its callback/code step.
+    antigravity_sign_in: Option<antigravity_sign_in::CodeStep<'a>>,
 }
 
 async fn render_page(
@@ -200,9 +203,15 @@ async fn render_page(
     let sign_in = rejected
         .as_ref()
         .and_then(|rejected| rejected.sign_in.as_ref());
+    let agy_sign_in = rejected
+        .as_ref()
+        .and_then(|rejected| rejected.antigravity_sign_in.as_ref());
     let page = CredentialSettingsView {
         claude_sign_in_code: sign_in.is_some(),
         claude_sign_in_url: sign_in.map_or_else(String::new, |step| step.authorize_url.into()),
+        antigravity_sign_in_code: agy_sign_in.is_some(),
+        antigravity_sign_in_url: agy_sign_in
+            .map_or_else(String::new, |step| step.authorize_url.into()),
         navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
             if let DraftReturn::Exact(id) = &query.draft {
@@ -266,6 +275,7 @@ async fn reject_addition(
             error,
             name,
             sign_in: None,
+            antigravity_sign_in: None,
         }),
     )
     .await
@@ -1415,6 +1425,7 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
             | "connect-codex"
             | "add-openai-api-key"
             | "add-anthropic-api-key"
+            | "add-gemini-api-key"
             | "add-claude-subscription-token"
             | "add-ssh"
             | "generate-ssh"
@@ -1438,6 +1449,7 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                         && (credential.revoked || credential.oauth_provider == "github"))
         })
     }) || claude_sign_in::approved_dialog(requested, data)
+        || antigravity_sign_in::approved_dialog(requested, data)
         || requested_row_id(requested, "profile").is_some_and(|id| {
             // Rows open their actions directly; there is no per-row manage dialog.
             requested != row_dialog("profile", id)
@@ -1485,7 +1497,14 @@ fn approved_message(code: &str) -> &'static str {
         "profile-updated" => "Credential profile updated.",
         "profile-renamed" => "Credential profile renamed.",
         "profile-deleted" => "Credential profile deleted.",
-        code => claude_sign_in::approved_message(code),
+        code => {
+            let msg = claude_sign_in::approved_message(code);
+            if msg.is_empty() {
+                antigravity_sign_in::approved_message(code)
+            } else {
+                msg
+            }
+        }
     }
 }
 
@@ -1540,7 +1559,14 @@ fn approved_error(code: &str) -> &'static str {
         }
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
-        code => claude_sign_in::approved_error(code),
+        code => {
+            let err = claude_sign_in::approved_error(code);
+            if err.is_empty() {
+                antigravity_sign_in::approved_error(code)
+            } else {
+                err
+            }
+        }
     }
 }
 
@@ -1571,6 +1597,7 @@ mod tests {
                 oauth: true,
                 subscription_token: false,
                 claude_sign_in: false,
+                antigravity_sign_in: false,
                 reconnect_needed: false,
                 revoked: false,
                 oauth_provider: "github",
@@ -1589,6 +1616,8 @@ mod tests {
                 codex: String::new(),
                 openai: String::new(),
                 anthropic: String::new(),
+                gemini: String::new(),
+                antigravity: String::new(),
                 ssh: String::new(),
             }],
             choices: CredentialChoicesView::default(),
@@ -1658,6 +1687,8 @@ mod tests {
         CredentialSettingsView {
             claude_sign_in_code: false,
             claude_sign_in_url: String::new(),
+            antigravity_sign_in_code: false,
+            antigravity_sign_in_url: String::new(),
             navigation_query: navigation.into(),
             creation_return_url: String::new(),
             git_identity: crate::view::SettingsData {
@@ -1936,6 +1967,7 @@ mod tests {
             oauth: false,
             subscription_token: true,
             claude_sign_in: false,
+            antigravity_sign_in: false,
             reconnect_needed,
             revoked: false,
             oauth_provider: "",
@@ -2239,7 +2271,7 @@ mod tests {
         );
         // Rows open their actions from a menu with no per-row manage dialog;
         // the profile row has Rename, Edit identities and Delete dialogs.
-        assert_eq!(html.matches("data-dialog id=").count(), 16);
+        assert_eq!(html.matches("data-dialog id=").count(), 18);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));
@@ -2374,7 +2406,7 @@ mod tests {
             "<button class=\"cw-button\" type=\"submit\" form=\"profile-{id}-rename-form\">Save name</button>"
         )));
         assert!(dialog.contains(&format!(
-            "<form class=\"cw-dialog-launcher\" method=\"get\" action=\"{PATH}\"><button class=\"cw-button cw-button--outline\" type=\"submit\" data-dialog-close>Cancel</button></form>"
+            "<form class=\"cw-dialog-launcher\" method=\"get\" action=\"{PATH}\"><button class=\"cw-icon-button cw-dialog-close\" type=\"submit\" data-dialog-close aria-label=\"Close\""
         )));
         assert_eq!(
             rename_error_code(ErrorCode::AlreadyExists),
@@ -2424,6 +2456,8 @@ mod tests {
         let additions = [
             ("add-openai-api-key", "openai-api-key-name"),
             ("add-anthropic-api-key", "anthropic-api-key-name"),
+            ("add-gemini-api-key", "gemini-api-key-name"),
+            ("add-antigravity-sign-in", "add-antigravity-sign-in-name"),
             (
                 "add-claude-subscription-token",
                 "claude-subscription-token-name",
@@ -2455,7 +2489,7 @@ mod tests {
                 .map(|tag| tag.split('>').next().unwrap())
                 .filter(|tag| tag.contains("data-dialog-private"))
                 .collect::<Vec<_>>();
-            assert_eq!(secrets.len(), 5);
+            assert_eq!(secrets.len(), 6);
             for tag in secrets {
                 assert!(!tag.contains(" value="), "{dialog}: {tag}");
             }

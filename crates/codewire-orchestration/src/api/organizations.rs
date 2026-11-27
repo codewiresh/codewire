@@ -138,6 +138,7 @@ pub struct OrgWithMembers {
     pub deletion_state: Option<OrganizationDeletionState>,
     pub deletion_operation_id: Option<String>,
     pub deletion_failure_code: Option<String>,
+    pub agent_chat: bool,
 }
 
 pub(crate) async fn get_organization_core(
@@ -151,7 +152,7 @@ pub(crate) async fn get_organization_core(
 
     let org_row = sqlx::query(
         r#"SELECT id, name, slug, created_by, created_at, updated_at,
-                  deletion_state, deletion_operation_id, deletion_failure_code
+                  deletion_state, deletion_operation_id, deletion_failure_code, agent_chat
            FROM organizations WHERE id = $1"#,
     )
     .bind(&org_id)
@@ -219,6 +220,7 @@ pub(crate) async fn get_organization_core(
         deletion_failure_code: org_row
             .try_get("deletion_failure_code")
             .map_err(AppError::from)?,
+        agent_chat: org_row.try_get("agent_chat").map_err(AppError::from)?,
     })
 }
 
@@ -1121,6 +1123,7 @@ pub struct OrgWithRole {
     pub joined_at: Option<String>,
     /// The caller is the only owner, so cannot leave (#4519).
     pub only_owner: bool,
+    pub agent_chat: bool,
 }
 
 #[derive(Debug)]
@@ -1200,7 +1203,7 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
                              SELECT 1 FROM org_members other
                              WHERE other.org_id = o.id AND other.role = 'owner'
                                AND other.user_id <> m.user_id)) AS only_owner,
-                         o.billing_status, o.trial_ends_at,
+                         o.billing_status, o.trial_ends_at, o.agent_chat,
                          ARRAY(SELECT a.assignment FROM org_member_assignments a
                                 WHERE a.org_member_id = m.id) AS assignments
                   FROM organizations o
@@ -1242,6 +1245,7 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
             trial_ends_at: trial_ends_at.map(format_time),
             joined_at: joined_at.map(format_time),
             only_owner: r.try_get("only_owner").map_err(AppError::from)?,
+            agent_chat: r.try_get("agent_chat").map_err(AppError::from)?,
         });
     }
     Ok(result)
@@ -1322,6 +1326,7 @@ mod tests {
             trial_ends_at: None,
             joined_at: None,
             only_owner: false,
+            agent_chat: false,
         }
     }
 

@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
 test("explicit Create return carries only its draft handle while credential inputs stay private", async ({ page }) => {
   const returnLink = page.getByRole("link", { name: "Return to Create Sandbox", exact: true });
   await expect(returnLink).toHaveAttribute("href", "/fixture-org/new/?creation_draft=00000000-0000-4000-8000-000000000003");
-  await choose(page, "OpenAI API key");
+  await choose(page, "Add OpenAI key");
   const dialog = page.getByRole("dialog", { name: "Add OpenAI API key", exact: true });
   const privateCanary = "synthetic-draft-return-write-only-canary";
   await dialog.getByLabel("API key", { exact: true }).fill(privateCanary);
@@ -41,10 +41,15 @@ const fits = async (page: Page, owner: Locator) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(await owner.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
 };
-const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") => {
-  await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+const footer = async (owner: Locator, primary?: string, destructive = false) => {
   await expect(owner.locator("[data-dialog-close]")).toHaveCount(1);
-  await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: dismissal, exact: true })).toBeVisible();
+  if (destructive) {
+    await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+    await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  } else {
+    await expect(owner.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
+    await expect(owner.locator(".cw-dialog-actions").getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  }
   await expect(owner.locator('button[type="submit"]:not([data-dialog-open], [data-dialog-close])')).toHaveCount(primary ? 1 : 0);
   if (primary) {
     const submit = owner.locator(".cw-dialog-actions").getByRole("button", { name: primary, exact: true });
@@ -53,7 +58,7 @@ const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") =>
   }
 };
 
-test("seven full-row choices open focused provider editors with Back and one footer", { tag: "@mobile" }, async ({ page }) => {
+test("nine full-row choices open focused provider editors with Back and one footer", { tag: "@mobile" }, async ({ page }) => {
   const errors: string[] = [];
   const posts: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -61,35 +66,37 @@ test("seven full-row choices open focused provider editors with Back and one foo
   const add = action(page, "Add credential");
   await add.click();
   const chooser = dialog(page, "Add credential");
-  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(7);
+  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(9);
+  for (const icon of ["icon-github", "icon-antigravity", "icon-codex", "icon-claude", "icon-openai", "icon-gemini"]) {
+    await expect(chooser.locator(`use[href*="#${icon}"]`).first()).toBeAttached();
+  }
   await footer(chooser);
   await fits(page, chooser);
   await artifactScreenshot(page, "credential-chooser.png");
   for (const [name, title, primary, provider] of [
     // The fixture account already has its one GitHub connection, so the
     // connect dialog routes to Reconnect and offers no second authorization.
-    ["GitHub", "Connect GitHub", "", ""],
-    ["Codex", "Connect Codex", "Connect Codex", "codex"],
+    ["Connect GitHub", "Connect GitHub", "", ""],
+    ["Connect Antigravity", "Connect Antigravity", "Continue", ""],
+    ["Connect Codex", "Connect Codex", "Connect Codex", "codex"],
     ["Connect Claude", "Connect Claude", "Continue", ""],
-    ["Claude (token)", "Connect Claude (token)", "Add token", ""],
-    ["OpenAI API key", "Add OpenAI API key", "Add API key", "openai"],
-    ["Anthropic API key", "Add Anthropic API key", "Add API key", "anthropic"],
+    ["Add Claude token", "Connect Claude (token)", "Add token", ""],
+    ["Add OpenAI key", "Add OpenAI API key", "Add API key", "openai"],
+    ["Add Anthropic key", "Add Anthropic API key", "Add API key", "anthropic"],
+    ["Add Gemini key", "Add Gemini API key", "Add API key", "google"],
   ]) {
     const row = action(chooser, name);
-    // The description itself is inside the action, not detached underneath it.
-    // Connect Claude has no description, so its name is what is clicked.
-    const description = row.locator("span > span");
-    await (await description.count() ? description : row.locator("strong")).click();
+    await row.click();
     const editor = dialog(page, title);
     await expect(page.locator("dialog[open]")).toHaveCount(1);
-    await footer(editor, primary || undefined, name === "GitHub" ? "Done" : "Cancel");
+    await footer(editor, primary || undefined);
     // Back opens the chooser through its own form; it never submits the editor's values.
     expect(await action(editor, "Back").evaluate((button: HTMLButtonElement) => button.form?.matches(".cw-dialog-launcher")
       && [...button.form.elements].every((field) => field === button || ["creation_draft", "dialog"].includes((field as HTMLInputElement).name)))).toBe(true);
     if (provider) await expect(editor.locator('[name="provider"]')).toHaveValue(provider);
-    if (name === "GitHub") {
+    if (name === "Connect GitHub") {
       await expect(editor.locator('input[name="name"]')).toHaveCount(0);
-      await expect(action(editor, "Done")).toBeFocused();
+      await expect(action(editor, "Close")).toBeFocused();
       await expect(action(editor, "Continue to GitHub")).toHaveCount(0);
       // The one account-level connection is stated plainly; the actions are
       // reconnecting it or disconnecting it to use a different account.
@@ -100,20 +107,22 @@ test("seven full-row choices open focused provider editors with Back and one foo
       await expect(editor.getByRole("heading", { level: 3 })).toHaveCount(0);
       await artifactScreenshot(page, "github-saved-connections.png");
     }
-    if (name.includes("API key")) {
+    if (name.includes("key")) {
       await expect(editor.getByRole("combobox")).toHaveCount(0);
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.getByLabel("Hard expiry (UTC)", { exact: true })).not.toBeVisible();
     }
-    if (name === "Connect Claude") {
+    if (name === "Connect Claude" || name === "Connect Antigravity") {
       // The name first; the sign-in starts on Continue, so no code field yet.
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.locator('[name="code"], [name="provider"], [name="credential_id"]')).toHaveCount(0);
-      // A name and Continue, and no text: Claude's own page says the rest.
-      await expect(editor.locator(".cw-dialog-body > p")).toHaveCount(0);
-      await artifactScreenshot(page, "claude-sign-in-dialog.png");
+      if (name === "Connect Claude") {
+        // A name and Continue, and no text: Claude's own page says the rest.
+        await expect(editor.locator(".cw-dialog-body > p")).toHaveCount(0);
+        await artifactScreenshot(page, "claude-sign-in-dialog.png");
+      }
     }
-    if (name === "Claude (token)") {
+    if (name === "Add Claude token") {
       // Paste only: the owner runs claude setup-token; the service sets the expiry.
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.getByLabel("Token", { exact: true })).toHaveAttribute("type", "password");
@@ -130,7 +139,7 @@ test("seven full-row choices open focused provider editors with Back and one foo
     await expect(row).toBeFocused();
     await expect(page.locator("dialog[open]")).toHaveCount(1);
   }
-  await action(chooser, "Cancel").click();
+  await action(chooser, "Close").click();
   await expect(add).toBeFocused();
   expect(posts).toEqual([]);
   expect(errors).toEqual([]);
@@ -139,7 +148,7 @@ test("seven full-row choices open focused provider editors with Back and one foo
 test("saved GitHub connection opens its exact reconnect dialog without submitting", async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
-  await choose(page, "GitHub");
+  await choose(page, "Connect GitHub");
   const connect = dialog(page, "Connect GitHub");
   await action(connect, "Reconnect").click();
   const reconnect = dialog(page, "Reconnect verified-user");
@@ -168,7 +177,7 @@ test("arriving from Connect GitHub opens its dialog with no Add credential step"
 test("SSH chooses Generate or Import and Back clears private values only after discard", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
-  await choose(page, "SSH key");
+  await choose(page, "Add SSH key");
   const method = dialog(page, "Add SSH key");
   await expect(method.getByRole("textbox")).toHaveCount(0);
   await footer(method);
@@ -194,7 +203,7 @@ test("SSH chooses Generate or Import and Back clears private values only after d
   await action(method, "Import").click();
   await expect(imported.locator('[name="private_key"]')).toHaveValue("");
   await expect(imported.locator('[name="passphrase"]')).toHaveValue("");
-  await action(imported, "Cancel").click();
+  await action(imported, "Close").click();
   await expect(action(page, "Add credential")).toBeFocused();
   expect(posts).toBe(0);
 });
@@ -218,14 +227,14 @@ test("rows keep status and expiry visible and open focused editors straight from
   await expect(rotate.locator('[name="credential_id"]')).toHaveValue("fixture-openai");
   await expect(rotate.locator('[name="expected_revocation_generation"]')).toHaveValue("3");
   await expect(rotate.getByLabel("Replacement API key", { exact: true })).toBeFocused();
-  await action(rotate, "Cancel").click();
+  await action(rotate, "Close").click();
   await expect(action(menu, "Rotate API key")).toBeFocused();
   await action(menu, "Rename").click();
   const rename = dialog(page, "Rename Work API");
   await footer(rename, "Save name");
   await expect(rename.getByLabel("New name")).toHaveValue("Work API");
   await expect(rename.locator('[name="expected_name"]')).toHaveValue("Work API");
-  await action(rename, "Cancel").click();
+  await action(rename, "Close").click();
   await expect(action(menu, "Rename")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(menu).not.toHaveAttribute("open", "");
@@ -245,7 +254,13 @@ test("rows keep status and expiry visible and open focused editors straight from
 // sideways, an SSH key's 50-character fingerprint included (#6330). A phone
 // emulation would zoom out to fit a wide page instead, so the window is set
 // here and the page is measured against it.
-test("at 390 pixels the credentials page, an SSH key's fingerprint included, never scrolls sideways", async ({ page }) => {
+test("at 390 pixels the credentials page, an SSH key's fingerprint included, never scrolls sideways", { tag: "@mobile" }, async ({ page }) => {
+  const sshRow = page.locator(".cw-credential-row").filter({ has: page.locator(".cw-public-key") });
+  const titleX = (await sshRow.locator(".cw-credential-identity strong").boundingBox())!.x;
+  for (const selector of [".cw-public-key > span", ".cw-public-key > code", ".cw-public-key > small"]) {
+    const x = (await sshRow.locator(selector).boundingBox())!.x;
+    expect(Math.abs(x - titleX), selector).toBeLessThanOrEqual(1);
+  }
   await page.setViewportSize({ width: 390, height: 900 });
   const fingerprint = page.locator(".cw-public-key > small");
   await expect(fingerprint).toHaveText(/^SHA256:\S{43}$/);
@@ -281,7 +296,7 @@ test("a Claude subscription token reads its expiry and is replaced by paste from
   await expect(token).toHaveAttribute("type", "password");
   await expect(replace.locator('[name="expiration_utc"]')).toHaveCount(0);
   await token.fill("synthetic-subscription-token-canary");
-  await action(replace, "Cancel").click();
+  await action(replace, "Close").click();
   await action(prompt(page), "Keep editing").click();
   await expect(token).toHaveValue("synthetic-subscription-token-canary");
   await fits(page, replace);
@@ -316,7 +331,7 @@ test("a credential whose refresh failed says Reconnect needed and reconnects fro
   await expect(editor).toBeVisible();
   await expect(page.locator("dialog[open]")).toHaveCount(1);
   await expect(editor.locator('[name="credential_id"]')).toHaveValue("fixture-codex");
-  await action(editor, "Cancel").click();
+  await action(editor, "Close").click();
   await expect(editor).not.toBeVisible();
   await expect(reconnect).toBeFocused();
   expect(posts).toBe(0);
@@ -334,8 +349,10 @@ test("profile rows open exact-revision editors from their menu with native valid
   await create.click();
   const editor = dialog(page, "Create profile");
   await footer(editor, "Create profile");
-  // Codex, OpenAI, Anthropic and SSH; GitHub is always the account connection.
-  await expect(editor.getByRole("combobox")).toHaveCount(4);
+  // Codex, OpenAI, Anthropic, Gemini, Antigravity and SSH; GitHub is always the account connection.
+  await expect(editor.getByRole("combobox")).toHaveCount(6);
+  await expect(editor.getByRole("combobox", { name: "Antigravity", exact: true })).toBeVisible();
+  await expect(editor.getByRole("combobox", { name: "Gemini", exact: true })).toBeVisible();
   await expect(editor.getByRole("combobox", { name: "GitHub", exact: true })).toHaveCount(0);
   await expect(editor.getByLabel("Profile name", { exact: true })).toBeFocused();
   await editor.getByLabel("Profile name", { exact: true }).fill("Not a valid name");
@@ -344,7 +361,7 @@ test("profile rows open exact-revision editors from their menu with native valid
   expect(await editor.locator("form:not(.cw-dialog-launcher)").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
   await fits(page, editor);
   await artifactScreenshot(page, "create-profile-dialog.png");
-  await action(editor, "Cancel").click();
+  await action(editor, "Close").click();
   await discard(page);
   await expect(create).toBeFocused();
   const menu = await rowMenu(row);
@@ -360,13 +377,13 @@ test("profile rows open exact-revision editors from their menu with native valid
   // Reverted values are clean; untouched/default selects do not warn.
   await codex.selectOption("");
   await codex.selectOption("fixture-codex");
-  await action(edit, "Cancel").click();
+  await action(edit, "Close").click();
   await expect(prompt(page)).not.toBeVisible();
   await expect(action(menu, "Edit identities")).toBeFocused();
   await action(menu, "Edit identities").click();
   await edit.locator('[name="expected_revision"]').evaluate((node: HTMLInputElement) => { node.value = "8"; });
   await codex.selectOption("");
-  await action(edit, "Cancel").click();
+  await action(edit, "Close").click();
   await discard(page);
   await action(menu, "Edit identities").click();
   await expect(codex).toHaveValue("fixture-codex");
@@ -400,8 +417,8 @@ test("profile Rename edits one name at the observed revision and posts only the 
   await expect(rename).toBeVisible();
   expect(await rename.locator("form:not(.cw-dialog-launcher)").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
   expect(posts).toEqual([]);
-  // An edited name asks before Cancel discards it, then returns to the menu.
-  await action(rename, "Cancel").click();
+  // An edited name asks before Close discards it, then returns to the menu.
+  await action(rename, "Close").click();
   await discard(page);
   await expect(action(menu, "Rename")).toBeFocused();
   await action(menu, "Rename").click();
@@ -419,7 +436,7 @@ test("profile Rename edits one name at the observed revision and posts only the 
 test("Keep editing, Escape and backdrop retain private DOM and fresh hidden authority", async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
-  await choose(page, "OpenAI API key");
+  await choose(page, "Add OpenAI key");
   const api = dialog(page, "Add OpenAI API key");
   const key = api.getByLabel("API key", { exact: true });
   await key.fill("synthetic-kept-private-value");
@@ -430,15 +447,15 @@ test("Keep editing, Escape and backdrop retain private DOM and fresh hidden auth
   await page.keyboard.press("Escape");
   await expect(key).toBeFocused();
   await expect(key).toHaveValue("synthetic-kept-private-value");
-  await action(api, "Cancel").click();
+  await action(api, "Close").click();
   await action(prompt(page), "Keep editing").click();
-  await expect(action(api, "Cancel")).toBeFocused();
+  await expect(action(api, "Close")).toBeFocused();
   await page.mouse.click(2, 2);
   await expect(prompt(page)).toBeVisible();
   await page.mouse.click(2, 2);
   await expect(prompt(page)).not.toBeVisible();
   await expect(key).toHaveValue("synthetic-kept-private-value");
-  await action(api, "Cancel").click();
+  await action(api, "Close").click();
   await discard(page);
   await expect(page.locator("#openai-api-key-value")).toHaveValue("");
   await expect(page.locator('#add-openai-api-key [name="_csrf"]')).toHaveValue("fresh-csrf-fence");
@@ -446,10 +463,10 @@ test("Keep editing, Escape and backdrop retain private DOM and fresh hidden auth
 });
 
 test("inner form replacement fences pending dismissal and preserves new validation", async ({ page }) => {
-  await choose(page, "Anthropic API key");
+  await choose(page, "Add Anthropic key");
   const api = dialog(page, "Add Anthropic API key");
   await api.getByLabel("API key", { exact: true }).fill("synthetic-old-draft");
-  await action(api, "Cancel").click();
+  await action(api, "Close").click();
   await expect(prompt(page)).toBeVisible();
   // Emulate a late owner-form HTMX replacement from test code only.
   await api.locator("form:not(.cw-dialog-launcher)").evaluate((form) => {
@@ -465,7 +482,7 @@ test("inner form replacement fences pending dismissal and preserves new validati
   await expect(api).toBeVisible();
   await expect(api.getByRole("alert")).toHaveText("The credential changed. Review the current form.");
   await expect(api.getByLabel("API key", { exact: true })).toHaveValue("");
-  await action(api, "Cancel").click();
+  await action(api, "Close").click();
   await expect(api).not.toBeVisible();
 });
 
@@ -483,20 +500,20 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await footer(reconnect, "Continue to GitHub");
   const consent = reconnect.getByRole("checkbox");
   await consent.check();
-  await action(reconnect, "Cancel").click();
+  await action(reconnect, "Close").click();
   await action(prompt(page), "Keep editing").click();
   await expect(consent).toBeChecked();
-  await action(reconnect, "Cancel").click();
+  await action(reconnect, "Close").click();
   await discard(page);
   await action(github, "Reconnect").click();
   await expect(consent).not.toBeChecked();
   await expect(reconnect.locator('[name="expected_revocation_generation"]')).toHaveValue("1");
-  await action(reconnect, "Cancel").click();
+  await action(reconnect, "Close").click();
   // GitHub has no separate revoke step: one confirmed Disconnect revokes and removes the connection.
   await expect(action(github, "Revoke")).toHaveCount(0);
   await action(github, "Disconnect GitHub").click();
   const removal = dialog(page, "Disconnect GitHub?");
-  await footer(removal, "Disconnect GitHub");
+  await footer(removal, "Disconnect GitHub", true);
   await expect(action(removal, "Cancel")).toBeFocused();
   await expect(removal).toContainText("You won't be able to browse your GitHub repositories in Codewire, or clone private ones into your sandboxes, until you connect GitHub again.");
   await expect(removal).toContainText("The Codewire app stays installed on GitHub. To remove it, uninstall it under Applications in your GitHub settings.");
@@ -514,14 +531,14 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await expect(menuItems(revoked)).toHaveText(["Rename", "Rotate API key", "Delete"]);
   await action(revoked, "Delete").click();
   const deleted = dialog(page, "Delete Old Anthropic?");
-  await footer(deleted, "Delete credential");
+  await footer(deleted, "Delete credential", true);
   await expect(deleted).toContainText("no profile references");
   await action(deleted, "Cancel").click();
   expect(posts).toHaveLength(1);
 });
 
 test("leaving a retained document clears private values without changing hidden bindings", async ({ page }) => {
-  await choose(page, "OpenAI API key");
+  await choose(page, "Add OpenAI key");
   const api = dialog(page, "Add OpenAI API key");
   await api.getByLabel("API key", { exact: true }).fill("synthetic-navigation-private-value");
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
@@ -531,7 +548,7 @@ test("leaving a retained document clears private values without changing hidden 
 });
 
 test("explicit leaving-page Discard fences a dialog request that began after the prompt opened", async ({ page }) => {
-  await choose(page, "OpenAI API key");
+  await choose(page, "Add OpenAI key");
   const api = dialog(page, "Add OpenAI API key");
   await api.getByLabel("API key", { exact: true }).fill("private-discard-canary");
   // Controller-unit proof, using the actual HTMX lifecycle/version fence.
@@ -715,14 +732,32 @@ test("an empty credentials page keeps both add actions and says what to do", asy
   expect(await boxless(page.locator(".cw-settings-content > .cw-section"))).toBe(3);
 });
 
-test("Add credential is a dialog, so its providers keep their tiles", { tag: "@mobile" }, async ({ page }) => {
+test("Add credential renders its providers directly inside the modal with separators and descriptions", { tag: "@mobile" }, async ({ page }) => {
   await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-add-credential.html`);
   const add = dialog(page, "Add credential");
   await expect(add).toBeVisible();
-  const tiles = await add.locator(".cw-credential-choice").evaluateAll((nodes) => nodes.map((node) => {
+  await expect(add.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
+  await expect(add.locator(".cw-dialog-actions")).toHaveCount(0);
+  const listStyle = await add.locator(".cw-credential-types").evaluate((node) => {
+    const s = getComputedStyle(node);
+    return {
+      topBorder: parseFloat(s.borderTopWidth),
+      sideBorder: parseFloat(s.borderLeftWidth) + parseFloat(s.borderRightWidth) + parseFloat(s.borderBottomWidth),
+      radius: parseFloat(s.borderTopLeftRadius),
+    };
+  });
+  expect(listStyle.topBorder).toBeGreaterThan(0);
+  expect(listStyle.sideBorder).toBe(0);
+  expect(listStyle.radius).toBe(0);
+  const rows = await add.locator(".cw-credential-choice").evaluateAll((nodes) => nodes.map((node) => {
     const style = getComputedStyle(node);
-    return parseFloat(style.borderTopWidth) > 0 && parseFloat(style.borderTopLeftRadius) > 0;
+    return {
+      topBorder: parseFloat(style.borderTopWidth) > 0,
+      hasDescription: (node.querySelector("div > span")?.textContent?.trim().length ?? 0) > 0,
+    };
   }));
-  expect(tiles).toEqual(Array(7).fill(true));
+  expect(rows).toHaveLength(9);
+  expect(rows.map((r) => r.topBorder)).toEqual([false, ...Array(8).fill(true)]);
+  expect(rows.every((r) => r.hasDescription)).toBe(true);
   await fits(page, add);
 });

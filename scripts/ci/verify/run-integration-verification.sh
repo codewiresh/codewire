@@ -1411,6 +1411,12 @@ database_lane_orchestration_admin() {
       'api::admin::dedicated_cpu_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "admin organization agent chat matrix" admin-organization-agent-chat \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::agent_chat_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization standard runtime move matrix" organization-standard-runtime-move \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

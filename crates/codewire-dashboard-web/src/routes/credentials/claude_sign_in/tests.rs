@@ -116,6 +116,7 @@ mod rendered {
             oauth: false,
             subscription_token: false,
             claude_sign_in: true,
+            antigravity_sign_in: false,
             reconnect_needed: false,
             revoked: false,
             oauth_provider: "",
@@ -152,12 +153,13 @@ mod rendered {
     fn the_sign_in_is_offered_before_the_subscription_token() {
         let html = rendered("", "", None);
         let sign_in = html
-            .find("id=\"add-claude-sign-in-choice-name\">Connect Claude<")
+            .find("id=\"add-claude-sign-in-choice-name\">Claude<")
             .unwrap();
         let token = html
             .find("id=\"add-claude-subscription-token-choice-name\">Claude (token)<")
             .unwrap();
         assert!(sign_in < token);
+        assert!(html.contains("<span>Connect Claude</span>"));
         assert!(html.contains("Your subscription; lasts a year, for automation."));
     }
 
