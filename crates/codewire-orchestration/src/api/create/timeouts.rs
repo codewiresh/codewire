@@ -4,25 +4,37 @@
 
 use super::*;
 
-/// Refuses a timeout out of range, an idle suspend or hibernate on a Sandbox
-/// whose recorded runtime profile isn't `standard`, or an idle hibernate that
-/// isn't strictly greater than idle suspend when both are set explicitly.
-pub(super) fn validate(body: &CreateEnvironmentBody, runtime_profile: &str) -> AppResult<()> {
+/// Refuses out-of-range idle timeouts or an idle hibernate that isn't strictly
+/// greater than idle suspend, without checking the runtime profile yet (used
+/// before default-image preset resolution when a create omits `image`).
+pub(super) fn validate_bounds(body: &CreateEnvironmentBody) -> AppResult<()> {
     if let Some(idle_stop_seconds) = body.idle_stop_seconds {
         super::super::environments::validate_idle_stop_seconds(idle_stop_seconds)?;
     }
     if let Some(seconds) = body.idle_suspend_seconds {
         super::super::environments::validate_idle_suspend_seconds(seconds)?;
-        super::super::environments::require_standard_for_idle_suspend(runtime_profile, seconds)?;
     }
     if let Some(seconds) = body.idle_hibernate_seconds {
         super::super::environments::validate_idle_hibernate_seconds(seconds)?;
-        super::super::environments::require_standard_for_idle_hibernate(runtime_profile, seconds)?;
     }
     super::super::environments::validate_idle_hibernate_after_suspend(
         body.idle_suspend_seconds.unwrap_or(0),
         body.idle_hibernate_seconds.unwrap_or(0),
     )?;
+    Ok(())
+}
+
+/// Refuses a timeout out of range, an idle suspend or hibernate on a Sandbox
+/// whose recorded runtime profile isn't `standard`, or an idle hibernate that
+/// isn't strictly greater than idle suspend when both are set explicitly.
+pub(super) fn validate(body: &CreateEnvironmentBody, runtime_profile: &str) -> AppResult<()> {
+    validate_bounds(body)?;
+    if let Some(seconds) = body.idle_suspend_seconds {
+        super::super::environments::require_standard_for_idle_suspend(runtime_profile, seconds)?;
+    }
+    if let Some(seconds) = body.idle_hibernate_seconds {
+        super::super::environments::require_standard_for_idle_hibernate(runtime_profile, seconds)?;
+    }
     Ok(())
 }
 
@@ -123,5 +135,17 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&inverted, "standard").is_err());
+
+        // Default-image creates omit `image`, so early validation checks
+        // range and ordering via `validate_bounds` before preset resolution,
+        // then `validate` enforces the `standard` profile gate once the
+        // default image resolves.
+        assert!(validate_bounds(&suspend(900)).is_ok());
+        assert!(validate_bounds(&hibernate(300)).is_ok());
+        assert!(validate_bounds(&suspend(60)).is_err());
+        assert!(validate_bounds(&hibernate(60)).is_err());
+        assert!(validate_bounds(&inverted).is_err());
+        assert!(validate(&hibernate(300), "standard").is_ok());
+        assert!(validate(&hibernate(300), "commodity").is_err());
     }
 }

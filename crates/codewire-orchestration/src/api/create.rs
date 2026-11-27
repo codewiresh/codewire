@@ -1350,7 +1350,15 @@ pub(crate) async fn create_environment_core(
         body.project_spec.resources.disk_gib,
         body.ttl_seconds,
     )?;
-    timeouts::validate(&body, &runtime.profile)?;
+    // When the request names no image yet, check timeout ranges and cross-field
+    // ordering here, and defer the `standard`-profile gate until
+    // `resolve_create_defaults` populates the default workspace image and
+    // recomputes `runtime.profile` (#6647).
+    if had_image {
+        timeouts::validate(&body, &runtime.profile)?;
+    } else {
+        timeouts::validate_bounds(&body)?;
+    }
 
     let dispatch_ambiguous = AtomicBool::new(false);
     // The admitted operation outlives a dropped request, so it owns its inputs.
@@ -1363,9 +1371,11 @@ pub(crate) async fn create_environment_core(
         let result: AppResult<Environment> = async {
             let preset =
                 resolve_create_defaults(pool, user, org_id, &mut body, isolation_tier).await?;
-            if !had_image && !body.project_spec.image.is_empty() {
-                runtime =
-                    admit_runtime_create(state, user, org_id, &mut body, isolation_tier).await?;
+            if !had_image {
+                if !body.project_spec.image.is_empty() {
+                    runtime = admit_runtime_create(state, user, org_id, &mut body, isolation_tier)
+                        .await?;
+                }
                 timeouts::validate(&body, &runtime.profile)?;
             }
             body.project_spec.validate().map_err(invalid_project_spec)?;
