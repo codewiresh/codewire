@@ -223,6 +223,36 @@ where
     post_json_for_client(state, path, cookie, None, body).await
 }
 
+/// [`post_json`] for browser-session IdP mutations that enforce exact
+/// `Origin` matching (such as `/api/auth/complete-onboarding`).
+pub(crate) async fn post_json_with_origin<I, O>(
+    state: &AppState,
+    path: &str,
+    cookie: HeaderValue,
+    body: &I,
+) -> Result<IdentityResponse<O>, ()>
+where
+    I: Serialize + ?Sized,
+    O: DeserializeOwned,
+{
+    debug_assert!(path.starts_with('/'));
+    let origin = reqwest::Url::parse(&state.public_origin)
+        .map_err(|_| ())?
+        .origin()
+        .ascii_serialization();
+    let response = state
+        .http
+        .post(format!("{}{}", state.identity_origin_string, path))
+        .headers(crate::transport::trace_context())
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, origin)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| ())?;
+    decode_identity_response(response).await
+}
+
 /// [`post_json`] for a call the IdP counts per client address, such as
 /// sign-up (#3297). `client` is the one hop this dashboard trusts, the last
 /// `X-Forwarded-For` hop the edge wrote on the browser's request, and it is

@@ -315,6 +315,7 @@ async fn complete_signup(
         is_admin: false,
         two_factor_enabled: false,
         cli_signed_in: false,
+        onboarding_completed: false,
         created_at: format_time(created_at),
     };
 

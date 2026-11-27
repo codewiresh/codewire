@@ -10,6 +10,7 @@
     "/api/admin/accounts/{user_id}/deletion-plan",
     "/api/admin/accounts/{user_id}/enabled",
     "/api/admin/accounts/{user_id}/resend-verification",
+    "/api/auth/complete-onboarding",
     "/api/auth/forget-password",
     "/api/auth/get-session",
     "/api/auth/oauth/identities",

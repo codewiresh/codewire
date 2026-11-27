@@ -2,11 +2,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::console::v1::{
-    AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BillingServiceClient,
-    CardSetupSettlement, FinishCardSetupRequest, GetBillingOverviewRequest,
+    ActivatePaygPlanRequest, AddCreditRequest, AddCreditResponse, BeginCardSetupRequest,
+    BillingServiceClient, CardSetupSettlement, CreateCheckoutSessionRequest,
+    CreatePortalSessionRequest, FinishCardSetupRequest, GetBillingOverviewRequest,
     GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetSignupCreditRequest,
     ListBillingEventsRequest, ListInvoicesRequest, ListPaymentMethodsRequest,
-    RemovePaymentMethodRequest, SavedPaymentMethod, SetDefaultPaymentMethodRequest,
+    ReconcilePlanCheckoutSessionRequest, RemovePaymentMethodRequest, SavedPaymentMethod,
+    SetDefaultPaymentMethodRequest, SwitchOrganizationPlanRequest, SwitchOrganizationPlanResponse,
     UpdateAutoTopUpRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
@@ -856,6 +858,158 @@ pub(crate) async fn add_credit(
         .into_owned())
 }
 
+/// Starts Stripe Checkout for a paid monthly plan (`pro` or `max`) (#6659).
+pub(crate) async fn create_plan_checkout(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    plan: String,
+    success_url: String,
+    cancel_url: String,
+) -> Result<String, ConnectError> {
+    let response = client(state, cookie)
+        .create_checkout_session(CreateCheckoutSessionRequest {
+            org_id,
+            plan,
+            success_url,
+            cancel_url,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(response.checkout_url)
+}
+
+/// Synchronizes a completed Stripe Checkout subscription right after redirect (#6659).
+pub(crate) async fn reconcile_plan_checkout(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    session_id: String,
+) -> Result<(), ConnectError> {
+    client(state, cookie)
+        .reconcile_plan_checkout_session(ReconcilePlanCheckoutSessionRequest {
+            org_id,
+            session_id,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// Activates the Pay as you go ($0/mo) plan once a card is on file (#6659).
+pub(crate) async fn activate_payg_plan(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+) -> Result<(), ConnectError> {
+    client(state, cookie)
+        .activate_payg_plan(ActivatePaygPlanRequest {
+            org_id,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// Switches an organization between `payg`, `pro`, and `max` (#6659).
+#[allow(dead_code)]
+pub(crate) async fn switch_organization_plan(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    plan: String,
+    success_url: String,
+    cancel_url: String,
+) -> Result<SwitchOrganizationPlanResponse, ConnectError> {
+    Ok(client(state, cookie)
+        .switch_organization_plan(SwitchOrganizationPlanRequest {
+            org_id,
+            plan,
+            success_url,
+            cancel_url,
+            ..Default::default()
+        })
+        .await?
+        .into_owned())
+}
+
+/// Creates a Stripe Billing Portal session URL (#6659).
+#[allow(dead_code)]
+pub(crate) async fn create_portal_session(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    return_url: String,
+) -> Result<String, ConnectError> {
+    let response = client(state, cookie)
+        .create_portal_session(CreatePortalSessionRequest {
+            org_id,
+            return_url,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(response.portal_url)
+}
+
+/// Reads the minimal billing overview and Stripe publishable key for onboarding Step 2 (#6659).
+pub(crate) struct OnboardingBillingFacts {
+    pub(crate) billing_enabled: bool,
+    pub(crate) has_payment_method: bool,
+    pub(crate) stripe_publishable_key: String,
+}
+
+pub(crate) async fn onboarding_billing_facts(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> Result<OnboardingBillingFacts, crate::error::WebError> {
+    let billing = client(state, cookie);
+    let overview_call = billing.get_billing_overview(GetBillingOverviewRequest {
+        org_id: org_id.to_owned(),
+        ..Default::default()
+    });
+    let cards_call = billing.list_payment_methods(ListPaymentMethodsRequest {
+        org_id: org_id.to_owned(),
+        ..Default::default()
+    });
+    let (overview, cards) = tokio::join!(overview_call, cards_call);
+    let overview = overview
+        .map_err(|error| match error.code {
+            connectrpc::ErrorCode::Unauthenticated => crate::error::WebError::Unauthorized,
+            _ => crate::error::WebError::Connect(error),
+        })?
+        .into_owned();
+    if !overview.billing_enabled {
+        return Ok(OnboardingBillingFacts {
+            billing_enabled: false,
+            has_payment_method: false,
+            stripe_publishable_key: String::new(),
+        });
+    }
+    let publishable_key = match cards {
+        Ok(response) => response.into_owned().publishable_key,
+        Err(error) if overview.has_payment_method => {
+            if error.code == connectrpc::ErrorCode::Unauthenticated {
+                return Err(crate::error::WebError::Unauthorized);
+            }
+            String::new()
+        }
+        Err(error) => {
+            return Err(match error.code {
+                connectrpc::ErrorCode::Unauthenticated => crate::error::WebError::Unauthorized,
+                _ => crate::error::WebError::Connect(error),
+            });
+        }
+    };
+    Ok(OnboardingBillingFacts {
+        billing_enabled: overview.billing_enabled,
+        has_payment_method: overview.has_payment_method,
+        stripe_publishable_key: publishable_key,
+    })
+}
+
 /// A top-up amount in whole euros, or with cents when it has them.
 pub(crate) fn top_up_euros(cents: i32) -> String {
     if cents % 100 == 0 {
@@ -997,6 +1151,7 @@ mod tests {
     fn money_formatting_is_bounded_and_currency_aware() {
         assert_eq!(money(1234, "usd"), "$12.34");
         assert_eq!(money(-50, "eur"), "-€0.50");
+        assert_eq!(money(-50, ""), "-$0.50");
         assert_eq!(money(50, "gbp"), "0.50 GBP");
     }
 

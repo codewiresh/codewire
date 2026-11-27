@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Secure your account · Codewire</title>
+    <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/onboarding-v1.css">
+    <script src="/assets/codewire/onboarding-v1.js" defer></script>
+  </head>
+  <body class="cw-body cw-onboarding-body" data-route="onboarding-2fa">
+    {% include "onboarding-backdrop.html" %}
+      <section class="cw-onboarding-shell" aria-labelledby="onboarding-2fa-title">
+        <header class="cw-onboarding-header">
+          <h1 id="onboarding-2fa-title">Secure your account</h1>
+          <p class="cw-onboarding-subtitle">Add an authenticator app to protect your sandboxes and credentials.</p>
+        </header>
+        {% if !error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ error }}</div>{% endif %}
+        <form method="post" action="/setup-2fa/_actions/verify">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="return_to" value="/{{ chrome.org_slug }}/onboarding/code">
+          <div class="cw-onboarding-totp">
+            <div class="cw-onboarding-qr" aria-label="Authenticator setup QR code">{{ qr_svg|safe }}</div>
+            <div class="cw-onboarding-totp-col">
+              <div class="cw-onboarding-totp-step">
+                <p class="cw-onboarding-totp-label">1. Scan with your authenticator</p>
+                <p class="cw-onboarding-totp-hint">Use 1Password, Apple Passwords, or Google Authenticator, or enter the key manually:</p>
+                <div class="cw-onboarding-manual-key">
+                  <code data-testid="totp-secret" data-totp-secret-display data-masked="true" data-masked-text="{{ masked_secret }}" data-full-text="{{ grouped_secret }}" data-raw-secret="{{ secret }}">{{ masked_secret }}</code>
+                  <span class="cw-onboarding-manual-actions">
+                    <button class="cw-icon-button" type="button" data-totp-eye data-icons-href="/assets/codewire/icons-v2.svg" aria-label="Show setup key" aria-pressed="false">
+                      <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-eye"/></svg>
+                    </button>
+                    <button class="cw-icon-button" type="button" data-totp-copy data-icons-href="/assets/codewire/icons-v2.svg" aria-label="Copy setup key">
+                      <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-copy"/></svg>
+                    </button>
+                  </span>
+                </div>
+              </div>
+              <div class="cw-onboarding-totp-step">
+                <label class="cw-onboarding-totp-label" for="onboarding-totp-code">2. Enter 6-digit code</label>
+                <input class="cw-input cw-onboarding-totp-code" id="onboarding-totp-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" data-totp-code required autofocus>
+              </div>
+            </div>
+          </div>
+          <button class="cw-button cw-button--pill cw-button--large cw-onboarding-submit" type="submit" data-totp-submit>Enable two-factor authentication</button>
+        </form>
+        <div class="cw-onboarding-skip">
+          <form method="post" action="/setup-2fa/_actions/skip">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <input type="hidden" name="return_to" value="/{{ chrome.org_slug }}/onboarding/code">
+            <button class="cw-link-button" type="submit">Set up later</button>
+          </form>
+        </div>
+      </section>
+    {% include "onboarding-footer.html" %}
+  </body>
+</html>

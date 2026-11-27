@@ -19,6 +19,8 @@ pub(crate) const HTMX_PATH: &str = "/assets/codewire/htmx-2.0.10.min.js";
 pub(crate) const STYLE_PATH: &str = "/assets/codewire/design-v1.css";
 pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard-v1.css";
 pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
+pub(crate) const ONBOARDING_STYLE_PATH: &str = "/assets/codewire/routes/onboarding-v1.css";
+pub(crate) const ONBOARDING_SCRIPT_PATH: &str = "/assets/codewire/onboarding-v1.js";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v2.css";
 pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
 pub(crate) const LIVE_SCRIPT_PATH: &str = "/assets/codewire/live-v1.js";
@@ -92,6 +94,9 @@ const STYLES: &str = concat!(
 const DASHBOARD_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/dashboard.css");
 const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes/auth.css");
+const ONBOARDING_STYLES: &str =
+    include_str!("../../../packages/codewire-design/routes/onboarding.css");
+const ONBOARDING_SCRIPT: &str = include_str!("../../../packages/codewire-design/onboarding.js");
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
 const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
 const LIVE_SCRIPT: &str = include_str!("../../../packages/codewire-design/live.js");
@@ -201,6 +206,8 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     ),
     (DASHBOARD_STYLE_PATH, CSS, DASHBOARD_STYLES.as_bytes()),
     (AUTH_STYLE_PATH, CSS, AUTH_STYLES.as_bytes()),
+    (ONBOARDING_STYLE_PATH, CSS, ONBOARDING_STYLES.as_bytes()),
+    (ONBOARDING_SCRIPT_PATH, JS, ONBOARDING_SCRIPT.as_bytes()),
     (PUBLIC_STYLE_PATH, CSS, PUBLIC_STYLES.as_bytes()),
     (SETTINGS_STYLE_PATH, CSS, SETTINGS_STYLES.as_bytes()),
     (

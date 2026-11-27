@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bring your AI subscription · Codewire</title>
+    <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/onboarding-v1.css">
+  </head>
+  <body class="cw-body cw-onboarding-body" data-route="onboarding-ai">
+    {% include "onboarding-backdrop.html" %}
+      <section class="cw-onboarding-shell" aria-labelledby="onboarding-ai-title">
+        <header class="cw-onboarding-header">
+          <h1 id="onboarding-ai-title">Bring your AI subscription</h1>
+          <p class="cw-onboarding-subtitle">Connect Claude, Codex, or Antigravity to run agents on the plan you already pay for. Connected accounts are added to your default profile.</p>
+        </header>
+
+        <p class="cw-onboarding-trust">
+          <span class="cw-onboarding-trust-dot" aria-hidden="true"></span>
+          <span>Protected by Codewire’s credential proxy. Sandboxes never see your keys.</span>
+        </p>
+
+        <div class="cw-onboarding-providers">
+          <div class="cw-onboarding-provider-row">
+            <div>
+              <h2 class="cw-onboarding-provider-title">Claude</h2>
+              <p class="cw-onboarding-provider-desc">Use your Claude Pro or Max subscription with Claude Code.</p>
+            </div>
+            {% if claude_connected %}
+            <span class="cw-badge" data-tone="success">Connected</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">
+              <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-claude"/></svg>
+              <span>Connect Claude</span>
+            </a>
+            {% endif %}
+          </div>
+
+          <div class="cw-onboarding-provider-row">
+            <div>
+              <h2 class="cw-onboarding-provider-title">ChatGPT Codex</h2>
+              <p class="cw-onboarding-provider-desc">Use your ChatGPT subscription for Codex agents.</p>
+            </div>
+            {% if codex_connected %}
+            <span class="cw-badge" data-tone="success">Connected</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">
+              <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-openai"/></svg>
+              <span>Connect Codex</span>
+            </a>
+            {% endif %}
+          </div>
+
+          <div class="cw-onboarding-provider-row">
+            <div>
+              <h2 class="cw-onboarding-provider-title">Antigravity</h2>
+              <p class="cw-onboarding-provider-desc">Use your Google Antigravity subscription for agy agents.</p>
+            </div>
+            {% if antigravity_connected %}
+            <span class="cw-badge" data-tone="success">Connected</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">
+              <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-antigravity"/></svg>
+              <span>Connect Antigravity</span>
+            </a>
+            {% endif %}
+          </div>
+
+          <div class="cw-onboarding-provider-row">
+            <div>
+              <h2 class="cw-onboarding-provider-title">API key</h2>
+              <p class="cw-onboarding-provider-desc">Bring an Anthropic, OpenAI, or Gemini API key instead.</p>
+            </div>
+            {% if api_key_connected %}
+            <span class="cw-badge" data-tone="success">Key saved</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">
+              <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
+              <span>Add key</span>
+            </a>
+            {% endif %}
+          </div>
+        </div>
+
+        <form method="post" action="/{{ chrome.org_slug }}/onboarding/_actions/complete">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <button class="cw-button cw-button--pill cw-button--large cw-onboarding-submit" type="submit">Finish setup</button>
+        </form>
+        <div class="cw-onboarding-skip">
+          <form method="post" action="/{{ chrome.org_slug }}/onboarding/_actions/complete">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <button class="cw-link-button" type="submit">Skip for now</button>
+          </form>
+        </div>
+      </section>
+    {% include "onboarding-footer.html" %}
+  </body>
+</html>

@@ -36,26 +36,48 @@ pub(super) async fn dashboard(
     Query(query): Query<DashboardQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match dashboard_view(&state, &headers).await {
-        Ok(mut view) => {
-            let current = view
-                .organizations
-                .iter()
-                .find(|organization| organization.slug == query.org)
-                .or_else(|| view.organizations.first())
-                .map(OrganizationContext::from_row);
-            match current {
-                Some(organization) => {
-                    view.select_organization(&organization, Vec::new(), false);
-                    view.sandbox_rail_loading = true;
-                    render_page(AccountHomeTemplate { view: &view })
-                }
-                None => render_page(DashboardTemplate { view: &view }),
-            }
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(()) => return login_redirect(DASHBOARD_PATH, &headers),
+    };
+    let (identity, organizations) = identity_and_organizations(&state, &headers, cookie).await;
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(WebError::Unauthorized) => return login_redirect(DASHBOARD_PATH, &headers),
+        Err(error) => return error_page(error),
+    };
+    if !identity.onboarding_completed() {
+        let target = match organizations.ok().and_then(|list| list.into_iter().next()) {
+            Some(org) => format!("/{}/onboarding/plan", org.slug),
+            None => crate::routes::ONBOARDING_WORKSPACE_PATH.to_owned(),
+        };
+        return crate::response::redirect(target, &headers);
+    }
+    if let Err(WebError::TwoFactorRequired) = enforce_two_factor(&identity) {
+        return two_factor_redirect(DASHBOARD_PATH, &headers);
+    }
+    let organizations = match resolve_web(PageDependency::DashboardOrganizations, organizations) {
+        Ok(DependencyResult::Available(organizations)) => organizations,
+        Ok(DependencyResult::Unavailable) => {
+            unreachable!("required dashboard organizations cannot degrade")
         }
-        Err(WebError::Unauthorized) => login_redirect(DASHBOARD_PATH, &headers),
-        Err(WebError::TwoFactorRequired) => two_factor_redirect(DASHBOARD_PATH, &headers),
-        Err(error) => error_page(error),
+        Err(WebError::Unauthorized) => return login_redirect(DASHBOARD_PATH, &headers),
+        Err(error) => return error_page(error),
+    };
+    let mut view = build_dashboard_view(&state, &headers, identity, organizations);
+    let current = view
+        .organizations
+        .iter()
+        .find(|organization| organization.slug == query.org)
+        .or_else(|| view.organizations.first())
+        .map(OrganizationContext::from_row);
+    match current {
+        Some(organization) => {
+            view.select_organization(&organization, Vec::new(), false);
+            view.sandbox_rail_loading = true;
+            render_page(AccountHomeTemplate { view: &view })
+        }
+        None => render_page(DashboardTemplate { view: &view }),
     }
 }
 
@@ -120,11 +142,25 @@ pub(super) async fn dashboard_view(
             unreachable!("required dashboard organizations cannot degrade")
         }
     };
-    let has_organizations = !organizations.is_empty();
+    Ok(build_dashboard_view(
+        state,
+        headers,
+        identity,
+        organizations,
+    ))
+}
 
-    Ok(DashboardView {
-        account_id: identity.id.clone(),
-        user_name: identity.display_name().to_owned(),
+fn build_dashboard_view(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: IdentityUser,
+    organizations: Vec<OrganizationRow>,
+) -> DashboardView {
+    let has_organizations = !organizations.is_empty();
+    let user_name = identity.display_name().to_owned();
+    DashboardView {
+        account_id: identity.id,
+        user_name,
         csrf_token: PageCsrfToken::from_headers(headers),
         is_admin: identity.is_admin,
         organizations,
@@ -150,7 +186,7 @@ pub(super) async fn dashboard_view(
         sidebar_collapsed: sidebar_collapsed(headers),
         support_mailto: state.support_mailto.clone(),
         updates_enabled: state.updates.is_some(),
-    })
+    }
 }
 
 /// Load only the authenticated shell fields used by nested product routes.

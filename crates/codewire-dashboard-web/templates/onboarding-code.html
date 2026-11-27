@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Connect your code · Codewire</title>
+    <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/onboarding-v1.css">
+  </head>
+  <body class="cw-body cw-onboarding-body" data-route="onboarding-code">
+    {% include "onboarding-backdrop.html" %}
+      <section class="cw-onboarding-shell" aria-labelledby="onboarding-code-title">
+        <header class="cw-onboarding-header">
+          <h1 id="onboarding-code-title">Connect your code</h1>
+          <p class="cw-onboarding-subtitle">Give sandboxes access to clone private repositories and push pull requests.</p>
+        </header>
+        {% if !error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ error }}</div>{% endif %}
+        <div class="cw-onboarding-providers">
+          <div class="cw-onboarding-provider-row">
+            <div class="cw-onboarding-provider-left">
+              <div class="cw-onboarding-provider-icon" aria-hidden="true">
+                <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg>
+              </div>
+              <div>
+                <h2 class="cw-onboarding-provider-title">GitHub</h2>
+                <p class="cw-onboarding-provider-desc">Install the GitHub App to pick repositories and open PRs.</p>
+              </div>
+            </div>
+            {% if github_connected %}
+            <span class="cw-badge" data-tone="success">Connected</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">Connect</a>
+            {% endif %}
+          </div>
+
+          <div class="cw-onboarding-provider-row">
+            <div class="cw-onboarding-provider-left">
+              <div class="cw-onboarding-provider-icon" aria-hidden="true">
+                <svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg>
+              </div>
+              <div>
+                <h2 class="cw-onboarding-provider-title">SSH key</h2>
+                <p class="cw-onboarding-provider-desc">Works with GitLab, Bitbucket, Forgejo, or any Git host.</p>
+              </div>
+            </div>
+            {% if ssh_connected %}
+            <span class="cw-badge" data-tone="success">Key added</span>
+            {% else %}
+            <a class="cw-button cw-button--outline cw-button--small cw-button--pill" href="/settings/credentials/?scope=personal">Add key</a>
+            {% endif %}
+          </div>
+        </div>
+
+        <a class="cw-button cw-button--pill cw-button--large cw-onboarding-submit" href="/{{ chrome.org_slug }}/onboarding/ai">Continue</a>
+        <div class="cw-onboarding-skip">
+          <a class="cw-link-button" href="/{{ chrome.org_slug }}/onboarding/ai">Skip for now</a>
+        </div>
+      </section>
+    {% include "onboarding-footer.html" %}
+  </body>
+</html>

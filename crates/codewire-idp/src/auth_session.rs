@@ -169,6 +169,9 @@ pub(crate) struct UserResponse {
     /// once (`users.cli_signed_in_at`); signing the CLI out does not clear
     /// it. The dashboard's Get started checklist reads it.
     pub(crate) cli_signed_in: bool,
+    /// The account has completed (or predates) the first-run onboarding overlay
+    /// (`users.onboarding_completed_at IS NOT NULL`) (#6659).
+    pub(crate) onboarding_completed: bool,
     pub(crate) created_at: String,
 }
 
@@ -274,6 +277,8 @@ pub(crate) struct UserAuthRow {
     pub(crate) is_admin: Option<bool>,
     pub(crate) two_factor_enabled: Option<bool>,
     pub(crate) cli_signed_in: bool,
+    #[sqlx(default)]
+    pub(crate) onboarding_completed: bool,
     pub(crate) enabled: bool,
     pub(crate) locked_until: Option<NaiveDateTime>,
     pub(crate) created_at: Option<NaiveDateTime>,
@@ -312,6 +317,8 @@ struct ApiKeySessionRow {
     is_admin: Option<bool>,
     two_factor_enabled: Option<bool>,
     cli_signed_in: bool,
+    #[sqlx(default)]
+    onboarding_completed: bool,
     enabled: bool,
     locked_until: Option<NaiveDateTime>,
     created_at: Option<NaiveDateTime>,
@@ -740,6 +747,7 @@ pub(crate) fn user_response(r: UserAuthRow) -> UserResponse {
         is_admin: r.is_admin.unwrap_or(false),
         two_factor_enabled: r.two_factor_enabled.unwrap_or(false),
         cli_signed_in: r.cli_signed_in,
+        onboarding_completed: r.onboarding_completed,
         created_at: r.created_at.map(format_time).unwrap_or_default(),
     }
 }
@@ -837,6 +845,7 @@ fn pending_access_user_response(row: &PendingAccessSignupRow) -> UserResponse {
         two_factor_enabled: row.two_factor_enabled,
         // Waiting for review, so disabled: no device grant was redeemed.
         cli_signed_in: false,
+        onboarding_completed: false,
         created_at: format_time(row.created_at),
     }
 }
@@ -984,6 +993,7 @@ async fn sign_in_checked(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
                two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               onboarding_completed_at IS NOT NULL AS onboarding_completed,
                enabled, locked_until, created_at,
                email_vouched_by IS NOT NULL AS email_vouched
         FROM users WHERE email = $1
@@ -1210,6 +1220,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             SELECT ak.id AS key_id,
                    u.id, u.email, u.email_verified, u.name, u.image, u.is_admin,
                    u.two_factor_enabled, u.cli_signed_in_at IS NOT NULL AS cli_signed_in,
+                   u.onboarding_completed_at IS NOT NULL AS onboarding_completed,
                    u.enabled, u.locked_until, u.created_at
               FROM api_keys ak
               JOIN users u ON u.id = ak.user_id
@@ -1249,6 +1260,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             is_admin: row.is_admin,
             two_factor_enabled: row.two_factor_enabled,
             cli_signed_in: row.cli_signed_in,
+            onboarding_completed: row.onboarding_completed,
             enabled: row.enabled,
             locked_until: row.locked_until,
             created_at: row.created_at,
@@ -1302,6 +1314,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
                two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               onboarding_completed_at IS NOT NULL AS onboarding_completed,
                enabled, locked_until, created_at
         FROM users WHERE id = $1 AND enabled
         "#,
@@ -1333,6 +1346,67 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
         skip_2fa_setup,
     })
     .into_response()
+}
+
+#[derive(Serialize, JsonSchema)]
+struct CompleteOnboardingBody {
+    completed: bool,
+}
+
+/// `POST /api/auth/complete-onboarding` (browser session + exact `Origin`
+/// required). Marks the signed-in account's first-run onboarding overlay
+/// complete (`users.onboarding_completed_at`) idempotently (#6659).
+async fn complete_onboarding(
+    State(state): State<SessionAuthState>,
+    headers: HeaderMap,
+) -> Response {
+    session_inventory::private(complete_onboarding_inner(&state, &headers).await)
+}
+
+async fn complete_onboarding_inner(
+    state: &SessionAuthState,
+    headers: &HeaderMap,
+) -> Result<Json<CompleteOnboardingBody>, AppError> {
+    session_inventory::exact_origin(headers, &state.frontend_url)?;
+    let token = session_cookie(headers).ok_or(AppError::Unauthorized)?;
+    let token_hash = hash_session_token(&token);
+    let user_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT s.user_id
+          FROM sessions s
+          JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1
+           AND s.expires_at > NOW()
+           AND u.enabled
+           AND (u.locked_until IS NULL OR u.locked_until <= NOW())
+        "#,
+    )
+    .bind(&token_hash)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to resolve session for complete-onboarding");
+        AppError::InternalMsg("Failed to complete onboarding".into())
+    })?;
+    let Some(user_id) = user_id else {
+        return Err(AppError::Unauthorized);
+    };
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET onboarding_completed_at = COALESCE(onboarding_completed_at, NOW()),
+               updated_at = NOW()
+         WHERE id = $1
+        "#,
+    )
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, user_id = %user_id, "failed to mark onboarding complete");
+        AppError::InternalMsg("Failed to complete onboarding".into())
+    })?;
+    Ok(Json(CompleteOnboardingBody { completed: true }))
 }
 
 /// Attach a `Set-Cookie` header to a JSON response. Falls back to the
@@ -1476,6 +1550,7 @@ fn router_with_state(state: SessionAuthState) -> Router {
         .route("/api/auth/sign-in", post(sign_in))
         .route("/api/auth/sign-out", post(sign_out))
         .route("/api/auth/get-session", get(get_session))
+        .route("/api/auth/complete-onboarding", post(complete_onboarding))
         .merge(session_inventory::router())
         .merge(user_token_inventory::router())
         .with_state(state)
@@ -1783,6 +1858,7 @@ mod tests {
                 is_admin: false,
                 two_factor_enabled: false,
                 cli_signed_in: false,
+                onboarding_completed: false,
                 created_at: "2021-01-01T00:00:00Z".into(),
             },
             session: SessionResponse {
@@ -1871,5 +1947,46 @@ mod tests {
 
         let response = get_session(State(state), headers).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn complete_onboarding_requires_exact_origin_and_sets_no_store() {
+        let pool = PgPool::connect_lazy("postgres://localhost/none").unwrap();
+        pool.close().await;
+        let state = SessionAuthState {
+            pool,
+            secure: false,
+            signup_invite_policy: SignupInvitePolicy::open(),
+            frontend_url: "https://app.codewire.test".into(),
+            email: EmailClient::disabled(),
+            human_verification: HumanVerification::TrustedTest,
+            turnstile_bypass_email: String::new(),
+            client_address_key: "synthetic-client-address-key".into(),
+            http: reqwest::Client::new(),
+            operator_email: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "codewire.session_token=synthetic-session".parse().unwrap(),
+        );
+        // Missing Origin header must be rejected before hitting DB, with no-store + Vary: Cookie.
+        let missing = complete_onboarding(State(state.clone()), headers.clone()).await;
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            missing.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(missing.headers().get(header::VARY).unwrap(), "Cookie");
+
+        // Wrong Origin header must also be rejected with no-store + Vary: Cookie.
+        headers.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let wrong = complete_onboarding(State(state), headers).await;
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            wrong.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert_eq!(wrong.headers().get(header::VARY).unwrap(), "Cookie");
     }
 }

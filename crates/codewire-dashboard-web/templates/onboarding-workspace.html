@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Name your organization · Codewire</title>
+    <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/onboarding-v1.css">
+    <script src="/assets/codewire/onboarding-v1.js" defer></script>
+  </head>
+  <body class="cw-body cw-onboarding-body" data-route="onboarding-workspace">
+    {% include "onboarding-backdrop.html" %}
+      <section class="cw-onboarding-shell" aria-labelledby="onboarding-workspace-title">
+        <header class="cw-onboarding-header">
+          <h1 id="onboarding-workspace-title">Name your organization</h1>
+          <p class="cw-onboarding-subtitle">This is your team’s home for cloud sandboxes, shared secrets, and billing.</p>
+        </header>
+        {% if !form.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>{% endif %}
+        <form class="cw-onboarding-form" method="post" action="/onboarding/workspace/_actions/create">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <div class="cw-field">
+            <label class="cw-label" for="org-name">Organization name</label>
+            <input class="cw-input" id="org-name" name="name" type="text" value="{{ form.name }}" placeholder="Acme, Inc." data-onboarding-org-name required autofocus{% if !form.name_error.is_empty() %} aria-invalid="true" aria-describedby="org-name-error"{% endif %}>
+            {% if !form.name_error.is_empty() %}<p class="cw-field-error" id="org-name-error">{{ form.name_error }}</p>{% endif %}
+          </div>
+          <div class="cw-field">
+            <label class="cw-label" for="org-slug">Organization URL</label>
+            <div class="cw-input-group cw-mono">
+              <span aria-hidden="true">codewire.sh/</span>
+              <input class="cw-input" id="org-slug" name="slug" type="text" value="{{ form.slug }}" placeholder="your-org" autocomplete="off" autocapitalize="none" spellcheck="false" data-onboarding-org-slug required{% if !form.slug_error.is_empty() %} aria-invalid="true" aria-describedby="org-slug-error"{% endif %}>
+            </div>
+            {% if !form.slug_error.is_empty() %}<p class="cw-field-error" id="org-slug-error">{{ form.slug_error }}</p>{% endif %}
+          </div>
+          <button class="cw-button cw-button--pill cw-button--large cw-onboarding-submit" type="submit">Continue</button>
+        </form>
+      </section>
+    {% include "onboarding-footer.html" %}
+  </body>
+</html>

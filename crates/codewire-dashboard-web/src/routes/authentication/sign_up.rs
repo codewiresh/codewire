@@ -140,11 +140,12 @@ pub(in crate::routes) async fn signup_action(
         });
     }
     let completion = completion_target(&form.auth_request_id, &form.return_to);
-    forward_session_cookies(
-        redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
-        &identity,
-        &state.public_origin,
-    )
+    let next = if completion == crate::routes::DASHBOARD_PATH {
+        crate::routes::ONBOARDING_WORKSPACE_PATH.to_owned()
+    } else {
+        auth_url_for_target("/setup-2fa", &completion)
+    };
+    forward_session_cookies(redirect(next, &headers), &identity, &state.public_origin)
 }
 
 /// `/signup/complete`: the last step of a provider sign-up for an email with
@@ -235,11 +236,13 @@ pub(in crate::routes) async fn signup_complete_action(
         ),
         (status, Some(body)) if status.is_success() => {
             let completion = completion_target(&body.auth_request_id, &body.return_to);
-            let response = forward_session_cookies(
-                redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
-                &identity,
-                &state.public_origin,
-            );
+            let next = if completion == crate::routes::DASHBOARD_PATH {
+                crate::routes::ONBOARDING_WORKSPACE_PATH.to_owned()
+            } else {
+                auth_url_for_target("/setup-2fa", &completion)
+            };
+            let response =
+                forward_session_cookies(redirect(next, &headers), &identity, &state.public_origin);
             with_response_cookie(response, clear)
         }
         (StatusCode::NOT_FOUND, _) => expired_oauth_signup(&state),

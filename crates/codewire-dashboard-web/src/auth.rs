@@ -10,6 +10,10 @@ struct IdentityEnvelope {
     skip_2fa_setup: bool,
 }
 
+fn default_onboarding_completed() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct IdentityUser {
     pub(crate) id: String,
@@ -25,6 +29,11 @@ pub(crate) struct IdentityUser {
     /// once. An identity provider that does not say is read as not yet.
     #[serde(default)]
     cli_signed_in: bool,
+    /// Whether the account has finished (or predates) first-run onboarding (#6659).
+    /// Defaults to `true` when omitted so older IdP responses and existing test
+    /// fixtures keep landing directly on the dashboard.
+    #[serde(default = "default_onboarding_completed")]
+    onboarding_completed: bool,
     #[serde(default)]
     created_at: String,
     #[serde(skip)]
@@ -53,6 +62,10 @@ impl IdentityUser {
 
     pub(crate) fn cli_signed_in(&self) -> bool {
         self.cli_signed_in
+    }
+
+    pub(crate) fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed
     }
 
     pub(crate) fn created_at(&self) -> &str {
@@ -201,6 +214,7 @@ mod tests {
             two_factor_enabled: false,
             email_verified: false,
             cli_signed_in: false,
+            onboarding_completed: true,
             created_at: String::new(),
             skip_2fa_setup: false,
         };

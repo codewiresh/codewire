@@ -40,17 +40,11 @@ provider; it does not imply endorsement. See
 "Continue with GitHub" uses the sprite's existing outline `icon-github`, the
 same symbol the credentials pages use for GitHub.
 
-## Codex
+## Codex, Claude, OpenAI and Antigravity
 
-`codex.svg` is the unmodified monochrome Codex mark downloaded from
-[Lobe Icons](https://github.com/lobehub/lobe-icons/blob/63c800e3db6427b3f156f7b88d426ccb3f7277a1/packages/static-svg/icons/codex.svg)
-on 18 September 2026. `icons.svg#icon-codex` embeds the same path and viewBox
-in our shared sprite, with explicit fill and no stroke to preserve the artwork.
-Both the credential inventory and chooser use that symbol.
+`codex.svg` and `icons.svg#icon-codex`, `icons.svg#icon-claude`, `icons.svg#icon-openai`, and `icons.svg#icon-antigravity` embed unmodified monochrome vector marks from [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT license below), with explicit `fill="currentColor"` and no stroke to preserve each provider's artwork.
 
-This is a community-maintained vector asset, not an OpenAI-provided download.
-The Codex name and mark belong to OpenAI. This use identifies the provider;
-it does not imply endorsement. See [OpenAI's brand guidelines](https://openai.com/brand/).
+These are community-maintained vector assets, not provider-distributed downloads. The Claude name and mark belong to Anthropic; OpenAI and Codex belong to OpenAI; Antigravity belongs to Google LLC. This use identifies each compatible provider and does not imply endorsement.
 
 Upstream asset license:
 

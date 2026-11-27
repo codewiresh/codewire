@@ -361,6 +361,7 @@ async fn create_account(
             is_admin: false,
             two_factor_enabled: false,
             cli_signed_in: false,
+            onboarding_completed: false,
             created_at: format_time(created_at),
         },
         admission,
@@ -444,6 +445,7 @@ mod tests {
             is_admin: false,
             two_factor_enabled: false,
             cli_signed_in: false,
+            onboarding_completed: false,
             created_at: String::new(),
         };
 

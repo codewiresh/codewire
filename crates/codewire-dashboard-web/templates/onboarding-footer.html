@@ -1,0 +1,19 @@
+      <div class="cw-onboarding-stepper" aria-label="Step {{ chrome.step }} of 5">
+        <span class="cw-onboarding-step-dot"{% if chrome.step == 1 %} data-state="current"{% else if chrome.step > 1 %} data-state="done"{% endif %}></span>
+        <span class="cw-onboarding-step-dot"{% if chrome.step == 2 %} data-state="current"{% else if chrome.step > 2 %} data-state="done"{% endif %}></span>
+        <span class="cw-onboarding-step-dot"{% if chrome.step == 3 %} data-state="current"{% else if chrome.step > 3 %} data-state="done"{% endif %}></span>
+        <span class="cw-onboarding-step-dot"{% if chrome.step == 4 %} data-state="current"{% else if chrome.step > 4 %} data-state="done"{% endif %}></span>
+        <span class="cw-onboarding-step-dot"{% if chrome.step == 5 %} data-state="current"{% endif %}></span>
+      </div>
+    </main>
+    <footer class="cw-onboarding-footer" aria-label="Account actions">
+      <div class="cw-onboarding-footer-links">
+        <form method="post" action="/settings/_actions/sign-out">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <button class="cw-onboarding-footer-action" type="submit">Sign out</button>
+        </form>
+        {% if !chrome.org_slug.is_empty() %}<a class="cw-onboarding-danger" href="/{{ chrome.org_slug }}/settings/">Delete organization</a>{% endif %}
+        <a class="cw-onboarding-danger" href="/settings/delete-account/">Delete account</a>
+      </div>
+      <div>Signed in as {{ chrome.email }}</div>
+    </footer>

@@ -24,6 +24,7 @@ mod invitations;
 mod live_events;
 mod my_invitations;
 pub(crate) mod network_policies;
+mod onboarding;
 mod organization_context;
 mod organization_governance;
 mod organizations;
@@ -58,6 +59,7 @@ pub(crate) const ORGANIZATIONS_FRAGMENT_PATH: &str = "/dashboard/_fragments/orga
 pub(crate) const ACCOUNT_OVERVIEW_FRAGMENT_PATH: &str = "/dashboard/_fragments/overview";
 pub(crate) const NEW_ORGANIZATION_PATH: &str = "/organizations/new/";
 pub(crate) const CREATE_ORGANIZATION_ACTION_PATH: &str = "/organizations/_actions/create";
+pub(crate) const ONBOARDING_WORKSPACE_PATH: &str = "/onboarding/workspace";
 
 use organization_context::remember as remember_organization_choice;
 pub(crate) use organization_context::remember_organization;
@@ -66,6 +68,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .merge(public_routes())
         .merge(account_routes())
+        .merge(onboarding_routes())
         .merge(admin_routes())
         .merge(settings_routes())
         .merge(credentials_routes())
@@ -174,6 +177,39 @@ fn account_routes() -> Router<AppState> {
             post(organizations::create_organization),
         )
         .route("/_events/live", get(live_events::events))
+}
+
+fn onboarding_routes() -> Router<AppState> {
+    Router::new()
+        .route("/onboarding/workspace", get(onboarding::workspace_page))
+        .route(
+            "/onboarding/workspace/_actions/create",
+            post(onboarding::create_workspace_action).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route("/{slug}/onboarding/plan", get(onboarding::plan_page))
+        .route(
+            "/{slug}/onboarding/plan/_actions/choose",
+            post(onboarding::choose_plan_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/onboarding/plan/_actions/payg-card-begin",
+            post(onboarding::payg_card_begin_action).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/{slug}/onboarding/plan/_actions/payg-card-finish",
+            post(onboarding::payg_card_finish_action).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/{slug}/onboarding/plan/return",
+            get(onboarding::plan_return),
+        )
+        .route("/{slug}/onboarding/2fa", get(onboarding::two_factor_page))
+        .route("/{slug}/onboarding/code", get(onboarding::code_page))
+        .route("/{slug}/onboarding/ai", get(onboarding::ai_page))
+        .route(
+            "/{slug}/onboarding/_actions/complete",
+            post(onboarding::complete_action).layer(DefaultBodyLimit::max(2048)),
+        )
 }
 
 fn admin_routes() -> Router<AppState> {

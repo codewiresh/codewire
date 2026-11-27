@@ -1137,6 +1137,7 @@ async fn sign_in_gates(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
                two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               onboarding_completed_at IS NOT NULL AS onboarding_completed,
                enabled, locked_until, created_at
           FROM users WHERE id = $1
         "#,

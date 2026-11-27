@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Choose a plan · Codewire</title>
+    <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/onboarding-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+    <script src="/assets/codewire/live-v1.js" defer></script>
+    {% if !stripe_publishable_key.is_empty() %}<script src="/assets/codewire/billing-cards-v1.js" defer></script>{% endif %}
+  </head>
+  <body class="cw-body cw-onboarding-body" data-route="onboarding-plan" data-dashboard-app>
+    {% include "onboarding-backdrop.html" %}
+      <section class="cw-onboarding-shell cw-onboarding-shell--wide" aria-labelledby="onboarding-plan-title">
+        <header class="cw-onboarding-header">
+          <h1 id="onboarding-plan-title">Choose a plan to unlock Cloud</h1>
+          <p class="cw-onboarding-subtitle">Every plan includes monthly cloud compute. Local VMs stay free forever.</p>
+        </header>
+        {% if !error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ error }}</div>{% endif %}
+        <div class="cw-onboarding-plans">
+          <article class="cw-onboarding-plan">
+            <div class="cw-onboarding-plan-body">
+              <div class="cw-onboarding-plan-head">
+                <h2 class="cw-onboarding-plan-name">Pro</h2>
+                <div class="cw-onboarding-plan-price"><span class="cw-onboarding-plan-amount">$40</span><span class="cw-onboarding-plan-unit">/ month</span></div>
+              </div>
+              <ul class="cw-onboarding-plan-meta">
+                <li><strong>$100/mo compute</strong></li>
+                <li>Up to 10 sandboxes</li>
+                <li>8 vCPU, 16 GB RAM</li>
+                <li>Up to 5 teammates</li>
+              </ul>
+            </div>
+            <form class="cw-onboarding-plan-action" method="post" action="/{{ chrome.org_slug }}/onboarding/plan/_actions/choose">
+              <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+              <input type="hidden" name="plan" value="pro">
+              <button class="cw-button cw-button--outline cw-button--pill" type="submit">Choose Pro</button>
+            </form>
+          </article>
+
+          <article class="cw-onboarding-plan cw-onboarding-plan--featured">
+            <div class="cw-onboarding-plan-body">
+              <div class="cw-onboarding-plan-head">
+                <h2 class="cw-onboarding-plan-name">Max</h2>
+                <div class="cw-onboarding-plan-price"><span class="cw-onboarding-plan-amount">$100</span><span class="cw-onboarding-plan-unit">/ month</span></div>
+                <span class="cw-badge" data-tone="success">Recommended</span>
+              </div>
+              <ul class="cw-onboarding-plan-meta">
+                <li><strong>$250/mo compute</strong></li>
+                <li>Unlimited sandboxes</li>
+                <li>16 vCPU, 32 GB RAM</li>
+                <li>Unlimited teammates</li>
+              </ul>
+            </div>
+            <form class="cw-onboarding-plan-action" method="post" action="/{{ chrome.org_slug }}/onboarding/plan/_actions/choose">
+              <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+              <input type="hidden" name="plan" value="max">
+              <button class="cw-button cw-button--success cw-button--pill" type="submit">Choose Max</button>
+            </form>
+          </article>
+
+          <article class="cw-onboarding-plan">
+            <div class="cw-onboarding-plan-body">
+              <div class="cw-onboarding-plan-head">
+                <h2 class="cw-onboarding-plan-name">Pay as you go</h2>
+                <div class="cw-onboarding-plan-price"><span class="cw-onboarding-plan-amount">$0</span><span class="cw-onboarding-plan-unit">/ month</span></div>
+              </div>
+              <ul class="cw-onboarding-plan-meta">
+                <li><strong>Pay per second</strong></li>
+                <li>Up to 3 sandboxes</li>
+                <li>No monthly fee</li>
+                <li>Card required</li>
+              </ul>
+            </div>
+            {% if !billing_enabled || has_payment_method || stripe_publishable_key.is_empty() %}
+            <form class="cw-onboarding-plan-action" method="post" action="/{{ chrome.org_slug }}/onboarding/plan/_actions/choose">
+              <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+              <input type="hidden" name="plan" value="payg">
+              <button class="cw-button cw-button--outline cw-button--pill" type="submit">Choose PAYG</button>
+            </form>
+            {% else %}
+            <div class="cw-onboarding-plan-action">
+              <button class="cw-button cw-button--outline cw-button--pill" type="button" data-dialog-open="payg-card-dialog">Choose PAYG</button>
+            </div>
+            {% endif %}
+          </article>
+        </div>
+
+        <p class="cw-onboarding-enterprise">Need higher concurrency, self-hosted support, or SSO? <a href="mailto:hello@codewire.sh">Contact us</a></p>
+      </section>
+    {% include "onboarding-footer.html" %}
+    {% if billing_enabled && !has_payment_method && !stripe_publishable_key.is_empty() %}
+    <dialog class="cw-dialog" id="payg-card-dialog" data-dialog aria-labelledby="payg-card-title">
+      <form class="cw-card-form" method="dialog" data-card-form data-card-dialog>
+        <header class="cw-dialog-header">
+          <h2 id="payg-card-title">Add a card for Pay as you go</h2>
+          <p class="cw-muted">No monthly fee. Add a card with $20 automatic top-up so cloud sandboxes can run per second.</p>
+        </header>
+        <div class="cw-dialog-body">
+          <p class="cw-alert cw-alert--warning" role="alert" data-card-declined hidden></p>
+          <div class="cw-card-element" data-card-element></div>
+          <p class="cw-field-error" role="alert" data-card-error hidden></p>
+          <div class="cw-top-up-line">
+            <input class="cw-switch" type="checkbox" role="switch" id="payg-top-up" name="top_up" value="true" data-card-top-up checked>
+            <label class="cw-label" for="payg-top-up">Automatic top-up ($20)</label>
+            <input type="hidden" name="top_up_amount" value="20" data-card-top-up-amount>
+          </div>
+          <p class="cw-muted" role="status" data-card-status hidden></p>
+        </div>
+        <footer class="cw-dialog-actions">
+          <button class="cw-button cw-button--outline" type="button" data-dialog-close data-card-cancel>Cancel</button>
+          <button class="cw-button" type="submit" data-card-submit>Save card &amp; continue</button>
+        </footer>
+      </form>
+    </dialog>
+    <div hidden data-card-setup data-card-stripe="https://js.stripe.com/v3/" data-card-key="{{ stripe_publishable_key }}" data-card-begin="/{{ chrome.org_slug }}/onboarding/plan/_actions/payg-card-begin" data-card-finish="/{{ chrome.org_slug }}/onboarding/plan/_actions/payg-card-finish"><input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}"></div>
+    {% endif %}
+  </body>
+</html>

@@ -70,10 +70,16 @@
   --light-focus-ring: #0048bd;
   --dark-success: #3fb950;
   --light-success: #116329;
+  --dark-success-hover: #4cc85d;
+  --light-success-hover: #0d4f20;
   --dark-success-muted: rgba(63, 185, 80, 0.12);
   --light-success-muted: rgba(17, 99, 41, 0.1);
   --dark-success-border: rgba(63, 185, 80, 0.35);
   --light-success-border: rgba(17, 99, 41, 0.35);
+  --dark-onboarding-card-glow: radial-gradient(120% 80% at 50% 0%, rgba(63, 185, 80, 0.14) 0%, rgba(19, 19, 19, 0) 68%);
+  --light-onboarding-card-glow: radial-gradient(120% 80% at 50% 0%, rgba(17, 99, 41, 0.09) 0%, rgba(247, 247, 245, 0) 68%);
+  --dark-onboarding-scrim: radial-gradient(circle at 50% 45%, rgba(0, 0, 0, 0.48) 0%, rgba(0, 0, 0, 0.82) 100%);
+  --light-onboarding-scrim: radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.58) 0%, rgba(247, 247, 245, 0.88) 100%);
   --dark-warning: #d29922;
   --light-warning: #7a4f00;
   --dark-warning-muted: rgba(210, 153, 34, 0.12);
@@ -159,8 +165,11 @@
   --focus-ring: var(--dark-focus-ring);
 
   --success: var(--dark-success);
+  --success-hover: var(--dark-success-hover);
   --success-muted: var(--dark-success-muted);
   --success-border: var(--dark-success-border);
+  --onboarding-card-glow: var(--dark-onboarding-card-glow);
+  --onboarding-scrim: var(--dark-onboarding-scrim);
   --warning: var(--dark-warning);
   --warning-muted: var(--dark-warning-muted);
   --warning-border: var(--dark-warning-border);
@@ -314,6 +323,18 @@
   --content-default: 56rem;
   --content-wide: 76rem;
   --content-page: 80rem;
+  /* Onboarding overlay and monthly compute allowance meter (#6659). */
+  --onboarding-shell-width: 35rem;
+  --onboarding-shell-wide: 36.25rem;
+  --onboarding-step-dot: 0.4375rem;
+  --onboarding-step-dot-active: 1.75rem;
+  --onboarding-qr-size: 8.25rem;
+  --onboarding-wordmark-height: 1.75rem;
+  --onboarding-backdrop-sidebar: 14.375rem;
+  --onboarding-plan-col: 9.5rem;
+  --onboarding-trust-dot: 0.375rem;
+  --onboarding-corner-mark: 0.625rem;
+  --meter-height: 0.5rem;
 
   --icon-chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --icon-chevron-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -322,8 +343,8 @@
 }
 
 /* Light: the system asks for it and the visitor has not chosen dark, or the visitor chose light. */
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; } }
-:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-hover: var(--light-success-hover); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --onboarding-card-glow: var(--light-onboarding-card-glow); --onboarding-scrim: var(--light-onboarding-scrim); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; } }
+:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-composer: var(--light-bg-composer); --bg-composer-pill: var(--light-bg-composer-pill); --bg-composer-pill-hover: var(--light-bg-composer-pill-hover); --bg-composer-menu: var(--light-bg-composer-menu); --bg-composer-selected: var(--light-bg-composer-selected); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-hover: var(--light-success-hover); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --onboarding-card-glow: var(--light-onboarding-card-glow); --onboarding-scrim: var(--light-onboarding-scrim); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; }
 
 /* Geist Mono, shared with the public site: one variable file with the box-drawing
    and block characters the terminal needs. */
@@ -582,6 +603,17 @@
 }
 
 .cw-button--accent:hover { background: var(--button-accent-hover); }
+
+.cw-button--success {
+  border-color: var(--success);
+  background: var(--success);
+  color: var(--fg-inverse);
+}
+
+.cw-button--success:hover {
+  border-color: var(--success-hover);
+  background: var(--success-hover);
+}
 
 .cw-button--outline {
   border-color: var(--border);

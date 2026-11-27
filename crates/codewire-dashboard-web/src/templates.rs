@@ -548,3 +548,58 @@ pub(crate) struct EnvironmentPortsTemplate<'a> {
 pub(crate) struct ErrorTemplate<'a> {
     pub(crate) message: &'a str,
 }
+
+/// Shared chrome rendered across the 5-step first-run onboarding overlay (#6659).
+pub(crate) struct OnboardingChrome {
+    pub(crate) step: u8,
+    pub(crate) email: String,
+    pub(crate) org_slug: String,
+    pub(crate) csrf_token: String,
+}
+
+#[derive(Template)]
+#[template(path = "onboarding-workspace.html")]
+pub(crate) struct OnboardingWorkspaceTemplate<'a> {
+    pub(crate) chrome: &'a OnboardingChrome,
+    pub(crate) form: &'a OrganizationFormView,
+}
+
+#[derive(Template)]
+#[template(path = "onboarding-plan.html")]
+pub(crate) struct OnboardingPlanTemplate<'a> {
+    pub(crate) chrome: &'a OnboardingChrome,
+    pub(crate) billing_enabled: bool,
+    pub(crate) has_payment_method: bool,
+    pub(crate) stripe_publishable_key: &'a str,
+    pub(crate) error: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "onboarding-two-factor.html")]
+pub(crate) struct OnboardingTwoFactorTemplate<'a> {
+    pub(crate) chrome: &'a OnboardingChrome,
+    pub(crate) qr_svg: &'a str,
+    pub(crate) secret: &'a str,
+    pub(crate) grouped_secret: &'a str,
+    pub(crate) masked_secret: &'a str,
+    pub(crate) error: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "onboarding-code.html")]
+pub(crate) struct OnboardingCodeTemplate<'a> {
+    pub(crate) chrome: &'a OnboardingChrome,
+    pub(crate) github_connected: bool,
+    pub(crate) ssh_connected: bool,
+    pub(crate) error: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "onboarding-ai.html")]
+pub(crate) struct OnboardingAiTemplate<'a> {
+    pub(crate) chrome: &'a OnboardingChrome,
+    pub(crate) claude_connected: bool,
+    pub(crate) codex_connected: bool,
+    pub(crate) antigravity_connected: bool,
+    pub(crate) api_key_connected: bool,
+}
