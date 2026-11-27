@@ -6,11 +6,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
 <title>Pricing — Codewire</title>
-<meta name="description" content="Local VMs are free forever. Cloud VMs bill per second, only while they run, with no plans and no seats.">
+<meta name="description" content="Local VMs are free forever. Cloud plans include monthly compute allowances and per-second billing in USD.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Codewire">
 <meta property="og:title" content="Pricing — Codewire">
-<meta property="og:description" content="Local VMs are free forever. Cloud VMs bill per second, only while they run, with no plans and no seats.">
+<meta property="og:description" content="Local VMs are free forever. Cloud plans include monthly compute allowances and per-second billing in USD.">
 <meta property="og:url" content="https://codewire.sh/pricing">
 <meta property="og:image" content="https://codewire.sh/assets/codewire/share-1200x630-v1.png">
 <meta property="og:image:width" content="1200">
@@ -56,7 +56,7 @@
     </div>
     <div class="grid ptitle">
       <h1 id="pricing-title">Pricing</h1>
-      <p class="lede">Local VMs are free forever. <span>Cloud VMs bill per second, only while they run, with no plans and no seats.</span></p>
+      <p class="lede">Local VMs are free forever. <span>Cloud plans include monthly compute allowances, with transparent per-second billing in USD.</span></p>
     </div>
   </section>
 
@@ -84,19 +84,41 @@
         </article>
       </li>
       <li class="plan panel">
-        <article aria-labelledby="plan-cloud-title">
-          <header class="plan-title"><h3 id="plan-cloud-title">Cloud</h3><p class="plan-price">Pay as you go</p></header>
-          <p class="copy">Pay only while your sandboxes run.</p>
-          <a class="btn" href="/signup">Request access <span aria-hidden="true">→</span></a>
+        <article aria-labelledby="plan-payg-title">
+          <header class="plan-title"><h3 id="plan-payg-title">Pay as you go</h3><p class="plan-price">$0 / month</p></header>
+          <p class="copy">Pay per second, only while your sandboxes run. Card required.</p>
+          <a class="btn" href="/signup">Start with PAYG <span aria-hidden="true">→</span></a>
           <ul class="feats">
-            <li>10 sandboxes included</li>
-            <li>2 vCPU · 8 GB RAM · 100 GB disk</li>
-            <li>Credential proxy</li>
-            <li>Preview URLs for any service</li>
-            <li>Agent relay built in</li>
-            <li>SSH in from any device</li>
-            <li>GitHub, Claude Code and Codex integrated by default</li>
-            <li>And much more: <a href="/docs">read the docs</a></li>
+            <li>Up to 3 concurrent sandboxes</li>
+            <li>Up to 8 vCPU · 16 GB RAM · 100 GB disk</li>
+            <li>Credential proxy and preview URLs</li>
+            <li>No monthly fee</li>
+          </ul>
+        </article>
+      </li>
+      <li class="plan panel">
+        <article aria-labelledby="plan-pro-title">
+          <header class="plan-title"><h3 id="plan-pro-title">Pro</h3><p class="plan-price">$40 / month</p></header>
+          <p class="copy">$100/mo of included cloud compute every billing cycle, then pay per second.</p>
+          <a class="btn" href="/signup">Choose Pro <span aria-hidden="true">→</span></a>
+          <ul class="feats">
+            <li>$100/mo included compute allowance</li>
+            <li>Up to 10 concurrent sandboxes</li>
+            <li>Up to 8 vCPU · 16 GB RAM · 100 GB disk</li>
+            <li>Up to 5 teammates</li>
+          </ul>
+        </article>
+      </li>
+      <li class="plan panel">
+        <article aria-labelledby="plan-max-title">
+          <header class="plan-title"><h3 id="plan-max-title">Max · Recommended</h3><p class="plan-price">$100 / month</p></header>
+          <p class="copy">$250/mo of included cloud compute every billing cycle, with unlimited sandboxes and teammates.</p>
+          <a class="btn" href="/signup">Choose Max <span aria-hidden="true">→</span></a>
+          <ul class="feats">
+            <li>$250/mo included compute allowance</li>
+            <li>Unlimited concurrent sandboxes</li>
+            <li>Up to 16 vCPU · 32 GB RAM · 200 GB disk</li>
+            <li>Unlimited teammates</li>
           </ul>
         </article>
       </li>

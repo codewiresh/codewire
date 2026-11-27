@@ -72,6 +72,28 @@ dl.cw-stat-grid { margin: 0; }
 .cw-balance-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: var(--space-3); padding: 0 var(--space-1); }
 .cw-balance-head p { margin: 0; }
 .cw-balance { font-size: var(--text-page); font-weight: var(--weight-semibold); }
+/* Monthly plan card at the top of Billing (#6659). */
+.cw-plan-card { display: grid; gap: var(--space-4); }
+.cw-plan-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-plan-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.cw-plan-title-row h2 { margin: 0; font-size: var(--text-page); font-weight: var(--weight-semibold); line-height: var(--leading-tight); }
+.cw-plan-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.cw-plan-actions form { margin: 0; }
+.cw-plan-summary { display: grid; gap: var(--space-1); }
+.cw-plan-summary p { margin: 0; color: var(--fg-secondary); font-size: var(--text-body); }
+.cw-plan-summary p + p { color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-plan-meter-wrap { display: grid; gap: var(--space-2); }
+.cw-plan-meter-labels { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); color: var(--fg-secondary); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
+.cw-plan-meter { display: block; width: 100%; height: var(--meter-height); overflow: hidden; border: 0; border-radius: var(--radius-pill); background: var(--border); appearance: none; }
+.cw-plan-meter::-webkit-progress-bar { border-radius: var(--radius-pill); background: var(--border); }
+.cw-plan-meter::-webkit-progress-value { border-radius: var(--radius-pill); background: var(--success); }
+.cw-plan-meter::-moz-progress-bar { border-radius: var(--radius-pill); background: var(--success); }
+.cw-plan-switch-list { display: grid; gap: var(--space-2); }
+.cw-plan-switch-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); }
+.cw-plan-switch-row--featured { border-color: var(--success-border); background: var(--onboarding-card-glow), var(--bg-surface); }
+.cw-plan-switch-row form { margin: 0; }
+.cw-plan-switch-info { display: grid; gap: var(--space-0-5); }
+.cw-plan-switch-info p { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); }
 /* Payment methods: the heading and its description on the left, Add card on the right. */
 .cw-billing-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .cw-billing-heading-help { display: flex; align-items: center; gap: var(--space-2); }

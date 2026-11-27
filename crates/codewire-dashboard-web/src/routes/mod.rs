@@ -595,6 +595,14 @@ fn organization_governance_routes() -> Router<AppState> {
             "/{slug}/billing/_actions/add-credit",
             post(billing::add_credit),
         )
+        .route(
+            "/{slug}/billing/_actions/switch-plan",
+            post(billing::switch_plan).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/billing/_actions/portal",
+            post(billing::portal_session).layer(DefaultBodyLimit::max(2048)),
+        )
         .route("/{slug}/_fragments/billing", get(billing::stack_fragment))
         .route(
             "/{slug}/_fragments/billing-banner",

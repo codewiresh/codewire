@@ -88,7 +88,7 @@
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="organization_id" value="{{ organization.id }}">
               <input type="hidden" name="idempotency_key" value="{{ credit_key }}">
-              <label class="cw-field"><span>Amount (EUR)</span><input class="cw-input" type="text" name="amount" inputmode="decimal" pattern="[+\-]?[0-9]{1,6}(\.[0-9]{1,2})?" placeholder="25.00" required></label>
+              <label class="cw-field"><span>Amount (USD)</span><input class="cw-input" type="text" name="amount" inputmode="decimal" pattern="[+\-]?[0-9]{1,6}(\.[0-9]{1,2})?" placeholder="25.00" required></label>
               <label class="cw-field"><span>Reason</span><input class="cw-input" type="text" name="reason" maxlength="500" required></label>
               <p class="cw-muted">A positive amount grants credit and a negative one removes it. Each adjustment is recorded with your name and reason, and audited.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Adjust credit</button></div>

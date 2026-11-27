@@ -118,6 +118,13 @@ pub(super) struct AddCreditSubmission {
     amount: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct SwitchPlanSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    plan: String,
+}
+
 /// Stripe's return from a bank's redirect names the SetupIntent and its
 /// client secret. Nothing here needs the secret, so the page first sends the
 /// browser to the same address without it: it stays out of history, and out
@@ -593,6 +600,106 @@ pub(super) async fn auto_top_up(
     }
 }
 
+/// Switches the organization's monthly plan between `payg`, `pro`, and `max` (#6659).
+pub(super) async fn switch_plan(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<SwitchPlanSubmission>,
+) -> Response {
+    if !crate::view::valid_organization_slug(&slug) {
+        return crate::response::error_page(crate::error::WebError::NotFound);
+    }
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let canonical_path = billing_path(&organization.slug);
+    if !organization.can_admin {
+        return mutation_redirect(canonical_path, "", "not-authorized", &headers);
+    }
+    let target_plan = submission.plan.trim().to_ascii_lowercase();
+    if !matches!(target_plan.as_str(), "payg" | "pro" | "max") {
+        return mutation_redirect(canonical_path, "", "invalid-plan", &headers);
+    }
+    let origin = state.public_origin.as_str().trim_end_matches('/');
+    let success_url = format!("{origin}{canonical_path}?message=plan-switched");
+    let cancel_url = format!("{origin}{canonical_path}");
+    match billing_connect::switch_organization_plan(
+        &state,
+        cookie,
+        organization.id,
+        target_plan,
+        success_url,
+        cancel_url,
+    )
+    .await
+    {
+        Ok(response) => {
+            if !response.checkout_url.is_empty() {
+                let checkout_url = billing_connect::safe_stripe_url(response.checkout_url);
+                if checkout_url.is_empty() {
+                    mutation_redirect(canonical_path, "", "invalid-redirect", &headers)
+                } else {
+                    redirect(checkout_url, &headers)
+                }
+            } else if response.cancel_at_period_end {
+                mutation_redirect(canonical_path, "plan-cancel-scheduled", "", &headers)
+            } else {
+                mutation_redirect(canonical_path, "plan-switched", "", &headers)
+            }
+        }
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&canonical_path, &headers)
+        }
+        Err(error) => mutation_redirect(canonical_path, "", mutation_error(&error), &headers),
+    }
+}
+
+/// Opens the Stripe Billing Portal for invoices, card management, and cancellation (#6659).
+pub(super) async fn portal_session(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<crate::view::CsrfSubmission>,
+) -> Response {
+    if !crate::view::valid_organization_slug(&slug) {
+        return crate::response::error_page(crate::error::WebError::NotFound);
+    }
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let canonical_path = billing_path(&organization.slug);
+    if !organization.can_admin {
+        return mutation_redirect(canonical_path, "", "not-authorized", &headers);
+    }
+    let return_url = format!(
+        "{}{}",
+        state.public_origin.as_str().trim_end_matches('/'),
+        canonical_path
+    );
+    match billing_connect::create_portal_session(&state, cookie, organization.id, return_url).await
+    {
+        Ok(url) => {
+            let safe = billing_connect::safe_stripe_url(url);
+            if safe.is_empty() {
+                mutation_redirect(canonical_path, "", "invalid-redirect", &headers)
+            } else {
+                redirect(safe, &headers)
+            }
+        }
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&canonical_path, &headers)
+        }
+        Err(error) => mutation_redirect(canonical_path, "", mutation_error(&error), &headers),
+    }
+}
+
 fn billing_path(slug: &str) -> String {
     format!("/{slug}/billing/")
 }
@@ -636,6 +743,11 @@ fn billing_message(value: &str, amount: &str, default_card: &str) -> String {
         }
         ("card-removed", _) => "Card removed.".to_owned(),
         ("top-up-saved", _) => "Automatic top-up saved.".to_owned(),
+        ("plan-switched", _) => "Plan updated.".to_owned(),
+        ("plan-cancel-scheduled", _) => {
+            "Your plan will move to Pay as you go at the end of the current billing period."
+                .to_owned()
+        }
         ("credit-added", Some(euros)) => format!("{euros} added to your credit."),
         ("credit-added", None) => "Credit added.".to_owned(),
         ("credit-paid", Some(euros)) => {
@@ -721,6 +833,10 @@ fn billing_error(value: &str) -> &'static str {
             "Too many tries at adding a card, so nothing was saved or charged. Try again later, or contact support."
         }
         "invalid-top-up" => "Enter a top-up amount from $5 to $1,000, with at most two decimals.",
+        "invalid-plan" => "Choose a valid billing plan (Pay as you go, Pro, or Max).",
+        "plan-precondition" => {
+            "This plan change couldn't be completed right now. Make sure your subscription is active and a default payment method is saved, then try again."
+        }
         "invalid-credit" => {
             "Choose an amount, or enter one from $5 to $1,000 with at most two decimals."
         }
@@ -745,6 +861,7 @@ fn mutation_error(error: &connectrpc::ConnectError) -> &'static str {
         ErrorCode::PermissionDenied => "not-authorized",
         ErrorCode::InvalidArgument => "invalid",
         ErrorCode::NotFound => "not-found",
+        ErrorCode::FailedPrecondition => "plan-precondition",
         _ => "unavailable",
     }
 }
@@ -765,6 +882,18 @@ mod tests {
         assert_eq!(
             billing_error("invalid-redirect"),
             "The billing provider returned an unsafe destination."
+        );
+        assert_eq!(
+            billing_error("invalid-plan"),
+            "Choose a valid billing plan (Pay as you go, Pro, or Max)."
+        );
+        assert!(!billing_error("plan-precondition").is_empty());
+        assert_eq!(
+            mutation_error(&connectrpc::ConnectError::new(
+                ErrorCode::FailedPrecondition,
+                "card required"
+            )),
+            "plan-precondition"
         );
         assert_eq!(billing_error("raw-upstream-detail"), "");
     }

@@ -276,6 +276,22 @@ pub(crate) fn card_brand_name(code: &str) -> &'static str {
 pub(crate) struct BillingPageView {
     pub(crate) billing_enabled: bool,
     pub(crate) has_payment_method: bool,
+    /// Monthly subscription plan summary (#6659).
+    pub(crate) has_plan: bool,
+    pub(crate) plan_is_active: bool,
+    pub(crate) plan_key: String,
+    pub(crate) plan_title: String,
+    pub(crate) plan_status_label: String,
+    pub(crate) plan_status_tone: &'static str,
+    pub(crate) plan_price_line: String,
+    pub(crate) plan_limits_line: String,
+    pub(crate) has_allowance: bool,
+    pub(crate) allowance_used: String,
+    pub(crate) allowance_granted: String,
+    pub(crate) allowance_remaining: String,
+    pub(crate) allowance_percent: u8,
+    pub(crate) auto_top_up_summary: String,
+    pub(crate) cancel_at_period_end: bool,
     /// The organization's saved cards, newest first (#4750).
     pub(crate) cards: Vec<SavedCardView>,
     /// Billing answered with the cards; otherwise the list says it is
@@ -534,6 +550,7 @@ pub(crate) async fn billing_page(
         .map(|card| card.label.clone())
         .unwrap_or_default();
 
+    let plan_summary = plan_card_summary(&overview, &default_card);
     let rates = overview.rates.into_option().unwrap_or_default();
     let usage_available = usage.is_some();
     let (current_month, hourly, usage_rows) = usage.map_or_else(
@@ -598,6 +615,21 @@ pub(crate) async fn billing_page(
     Ok(BillingPageView {
         billing_enabled: overview.billing_enabled,
         has_payment_method: overview.has_payment_method,
+        has_plan: plan_summary.has_plan,
+        plan_is_active: plan_summary.plan_is_active,
+        plan_key: plan_summary.plan_key,
+        plan_title: plan_summary.plan_title,
+        plan_status_label: plan_summary.plan_status_label,
+        plan_status_tone: plan_summary.plan_status_tone,
+        plan_price_line: plan_summary.plan_price_line,
+        plan_limits_line: plan_summary.plan_limits_line,
+        has_allowance: plan_summary.has_allowance,
+        allowance_used: plan_summary.allowance_used,
+        allowance_granted: plan_summary.allowance_granted,
+        allowance_remaining: plan_summary.allowance_remaining,
+        allowance_percent: plan_summary.allowance_percent,
+        auto_top_up_summary: plan_summary.auto_top_up_summary,
+        cancel_at_period_end: overview.cancel_at_period_end,
         cards,
         cards_available,
         card_key,
@@ -913,7 +945,6 @@ pub(crate) async fn activate_payg_plan(
 }
 
 /// Switches an organization between `payg`, `pro`, and `max` (#6659).
-#[allow(dead_code)]
 pub(crate) async fn switch_organization_plan(
     state: &AppState,
     cookie: HeaderValue,
@@ -935,7 +966,6 @@ pub(crate) async fn switch_organization_plan(
 }
 
 /// Creates a Stripe Billing Portal session URL (#6659).
-#[allow(dead_code)]
 pub(crate) async fn create_portal_session(
     state: &AppState,
     cookie: HeaderValue,
@@ -951,6 +981,132 @@ pub(crate) async fn create_portal_session(
         .await?
         .into_owned();
     Ok(response.portal_url)
+}
+
+struct PlanCardSummary {
+    has_plan: bool,
+    plan_is_active: bool,
+    plan_key: String,
+    plan_title: String,
+    plan_status_label: String,
+    plan_status_tone: &'static str,
+    plan_price_line: String,
+    plan_limits_line: String,
+    has_allowance: bool,
+    allowance_used: String,
+    allowance_granted: String,
+    allowance_remaining: String,
+    allowance_percent: u8,
+    auto_top_up_summary: String,
+}
+
+fn plan_card_summary(overview: &GetBillingOverviewResponse, default_card: &str) -> PlanCardSummary {
+    let key = overview.plan.trim().to_ascii_lowercase();
+    let has_plan = matches!(key.as_str(), "payg" | "pro" | "max");
+    let plan_title = match key.as_str() {
+        "max" => "Max Plan",
+        "pro" => "Pro Plan",
+        "payg" => "Pay as you go",
+        _ => "",
+    }
+    .to_owned();
+    let status = overview.status.trim().to_ascii_lowercase();
+    let plan_is_active = matches!(status.as_str(), "active" | "trialing" | "past_due");
+    let (plan_status_label, plan_status_tone) =
+        match (status.as_str(), overview.cancel_at_period_end) {
+            ("active" | "trialing", true) => ("Cancels at period end".to_owned(), "warning"),
+            ("active", false) => ("Active".to_owned(), "success"),
+            ("trialing", false) => ("Trial".to_owned(), "info"),
+            ("past_due", _) => ("Past due".to_owned(), "warning"),
+            ("canceled", _) => ("Canceled".to_owned(), "warning"),
+            ("unpaid", _) => ("Unpaid".to_owned(), "warning"),
+            ("incomplete" | "incomplete_expired", _) => ("Incomplete".to_owned(), "warning"),
+            ("paused", _) => ("Paused".to_owned(), "warning"),
+            _ => ("Inactive".to_owned(), "warning"),
+        };
+    let monthly_dollars = if overview.plan_price_cents > 0 {
+        format!("${}", top_up_euros(overview.plan_price_cents))
+    } else {
+        match key.as_str() {
+            "max" => "$100".to_owned(),
+            "pro" => "$40".to_owned(),
+            _ => "$0".to_owned(),
+        }
+    };
+    let period_end = overview
+        .allowance_period_end
+        .as_option()
+        .or(overview.current_period_end.as_option())
+        .map(|ts| calendar_date(ts.seconds));
+    let plan_price_line = if key == "payg" {
+        if default_card.is_empty() {
+            "$0 / month · Pay per second".to_owned()
+        } else {
+            format!("$0 / month · Pay per second on {default_card}")
+        }
+    } else {
+        let verb = if overview.cancel_at_period_end {
+            "Ends"
+        } else {
+            "Renews"
+        };
+        match (period_end, default_card.is_empty()) {
+            (Some(date), false) => {
+                format!("{monthly_dollars} / month · {verb} {date} on {default_card}")
+            }
+            (Some(date), true) => format!("{monthly_dollars} / month · {verb} {date}"),
+            (None, false) => format!("{monthly_dollars} / month · Billed on {default_card}"),
+            (None, true) => format!("{monthly_dollars} / month"),
+        }
+    };
+    let (max_vcpu, max_mem, max_conc) = if overview.max_vcpu > 0 {
+        (
+            overview.max_vcpu,
+            overview.max_memory_gib,
+            overview.max_concurrent_sandboxes,
+        )
+    } else {
+        match key.as_str() {
+            "max" => (16, 32, -1),
+            "pro" => (8, 16, 10),
+            _ => (8, 16, 3),
+        }
+    };
+    let plan_limits_line = if max_conc < 0 {
+        format!("Unlimited concurrent sandboxes ({max_vcpu} vCPU / {max_mem} GB max).")
+    } else {
+        format!("Up to {max_conc} concurrent sandboxes ({max_vcpu} vCPU / {max_mem} GB max).")
+    };
+    let granted = overview.allowance_granted_nano_usd.max(0);
+    let drawn = overview.allowance_drawn_nano_usd.clamp(0, granted);
+    let remaining = granted.saturating_sub(drawn);
+    let has_allowance = plan_is_active && granted > 0;
+    let allowance_percent = if has_allowance {
+        ((i128::from(drawn) * 100) / i128::from(granted)).clamp(0, 100) as u8
+    } else {
+        0
+    };
+    let auto_top_up_summary = if overview.auto_top_up_enabled {
+        format!("On · ${}", top_up_euros(overview.auto_top_up_cents))
+    } else {
+        "Off".to_owned()
+    };
+    PlanCardSummary {
+        has_plan,
+        plan_is_active,
+        plan_key: key,
+        plan_title,
+        plan_status_label,
+        plan_status_tone,
+        plan_price_line,
+        plan_limits_line,
+        has_allowance,
+        allowance_used: euro_text(drawn),
+        allowance_granted: euro_text(granted),
+        allowance_remaining: euro_text(remaining),
+        allowance_percent,
+        auto_top_up_summary,
+    }
 }
 
 /// Reads the minimal billing overview and Stripe publishable key for onboarding Step 2 (#6659).
@@ -1165,6 +1321,124 @@ mod tests {
         }
         assert_eq!(top_up_euros(2000), "20");
         assert_eq!(top_up_euros(750), "7.50");
+    }
+
+    #[test]
+    fn plan_card_summary_renders_max_pro_and_payg_views() {
+        let max_overview = GetBillingOverviewResponse {
+            plan: "max".into(),
+            status: "active".into(),
+            plan_price_cents: 10_000,
+            allowance_granted_nano_usd: 250_000_000_000,
+            allowance_drawn_nano_usd: 72_500_000_000,
+            max_vcpu: 16,
+            max_memory_gib: 32,
+            max_concurrent_sandboxes: -1,
+            auto_top_up_enabled: true,
+            auto_top_up_cents: 2_000,
+            ..Default::default()
+        };
+        let summary = plan_card_summary(&max_overview, "Visa •••• 4242");
+        assert!(summary.has_plan);
+        assert!(summary.plan_is_active);
+        assert_eq!(summary.plan_title, "Max Plan");
+        assert_eq!(summary.plan_status_label, "Active");
+        assert_eq!(summary.plan_status_tone, "success");
+        assert!(summary.plan_price_line.contains("$100 / month"));
+        assert!(summary.plan_price_line.contains("Visa •••• 4242"));
+        assert_eq!(
+            summary.plan_limits_line,
+            "Unlimited concurrent sandboxes (16 vCPU / 32 GB max)."
+        );
+        assert!(summary.has_allowance);
+        assert_eq!(summary.allowance_used, "$72.50");
+        assert_eq!(summary.allowance_granted, "$250.00");
+        assert_eq!(summary.allowance_remaining, "$177.50");
+        assert_eq!(summary.allowance_percent, 29);
+        assert_eq!(summary.auto_top_up_summary, "On · $20");
+
+        let payg_overview = GetBillingOverviewResponse {
+            plan: "payg".into(),
+            status: "active".into(),
+            max_vcpu: 8,
+            max_memory_gib: 16,
+            max_concurrent_sandboxes: 3,
+            ..Default::default()
+        };
+        let payg = plan_card_summary(&payg_overview, "");
+        assert!(payg.has_plan);
+        assert_eq!(payg.plan_title, "Pay as you go");
+        assert!(!payg.has_allowance);
+        assert_eq!(payg.plan_price_line, "$0 / month · Pay per second");
+        assert_eq!(
+            payg.plan_limits_line,
+            "Up to 3 concurrent sandboxes (8 vCPU / 16 GB max)."
+        );
+        assert_eq!(payg.auto_top_up_summary, "Off");
+    }
+
+    #[test]
+    fn plan_card_summary_marks_inactive_statuses_non_active_without_allowance() {
+        for (status, expected_label) in [
+            ("canceled", "Canceled"),
+            ("unpaid", "Unpaid"),
+            ("incomplete", "Incomplete"),
+            ("incomplete_expired", "Incomplete"),
+            ("paused", "Paused"),
+            ("", "Inactive"),
+            ("mystery_status", "Inactive"),
+        ] {
+            let overview = GetBillingOverviewResponse {
+                plan: "pro".into(),
+                status: status.into(),
+                plan_price_cents: 4_000,
+                allowance_granted_nano_usd: 100_000_000_000,
+                allowance_drawn_nano_usd: 25_000_000_000,
+                max_vcpu: 8,
+                max_memory_gib: 16,
+                max_concurrent_sandboxes: 10,
+                ..Default::default()
+            };
+            let summary = plan_card_summary(&overview, "");
+            assert!(summary.has_plan, "{status}");
+            assert!(!summary.plan_is_active, "{status}");
+            assert_eq!(summary.plan_status_label, expected_label, "{status}");
+            assert_eq!(summary.plan_status_tone, "warning", "{status}");
+            assert!(!summary.has_allowance, "{status}");
+            assert_eq!(summary.allowance_percent, 0, "{status}");
+        }
+
+        let past_due = plan_card_summary(
+            &GetBillingOverviewResponse {
+                plan: "pro".into(),
+                status: "past_due".into(),
+                allowance_granted_nano_usd: 100_000_000_000,
+                ..Default::default()
+            },
+            "",
+        );
+        assert!(past_due.plan_is_active);
+        assert!(past_due.has_allowance);
+        assert_eq!(past_due.plan_status_label, "Past due");
+        assert_eq!(past_due.plan_status_tone, "warning");
+    }
+
+    #[test]
+    fn switch_plan_dialog_allows_resubscribing_when_plan_inactive() {
+        let mut active_pro = credit_view(true);
+        active_pro.has_plan = true;
+        active_pro.plan_is_active = true;
+        active_pro.plan_key = "pro".into();
+        active_pro.plan_title = "Pro Plan".into();
+        let active_html = render(&active_pro);
+        assert!(active_html.contains("disabled>Current</button>"));
+        assert!(!active_html.contains(">Choose Pro</button>"));
+
+        let mut canceled_pro = active_pro;
+        canceled_pro.plan_is_active = false;
+        let canceled_html = render(&canceled_pro);
+        assert!(!canceled_html.contains("disabled>Current</button>"));
+        assert!(canceled_html.contains(">Choose Pro</button>"));
     }
 
     fn test_organization() -> OrganizationContext {
@@ -1573,14 +1847,16 @@ mod tests {
         for promise in ["of compute", "sign up", "$50"] {
             assert!(!off.contains(promise), "{promise}");
         }
-        assert!(off.contains("<p class=\"copy\">Pay only while your sandboxes run.</p>"));
+        assert!(off.contains(
+            "<p class=\"copy\">Pay per second, only while your sandboxes run. Card required.</p>"
+        ));
         assert!(off.contains("<h2 id=\"access-title\">Start building.</h2>"));
         assert!(off.contains("Local sandboxes are always free."));
 
         let on = render(Some("$10"));
-        assert!(
-            on.contains("$10 of compute when you sign up. Then pay only while your sandboxes run.")
-        );
+        assert!(on.contains(
+            "$10 of compute when you sign up. Then pay per second, only while your sandboxes run. Card required."
+        ));
         assert!(on.contains("Start with $10 of compute <span"));
         assert!(on.contains("<h2 id=\"access-title\">Start with $10 of compute.</h2>"));
         assert!(

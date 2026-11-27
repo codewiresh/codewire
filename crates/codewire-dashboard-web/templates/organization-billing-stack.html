@@ -3,6 +3,46 @@
           <section class="cw-section" aria-label="Billing"><div class="cw-state"><p>Billing is not configured. Sandboxes run freely in dev mode.</p></div></section>
           {% else if billing.unmetered %}
           <section class="cw-section" aria-label="Compute credit"><div class="cw-state"><p>This organization is not charged for compute and has no Sandbox quota.</p></div></section>
+          {% else if billing.has_plan %}
+          <section class="cw-section cw-plan-card" aria-labelledby="plan-heading">
+            <header class="cw-plan-head">
+              <div class="cw-plan-title-row">
+                <h2 id="plan-heading">{{ billing.plan_title }}</h2>
+                <span class="cw-badge" data-tone="{{ billing.plan_status_tone }}">{{ billing.plan_status_label }}</span>
+              </div>
+              {% if billing.can_manage %}
+              <div class="cw-plan-actions">
+                <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="switch-plan-dialog">Switch plan</button>
+                <form method="post" action="/{{ organization.slug }}/billing/_actions/portal">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
+                </form>
+              </div>
+              {% endif %}
+            </header>
+            <div class="cw-plan-summary">
+              <p>{{ billing.plan_price_line }}</p>
+              <p>{{ billing.plan_limits_line }}</p>
+            </div>
+            {% if billing.has_allowance %}
+            <div class="cw-plan-meter-wrap">
+              <div class="cw-plan-meter-labels">
+                <span>Monthly compute allowance</span>
+                <span>{{ billing.allowance_used }} / {{ billing.allowance_granted }} used</span>
+              </div>
+              <progress class="cw-plan-meter" max="100" value="{{ billing.allowance_percent }}">{{ billing.allowance_percent }}%</progress>
+            </div>
+            {% endif %}
+            <dl class="cw-stat-grid cw-stat-grid--three">
+              {% if billing.has_allowance %}
+              <div class="cw-stat"><dt>Allowance remaining</dt><dd>{{ billing.allowance_remaining }}</dd></div>
+              {% else %}
+              <div class="cw-stat"><dt>Plan</dt><dd>{{ billing.plan_title }}</dd></div>
+              {% endif %}
+              <div class="cw-stat"><dt>Extra prepaid credit</dt><dd>{% if billing.credit_negative %}<span class="cw-badge" data-tone="warning">{{ billing.credit_balance }}</span>{% else %}{{ billing.credit_balance }}{% endif %}</dd></div>
+              <div class="cw-stat"><dt>Auto top-up</dt><dd>{{ billing.auto_top_up_summary }}</dd></div>
+            </dl>
+          </section>
           {% else %}
           <header class="cw-balance-head" aria-label="Compute credit">
             <div><p class="cw-muted">Compute credit</p><p class="cw-balance">{% if billing.credit_negative %}<span class="cw-badge" data-tone="warning">{{ billing.credit_balance }}</span>{% else %}{{ billing.credit_balance }}{% endif %}</p></div>

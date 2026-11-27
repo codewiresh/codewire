@@ -53,6 +53,47 @@
           </form>
         </dialog>{% endif %}
         {% if billing.billing_enabled && billing.can_manage %}<div hidden data-card-setup data-card-stripe="https://js.stripe.com/v3/" data-card-key="{{ billing.card_key }}" data-card-begin="/{{ organization.slug }}/billing/_actions/card-setup" data-card-finish="/{{ organization.slug }}/billing/_actions/card-setup/finish"><input type="hidden" name="_csrf" value="{{ billing.csrf_token }}"></div>{% endif %}
+        {% if billing.billing_enabled && billing.can_manage && !billing.unmetered %}<dialog class="cw-dialog" id="switch-plan-dialog" data-dialog aria-labelledby="switch-plan-title">
+          <header class="cw-dialog-header"><h2 id="switch-plan-title">Switch plan</h2></header>
+          <div class="cw-dialog-body">
+            <div class="cw-plan-switch-list">
+              <div class="cw-plan-switch-row">
+                <div class="cw-plan-switch-info">
+                  <strong>Pro · $40 / month</strong>
+                  <p>$100/mo compute · Up to 10 sandboxes · 8 vCPU, 16 GB RAM · Up to 5 teammates</p>
+                </div>
+                <form method="post" action="/{{ organization.slug }}/billing/_actions/switch-plan">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <input type="hidden" name="plan" value="pro">
+                  <button class="cw-button cw-button--outline cw-button--small" type="submit"{% if billing.plan_is_active && billing.plan_key == "pro" && !billing.cancel_at_period_end %} disabled{% endif %}>{% if billing.plan_is_active && billing.plan_key == "pro" && !billing.cancel_at_period_end %}Current{% else %}Choose Pro{% endif %}</button>
+                </form>
+              </div>
+              <div class="cw-plan-switch-row cw-plan-switch-row--featured">
+                <div class="cw-plan-switch-info">
+                  <strong>Max · $100 / month</strong>
+                  <p>$250/mo compute · Unlimited sandboxes · 16 vCPU, 32 GB RAM · Unlimited teammates</p>
+                </div>
+                <form method="post" action="/{{ organization.slug }}/billing/_actions/switch-plan">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <input type="hidden" name="plan" value="max">
+                  <button class="cw-button cw-button--success cw-button--small" type="submit"{% if billing.plan_is_active && billing.plan_key == "max" && !billing.cancel_at_period_end %} disabled{% endif %}>{% if billing.plan_is_active && billing.plan_key == "max" && !billing.cancel_at_period_end %}Current{% else %}Choose Max{% endif %}</button>
+                </form>
+              </div>
+              <div class="cw-plan-switch-row">
+                <div class="cw-plan-switch-info">
+                  <strong>Pay as you go · $0 / month</strong>
+                  <p>Pay per second · Up to 3 sandboxes · 8 vCPU, 16 GB RAM · No monthly fee</p>
+                </div>
+                <form method="post" action="/{{ organization.slug }}/billing/_actions/switch-plan">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <input type="hidden" name="plan" value="payg">
+                  <button class="cw-button cw-button--outline cw-button--small" type="submit"{% if billing.plan_is_active && billing.plan_key == "payg" %} disabled{% endif %}>{% if billing.plan_is_active && billing.plan_key == "payg" %}Current{% else %}Choose PAYG{% endif %}</button>
+                </form>
+              </div>
+            </div>
+          </div>
+          <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Close</button></footer>
+        </dialog>{% endif %}
         </div></div>
       </div></main>
     </div>
