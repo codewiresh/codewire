@@ -67,6 +67,170 @@
     return svg;
   }
 
+  function clientUuid() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  function safeExternalHref(raw) {
+    try {
+      const url = new URL(raw);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // CSP-safe DOM Markdown renderer (zero innerHTML, zero raw HTML pass-through).
+  function appendInlineMarkdown(parent, text) {
+    const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(([^)\s]+)\))/g;
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+      const token = match[0];
+      if (token.startsWith("`")) {
+        const code = document.createElement("code");
+        code.textContent = token.slice(1, -1);
+        parent.append(code);
+      } else if (token.startsWith("**")) {
+        const strong = document.createElement("strong");
+        strong.textContent = token.slice(2, -2);
+        parent.append(strong);
+      } else if (token.startsWith("*")) {
+        const em = document.createElement("em");
+        em.textContent = token.slice(1, -1);
+        parent.append(em);
+      } else if (token.startsWith("[")) {
+        const closeBracket = token.indexOf("](");
+        const label = token.slice(1, closeBracket);
+        const href = safeExternalHref(match[2]);
+        if (href) {
+          const a = document.createElement("a");
+          a.href = href;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.textContent = label;
+          parent.append(a);
+        } else {
+          parent.append(document.createTextNode(label));
+        }
+      }
+      last = pattern.lastIndex;
+    }
+    if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+  }
+
+  function renderMarkdown(container, markdown) {
+    const fragment = document.createDocumentFragment();
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i += 1; continue; }
+      const fence = line.match(/^```([a-zA-Z0-9_+#.-]*)\s*$/);
+      if (fence) {
+        const lang = fence[1] || "code";
+        const codeLines = [];
+        i += 1;
+        while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+          codeLines.push(lines[i]);
+          i += 1;
+        }
+        if (i < lines.length) i += 1;
+        const codeText = codeLines.join("\n");
+        const wrap = document.createElement("div");
+        wrap.className = "cw-agent-codeblock";
+        const head = document.createElement("div");
+        head.className = "cw-agent-codeblock-head";
+        const langEl = document.createElement("span");
+        langEl.textContent = lang;
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "cw-link-button";
+        copyBtn.textContent = "Copy";
+        copyBtn.addEventListener("click", () => {
+          navigator.clipboard?.writeText(codeText).then(() => {
+            copyBtn.textContent = "Copied";
+          }, () => {});
+        });
+        head.append(langEl, copyBtn);
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.textContent = codeText;
+        pre.append(code);
+        wrap.append(head, pre);
+        fragment.append(wrap);
+        continue;
+      }
+      const heading = line.match(/^(#{1,4})\s+(.+)$/);
+      if (heading) {
+        const h = document.createElement(`h${heading[1].length}`);
+        appendInlineMarkdown(h, heading[2]);
+        fragment.append(h);
+        i += 1;
+        continue;
+      }
+      if (/^>\s?/.test(line)) {
+        const quote = document.createElement("blockquote");
+        const parts = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          parts.push(lines[i].replace(/^>\s?/, ""));
+          i += 1;
+        }
+        appendInlineMarkdown(quote, parts.join(" "));
+        fragment.append(quote);
+        continue;
+      }
+      if (/^\s*[-*]\s+/.test(line)) {
+        const ul = document.createElement("ul");
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+          const li = document.createElement("li");
+          appendInlineMarkdown(li, lines[i].replace(/^\s*[-*]\s+/, ""));
+          ul.append(li);
+          i += 1;
+        }
+        fragment.append(ul);
+        continue;
+      }
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const ol = document.createElement("ol");
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          const li = document.createElement("li");
+          appendInlineMarkdown(li, lines[i].replace(/^\s*\d+\.\s+/, ""));
+          ol.append(li);
+          i += 1;
+        }
+        fragment.append(ol);
+        continue;
+      }
+      const paraLines = [];
+      while (
+        i < lines.length
+        && lines[i].trim()
+        && !/^```/.test(lines[i])
+        && !/^#{1,4}\s+/.test(lines[i])
+        && !/^>\s?/.test(lines[i])
+        && !/^\s*[-*]\s+/.test(lines[i])
+        && !/^\s*\d+\.\s+/.test(lines[i])
+      ) {
+        paraLines.push(lines[i]);
+        i += 1;
+      }
+      const p = document.createElement("p");
+      appendInlineMarkdown(p, paraLines.join(" "));
+      fragment.append(p);
+    }
+    container.replaceChildren(fragment);
+  }
+
   function clearReferences() {
     try {
       for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
@@ -127,6 +291,7 @@
     let desktopState = desktopPanel?.dataset.desktopState || "loading";
     let desktopCloseReturn = null;
     let inventory = [];
+    let agentInventory = [];
     const terminalTabs = () => [...tabs.values()].filter((tab) => tab.kind === "terminal");
     let closeTarget = null;
     // Where focus returns when the Close dialog closes: the tab's close
@@ -765,6 +930,9 @@
         tab.item.remove();
         if (desktopPanel) desktopPanel.hidden = true;
       } else {
+        tab.eventSource?.close();
+        tab.eventSource = null;
+        if (tab.renderRaf) cancelAnimationFrame(tab.renderRaf);
         tab.abort?.abort();
         tab.panel?.remove();
         tab.item.remove();
@@ -794,6 +962,10 @@
       const desktopOpen = tabs.has("desktop");
       const desktopRunningNow = desktopLive(desktopState);
       const detachedTerminals = inventory.filter((session) => live(session.state) && !tabs.has(session.sessionId));
+      const openAgentSessionIds = new Set([...tabs.values()].map((t) => t.agentSession?.sessionId).filter(Boolean));
+      const detachedAgents = agentChatEnabled
+        ? agentInventory.filter((session) => live(session.state) && !openAgentSessionIds.has(session.sessionId))
+        : [];
       for (const tab of tabs.values()) {
         if (tab.kind !== "home") continue;
         const badge = tab.panel.querySelector("[data-home-desktop-state]");
@@ -806,6 +978,25 @@
         const list = tab.panel.querySelector("[data-home-reattach-list]");
         if (!section || !list) continue;
         list.replaceChildren();
+        for (const session of detachedAgents) {
+          const li = document.createElement("li");
+          li.className = "cw-tab-home-reattach-row";
+          const meta = document.createElement("span");
+          meta.className = "cw-tab-home-reattach-meta";
+          const name = document.createElement("span");
+          name.textContent = session.name || `Agent ${session.sessionId.slice(-8)}`;
+          const sub = document.createElement("span");
+          sub.className = "cw-tab-home-reattach-sub";
+          sub.textContent = session.state;
+          meta.append(spriteIcon(iconsBase, "icon-chat"), name, sub);
+          const btn = document.createElement("button");
+          btn.className = "cw-button cw-button--outline cw-button--small";
+          btn.type = "button";
+          btn.textContent = "Reattach";
+          btn.addEventListener("click", () => openAgentFrom(tab.id, session));
+          li.append(meta, btn);
+          list.append(li);
+        }
         for (const session of detachedTerminals) {
           const li = document.createElement("li");
           li.className = "cw-tab-home-reattach-row";
@@ -931,7 +1122,42 @@
       choose("desktop", true);
       refreshHomes();
     }
-    function openAgentFrom(replaceHomeId) {
+    async function fetchAgentInventory() {
+      if (!agentChatEnabled || !slug || !environment) return;
+      const current = epoch;
+      try {
+        const response = await fetch(`/${encodeURIComponent(slug)}/${encodeURIComponent(environment)}/_fragments/agents`, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (response.status === 401 || response.status === 403) {
+          if (current === epoch && !suspended) {
+            account = null;
+            agentInventory = [];
+            refreshHomes();
+          }
+          return;
+        }
+        if (!response.ok || current !== epoch || suspended) return;
+        const data = await response.json();
+        if (current !== epoch || suspended) return;
+        if (typeof data?.accountId === "string" && data.accountId) {
+          let previous;
+          try { previous = sessionStorage.getItem(`${storagePrefix}account`); } catch { /* Optional storage. */ }
+          if ((account && account !== data.accountId) || (previous && previous !== data.accountId)) {
+            clearReferences();
+            clearPresentations();
+            reconnectId = null;
+          }
+          account = data.accountId;
+        }
+        if (Array.isArray(data?.sessions)) {
+          agentInventory = data.sessions;
+          refreshHomes();
+        }
+      } catch { /* Agents inventory is optional when older backends run. */ }
+    }
+    function openAgentFrom(replaceHomeId, existingSession = null) {
       if (!agentChatEnabled || !agentTemplate) return;
       if (!replaceHomeId && tabs.size >= maxTabs) return;
       autoOpen = "off";
@@ -950,44 +1176,323 @@
       insertTabItem(item, replaceHomeId);
       panels.append(panel);
       const abort = new AbortController();
-      const tab = { id, kind: "agent", label: "New agent", item, button, panel, remove, abort };
+      const tab = {
+        id, kind: "agent", label: existingSession?.name || "New agent",
+        item, button, panel, remove, abort,
+        agentSession: null, eventSource: null, busy: false, renderRaf: 0,
+      };
       tabs.set(id, tab);
       button.addEventListener("click", () => choose(id));
       remove.addEventListener("click", () => closeSimpleTab(tab, true));
-      wireAgentComposer(tab);
+      wireAgentComposer(tab, existingSession);
       showSessions(true);
       choose(id, true);
       refreshHomes();
       panel.querySelector("[data-agent-input]")?.focus();
     }
-    function wireAgentComposer(tab) {
+    function wireAgentComposer(tab, existingSession = null) {
       const { panel, item, abort } = tab;
       const signal = abort.signal;
+      const thread = panel.querySelector("[data-agent-thread]");
+      const threadInner = panel.querySelector("[data-agent-thread-inner]");
       const form = panel.querySelector("[data-agent-composer]");
       const input = panel.querySelector("[data-agent-input]");
       const sendBtn = panel.querySelector("[data-agent-send]");
+      const stopBtn = panel.querySelector("[data-agent-stop]");
       const note = panel.querySelector("[data-agent-note]");
       const trigger = panel.querySelector("[data-agent-menu-trigger]");
       const triggerIcon = panel.querySelector("[data-agent-trigger-icon]");
       const triggerModel = panel.querySelector("[data-agent-trigger-model]");
       const triggerEffort = panel.querySelector("[data-agent-trigger-effort]");
       const tabIcon = item.querySelector("[data-agent-tab-icon]");
+      const tabLabelEl = item.querySelector("[data-agent-tab-label]");
+      const projectBtn = panel.querySelector("[data-agent-project]");
+      const projectLabel = panel.querySelector("[data-agent-project-label]");
       const menuRoot = panel.querySelector("[data-agent-menu-root]");
       const l1 = panel.querySelector("[data-agent-menu-l1]");
       const l1Model = panel.querySelector("[data-agent-l1-model]");
       const l1Effort = panel.querySelector("[data-agent-l1-effort]");
       const l2 = panel.querySelector("[data-agent-menu-l2]");
       const anchor = panel.querySelector("[data-agent-popover-anchor]");
+      const basePrefix = `/${encodeURIComponent(slug || "")}/${encodeURIComponent(environment || "")}`;
       let selectedAgentId = agentCatalog[0].id;
       let selectedModelId = agentCatalog[0].models[0].id;
       let selectedEffort = agentEfforts[0];
+      let workingDir = projectLabel?.textContent?.trim() || "/workspace";
       let menuOpen = false;
       let activeL1 = null;
       let hoveredAgentId = null;
       let searchQuery = "";
+      let activeTurn = null;
+      const turnsByMessage = new Map();
 
       const currentAgent = () => agentCatalog.find((a) => a.id === selectedAgentId) || agentCatalog[0];
       const currentModel = () => currentAgent().models.find((m) => m.id === selectedModelId) || currentAgent().models[0];
+
+      function setTabTitle(text) {
+        const cleaned = String(text || "").replace(/\s+/g, " ").trim().slice(0, 40);
+        if (!cleaned) return;
+        tab.label = cleaned;
+        if (tabLabelEl) tabLabelEl.textContent = cleaned;
+      }
+
+      function scrollThreadIfNearBottom() {
+        if (!thread || thread.hidden) return;
+        const distance = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+        if (distance < 120) thread.scrollTop = thread.scrollHeight;
+      }
+
+      function syncBusyControls() {
+        const hasText = input.value.trim().length > 0;
+        if (stopBtn) stopBtn.hidden = !tab.busy;
+        sendBtn.disabled = !hasText || (tab.busy && !tab.agentSession?.steer);
+      }
+
+      function lockSessionContext() {
+        if (trigger) trigger.disabled = true;
+        if (projectBtn) projectBtn.disabled = true;
+        closeMenu(false);
+      }
+
+      function activateThreadView() {
+        panel.dataset.agentActive = "true";
+        if (thread) thread.hidden = false;
+      }
+
+      function appendUserMessage(text) {
+        activateThreadView();
+        const bubble = document.createElement("p");
+        bubble.className = "cw-agent-turn-user";
+        bubble.textContent = text;
+        threadInner?.append(bubble);
+        if (thread) thread.scrollTop = thread.scrollHeight;
+      }
+
+      function createAssistantTurn(messageId, agentName) {
+        activateThreadView();
+        const wrap = document.createElement("article");
+        wrap.className = "cw-agent-turn-assistant";
+        wrap.dataset.agentTurn = messageId;
+        const activity = document.createElement("details");
+        activity.className = "cw-agent-activity";
+        activity.open = true;
+        activity.dataset.busy = "true";
+        const summary = document.createElement("summary");
+        summary.className = "cw-agent-activity-summary";
+        const dot = document.createElement("span");
+        dot.className = "cw-agent-activity-dot";
+        dot.setAttribute("aria-hidden", "true");
+        const summaryText = document.createElement("span");
+        summaryText.textContent = "Working…";
+        summary.append(dot, summaryText);
+        const stepsList = document.createElement("ul");
+        stepsList.className = "cw-agent-activity-steps";
+        activity.append(summary, stepsList);
+        const prose = document.createElement("div");
+        prose.className = "cw-agent-prose";
+        const meta = document.createElement("p");
+        meta.className = "cw-agent-turn-meta";
+        meta.hidden = true;
+        wrap.append(activity, prose, meta);
+        threadInner?.append(wrap);
+        const turn = {
+          messageId,
+          agentName,
+          startedAt: Date.now(),
+          text: "",
+          steps: new Map(),
+          activity,
+          summaryText,
+          stepsList,
+          prose,
+          meta,
+          settled: false,
+        };
+        turnsByMessage.set(messageId, turn);
+        activeTurn = turn;
+        scrollThreadIfNearBottom();
+        return turn;
+      }
+
+      function scheduleProseRender(turn) {
+        if (tab.renderRaf) return;
+        tab.renderRaf = requestAnimationFrame(() => {
+          tab.renderRaf = 0;
+          if (turn) {
+            renderMarkdown(turn.prose, turn.text);
+            scrollThreadIfNearBottom();
+          }
+        });
+      }
+
+      function upsertToolStep(turn, id, label, state) {
+        const key = String(id || label || turn.steps.size);
+        let entry = turn.steps.get(key);
+        if (!entry) {
+          const li = document.createElement("li");
+          li.className = "cw-agent-activity-step";
+          const labelSpan = document.createElement("span");
+          li.append(labelSpan);
+          turn.stepsList.append(li);
+          entry = { li, labelSpan, label: label || "Tool step", state: "running" };
+          turn.steps.set(key, entry);
+        }
+        if (label) {
+          entry.label = label;
+          entry.labelSpan.textContent = label;
+        }
+        if (state) {
+          entry.state = state;
+          entry.li.dataset.state = state;
+        }
+        if (!turn.settled) {
+          turn.summaryText.textContent = state === "running"
+            ? `${entry.label}…`
+            : `Working · ${turn.steps.size} ${turn.steps.size === 1 ? "step" : "steps"}`;
+        }
+        scrollThreadIfNearBottom();
+      }
+
+      function settleTurn(turn, state, errorText) {
+        if (!turn || turn.settled) return;
+        turn.settled = true;
+        if (tab.renderRaf) {
+          cancelAnimationFrame(tab.renderRaf);
+          tab.renderRaf = 0;
+        }
+        renderMarkdown(turn.prose, turn.text);
+        const elapsedSec = Math.max(0.1, (Date.now() - turn.startedAt) / 1000).toFixed(1);
+        const stepCount = turn.steps.size;
+        turn.activity.dataset.busy = "false";
+        if (stepCount === 0 && !turn.text) {
+          turn.activity.hidden = true;
+        } else {
+          turn.activity.open = false;
+          turn.summaryText.textContent = stepCount > 0
+            ? `Worked for ${elapsedSec}s · ${stepCount} ${stepCount === 1 ? "step" : "steps"}`
+            : `Worked for ${elapsedSec}s`;
+        }
+        if (state === "error" || state === "failed") {
+          turn.meta.dataset.tone = "danger";
+          turn.meta.textContent = errorText || "The turn failed.";
+          turn.meta.hidden = false;
+        } else if (state === "interrupted") {
+          turn.meta.dataset.tone = "neutral";
+          turn.meta.textContent = `${turn.agentName} · Interrupted after ${elapsedSec}s`;
+          turn.meta.hidden = false;
+        } else {
+          turn.meta.dataset.tone = "neutral";
+          turn.meta.textContent = `${turn.agentName} · ${elapsedSec}s`;
+          turn.meta.hidden = false;
+        }
+        if (activeTurn === turn) activeTurn = null;
+        tab.busy = false;
+        syncBusyControls();
+        scrollThreadIfNearBottom();
+      }
+
+      function attachAgentStream(sessionId) {
+        if (tab.eventSource) {
+          tab.eventSource.close();
+          tab.eventSource = null;
+        }
+        const url = `${basePrefix}/_events/agents/${encodeURIComponent(sessionId)}`;
+        const source = new EventSource(url, { withCredentials: true });
+        tab.eventSource = source;
+        const isSettledMessage = (msgId) => {
+          if (!msgId) return false;
+          return Boolean(turnsByMessage.get(String(msgId))?.settled);
+        };
+        const resolveTurn = (msgId) => {
+          const id = String(msgId || activeTurn?.messageId || "turn");
+          return turnsByMessage.get(id) || activeTurn || createAssistantTurn(id, currentAgent().name);
+        };
+        const parseData = (event) => {
+          try { return JSON.parse(event.data || "{}"); } catch { return null; }
+        };
+        source.addEventListener("turn_start", (event) => {
+          const data = parseData(event);
+          if (!data || isSettledMessage(data.msg)) return;
+          tab.busy = true;
+          syncBusyControls();
+          resolveTurn(data.msg);
+        });
+        source.addEventListener("delta", (event) => {
+          const data = parseData(event);
+          if (!data || typeof data.text !== "string" || isSettledMessage(data.msg)) return;
+          const turn = resolveTurn(data.msg);
+          if (turn.settled) return;
+          tab.busy = true;
+          syncBusyControls();
+          turn.text += data.text;
+          scheduleProseRender(turn);
+        });
+        source.addEventListener("tool_start", (event) => {
+          const data = parseData(event);
+          if (!data || isSettledMessage(data.msg)) return;
+          const turn = resolveTurn(data.msg);
+          if (turn.settled) return;
+          upsertToolStep(turn, data.id, data.label || data.kind || "Tool", "running");
+        });
+        source.addEventListener("tool_end", (event) => {
+          const data = parseData(event);
+          if (!data || isSettledMessage(data.msg)) return;
+          const turn = resolveTurn(data.msg);
+          if (turn.settled) return;
+          upsertToolStep(turn, data.id, data.summary || "", data.ok === false ? "failed" : "done");
+        });
+        source.addEventListener("turn_end", (event) => {
+          const data = parseData(event);
+          if (!data || isSettledMessage(data.msg)) return;
+          const turn = resolveTurn(data.msg);
+          settleTurn(turn, data.state || "completed", data.error);
+        });
+        source.addEventListener("status", (event) => {
+          const data = parseData(event);
+          if (data?.state && ended(data.state) && activeTurn) {
+            settleTurn(activeTurn, data.state, "Agent session ended.");
+          }
+        });
+      }
+
+      async function restoreExistingSession(session) {
+        tab.agentSession = {
+          sessionId: session.sessionId,
+          driverId: session.driverId,
+          launchGeneration: session.launchGeneration || 1,
+          agentId: selectedAgentId,
+          agentName: session.name || "Agent",
+          workingDir: session.workingDir || workingDir,
+          steer: true,
+          interrupt: true,
+        };
+        if (projectLabel) projectLabel.textContent = tab.agentSession.workingDir;
+        lockSessionContext();
+        activateThreadView();
+        try {
+          const query = new URLSearchParams({
+            driver_id: tab.agentSession.driverId,
+            launch_generation: String(tab.agentSession.launchGeneration),
+          });
+          const res = await fetch(
+            `${basePrefix}/_fragments/agents/${encodeURIComponent(session.sessionId)}?${query}`,
+            { credentials: "same-origin", headers: { Accept: "application/json" } },
+          );
+          if (res.ok) {
+            const data = await res.json();
+            for (const msg of data.messages || []) {
+              if (msg.text) appendUserMessage(msg.text);
+              const terminal = ["completed", "error", "failed", "interrupted", "unknown"].includes(msg.state);
+              if (msg.result || msg.error || terminal) {
+                const turn = createAssistantTurn(msg.id || clientUuid(), tab.agentSession.agentName);
+                turn.text = msg.result || "";
+                settleTurn(turn, msg.state || "completed", msg.error);
+              }
+            }
+          }
+        } catch { /* Attach live stream even if history read failed. */ }
+        attachAgentStream(session.sessionId);
+      }
 
       function syncTrigger() {
         const model = currentModel();
@@ -1195,7 +1700,7 @@
       input.addEventListener("input", () => {
         input.style.height = "auto";
         input.style.height = `${Math.min(input.scrollHeight, 176)}px`;
-        sendBtn.disabled = input.value.trim().length === 0;
+        syncBusyControls();
         if (note) note.hidden = true;
       });
       input.addEventListener("keydown", (event) => {
@@ -1204,16 +1709,158 @@
           if (!sendBtn.disabled) form.requestSubmit();
         }
       });
-      form.addEventListener("submit", (event) => {
-        event.preventDefault();
-        if (!input.value.trim()) return;
-        const agent = currentAgent();
+      async function ensureAgentAccount() {
+        if (account) return account;
+        await fetchAgentInventory();
+        return account;
+      }
+      function showMissingAccountNotice() {
         if (note) {
-          note.textContent = `Managed ${agent.name} streaming connects in the next slice. Open a Terminal tab to run ${agent.cmd} now.`;
+          note.textContent = "Session identity is still loading. Refresh the page and try again.";
           note.hidden = false;
+        }
+        syncBusyControls();
+      }
+      stopBtn?.addEventListener("click", async () => {
+        if (!tab.agentSession || !tab.busy) return;
+        const accountId = await ensureAgentAccount();
+        if (tab.disposed) return;
+        if (!accountId) {
+          showMissingAccountNotice();
+          return;
+        }
+        stopBtn.disabled = true;
+        try {
+          await fetch(`${basePrefix}/_actions/agents/control`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({
+              _csrf: csrf || "",
+              account_id: accountId,
+              request_id: clientUuid(),
+              action: "interrupt",
+              session_id: tab.agentSession.sessionId,
+              driver_id: tab.agentSession.driverId,
+              launch_generation: tab.agentSession.launchGeneration,
+              text: "",
+            }),
+          });
+        } finally {
+          stopBtn.disabled = false;
+        }
+      });
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const promptText = input.value.trim();
+        if (!promptText) return;
+        const agent = currentAgent();
+        const model = currentModel();
+        if (note) note.hidden = true;
+        sendBtn.disabled = true;
+        const accountId = await ensureAgentAccount();
+        if (tab.disposed) return;
+        if (!accountId) {
+          showMissingAccountNotice();
+          return;
+        }
+        const requestId = clientUuid();
+        try {
+          if (!tab.agentSession) {
+            const response = await fetch(`${basePrefix}/_actions/agents/launch`, {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                _csrf: csrf || "",
+                account_id: accountId,
+                request_id: requestId,
+                agent: agent.id,
+                model: model?.id || agent.id,
+                effort: selectedEffort === "Default" ? null : selectedEffort.toLowerCase(),
+                working_dir: workingDir,
+                prompt: promptText,
+              }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || !payload.sessionId) {
+              const reason = payload?.error;
+              if (note) {
+                note.textContent = reason === "unsupported-agent" || reason === "agent-not-configured"
+                  ? `${agent.name} is not enabled in this Sandbox yet. Switch to Claude Code or Codex, or open a Terminal tab.`
+                  : reason === "agent-chat-disabled"
+                    ? "Agent chat is not enabled for this organization."
+                    : "Could not start the agent session right now. Check Sandbox readiness and try again.";
+                note.hidden = false;
+              }
+              syncBusyControls();
+              return;
+            }
+            tab.agentSession = {
+              sessionId: payload.sessionId,
+              driverId: payload.driverId || payload.sessionId.replace(/^session-/, ""),
+              launchGeneration: payload.launchGeneration || 1,
+              agentId: agent.id,
+              agentName: agent.name,
+              workingDir,
+              steer: agent.id === "codex",
+              interrupt: true,
+            };
+            input.value = "";
+            input.style.height = "auto";
+            setTabTitle(promptText);
+            lockSessionContext();
+            appendUserMessage(promptText);
+            tab.busy = true;
+            createAssistantTurn(payload.messageId || requestId, agent.name);
+            syncBusyControls();
+            attachAgentStream(payload.sessionId);
+            void fetchAgentInventory();
+          } else {
+            const action = tab.busy && tab.agentSession.steer ? "steer" : "message";
+            const response = await fetch(`${basePrefix}/_actions/agents/control`, {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                _csrf: csrf || "",
+                account_id: accountId,
+                request_id: requestId,
+                action,
+                session_id: tab.agentSession.sessionId,
+                driver_id: tab.agentSession.driverId,
+                launch_generation: tab.agentSession.launchGeneration,
+                text: promptText,
+              }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              if (note) {
+                note.textContent = "Could not send that message right now. Try again.";
+                note.hidden = false;
+              }
+              syncBusyControls();
+              return;
+            }
+            input.value = "";
+            input.style.height = "auto";
+            appendUserMessage(promptText);
+            if (action === "message") {
+              tab.busy = true;
+              createAssistantTurn(payload.messageId || requestId, tab.agentSession.agentName);
+            }
+            syncBusyControls();
+          }
+        } catch {
+          if (note) {
+            note.textContent = "Could not reach the Sandbox agent endpoint. Try again.";
+            note.hidden = false;
+          }
+          syncBusyControls();
         }
       });
       syncTrigger();
+      if (existingSession) void restoreExistingSession(existingSession);
     }
     function add(session, replaceHomeId) {
       if (tabs.has(session.sessionId)) return tabs.get(session.sessionId);
@@ -1421,6 +2068,7 @@
             if (!launch) autoOpen = "off";
           }
         }
+        void fetchAgentInventory();
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }

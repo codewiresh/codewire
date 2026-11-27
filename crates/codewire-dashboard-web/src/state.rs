@@ -25,6 +25,8 @@ pub(crate) struct AppState {
     /// Long-lived reads such as the setup-progress relay. No total timeout:
     /// each use bounds its own lifetime.
     pub(crate) stream_http: reqwest::Client,
+    /// HTTP/2 streaming client for bidirectional Connect RPCs (AttachSession).
+    pub(crate) bidi_http: reqwest::Client,
     /// The sign-up credit the pricing page last read.
     pub(crate) signup_credit: std::sync::Arc<crate::billing_connect::SignupCreditCache>,
     /// Regular's rates the pricing page last read.
@@ -43,6 +45,17 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub(crate) fn new(config: Config) -> Self {
+        let is_cleartext_api = config.api_origin.scheme_str() == Some("http");
+        let bidi_builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none());
+        let bidi_http = if is_cleartext_api {
+            bidi_builder.http2_prior_knowledge()
+        } else {
+            bidi_builder
+        }
+        .build()
+        .expect("static dashboard bidi HTTP client configuration");
         Self {
             public_origin: config.public_origin,
             api_origin: config.api_origin,
@@ -84,6 +97,7 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static dashboard stream HTTP client configuration"),
+            bidi_http,
             signup_credit: std::sync::Arc::default(),
             public_rates: std::sync::Arc::default(),
             oauth_providers: std::sync::Arc::default(),

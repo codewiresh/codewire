@@ -36,6 +36,7 @@ pub(crate) use dispatch::{handle_inbox_command, handle_message_command};
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
+mod stream_events;
 mod turn_failure;
 mod turn_heartbeat;
 use activity_lines::{claude_activity, codex_activity, codex_turn_outcome};
@@ -2655,6 +2656,7 @@ fn claude_arguments(
         "--output-format",
         "stream-json",
         "--verbose",
+        "--include-partial-messages",
         "--replay-user-messages",
         "--model",
         config.model.as_str(),
@@ -3760,6 +3762,7 @@ impl Driver {
                 continue;
             }
             let text = turn_text(&record);
+            stream_events::emit_turn_start(&record.id);
             self.active = Some(ActiveTurn {
                 message_id: record.id.clone(),
                 text: text.clone(),
@@ -4180,6 +4183,7 @@ impl Driver {
                 | "turn/completed"
                 | "item/started"
                 | "item/completed"
+                | "item/agentMessage/delta"
                 | "thread/tokenUsage/updated"
         ) && params.get("threadId").and_then(Value::as_str)
             != self.state.native_thread_id.as_deref()
@@ -4204,20 +4208,42 @@ impl Driver {
                     self.record_turn(&message_id, &turn)?;
                 }
             }
-            "item/started" => {
-                if let Some(line) = params
-                    .get("item")
-                    .and_then(|item| codex_activity(item, false))
+            "item/agentMessage/delta" => {
+                if let (Some(delta), Some(active)) =
+                    (stream_events::codex_delta(&params), self.active.as_ref())
                 {
-                    log(line);
+                    let turn = params.get("turnId").and_then(Value::as_str);
+                    if turn.is_none()
+                        || active.turn_id.is_none()
+                        || active.turn_id.as_deref() == turn
+                    {
+                        stream_events::emit_delta(&active.message_id, delta);
+                    }
+                }
+            }
+            "item/started" => {
+                if let Some(item) = params.get("item") {
+                    if let Some(line) = codex_activity(item, false) {
+                        log(line);
+                    }
+                    if let (Some((id, kind, label)), Some(active)) =
+                        (stream_events::codex_tool(item), self.active.as_ref())
+                    {
+                        stream_events::emit_tool_start(&active.message_id, &id, kind, &label);
+                    }
                 }
             }
             "item/completed" => {
-                if let Some(line) = params
-                    .get("item")
-                    .and_then(|item| codex_activity(item, true))
-                {
-                    log(line);
+                if let Some(item) = params.get("item") {
+                    if let Some(line) = codex_activity(item, true) {
+                        log(line);
+                    }
+                    if let (Some((id, _kind, label)), Some(active)) =
+                        (stream_events::codex_tool(item), self.active.as_ref())
+                    {
+                        let ok = item.get("status").and_then(Value::as_str) != Some("failed");
+                        stream_events::emit_tool_end(&active.message_id, &id, ok, &label);
+                    }
                 }
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage")
                     && let Some(text) = params.pointer("/item/text").and_then(Value::as_str)
@@ -4378,9 +4404,33 @@ impl Driver {
                     update_message(&self.dir, &message_id, |r| r.native_acknowledged = true)?;
                 }
             }
+            "stream_event" => {
+                if let (Some(event), Some(active)) = (
+                    stream_events::claude_stream_event(&value),
+                    self.active.as_ref(),
+                ) {
+                    match event {
+                        stream_events::ClaudeStreamEvent::Delta(text) => {
+                            stream_events::emit_delta(&active.message_id, &text);
+                        }
+                        stream_events::ClaudeStreamEvent::ToolStart { id, kind, label } => {
+                            stream_events::emit_tool_start(&active.message_id, &id, kind, &label);
+                        }
+                        stream_events::ClaudeStreamEvent::ToolEnd { id } => {
+                            stream_events::emit_tool_end(&active.message_id, &id, true, "");
+                        }
+                    }
+                }
+            }
             "assistant" => {
                 for line in claude_activity(&value) {
                     log(line);
+                }
+                if let Some(active) = self.active.as_ref() {
+                    for (id, kind, label) in stream_events::claude_assistant_tools(&value) {
+                        stream_events::emit_tool_start(&active.message_id, &id, kind, &label);
+                        stream_events::emit_tool_end(&active.message_id, &id, true, &label);
+                    }
                 }
                 if let Some(text) = content_text(&value)
                     && let Some(active) = self.active.as_mut()
@@ -4563,6 +4613,12 @@ impl Driver {
             _ => {}
         }
         self.persist_state()?;
+        stream_events::emit_turn_end(
+            &main.id,
+            main.state.name(),
+            main.error.as_deref(),
+            main.usage.as_ref(),
+        );
         log(format!("message {} {}", main.id, main.state.name()));
         if let Some(reply) = main
             .result
@@ -5519,13 +5575,14 @@ mod tests {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--replay-user-messages",
             "--model",
             "synthetic-model",
         ];
         let host = claude_arguments(&claude_config(None), false, false, session);
-        assert_eq!(host[..9], stream);
-        assert_eq!(host[9..], ["--session-id", session]);
+        assert_eq!(host[..10], stream);
+        assert_eq!(host[10..], ["--session-id", session]);
         let sandbox = claude_arguments(&claude_config(None), true, false, session);
         // The Sandbox launch is the host launch plus bypass mode, last.
         assert_eq!(sandbox[..host.len()], host[..]);
@@ -5535,7 +5592,7 @@ mod tests {
         );
         // A saved conversation resumes, and effort keeps its place.
         assert_eq!(
-            claude_arguments(&claude_config(Some("high")), true, true, session)[9..],
+            claude_arguments(&claude_config(Some("high")), true, true, session)[10..],
             [
                 "--resume",
                 session,
@@ -5546,7 +5603,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            claude_arguments(&claude_config(Some("high")), false, true, session)[9..],
+            claude_arguments(&claude_config(Some("high")), false, true, session)[10..],
             ["--resume", session, "--effort", "high"]
         );
         for sandbox in [false, true] {

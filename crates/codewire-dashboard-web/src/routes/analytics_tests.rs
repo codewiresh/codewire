@@ -76,6 +76,7 @@ fn every_path_parameter_is_a_name_or_an_id() {
             "environment_id",
             "name",
             "organization_id",
+            "session_id",
             "slug",
             "user_id",
         ]

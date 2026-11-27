@@ -7,6 +7,7 @@
 
 mod admin;
 mod admin_credit;
+mod agent_sessions;
 mod authentication;
 mod billing;
 #[cfg(test)]
@@ -810,6 +811,26 @@ fn sandbox_routes() -> Router<AppState> {
         .route(
             "/{slug}/{environment_id}/_actions/terminal-sessions/stop",
             post(terminal_sessions::stop).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_fragments/agents",
+            get(agent_sessions::list),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/agents/launch",
+            post(agent_sessions::launch).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_actions/agents/control",
+            post(agent_sessions::control).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/{slug}/{environment_id}/_fragments/agents/{session_id}",
+            get(agent_sessions::read),
+        )
+        .route(
+            "/{slug}/{environment_id}/_events/agents/{session_id}",
+            get(agent_sessions::events),
         )
         .route(
             "/{slug}/{environment_id}/_fragments/desktop",

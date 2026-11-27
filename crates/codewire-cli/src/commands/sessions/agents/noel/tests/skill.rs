@@ -310,6 +310,7 @@ fn codex_and_claude_are_launched_without_a_skill() {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--replay-user-messages",
             "--model",
             "faux/echo",

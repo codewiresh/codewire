@@ -318,9 +318,48 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-tab-home-reattach-meta { display: flex; min-width: 0; align-items: center; gap: var(--space-2); color: var(--fg-secondary); font-size: var(--text-secondary); }
 .cw-tab-home-reattach-sub { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-small); }
 
-/* Agent Chat panel & composer: equal left/right/bottom padding around the
-   bottom pill bar, with rock-solid 1-level-at-a-time cascading menus. */
+/* Agent Chat panel & composer: centred empty state transitions to a full
+   streaming conversation thread with a bottom-docked composer. */
 .cw-agent-panel { display: grid; height: 100%; min-height: 0; place-items: center; overflow-y: auto; padding: var(--space-6) var(--space-5) var(--space-16); background: var(--bg-base); }
+.cw-agent-panel[data-agent-active="true"] { grid-template-rows: minmax(0, 1fr) auto; place-items: stretch; overflow: hidden; padding: 0; }
+.cw-agent-panel[data-agent-active="true"] .cw-agent-empty-title { display: none; }
+.cw-agent-panel[data-agent-active="true"] .cw-agent-empty { width: 100%; padding: var(--space-3) var(--space-5) var(--space-5); border-top: var(--border-width) solid var(--border-subtle); background: var(--bg-base); }
+.cw-agent-panel[data-agent-active="true"] .cw-agent-empty > .cw-agent-composer,
+.cw-agent-panel[data-agent-active="true"] .cw-agent-empty > .cw-agent-note { width: min(100%, var(--measure)); margin-inline: auto; }
+.cw-agent-thread { min-height: 0; overflow-y: auto; padding: var(--space-6) var(--space-5); }
+.cw-agent-thread[hidden] { display: none; }
+.cw-agent-thread-inner { display: grid; width: min(100%, var(--measure)); margin-inline: auto; align-content: start; gap: var(--space-5); }
+.cw-agent-turn-user { justify-self: end; max-width: 85%; margin: 0; padding: var(--space-3) var(--space-4); border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--fg-primary); font-size: var(--text-body); line-height: var(--leading-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cw-agent-turn-assistant { display: grid; min-width: 0; gap: var(--space-3); }
+.cw-agent-activity { border: var(--border-width) solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-secondary); }
+.cw-agent-activity-summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); color: var(--fg-secondary); font-size: var(--text-secondary); font-weight: var(--weight-medium); line-height: var(--leading-tight); list-style: none; cursor: pointer; }
+.cw-agent-activity-summary::-webkit-details-marker { display: none; }
+.cw-agent-activity-dot { width: var(--space-2); height: var(--space-2); flex: none; border-radius: var(--radius-pill); background: var(--fg-tertiary); }
+.cw-agent-activity[data-busy="true"] .cw-agent-activity-dot { background: var(--accent-text); animation: cw-agent-pulse 1.2s ease-in-out infinite; }
+.cw-agent-activity-steps { display: grid; gap: var(--space-1-5); margin: 0; padding: var(--space-2) var(--space-3) var(--space-3); border-top: var(--border-width) solid var(--border-subtle); list-style: none; }
+.cw-agent-activity-steps:empty { display: none; }
+.cw-agent-activity-step { display: flex; align-items: center; gap: var(--space-2); color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); line-height: var(--leading-body); overflow-wrap: anywhere; }
+.cw-agent-activity-step[data-state="done"] { color: var(--fg-tertiary); }
+.cw-agent-activity-step[data-state="failed"] { color: var(--destructive); }
+.cw-agent-prose { display: grid; min-width: 0; gap: var(--space-3); color: var(--fg-primary); font-size: var(--text-body); line-height: var(--leading-body); overflow-wrap: anywhere; }
+.cw-agent-prose:empty { display: none; }
+.cw-agent-prose > :is(p, ul, ol, blockquote, h1, h2, h3, h4) { margin: 0; }
+.cw-agent-prose > :is(h1, h2, h3, h4) { color: var(--fg-primary); font-weight: var(--weight-semibold); line-height: var(--leading-tight); }
+.cw-agent-prose > h1 { font-size: var(--text-title); }
+.cw-agent-prose > h2 { font-size: var(--text-title); }
+.cw-agent-prose > :is(ul, ol) { display: grid; gap: var(--space-1); padding-inline-start: var(--space-5); }
+.cw-agent-prose blockquote { padding-inline-start: var(--space-3); border-inline-start: var(--tab-indicator) solid var(--border); color: var(--fg-secondary); }
+.cw-agent-prose code { padding: 0 var(--space-1); border-radius: var(--radius-sm); background: var(--bg-surface); font-family: var(--font-mono); font-size: var(--text-code); }
+.cw-agent-prose a { color: var(--accent-text); text-decoration: underline; }
+.cw-agent-codeblock { display: grid; min-width: 0; overflow: hidden; border: var(--border-width) solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-secondary); }
+.cw-agent-codeblock-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-1-5) var(--space-3); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-small); }
+.cw-agent-codeblock pre { margin: 0; padding: var(--space-3); overflow-x: auto; font-family: var(--font-mono); font-size: var(--text-code); line-height: var(--leading-body); }
+.cw-agent-codeblock pre code { padding: 0; border-radius: 0; background: transparent; }
+.cw-agent-turn-meta { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-tight); }
+.cw-agent-turn-meta[data-tone="danger"] { color: var(--destructive); }
+.cw-agent-stop { display: inline-grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--destructive); color: var(--fg-inverse); cursor: pointer; }
+.cw-agent-stop[hidden] { display: none; }
+@keyframes cw-agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .cw-agent-empty { display: grid; width: min(100%, var(--measure)); gap: var(--space-4); }
 .cw-agent-empty-title { margin: 0; padding-inline: var(--space-1); color: var(--fg-primary); font-size: var(--text-title); font-weight: var(--weight-medium); line-height: var(--leading-tight); }
 .cw-agent-composer { display: grid; gap: var(--space-5); padding: var(--space-4) var(--space-3) var(--space-3); border: var(--border-width) solid var(--border); border-radius: var(--radius-xl); background: var(--bg-composer); transition: border-color 140ms ease; }

@@ -39,6 +39,9 @@ async function transport(page: Page) {
     await route.fulfill({ status: state.listStatus, json: state.listStatus === 200
       ? { accountId: state.accountId, sessions: state.sessions } : { error: state.listError } });
   });
+  await page.route("**/_fragments/agents", async (route) => {
+    await route.fulfill({ status: 200, json: { accountId: state.accountId, supportedAgents: [], sessions: [] } });
+  });
   await page.route("**/_actions/terminal-sessions/launch", async (route) => {
     state.launches += 1;
     const form = new URLSearchParams(route.request().postData() || "");
@@ -3250,6 +3253,231 @@ test("Agent tab composer opens stable one-level-at-a-time cascading menus with r
   await expect(trigger.locator("[data-agent-trigger-model]")).toHaveText("Sonnet 5.5");
   await expect(trigger.locator("use").first()).toHaveAttribute("href", /#icon-claude$/);
   await expect(page.locator('[role="tab"][aria-selected="true"] use')).toHaveAttribute("href", /#icon-claude$/);
+});
+
+test("Agent tab streams SSE tool steps and CSP-safe Markdown, collapses activity on finish, and supports Stop", async ({ page }) => {
+  await transport(page);
+  const launched: Array<Record<string, unknown>> = [];
+  const controls: Array<Record<string, unknown>> = [];
+  const driverId = "11111111-1111-4111-8111-111111111111";
+  const agentSessionId = `session-${driverId}`;
+  const msgId = "22222222-2222-4222-8222-222222222222";
+  await page.route("**/_fragments/agents", async (route) => {
+    await route.fulfill({ json: { accountId: "account-a", supportedAgents: [], sessions: [] } });
+  });
+  await page.route("**/_actions/agents/launch", async (route) => {
+    launched.push(route.request().postDataJSON());
+    await route.fulfill({
+      json: {
+        requestId: msgId,
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messageId: msgId,
+        phase: "completed",
+        state: "running",
+        reason: "",
+      },
+    });
+  });
+  await page.route("**/_actions/agents/control", async (route) => {
+    controls.push(route.request().postDataJSON());
+    await route.fulfill({
+      json: {
+        requestId: msgId,
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messageId: msgId,
+        phase: "completed",
+        state: "running",
+        reason: "",
+      },
+    });
+  });
+  await page.route(`**/_events/agents/${agentSessionId}`, async (route) => {
+    const sse = [
+      `id: 1\nevent: turn_start\ndata: ${JSON.stringify({ v: 1, t: "turn_start", msg: msgId })}\n\n`,
+      `id: 2\nevent: tool_start\ndata: ${JSON.stringify({ v: 1, t: "tool_start", msg: msgId, id: "call-1", kind: "run", label: "Ran cargo test" })}\n\n`,
+      `id: 3\nevent: tool_end\ndata: ${JSON.stringify({ v: 1, t: "tool_end", msg: msgId, id: "call-1", ok: true, summary: "Ran cargo test" })}\n\n`,
+      `id: 4\nevent: delta\ndata: ${JSON.stringify({ v: 1, t: "delta", msg: msgId, text: "## Done\n\nAll tests **pass** <script>alert(1)</script>\n\n```rust\nfn ok() {}\n```" })}\n\n`,
+      `id: 5\nevent: turn_end\ndata: ${JSON.stringify({ v: 1, t: "turn_end", msg: msgId, state: "completed" })}\n\n`,
+    ].join("");
+    await route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" },
+      body: sse,
+    });
+  });
+
+  await openFixture(page);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="agent"]').click();
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  await agentPanel.locator("[data-agent-input]").fill("Run the tests and summarize");
+  await agentPanel.locator("[data-agent-send]").click();
+
+  await expect(agentPanel).toHaveAttribute("data-agent-active", "true");
+  expect(launched).toHaveLength(1);
+  expect(launched[0].prompt).toBe("Run the tests and summarize");
+  await expect(agentPanel.locator(".cw-agent-turn-user")).toHaveText("Run the tests and summarize");
+  await expect(agentPanel.locator(".cw-agent-prose h2")).toHaveText("Done");
+  await expect(agentPanel.locator(".cw-agent-prose strong")).toHaveText("pass");
+  await expect(agentPanel.locator(".cw-agent-prose script")).toHaveCount(0);
+  await expect(agentPanel.locator(".cw-agent-codeblock pre code")).toHaveText("fn ok() {}");
+  const activity = agentPanel.locator(".cw-agent-activity");
+  await expect(activity).not.toHaveAttribute("open", "");
+  await expect(activity.locator(".cw-agent-activity-summary")).toContainText("1 step");
+  await expect(agentPanel.locator("[data-agent-menu-trigger]")).toBeDisabled();
+  // Follow-up prompt uses /_actions/agents/control.
+  await agentPanel.locator("[data-agent-input]").fill("Follow up");
+  await agentPanel.locator("[data-agent-send]").click();
+  await expect.poll(() => controls.length).toBe(1);
+  expect(controls[0].action).toBe("message");
+  expect(controls[0].text).toBe("Follow up");
+});
+
+test("Reattaching an agent session ignores SSE replay for settled history turns without doubling prose", async ({ page }) => {
+  await transport(page);
+  const driverId = "33333333-3333-4333-8333-333333333333";
+  const agentSessionId = `session-${driverId}`;
+  const settledMsgId = "44444444-4444-4444-8444-444444444444";
+  const liveMsgId = "55555555-5555-4555-8555-555555555555";
+  await page.route("**/_fragments/agents", async (route) => {
+    await route.fulfill({
+      json: {
+        accountId: "account-a",
+        supportedAgents: [],
+        sessions: [
+          {
+            sessionId: agentSessionId,
+            driverId,
+            launchGeneration: 1,
+            name: "Claude Code",
+            state: "running",
+            workingDir: "/workspace",
+          },
+        ],
+      },
+    });
+  });
+  await page.route(`**/_fragments/agents/${agentSessionId}*`, async (route) => {
+    await route.fulfill({
+      json: {
+        accountId: "account-a",
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messages: [
+          {
+            id: settledMsgId,
+            text: "Check tests",
+            state: "completed",
+            result: "All green.",
+            error: "",
+          },
+        ],
+      },
+    });
+  });
+  await page.route(`**/_events/agents/${agentSessionId}`, async (route) => {
+    const sse = [
+      // Historical replay of already-settled turn must be ignored completely.
+      `id: 10\nevent: turn_start\ndata: ${JSON.stringify({ v: 1, t: "turn_start", msg: settledMsgId })}\n\n`,
+      `id: 20\nevent: tool_start\ndata: ${JSON.stringify({ v: 1, t: "tool_start", msg: settledMsgId, id: "call-old", kind: "run", label: "Stale replay step" })}\n\n`,
+      `id: 30\nevent: tool_end\ndata: ${JSON.stringify({ v: 1, t: "tool_end", msg: settledMsgId, id: "call-old", ok: true, summary: "Stale replay step" })}\n\n`,
+      `id: 40\nevent: delta\ndata: ${JSON.stringify({ v: 1, t: "delta", msg: settledMsgId, text: "All green." })}\n\n`,
+      `id: 50\nevent: turn_end\ndata: ${JSON.stringify({ v: 1, t: "turn_end", msg: settledMsgId, state: "completed" })}\n\n`,
+      // Subsequent live turn after reattach streams normally.
+      `id: 60\nevent: turn_start\ndata: ${JSON.stringify({ v: 1, t: "turn_start", msg: liveMsgId })}\n\n`,
+      `id: 70\nevent: delta\ndata: ${JSON.stringify({ v: 1, t: "delta", msg: liveMsgId, text: "Second turn." })}\n\n`,
+      `id: 80\nevent: turn_end\ndata: ${JSON.stringify({ v: 1, t: "turn_end", msg: liveMsgId, state: "completed" })}\n\n`,
+    ].join("");
+    await route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" },
+      body: sse,
+    });
+  });
+
+  await openFixture(page);
+  const home = page.locator("[data-home-tab-panel]:not([hidden])");
+  await expect(home.locator("[data-home-reattach]")).toContainText("Claude Code");
+  await home.locator("[data-home-reattach]").getByRole("button", { name: "Reattach", exact: true }).click();
+
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  const assistantTurns = agentPanel.locator(".cw-agent-turn-assistant");
+  await expect(assistantTurns).toHaveCount(2);
+  await expect(assistantTurns.nth(0).locator(".cw-agent-prose")).toHaveText("All green.");
+  await expect(assistantTurns.nth(0).locator(".cw-agent-activity-step")).toHaveCount(0);
+  await expect(assistantTurns.nth(0)).not.toContainText("Stale replay step");
+  await expect(assistantTurns.nth(1).locator(".cw-agent-prose")).toHaveText("Second turn.");
+  await expect(agentPanel.locator("[data-agent-stop]")).toBeHidden();
+});
+
+test("Agent tab refuses launch without account identity and uses accountId from agent inventory once available", async ({ page }) => {
+  const state = await transport(page);
+  state.accountId = "account-real";
+  let agentInventoryStatus = 401;
+  let agentInventoryAccount = "";
+  let agentInventoryCalls = 0;
+  const launched: Array<Record<string, unknown>> = [];
+  const driverId = "66666666-6666-4666-8666-666666666666";
+  const agentSessionId = `session-${driverId}`;
+  const msgId = "77777777-7777-4777-8777-777777777777";
+  await page.route("**/_fragments/agents", async (route) => {
+    agentInventoryCalls += 1;
+    if (agentInventoryStatus !== 200) {
+      await route.fulfill({ status: agentInventoryStatus, json: { error: "sign-in-required" } });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        ...(agentInventoryAccount ? { accountId: agentInventoryAccount } : {}),
+        supportedAgents: [],
+        sessions: [],
+      },
+    });
+  });
+  await page.route("**/_actions/agents/launch", async (route) => {
+    launched.push(route.request().postDataJSON());
+    await route.fulfill({
+      json: {
+        requestId: msgId,
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messageId: msgId,
+        phase: "completed",
+        state: "running",
+        reason: "",
+      },
+    });
+  });
+  await page.route(`**/_events/agents/${agentSessionId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" },
+      body: `id: 1\nevent: turn_end\ndata: ${JSON.stringify({ v: 1, t: "turn_end", msg: msgId, state: "completed" })}\n\n`,
+    });
+  });
+
+  await openFixture(page);
+  await expect.poll(() => agentInventoryCalls).toBeGreaterThanOrEqual(1);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="agent"]').click();
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  await agentPanel.locator("[data-agent-input]").fill("Check status");
+  await agentPanel.locator("[data-agent-send]").click();
+
+  await expect(agentPanel.locator("[data-agent-note]")).toHaveText("Session identity is still loading. Refresh the page and try again.");
+  expect(launched).toHaveLength(0);
+
+  // Once agent inventory supplies accountId, submitting succeeds with that exact identity.
+  agentInventoryStatus = 200;
+  agentInventoryAccount = "account-real";
+  await agentPanel.locator("[data-agent-send]").click();
+  await expect.poll(() => launched.length).toBe(1);
+  expect(launched[0].account_id).toBe("account-real");
 });
 
 // Status reads the page made, counted as the browser sends them.
