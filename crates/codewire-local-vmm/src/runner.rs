@@ -138,8 +138,13 @@ mod progress;
 #[cfg(target_os = "macos")]
 mod vz_launch;
 
+#[cfg(target_os = "linux")]
+pub use checkpoint::Hibernation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use checkpoint::{RestoreBoot, RestoreReport};
+pub use checkpoint::{
+    CaptureTimings, CheckpointCapture, CheckpointImageDisk, RestoreBoot, RestoreImageDiskError,
+    RestoreReport,
+};
 use host_port_forward::HostPortForwarder;
 use mesh_ingress_pass::MeshIngressPass;
 use progress::{
@@ -3748,14 +3753,9 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     {
         return Err(RunnerError::InvalidRequest);
     }
-    // An image disk boots on Linux only, and not yet from a VM checkpoint,
-    // until both are built (#4646 steps 4 and 5).
+    // An image disk boots on Linux only until the Mac's is built (#4646).
     #[cfg(target_os = "macos")]
     if request.image_disk.is_some() {
-        return Err(RunnerError::InvalidRequest);
-    }
-    #[cfg(target_os = "linux")]
-    if request.image_disk.is_some() && request.checkpoint.is_some() {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
@@ -4421,6 +4421,8 @@ pub enum RunnerError {
     InvalidRequest,
     #[error("VM checkpoint: {0}")]
     Checkpoint(&'static str),
+    #[error("VM checkpoint: {0}")]
+    RestoreImageDisk(#[from] checkpoint::RestoreImageDiskError),
     #[error(
         "artifact lock and artifact directory must be siblings beneath one canonical private parent"
     )]
@@ -4642,6 +4644,7 @@ impl RunnerError {
             Self::ImageDisk(_) => "image_disk",
             Self::InvalidRequest => "invalid_request",
             Self::Checkpoint(_) => "checkpoint",
+            Self::RestoreImageDisk(_) => "restore_image_disk",
             Self::InvalidArtifactStagingLayout => "invalid_artifact_staging_layout",
             Self::Artifact(_) => "artifact",
             Self::Path(_) => "path",

@@ -11,6 +11,7 @@ pub(crate) fn runner_error_class(error: &RunnerError) -> &'static str {
         RunnerError::InvalidRequest => "invalid-request",
         RunnerError::Interception(_) => "interception",
         RunnerError::Checkpoint(_) => "checkpoint",
+        RunnerError::RestoreImageDisk(_) => "restore-image-disk",
         RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
         RunnerError::Artifact(_) => "artifact",
         RunnerError::Path(_) => "path",

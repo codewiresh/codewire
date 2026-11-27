@@ -9,6 +9,10 @@
 //! takes that tree over and admits it as untrusted input before it publishes
 //! anything. Restoring one is Linux-only for now.
 
+#[cfg(target_os = "linux")]
+mod sleep;
+#[cfg(target_os = "linux")]
+pub use sleep::Hibernation;
 #[cfg(target_os = "macos")]
 mod vz;
 #[cfg(target_os = "macos")]
@@ -34,30 +38,33 @@ const SNAPSHOT_BASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What one capture left in `checkpoints/out-<operation>`.
 #[derive(Debug, Clone)]
-pub(crate) struct CheckpointCapture {
-    pub(crate) timings: CaptureTimings,
-    pub(crate) memory_bytes: u64,
-    pub(crate) guest_abi: u32,
+pub struct CheckpointCapture {
+    pub timings: CaptureTimings,
+    pub memory_bytes: u64,
+    pub guest_abi: u32,
     /// The captured boot's setup disk, when it had one.
-    pub(crate) setup_disk_bytes: Option<u64>,
+    pub setup_disk_bytes: Option<u64>,
+    /// The image disk the captured boot sat on, which its restore must
+    /// attach (#4646); the disk itself is never copied.
+    pub image_disk: Option<CheckpointImageDisk>,
     /// The checkpoint is complete, but the VM did not resume.
-    pub(crate) resume_failed: bool,
+    pub resume_failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct CaptureTimings {
-    pub(crate) guest_freeze: Duration,
-    pub(crate) workload_frozen: Duration,
-    pub(crate) vm_paused: Duration,
-    pub(crate) memory_write: Duration,
-    pub(crate) disk_clone: Duration,
+pub struct CaptureTimings {
+    pub guest_freeze: Duration,
+    pub workload_frozen: Duration,
+    pub vm_paused: Duration,
+    pub memory_write: Duration,
+    pub disk_clone: Duration,
 }
 
 impl CloudHypervisorRunner {
     /// The pinned VMM's release and sha256, which a checkpoint restores only
     /// into.
     #[cfg(target_os = "linux")]
-    pub(crate) fn vmm_identity(&self) -> (&'static str, String) {
+    pub fn vmm_identity(&self) -> (&'static str, String) {
         (
             crate::artifact::CLOUD_HYPERVISOR_RELEASE,
             self.artifacts.cloud_hypervisor.sha256().to_owned(),
@@ -67,7 +74,7 @@ impl CloudHypervisorRunner {
     /// The pinned helper's schema and sha256, which a checkpoint restores
     /// only into (#4654 design §6).
     #[cfg(target_os = "macos")]
-    pub(crate) fn vmm_identity(&self) -> (&'static str, String) {
+    pub fn vmm_identity(&self) -> (&'static str, String) {
         (
             crate::vz::CHECKPOINT_VMM_VERSION,
             self.artifacts.vz_runner.sha256().to_owned(),
@@ -105,7 +112,7 @@ impl RunningVm {
     /// Capture a VM checkpoint into `checkpoints/out-<operation_id>`, with
     /// hook requests of ABI `abi`. On any failure the VM is running and thawed
     /// again, as far as it can be, and the tree is removed.
-    pub(crate) async fn checkpoint(
+    pub async fn checkpoint(
         &mut self,
         operation_id: Uuid,
         abi: u32,
@@ -172,35 +179,8 @@ impl RunningVm {
         timings.workload_frozen = workload_frozen;
 
         // Outside the pause: everything durable before the supervisor sees it.
-        for name in CHECKPOINT_VMM_FILES {
-            let path = vmm.join(name);
-            let file = File::open(&path).map_err(|source| PathError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            file.sync_all().map_err(|source| PathError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).map_err(
-                |source| PathError::Io {
-                    path: path.clone(),
-                    source,
-                },
-            )?;
-        }
-        // Cloud Hypervisor writes the memory as it is; Virtualization.framework's
-        // saved state is opaque, so the VM's memory is what it saved.
-        #[cfg(target_os = "linux")]
-        let memory_bytes = std::fs::metadata(vmm.join("memory-ranges"))
-            .map_err(|source| PathError::Io {
-                path: vmm.join("memory-ranges"),
-                source,
-            })?
-            .len();
-        #[cfg(target_os = "macos")]
-        let memory_bytes = u64::from(self.request.memory_mib) << 20;
-        for directory in [&vmm, &disks, &generation_dir, &root, &out.to_owned()] {
+        let memory_bytes = seal_vmm_files(&vmm, self.request.memory_mib)?;
+        for directory in [&disks, &generation_dir, &root, &out.to_owned()] {
             File::open(directory)
                 .and_then(|directory| directory.sync_all())
                 .map_err(|source| PathError::Io {
@@ -213,6 +193,11 @@ impl RunningVm {
             memory_bytes,
             guest_abi: abi,
             setup_disk_bytes: self.setup_disk.as_ref().map(|setup| setup.file.size),
+            image_disk: self
+                .request
+                .image_disk
+                .as_ref()
+                .map(CheckpointImageDisk::from),
             resume_failed,
         })
     }
@@ -401,6 +386,42 @@ pub(super) fn vmm_exit_wait(discard_guest_state: bool) -> Duration {
     }
 }
 
+/// Sync the VMM's checkpoint files and their directory, make the files
+/// read-only (0400), and return the memory image size in bytes.
+pub(super) fn seal_vmm_files(vmm: &Path, memory_mib: u32) -> Result<u64, RunnerError> {
+    #[cfg(target_os = "linux")]
+    let _ = memory_mib;
+    for name in CHECKPOINT_VMM_FILES {
+        let path = vmm.join(name);
+        let io_error = |source| PathError::Io {
+            path: path.clone(),
+            source,
+        };
+        let file = File::open(&path).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .map_err(io_error)?;
+    }
+    // Cloud Hypervisor writes the memory as it is; Virtualization.framework's
+    // saved state is opaque, so the VM's memory is what it saved.
+    #[cfg(target_os = "linux")]
+    let memory_bytes = std::fs::metadata(vmm.join("memory-ranges"))
+        .map_err(|source| PathError::Io {
+            path: vmm.join("memory-ranges"),
+            source,
+        })?
+        .len();
+    #[cfg(target_os = "macos")]
+    let memory_bytes = u64::from(memory_mib) << 20;
+    File::open(vmm)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| PathError::Io {
+            path: vmm.to_owned(),
+            source,
+        })?;
+    Ok(memory_bytes)
+}
+
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -447,6 +468,152 @@ mod tests {
         // An existing destination is never replaced.
         assert!(clone_disk(&source, &source).is_err());
     }
+
+    /// A published disk directory holding `build`, and an attachment that
+    /// names it with `named_build`.
+    fn published(
+        directory: &Path,
+        build: &str,
+        named_build: &str,
+    ) -> (ImageDiskAttachment, CheckpointImageDisk) {
+        use crate::image_disk::{IMAGE_DISK_FORMAT_VERSION, ImageDiskRecord, image_disk_id};
+        let id = image_disk_id("amd64", &"1".repeat(64)).unwrap();
+        let record = ImageDiskRecord {
+            schema_version: 1,
+            image_disk_id: id.clone(),
+            build_id: build.to_owned(),
+            format_version: IMAGE_DISK_FORMAT_VERSION,
+            architecture: "amd64".to_owned(),
+            manifest_sha256: "1".repeat(64),
+            disk_bytes: 8192,
+        };
+        std::fs::write(
+            directory.join("record.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("image.raw"), vec![0_u8; 8192]).unwrap();
+        let attachment = ImageDiskAttachment::Published {
+            directory: directory.to_owned(),
+            image_disk_id: id,
+            build_id: named_build.to_owned(),
+        };
+        let recorded = CheckpointImageDisk::from(&attachment);
+        (attachment, recorded)
+    }
+
+    #[test]
+    fn a_restore_attaches_exactly_the_image_disk_its_checkpoint_names() {
+        let engine = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(engine.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = PrivateRoot::open(engine.path()).unwrap();
+        let disk = tempfile::tempdir().unwrap();
+        let build = crate::image_disk::new_build_id();
+        let (attachment, recorded) = published(disk.path(), &build, &build);
+        let refusal = |named, recorded| match admit_restored_image_disk(&engine, named, recorded) {
+            Err(RunnerError::RestoreImageDisk(error)) => error,
+            other => panic!("{other:?}"),
+        };
+
+        admit_restored_image_disk(&engine, None, None).unwrap();
+        admit_restored_image_disk(&engine, Some(&attachment), Some(&recorded)).unwrap();
+        assert_eq!(
+            refusal(None, Some(&recorded)),
+            RestoreImageDiskError::NotNamed(recorded.clone())
+        );
+        assert_eq!(
+            refusal(Some(&attachment), None),
+            RestoreImageDiskError::NotRecorded(recorded.clone())
+        );
+        let other_build = crate::image_disk::new_build_id();
+        let (other, named) = published(disk.path(), &build, &other_build);
+        assert_eq!(
+            refusal(Some(&other), Some(&recorded)),
+            RestoreImageDiskError::Other {
+                recorded: recorded.clone(),
+                named,
+            }
+        );
+
+        // The disk was rebuilt after the checkpoint: the boot names the
+        // checkpoint's build, and the host holds another.
+        let rebuilt = crate::image_disk::new_build_id();
+        let (attachment, recorded) = published(disk.path(), &rebuilt, &build);
+        let error = refusal(Some(&attachment), Some(&recorded));
+        let message = RunnerError::from(error.clone()).to_string();
+        assert_eq!(
+            error,
+            RestoreImageDiskError::Rebuilt {
+                recorded,
+                found: rebuilt.clone(),
+            }
+        );
+        assert!(
+            message.contains(&build) && message.contains(&rebuilt),
+            "{message}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validate_request_allows_image_disk_with_checkpoint_on_linux() {
+        let build = crate::image_disk::new_build_id();
+        let image_disk_id = crate::image_disk::image_disk_id("amd64", &"1".repeat(64)).unwrap();
+        let attachment = ImageDiskAttachment::Published {
+            directory: PathBuf::from("/image"),
+            image_disk_id: image_disk_id.clone(),
+            build_id: build.clone(),
+        };
+        let request = CreateVmRequest {
+            vm_id: Uuid::new_v4(),
+            generation: 2,
+            vsock_cid: 10,
+            daemon_vsock_port: 7777,
+            state_disk_bytes: crate::state::MINIMUM_STATE_DISK_BYTES,
+            docker_disk_bytes: None,
+            root_generation: "a".repeat(64),
+            root_disk_bytes: crate::runner::MINIMUM_ROOT_DISK_BYTES,
+            vcpus: 2,
+            memory_mib: 512,
+            setup: None,
+            host_ports: Vec::new(),
+            mesh: None,
+            direct_shares: Vec::new(),
+            skill_snapshot_sha256: None,
+            environment_projection_sha256: None,
+            managed_credential_clients: Default::default(),
+            cw_runtime_catalog_generation: None,
+            cw_runtime_moved_from_generation: None,
+            image_disk: Some(attachment),
+            network_policy: codewire_egress_policy::CompiledPolicy::locked(),
+            udp_peers: Vec::new(),
+            intercepts: Default::default(),
+            credential_placeholders: Default::default(),
+            checkpoint: Some(RestoreBoot {
+                checkpoint_id: Uuid::new_v4(),
+                source_environment_id: Uuid::new_v4(),
+                config_sha256: "b".repeat(64),
+                state_sha256: "c".repeat(64),
+                memory_bytes: 512 * 1024 * 1024,
+                setup_disk_bytes: None,
+                vmm_sha256: "d".repeat(64),
+                source_generation: 1,
+                skill_snapshot_sha256: None,
+                environment_projection_sha256: None,
+                managed_credential_clients: Default::default(),
+                docker: false,
+                cw_runtime_catalog_generation: None,
+                daemon_vsock_port: 7777,
+                intercept: false,
+                image_disk: Some(CheckpointImageDisk {
+                    image_disk_id,
+                    build_id: build,
+                }),
+                state_identity: None,
+            }),
+        };
+        crate::runner::validate_request(&request).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -473,9 +640,60 @@ pub struct RestoreBoot {
     pub daemon_vsock_port: u32,
     /// The captured boot intercepted agent hosts (#3999).
     pub intercept: bool,
+    /// The image disk the captured boot sat on (#4646).
+    pub image_disk: Option<CheckpointImageDisk>,
     /// On a Mac, the identity the supervisor pinned for the saved state it
     /// cloned into `checkpoints/in`: a match skips the digest (#6124).
     pub(crate) state_identity: Option<crate::checkpoint_pin::StateIdentity>,
+}
+
+/// The image disk a checkpointed boot sat on: which disk and which build.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointImageDisk {
+    pub image_disk_id: String,
+    pub build_id: String,
+}
+
+impl From<&ImageDiskAttachment> for CheckpointImageDisk {
+    fn from(disk: &ImageDiskAttachment) -> Self {
+        Self {
+            image_disk_id: disk.image_disk_id().to_owned(),
+            build_id: disk.build_id().to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for CheckpointImageDisk {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "image disk {} build {}",
+            self.image_disk_id, self.build_id
+        )
+    }
+}
+
+/// Why a restore's boot cannot attach the image disk its checkpoint names.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RestoreImageDiskError {
+    #[error("this VM checkpoint was taken over {0}, and this boot names no image disk")]
+    NotNamed(CheckpointImageDisk),
+    #[error("this VM checkpoint was taken on a combined root disk, and this boot names {0}")]
+    NotRecorded(CheckpointImageDisk),
+    #[error("this VM checkpoint was taken over {recorded}, and this boot names {named}")]
+    Other {
+        recorded: CheckpointImageDisk,
+        named: CheckpointImageDisk,
+    },
+    #[error(
+        "this VM checkpoint was taken over {recorded}, and the disk on this host is build \
+         {found}; a VM checkpoint restores only onto the build it was taken on"
+    )]
+    Rebuilt {
+        recorded: CheckpointImageDisk,
+        found: String,
+    },
 }
 
 /// What the guest reported when the restored VM resumed.
@@ -539,7 +757,11 @@ impl CloudHypervisorRunner {
                 "this boot's bindings differ from the checkpointed guest's",
             ));
         }
-        Ok(())
+        admit_restored_image_disk(
+            &self.state_root,
+            request.image_disk.as_ref(),
+            restore.image_disk.as_ref(),
+        )
     }
 
     /// The restore command for `config`: admit the checkpoint's VMM files in
@@ -616,6 +838,9 @@ impl CloudHypervisorRunner {
         if let Some(runtime) = &config.cw_runtime_disk {
             target = target.with_disk(RestoreDisk::CwRuntime, runtime.clone());
         }
+        if let Some(image) = &config.image_disk {
+            target = target.with_disk(RestoreDisk::Image, image.clone());
+        }
         if let Some(bytes) = restore.setup_disk_bytes {
             // The guest read its setup disk only while it booted; the device
             // must exist for its restored state, so it gets an empty one.
@@ -660,6 +885,37 @@ impl CloudHypervisorRunner {
                 .map_err(|_| RunnerError::Checkpoint("the restore command is invalid"))?;
         Ok(CommandSpec::restore(config.executable.clone(), arguments))
     }
+}
+
+/// Admit the image disk a restore attaches: exactly the one its checkpoint
+/// names, by id and build. The restored memory holds that disk mounted, so
+/// the resumed guest cannot check it again; this is the only check (design
+/// section 5 of #4646). Prepare admits the disk again for the attachment.
+fn admit_restored_image_disk(
+    engine_root: &PrivateRoot,
+    named: Option<&ImageDiskAttachment>,
+    recorded: Option<&CheckpointImageDisk>,
+) -> Result<(), RunnerError> {
+    let refused = match (named, recorded) {
+        (None, None) => return Ok(()),
+        (Some(named), None) => RestoreImageDiskError::NotRecorded(named.into()),
+        (None, Some(recorded)) => RestoreImageDiskError::NotNamed(recorded.clone()),
+        (Some(named), Some(recorded)) if CheckpointImageDisk::from(named) != *recorded => {
+            RestoreImageDiskError::Other {
+                recorded: recorded.clone(),
+                named: named.into(),
+            }
+        }
+        (Some(named), Some(recorded)) => match named.admit(engine_root) {
+            Ok(_) => return Ok(()),
+            Err(ImageDiskError::BuildMismatch { found, .. }) => RestoreImageDiskError::Rebuilt {
+                recorded: recorded.clone(),
+                found,
+            },
+            Err(other) => return Err(other.into()),
+        },
+    };
+    Err(refused.into())
 }
 
 /// Resume a VM restored from a VM checkpoint, its workload still frozen:

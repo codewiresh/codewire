@@ -196,6 +196,7 @@ pub(super) fn parse_checkpoint_boot(
             .transpose()?,
         daemon_vsock_port: bindings.daemon_vsock_port,
         intercept: bindings.intercept,
+        image_disk: None,
         state_identity: boot.state_identity.as_ref().map(|identity| {
             crate::checkpoint_pin::StateIdentity {
                 device: identity.device,
