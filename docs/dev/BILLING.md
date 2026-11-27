@@ -119,10 +119,11 @@ Discounted and Unlimited (#5782).
 
 - **What a card holds:** a vCPU-hour, a GiB-hour of memory and a GiB-hour of
   disk while a Sandbox runs, and a GiB-hour of storage while it is suspended
-  or hibernated (#5484), in nano-euros. The storage rate starts at 0 on
-  every card. Unlimited's rates are all 0 and stay 0. No rate is negative or
-  above €10 a unit-hour; the call and the database both refuse one, so a
-  price typed with extra zeros can't reach every organization.
+  or hibernated (#5484), in nano-dollars (`USD`, migrated from EUR in #6659).
+  The storage rate starts at 0 on every card. Unlimited's rates are all 0 and
+  stay 0. No rate is negative or above $10 a unit-hour; the call and the
+  database both refuse one, so a price typed with extra zeros can't reach
+  every organization.
 - **Who changes them:** a platform administrator, on the admin panel's
   Pricing page, through an admin-only call. A change made from a stale read
   of the card is refused, never applied over a newer one. Nothing else
@@ -143,4 +144,32 @@ Discounted and Unlimited (#5782).
   it shows the last rates it read, and no prices if it has read none since
   it started; it never shows a copied number. The usage documentation points
   to the pricing page.
+
+## Plans and monthly allowances (#6659)
+
+**Not yet built (#6659).** Journeys live in
+[`docs/journeys/billing-and-credits.md`](../journeys/billing-and-credits.md)
+and [`docs/journeys/onboarding.md`](../journeys/onboarding.md).
+
+Every metered Cloud organization runs on one of three USD plans defined in
+`billing_plan_definitions`:
+
+- **`payg` (Pay as you go, $0/month):** no monthly allowance; requires a saved
+  card and draws per-second usage directly from prepaid credit (`$20` default
+  automatic top-up). Up to 3 concurrent cloud Sandboxes, up to 8 vCPU / 16 GB
+  RAM / 100 GB disk per Sandbox, 1 member.
+- **`pro` (Pro, $40/month):** includes `$100/month` of cloud compute allowance
+  per billing cycle (does not roll over). Up to 10 concurrent cloud Sandboxes,
+  up to 8 vCPU / 16 GB RAM / 100 GB disk per Sandbox, up to 5 team members.
+- **`max` (Max, $100/month):** includes `$250/month` of cloud compute
+  allowance per billing cycle (does not roll over). Unlimited concurrent cloud
+  Sandboxes, up to 16 vCPU / 32 GB RAM / 200 GB disk per Sandbox, unlimited
+  team members.
+
+Metering draws each organization's running usage from its active
+`billing_plan_allowances` period row first, then from its non-expiring
+`billing_credit_balances` prepaid ledger once the monthly allowance reaches
+`$0`. Organizations on the `unlimited` rate card, and self-hosted deployments
+without Stripe configured, bypass plan gating and quotas. Local VMs
+(`cw create --local`) remain free with no account or plan required.
 

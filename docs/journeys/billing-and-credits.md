@@ -26,6 +26,10 @@ the first Production release after codewire/deploy#245.
 | `billing-operator-notice` | not yet observed (#5358) | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
+| `billing-plan-subscribe` | not yet observed (#6659) | not yet observed |
+| `billing-plan-allowance-draw` | not yet observed (#6659) | not yet observed |
+| `billing-plan-switch-and-cancel` | not yet observed (#6659) | not yet observed |
+| `billing-plan-quotas` | not yet observed (#6659) | not yet observed |
 
 ## Before the walk
 
@@ -479,4 +483,92 @@ The rules are in `docs/CONFIGURATION.md`, "Operator notices".
     purchase is credited, and Stripe isn't asked to redeliver.
 - **Gotchas:** Stripe's receipt to the buyer (#4816) is separate: this
   notice goes only to the operator, and never to the buyer.
+- **Observed:** not yet observed.
+
+## 13. `billing-plan-subscribe`: subscribe to Pro, Max or Pay as you go
+
+Issue: #6659. The rule is [`docs/dev/BILLING.md`](../dev/BILLING.md),
+"Plans and monthly allowances (#6659)".
+
+- **Entry points:** Step 2 of onboarding (`/{slug}/onboarding/plan`), the
+  Billing page (`/{slug}/billing/`), and the refusal link from `cw create
+  --cloud` when an organization has no plan.
+- **States to exercise:** subscribing to Pro ($40/mo, $100 compute) via Stripe
+  Hosted Checkout; subscribing to Max ($100/mo, $250 compute) via Stripe Hosted
+  Checkout; selecting Pay as you go ($0/mo, 3 sandboxes) through the in-page
+  card setup modal; cancelling Checkout before completing; an `unlimited`
+  organization bypassing plan selection.
+- **Driving it:** on a fresh metered organization, select each plan in Stripe
+  test mode and verify the return path (`/{slug}/onboarding/plan/return`).
+- **Proof:** `GetBillingOverview` reports the active plan key (`pro`, `max`, or
+  `payg`), renewal period end (for Pro/Max), and included monthly allowance
+  (`$100` or `$250`). The Billing page top card shows the plan name and
+  `Active` badge on the same line as **Switch plan** and **Manage in Stripe**.
+- **Gotchas:** local VMs (`cw create --local`) never require a plan.
+- **Observed:** not yet observed.
+
+## 14. `billing-plan-allowance-draw`: monthly allowance draws before prepaid credit
+
+Issue: #6659.
+
+- **Entry points:** running a cloud Sandbox on Pro or Max, `cw cost`, and the
+  Billing page's monthly compute allowance meter.
+- **States to exercise:** usage within the monthly allowance (`$100` Pro /
+  `$250` Max); usage exhausting the monthly allowance and spilling seamlessly
+  into prepaid credit; automatic `$20` top-up triggering once both buckets
+  reach `$0`; renewal resetting the monthly allowance without rolling over
+  unused allowance.
+- **Driving it:** run a cloud Sandbox on a Pro organization, observe
+  `billing_plan_allowances.drawn_nano_usd` increase while prepaid credit stays
+  unchanged, then drain allowance to `$0` and observe prepaid credit draw next.
+- **Proof:** metering draws `billing_plan_allowances` to `$0` before writing
+  any debit against `billing_credit_balances`, and `cw cost` reports both
+  remaining allowance and prepaid credit.
+- **Gotchas:** `invoice.paid` idempotency keys ensure a redelivered Stripe
+  webhook never grants a second monthly allowance.
+- **Observed:** not yet observed.
+
+## 15. `billing-plan-switch-and-cancel`: switch plans or cancel
+
+Issue: #6659.
+
+- **Entry points:** **Switch plan** and **Manage in Stripe** on the Billing
+  page (`/{slug}/billing/`).
+- **States to exercise:** upgrading PAYG → Pro or Pro → Max (immediate
+  proration, quotas and allowance bump at once); downgrading Max → Pro
+  (scheduled at period end; existing sandboxes/members stay intact while new
+  creates/invites respect Pro limits once effective); cancelling at period end
+  and keeping access through `current_period_end`; failed renewal marking
+  `past_due` with a warning banner.
+- **Driving it:** trigger each plan transition in Stripe test mode and verify
+  the synced state after webhook delivery.
+- **Proof:** `org_subscriptions` and the Billing page reflect the new plan,
+  period end, and `cancel_at_period_end` state accurately.
+- **Gotchas:** organization deletion cancels all non-terminal Stripe
+  subscriptions before removing the organization.
+- **Observed:** not yet observed.
+
+## 16. `billing-plan-quotas`: plan concurrency, VM size and member caps
+
+Issue: #6659.
+
+- **Entry points:** `cw create --cloud`, `cw start`, dashboard Create Sandbox
+  and Resize, and organization member invitations.
+- **States to exercise:**
+  - no plan (`none`/`canceled`): `cw create --cloud` fails with `plan_required`
+    and prints the plan URL while reminding that `cw create --local` is free;
+  - Pay as you go: 4th concurrent cloud Sandbox refused; VM above 8 vCPU / 16
+    GB RAM / 100 GB disk refused; inviting a 2nd member refused;
+  - Pro: 11th concurrent cloud Sandbox refused; VM above 8 vCPU / 16 GB RAM /
+    100 GB disk refused; inviting a 6th member refused;
+  - Max: unlimited concurrent Sandboxes; up to 16 vCPU / 32 GB RAM / 200 GB
+    disk allowed; unlimited teammates allowed;
+  - `unlimited` rate card or billing disabled: no plan cap enforced.
+- **Driving it:** attempt creates, resizes, and member invitations at and above
+  each plan boundary.
+- **Proof:** orchestration refuses out-of-plan requests with explicit
+  plan-limit errors and admits in-plan requests.
+- **Gotchas:** existing running Sandboxes or members above a lower plan's cap
+  after a downgrade are never forcibly deleted; only new creates/starts and
+  invitations are gated.
 - **Observed:** not yet observed.

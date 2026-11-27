@@ -28,7 +28,8 @@ runs the same commands and holds the result to the same standard.
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
 | [interruptions.md](interruptions.md) | Every way a running cloud Sandbox is restarted, stopped, cut off or disconnected (#6084): what the user sees for each, the journey that proves it, and the issue for each gap |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
-| [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |
+| [billing-and-credits.md](billing-and-credits.md) | USD billing plans and compute credit (#3381, #6659): Pro, Max and Pay as you go plans, monthly compute allowances, cards, top-ups, receipts, costs and refusals |
+| [onboarding.md](onboarding.md) | First-run 5-step onboarding overlay (#6659): name organization, choose plan, condensed 2FA setup, connect code and connect AI credentials |
 | [previews-and-ports.md](previews-and-ports.md) | Reaching a server in an environment: `cw ports` on a local VM (#4347), cloud previews of loopback servers (#4357), local HTTPS hostnames (#4316), and Unix sockets forwarded over SSH (#5608) |
 | [cloud-sandbox.md](cloud-sandbox.md) | A cloud sandbox: create it, see why a create failed, run commands and shells, stop a session and every process it started, stop and start it and restart its sessions by name, the list of steps its page shows while it starts, copy files with `cw cp`, and keep working across an orchestration rollout |
 | [sdk-files.md](sdk-files.md) | File calls from the SDKs (#5804): `stat` and `exists` on a file, a folder, a symlink and a missing path, and many files written in one call. Written first; every step is not yet observed |
