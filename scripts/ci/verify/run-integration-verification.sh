@@ -1465,6 +1465,12 @@ database_lane_orchestration_admin() {
       'api::environments::access_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "monthly plan quotas and team member caps" plan-admission-quotas \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::plan_admission_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "environment rate limit" environment-rate-limit \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

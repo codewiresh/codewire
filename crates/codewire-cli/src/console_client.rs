@@ -38,6 +38,11 @@ pub struct BillingOverview {
     /// When credit ran out with no way to get more; creates and starts are
     /// refused while it is set.
     pub credit_exhausted_at: Option<String>,
+    pub plan_price_cents: i32,
+    pub allowance_granted_nano_usd: i64,
+    pub allowance_drawn_nano_usd: i64,
+    pub allowance_period_end: Option<String>,
+    pub cancel_at_period_end: bool,
 }
 
 /// What a running sandbox costs per unit-hour, in nano-euros.
@@ -128,6 +133,14 @@ fn legacy_billing_overview(value: rpc::GetBillingOverviewResponse) -> BillingOve
             .credit_exhausted_at
             .into_option()
             .map(timestamp_to_rfc3339),
+        plan_price_cents: value.plan_price_cents,
+        allowance_granted_nano_usd: value.allowance_granted_nano_usd,
+        allowance_drawn_nano_usd: value.allowance_drawn_nano_usd,
+        allowance_period_end: value
+            .allowance_period_end
+            .into_option()
+            .map(timestamp_to_rfc3339),
+        cancel_at_period_end: value.cancel_at_period_end,
         billing_enabled: value.billing_enabled,
         has_payment_method: value.has_payment_method,
         plan: value.plan,

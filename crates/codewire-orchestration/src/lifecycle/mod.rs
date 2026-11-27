@@ -264,8 +264,8 @@ impl Service<PgLifecycleStore> {
             .fetch_one(&mut *tx)
             .await?;
         // A host environment's start needs no credit or compute headroom.
-        let backend: String = sqlx::query_scalar(
-            "SELECT runtime_backend FROM environments WHERE id = $1 AND org_id = $2",
+        let (backend, disk_gb): (String, i32) = sqlx::query_as(
+            "SELECT runtime_backend, disk_gb FROM environments WHERE id = $1 AND org_id = $2",
         )
         .bind(env_id)
         .bind(org_id)
@@ -281,6 +281,7 @@ impl Service<PgLifecycleStore> {
                 backend: crate::runtime::RuntimeBackend::parse(&backend)?,
                 cpu_millicores: quota.cpu_millicores,
                 memory_mb: quota.memory_mb,
+                disk_gb,
             },
         )
         .await?;

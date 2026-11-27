@@ -157,6 +157,7 @@ async fn refusal(pool: &PgPool, org: &str) -> Result<Option<String>> {
             backend: crate::runtime::RuntimeBackend::Kubernetes,
             cpu_millicores: 1_000,
             memory_mb: 1_024,
+            disk_gb: 10,
         },
     )
     .await;

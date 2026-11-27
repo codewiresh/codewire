@@ -1008,26 +1008,68 @@ pub(crate) const NO_QUOTA: OrgQuota = OrgQuota {
 /// A failed read of the card, the organization's quota or the defaults is an
 /// error, never looser limits: admission turns it into the retryable
 /// `quota_unavailable` refusal (#3256).
+#[derive(Debug, sqlx::FromRow)]
+struct OrgQuotaRow {
+    rate_card: String,
+    max_concurrent_environments: Option<i32>,
+    max_concurrent_sandbox: Option<i32>,
+    max_cpu_millicores: Option<i32>,
+    max_memory_mb: Option<i32>,
+    plan_key: Option<String>,
+    plan_max_concurrent_sandboxes: Option<i32>,
+}
+
 pub(crate) async fn get_org_quota(pool: &PgPool, org_id: &str) -> Result<OrgQuota, sqlx::Error> {
-    type Row = (String, Option<i32>, Option<i32>, Option<i32>, Option<i32>);
-    match sqlx::query_as::<_, Row>(
-        r#"SELECT o.rate_card, q.max_concurrent_environments, q.max_concurrent_sandbox,
-                  q.max_cpu_millicores, q.max_memory_mb
+    match sqlx::query_as::<_, OrgQuotaRow>(
+        r#"SELECT o.rate_card,
+                  q.max_concurrent_environments,
+                  q.max_concurrent_sandbox,
+                  q.max_cpu_millicores,
+                  q.max_memory_mb,
+                  d.plan_key,
+                  d.max_concurrent_sandboxes AS plan_max_concurrent_sandboxes
            FROM organizations o
            LEFT JOIN environment_quotas q ON q.org_id = o.id
+           LEFT JOIN org_subscriptions os
+             ON os.org_id = o.id
+            AND os.status IN ('active', 'trialing', 'past_due')
+           LEFT JOIN billing_plan_definitions d ON d.plan_key = os.plan
            WHERE o.id = $1"#,
     )
     .bind(org_id)
     .fetch_optional(pool)
     .await?
     {
-        Some((rate_card, ..)) if rate_card == UNLIMITED_RATE_CARD => Ok(NO_QUOTA),
-        Some((_, Some(envs), Some(sandbox), Some(cpu), Some(mem))) => Ok(OrgQuota {
+        Some(row) if row.rate_card == UNLIMITED_RATE_CARD => Ok(NO_QUOTA),
+        Some(OrgQuotaRow {
+            max_concurrent_environments: Some(envs),
+            max_concurrent_sandbox: Some(sandbox),
+            max_cpu_millicores: Some(cpu),
+            max_memory_mb: Some(mem),
+            ..
+        }) => Ok(OrgQuota {
             max_concurrent_environments: envs,
             max_concurrent_sandbox: sandbox,
             max_cpu_millicores: cpu,
             max_memory_mb: mem,
         }),
+        Some(OrgQuotaRow {
+            plan_key: Some(plan_key),
+            plan_max_concurrent_sandboxes,
+            ..
+        }) => {
+            let defaults = quota_defaults(pool).await?;
+            let concurrent = plan_max_concurrent_sandboxes.unwrap_or(-1);
+            if plan_key == "max" {
+                Ok(NO_QUOTA)
+            } else {
+                Ok(OrgQuota {
+                    max_concurrent_environments: concurrent,
+                    max_concurrent_sandbox: concurrent,
+                    ..defaults
+                })
+            }
+        }
         _ => quota_defaults(pool).await,
     }
 }
@@ -1464,7 +1506,9 @@ pub(crate) use idle_suspend::{
 pub(crate) use start::start_environment_core;
 pub(crate) use suspend::{resume_environment_core, suspend_environment_core};
 
-pub(crate) use admission::{QuotaRequest, check_credit_in, check_not_suspended_in, check_quota_in};
+pub(crate) use admission::{
+    QuotaRequest, check_credit_in, check_not_suspended_in, check_plan_vm_size_in, check_quota_in,
+};
 #[cfg(test)]
 use admission::{evaluate_credit, evaluate_quota};
 /// An idle stop the platform accepts: 0 (off), or five minutes to seven days.
@@ -1514,6 +1558,9 @@ pub(crate) async fn set_environment_idle_stop_core(
 
 #[cfg(test)]
 mod access_database_tests;
+
+#[cfg(test)]
+mod plan_admission_database_tests;
 
 #[cfg(test)]
 mod rate_limit_database_tests;

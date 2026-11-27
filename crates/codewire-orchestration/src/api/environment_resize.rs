@@ -813,8 +813,9 @@ async fn resize_environment_core_inner(
             let state = &owned_state;
             let params = owned_params;
             let result: AppResult<(EnvironmentResizeOperation, bool)> = async {
-                let (operation, admitted) = begin_resize_operation(
+                let (operation, admitted) = begin_resize_operation_with_enforcement(
                     &state.pool,
+                    state.credit_enforcement,
                     &params,
                     &plan,
                     quota.max_cpu_millicores,
@@ -893,8 +894,28 @@ async fn active_operation_exists(state: &ApiState, environment_id: &str) -> AppR
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %params.environment_id))]
+#[cfg(test)]
 async fn begin_resize_operation(
     pool: &sqlx::PgPool,
+    params: &ResizeEnvironmentParams,
+    plan: &EnvironmentResizePlan,
+    max_cpu_millicores: i32,
+    max_memory_mb: i32,
+) -> AppResult<(EnvironmentResizeOperation, bool)> {
+    begin_resize_operation_with_enforcement(
+        pool,
+        codewire_server_core::credit_enforcement::CreditEnforcement::Off,
+        params,
+        plan,
+        max_cpu_millicores,
+        max_memory_mb,
+    )
+    .await
+}
+
+async fn begin_resize_operation_with_enforcement(
+    pool: &sqlx::PgPool,
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     params: &ResizeEnvironmentParams,
     plan: &EnvironmentResizePlan,
     max_cpu_millicores: i32,
@@ -932,7 +953,7 @@ async fn begin_resize_operation(
     }
 
     let row = sqlx::query(
-        "SELECT state, desired_state, type, cpu_millicores, memory_mb, disk_gb
+        "SELECT state, desired_state, type, runtime_backend, cpu_millicores, memory_mb, disk_gb
            FROM environments
           WHERE id = $1 AND org_id = $2
           FOR UPDATE",
@@ -948,6 +969,7 @@ async fn begin_resize_operation(
             "environment not found",
         )
     })?;
+    let runtime_backend: String = row.try_get("runtime_backend")?;
     let env = LockedEnvironment {
         state: row.try_get("state")?,
         desired_state: row.try_get("desired_state")?,
@@ -1013,6 +1035,21 @@ async fn begin_resize_operation(
         ));
     }
     refuse_disk_growth_over_limit(previous.disk_gb, desired.disk_gb)?;
+    let backend = crate::runtime::RuntimeBackend::parse(&runtime_backend).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "invalid runtime_backend {runtime_backend:?} during resize admission: {error}"
+        ))
+    })?;
+    super::environments::check_plan_vm_size_in(
+        &mut tx,
+        &params.org_id,
+        credit_enforcement,
+        backend,
+        desired.cpu_millicores,
+        desired.memory_mb,
+        desired.disk_gb,
+    )
+    .await?;
     let reserved_cpu = (desired.cpu_millicores - previous.cpu_millicores).max(0);
     let reserved_memory = (desired.memory_mb - previous.memory_mb).max(0);
     let (used_cpu, used_memory): (i64, i64) = sqlx::query_as(

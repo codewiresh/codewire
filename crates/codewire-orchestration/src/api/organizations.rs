@@ -21,9 +21,11 @@ mod create;
 mod invitation_limits;
 
 pub use accept::AcceptInvitationResult;
+#[cfg(test)]
+pub(crate) use accept::accept_invitation;
 pub(crate) use accept::{AcceptInvitationBy, accept_invitation_core};
 #[cfg(test)]
-use accept::{InvitationKey, accept_invitation, accept_invitation_transaction};
+use accept::{InvitationKey, accept_invitation_transaction};
 use address_proof::AddressProof;
 #[cfg(test)]
 pub(crate) use create::create_organization;
@@ -891,7 +893,93 @@ impl Inviter {
 /// the invitee accepts by invitation id with a verified address. The
 /// inviter's verified address and the invitation limits are checked in the
 /// same transaction first (#4457).
-async fn create_invitation(
+/// Enforces the organization's monthly plan team-member cap under an
+/// organization row lock (`FOR UPDATE OF o`) for both invitation creation
+/// (`count_pending_invitations = true`) and invitation acceptance
+/// (`count_pending_invitations = false`) (#6659). Unlimited rate-card
+/// organizations are exempt; inactive subscriptions are refused rather than
+/// treated as unlimited.
+pub(super) async fn enforce_plan_team_member_cap_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    count_pending_invitations: bool,
+) -> AppResult<()> {
+    type PlanMemberCapRow = (String, Option<String>, Option<String>, Option<i32>);
+    let row: Option<PlanMemberCapRow> = sqlx::query_as(
+        r#"SELECT o.rate_card, os.status, d.display_name, d.max_team_members
+           FROM organizations o
+           LEFT JOIN org_subscriptions os ON os.org_id = o.id
+           LEFT JOIN billing_plan_definitions d ON d.plan_key = os.plan
+           WHERE o.id = $1
+           FOR UPDATE OF o"#,
+    )
+    .bind(org_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: check plan team member cap failed");
+        AppError::InternalMsg("failed to check organization plan limits".into())
+    })?;
+    let Some((rate_card, sub_status, plan_name, max_members)) = row else {
+        return Ok(());
+    };
+    if rate_card == "unlimited" {
+        return Ok(());
+    }
+    if matches!(
+        sub_status.as_deref(),
+        Some("canceled" | "unpaid" | "incomplete" | "incomplete_expired" | "paused")
+    ) {
+        return Err(coded_owned(
+            axum::http::StatusCode::FORBIDDEN,
+            "team_member_limit_reached",
+            "this organization's plan is not active; reactivate a plan on Billing before adding team members"
+                .to_owned(),
+        ));
+    }
+    if let (Some(plan_name), Some(max_members)) = (plan_name, max_members) {
+        let count: i64 = if count_pending_invitations {
+            sqlx::query_scalar(
+                r#"SELECT (SELECT COUNT(*) FROM org_members WHERE org_id = $1)
+                        + (SELECT COUNT(*) FROM org_invitations
+                           WHERE org_id = $1 AND status = 'pending' AND expires_at > NOW())"#,
+            )
+            .bind(org_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "organizations: count team members failed");
+                AppError::InternalMsg("failed to check organization member count".into())
+            })?
+        } else {
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = $1")
+                .bind(org_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "organizations: count team members failed");
+                    AppError::InternalMsg("failed to check organization member count".into())
+                })?
+        };
+        if count >= i64::from(max_members) {
+            let noun = if max_members == 1 {
+                "member"
+            } else {
+                "members"
+            };
+            return Err(coded_owned(
+                axum::http::StatusCode::FORBIDDEN,
+                "team_member_limit_reached",
+                format!(
+                    "{plan_name} allows up to {max_members} team {noun}; upgrade your plan on Billing to add more teammates"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn create_invitation(
     pool: &sqlx::PgPool,
     user: &AuthUser,
     org_id: &str,
@@ -976,6 +1064,8 @@ async fn create_invitation(
         ));
     }
     invitation_limits::check(&mut tx, &user.user_id, org_id).await?;
+
+    enforce_plan_team_member_cap_in(&mut tx, org_id, true).await?;
 
     let inv_id = uuid::Uuid::new_v4().simple().to_string();
     let token = uuid::Uuid::new_v4().simple().to_string();

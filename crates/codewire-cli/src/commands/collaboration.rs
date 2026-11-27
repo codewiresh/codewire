@@ -190,6 +190,20 @@ pub(crate) fn format_cost_text(reports: &[OrgCostReport]) -> String {
         };
 
         output.push_str(&format!("# {org_slug}\n\n"));
+        if overview.allowance_granted_nano_usd > 0 {
+            let remaining =
+                (overview.allowance_granted_nano_usd - overview.allowance_drawn_nano_usd).max(0);
+            let plan_label = if overview.plan_display_name.is_empty() {
+                overview.plan.as_str()
+            } else {
+                overview.plan_display_name.as_str()
+            };
+            output.push_str(&format!(
+                "  Plan: {plan_label} — Monthly allowance: {} remaining of {}\n\n",
+                format_euros(remaining),
+                format_euros(overview.allowance_granted_nano_usd),
+            ));
+        }
         output.push_str(&format!(
             "  {:<12} {:<12} {:<7} {:<10} {}\n",
             "Balance", "This month", "CPU hrs", "Mem GB·hrs", "Storage GB·hrs"

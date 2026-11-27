@@ -99,8 +99,26 @@ pub(crate) async fn check_credit_in(
     transaction: &mut Transaction<'_, Postgres>,
     org_id: &str,
 ) -> Result<(), AppError> {
-    let credit: Option<(String, i64)> = sqlx::query_as(
-        r#"SELECT o.rate_card, COALESCE(b.balance_nano_eur, 0)
+    let credit: Option<(String, i64, i64)> = sqlx::query_as(
+        r#"SELECT o.rate_card,
+                  COALESCE(b.balance_nano_eur, 0),
+                  CASE
+                      WHEN EXISTS (
+                          SELECT 1 FROM org_subscriptions os
+                          WHERE os.org_id = o.id
+                            AND os.status IN ('active', 'trialing', 'past_due')
+                      )
+                      THEN COALESCE((
+                          SELECT GREATEST(a.granted_nano_usd - a.drawn_nano_usd, 0)
+                          FROM billing_plan_allowances a
+                          WHERE a.organization_id = o.id
+                            AND a.period_start <= now()
+                            AND a.period_end > now()
+                          ORDER BY a.period_end DESC, a.id DESC
+                          LIMIT 1
+                      ), 0)
+                      ELSE 0
+                  END
            FROM organizations o
            LEFT JOIN billing_credit_balances b ON b.organization_id = o.id
            WHERE o.id = $1"#,
@@ -116,14 +134,168 @@ pub(crate) async fn check_credit_in(
             "the organization's compute credit could not be checked; retry in a moment",
         )
     })?;
-    let Some((rate_card, balance)) = credit else {
+    let Some((rate_card, balance, allowance_remaining)) = credit else {
         return Err(coded(
             StatusCode::NOT_FOUND,
             "org_not_found",
             "organization not found",
         ));
     };
+    if allowance_remaining > 0 {
+        return Ok(());
+    }
     evaluate_credit(&rate_card, balance)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OrgPlanEnforcementRow {
+    rate_card: String,
+    slug: String,
+    sub_status: Option<String>,
+    plan_display_name: Option<String>,
+    max_concurrent_sandboxes: Option<i32>,
+    max_vcpu: Option<i32>,
+    max_memory_gib: Option<i32>,
+    max_disk_gib: Option<i32>,
+}
+
+fn check_plan_shape_limits(
+    row: &OrgPlanEnforcementRow,
+    cpu_millicores: i32,
+    memory_mb: i32,
+    disk_gb: i32,
+) -> Result<(), AppError> {
+    if let (Some(display_name), Some(max_vcpu), Some(max_memory_gib), Some(max_disk_gib)) = (
+        row.plan_display_name.as_deref(),
+        row.max_vcpu,
+        row.max_memory_gib,
+        row.max_disk_gib,
+    ) && (cpu_millicores > max_vcpu.saturating_mul(1_000)
+        || memory_mb > max_memory_gib.saturating_mul(1_024)
+        || disk_gb > max_disk_gib)
+    {
+        return Err(coded_owned(
+            StatusCode::FORBIDDEN,
+            "plan_vm_size_exceeded",
+            format!(
+                "{display_name} allows up to {max_vcpu} vCPU, {max_memory_gib} GB RAM, and {max_disk_gib} GB disk per sandbox; upgrade your plan on Billing for larger sizes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn check_plan_status(
+    row: &OrgPlanEnforcementRow,
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+) -> Result<(), AppError> {
+    if credit_enforcement.is_on()
+        && matches!(
+            row.sub_status.as_deref(),
+            Some("canceled" | "unpaid" | "incomplete" | "incomplete_expired" | "paused")
+        )
+    {
+        return Err(coded_owned(
+            StatusCode::PAYMENT_REQUIRED,
+            "plan_required",
+            format!(
+                "this organization's plan is not active; choose a plan at https://codewire.sh/{}/onboarding/plan (local sandboxes with cw create --local are always free)",
+                row.slug
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn load_org_plan_enforcement(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+) -> Result<Option<OrgPlanEnforcementRow>, AppError> {
+    sqlx::query_as(
+        r#"SELECT o.rate_card,
+                  o.slug,
+                  os.status AS sub_status,
+                  d.display_name AS plan_display_name,
+                  d.max_concurrent_sandboxes,
+                  d.max_vcpu,
+                  d.max_memory_gib,
+                  d.max_disk_gib
+           FROM organizations o
+           LEFT JOIN org_subscriptions os ON os.org_id = o.id
+           LEFT JOIN billing_plan_definitions d ON d.plan_key = os.plan
+           WHERE o.id = $1"#,
+    )
+    .bind(org_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| quota_unavailable(org_id, &error))
+}
+
+/// Enforces monthly plan active status and per-sandbox VM shape limits
+/// (`max_vcpu`, `max_memory_gib`, `max_disk_gib`) on in-place and restart
+/// resizes (#6659). Unlimited rate-card organizations and non-cloud
+/// (local/host) runtimes are never restricted.
+pub(crate) async fn check_plan_vm_size_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    backend: crate::runtime::RuntimeBackend,
+    cpu_millicores: i32,
+    memory_mb: i32,
+    disk_gb: i32,
+) -> Result<(), AppError> {
+    if !backend.platform_compute() {
+        return Ok(());
+    }
+    let Some(row) = load_org_plan_enforcement(transaction, org_id).await? else {
+        return Ok(());
+    };
+    if row.rate_card == UNLIMITED_RATE_CARD {
+        return Ok(());
+    }
+    check_plan_status(&row, credit_enforcement)?;
+    check_plan_shape_limits(&row, cpu_millicores, memory_mb, disk_gb)
+}
+
+/// Enforces monthly plan gating and per-sandbox VM shape / concurrency caps
+/// from `billing_plan_definitions` (#6659). Unlimited rate-card organizations
+/// and non-cloud (local/host) runtimes are never restricted.
+pub(crate) async fn check_plan_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    usage: OrgEnvironmentUsage,
+    request: &QuotaRequest<'_>,
+) -> Result<(), AppError> {
+    if !request.backend.platform_compute() {
+        return Ok(());
+    }
+    let Some(row) = load_org_plan_enforcement(transaction, org_id).await? else {
+        return Ok(());
+    };
+    if row.rate_card == UNLIMITED_RATE_CARD {
+        return Ok(());
+    }
+    check_plan_status(&row, request.credit_enforcement)?;
+    check_plan_shape_limits(
+        &row,
+        request.cpu_millicores,
+        request.memory_mb,
+        request.disk_gb,
+    )?;
+    if let Some(display_name) = row.plan_display_name.as_deref()
+        && request.env_type == "sandbox"
+        && let Some(limit) = row.max_concurrent_sandboxes
+        && usage.active_sandbox >= i64::from(limit)
+    {
+        return Err(coded_owned(
+            StatusCode::FORBIDDEN,
+            "plan_sandbox_limit_reached",
+            format!(
+                "{display_name} allows up to {limit} concurrent sandboxes; stop one or upgrade your plan on Billing"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuses anything that would use compute or storage in a suspended
@@ -162,15 +334,19 @@ pub(crate) async fn check_quota_in(
     request: QuotaRequest<'_>,
 ) -> Result<(), AppError> {
     check_not_suspended_in(transaction, org_id).await?;
+    let usage = count_active_environments(&mut **transaction, org_id)
+        .await
+        .map_err(|error| quota_unavailable(org_id, &error))?;
+    // Check plan gating before credit balance so an inactive-plan org with $0
+    // credit receives `plan_required` (with the plan URL and local hint)
+    // instead of `credit_exhausted` (#6659).
+    check_plan_in(transaction, org_id, usage, &request).await?;
     // A host's compute is its owner's: it needs no credit (owner,
     // 2026-11-13, #3609) and no CPU or memory headroom, but still counts as
     // an environment (design §10 Q1).
     if request.backend.platform_compute() && request.credit_enforcement.is_on() {
         check_credit_in(transaction, org_id).await?;
     }
-    let usage = count_active_environments(&mut **transaction, org_id)
-        .await
-        .map_err(|error| quota_unavailable(org_id, &error))?;
     evaluate_quota(
         request.quota,
         usage,
@@ -189,4 +365,5 @@ pub(crate) struct QuotaRequest<'a> {
     pub backend: crate::runtime::RuntimeBackend,
     pub cpu_millicores: i32,
     pub memory_mb: i32,
+    pub disk_gb: i32,
 }

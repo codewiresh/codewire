@@ -66,7 +66,7 @@ pub(crate) async fn accept_invitation_core(
 /// after its claim, so a refusal leaves the invitation pending. To a caller
 /// at another address an invitation is not found, in every state, exactly as
 /// an unknown id or token is.
-pub(super) async fn accept_invitation(
+pub(crate) async fn accept_invitation(
     pool: &sqlx::PgPool,
     user: &AuthUser,
     by: AcceptInvitationBy,
@@ -202,6 +202,26 @@ pub(super) async fn accept_invitation_transaction(
     if assignments.is_empty() {
         assignments.push("viewer".to_string());
     }
+
+    // Re-check plan team-member cap under the organization lock so pending
+    // invitations issued before a plan downgrade (or while a subscription
+    // became inactive) cannot bypass the current plan cap (#6659). Returning
+    // an error rolls back the invitation claim above.
+    let already_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2)",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: check existing member failed");
+        AppError::InternalMsg("failed to accept invitation".into())
+    })?;
+    if !already_member {
+        super::enforce_plan_team_member_cap_in(&mut tx, org_id, false).await?;
+    }
+
     let member_id = uuid::Uuid::new_v4().simple().to_string();
     let now = chrono::Utc::now().naive_utc();
 

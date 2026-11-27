@@ -937,6 +937,7 @@ async fn insert_environment(
             backend,
             cpu_millicores: p.cpu_millicores,
             memory_mb: p.memory_mb,
+            disk_gb: p.disk_gb,
         },
     )
     .await?;
@@ -1080,6 +1081,7 @@ struct CapacityRequest<'a> {
     backend: crate::runtime::RuntimeBackend,
     cpu_millicores: i32,
     memory_mb: i32,
+    disk_gb: i32,
 }
 
 /// Reserves a create's capacity: the organization's environment quota, for
@@ -1106,6 +1108,7 @@ async fn reserve_capacity(
             backend: request.backend,
             cpu_millicores: request.cpu_millicores,
             memory_mb: request.memory_mb,
+            disk_gb: request.disk_gb,
         },
     )
     .await
@@ -2121,6 +2124,7 @@ credentials: {profile: user/work}
             backend: crate::runtime::RuntimeBackend::Kubernetes,
             cpu_millicores: 0,
             memory_mb: 0,
+            disk_gb: 0,
         };
         let quota = get_org_quota(&pool, &org_id).await.unwrap();
         assert_eq!(quota.max_concurrent_sandbox, 1);
@@ -3323,6 +3327,7 @@ credentials: {profile: user/work}
                 backend: crate::runtime::RuntimeBackend::Kubernetes,
                 cpu_millicores: 1_000,
                 memory_mb: 1_024,
+                disk_gb: 10,
             },
         )
         .await
@@ -3685,6 +3690,7 @@ credentials: {profile: user/work}
                 backend: crate::runtime::RuntimeBackend::Kubernetes,
                 cpu_millicores: 1_000,
                 memory_mb: 1_024,
+                disk_gb: 10,
             },
         )
         .await

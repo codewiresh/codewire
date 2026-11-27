@@ -105,6 +105,28 @@ fn format_cost_text_shows_credit_rates_and_top_up() {
 }
 
 #[test]
+fn format_cost_text_shows_plan_monthly_allowance_when_active() {
+    let mut overview = test_billing_overview();
+    overview.plan = "max".to_string();
+    overview.plan_display_name = "Max".to_string();
+    overview.allowance_granted_nano_usd = 250_000_000_000;
+    overview.allowance_drawn_nano_usd = 107_600_000_000;
+    let reports = vec![OrgCostReport {
+        org: OrgWithRole {
+            id: "org_123".to_string(),
+            slug: "acme".to_string(),
+            ..OrgWithRole::default()
+        },
+        billing: Some(overview),
+    }];
+    let text = format_cost_text(&reports);
+    assert!(
+        text.contains("  Plan: Max — Monthly allowance: $142.40 remaining of $250.00\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn cost_json_omits_unavailable_billing() {
     let reports = vec![OrgCostReport {
         org: OrgWithRole {
