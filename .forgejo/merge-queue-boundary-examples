@@ -34,7 +34,7 @@ auth **/*signature* crates/codewire-cw-release/examples/verify-release-signature
 auth **/*attest* crates/codewire-orchestration/src/runtime/kubernetes/attestation.rs
 auth **/*cert* crates/codewire-cli/src/commands/native/local_https/trust/fake-certutil.sh
 auth **/*keychain* crates/codewire-protected-store/src/keychain.rs
-auth **/*keyring* absent
+auth **/*keyring* crates/codewire-server-core/migrations/0066_tenant_secret_local_keyring.sql
 auth **/*redact* crates/codewire-cli-bin/tests/init_remote_redaction.rs
 auth **/*login* crates/codewire-cli/src/commands/login.rs
 auth crates/codewire-server-core/src/connect.rs crates/codewire-server-core/src/connect.rs

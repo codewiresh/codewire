@@ -1,14 +1,23 @@
 //! Encrypted tenant-secret storage used by the API and environment worker.
 //!
-//! PostgreSQL stores only encrypted envelopes. OpenBao Transit is the sole
-//! production KEK authority; there is no runtime selector or plaintext
-//! fallback. Organization teardown deletes only names and paths, never values,
-//! and re-enumerates before it can call a namespace absent.
+//! PostgreSQL stores only encrypted envelopes. OpenBao Transit is the default
+//! KEK authority; self-hosted deployments without OpenBao may explicitly opt
+//! into `CODEWIRE_SECRET_KEK_PROVIDER=local-keyring` with
+//! `CODEWIRE_SECRET_KEK_DIR`. There is never a fallback when OpenBao is
+//! missing, and no plaintext fallback. Organization teardown deletes only
+//! names and paths, never values, and re-enumerates before it can call a
+//! namespace absent.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use sqlx::PgPool;
+
+pub const SECRET_KEK_PROVIDER_ENV: &str = "CODEWIRE_SECRET_KEK_PROVIDER";
+pub const SECRET_KEK_DIR_ENV: &str = "CODEWIRE_SECRET_KEK_DIR";
+pub const SECRET_KEK_ACTIVE_ID_ENV: &str = "CODEWIRE_SECRET_KEK_ACTIVE_ID";
+const DEFAULT_LOCAL_KEK_ACTIVE_ID: &str = "v1";
 
 #[cfg(test)]
 use codewire_protected_store::secret_envelope::KekProvider;
@@ -90,13 +99,33 @@ impl SecretStore {
                 std::sync::Arc::new(TestKekProvider),
             )));
         }
-        tracing::info!("using OpenBao-wrapped encrypted PostgreSQL tenant-secret store");
-        let kube = kube.ok_or_else(|| {
-            anyhow::anyhow!("OpenBao tenant-secret storage requires a Kubernetes client")
-        })?;
-        Ok(Self(
-            super::postgres_secrets::PostgresSecretStore::from_env(pool, kube)?,
-        ))
+        let mode = SecretKekProviderMode::from_lookup(|name| std::env::var(name).ok())?;
+        match mode {
+            SecretKekProviderMode::OpenBaoTransit => {
+                tracing::info!("using OpenBao-wrapped encrypted PostgreSQL tenant-secret store");
+                let kube = kube.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "OpenBao tenant-secret storage requires a Kubernetes client \
+                         (set {SECRET_KEK_PROVIDER_ENV}=local-keyring and {SECRET_KEK_DIR_ENV} \
+                         for self-hosted Compose deployments; see docs/CONFIGURATION.md)"
+                    )
+                })?;
+                Ok(Self(
+                    super::postgres_secrets::PostgresSecretStore::from_env(pool, kube)?,
+                ))
+            }
+            SecretKekProviderMode::LocalKeyring { dir, active_id } => {
+                tracing::info!(
+                    active_id = %active_id,
+                    "using local-keyring-wrapped encrypted PostgreSQL tenant-secret store"
+                );
+                Ok(Self(
+                    super::postgres_secrets::PostgresSecretStore::from_local_keyring(
+                        pool, &dir, &active_id,
+                    )?,
+                ))
+            }
+        }
     }
 
     /// Mirrors `GetSecretsRawAtPath`.
@@ -218,6 +247,68 @@ fn split_folder_path(secret_path: &str) -> anyhow::Result<(String, String)> {
     ))
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum SecretKekProviderMode {
+    OpenBaoTransit,
+    LocalKeyring { dir: PathBuf, active_id: String },
+}
+
+impl SecretKekProviderMode {
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        let provider = lookup(SECRET_KEK_PROVIDER_ENV);
+        let dir = lookup(SECRET_KEK_DIR_ENV);
+        let active_id = lookup(SECRET_KEK_ACTIVE_ID_ENV);
+
+        let selected = match provider.as_deref().map(str::trim) {
+            None | Some("") | Some("openbao-transit") => None,
+            Some("local-keyring") => Some("local-keyring"),
+            Some(other) => {
+                anyhow::bail!(
+                    "{SECRET_KEK_PROVIDER_ENV}={other:?} is not supported; \
+                     use `openbao-transit` or `local-keyring` (see docs/CONFIGURATION.md)"
+                );
+            }
+        };
+
+        if selected.is_none() {
+            if dir.as_deref().is_some_and(|v| !v.trim().is_empty())
+                || active_id.as_deref().is_some_and(|v| !v.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "{SECRET_KEK_DIR_ENV} and {SECRET_KEK_ACTIVE_ID_ENV} require \
+                     {SECRET_KEK_PROVIDER_ENV}=local-keyring; local-keyring is never a fallback"
+                );
+            }
+            return Ok(Self::OpenBaoTransit);
+        }
+
+        let dir = dir
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{SECRET_KEK_DIR_ENV} is required when {SECRET_KEK_PROVIDER_ENV}=local-keyring"
+                )
+            })?;
+        let active_id = match active_id {
+            None => DEFAULT_LOCAL_KEK_ACTIVE_ID.to_owned(),
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    anyhow::bail!(
+                        "{SECRET_KEK_ACTIVE_ID_ENV} must be a canonical vN identifier (such as v1) when set"
+                    );
+                }
+                trimmed.to_owned()
+            }
+        };
+        Ok(Self::LocalKeyring {
+            dir: PathBuf::from(dir),
+            active_id,
+        })
+    }
+}
+
 /// The product-facing secret-key contract. Keeping this deliberately narrower
 /// than a general URL segment keeps the storage path sink unambiguous and
 /// matches the dashboard's environment-variable-style key input.
@@ -228,6 +319,16 @@ pub fn is_valid_secret_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lookup_from(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
 
     #[test]
     fn stored_secret_parses_api_field_names() {
@@ -246,5 +347,91 @@ mod tests {
         for path in ["", "/", "relative", "/projects/.."] {
             assert!(split_folder_path(path).is_err(), "accepted {path:?}");
         }
+    }
+
+    #[test]
+    fn secret_kek_provider_selection_is_explicit_and_never_falls_back() {
+        assert_eq!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[])).unwrap(),
+            SecretKekProviderMode::OpenBaoTransit
+        );
+        assert_eq!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[(
+                SECRET_KEK_PROVIDER_ENV,
+                "openbao-transit"
+            )]))
+            .unwrap(),
+            SecretKekProviderMode::OpenBaoTransit
+        );
+        // Local keyring directory without explicit provider must never fall back.
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[(
+                SECRET_KEK_DIR_ENV,
+                "/etc/codewire/kek"
+            )]))
+            .is_err()
+        );
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[
+                (SECRET_KEK_PROVIDER_ENV, "openbao-transit"),
+                (SECRET_KEK_DIR_ENV, "/etc/codewire/kek"),
+            ]))
+            .is_err()
+        );
+        // Unknown provider fails closed.
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[(
+                SECRET_KEK_PROVIDER_ENV,
+                "plaintext"
+            )]))
+            .is_err()
+        );
+        // Explicit local-keyring requires a non-empty directory.
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[(
+                SECRET_KEK_PROVIDER_ENV,
+                "local-keyring"
+            )]))
+            .is_err()
+        );
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[
+                (SECRET_KEK_PROVIDER_ENV, "local-keyring"),
+                (SECRET_KEK_DIR_ENV, "   "),
+            ]))
+            .is_err()
+        );
+        assert!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[
+                (SECRET_KEK_PROVIDER_ENV, "local-keyring"),
+                (SECRET_KEK_DIR_ENV, "/run/secrets/kek"),
+                (SECRET_KEK_ACTIVE_ID_ENV, " "),
+            ]))
+            .is_err()
+        );
+        // Explicit local-keyring defaults active_id to v1 and accepts explicit vN.
+        assert_eq!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[
+                (SECRET_KEK_PROVIDER_ENV, "local-keyring"),
+                (SECRET_KEK_DIR_ENV, "/run/secrets/kek"),
+            ]))
+            .unwrap(),
+            SecretKekProviderMode::LocalKeyring {
+                dir: PathBuf::from("/run/secrets/kek"),
+                active_id: "v1".into(),
+            }
+        );
+        assert_eq!(
+            SecretKekProviderMode::from_lookup(lookup_from(&[
+                (SECRET_KEK_PROVIDER_ENV, "local-keyring"),
+                (SECRET_KEK_DIR_ENV, "/run/secrets/kek"),
+                (SECRET_KEK_ACTIVE_ID_ENV, "v2"),
+            ]))
+            .unwrap(),
+            SecretKekProviderMode::LocalKeyring {
+                dir: PathBuf::from("/run/secrets/kek"),
+                active_id: "v2".into(),
+            }
+        );
     }
 }

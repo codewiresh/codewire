@@ -236,6 +236,26 @@ second run changes nothing once an admin exists. With mail, the admin verifies
 the address before signing in, like any account; without mail, setup vouches
 for it.
 
+## Tenant-secret KEK provider
+
+Orchestration encrypts tenant secrets with one per-tenant 256-bit DEK stored in
+PostgreSQL and wrapped by a key-encryption-key (KEK) provider. By default it
+uses OpenBao Transit through Kubernetes workload identity; there is no fallback
+when OpenBao or Kubernetes is unavailable.
+
+Self-hosted deployments without OpenBao may explicitly opt into a local
+versioned keyring directory using the same `vN` 64-hex-character file format as
+the IdP signing keyring. Because the key file sits on the same host as the
+database, the host disk is the boundary: back up the keyring alongside
+PostgreSQL, because losing it loses every stored tenant secret. A database
+initialized with one KEK provider refuses to open under another.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_SECRET_KEK_PROVIDER` | No | `openbao-transit` (the default) or `local-keyring`. Any other value stops orchestration at startup. | `local-keyring` |
+| `CODEWIRE_SECRET_KEK_DIR` | With `local-keyring` | Directory of canonical `vN` key files (64 lowercase hex characters each, non-group/world-writable). Setting it without `CODEWIRE_SECRET_KEK_PROVIDER=local-keyring` stops orchestration at startup. | `/var/run/secrets/codewire/tenant-keks` |
+| `CODEWIRE_SECRET_KEK_ACTIVE_ID` | No (with `local-keyring`) | Active `vN` key identifier used to wrap new DEKs; defaults to `v1`. | `v1` |
+
 ## Sign in with GitHub or Google
 
 The IdP offers "Continue with GitHub" and "Continue with Google" on the

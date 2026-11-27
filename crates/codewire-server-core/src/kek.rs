@@ -180,6 +180,11 @@ impl KekKeyring {
     pub fn key(&self, kek_id: &str) -> Option<&[u8; 32]> {
         self.keys.get(kek_id).map(|key| &**key)
     }
+
+    /// Iterate over every loaded canonical `vN` identifier and its 256-bit key.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &[u8; 32])> {
+        self.keys.iter().map(|(id, key)| (id.as_str(), &**key))
+    }
 }
 
 struct AtomicWriterDataDir {

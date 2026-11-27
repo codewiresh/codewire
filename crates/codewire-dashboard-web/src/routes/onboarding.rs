@@ -345,6 +345,9 @@ pub(super) async fn plan_page(
         Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
         Err(error) => return error_page(error),
     };
+    if !facts.billing_enabled {
+        return redirect(format!("/{}/onboarding/2fa", org.slug), &headers);
+    }
     let csrf = page_csrf_token(&headers);
     let chrome = chrome(2, &identity, &org.slug, csrf.clone());
     let error = if !query.canceled.is_empty() {

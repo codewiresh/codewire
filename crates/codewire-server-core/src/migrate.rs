@@ -111,6 +111,7 @@ mod tests {
     mod ssh;
     mod ssh_host_keys;
     mod standard_hibernate;
+    mod tenant_secret_local_keyring;
     mod two_factor_replacements;
     mod user_cli_sign_in;
     mod workspace_binding;
@@ -122,9 +123,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0065.
+    // (which equals the 41-migration history it replaced), 0002 to 0066.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "5e0cba7e8a113810acabb1f2c3586969671a4ff9838044a5617ef467ca104674";
+        "ed0ccc3654f42650336b35914f6702a2ff3d55a59e705700d4936641e8f0b83a";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -276,6 +277,8 @@ mod tests {
     const APPLIED_ORGANIZATION_AGENT_CHAT_CHECKSUM: &str = "849f0abf4ef6f4be73f88bf2dfbce11c838be1bfad9eceab5c555f6f0ca5eb764c683381751988ee11befe37cbe2e160";
     // SHA-384 of 0065_platform_agent_agy.sql.
     const APPLIED_PLATFORM_AGENT_AGY_CHECKSUM: &str = "c87d48d93fa439c72fc268ee00d0ca7c0f11a16c7657985407f2b9672d2412cb3cdd6f4964e5ee511261a65f7d7c6094";
+    // SHA-384 of 0066_tenant_secret_local_keyring.sql (#4121).
+    const APPLIED_TENANT_SECRET_LOCAL_KEYRING_CHECKSUM: &str = "3c18b73a2ab54a35d067f05dfb7ec0bfeeab170be83353fad5892c1b53649fa5369d213fcb9c2d19c8b8a2a24341e0a0";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1422,6 +1425,7 @@ mod tests {
             (63, APPLIED_BILLING_PLANS_AND_ONBOARDING_CHECKSUM),
             (64, APPLIED_ORGANIZATION_AGENT_CHAT_CHECKSUM),
             (65, APPLIED_PLATFORM_AGENT_AGY_CHECKSUM),
+            (66, APPLIED_TENANT_SECRET_LOCAL_KEYRING_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1452,12 +1456,12 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 65
+                first.len() == 66
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
                         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
-                        60, 61, 62, 63, 64, 65
+                        60, 61, 62, 63, 64, 65, 66
                     ])
                     && first.iter().all(|migration| migration.2)
             );

@@ -455,11 +455,16 @@ async fn bind_listeners(
     })
 }
 
-/// The deployment names the images every workspace runs; there are no
-/// defaults (docs/CONFIGURATION.md).
-fn require_runtime_images() -> anyhow::Result<()> {
+/// The deployment names the workspace image repositories it accepts; there are
+/// no defaults (docs/CONFIGURATION.md). The Kubernetes daemon image is
+/// required only when a Kubernetes cluster is attached.
+fn init_runtime_images() -> anyhow::Result<()> {
+    codewire_orchestration::sandbox::runtime_images::init().map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+fn require_daemon_image() -> anyhow::Result<()> {
     use codewire_orchestration::sandbox::runtime_images;
-    runtime_images::init().map_err(anyhow::Error::msg)?;
     if std::env::var(runtime_images::DAEMON_IMAGE_ENV).is_ok_and(|image| !image.trim().is_empty()) {
         Ok(())
     } else {
@@ -612,7 +617,7 @@ async fn main() -> anyhow::Result<()> {
             &INVITATION_LOOKUP,
         ]);
     }
-    require_runtime_images()?;
+    init_runtime_images()?;
     // Before anything serves: a server that cannot stage a cw runtime upload
     // in its own private directory never starts, and never stages anywhere
     // else (docs/dev/CW-RUNTIME-JOURNAL.md, "Where an upload is staged").
@@ -708,7 +713,10 @@ async fn main() -> anyhow::Result<()> {
     )?
     .map(Arc::new);
 
-    let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
+    if kube.is_some() {
+        require_daemon_image()?;
+    }
+    let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env_for_cluster(kube.is_some());
     // Hosted egress and the standard runtime, read once here (#4000, #6070, #5602).
     let egress_settings =
         egress::startup::configure(&mut sandbox_cfg, kube.as_ref(), &pool).await?;

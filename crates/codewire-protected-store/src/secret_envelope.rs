@@ -5,6 +5,7 @@
 //! observed key version beside the wrapped DEK, so callers never race a
 //! separate "active version" query.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +32,9 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const SECRET_AAD_DOMAIN_V1: &[u8] = b"codewire/tenant-secret/v1\0";
 const DEK_CONTEXT_DOMAIN_V1: &[u8] = b"codewire/tenant-dek-context/v1\0";
+const LOCAL_KEYRING_AAD_DOMAIN_V1: &[u8] = b"codewire/tenant-dek-local-keyring/v1\0";
+const LOCAL_KEYRING_AUTHORITY_ID: &str = "local-keyring";
+const LOCAL_KEYRING_WRAPPED_BYTES: usize = NONCE_BYTES + DEK_BYTES + TAG_BYTES;
 const DEFAULT_AUTH_MOUNT: &str = "kubernetes-codewire";
 const DEFAULT_TRANSIT_MOUNT: &str = "transit";
 const DEFAULT_TRANSIT_KEY: &str = "tenant-dek";
@@ -329,18 +333,21 @@ fn length_prefixed(domain: &[u8], values: &[&[u8]]) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum KekProviderKind {
     OpenBaoTransit,
+    LocalKeyring,
 }
 
 impl KekProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenBaoTransit => "openbao-transit",
+            Self::LocalKeyring => "local-keyring",
         }
     }
 
     pub fn from_persisted(value: &str) -> Option<Self> {
         match value {
             "openbao-transit" => Some(Self::OpenBaoTransit),
+            "local-keyring" => Some(Self::LocalKeyring),
             _ => None,
         }
     }
@@ -979,6 +986,236 @@ fn parse_transit_version(ciphertext: &str) -> Option<u32> {
     Some(version)
 }
 
+fn parse_local_wrapped(ciphertext: &str) -> Option<(u32, &str)> {
+    let mut fields = ciphertext.splitn(3, ':');
+    if fields.next()? != "local" {
+        return None;
+    }
+    let version = parse_version(fields.next()?)?;
+    let payload = fields.next()?;
+    if payload.is_empty() {
+        return None;
+    }
+    Some((version, payload))
+}
+
+fn local_keyring_aad_v1(key_name: &str, key_version: u32, context: &DekContext) -> Vec<u8> {
+    let version_bytes = key_version.to_be_bytes();
+    length_prefixed(
+        LOCAL_KEYRING_AAD_DOMAIN_V1,
+        &[
+            key_name.as_bytes(),
+            &version_bytes,
+            context.scope.as_str().as_bytes(),
+            context.scope_id.as_bytes(),
+        ],
+    )
+}
+
+/// Explicit self-hosted KEK provider backed by a versioned in-memory 256-bit
+/// keyring (loaded by the caller from a hardened keyring directory).
+///
+/// Each DEK is wrapped with AES-256-GCM under the active KEK using a fresh
+/// random 96-bit nonce and AAD bound to the key name, key version, and DEK
+/// context. Ciphertexts are persisted as `local:v<N>:<base64(nonce || ct)>` so
+/// they cannot be confused with OpenBao Transit envelopes.
+pub struct LocalKeyringProvider {
+    active_version: u32,
+    keys: HashMap<u32, Zeroizing<[u8; DEK_BYTES]>>,
+}
+
+impl LocalKeyringProvider {
+    pub fn new(
+        active_version: u32,
+        keys: HashMap<u32, Zeroizing<[u8; DEK_BYTES]>>,
+    ) -> Result<Self, SecretEnvelopeError> {
+        let provider = KekProviderKind::LocalKeyring;
+        if active_version == 0 || keys.contains_key(&0) {
+            return Err(SecretEnvelopeError::configuration(
+                "invalid-local-keyring-version",
+                provider,
+            ));
+        }
+        if !keys.contains_key(&active_version) {
+            return Err(SecretEnvelopeError::configuration(
+                "missing-active-local-keyring-key",
+                provider,
+            ));
+        }
+        Ok(Self {
+            active_version,
+            keys,
+        })
+    }
+
+    pub fn active_version(&self) -> u32 {
+        self.active_version
+    }
+
+    fn wrap_with_active(
+        &self,
+        context: &DekContext,
+        dek: &[u8; DEK_BYTES],
+    ) -> Result<WrappedDek, SecretEnvelopeError> {
+        let provider = KekProviderKind::LocalKeyring;
+        let key = self.keys.get(&self.active_version).ok_or_else(|| {
+            SecretEnvelopeError::provider(
+                "local-keyring-unknown-key-version",
+                provider,
+                Some(self.active_version),
+                Some(WRAPPED_DEK_FORMAT_V1),
+            )
+        })?;
+        let cipher = Aes256Gcm::new_from_slice(&**key).map_err(|_| {
+            SecretEnvelopeError::provider(
+                "local-keyring-invalid-kek-length",
+                provider,
+                Some(self.active_version),
+                Some(WRAPPED_DEK_FORMAT_V1),
+            )
+        })?;
+        let mut nonce = [0_u8; NONCE_BYTES];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let aad = local_keyring_aad_v1(DEFAULT_TRANSIT_KEY, self.active_version, context);
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: dek.as_slice(),
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| {
+                SecretEnvelopeError::provider(
+                    "local-keyring-encrypt-failed",
+                    provider,
+                    Some(self.active_version),
+                    Some(WRAPPED_DEK_FORMAT_V1),
+                )
+            })?;
+        let mut payload = Vec::with_capacity(LOCAL_KEYRING_WRAPPED_BYTES);
+        payload.extend_from_slice(&nonce);
+        payload.extend_from_slice(&ciphertext);
+        let encoded = format!(
+            "local:v{}:{}",
+            self.active_version,
+            STANDARD.encode(payload)
+        );
+        Ok(WrappedDek {
+            provider,
+            key_name: DEFAULT_TRANSIT_KEY.into(),
+            key_version: self.active_version,
+            ciphertext: encoded.into_bytes(),
+            nonce: None,
+            format: WRAPPED_DEK_FORMAT_V1,
+        })
+    }
+
+    fn validate_local_wrapped<'a>(
+        &self,
+        wrapped: &'a WrappedDek,
+    ) -> Result<&'a str, SecretEnvelopeError> {
+        let error = |class| {
+            SecretEnvelopeError::provider(
+                class,
+                KekProviderKind::LocalKeyring,
+                Some(wrapped.key_version),
+                Some(wrapped.format),
+            )
+        };
+        if wrapped.provider != KekProviderKind::LocalKeyring
+            || wrapped.key_name != DEFAULT_TRANSIT_KEY
+            || wrapped.key_version == 0
+            || wrapped.format != WRAPPED_DEK_FORMAT_V1
+            || wrapped.nonce.is_some()
+        {
+            return Err(error("invalid-local-keyring-envelope"));
+        }
+        let ciphertext = std::str::from_utf8(&wrapped.ciphertext)
+            .map_err(|_| error("invalid-local-keyring-envelope"))?;
+        let (observed, payload) = parse_local_wrapped(ciphertext)
+            .ok_or_else(|| error("invalid-local-keyring-envelope"))?;
+        if observed != wrapped.key_version {
+            return Err(error("local-keyring-version-mismatch"));
+        }
+        Ok(payload)
+    }
+}
+
+#[async_trait]
+impl KekProvider for LocalKeyringProvider {
+    fn kind(&self) -> KekProviderKind {
+        KekProviderKind::LocalKeyring
+    }
+
+    async fn generate(&self, context: &DekContext) -> Result<GeneratedDek, SecretEnvelopeError> {
+        let mut plaintext = Zeroizing::new([0_u8; DEK_BYTES]);
+        rand::rngs::OsRng.fill_bytes(&mut *plaintext);
+        let wrapped = self.wrap_with_active(context, &plaintext)?;
+        Ok(GeneratedDek { plaintext, wrapped })
+    }
+
+    async fn unwrap(
+        &self,
+        context: &DekContext,
+        wrapped: &WrappedDek,
+    ) -> Result<Zeroizing<[u8; DEK_BYTES]>, SecretEnvelopeError> {
+        let provider = KekProviderKind::LocalKeyring;
+        let error = |class| {
+            SecretEnvelopeError::provider(
+                class,
+                provider,
+                Some(wrapped.key_version),
+                Some(wrapped.format),
+            )
+        };
+        let encoded_payload = self.validate_local_wrapped(wrapped)?;
+        let key = self
+            .keys
+            .get(&wrapped.key_version)
+            .ok_or_else(|| error("local-keyring-unknown-key-version"))?;
+        let decoded = STANDARD
+            .decode(encoded_payload)
+            .map_err(|_| error("invalid-local-keyring-envelope"))?;
+        if decoded.len() != LOCAL_KEYRING_WRAPPED_BYTES {
+            return Err(error("invalid-local-keyring-envelope"));
+        }
+        let (nonce, ciphertext) = decoded.split_at(NONCE_BYTES);
+        let cipher = Aes256Gcm::new_from_slice(&**key)
+            .map_err(|_| error("local-keyring-invalid-kek-length"))?;
+        let aad = local_keyring_aad_v1(&wrapped.key_name, wrapped.key_version, context);
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(
+                    Nonce::from_slice(nonce),
+                    Payload {
+                        msg: ciphertext,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| error("local-keyring-decrypt-failed"))?,
+        );
+        let dek: [u8; DEK_BYTES] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| error("local-keyring-decrypt-invalid"))?;
+        Ok(Zeroizing::new(dek))
+    }
+
+    async fn rewrap(
+        &self,
+        context: &DekContext,
+        wrapped: &WrappedDek,
+    ) -> Result<WrappedDek, SecretEnvelopeError> {
+        let dek = self.unwrap(context, wrapped).await?;
+        self.wrap_with_active(context, &dek)
+    }
+
+    async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError> {
+        Ok(Some(LOCAL_KEYRING_AUTHORITY_ID.to_owned()))
+    }
+}
+
 pub fn dek_fingerprint(dek: &[u8; DEK_BYTES]) -> [u8; 32] {
     Sha256::digest(dek).into()
 }
@@ -1334,5 +1571,206 @@ mod tests {
         let rendered = format!("{wrapped:?}");
         assert!(!rendered.contains("private-ciphertext"));
         assert!(rendered.contains("ciphertext_len"));
+    }
+
+    fn local_keyring_provider(active_version: u32, versions: &[(u32, u8)]) -> LocalKeyringProvider {
+        let keys = versions
+            .iter()
+            .map(|(version, byte)| (*version, Zeroizing::new([*byte; DEK_BYTES])))
+            .collect();
+        LocalKeyringProvider::new(active_version, keys).unwrap()
+    }
+
+    #[test]
+    fn local_keyring_rejects_invalid_configuration() {
+        assert_eq!(
+            LocalKeyringProvider::new(0, HashMap::new())
+                .err()
+                .map(|e| e.failure_class()),
+            Some("invalid-local-keyring-version")
+        );
+        let with_zero = HashMap::from([
+            (0, Zeroizing::new([0x11; DEK_BYTES])),
+            (1, Zeroizing::new([0x22; DEK_BYTES])),
+        ]);
+        assert_eq!(
+            LocalKeyringProvider::new(1, with_zero)
+                .err()
+                .map(|e| e.failure_class()),
+            Some("invalid-local-keyring-version")
+        );
+        let missing_active = HashMap::from([(1, Zeroizing::new([0x22; DEK_BYTES]))]);
+        assert_eq!(
+            LocalKeyringProvider::new(2, missing_active)
+                .err()
+                .map(|e| e.failure_class()),
+            Some("missing-active-local-keyring-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_keyring_round_trips_rotates_and_binds_context() {
+        let v1 = local_keyring_provider(1, &[(1, 0x11)]);
+        let ctx_a = context("/users/user_a");
+        let ctx_b = context("/users/user_b");
+
+        assert_eq!(v1.kind(), KekProviderKind::LocalKeyring);
+        assert_eq!(
+            v1.authority_id().await.unwrap().as_deref(),
+            Some("local-keyring")
+        );
+
+        let first = v1.generate(&ctx_a).await.unwrap();
+        let second = v1.generate(&ctx_a).await.unwrap();
+        assert_eq!(first.wrapped.provider, KekProviderKind::LocalKeyring);
+        assert_eq!(first.wrapped.key_name, "tenant-dek");
+        assert_eq!(first.wrapped.key_version, 1);
+        assert_eq!(first.wrapped.format, WRAPPED_DEK_FORMAT_V1);
+        assert!(first.wrapped.nonce.is_none());
+        assert_ne!(first.wrapped.ciphertext, second.wrapped.ciphertext);
+        assert!(
+            std::str::from_utf8(&first.wrapped.ciphertext)
+                .unwrap()
+                .starts_with("local:v1:")
+        );
+
+        let unwrapped = v1.unwrap(&ctx_a, &first.wrapped).await.unwrap();
+        assert_eq!(unwrapped.as_ref(), first.plaintext.as_ref());
+
+        // Cross-context swap must fail authentication with a value-blind error.
+        let cross_err = v1.unwrap(&ctx_b, &first.wrapped).await.unwrap_err();
+        assert_eq!(cross_err.failure_class(), "local-keyring-decrypt-failed");
+        assert!(!cross_err.to_string().contains("user_a"));
+        assert!(!cross_err.to_string().contains("user_b"));
+
+        // Rotate v1 -> v2: dual keyring unwraps v1 and rewraps under v2.
+        let dual = local_keyring_provider(2, &[(1, 0x11), (2, 0x22)]);
+        assert_eq!(
+            dual.unwrap(&ctx_a, &first.wrapped).await.unwrap().as_ref(),
+            first.plaintext.as_ref()
+        );
+        let rewrapped = dual.rewrap(&ctx_a, &first.wrapped).await.unwrap();
+        assert_eq!(rewrapped.key_version, 2);
+        assert!(
+            std::str::from_utf8(&rewrapped.ciphertext)
+                .unwrap()
+                .starts_with("local:v2:")
+        );
+
+        // v2-only keyring unwraps rewrapped DEK and refuses retired v1 DEK.
+        let v2_only = local_keyring_provider(2, &[(2, 0x22)]);
+        assert_eq!(
+            v2_only.unwrap(&ctx_a, &rewrapped).await.unwrap().as_ref(),
+            first.plaintext.as_ref()
+        );
+        let missing_v1 = v2_only.unwrap(&ctx_a, &first.wrapped).await.unwrap_err();
+        assert_eq!(
+            missing_v1.failure_class(),
+            "local-keyring-unknown-key-version"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_keyring_rejects_provider_mixing_and_envelope_tampering() {
+        let local = local_keyring_provider(1, &[(1, 0x33)]);
+        let ctx = context("/org-secrets/org_1");
+        let generated = local.generate(&ctx).await.unwrap();
+
+        // Mixing OpenBaoTransit envelope into LocalKeyring fails closed.
+        let bao_wrapped = TestKekProvider.generate(&ctx).await.unwrap().wrapped;
+        assert_eq!(
+            local
+                .unwrap(&ctx, &bao_wrapped)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
+
+        // Relabeling provider while keeping vault: prefix also fails closed.
+        let mut relabeled = bao_wrapped.clone();
+        relabeled.provider = KekProviderKind::LocalKeyring;
+        assert_eq!(
+            local
+                .unwrap(&ctx, &relabeled)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
+
+        // Version mismatch between column and ciphertext prefix fails closed.
+        let mut wrong_version = generated.wrapped.clone();
+        wrong_version.key_version = 2;
+        assert_eq!(
+            local
+                .unwrap(&ctx, &wrong_version)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "local-keyring-version-mismatch"
+        );
+
+        // Non-empty nonce field, wrong format, wrong key name fail closed.
+        let mut with_nonce = generated.wrapped.clone();
+        with_nonce.nonce = Some(vec![0; NONCE_BYTES]);
+        assert_eq!(
+            local
+                .unwrap(&ctx, &with_nonce)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
+
+        let mut wrong_format = generated.wrapped.clone();
+        wrong_format.format = 2;
+        assert_eq!(
+            local
+                .unwrap(&ctx, &wrong_format)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
+
+        let mut wrong_key = generated.wrapped.clone();
+        wrong_key.key_name = "other-key".into();
+        assert_eq!(
+            local
+                .unwrap(&ctx, &wrong_key)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
+
+        // Tampered payload byte fails AEAD authentication.
+        let mut tampered = generated.wrapped.clone();
+        let text = std::str::from_utf8(&tampered.ciphertext).unwrap();
+        let (prefix, b64) = text.rsplit_once(':').unwrap();
+        let mut raw = STANDARD.decode(b64).unwrap();
+        raw[NONCE_BYTES] ^= 0x01;
+        tampered.ciphertext = format!("{prefix}:{}", STANDARD.encode(raw)).into_bytes();
+        assert_eq!(
+            local
+                .unwrap(&ctx, &tampered)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "local-keyring-decrypt-failed"
+        );
+
+        // Truncated payload fails length check.
+        let mut truncated = generated.wrapped.clone();
+        truncated.ciphertext = format!("local:v1:{}", STANDARD.encode([0_u8; 16])).into_bytes();
+        assert_eq!(
+            local
+                .unwrap(&ctx, &truncated)
+                .await
+                .unwrap_err()
+                .failure_class(),
+            "invalid-local-keyring-envelope"
+        );
     }
 }

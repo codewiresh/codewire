@@ -1650,8 +1650,8 @@ database_lane_orchestration_workers() {
   counted_suite "encrypted tenant secret store matrix" encrypted-tenant-secret-store \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-orchestration --lib \
-      'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
-      -- --ignored --exact --nocapture
+      'worker::postgres_secrets::tests::' \
+      -- --ignored --nocapture --test-threads=1
 
   counted_suite "leader handover when a replica drains" leader-drain-handover \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \

@@ -5,6 +5,7 @@
 //! wrapped by OpenBao Transit.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -19,8 +20,9 @@ use super::secrets::{StoredSecret, StoredSecretMetadata, is_valid_secret_key};
 use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, EncryptedTenantSecret, GeneratedDek, KekProvider, KekProviderKind,
-    OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, SecretEnvelopeError,
-    WrappedDek, decrypt_secret, dek_fingerprint, encrypt_secret, verify_dek_fingerprint,
+    LocalKeyringProvider, OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates,
+    SecretEnvelopeError, WrappedDek, decrypt_secret, dek_fingerprint, encrypt_secret,
+    verify_dek_fingerprint,
 };
 
 const MAX_CACHED_DEKS: usize = 4096;
@@ -33,6 +35,16 @@ fn store_error(class: &'static str) -> anyhow::Error {
 
 fn envelope_error(error: SecretEnvelopeError) -> anyhow::Error {
     anyhow::anyhow!(error)
+}
+
+fn parse_kek_version(id: &str) -> Option<u32> {
+    let digits = id.strip_prefix('v')?;
+    if !matches!(digits.as_bytes().first(), Some(b'1'..=b'9'))
+        || !digits.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 #[derive(sqlx::FromRow)]
@@ -166,6 +178,21 @@ impl PostgresSecretStore {
             )
             .map_err(envelope_error)?,
         );
+        Ok(Self::new(pool, provider))
+    }
+
+    pub fn from_local_keyring(pool: PgPool, dir: &Path, active_id: &str) -> anyhow::Result<Self> {
+        let keyring = codewire_server_core::kek::KekKeyring::load(dir, active_id)?;
+        let active_version = parse_kek_version(keyring.active_id())
+            .ok_or_else(|| store_error("invalid-local-keyring-active-version"))?;
+        let mut keys = HashMap::new();
+        for (id, key) in keyring.iter() {
+            let version = parse_kek_version(id)
+                .ok_or_else(|| store_error("invalid-local-keyring-key-version"))?;
+            keys.insert(version, Zeroizing::new(*key));
+        }
+        let provider: Arc<dyn KekProvider> =
+            Arc::new(LocalKeyringProvider::new(active_version, keys).map_err(envelope_error)?);
         Ok(Self::new(pool, provider))
     }
 
@@ -991,6 +1018,87 @@ mod tests {
             "the final live secret deletion must remove its DEK"
         );
         assert_eq!(store.cached_dek_count().await, 0);
+
+        sqlx::query("DELETE FROM tenant_secret_kek_canary")
+            .execute(&pool)
+            .await?;
+        isolation.rollback().await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn local_keyring_store_persists_secrets_and_refuses_provider_mixing() -> anyhow::Result<()>
+    {
+        const TEST_LOCK: i64 = 0x4357_5453_4f50_5431;
+        let database_url = std::env::var("TEST_DATABASE_URL")?;
+        codewire_server_core::migrate::ensure_schema(&database_url).await?;
+        let pool = PgPool::connect(&database_url).await?;
+        let mut isolation = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(TEST_LOCK)
+            .fetch_one(&mut *isolation)
+            .await?;
+
+        let keyring_dir = tempfile::tempdir()?;
+        std::fs::write(
+            keyring_dir.path().join("v1"),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )?;
+        let local_store =
+            PostgresSecretStore::from_local_keyring(pool.clone(), keyring_dir.path(), "v1")?;
+
+        sqlx::query("DELETE FROM tenant_secret_kek_canary")
+            .execute(&pool)
+            .await?;
+        assert!(local_store.initialize_canary().await?);
+        assert!(!local_store.initialize_canary().await?);
+        local_store.verify_canary().await?;
+
+        // An OpenBao store must fail closed against a local-keyring canary.
+        let bao_store = PostgresSecretStore::new(pool.clone(), Arc::new(TestKekProvider));
+        let mixed_canary = bao_store.verify_canary().await.unwrap_err().to_string();
+        assert!(
+            mixed_canary.contains("failure_class=canary-provider-mismatch"),
+            "{mixed_canary}"
+        );
+
+        let fixture_id = uuid::Uuid::new_v4().simple().to_string();
+        let path = format!("/org-secrets/org_{fixture_id}");
+        local_store
+            .set_secret_at_path(&path, "SELFHOST_SECRET", "local-secret-value")
+            .await?;
+        let listed = local_store.get_secrets_raw_at_path(&path).await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].value, "local-secret-value");
+
+        // An OpenBao store must fail closed when reading a local-keyring DEK.
+        let mixed_dek = bao_store
+            .get_secrets_raw_at_path(&path)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mixed_dek.contains("failure_class=provider-authority-mismatch"),
+            "{mixed_dek}"
+        );
+
+        // And a local-keyring store must fail closed against an OpenBao canary.
+        assert!(
+            local_store
+                .delete_secret_at_path(&path, "SELFHOST_SECRET")
+                .await?
+        );
+        sqlx::query("DELETE FROM tenant_secret_kek_canary")
+            .execute(&pool)
+            .await?;
+        assert!(bao_store.initialize_canary().await?);
+        let reverse_mixed = local_store.verify_canary().await.unwrap_err().to_string();
+        assert!(
+            reverse_mixed.contains("failure_class=canary-provider-mismatch"),
+            "{reverse_mixed}"
+        );
 
         sqlx::query("DELETE FROM tenant_secret_kek_canary")
             .execute(&pool)

@@ -410,6 +410,14 @@ fn kind_codex_login_check_period_seconds(value: Option<std::ffi::OsString>) -> O
 
 impl SandboxWorkerCfg {
     pub fn from_env() -> Self {
+        Self::from_env_for_cluster(true)
+    }
+
+    /// Reads runtime configuration from the process environment. When
+    /// `has_kube` is false (for example, a self-hosted Compose control plane
+    /// with no Kubernetes cluster), Kubernetes-only storage-class settings
+    /// are not required at startup; any value that is set is still validated.
+    pub fn from_env_for_cluster(has_kube: bool) -> Self {
         let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
         let env_prefix = match env.as_str() {
             "local" | "development" => "dev",
@@ -428,12 +436,18 @@ impl SandboxWorkerCfg {
             crate::sandbox::template::CredentialRuntimeTemplateConfig::from_env(&sandbox_namespace)
                 .expect("platform credential runtime configuration must be complete and canonical");
         let runtime_profile = std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default();
-        let workspace_storage_class = crate::sandbox::template::required_workspace_storage_class(
-            &runtime_profile,
-            &std::env::var(crate::sandbox::template::WORKSPACE_STORAGE_CLASS_ENV)
-                .unwrap_or_default(),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        let raw_storage_class =
+            std::env::var(crate::sandbox::template::WORKSPACE_STORAGE_CLASS_ENV)
+                .unwrap_or_default();
+        let workspace_storage_class = if has_kube || !raw_storage_class.trim().is_empty() {
+            crate::sandbox::template::required_workspace_storage_class(
+                &runtime_profile,
+                &raw_storage_class,
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+        } else {
+            String::new()
+        };
         let confidential_workspace_storage_class =
             crate::sandbox::template::confidential_workspace_storage_class(
                 &std::env::var(crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV)
