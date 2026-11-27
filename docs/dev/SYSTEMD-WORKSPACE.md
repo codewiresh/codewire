@@ -251,10 +251,9 @@ memory and CPU limits still hold ("What is loosened").
 
 ## On the `standard` profile
 
-Target, not built (#5638, #5602): orchestration's half is described here;
-the guest half belongs to the `standard` runtime and is written with it. Of
-orchestration's half, the Pod setting below is on `main`; creating a systemd
-workspace on `standard` is not, and such a create is still refused.
+Implemented on `main` (#5638, #5602), not yet observed live on Dev: both
+orchestration's rendering/checks and the `standard` runtime's host/guest
+handoff (`CODEWIRE_WORKSPACE_INIT=image|systemd`) are wired.
 
 On `commodity`, Kubernetes and Kata build the workspace container, so the
 Pod has to ask for systemd's shape itself: root, `CAP_SYS_ADMIN` and the
@@ -308,9 +307,12 @@ workspace container itself. So none of the above is rendered there:
   holds: the vsock control channel, the hosted ingress, the daemon's listener
   on 127.0.0.1:17777 and the per-boot bind check. systemd becomes PID 1 of
   the workspace container, in its own pid, mount and cgroup namespaces with a
-  delegated cgroup v2 subtree. The daemon is still the one guest init executes
-  in the container, as the workspace user, with the held listener; the
-  image's `codewire-daemon.service` is masked.
+  delegated cgroup v2 subtree and separate `/run` and `/run/lock` tmpfs mounts.
+  The daemon is still the one guest init executes in the container, as the
+  workspace user (`codewire`, with `XDG_RUNTIME_DIR=/run/user/1000` and inside
+  `init.scope`), with the held listener; the image's `codewire-daemon.service`
+  (in `/etc/systemd/system`), `docker.service` and
+  `systemd-machine-id-commit.service` (in `/run/systemd/system`) are masked.
 
 **The boundary.** The whole guest, guest init included, belongs to the
 Sandbox's user: a systemd workspace is a full operating system whose user can
@@ -376,11 +378,13 @@ accidents away from guest init's own pieces, on these conditions:
    `CAP_SYS_ADMIN` outside the delegated subtree. It has no device beyond the
    workspace's own.
 2. **No vsock from the container.** Its seccomp filter refuses `AF_VSOCK`
-   sockets, so root in it cannot speak to the host's control port or the
-   ingress ports as guest init would. The same filter refuses
-   `io_uring_setup`, `io_uring_enter` and `io_uring_register`, since io_uring
-   can make a socket without the socket call. The default `standard`
-   container gets the same filter.
+   sockets (`socket` and `socketpair`, plus 32-bit `socketcall` on `x86_64`),
+   so root in it cannot speak to the host's control port or the ingress ports
+   as guest init would; sleep control (`7784`) goes through guest init's
+   fixed-request Unix-socket relay (`/run/codewire-hosted/sleep/control.sock`).
+   The same filter refuses `io_uring_setup`, `io_uring_enter` and
+   `io_uring_register`, since io_uring can make a socket without the socket
+   call. The default `standard` container gets the same filter.
 3. **What the held listener protects.** The listener and the daemon's
    non-dumpable state protect it from unprivileged processes only, not from
    root in the container. The listener still means no other process binds

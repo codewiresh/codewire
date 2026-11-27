@@ -28,6 +28,7 @@ parts the table names; the rest are not yet observed.
 | `standard-beside-commodity` | not yet observed | step 2 observed 2026-11-26 (custom `--image` fallback to `commodity`, `#5602`); step 1 not yet | not yet observed |
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
 | `standard-suspend` | not yet observed | not yet observed | not yet observed |
+| `standard-systemd` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -404,3 +405,17 @@ Target, not shipped (#5529). The contract is
   6. Inside `std-s`, a process other than the daemon sends `suspend` on vsock port 7784. The operator reads a `paused` record in the Pod log, `cw ls` still reads `running`, and the next activity check (at most 30 seconds later) resumes it, leaving a `resumed` record.
   7. The operator compares the billing session's suspended seconds with the Pod log's `paused` and `resumed` records for the walk: they match to the second, and no gap is flagged.
 - **Proof:** the state transitions in `cw ls` and the API, the wake times, the `sleep`'s PID unchanged across the pause, the clock difference, the operator's Pod reads (Ready, the same Pod UID, no restart), the billing record's suspended seconds taken from the supervisor's pause record, and #6367's four checks.
+
+## `standard-systemd`: a `standard` sandbox on a `workspace-systemd` disk boots systemd as container PID 1
+
+Contract: [`docs/dev/SYSTEMD-WORKSPACE.md`](../dev/SYSTEMD-WORKSPACE.md), "On the `standard` profile" (#5638, #5602).
+
+- **Entry points:** `cw --cloud create` on a `standard` deployment whose `SANDBOX_STANDARD_IMAGE_DISK` is built from `workspace-systemd`, with `CODEWIRE_WORKSPACE_INIT=systemd`.
+- **States to exercise:** boot with no failed units; `systemctl --user` user manager and persistent user unit across stop/start; guest Docker with `docker.service` masked; `codewire-daemon.service` masked and `127.0.0.1:17777` unbindable; `CAP_SYS_ADMIN` dropped and `AF_VSOCK` refused by seccomp (for both user and `sudo`); clean stop via `SIGRTMIN+3`.
+- **Driving it:**
+  1. `cw --cloud create --name std-sd`, then `cw exec --in std-sd -- sh -c 'cat /proc/1/comm; systemctl is-system-running; systemctl --failed --no-legend | wc -l; stat -fc %T /sys/fs/cgroup'`.
+  2. `cw exec --in std-sd -- sh -c 'systemctl is-enabled codewire-daemon.service || true; systemctl is-enabled docker.service || true; systemctl --user is-system-running; echo $XDG_RUNTIME_DIR'`.
+  3. Enable and start a user unit (`~/.config/systemd/user/keep.service`), run `cw stop std-sd && cw start std-sd`, and confirm `systemctl --user is-active keep.service` prints `active`.
+  4. `cw exec --in std-sd -- docker run --rm busybox echo ok`, verify `sudo -n mount -t tmpfs none /mnt` fails, and verify `socket(AF_VSOCK, SOCK_STREAM)` fails with `EAFNOSUPPORT` both as `codewire` and under `sudo -n`.
+- **Proof:** step 1 prints `systemd`, `running`, `0`, `cgroup2fs`; step 2 shows `masked` / `masked-runtime`, `running`, and `/run/user/1000`; step 3 prints `active` across restart; step 4 runs Docker while refusing both `mount` and `AF_VSOCK`, and `cw stop` completes cleanly well inside the Pod grace period.
+- **Observed:** not yet observed on Dev (local `/dev/kvm` A/B verification passed on 2026-11-27; Dev walk follows merge and Dev promotion).

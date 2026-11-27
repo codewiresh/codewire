@@ -118,11 +118,18 @@ fn entrypoint() -> anyhow::Result<()> {
             guest::run_runc_exec(&container_id, Path::new(&process_spec))
         }
         Some("workspace-init") => {
-            ensure!(
-                arguments.next().is_none(),
-                "workspace-init accepts no arguments"
-            );
-            guest::run_workspace_init()
+            let systemd = match arguments.next().as_deref() {
+                None => false,
+                Some(arg) if arg == "--systemd" => {
+                    ensure!(
+                        arguments.next().is_none(),
+                        "workspace-init accepts at most --systemd"
+                    );
+                    true
+                }
+                Some(_) => bail!("workspace-init accepts only optional --systemd"),
+            };
+            guest::run_workspace_init(systemd)
         }
         Some("credential-forwarder") => {
             ensure!(

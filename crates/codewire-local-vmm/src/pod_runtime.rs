@@ -135,6 +135,9 @@ pub struct PodSettings {
     /// `CODEWIRE_VM_EGRESS_MODE`, which orchestration renders on every
     /// standard Pod. The runtime never defaults it.
     pub egress_mode: EgressMode,
+    /// `CODEWIRE_WORKSPACE_INIT`, which orchestration renders on every
+    /// standard Pod (`image` or `systemd`). The runtime never defaults it.
+    pub workspace_init: codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit,
 }
 
 /// How the guest's workload reaches the network (#5602).
@@ -232,6 +235,19 @@ impl PodSettings {
                 "guest-carried" => EgressMode::GuestCarried,
                 "broker" => EgressMode::Broker,
                 _ => return Err(PodRuntimeError::Setting("CODEWIRE_VM_EGRESS_MODE")),
+            },
+            // Exactly these two values; missing, empty or any other value is
+            // refused (`docs/dev/SYSTEMD-WORKSPACE.md`, "On the `standard` profile").
+            workspace_init: match read(codewire_daemon_proto::POD_RUNTIME_WORKSPACE_INIT_ENV)?
+                .as_str()
+            {
+                "image" => codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit::Image,
+                "systemd" => codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit::Systemd,
+                _ => {
+                    return Err(PodRuntimeError::Setting(
+                        codewire_daemon_proto::POD_RUNTIME_WORKSPACE_INIT_ENV,
+                    ));
+                }
             },
         };
         if !settings
@@ -533,7 +549,11 @@ async fn boot_and_wait(
     let booting = std::time::Instant::now();
     let phase = std::time::Instant::now();
     let prepared = runner
-        .prepare_hosted(request, settings.egress_mode.hosted())
+        .prepare_hosted(
+            request,
+            settings.egress_mode.hosted(),
+            settings.workspace_init,
+        )
         .await?;
     let prepare_ms = phase.elapsed().as_millis();
     let phase = std::time::Instant::now();
@@ -750,6 +770,7 @@ mod tests {
             ("CODEWIRE_VM_MEMORY_MIB", "4096"),
             ("CODEWIRE_VM_STATE_DISK_MIB", "20480"),
             ("CODEWIRE_VM_EGRESS_MODE", "guest-carried"),
+            ("CODEWIRE_WORKSPACE_INIT", "image"),
             ("CODEWIRE_VM_STATE", "new"),
             ("CODEWIRE_WORKSPACE_IMAGE", "registry.example/workspace:1"),
             (
@@ -870,6 +891,17 @@ mod tests {
             PodSettings::from_environment(environment(&[("CODEWIRE_VM_DOCKER_DISK_MIB", "2048")]))
                 .unwrap();
         assert_eq!(docker.docker_disk_bytes, Some(2048 * 1024 * 1024));
+        assert_eq!(
+            settings.workspace_init,
+            codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit::Image
+        );
+        let systemd =
+            PodSettings::from_environment(environment(&[("CODEWIRE_WORKSPACE_INIT", "systemd")]))
+                .unwrap();
+        assert_eq!(
+            systemd.workspace_init,
+            codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit::Systemd
+        );
         assert_eq!(settings.vm_state, VmState::New);
         let existing =
             PodSettings::from_environment(environment(&[("CODEWIRE_VM_STATE", "existing")]))
@@ -893,6 +925,10 @@ mod tests {
             ("CODEWIRE_VM_EGRESS_MODE", "Broker"),
             ("CODEWIRE_VM_EGRESS_MODE", "Guest-carried"),
             ("CODEWIRE_VM_EGRESS_MODE", "direct"),
+            ("CODEWIRE_WORKSPACE_INIT", ""),
+            ("CODEWIRE_WORKSPACE_INIT", "Systemd"),
+            ("CODEWIRE_WORKSPACE_INIT", "IMAGE"),
+            ("CODEWIRE_WORKSPACE_INIT", "other"),
             ("CODEWIRE_VM_STATE", ""),
             ("CODEWIRE_VM_STATE", "New"),
             ("CODEWIRE_VM_STATE", "fresh"),

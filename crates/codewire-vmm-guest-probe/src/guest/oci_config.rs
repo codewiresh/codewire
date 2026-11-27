@@ -5,7 +5,53 @@ use super::*;
 
 #[cfg(test)]
 pub(super) fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
-    workspace_oci_config_with_cw(plan, false, false)
+    workspace_oci_config_with_options(plan, false, false, false, false)
+}
+
+/// Defense-in-depth seccomp policy for `standard` hosted workspace containers
+/// (`docs/dev/SYSTEMD-WORKSPACE.md`, "The container is defense in depth"):
+/// denies `AF_VSOCK` sockets (`socket` and `socketpair`), 32-bit `socketcall`,
+/// and `io_uring` syscalls so even root inside the container cannot open
+/// guest-host vsock channels directly.
+fn hosted_seccomp_policy() -> serde_json::Value {
+    #[cfg(target_arch = "x86_64")]
+    let architectures = ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"];
+    #[cfg(target_arch = "aarch64")]
+    let architectures = ["SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"];
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let architectures: [&str; 0] = [];
+
+    let mut syscalls = vec![
+        serde_json::json!({
+            "names": ["socket", "socketpair"],
+            "action": "SCMP_ACT_ERRNO",
+            "errnoRet": libc::EAFNOSUPPORT,
+            "args": [
+                {
+                    "index": 0,
+                    "value": u64::try_from(libc::AF_VSOCK).unwrap_or(40),
+                    "op": "SCMP_CMP_EQ"
+                }
+            ]
+        }),
+        serde_json::json!({
+            "names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],
+            "action": "SCMP_ACT_ERRNO",
+            "errnoRet": libc::EPERM
+        }),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    syscalls.push(serde_json::json!({
+        "names": ["socketcall"],
+        "action": "SCMP_ACT_ERRNO",
+        "errnoRet": libc::EPERM
+    }));
+
+    serde_json::json!({
+        "defaultAction": "SCMP_ACT_ALLOW",
+        "architectures": architectures,
+        "syscalls": syscalls
+    })
 }
 
 /// With `workload_may_become_root` (Docker on), the container runs without
@@ -59,10 +105,60 @@ pub(super) fn workspace_oci_config_with_cw(
     cw_asset: bool,
     workload_may_become_root: bool,
 ) -> Result<Vec<u8>> {
-    let bounding: Vec<&str> = if workload_may_become_root {
+    workspace_oci_config_with_options(
+        plan,
+        cw_asset,
+        workload_may_become_root,
+        super::hosted::active(),
+        super::hosted::systemd_workspace(),
+    )
+}
+
+fn workspace_oci_config_with_options(
+    plan: &WorkspacePlan,
+    cw_asset: bool,
+    workload_may_become_root: bool,
+    hosted_active: bool,
+    systemd_workspace: bool,
+) -> Result<Vec<u8>> {
+    let allow_root = workload_may_become_root || systemd_workspace;
+    let mut bounding: Vec<&str> = if allow_root {
         codewire_daemon::execution::WORKLOAD_ROOT_CAPABILITIES.to_vec()
     } else {
         vec!["CAP_SETGID", "CAP_SETUID"]
+    };
+    let (effective, permitted): (Vec<&str>, Vec<&str>) = if systemd_workspace {
+        // Held only by sealed `workspace-init --systemd` long enough to
+        // unshare the cgroup namespace and mount the delegated cgroup2
+        // subtree; permanently dropped from CapBnd before any workspace code
+        // or `/sbin/init` runs.
+        bounding.push("CAP_SYS_ADMIN");
+        (bounding.clone(), bounding.clone())
+    } else {
+        (
+            vec!["CAP_SETGID", "CAP_SETUID"],
+            vec!["CAP_SETGID", "CAP_SETUID"],
+        )
+    };
+    let args: Vec<&str> = if systemd_workspace {
+        vec![CONTAINER_INIT_PATH, "workspace-init", "--systemd"]
+    } else {
+        vec![CONTAINER_INIT_PATH, "workspace-init"]
+    };
+    let mut env = vec![
+        "HOME=/root",
+        "USER=root",
+        "SHELL=/bin/sh",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+    ];
+    if systemd_workspace {
+        env.push("container=oci");
+    }
+    let run_mount_size = if systemd_workspace {
+        "size=64m"
+    } else {
+        "size=16m"
     };
     let (mut devices, mut allowed_devices) = standard_devices();
     // A hosted boot's own (broker mode's TUN device), none otherwise.
@@ -74,26 +170,20 @@ pub(super) fn workspace_oci_config_with_cw(
         "process": {
             "terminal": false,
             "user": { "uid": 0, "gid": 0 },
-            "args": [CONTAINER_INIT_PATH, "workspace-init"],
-            "env": [
-                "HOME=/root",
-                "USER=root",
-                "SHELL=/bin/sh",
-                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "LANG=C.UTF-8"
-            ],
+            "args": args,
+            "env": env,
             "cwd": "/",
             "capabilities": {
                 "bounding": bounding,
-                "effective": ["CAP_SETGID", "CAP_SETUID"],
+                "effective": effective,
                 "inheritable": [],
-                "permitted": ["CAP_SETGID", "CAP_SETUID"],
+                "permitted": permitted,
                 "ambient": []
             },
             "rlimits": [
                 { "type": "RLIMIT_NOFILE", "hard": 1048576, "soft": 1048576 }
             ],
-            "noNewPrivileges": !workload_may_become_root
+            "noNewPrivileges": !allow_root
         },
         "root": { "path": "../merged", "readonly": false },
         "hostname": CONTAINER_HOSTNAME,
@@ -103,7 +193,7 @@ pub(super) fn workspace_oci_config_with_cw(
             { "destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"] },
             { "destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] },
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
-            { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
+            { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", run_mount_size] },
             { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev", "exec"] },
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": ACTIVE_WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
@@ -174,11 +264,89 @@ pub(super) fn workspace_oci_config_with_cw(
                 }),
             ]);
     }
-    if super::hosted::active() {
+    if hosted_active {
         configuration["mounts"]
             .as_array_mut()
             .context("workspace mounts")?
             .extend(super::hosted::container_mounts());
+        configuration["linux"]["seccomp"] = hosted_seccomp_policy();
+    }
+    if systemd_workspace {
+        // `/run/lock` must be its own tmpfs mountpoint: without `CAP_SYS_ADMIN`,
+        // systemd cannot mount it itself and fails API filesystem setup
+        // (`docs/dev/SYSTEMD-WORKSPACE.md`).
+        configuration["mounts"]
+            .as_array_mut()
+            .context("workspace mounts")?
+            .push(serde_json::json!({
+                "destination": "/run/lock",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=8m"]
+            }));
+        // systemd mounts/reads `/proc` and `/sys` inside its own VM; per
+        // `docs/dev/SYSTEMD-WORKSPACE.md`, the VM is the boundary and the
+        // container masks are not re-applied on systemd's side.
+        configuration["linux"]["maskedPaths"] = serde_json::json!([]);
+        configuration["linux"]["readonlyPaths"] = serde_json::json!([]);
     }
     serde_json::to_vec(&configuration).context("encode workspace OCI configuration")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_container_gets_vsock_and_io_uring_seccomp_filter() {
+        let plan = super::super::tests::test_workspace_plan();
+        let hosted: serde_json::Value = serde_json::from_slice(
+            &workspace_oci_config_with_options(&plan, true, true, true, false).unwrap(),
+        )
+        .unwrap();
+        let syscalls = hosted["linux"]["seccomp"]["syscalls"].as_array().unwrap();
+        assert_eq!(
+            hosted["linux"]["seccomp"]["defaultAction"],
+            "SCMP_ACT_ALLOW"
+        );
+        assert!(syscalls.iter().any(|rule| {
+            rule["names"] == serde_json::json!(["socket", "socketpair"])
+                && rule["args"][0]["value"] == serde_json::json!(40)
+        }));
+        #[cfg(target_arch = "x86_64")]
+        assert!(syscalls.iter().any(|rule| {
+            rule["names"] == serde_json::json!(["socketcall"])
+                && rule["errnoRet"] == serde_json::json!(libc::EPERM)
+        }));
+        assert!(syscalls.iter().any(|rule| {
+            rule["names"]
+                == serde_json::json!(["io_uring_setup", "io_uring_enter", "io_uring_register"])
+        }));
+        let local: serde_json::Value = serde_json::from_slice(
+            &workspace_oci_config_with_options(&plan, true, false, false, false).unwrap(),
+        )
+        .unwrap();
+        assert!(local["linux"].get("seccomp").is_none());
+    }
+
+    #[test]
+    fn systemd_workspace_container_config_passes_flag_and_container_env() {
+        let plan = super::super::tests::test_workspace_plan();
+        let config: serde_json::Value = serde_json::from_slice(
+            &workspace_oci_config_with_options(&plan, true, true, true, true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["process"]["args"],
+            serde_json::json!([CONTAINER_INIT_PATH, "workspace-init", "--systemd"])
+        );
+        assert!(
+            config["process"]["env"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("container=oci"))
+        );
+        assert_eq!(config["process"]["noNewPrivileges"], false);
+        assert!(config["linux"].get("seccomp").is_some());
+    }
 }

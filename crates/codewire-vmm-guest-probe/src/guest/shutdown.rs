@@ -22,6 +22,9 @@ use anyhow::{Context as _, Result, bail};
 /// How long the workload may take to exit after SIGTERM before the container
 /// is killed. The host waits 30 s for the whole poweroff.
 pub(super) const WORKLOAD_STOP_GRACE: Duration = Duration::from_secs(5);
+/// Bounded clean-shutdown grace for a `systemd` workspace container after
+/// `SIGRTMIN+3`, well inside `pod_runtime`'s 45 s `STOP_TIMEOUT`.
+pub(super) const SYSTEMD_STOP_GRACE: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Outcome of one non-blocking `waitpid(-1, ..., WNOHANG)` poll.
@@ -182,6 +185,56 @@ pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize 
         }
     }
     signalled.len()
+}
+
+/// Ask a `systemd` workspace container's PID 1 to shut down cleanly with
+/// `SIGRTMIN+3` (and `SIGTERM` the guest-init-spawned hosted daemon so its
+/// sessions end cleanly too), waiting up to `grace` for `workspace` to exit
+/// before the caller falls back to `runc kill KILL`.
+pub(super) fn terminate_systemd_workspace(
+    workspace: &mut std::process::Child,
+    container_init: i32,
+    grace: Duration,
+) {
+    let Some(namespace) = pid_namespace(container_init) else {
+        return;
+    };
+    if std::fs::read_link("/proc/self/ns/pid").ok().as_deref() == Some(namespace.as_path()) {
+        return;
+    }
+    // Signal the guest-init-spawned hosted daemon alongside `systemd` so
+    // active sessions get clean teardown while systemd stops user and system
+    // units.
+    for pid in processes() {
+        if pid == container_init
+            || pid_namespace(pid).as_deref() != Some(namespace.as_path())
+            || exited(pid)
+        {
+            continue;
+        }
+        if std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmd| {
+            cmd.windows(b"__hosted-daemon".len())
+                .any(|w| w == b"__hosted-daemon")
+        }) {
+            // SAFETY: `pid` is a validated live process in the workspace
+            // container's PID namespace.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+    }
+    let sigrtmin_plus_3 = libc::SIGRTMIN() + 3;
+    // SAFETY: `container_init` is the workspace container's PID 1.
+    unsafe {
+        libc::kill(container_init, sigrtmin_plus_3);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if workspace.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
 }
 
 fn processes() -> Vec<i32> {

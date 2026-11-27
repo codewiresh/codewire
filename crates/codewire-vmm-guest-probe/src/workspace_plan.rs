@@ -322,6 +322,48 @@ impl WorkspacePlan {
         Ok((self, kept))
     }
 
+    /// For a `standard` `systemd` workspace whose OCI image declares `USER root`
+    /// (so standalone / `commodity` boots can start `/sbin/init` as root), switch
+    /// the workspace identity to the `codewire` account from `root/etc/passwd`
+    /// so the hosted daemon, persistent home, and `XDG_RUNTIME_DIR` belong to
+    /// the workspace user (`docs/dev/SYSTEMD-WORKSPACE.md`).
+    pub(crate) fn with_systemd_workspace_user(
+        mut self,
+        root: &Path,
+    ) -> Result<Self, WorkspacePlanError> {
+        if self.identity.uid != 0 {
+            return Ok(self);
+        }
+        let identity = resolve_identity(root, "codewire")?;
+        if identity.uid == 0 {
+            return Err(WorkspacePlanError::Identity);
+        }
+        let mut environment: BTreeMap<String, String> = self
+            .environment
+            .iter()
+            .map(|entry| {
+                entry
+                    .split_once('=')
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .ok_or(WorkspacePlanError::Plan)
+            })
+            .collect::<Result<_, _>>()?;
+        environment.insert("HOME".to_owned(), identity.home.clone());
+        environment.insert("USER".to_owned(), identity.username.clone());
+        environment.insert("LOGNAME".to_owned(), identity.username.clone());
+        environment.insert("SHELL".to_owned(), identity.shell.clone());
+        if self.session_cwd == "/root" {
+            self.session_cwd = identity.home.clone();
+        }
+        self.identity = identity;
+        self.environment = environment
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        self.validate()?;
+        Ok(self)
+    }
+
     pub(crate) fn require_ordinary(&self) -> Result<(), WorkspacePlanError> {
         self.validate()?;
         if self.installation_plan_sha256.is_some() {
@@ -1601,6 +1643,32 @@ mod tests {
         assert!(matches!(
             validate_home_path("/srv/codewire"),
             Err(WorkspacePlanError::Path)
+        ));
+    }
+
+    #[test]
+    fn systemd_workspace_user_switches_root_to_codewire_and_rejects_uid_zero() {
+        let root = root();
+        let config = config(json!({"config": {"User": "root"}}));
+        let header = setup(&config);
+        let plan = WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path())
+            .unwrap()
+            .with_systemd_workspace_user(root.path())
+            .unwrap();
+        assert_eq!(plan.identity.username, "codewire");
+        assert_eq!(plan.identity.uid, 1000);
+        assert_eq!(plan.identity.home, "/home/codewire");
+
+        let root_plan =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        fs::write(
+            root.path().join("etc/passwd"),
+            "codewire:x:0:0:codewire:/home/codewire:/bin/bash\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            root_plan.with_systemd_workspace_user(root.path()),
+            Err(WorkspacePlanError::Identity)
         ));
     }
 }

@@ -16,10 +16,11 @@ use super::*;
 use crate::hosted_control::{
     HOSTED_CONTROL_VSOCK_PORT, HOSTED_DAEMON_LISTENER_FD, HOSTED_DAEMON_LISTENER_FD_ENV,
     HOSTED_HELLO_LEN, HOSTED_REQUEST_HEADER_LEN, HostedControlKey, HostedEgressMode, HostedMessage,
-    HostedSettings, HostedTokens, encode_hello, encode_reply,
+    HostedSettings, HostedTokens, HostedWorkspaceInit, encode_hello, encode_reply,
 };
 
 mod broker;
+mod sleep_relay;
 
 /// Everything the guest keeps for the hosted workspace, in memory.
 pub(super) const HOSTED_ROOT: &str = "/run/codewire/hosted";
@@ -200,6 +201,11 @@ pub(super) fn start(seed: &Seed) -> Result<Arc<HostedState>> {
         .flatten()
         .context("a standard Pod's boot names exactly one hosted egress mode")?;
     let _ = MODE.set(mode); // Set once per boot.
+    let workspace_init = HostedWorkspaceInit::from_command_line(&command_line)
+        .ok()
+        .flatten()
+        .context("a standard Pod's boot names exactly one hosted workspace init")?;
+    let _ = WORKSPACE_INIT.set(workspace_init); // Set once per boot.
     super::hosted_ingress::start(&command_line)?;
     Ok(state)
 }
@@ -226,10 +232,17 @@ pub(super) fn eth0_addresses_for(command_line: &str) -> (&'static str, &'static 
 
 /// This boot's hosted egress mode, from the kernel command line.
 static MODE: std::sync::OnceLock<HostedEgressMode> = std::sync::OnceLock::new();
+/// This boot's workspace container init mode, from the kernel command line.
+static WORKSPACE_INIT: std::sync::OnceLock<HostedWorkspaceInit> = std::sync::OnceLock::new();
 
 /// Whether this boot runs hosted broker mode inside the VM.
 pub(super) fn broker() -> bool {
     MODE.get() == Some(&HostedEgressMode::Broker)
+}
+
+/// Whether this boot hands container PID 1 over to `/sbin/init` (`systemd`).
+pub(super) fn systemd_workspace() -> bool {
+    WORKSPACE_INIT.get() == Some(&HostedWorkspaceInit::Systemd)
 }
 
 async fn serve(mut stream: VsockStream, key: &HostedControlKey, state: &HostedState) -> Result<()> {
@@ -353,9 +366,13 @@ impl HostedState {
             plan.identity.gid,
         )?;
         self.publish(plan.identity.uid, plan.identity.gid)?;
+        sleep_relay::start(plan.identity.uid, plan.identity.gid)?;
         // Broker mode's egress path exists before the workload's first packet.
         if broker() {
             broker::make_egress_path(plan.identity.uid)?;
+        }
+        if systemd_workspace() {
+            super::systemd_init::prepare_cgroup2()?;
         }
         Ok(())
     }
@@ -387,6 +404,11 @@ pub(super) fn container_mounts() -> Vec<serde_json::Value> {
         ),
         (HOSTED_CREDENTIAL_TOKEN_PATH, token_directory, "ro"),
         (HOSTED_RUN_PATH, "/codewire/run", "rw"),
+        (
+            sleep_relay::HOSTED_SLEEP_DIR,
+            sleep_relay::CONTAINER_SLEEP_DIR,
+            "ro",
+        ),
         (
             HOSTED_EGRESS_TOKEN_PATH,
             codewire_daemon_proto::EGRESS_TOKEN_MOUNT_PATH,
@@ -515,16 +537,29 @@ fn container_plan(mut plan: WorkspacePlan) -> Result<WorkspacePlan> {
     Ok(plan)
 }
 
-/// After the container starts: the hosted daemon's own readiness marker.
-/// "Daemon started" means the hosted daemon is up and its bind loop runs.
-pub(super) fn wait_until_ready() -> Result<()> {
+/// After the container starts: the hosted daemon's own readiness marker, and
+/// for a systemd workspace the workspace user's systemd bus so `systemctl
+/// --user` works immediately on the first session.
+pub(super) fn wait_until_ready(
+    identity: &WorkspaceIdentity,
+    workspace: &mut std::process::Child,
+) -> Result<()> {
     let deadline = Instant::now() + READY_TIMEOUT;
     while !Path::new(HOSTED_READY_PATH).exists() {
+        if let Some(status) = workspace
+            .try_wait()
+            .context("observe workspace container waiting for hosted daemon ready")?
+        {
+            bail!("workspace container exited ({status}) before hosted daemon reported ready");
+        }
         ensure!(
             Instant::now() < deadline,
             "the hosted daemon did not report ready in time"
         );
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if systemd_workspace() {
+        super::systemd_init::wait_for_user_manager(identity.uid, workspace, deadline)?;
     }
     Ok(())
 }
@@ -651,5 +686,20 @@ mod tests {
             HOSTED_DAEMON_LISTENER_FD
         )));
         assert!(uses_local_credential_forwarder_for(None));
+    }
+
+    #[test]
+    fn hosted_workspace_mounts_sleep_relay_directory_read_only() {
+        let mounts = container_mounts();
+        let sleep: Vec<_> = mounts
+            .iter()
+            .filter(|mount| mount["destination"] == sleep_relay::CONTAINER_SLEEP_DIR)
+            .collect();
+        assert_eq!(sleep.len(), 1);
+        assert_eq!(sleep[0]["source"], sleep_relay::HOSTED_SLEEP_DIR);
+        assert_eq!(
+            sleep[0]["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
     }
 }

@@ -81,6 +81,7 @@ mod network_topology;
 use network_topology::{verify_boot_topology, verify_isolated_tun};
 mod oci_config;
 mod shutdown;
+mod systemd_init;
 mod vm_only;
 mod workload_execution;
 mod workspace_failure;
@@ -134,6 +135,8 @@ const RUNC_STDERR_PATH: &str = "/state/codewire/runc.stderr";
 const RUNC_LOG_LIMIT: u64 = 64 * 1024;
 const CGROUP_ROOT_PATH: &str = "/sys/fs/cgroup";
 const CGROUP_HIERARCHY_PATH: &str = "/sys/fs/cgroup/codewire";
+const CGROUP2_MOUNT_PATH: &str = "/run/codewire/cgroup2";
+const CGROUP2_WORKSPACE_PATH: &str = "/run/codewire/cgroup2/workspace";
 const ROOT_LOWER_PATH: &str = "/generation/lower";
 
 /// The overlay's lower for this boot (#4646).
@@ -415,7 +418,10 @@ pub fn run_init() -> Result<()> {
             return Err(error);
         }
     };
-    prepare_workspace_generation(&plan, seed.docker_data_disk())?;
+    prepare_workspace_generation(
+        &plan,
+        seed.docker_data_disk() || hosted::systemd_workspace(),
+    )?;
     egress_trust::publish(&seed, Path::new(ROOT_MERGED_PATH))?;
     // Report an image without Docker tooling before readiness, so the host
     // can name it instead of seeing the guest stop during network attachment.
@@ -463,7 +469,7 @@ pub fn run_init() -> Result<()> {
         hosted.prepare(&plan)?;
     }
     let mut daemon = DaemonStartGuard(Some(spawn_daemon()?));
-    let workspace = spawn_workspace_container(
+    let mut workspace = spawn_workspace_container(
         &plan,
         seed.environment_projection_sha256().is_some(),
         daemon.0.as_mut().expect("daemon start child is present"),
@@ -481,7 +487,7 @@ pub fn run_init() -> Result<()> {
     )?;
 
     if hosted.is_some() {
-        hosted::wait_until_ready()?;
+        hosted::wait_until_ready(&plan.identity, &mut workspace)?;
     }
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
@@ -1293,7 +1299,7 @@ fn validate_runc_process_path(path: &Path) -> Result<()> {
 /// bound install step, starts the image process and startup script as the
 /// resolved image identity, reports readiness over its inherited private
 /// descriptor, and then remains as the durable exec/PTY namespace target.
-pub fn run_workspace_init() -> Result<()> {
+pub fn run_workspace_init(systemd: bool) -> Result<()> {
     if unsafe { libc::getpid() } != 1 {
         return fail_workspace_init(
             "workspace-identity-failed",
@@ -1308,10 +1314,18 @@ pub fn run_workspace_init() -> Result<()> {
     if let Err(error) = confine_workspace_readiness_descriptor() {
         return fail_workspace_init("workspace-confinement-failed", error);
     }
-    let (plan, workload) = match read_container_workspace_plan().and_then(hosted::with_workload) {
+    let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
+    if systemd && let Err(error) = systemd_init::prepare_container_for_systemd(deadline) {
+        return fail_workspace_init("workspace-confinement-failed", error);
+    }
+    let (plan, mut workload) = match read_container_workspace_plan().and_then(hosted::with_workload)
+    {
         Ok(plans) => plans,
         Err(error) => return fail_workspace_init("workspace-plan-invalid", error),
     };
+    if systemd {
+        systemd_init::ensure_xdg_runtime_dir(&mut workload.environment, plan.identity.uid);
+    }
     if let Err(error) = prepare_container_docker_socket(&plan.identity) {
         return fail_workspace_init("workspace-confinement-failed", error);
     }
@@ -1330,7 +1344,6 @@ pub fn run_workspace_init() -> Result<()> {
     }
     POWEROFF_REQUESTED.store(false, Ordering::Release);
 
-    let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
     let bootstrap = match BootstrapChild::receive(deadline) {
         Ok(bootstrap) => bootstrap,
         Err(error) => return fail_workspace_init("workspace-confinement-failed", error),
@@ -1351,6 +1364,14 @@ pub fn run_workspace_init() -> Result<()> {
     {
         return fail_workspace_init("workspace-install-failed", error);
     }
+    let daemon_scope = if systemd {
+        match systemd_init::open_daemon_scope_procs() {
+            Ok(file) => Some(file),
+            Err(error) => return fail_workspace_init("workspace-confinement-failed", error),
+        }
+    } else {
+        None
+    };
     if !workload.workload_args.is_empty() {
         ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
         let _workload =
@@ -1365,12 +1386,14 @@ pub fn run_workspace_init() -> Result<()> {
                         channel,
                         deadline,
                         hosted::workload_listener(),
+                        daemon_scope.as_ref(),
                     )
                 }) {
                 Ok(workload) => workload,
                 Err(error) => return fail_workspace_init("workspace-workload-failed", error),
             };
     }
+    drop(daemon_scope);
     // Startup runs in the background once per actual container boot, not per
     // daemon session or supervisor adoption. Spawn success is not application
     // readiness, and this PID 1 does not restart an exited application.
@@ -1388,6 +1411,9 @@ pub fn run_workspace_init() -> Result<()> {
     publish_workspace_readiness(&plan)?;
     drop(bootstrap);
 
+    if systemd {
+        return systemd_init::exec_systemd();
+    }
     shutdown::wait_for_poweroff(credential_forwarder, &POWEROFF_REQUESTED)
 }
 
@@ -1827,11 +1853,13 @@ fn spawn_workspace_process_with_projection(
         projection_channel,
         deadline,
         None,
+        None,
     )
 }
 
 /// As [`spawn_workspace_process_with_projection`], and `listener`, when given,
 /// as descriptor 9 with output to the log pipe: only the hosted workload's.
+#[allow(clippy::too_many_arguments)]
 fn spawn_workspace_process(
     plan: &WorkspacePlan,
     arguments: &[String],
@@ -1840,6 +1868,7 @@ fn spawn_workspace_process(
     projection_channel: Option<UnixStream>,
     deadline: Instant,
     listener: Option<std::os::fd::RawFd>,
+    cgroup_procs: Option<&File>,
 ) -> Result<std::process::Child> {
     let (program, remaining) = arguments
         .split_first()
@@ -1900,8 +1929,14 @@ fn spawn_workspace_process(
     let projection_fd = projection_descriptor.as_ref().map(AsRawFd::as_raw_fd);
     let status_fd = status_descriptor.as_ref().map(AsRawFd::as_raw_fd);
     let listener_fd = listener;
+    let cgroup_procs_fd = cgroup_procs.map(AsRawFd::as_raw_fd);
     unsafe {
         command.pre_exec(move || {
+            if let Some(fd) = cgroup_procs_fd
+                && libc::write(fd, b"0\n".as_ptr().cast(), 2) != 2
+            {
+                return Err(io::Error::last_os_error());
+            }
             if let Some(descriptor) = projection_fd
                 && ((descriptor != 3 && libc::dup2(descriptor, 3) == -1)
                     || libc::fcntl(3, libc::F_SETFD, 0) == -1)
@@ -4703,6 +4738,14 @@ fn spawn_workspace_container(
     record_boot_stage("runc-running")?;
     drop(readiness_writer);
     let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
+    if hosted::systemd_workspace() {
+        systemd_init::serve_cgroup2_join(
+            &mut readiness,
+            child.child(),
+            deadline,
+            &POWEROFF_REQUESTED,
+        )?;
+    }
     let mut protocol = WorkspaceStartupProtocol::new(plan, sync_install_filesystem)?;
     let bootstrap = BootstrapParent::new(projection_required, daemon.id());
     bootstrap.prelude(&mut readiness, deadline)?;
@@ -5116,13 +5159,18 @@ fn plan_from_setup(binding: SetupBinding, persistent: &[&Path]) -> Result<Worksp
         return Err(error).context("apply every admitted OCI layer into the staging root");
     }
     record_boot_stage("root-layers-ready")?;
-    let plan = WorkspacePlan::from_verified_setup(
+    let mut plan = WorkspacePlan::from_verified_setup(
         &contents.project,
         &contents.config,
         &header,
         Path::new(root_lower_path()),
     )
     .context("derive sealed workspace execution plan")?;
+    if hosted::systemd_workspace() {
+        plan = plan
+            .with_systemd_workspace_user(Path::new(root_lower_path()))
+            .context("resolve systemd workspace user identity")?;
+    }
     persist_workspace_plan(&plan)?;
     Ok(plan)
 }
@@ -5467,7 +5515,11 @@ fn terminate_workspace_workload(workspace: &mut std::process::Child) {
     if workspace.try_wait().ok().flatten().is_none()
         && let Some(init) = shutdown::container_init_pid()
     {
-        shutdown::terminate_workload(init, shutdown::WORKLOAD_STOP_GRACE);
+        if hosted::systemd_workspace() {
+            shutdown::terminate_systemd_workspace(workspace, init, shutdown::SYSTEMD_STOP_GRACE);
+        } else {
+            shutdown::terminate_workload(init, shutdown::WORKLOAD_STOP_GRACE);
+        }
     }
 }
 

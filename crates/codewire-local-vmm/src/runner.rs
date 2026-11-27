@@ -301,22 +301,28 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
-        self.prepare_boot(request, None).await
+        self.prepare_boot(request, None, None).await
     }
 
-    /// A standard Pod's boot (#5602): the hosted daemon, in `egress` mode.
+    /// A standard Pod's boot (#5602): the hosted daemon, in `egress` mode,
+    /// with `workspace_init` choosing the container's first process.
     pub async fn prepare_hosted(
         &self,
         request: CreateVmRequest,
         egress: codewire_vmm_guest_probe::hosted_control::HostedEgressMode,
+        workspace_init: codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit,
     ) -> Result<PreparedVm, RunnerError> {
-        self.prepare_boot(request, Some(egress)).await
+        self.prepare_boot(request, Some(egress), Some(workspace_init))
+            .await
     }
 
     async fn prepare_boot(
         &self,
         request: CreateVmRequest,
         hosted: Option<codewire_vmm_guest_probe::hosted_control::HostedEgressMode>,
+        hosted_workspace_init: Option<
+            codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit,
+        >,
     ) -> Result<PreparedVm, RunnerError> {
         #[cfg(target_os = "linux")]
         preflight()?;
@@ -348,9 +354,10 @@ impl CloudHypervisorRunner {
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
         let (root_disk_path, root_disk) =
             admit_root_disk(&paths, &request, persisted.as_ref(), is_hosted)?;
-        // Darwin writes its VMM configuration at launch, from the same paths.
-        #[cfg(target_os = "macos")]
-        let _ = root_disk_path;
+        // Darwin writes its VMM configuration at launch, from the same paths,
+        // and does not boot hosted `standard` Pods.
+        #[cfg(not(target_os = "linux"))]
+        let _ = (root_disk_path, hosted_workspace_init);
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
         if request.checkpoint.is_none() {
@@ -420,6 +427,7 @@ impl CloudHypervisorRunner {
         .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_image_disk(image_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_hosted_egress(hosted)
+        .with_hosted_workspace_init(hosted_workspace_init)
         .with_checkpoint_dir(Some(paths.checkpoints_dir.clone()))?
         .with_virtiofs(
             direct_shares

@@ -10,7 +10,7 @@ use codewire_vmm_guest_probe::{
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
-use codewire_vmm_guest_probe::hosted_control::HostedEgressMode;
+use codewire_vmm_guest_probe::hosted_control::{HostedEgressMode, HostedWorkspaceInit};
 use codewire_vmm_guest_probe::image_disk::IMAGE_DISK_SERIAL;
 
 mod image_build;
@@ -74,6 +74,9 @@ pub struct CloudHypervisorConfig {
     /// mode's one parameter
     /// ([`codewire_vmm_guest_probe::hosted_control::HostedEgressMode`]).
     pub hosted_egress: Option<HostedEgressMode>,
+    /// A standard Pod's workspace container init mode
+    /// ([`codewire_vmm_guest_probe::hosted_control::HostedWorkspaceInit`]).
+    pub hosted_workspace_init: Option<HostedWorkspaceInit>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -109,6 +112,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("image_disk", &self.image_disk)
             .field("hosted_egress", &self.hosted_egress)
+            .field("hosted_workspace_init", &self.hosted_workspace_init)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -217,6 +221,7 @@ impl CloudHypervisorConfig {
             cw_runtime_disk: None,
             image_disk: None,
             hosted_egress: None,
+            hosted_workspace_init: None,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -279,6 +284,14 @@ impl CloudHypervisorConfig {
 
     pub fn with_hosted_egress(mut self, hosted_egress: Option<HostedEgressMode>) -> Self {
         self.hosted_egress = hosted_egress;
+        self
+    }
+
+    pub fn with_hosted_workspace_init(
+        mut self,
+        hosted_workspace_init: Option<HostedWorkspaceInit>,
+    ) -> Self {
+        self.hosted_workspace_init = hosted_workspace_init;
         self
     }
 
@@ -351,14 +364,16 @@ impl CloudHypervisorConfig {
         );
         push_option(&mut arguments, "--kernel", display(&self.kernel)?);
         push_option(&mut arguments, "--initramfs", display(&self.initramfs)?);
-        push_option(
-            &mut arguments,
-            "--cmdline",
-            match self.hosted_egress {
-                Some(mode) => format!("{GUEST_KERNEL_CMDLINE} {}", mode.parameter()),
-                None => GUEST_KERNEL_CMDLINE.to_owned(),
-            },
-        );
+        let mut cmdline = GUEST_KERNEL_CMDLINE.to_owned();
+        if let Some(mode) = self.hosted_egress {
+            cmdline.push(' ');
+            cmdline.push_str(mode.parameter());
+        }
+        if let Some(init) = self.hosted_workspace_init {
+            cmdline.push(' ');
+            cmdline.push_str(init.parameter());
+        }
+        push_option(&mut arguments, "--cmdline", cmdline);
         push_option(
             &mut arguments,
             "--cpus",
@@ -949,6 +964,21 @@ mod tests {
             let line = command_line(config().with_hosted_egress(Some(mode)));
             assert_eq!(HostedEgressMode::from_command_line(&line), Ok(Some(mode)));
             assert!(line.starts_with(GUEST_KERNEL_CMDLINE));
+            for init in [HostedWorkspaceInit::Image, HostedWorkspaceInit::Systemd] {
+                let with_init = command_line(
+                    config()
+                        .with_hosted_egress(Some(mode))
+                        .with_hosted_workspace_init(Some(init)),
+                );
+                assert_eq!(
+                    HostedEgressMode::from_command_line(&with_init),
+                    Ok(Some(mode))
+                );
+                assert_eq!(
+                    HostedWorkspaceInit::from_command_line(&with_init),
+                    Ok(Some(init))
+                );
+            }
         }
     }
 

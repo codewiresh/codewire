@@ -62,31 +62,68 @@ pub const HOSTED_SUSPEND_VSOCK_PORT: u32 = 7_784;
 pub const HOSTED_SUSPEND_REQUEST: &[u8; 8] = b"suspend\n";
 pub const HOSTED_SUSPEND_ACCEPTED: &[u8; 3] = b"ok\n";
 pub const HOSTED_SUSPEND_REFUSED: &[u8; 3] = b"no\n";
+/// Container-side Unix socket where guest init relays fixed sleep-control
+/// requests to the host's [`HOSTED_SUSPEND_VSOCK_PORT`], so nothing inside the
+/// workspace container needs `AF_VSOCK` (#5638).
+pub const HOSTED_SLEEP_CONTROL_SOCKET_PATH: &str = "/run/codewire-hosted/sleep/control.sock";
 /// How long either side waits for the other's part of a suspend request.
 pub const HOSTED_SUSPEND_EXCHANGE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The guest's side of a suspend: asks the Pod's runtime to pause this VM,
-/// and returns whether it accepted. On `true` the VM pauses straight after
+/// The guest's side of a suspend: asks the Pod's runtime (through guest init's
+/// Unix-socket relay at [`HOSTED_SLEEP_CONTROL_SOCKET_PATH`]) to pause this
+/// VM, and returns whether it accepted. On `true` the VM pauses straight after
 /// the answer; the caller has already closed the connections whose far end
 /// sends periodic traffic, so that traffic can't wake it.
+///
+/// If the relay socket does not exist (`NotFound`), falls back to dialing
+/// [`HOSTED_SUSPEND_VSOCK_PORT`] directly so an updated `cw` runtime asset
+/// continues to work inside an older `pod-runtime` VM during rollout; on any
+/// `pod-runtime` with the relay, `AF_VSOCK` is blocked by container seccomp.
 #[cfg(target_os = "linux")]
 pub async fn request_suspend() -> std::io::Result<bool> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    match request_suspend_at(std::path::Path::new(HOSTED_SLEEP_CONTROL_SOCKET_PATH)).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => request_suspend_vsock().await,
+        other => other,
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn request_suspend_at(socket_path: &std::path::Path) -> std::io::Result<bool> {
     let exchange = async {
-        let mut host = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(
-            tokio_vsock::VMADDR_CID_HOST,
-            HOSTED_SUSPEND_VSOCK_PORT,
-        ))
-        .await?;
-        host.write_all(HOSTED_SUSPEND_REQUEST).await?;
-        host.flush().await?;
-        let mut answer = [0_u8; 3];
-        host.read_exact(&mut answer).await?;
-        Ok(&answer == HOSTED_SUSPEND_ACCEPTED)
+        let relay = tokio::net::UnixStream::connect(socket_path).await?;
+        exchange_suspend(relay).await
     };
     tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, exchange)
         .await
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+}
+
+#[cfg(target_os = "linux")]
+async fn request_suspend_vsock() -> std::io::Result<bool> {
+    let exchange = async {
+        let host = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(
+            tokio_vsock::VMADDR_CID_HOST,
+            HOSTED_SUSPEND_VSOCK_PORT,
+        ))
+        .await?;
+        exchange_suspend(host).await
+    };
+    tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, exchange)
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+}
+
+#[cfg(target_os = "linux")]
+async fn exchange_suspend<S>(mut stream: S) -> std::io::Result<bool>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    stream.write_all(HOSTED_SUSPEND_REQUEST).await?;
+    stream.flush().await?;
+    let mut answer = [0_u8; 3];
+    stream.read_exact(&mut answer).await?;
+    Ok(&answer == HOSTED_SUSPEND_ACCEPTED)
 }
 
 /// Joins two streams byte for byte until both directions have ended, or
@@ -208,6 +245,50 @@ impl HostedEgressMode {
 /// Whether a standard Pod's VMM booted this kernel, in either mode.
 pub fn hosted_guest(command_line: &str) -> bool {
     !matches!(HostedEgressMode::from_command_line(command_line), Ok(None))
+}
+
+/// The kernel command-line parameters naming the workspace container's first
+/// process in a standard Pod (`docs/dev/SYSTEMD-WORKSPACE.md`, "On the
+/// `standard` profile", #5638).
+pub const HOSTED_WORKSPACE_INIT_IMAGE_PARAMETER: &str = "codewire.workspace_init=image";
+pub const HOSTED_WORKSPACE_INIT_SYSTEMD_PARAMETER: &str = "codewire.workspace_init=systemd";
+
+/// How a standard Pod's guest runs the workspace container's first process.
+/// The Pod's `CODEWIRE_WORKSPACE_INIT` chooses it on the host, and the kernel
+/// command line carries it into the guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedWorkspaceInit {
+    /// Codewire's workspace init stays container PID 1 and runs the hosted
+    /// daemon as a child.
+    Image,
+    /// The workspace container hands PID 1 over to `/sbin/init` (`systemd`) in
+    /// a delegated cgroup v2 subtree, with `codewire-daemon.service` and
+    /// `docker.service` masked and the hosted daemon run by guest init.
+    Systemd,
+}
+
+impl HostedWorkspaceInit {
+    /// The one kernel command-line parameter that names this workspace init.
+    pub fn parameter(self) -> &'static str {
+        match self {
+            Self::Image => HOSTED_WORKSPACE_INIT_IMAGE_PARAMETER,
+            Self::Systemd => HOSTED_WORKSPACE_INIT_SYSTEMD_PARAMETER,
+        }
+    }
+
+    /// The workspace init a kernel command line names: none for a local VM's,
+    /// and an error for one naming both, which no runtime writes.
+    pub fn from_command_line(command_line: &str) -> Result<Option<Self>, HostedControlError> {
+        match (
+            names(command_line, HOSTED_WORKSPACE_INIT_IMAGE_PARAMETER),
+            names(command_line, HOSTED_WORKSPACE_INIT_SYSTEMD_PARAMETER),
+        ) {
+            (false, false) => Ok(None),
+            (true, false) => Ok(Some(Self::Image)),
+            (false, true) => Ok(Some(Self::Systemd)),
+            (true, true) => Err(HostedControlError::InvalidContent),
+        }
+    }
 }
 
 fn names(command_line: &str, parameter: &str) -> bool {
@@ -642,6 +723,36 @@ mod tests {
     }
 
     #[test]
+    fn a_kernel_command_line_names_one_workspace_init_or_none() {
+        let base = "console=ttyS0 rdinit=/init panic=-1";
+        assert_eq!(HostedWorkspaceInit::from_command_line(base), Ok(None));
+        for init in [HostedWorkspaceInit::Image, HostedWorkspaceInit::Systemd] {
+            let line = format!("{base} {}", init.parameter());
+            assert_eq!(
+                HostedWorkspaceInit::from_command_line(&line),
+                Ok(Some(init))
+            );
+        }
+        for near in [
+            "codewire.workspace_init=systemd2",
+            "xcodewire.workspace_init=systemd",
+            "codewire.workspace_init=Systemd",
+        ] {
+            assert_eq!(
+                HostedWorkspaceInit::from_command_line(&format!("{base} {near}")),
+                Ok(None)
+            );
+        }
+        let both = format!(
+            "{base} {HOSTED_WORKSPACE_INIT_IMAGE_PARAMETER} {HOSTED_WORKSPACE_INIT_SYSTEMD_PARAMETER}"
+        );
+        assert_eq!(
+            HostedWorkspaceInit::from_command_line(&both),
+            Err(HostedControlError::InvalidContent)
+        );
+    }
+
+    #[test]
     fn a_message_reaches_only_the_boot_and_challenge_it_was_made_for() {
         let challenge = [3_u8; HOSTED_CHALLENGE_LEN];
         for message in [
@@ -749,5 +860,39 @@ mod tests {
         assert!(HostedControlKey::derive("short", Uuid::from_u128(7), 1).is_err());
         assert!(HostedControlKey::derive(&"t".repeat(64), Uuid::nil(), 1).is_err());
         assert!(HostedControlKey::derive(&"t".repeat(64), Uuid::from_u128(7), 0).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn request_suspend_uses_unix_socket_relay() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("control.sock");
+        for (reply, expected) in [
+            (HOSTED_SUSPEND_ACCEPTED, true),
+            (HOSTED_SUSPEND_REFUSED, false),
+        ] {
+            let _ = std::fs::remove_file(&socket_path);
+            let path = socket_path.clone();
+            runtime.block_on(async move {
+                let listener = tokio::net::UnixListener::bind(&path).unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; HOSTED_SUSPEND_REQUEST.len()];
+                    stream.read_exact(&mut request).await.unwrap();
+                    assert_eq!(&request, HOSTED_SUSPEND_REQUEST);
+                    stream.write_all(reply).await.unwrap();
+                    stream.flush().await.unwrap();
+                });
+                let accepted = request_suspend_at(&path).await.unwrap();
+                assert_eq!(accepted, expected);
+                server.await.unwrap();
+            });
+        }
     }
 }
