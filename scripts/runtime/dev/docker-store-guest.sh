@@ -147,7 +147,11 @@ docker_store_guest() {
     core)
       docker_store_backend
       docker_store_seed
-      docker_store_limits
+      # Standard guest-local Docker runs cgroup v1 without a memory controller;
+      # cgroup v2 resource enforcement applies to the containerd DinD store.
+      if test "$ds_mode" = containerd; then
+        docker_store_limits
+      fi
       docker_store_cleanup
       ;;
     seed) docker_store_backend; docker_store_seed ;;

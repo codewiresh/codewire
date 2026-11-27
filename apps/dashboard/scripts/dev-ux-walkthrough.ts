@@ -121,8 +121,8 @@ async function pageTitle(header: Locator, title: string): Promise<void> {
 }
 
 // GitHub reconnects or disconnects; other credentials rename, optionally
-// reconnect or rotate, then revoke while active or delete once revoked.
-const CREDENTIAL_MENU = /^(?:Reconnect,Disconnect GitHub|Rename(?:,Reconnect)?(?:,Rotate API key)?,(?:Revoke|Delete))$/;
+// reconnect, rotate or replace their token, then revoke while active or delete once revoked.
+const CREDENTIAL_MENU = /^(?:Reconnect,Disconnect GitHub|Rename(?:,Reconnect)?(?:,Rotate API key)?(?:,Replace token)?,(?:Revoke|Delete))$/;
 const menuItems = (rows: Locator) => rows.evaluateAll((nodes) => nodes.map((row) => Array.from(
   row.querySelectorAll(":scope > details.cw-menu .cw-menu-item"), (item) => item.textContent?.trim()).join(",")));
 
@@ -426,7 +426,7 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
         await expect(page.getByRole("heading", { name: "Credentials", exact: true, level: 1 })).toBeVisible();
         await expect(page.getByRole("heading", { name: "Profiles", exact: true, level: 2 })).toBeVisible();
         await expect(page.locator(".cw-settings-content > .cw-page-header .cw-page-description"))
-          .toHaveText("Add and manage provider credentials for things like GitHub, SSH keys, Claude, and Codex.");
+          .toHaveText("Add and manage provider credentials for things like GitHub, SSH keys, Antigravity, Claude, Codex, and Gemini.");
       }],
       ["settings-shell", () => settingsShell(page, "personal", "/settings/credentials/")],
       ...credentialRows(page),
@@ -442,25 +442,29 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
   });
   await stage(`credentials-chooser-${width}`, async () => {
     await add.click();
-    await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(7);
-    await expect(chooser.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+    await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(9);
+    await expect(chooser.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
     await fits(page, chooser);
   });
   for (const [key, choice, title] of [
-    ["github", "GitHub", "Connect GitHub"], ["codex", "Codex", "Connect Codex"],
+    ["github", "Connect GitHub", "Connect GitHub"],
+    ["codex", "Connect Codex", "Connect Codex"],
+    ["antigravity", "Connect Antigravity", "Connect Antigravity"],
     ["claude-sign-in", "Connect Claude", "Connect Claude"],
-    ["claude", "Claude (token)", "Connect Claude (token)"],
-    ["openai", "OpenAI API key", "Add OpenAI API key"], ["anthropic", "Anthropic API key", "Add Anthropic API key"],
-    ["ssh", "SSH key", "Add SSH key"],
+    ["claude", "Add Claude token", "Connect Claude (token)"],
+    ["gemini", "Add Gemini key", "Add Gemini API key"],
+    ["openai", "Add OpenAI key", "Add OpenAI API key"],
+    ["anthropic", "Add Anthropic key", "Add Anthropic API key"],
+    ["ssh", "Add SSH key", "Add SSH key"],
   ]) {
     await stage(`credentials-${key}-${width}`, async () => {
       await button(chooser, choice).click();
       const editor = dialog(page, title);
       await expect(editor).toBeVisible();
       await expect(page.locator("dialog[open]")).toHaveCount(1);
-      await expect(editor.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
+      await expect(editor.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(1);
       await expect(editor.locator("[data-dialog-close]")).toHaveCount(1);
-      if (choice === "GitHub") {
+      if (key === "github") {
         await expect(editor.locator('input[name="name"]')).toHaveCount(0);
         // One account-level connection: connected accounts see it and can
         // reconnect; others continue to GitHub.
@@ -477,19 +481,19 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
     });
   }
   await stage(`credentials-profile-${width}`, async () => {
-    await button(chooser, "Cancel").click();
+    await button(chooser, "Close").click();
     await expect(add).toBeFocused();
     await button(page, "Create profile").click();
     const profile = dialog(page, "Create profile");
     await expect(profile.getByLabel("Profile name", { exact: true })).toBeFocused();
-    for (const provider of ["Codex", "OpenAI API", "Anthropic", "SSH"]) {
+    for (const provider of ["Codex", "OpenAI API", "Anthropic", "Antigravity", "Gemini", "SSH"]) {
       await expect(profile.getByLabel(provider, { exact: true })).toBeVisible();
     }
     // GitHub is one account-level connection included in every profile, not a
     // per-profile choice.
     await expect(profile.getByLabel("GitHub", { exact: true })).toHaveCount(0);
     await fits(page, profile);
-    await button(profile, "Cancel").click();
+    await button(profile, "Close").click();
   });
 }
 
@@ -805,14 +809,19 @@ async function createFailingSetup(page: Page, slug: string, owned: OwnedUxSandbo
   return `/${slug}/${await owned.createdId(deadline)}/`;
 }
 
-// The banner says where setup stopped, over a terminal that opened anyway.
+// The banner says where setup stopped, over a workspace that still opens a terminal.
 const failedOpen = (page: Page, path: string, step: string): Expectation[] => [
   ["failed-banner", async () => {
     await visit(page, path);
     await expect(noticeText(page)).toHaveText(new RegExp(`^Setup failed at ${step}: `), { timeout: 120_000 });
   }],
   ["danger-tone", () => expect(notice(page)).toHaveAttribute("data-tone", "danger")],
-  ["terminal-open", () => attachedTerminal(page, 60_000)],
+  ["terminal-open", async () => {
+    const openTerminal = page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]');
+    await expect(openTerminal.or(terminalConnection(page))).toBeVisible({ timeout: 60_000 });
+    if (await openTerminal.isVisible()) await openTerminal.click();
+    await attachedTerminal(page, 60_000);
+  }],
 ];
 
 // The Desktop panel (docs/journeys/desktop.md, `desktop-dashboard`): Start,
@@ -1159,11 +1168,12 @@ export async function runDevUxWalkthrough(page: Page, options: {
   await stage("terminal-tabs-second", async () => {
     await button(page, "New tab").click();
     await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="terminal"]').click();
+    await expect(page.getByRole("tab", { name: "New tab", exact: true })).toHaveCount(0, { timeout: TERMINAL_ATTACH_MS });
     await expect(page.getByRole("tab")).toHaveCount(2);
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
     secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondId).toBeTruthy();
     expect(secondId).not.toBe(firstId);
-    await attachedTerminal(page, TERMINAL_ATTACH_MS);
     await send("printf '__UX_SECOND__%s__%s__\\n' \"${CW_UX_SESSION-unset}\" \"$$\"");
     await expect(rows).toContainText(/__UX_SECOND__unset__\d+__/);
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);

@@ -353,6 +353,23 @@ bash -ec '
 ' >"$TEST_TMP/guest.sh"
 sh -n "$TEST_TMP/guest.sh"
 printf 'docker-store test: production guest script parses with POSIX sh (containerd + standard)\n'
+
+cat >"$TEST_TMP/core-dispatch-fixture.sh" <<'FIXTURE'
+set -eu
+. "$ROOT/scripts/runtime/dev/docker-store-guest.sh"
+docker_store_backend() { printf 'backend:%s\n' "$ds_mode"; }
+docker_store_seed() { printf 'seed:%s\n' "$ds_mode"; }
+docker_store_limits() { printf 'limits:%s\n' "$ds_mode"; }
+docker_store_cleanup() { printf 'cleanup:%s\n' "$ds_mode"; }
+docker_store_guest core abc123 "$MODE"
+FIXTURE
+MODE=containerd sh "$TEST_TMP/core-dispatch-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
+[[ "$(tr '\n' ',' <"$TEST_TMP/out")" == 'backend:containerd,seed:containerd,limits:containerd,cleanup:containerd,' ]] ||
+  fail "containerd core stages mismatch: $(<"$TEST_TMP/out")"
+MODE=standard sh "$TEST_TMP/core-dispatch-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
+[[ "$(tr '\n' ',' <"$TEST_TMP/out")" == 'backend:standard,seed:standard,cleanup:standard,' ]] ||
+  fail "standard core stages mismatch: $(<"$TEST_TMP/out")"
+printf 'docker-store test: core runs cgroup-v2 limits for containerd and skips them for standard (2 cases)\n'
 # Execute the actual normal Docker phase with its session transport stubbed.
 # This catches an optional-only core check, wrong runtime default, or a skip
 # that still mutates Docker; it does not run a real container.
@@ -437,4 +454,4 @@ raw = pathlib.Path(sys.argv[1]).read_bytes()
 assert raw.endswith(b"\n") and all(b == 10 or 32 <= b <= 126 for b in raw), f"non-ASCII stderr leaked: {raw!r}"
 PYTEST
 printf 'docker-store test: run_cw_session_script sanitizes stderr to ASCII and calls die on failure\n'
-printf 'docker-store journey fixture tests: 52 passed\n'
+printf 'docker-store journey fixture tests: 54 passed\n'
