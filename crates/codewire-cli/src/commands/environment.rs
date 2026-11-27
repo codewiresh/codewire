@@ -7,6 +7,7 @@ mod cp;
 pub(crate) mod cpu;
 mod create_request;
 mod host_placement;
+mod idle_hibernate;
 mod idle_stop;
 mod idle_suspend;
 pub(crate) mod info;
@@ -40,6 +41,7 @@ pub(crate) use policy_notice::policy_selection_notice;
 pub(crate) use policy_notice::{open_widening_notice, report_policy_selection};
 pub(crate) use server_errors::map_env_delete_error;
 use shown::display_name_for;
+pub(crate) use stop_start::wake_hibernated_if_needed;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
@@ -337,6 +339,7 @@ fn platform_only_command_name(command: &EnvCommand) -> &'static str {
         EnvCommand::Unprotect(_) => "unprotect",
         EnvCommand::CancelDelete(_) => "cancel-delete",
         EnvCommand::Extend(_) => "extend",
+        EnvCommand::Hibernate(_) => "hibernate",
         EnvCommand::Logs(_) => "logs --setup",
         _ => "this command",
     }
@@ -677,6 +680,9 @@ async fn handle_platform_env_command_with_created(
             print_env_report(&report, args.output)?;
         }
         EnvCommand::Stop(args) => stop_start::stop(&environment_client, &org_id, args).await?,
+        EnvCommand::Hibernate(args) => {
+            stop_start::hibernate(&environment_client, &org_id, args).await?
+        }
         EnvCommand::Start(args) => {
             stop_start::start(&platform, &environment_client, &org_id, args.target).await?;
         }
@@ -1261,6 +1267,13 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     /// A running sandbox whose VM is paused; `state` stays `running` (#5529).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) suspended: bool,
+    /// A stopped `standard` sandbox with a saved hibernate memory image;
+    /// `state` stays `stopped` (#6647).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) hibernated: bool,
+    /// Why it hibernated: `idle` or `user` (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hibernate_reason: Option<String>,
     pub(crate) daemon_health: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) id: String,

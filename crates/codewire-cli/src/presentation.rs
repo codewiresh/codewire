@@ -50,6 +50,21 @@ pub struct Environment {
     /// isn't suspended. Its state stays running, and any use wakes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+    /// Seconds with no activity before a `standard` cloud sandbox hibernates;
+    /// 0 never does (#6647).
+    #[serde(default)]
+    pub idle_hibernate_seconds: i32,
+    /// When the `standard` runtime committed a hibernate image, RFC 3339;
+    /// absent unless stopped and hibernated (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernated_at: Option<String>,
+    /// Why it hibernated: `idle` or `user` (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernate_reason: Option<String>,
+    /// Set when the last start could not restore from hibernate and cold-booted
+    /// cleanly from disks (processes lost, files kept), naming the reason (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernate_fallback_reason: Option<String>,
     /// When a running Sandbox was running again after a restart nobody
     /// asked for, RFC 3339 (#5997); cleared by the next start or stop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,6 +217,12 @@ impl Environment {
     /// `error`, isn't a suspend.
     pub fn suspended(&self) -> bool {
         self.state == "running" && self.suspended_at.is_some()
+    }
+
+    /// A stopped `standard` sandbox whose VM memory and device state were saved
+    /// to its encrypted volume (#6647). Its stored state stays `stopped`.
+    pub fn hibernated(&self) -> bool {
+        self.state == "stopped" && self.hibernated_at.is_some()
     }
 }
 
@@ -438,6 +459,10 @@ pub struct CreateEnvironmentRequest {
     /// off; `None` takes the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_suspend_seconds: Option<i32>,
+    /// Seconds with no activity before a `standard` sandbox hibernates, 0 for
+    /// off; `None` takes the default (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_hibernate_seconds: Option<i32>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,

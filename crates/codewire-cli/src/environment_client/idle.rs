@@ -82,4 +82,44 @@ impl EnvironmentClient {
             status: response.status,
         })
     }
+
+    pub async fn set_environment_idle_hibernate(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        idle_hibernate_seconds: i32,
+    ) -> anyhow::Result<StatusResponse> {
+        let response = self
+            .inner
+            .set_environment_idle_hibernate(rpc::SetEnvironmentIdleHibernateRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                idle_hibernate_seconds,
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(StatusResponse {
+            status: response.status,
+        })
+    }
+
+    pub async fn hibernate_environment(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<StatusResponse> {
+        let response = self
+            .inner
+            .hibernate_environment(rpc::HibernateEnvironmentRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(StatusResponse {
+            status: response.status,
+        })
+    }
 }

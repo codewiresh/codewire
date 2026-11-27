@@ -13,6 +13,7 @@ fn document(yaml: &str) -> PlatformDocument {
         spec: parsed.spec,
         idle_stop_seconds: parsed.idle_stop_seconds,
         idle_suspend_seconds: parsed.idle_suspend_seconds,
+        idle_hibernate_seconds: parsed.idle_hibernate_seconds,
         unused_fields: Vec::new(),
     }
 }

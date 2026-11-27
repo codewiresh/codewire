@@ -31,15 +31,20 @@ pub(crate) fn env_create_request_from_source(
         .context("invalid --ttl duration")?;
     let preset_id = trimmed_optional(args.preset_id.clone());
     let mut provenance = project_file::Provenance::new(source.clone());
-    let (mut project_spec, file_idle_stop, file_idle_suspend) = match source.path() {
-        Some(_) => {
-            let document = sources::load_platform_document(&source.paths())?;
-            provenance.unused_fields = document.unused_fields;
-            let (stop, suspend) = (document.idle_stop_seconds, document.idle_suspend_seconds);
-            (document.spec, stop, suspend)
-        }
-        None => (codewire_project::ProjectSpec::default(), None, None),
-    };
+    let (mut project_spec, file_idle_stop, file_idle_suspend, file_idle_hibernate) =
+        match source.path() {
+            Some(_) => {
+                let document = sources::load_platform_document(&source.paths())?;
+                provenance.unused_fields = document.unused_fields;
+                let (stop, suspend, hibernate) = (
+                    document.idle_stop_seconds,
+                    document.idle_suspend_seconds,
+                    document.idle_hibernate_seconds,
+                );
+                (document.spec, stop, suspend, hibernate)
+            }
+            None => (codewire_project::ProjectSpec::default(), None, None, None),
+        };
     let idle_stop_seconds = match args.idle_stop.as_deref() {
         Some(value) => {
             Some(codewire_project::parse_idle_stop(value).context("invalid --idle-stop")?)
@@ -51,6 +56,12 @@ pub(crate) fn env_create_request_from_source(
             Some(codewire_project::parse_idle_suspend(value).context("invalid --idle-suspend")?)
         }
         None => file_idle_suspend,
+    };
+    let idle_hibernate_seconds = match args.idle_hibernate.as_deref() {
+        Some(value) => Some(
+            codewire_project::parse_idle_hibernate(value).context("invalid --idle-hibernate")?,
+        ),
+        None => file_idle_hibernate,
     };
     if let Some(preset) = &args.preset_slug {
         project_spec.preset = preset.trim().to_owned();
@@ -128,6 +139,7 @@ pub(crate) fn env_create_request_from_source(
             ttl_seconds,
             idle_stop_seconds,
             idle_suspend_seconds,
+            idle_hibernate_seconds,
             isolation_tier: args.isolation.clone().unwrap_or_default(),
             project_spec,
             ..Default::default()

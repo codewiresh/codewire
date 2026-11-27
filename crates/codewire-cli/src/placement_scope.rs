@@ -63,6 +63,7 @@ pub(crate) fn validate_placement_scope(
             | Command::Start(_)
             | Command::Suspend(_)
             | Command::Resume(_)
+            | Command::Hibernate(_)
             | Command::Retry(_)
             | Command::Rm(_)
             | Command::Update(_)

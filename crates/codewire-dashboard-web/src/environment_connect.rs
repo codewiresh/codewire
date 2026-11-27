@@ -952,6 +952,19 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
             ""
         },
         idle_stop_seconds: environment.idle_stop_seconds,
+        hibernated: state == "stopped" && environment.hibernated_at.as_option().is_some(),
+        hibernate_reason: match environment.hibernate_reason.as_str() {
+            "idle" => "idle",
+            "user" => "user",
+            _ => "",
+        },
+        hibernated_at: environment
+            .hibernated_at
+            .into_option()
+            .map(|timestamp| past_time(timestamp.seconds))
+            .unwrap_or_default(),
+        idle_hibernate_seconds: environment.idle_hibernate_seconds,
+        hibernate_fallback_reason: environment.hibernate_fallback_reason.trim().to_owned(),
         preset_name: environment.preset_name,
         isolation_tier: match environment.isolation_tier.as_known() {
             Some(codewire_proto::codewire::v1::IsolationTier::Confidential) => "confidential",

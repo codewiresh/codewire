@@ -45,6 +45,10 @@ pub(super) fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<
         idle_stop_enforced: value.idle_stop_enforced,
         idle_suspend_seconds: value.idle_suspend_seconds,
         suspended_at: value.suspended_at.into_option().map(timestamp_to_rfc3339),
+        idle_hibernate_seconds: value.idle_hibernate_seconds,
+        hibernated_at: value.hibernated_at.into_option().map(timestamp_to_rfc3339),
+        hibernate_reason: empty_to_none(value.hibernate_reason),
+        hibernate_fallback_reason: empty_to_none(value.hibernate_fallback_reason),
         restarted_at: value.restarted_at.into_option().map(timestamp_to_rfc3339),
         restart_cause: empty_to_none(value.restart_cause),
         host: value

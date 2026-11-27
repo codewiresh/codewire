@@ -1133,6 +1133,18 @@ pub(crate) struct EnvironmentRow {
     pub(crate) stop_reason: &'static str,
     /// Its idle timeout in seconds, 0 for off (#3384).
     pub(crate) idle_stop_seconds: i32,
+    /// Whether this stopped `standard` Sandbox holds a restorable hibernate
+    /// memory image (#6647). The state pill reads "hibernated".
+    pub(crate) hibernated: bool,
+    /// Why it hibernated: "idle", "user", or "" (#6647).
+    pub(crate) hibernate_reason: &'static str,
+    /// Relative time it hibernated, or "" (#6647).
+    pub(crate) hibernated_at: String,
+    /// Its idle hibernate timeout in seconds, 0 for off (#6647).
+    pub(crate) idle_hibernate_seconds: i32,
+    /// Set when the last start could not restore from hibernate and booted
+    /// cold from disks (processes lost, files kept), naming the reason (#6647).
+    pub(crate) hibernate_fallback_reason: String,
     pub(crate) preset_name: String,
     pub(crate) isolation_tier: &'static str,
     pub(crate) last_event: String,
@@ -1209,8 +1221,12 @@ impl EnvironmentRow {
     }
 
     /// The lifecycle state as people read it. Deletion uses the product's
-    /// Delete language; every other state reads as its name.
+    /// Delete language, and a hibernated Sandbox reads "hibernated"; every
+    /// other state reads as its name.
     pub(crate) fn state_label(&self) -> &'static str {
+        if self.hibernated {
+            return "hibernated";
+        }
         match self.state {
             "destroying" => "deleting…",
             "destroyed" => "deleted",

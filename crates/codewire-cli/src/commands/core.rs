@@ -353,6 +353,8 @@ pub(crate) async fn handle_shell_stdio(
     let environment_id =
         resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
             .await?;
+    super::environment::wake_hibernated_if_needed(&environment_client, &org_id, &environment_id)
+        .await?;
     let mode = tailnet_ssh::SshTransportMode::from_env()?;
     let pipe = tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode);
     let piped = until_ssh_hangs_up(pipe).await.unwrap_or(Ok(()));
@@ -548,11 +550,15 @@ fn platform_address(environment: &Environment) -> crate::commands::lifecycle_out
 }
 
 /// Refuses a cloud environment that is stopped, naming the command that
-/// starts it. Any other state is left to the connection.
+/// starts it. A hibernated sandbox restores on access, so it is allowed.
+/// Any other state is left to the connection.
 pub(crate) fn ensure_cloud_connectable(
     environment: &Environment,
     shown: &str,
 ) -> anyhow::Result<()> {
+    if environment.hibernated() {
+        return Ok(());
+    }
     let state = match environment.state.as_str() {
         "stopped" => codewire_client::EnvironmentState::Stopped,
         "stopping" => codewire_client::EnvironmentState::Stopping,
@@ -720,6 +726,7 @@ pub(crate) fn env_create_request_from_init_args(
         ttl: args.ttl.clone(),
         idle_stop: None,
         idle_suspend: None,
+        idle_hibernate: None,
         cpu: args.cpu.clone(),
         memory: args.memory.map(|value| value.to_string()),
         disk: args.disk.map(|value| value.to_string()),

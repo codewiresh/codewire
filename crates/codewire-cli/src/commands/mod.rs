@@ -839,6 +839,7 @@ pub(crate) enum EnvCommand {
     Start(EnvStartArgs),
     Suspend(EnvTargetArgs),
     Resume(EnvTargetArgs),
+    Hibernate(EnvTargetArgs),
     Restart(EnvTargetArgs),
     RefreshSkills(EnvTargetArgs),
     Rm(EnvDeleteArgs),

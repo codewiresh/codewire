@@ -64,6 +64,7 @@ async fn shell(
         // a local VM's or trusted host's on its own path, each a session
         // that ends with the shell or 10 minutes after the last client left.
         let target = resolve_environment_session_target(globals, environment.as_deref()).await?;
+        super::wake_hibernated_session_target(globals, &target).await?;
         let status = if let EnvironmentSessionTarget::Platform {
             org_id,
             environment_id,

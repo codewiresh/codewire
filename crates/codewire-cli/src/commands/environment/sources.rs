@@ -52,6 +52,8 @@ pub(super) struct PlatformDocument {
     pub(super) idle_stop_seconds: Option<i32>,
     /// `idle_suspend`, sent beside the spec as `idle_stop` is.
     pub(super) idle_suspend_seconds: Option<i32>,
+    /// `idle_hibernate`, sent beside the spec as `idle_stop` is (#6647).
+    pub(super) idle_hibernate_seconds: Option<i32>,
     /// Whether the file names `working_directory`, rather than leaving it to
     /// follow its repositories.
     pub(super) working_directory_explicit: bool,
@@ -94,6 +96,7 @@ pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<Platform
         spec: document.spec,
         idle_stop_seconds: document.idle_stop_seconds,
         idle_suspend_seconds: document.idle_suspend_seconds,
+        idle_hibernate_seconds: document.idle_hibernate_seconds,
         unused_fields,
     })
 }
@@ -110,6 +113,7 @@ fn other_update_flags(args: &EnvUpdateArgs) -> Vec<&'static str> {
         (args.policy.is_some(), "--policy"),
         (args.idle_stop.is_some(), "--idle-stop"),
         (args.idle_suspend.is_some(), "--idle-suspend"),
+        (args.idle_hibernate.is_some(), "--idle-hibernate"),
     ]
     .into_iter()
     .filter_map(|(given, flag)| given.then_some(flag))

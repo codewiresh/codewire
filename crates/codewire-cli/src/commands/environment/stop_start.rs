@@ -75,6 +75,141 @@ pub(super) async fn stop(
     Ok(())
 }
 
+const HIBERNATING_LABEL: &str = "Hibernating the sandbox";
+const HIBERNATE_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// `cw hibernate ENV` in the cloud: hibernates a running or suspended
+/// `standard` Sandbox to its encrypted volume and waits until it lands in
+/// `hibernated` (#6647, `docs/dev/SANDBOX-SLEEP.md`).
+pub(super) async fn hibernate(
+    environment_client: &EnvironmentClient,
+    org_id: &str,
+    args: EnvTargetArgs,
+) -> anyhow::Result<()> {
+    let environment_id =
+        resolve_environment_id(environment_client, org_id, &args.environment).await?;
+    let caps = crate::commands::lifecycle_output::capabilities(args.output);
+    let shown = display_name_for(
+        environment_client,
+        org_id,
+        &environment_id,
+        &args.environment,
+        &caps,
+    )
+    .await;
+    let name = shown.name.clone();
+    let response = environment_client
+        .hibernate_environment(org_id, &environment_id)
+        .await
+        .context("hibernate environment")?;
+    if response.status == "already_hibernated"
+        || response.status.eq_ignore_ascii_case("already hibernated")
+    {
+        match args.output {
+            OutputFormat::Json => print_env_status(&args.environment, &response, args.output)?,
+            OutputFormat::Text => {
+                if !caps.is_machine() {
+                    println!(
+                        "Environment {} is already hibernated.",
+                        terminal_text(&name)
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+    let mut line = StatusLine::new(std::io::stderr(), &caps);
+    line.begin(HIBERNATING_LABEL)?;
+    let deadline = Instant::now() + HIBERNATE_WAIT_TIMEOUT;
+    let final_env = loop {
+        let env = environment_client
+            .get_environment(org_id, &environment_id)
+            .await
+            .context("poll hibernating environment")?;
+        if env.state == "stopped" || env.state == "error" || env.state == "destroyed" {
+            break env;
+        }
+        if Instant::now() >= deadline {
+            line.fail(HIBERNATING_LABEL)?;
+            anyhow::bail!(
+                "timed out waiting for {} to finish hibernating (current state: {})",
+                terminal_text(&name),
+                env.state
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    line.clear()?;
+    let status = if final_env.hibernated() {
+        "hibernated"
+    } else {
+        final_env.state.as_str()
+    };
+    match args.output {
+        OutputFormat::Json => {
+            print_env_status(
+                &args.environment,
+                &StatusResponse {
+                    status: status.to_owned(),
+                },
+                args.output,
+            )?;
+        }
+        OutputFormat::Text => {
+            let safe_name = terminal_text(&name);
+            if final_env.hibernated() {
+                println!(
+                    "Hibernated {safe_name}. Processes and files are saved; run `cw start {safe_name}` or connect to restore it."
+                );
+            } else {
+                println!(
+                    "Environment {safe_name} landed in {status} (could not save a hibernate image; files are kept)."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Wakes a hibernated cloud Sandbox on access (`cw shell`, `cw exec`,
+/// `cw attach`, `cw run`, `ssh`) and waits until its daemon is ready (#6647).
+/// A plain stopped (non-hibernated) or already running Sandbox is left alone.
+pub(crate) async fn wake_hibernated_if_needed(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+) -> anyhow::Result<()> {
+    let Ok(environment) = client.get_environment(org_id, environment_id).await else {
+        return Ok(());
+    };
+    if !environment.hibernated() {
+        return Ok(());
+    }
+    let name = super::lifecycle::display_name(&environment);
+    let safe_name = terminal_text(&name);
+    let began = Instant::now();
+    let caps = crate::commands::lifecycle_output::capabilities(OutputFormat::Text);
+    eprintln!("Restoring hibernated sandbox {safe_name}...");
+    Box::pin(start_platform_environment_with_progress(
+        client,
+        org_id,
+        environment_id,
+        began,
+        &caps,
+        &InterruptNotice::new(VmLocation::Cloud, "start", &name),
+    ))
+    .await?;
+    if let Ok(after) = client.get_environment(org_id, environment_id).await
+        && let Some(reason) = after
+            .hibernate_fallback_reason
+            .as_deref()
+            .and_then(trimmed_str)
+    {
+        eprintln!("Notice: {}", super::idle_hibernate::fallback_notice(reason));
+    }
+    Ok(())
+}
+
 /// `cw start ENV` in the cloud: the plan, the start's progress, and the
 /// result.
 pub(super) async fn start(
@@ -103,6 +238,7 @@ pub(super) async fn start(
             let name = super::lifecycle::display_name(&environment);
             return print_already(&args, &name, Already::Running, &caps);
         }
+        let was_hibernated = environment.hibernated();
         let summary = super::lifecycle::cloud_summary(&environment, Outcome::Started, &names);
         crate::commands::lifecycle_output::print_context(&summary, &caps);
         Box::pin(start_platform_environment_with_progress(
@@ -119,6 +255,24 @@ pub(super) async fn start(
         ))
         .await?;
         crate::commands::lifecycle_output::print_summary(&summary, &caps);
+        if was_hibernated {
+            let after = environment_client
+                .get_environment(org_id, &environment_id)
+                .await
+                .ok();
+            if let Some(reason) = after
+                .as_ref()
+                .and_then(|env| env.hibernate_fallback_reason.as_deref())
+                .and_then(trimmed_str)
+            {
+                eprintln!("Notice: {}", super::idle_hibernate::fallback_notice(reason));
+            } else if !caps.is_machine() {
+                eprintln!(
+                    "Restored from hibernate in {:.1}s.",
+                    began.elapsed().as_secs_f64()
+                );
+            }
+        }
         return Ok(());
     }
     let caps = crate::commands::lifecycle_output::capabilities(args.output);

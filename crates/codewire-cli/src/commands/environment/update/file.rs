@@ -129,6 +129,7 @@ enum Route {
     Resize,
     IdleStop,
     IdleSuspend,
+    IdleHibernate,
 }
 
 impl Route {
@@ -144,6 +145,9 @@ impl Route {
             Route::IdleSuspend => {
                 format!("change {pronoun} with `cw update {name} --idle-suspend`")
             }
+            Route::IdleHibernate => {
+                format!("change {pronoun} with `cw update {name} --idle-hibernate`")
+            }
         }
     }
 
@@ -156,6 +160,7 @@ impl Route {
             Route::Resize => format!("cw resize {name} --cpu CPU --memory MEMORY"),
             Route::IdleStop => format!("cw update {name} --idle-stop DURATION"),
             Route::IdleSuspend => format!("cw update {name} --idle-suspend DURATION"),
+            Route::IdleHibernate => format!("cw update {name} --idle-hibernate DURATION"),
         }
     }
 }
@@ -285,6 +290,12 @@ fn differences(file: &PlatformDocument, saved: &Saved<'_>) -> Vec<Difference> {
             file.idle_suspend_seconds == Some(environment.idle_suspend_seconds),
             "idle_suspend",
             Route::IdleSuspend,
+        ),
+        (
+            file.idle_hibernate_seconds.is_some(),
+            file.idle_hibernate_seconds == Some(environment.idle_hibernate_seconds),
+            "idle_hibernate",
+            Route::IdleHibernate,
         ),
     ];
     checks

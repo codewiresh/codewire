@@ -81,6 +81,12 @@ pub(crate) struct EnvCreateArgs {
     pub(crate) idle_suspend: Option<String>,
     #[arg(
         long,
+        value_name = "DURATION",
+        help = "Hibernate a standard cloud sandbox to its encrypted volume after this long with no activity: 5m to 7d, on (6h) or off; overrides codewire.yaml idle_hibernate (default off)"
+    )]
+    pub(crate) idle_hibernate: Option<String>,
+    #[arg(
+        long,
         value_name = "CPU",
         help = "CPU cores (for example 2, 0.5, or 500m; a local VM rounds up to whole cores)"
     )]

@@ -66,6 +66,12 @@ pub(super) async fn platform(
         .as_deref()
         .map(codewire_project::parse_idle_suspend)
         .transpose()?;
+    let idle_hibernate = args
+        .idle_hibernate
+        .take()
+        .as_deref()
+        .map(codewire_project::parse_idle_hibernate)
+        .transpose()?;
     let output = args.output;
     let environment = args.environment.clone();
     let sources_changed = args.clear_secrets
@@ -74,7 +80,12 @@ pub(super) async fn platform(
         || args.user_secrets.is_some()
         || args.org_secrets
         || args.profile.is_some();
-    if sources_changed || (policy.is_none() && idle_stop.is_none() && idle_suspend.is_none()) {
+    if sources_changed
+        || (policy.is_none()
+            && idle_stop.is_none()
+            && idle_suspend.is_none()
+            && idle_hibernate.is_none())
+    {
         sources::update_platform_sources(platform, environment_client, org_id, args).await?;
     }
     if let Some(reference) = policy {
@@ -107,6 +118,16 @@ pub(super) async fn platform(
             .await
             .context("set idle suspend")?;
         idle_suspend::print_status(&environment, &response, idle_suspend_seconds, output)?;
+    }
+    // A runtime that can't hibernate is refused by the server, by name.
+    if let Some(idle_hibernate_seconds) = idle_hibernate {
+        let environment_id =
+            resolve_environment_id(environment_client, org_id, &environment).await?;
+        let response = environment_client
+            .set_environment_idle_hibernate(org_id, &environment_id, idle_hibernate_seconds)
+            .await
+            .context("set idle hibernate")?;
+        idle_hibernate::print_status(&environment, &response, idle_hibernate_seconds, output)?;
     }
     Ok(())
 }

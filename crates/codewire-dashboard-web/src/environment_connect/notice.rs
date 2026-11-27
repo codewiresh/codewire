@@ -143,6 +143,16 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
         ("running", _) if row.setup_running => {
             SandboxNotice::banner(SETTING_UP.to_owned(), "neutral").kind("setup")
         }
+        ("running", _) if !row.hibernate_fallback_reason.is_empty() => SandboxNotice {
+            dismissible: true,
+            ..SandboxNotice::banner(
+                format!(
+                    "Could not restore from hibernate ({}); booted cleanly from disks — running processes were lost while files were kept.",
+                    row.hibernate_fallback_reason
+                ),
+                "warning",
+            )
+        },
         ("running", _) if !reason.is_empty() => SandboxNotice {
             dismissible: true,
             ..SandboxNotice::banner(said(""), "info")
@@ -182,6 +192,28 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
             SandboxNotice::banner(STARTING.to_owned(), "neutral").kind("setup")
         }
         ("stopped", _) if actions.pending => SandboxNotice::banner(PENDING.to_owned(), "info"),
+        ("stopped", _) if row.hibernated => {
+            let when = if row.hibernated_at.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", row.hibernated_at)
+            };
+            let text = if row.hibernate_reason == "idle" && row.idle_hibernate_seconds > 0 {
+                format!(
+                    "Hibernated after {} idle{when}. Processes and files are saved.",
+                    codewire_project::idle_stop_words(row.idle_hibernate_seconds)
+                )
+            } else if row.hibernate_reason == "idle" {
+                format!("Hibernated after being idle{when}. Processes and files are saved.")
+            } else {
+                format!("Hibernated{when}. Processes and files are saved.")
+            };
+            SandboxNotice::message("stopped", text, "neutral").offering(
+                actions.start,
+                "start",
+                "Start",
+            )
+        }
         // It stopped itself: how long it was idle, as briefly as it can be
         // said (#3384). `cw info` gives the full reason. Start, beside it, is
         // how to start it again.
@@ -307,5 +339,66 @@ mod tests {
                 "the setup worker no longer writes {prefix:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_hibernated_sandbox_pill_reads_hibernated_and_fallback_warns_naming_reason() {
+        let mut hibernated_env = Environment {
+            id: "00000000-0000-4000-8000-000000000002".into(),
+            state: EnvironmentState::Stopped.into(),
+            desired_state: DesiredState::Stopped.into(),
+            idle_hibernate_seconds: 6 * 3600,
+            hibernate_reason: "idle".into(),
+            ..Default::default()
+        };
+        let mut ts = hibernated_env
+            .hibernated_at
+            .into_option()
+            .unwrap_or_default();
+        ts.seconds = chrono::Utc::now().timestamp() - 600;
+        hibernated_env.hibernated_at = Some(ts).into();
+        let hibernated = environment_row(hibernated_env);
+        assert!(hibernated.hibernated);
+        assert_eq!(hibernated.state_label(), "hibernated");
+        let notice = sandbox_notice(&hibernated);
+        assert_eq!(notice.kind, "message");
+        assert_eq!(notice.action, "start");
+        assert_eq!(notice.label, "Start");
+        assert!(
+            notice.text.contains("Hibernated after 6 hours idle"),
+            "{}",
+            notice.text
+        );
+        assert!(
+            notice.text.contains("Processes and files are saved"),
+            "{}",
+            notice.text
+        );
+
+        let fallback = environment_row(Environment {
+            id: "00000000-0000-4000-8000-000000000003".into(),
+            state: EnvironmentState::Running.into(),
+            desired_state: DesiredState::Started.into(),
+            setup_complete: true,
+            hibernate_fallback_reason: "runtime_image_expired".into(),
+            ..Default::default()
+        });
+        assert!(!fallback.hibernated);
+        assert_eq!(fallback.state_label(), "running");
+        let banner = sandbox_notice(&fallback);
+        assert_eq!(banner.kind, "banner");
+        assert_eq!(banner.tone, "warning");
+        assert!(
+            banner.text.contains("runtime_image_expired"),
+            "{}",
+            banner.text
+        );
+        assert!(
+            banner
+                .text
+                .contains("running processes were lost while files were kept"),
+            "{}",
+            banner.text
+        );
     }
 }

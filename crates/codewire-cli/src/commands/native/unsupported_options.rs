@@ -11,6 +11,10 @@ pub(super) fn reject_unsupported_native_update_options(args: &EnvUpdateArgs) -> 
         args.idle_suspend.is_none(),
         "--idle-suspend applies to cloud sandboxes; a local VM is never suspended for being idle"
     );
+    anyhow::ensure!(
+        args.idle_hibernate.is_none(),
+        "--idle-hibernate applies to cloud sandboxes; a local VM is never hibernated for being idle"
+    );
     Ok(())
 }
 
@@ -30,6 +34,9 @@ pub(super) fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> 
     }
     if args.idle_suspend.is_some() {
         unsupported.push("--idle-suspend");
+    }
+    if args.idle_hibernate.is_some() {
+        unsupported.push("--idle-hibernate");
     }
     if args.isolation.is_some() {
         unsupported.push("--isolation");
@@ -85,6 +92,28 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "native local preview does not yet support: --idle-suspend"
+        );
+        let EnvCommand::Update(update) =
+            command(&["cw", "update", "app", "--idle-hibernate", "6h"])
+        else {
+            panic!("expected an update");
+        };
+        assert_eq!(
+            reject_unsupported_native_update_options(&update)
+                .unwrap_err()
+                .to_string(),
+            "--idle-hibernate applies to cloud sandboxes; a local VM is never hibernated for being idle"
+        );
+        let EnvCommand::Create(create) =
+            command(&["cw", "create", "--local", "--idle-hibernate", "6h"])
+        else {
+            panic!("expected a create");
+        };
+        assert_eq!(
+            reject_unsupported_native_create_options(&create)
+                .unwrap_err()
+                .to_string(),
+            "native local preview does not yet support: --idle-hibernate"
         );
     }
 }

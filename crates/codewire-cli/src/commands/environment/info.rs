@@ -106,10 +106,33 @@ where
     if let Some(stopped_at) = environment.stopped_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("StoppedAt:     {stopped_at}\n"));
     }
+    if let Some(hibernated_at) = environment.hibernated_at.as_deref().and_then(trimmed_str) {
+        output.push_str(&format!("HibernatedAt:  {hibernated_at}\n"));
+    }
+    if let Some(hibernate_reason) = environment
+        .hibernate_reason
+        .as_deref()
+        .and_then(trimmed_str)
+    {
+        output.push_str(&format!("HibernateReason: {hibernate_reason}\n"));
+    }
+    if let Some(notice) = super::idle_hibernate::hibernated_notice(environment) {
+        output.push_str(&format!("Notice:        {notice}\n"));
+    }
+    if let Some(fallback) = environment
+        .hibernate_fallback_reason
+        .as_deref()
+        .and_then(trimmed_str)
+    {
+        output.push_str(&format!(
+            "Notice:        {}\n",
+            super::idle_hibernate::fallback_notice(fallback)
+        ));
+    }
     if let Some(stop_reason) = environment.stop_reason.as_deref() {
         output.push_str(&format!("StopReason:    {stop_reason}\n"));
     }
-    if environment.stop_reason.as_deref() == Some("idle") {
+    if environment.stop_reason.as_deref() == Some("idle") && !environment.hibernated() {
         let name = environment
             .name
             .as_deref()
@@ -120,7 +143,7 @@ where
             codewire_project::idle_stop_notice(name, environment.idle_stop_seconds)
         ));
     }
-    // Only a cloud sandbox stops itself for being idle (#3384).
+    // Only a cloud sandbox stops, suspends, or hibernates itself for being idle (#3384, #5529, #6647).
     if environment.environment_type == "sandbox" {
         let unenforced = super::idle_stop::unenforced_note(environment).is_some();
         output.push_str(&format!(
@@ -133,6 +156,7 @@ where
             }
         ));
         output.push_str(&super::idle_suspend::info_line(environment));
+        output.push_str(&super::idle_hibernate::info_line(environment));
     }
     if let Some(shutdown_at) = environment.shutdown_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("ShutdownAt:    {shutdown_at}\n"));
@@ -190,6 +214,9 @@ pub(crate) fn env_state_label(environment: &Environment) -> &str {
     }
     if environment.suspended() {
         return "suspended";
+    }
+    if environment.hibernated() {
+        return "hibernated";
     }
     trimmed_str(&environment.state).unwrap_or("--")
 }

@@ -224,7 +224,7 @@ start ENV` runs it. Any other setting the file states differently refuses the
 whole update and names it, with where it changes instead: `secrets` and
 `credentials` with `--secrets` and `--profile`, `cpu`, `memory` and `disk`
 with `cw resize`, `idle_stop` with `--idle-stop`, `idle_suspend` with
-`--idle-suspend`, and the rest only in a new Sandbox. A setting the file
+`--idle-suspend`, `idle_hibernate` with `--idle-hibernate`, and the rest only in a new Sandbox. A setting the file
 leaves out isn't compared. Only the Sandbox's creator may change its startup
 script, while it is running or stopped, and the change is audited without the
 script's text. `--file` takes no other change, and a local VM refuses it.

@@ -2554,6 +2554,10 @@ fn a_stopped_cloud_environment_is_refused_with_the_command_that_starts_it() {
             "{state}"
         );
     }
+    // A hibernated sandbox restores on access, so it is connectable (#6647).
+    let mut hibernated = test_environment("env-1", Some("walk"), "stopped");
+    hibernated.hibernated_at = Some("2026-11-27T12:00:00Z".to_owned());
+    assert!(ensure_cloud_connectable(&hibernated, "walk").is_ok());
 }
 
 /// `cw shell --stdio`, ssh's ProxyCommand, ends when an idle stop takes the

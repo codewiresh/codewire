@@ -25,6 +25,7 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
     let target = resolve_environment_session_target(globals, args.environment.as_deref())
         .await
         .map_err(crate::command_line::name_hint)?;
+    super::wake_hibernated_session_target(globals, &target).await?;
     let code = match target {
         #[cfg(unix)]
         EnvironmentSessionTarget::Host { environment, .. } => {

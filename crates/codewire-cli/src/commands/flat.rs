@@ -47,6 +47,7 @@ pub(crate) fn direct_environment_command(
         Command::Start(args) => EnvCommand::Start(args),
         Command::Suspend(args) => EnvCommand::Suspend(args),
         Command::Resume(args) => EnvCommand::Resume(args),
+        Command::Hibernate(args) => EnvCommand::Hibernate(args),
         Command::Rm(args) => EnvCommand::Rm(args),
         Command::Cp(args) => EnvCommand::Cp(args),
         Command::Runtime(args) => EnvCommand::Runtime(args),

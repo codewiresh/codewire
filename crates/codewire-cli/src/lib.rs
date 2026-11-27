@@ -208,8 +208,20 @@ const HELP_SECTIONS: &[HelpSection] = &[
     HelpSection::everyday(
         "Environments",
         &[
-            "ls", "info", "create", "start", "stop", "suspend", "resume", "restart", "retry", "rm",
-            "use", "current", "snapshot",
+            "ls",
+            "info",
+            "create",
+            "start",
+            "stop",
+            "suspend",
+            "resume",
+            "hibernate",
+            "restart",
+            "retry",
+            "rm",
+            "use",
+            "current",
+            "snapshot",
         ],
     ),
     HelpSection::everyday(
@@ -695,7 +707,7 @@ enum Command {
     Create(Box<EnvCreateArgs>),
     #[command(
         about = "Start an environment",
-        long_about = "Start a stopped environment, or recover one in error:\n  cw start ENV\n\nIn error, a local VM's failed VM is stopped first, as `cw stop` would, and a cloud environment retries its create, which replaces a failed Pod. A cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
+        long_about = "Start a stopped or hibernated environment, or recover one in error:\n  cw start ENV\n\nIn error, a local VM's failed VM is stopped first, as `cw stop` would, and a cloud environment retries its create, which replaces a failed Pod. A cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
     )]
     Start(EnvStartArgs),
     #[command(
@@ -708,6 +720,11 @@ enum Command {
         long_about = "Wake a suspended standard cloud sandbox's VM immediately:\n  cw resume ENV\n\nTo start a stopped environment, use `cw start ENV`."
     )]
     Resume(EnvTargetArgs),
+    #[command(
+        about = "Hibernate a standard cloud Sandbox to its encrypted volume",
+        long_about = "Hibernate a running or suspended standard cloud Sandbox:\n  cw hibernate ENV\n\nSaves the VM's memory and device state to its encrypted volume outside guest reach and ends the Pod, keeping processes, sessions and files intact for the next start or access."
+    )]
+    Hibernate(EnvTargetArgs),
     #[command(
         about = "Run a cloud Sandbox's failed setup again",
         long_about = "Run a cloud Sandbox's failed setup again, from the step it failed at, and follow it to its end:\n  cw retry ENV\n\nFix what failed first, in `cw shell ENV`. Steps that completed don't run again. A retry from the clone step clones the repositories again, which deletes their directories and any edits made there; it asks first, and --yes confirms it without asking. Ctrl-C ends only the wait."
@@ -1200,6 +1217,7 @@ where
         | Command::Start(_)
         | Command::Suspend(_)
         | Command::Resume(_)
+        | Command::Hibernate(_)
         | Command::Rm(_)
         | Command::Cp(_)
         | Command::Runtime(_)

@@ -58,6 +58,12 @@ pub(crate) struct EnvUpdateArgs {
     pub(crate) idle_suspend: Option<String>,
     #[arg(
         long,
+        value_name = "DURATION",
+        help = "Hibernate a standard cloud sandbox to its encrypted volume after this long with no activity: 5m to 7d, on (6h) or off; takes effect without a restart"
+    )]
+    pub(crate) idle_hibernate: Option<String>,
+    #[arg(
+        long,
         value_name = "FILE",
         help = "Give a cloud Sandbox this codewire.yaml's startup_script, which runs at its next start; every other setting must already match. Repeat to merge files in order, as `cw create` does"
     )]

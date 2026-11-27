@@ -551,6 +551,27 @@ async fn resolve_environment_session_target(
     }
 }
 
+/// Wakes a hibernated cloud Sandbox before interactive access (`cw shell`,
+/// `cw exec`, `cw attach`, `cw run`) connects to it (#6647).
+async fn wake_hibernated_session_target(
+    globals: &Globals,
+    target: &EnvironmentSessionTarget,
+) -> anyhow::Result<()> {
+    let EnvironmentSessionTarget::Platform {
+        org_id,
+        environment_id,
+        ..
+    } = target
+    else {
+        return Ok(());
+    };
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env)?;
+    let platform = resolve_platform(globals, &paths, &env)?;
+    let client = EnvironmentClient::new(&platform)?;
+    super::environment::wake_hibernated_if_needed(&client, org_id, environment_id).await
+}
+
 /// A saved managed-message location is also its placement authority. Resolve
 /// it only in that placement so an unrelated local supervisor or cloud lookup
 /// cannot intercept a wait before the indexed environment is reached.
@@ -1712,6 +1733,7 @@ async fn launch_run(
             .await?;
         }
     }
+    wake_hibernated_session_target(globals, &target).await?;
     if args.agent.is_some() {
         #[cfg(unix)]
         return agents::handle_agent_run_command(globals, target, args).await;
@@ -2834,6 +2856,7 @@ pub(crate) async fn handle_attach_command(
             )),
             _ => error,
         })?;
+    wake_hibernated_session_target(globals, &target).await?;
     let place = SessionPlace::of(&target);
     let session = match requested.as_deref() {
         Some(requested) => match target

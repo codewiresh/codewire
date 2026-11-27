@@ -518,6 +518,8 @@ mod tests {
                 failed: None,
                 stop_reason: None,
                 suspended: false,
+                hibernated: false,
+                hibernate_reason: None,
                 daemon_health: String::new(),
                 id: VM_ID.into(),
             },

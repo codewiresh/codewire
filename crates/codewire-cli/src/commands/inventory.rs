@@ -494,6 +494,8 @@ pub(crate) fn local_entry(
             failed: None,
             stop_reason: None,
             suspended: false,
+            hibernated: false,
+            hibernate_reason: None,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -541,6 +543,11 @@ pub(crate) fn cloud_entry(
             failed,
             stop_reason: environment.stop_reason.clone(),
             suspended: environment.suspended(),
+            hibernated: environment.hibernated(),
+            hibernate_reason: environment
+                .hibernated()
+                .then(|| environment.hibernate_reason.clone())
+                .flatten(),
             daemon_health: daemon_health.to_owned(),
             id: environment.id.clone(),
         },
@@ -599,6 +606,8 @@ fn host_entry(
             failed: None,
             stop_reason: None,
             suspended: false,
+            hibernated: false,
+            hibernate_reason: None,
             daemon_health,
             id: environment.id,
         },
@@ -1206,6 +1215,12 @@ fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono:
         )
     } else if entry.suspended {
         "suspended".to_owned()
+    } else if entry.hibernated {
+        if entry.hibernate_reason.as_deref() == Some("idle") {
+            "hibernated (idle)".to_owned()
+        } else {
+            "hibernated".to_owned()
+        }
     } else if entry.restart.restarted && !entry.restart.recorded() {
         format!("{} (restarted)", display_str(&entry.state))
     } else if let Some(reason @ ("idle" | "credit")) = entry.stop_reason.as_deref() {
@@ -1333,6 +1348,8 @@ mod tests {
             failed: None,
             stop_reason: None,
             suspended: false,
+            hibernated: false,
+            hibernate_reason: None,
             daemon_health: String::new(),
             id: format!(
                 "{name}-{}-id",
@@ -1947,6 +1964,48 @@ mod tests {
         assert_eq!(state_cell(&failed.list, chrono::Utc::now()), "error");
         let json = serde_json::to_value(&failed.list).unwrap();
         assert!(json.get("suspended").is_none(), "{json}");
+    }
+
+    /// A hibernated sandbox reads `hibernated` or `hibernated (idle)` in
+    /// `cw ls`, while its JSON keeps `state: "stopped"` beside `hibernated: true` (#6647).
+    #[test]
+    fn a_hibernated_sandbox_says_so_in_the_state_cell_and_json() {
+        let mut environment = Environment {
+            id: "env-hib".into(),
+            name: Some("hib".into()),
+            state: "stopped".into(),
+            ..Environment::default()
+        };
+        let plain_stopped = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(
+            state_cell(&plain_stopped.list, chrono::Utc::now()),
+            "stopped"
+        );
+        let json = serde_json::to_value(&plain_stopped.list).unwrap();
+        assert!(json.get("hibernated").is_none(), "{json}");
+
+        environment.hibernated_at = Some("2026-11-27T12:00:00Z".into());
+        environment.hibernate_reason = Some("user".into());
+        let manual = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(state_cell(&manual.list, chrono::Utc::now()), "hibernated");
+        let json = serde_json::to_value(&manual.list).unwrap();
+        assert_eq!(json["state"], "stopped");
+        assert_eq!(json["hibernated"], true);
+        assert_eq!(json["hibernate_reason"], "user");
+
+        environment.hibernate_reason = Some("idle".into());
+        let idle = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(
+            state_cell(&idle.list, chrono::Utc::now()),
+            "hibernated (idle)"
+        );
+
+        // A mark left on a non-stopped sandbox is not hibernated.
+        environment.state = "running".into();
+        let running = cloud_entry(&environment, "", "org-1", None, None);
+        assert_eq!(state_cell(&running.list, chrono::Utc::now()), "running");
+        let json = serde_json::to_value(&running.list).unwrap();
+        assert!(json.get("hibernated").is_none(), "{json}");
     }
 
     #[test]
