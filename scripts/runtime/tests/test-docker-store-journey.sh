@@ -248,8 +248,19 @@ printf 'docker-store test: source create failure without receipt preserves name/
 cat >"$TEST_TMP/backend-fixture.sh" <<'FIXTURE'
 set -eu
 . "$ROOT/scripts/runtime/dev/docker-store-guest.sh"
-DOCKER_HOST=unix:///var/run/docker/docker.sock
+if [ "${DOCKER_HOST_SET:-1}" = 1 ]; then
+  DOCKER_HOST="${DOCKER_HOST_VAL:-unix:///var/run/docker/docker.sock}"
+else
+  unset DOCKER_HOST
+fi
 ds_mode="$MODE"
+test() {
+  if [ "$*" = '-S /run/docker.sock' ]; then
+    [ "${STANDARD_SOCKET:-1}" = 1 ]
+  else
+    command test "$@"
+  fi
+}
 docker() {
   case "$*" in
     'context show') printf 'default\n' ;;
@@ -263,16 +274,24 @@ docker_store_backend
 FIXTURE
 
 backend_case() {
-  local mode="$1" driver="$2" status="$3" expected="$4" rc=0
-  MODE="$mode" DRIVER="$driver" STATUS="$status" sh "$TEST_TMP/backend-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
+  local mode="$1" driver="$2" status="$3" expected="$4" docker_host_set="${5:-1}" standard_socket="${6:-1}" data_root="${7:-/var/lib/docker}" rc=0
+  MODE="$mode" DRIVER="$driver" STATUS="$status" DOCKER_HOST_SET="$docker_host_set" STANDARD_SOCKET="$standard_socket" DATA_ROOT="$data_root" \
+    sh "$TEST_TMP/backend-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
   [[ "$rc" == "$expected" ]] || fail "backend $mode/$driver exited $rc, expected $expected"
 }
 backend_case containerd overlayfs io.containerd.snapshotter.v1 0
 backend_case containerd overlayfs null 1
+backend_case containerd overlay2 null 1
 backend_case containerd vfs null 1
 backend_case vfs vfs null 1
 backend_case vfs overlayfs '[["driver-type","io.containerd.snapshotter.v1"]]' 1
-printf 'docker-store test: actual backend/store identity fails closed (5 cases)\n'
+backend_case standard overlay2 '' 0 0 1 /var/lib/docker
+backend_case standard overlay2 '' 1 1 1 /var/lib/docker
+backend_case standard overlay2 '' 1 0 0 /var/lib/docker
+backend_case standard overlayfs '' 1 0 1 /var/lib/docker
+backend_case standard vfs '' 1 0 1 /var/lib/docker
+backend_case standard overlay2 '' 1 0 1 /tmp/other-docker
+printf 'docker-store test: actual backend/store identity fails closed (12 cases)\n'
 
 cat >"$TEST_TMP/managed-root-fixture.sh" <<'FIXTURE'
 set -eu
@@ -330,39 +349,92 @@ bash -ec '
   shell_quote() { printf "%q" "$1"; }
   run_cw_session_script() { printf "%s\n" "$1"; }
   docker_store_run_guest core abc123
+  docker_store_run_guest core abc123 standard
 ' >"$TEST_TMP/guest.sh"
 sh -n "$TEST_TMP/guest.sh"
-printf 'docker-store test: production guest script parses with POSIX sh\n'
+printf 'docker-store test: production guest script parses with POSIX sh (containerd + standard)\n'
 # Execute the actual normal Docker phase with its session transport stubbed.
 # This catches an optional-only core check, wrong runtime default, or a skip
 # that still mutates Docker; it does not run a real container.
 cat >"$TEST_TMP/normal-fixture.sh" <<'FIXTURE'
 set -euo pipefail
 set --
+if [[ -n "${EXPLICIT_RUNTIME:-}" ]]; then
+  export EXPECTED_RUNTIME_CLASS="$EXPLICIT_RUNTIME"
+else
+  unset EXPECTED_RUNTIME_CLASS
+fi
 source "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
 ENV_ID=source123
-EXPECTED_RUNTIME_CLASS="$RUNTIME"
+if [[ -n "${RUNTIME:-}" ]]; then
+  EXPECTED_RUNTIME_CLASS="$RUNTIME"
+fi
+SMOKE_SKIP_KUBE="${SKIP_KUBE:-0}"
 SMOKE_SKIP_DOCKER="$SKIP_DOCKER"
-run_docker_store_core() { printf 'core\n' >>"$TEST_TMP/normal-events"; }
+run_docker_store_core() { printf 'core %s\n' "${1:-}" >>"$TEST_TMP/normal-events"; }
 run_cw_session_script() {
+  if [[ "$1" == *'/run/docker.sock'* && "$1" == *'printf "standard\n"'* ]]; then
+    printf 'probe\n' >>"$TEST_TMP/normal-events"
+    printf '%s\n' "${GUEST_DETECT:-commodity}"
+    return 0
+  fi
   printf 'session\n' >>"$TEST_TMP/normal-events"
   printf '%s\n' "$1" >>"$TEST_TMP/normal-guests"
 }
 run_docker_smoke
 FIXTURE
-for runtime in commodity confidential; do
+for runtime in commodity standard confidential; do
   : >"$TEST_TMP/normal-events"; : >"$TEST_TMP/normal-guests"
   RUNTIME="$runtime" SKIP_DOCKER=0 bash "$TEST_TMP/normal-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
   if [[ "$runtime" == commodity ]]; then
-    [[ "$(head -1 "$TEST_TMP/normal-events")" == core ]] || fail 'normal commodity phase did not run core first'
-    grep -q '^expected_driver=.*overlayfs'  "$TEST_TMP/normal-guests" || fail 'commodity driver is not overlayfs'
+    [[ "$(head -1 "$TEST_TMP/normal-events")" == 'core containerd' ]] || fail 'normal commodity phase did not run containerd core first'
+    grep -q '^expected_driver=.*overlayfs' "$TEST_TMP/normal-guests" || fail 'commodity driver is not overlayfs'
+    grep -q '^expected_runtime_class=.*commodity' "$TEST_TMP/normal-guests" || fail 'commodity runtime class mismatch'
+  elif [[ "$runtime" == standard ]]; then
+    [[ "$(head -1 "$TEST_TMP/normal-events")" == 'core standard' ]] || fail 'normal standard phase did not run standard core first'
+    grep -q '^expected_driver=.*overlay2' "$TEST_TMP/normal-guests" || fail 'standard driver is not overlay2'
+    grep -q '^expected_runtime_class=.*standard' "$TEST_TMP/normal-guests" || fail 'standard runtime class mismatch'
   else
-    ! grep -qx core "$TEST_TMP/normal-events" || fail 'confidential runtime ran modern commodity checks'
-    grep -q '^expected_driver=.*vfs'  "$TEST_TMP/normal-guests" || fail 'confidential driver was changed'
+    ! grep -q '^core' "$TEST_TMP/normal-events" || fail 'confidential runtime ran modern commodity checks'
+    grep -q '^expected_driver=.*vfs' "$TEST_TMP/normal-guests" || fail 'confidential driver was changed'
   fi
 done
+# Unset EXPECTED_RUNTIME_CLASS with SMOKE_SKIP_KUBE=1 detects a standard guest.
+: >"$TEST_TMP/normal-events"; : >"$TEST_TMP/normal-guests"
+RUNTIME='' SKIP_KUBE=1 GUEST_DETECT=standard SKIP_DOCKER=0 bash "$TEST_TMP/normal-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
+grep -qx 'core standard' "$TEST_TMP/normal-events" || fail 'auto-detected standard guest did not run standard core'
+grep -q '^expected_driver=.*overlay2' "$TEST_TMP/normal-guests" || fail 'auto-detected standard guest did not expect overlay2'
+# Explicit EXPECTED_RUNTIME_CLASS=commodity never auto-switches to standard (fails closed).
+: >"$TEST_TMP/normal-events"; : >"$TEST_TMP/normal-guests"
+EXPLICIT_RUNTIME=commodity RUNTIME='' SKIP_KUBE=1 GUEST_DETECT=standard SKIP_DOCKER=0 bash "$TEST_TMP/normal-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
+grep -qx 'core containerd' "$TEST_TMP/normal-events" || fail 'explicit commodity runtime switched to standard'
+grep -q '^expected_driver=.*overlayfs' "$TEST_TMP/normal-guests" || fail 'explicit commodity runtime changed expected driver'
 : >"$TEST_TMP/normal-events"
 RUNTIME=commodity SKIP_DOCKER=1 bash "$TEST_TMP/normal-fixture.sh" >"$TEST_TMP/out" 2>"$TEST_TMP/err"
 [[ ! -s "$TEST_TMP/normal-events" ]] || fail 'Docker skip still invoked guest/core'
-printf 'docker-store test: normal commodity, confidential and skip behavior passed (3 cases)\n'
-printf 'docker-store journey fixture tests: 41 passed\n'
+printf 'docker-store test: normal commodity, standard, confidential, auto-detect, explicit fail-closed and skip behavior passed (6 cases)\n'
+
+# Verify run_cw_session_script strips non-ASCII bytes from stderr and calls die on failure.
+rc=0
+bash -ec '
+  set --
+  source "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
+  TMPDIR_SMOKE="$TEST_TMP/work"
+  mkdir -p "$TMPDIR_SMOKE"
+  ENV_ID=source123
+  cw_with_timeout() {
+    printf "+ Started session app/sh \xc2\xb7 cloud\ndocker-store: unexpected Docker endpoint\n" >&2
+    return 1
+  }
+  run_cw_session_script "true"
+' >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
+[[ "$rc" == 1 ]] || fail "run_cw_session_script failure exited $rc, expected 1"
+grep -Fq '[runtime-smoke] ERROR: cw session script failed (exit 1, class=exit_1)' "$TEST_TMP/err" ||
+  fail "run_cw_session_script did not call die with classified error: $(<"$TEST_TMP/err")"
+python3 - "$TEST_TMP/err" <<'PYTEST'
+import pathlib, sys
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+assert raw.endswith(b"\n") and all(b == 10 or 32 <= b <= 126 for b in raw), f"non-ASCII stderr leaked: {raw!r}"
+PYTEST
+printf 'docker-store test: run_cw_session_script sanitizes stderr to ASCII and calls die on failure\n'
+printf 'docker-store journey fixture tests: 52 passed\n'

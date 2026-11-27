@@ -60,7 +60,12 @@ SMOKE_PREPARE_SECONDS=40
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
+EXPECTED_RUNTIME_CLASS_EXPLICIT=0
+if [[ -n "${EXPECTED_RUNTIME_CLASS:-}" ]]; then
+  EXPECTED_RUNTIME_CLASS_EXPLICIT=1
+fi
 EXPECTED_RUNTIME_CLASS="${EXPECTED_RUNTIME_CLASS:-commodity}"
+RESOLVED_DOCKER_RUNTIME_CLASS=""
 EXPECTED_DOCKER_MODE="${EXPECTED_DOCKER_MODE:-guest-dind}"
 DOCKER_STORE_FORK_ID=""
 DOCKER_STORE_FORK_NAME=""
@@ -3183,10 +3188,38 @@ discover_runtime_objects() {
   fi
 }
 
-run_cw_session_script() {
+run_cw_session_script_raw() {
   local script="$1"
   cw_with_timeout "$SMOKE_EXEC_TIMEOUT" \
     run --no-tty --in "$ENV_ID" -- sh -lc "$script"
+}
+
+run_cw_session_script() {
+  local script="$1"
+  local err_dir="${TMPDIR_SMOKE:-${TMPDIR:-/tmp}}"
+  local err_file status sanitized class
+  mkdir -p "$err_dir"
+  err_file="$(mktemp "$err_dir/cw-session-script.XXXXXX.err")"
+  if run_cw_session_script_raw "$script" 2>"$err_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ -s "$err_file" ]]; then
+    # Keep only printable ASCII and newlines so deploy's acceptance classifier
+    # never rejects the capture as non-ASCII / unclassified.
+    sanitized="$(LC_ALL=C tr -cd '\12\40-\176' <"$err_file")"
+    if [[ -n "$sanitized" ]]; then
+      printf '%s\n' "$sanitized" >&2
+    fi
+  fi
+  if ((status != 0)); then
+    class="$(cw_failure_class "$status" "$err_file")"
+    rm -f "$err_file"
+    SMOKE_LAST_CW_CLASS="$class"
+    die "cw session script failed (exit $status, class=$class)"
+  fi
+  rm -f "$err_file"
 }
 
 classify_coco_rest_isolation_result() {
@@ -3406,7 +3439,7 @@ SCRIPT
     chmod 0600 "$stdout_file" "$stderr_file"
 
     log "asserting the confidential workload cannot reach a guest CDH REST listener"
-    if run_cw_session_script "$script" >"$stdout_file" 2>"$stderr_file"; then
+    if run_cw_session_script_raw "$script" >"$stdout_file" 2>"$stderr_file"; then
       command_exit=0
     else
       command_exit=$?
@@ -3477,6 +3510,35 @@ SCRIPT
     die "CoCo test resource assertion failed"
 }
 
+resolve_docker_runtime_class() {
+  # When the caller explicitly pins EXPECTED_RUNTIME_CLASS (or sets a
+  # non-default runtime such as standard/confidential), honor it strictly so
+  # a runtime mismatch fails closed. Only when EXPECTED_RUNTIME_CLASS was left
+  # unset at the commodity default do we inspect the sandbox to detect a
+  # standard guest-local Docker layout.
+  if [[ "$EXPECTED_RUNTIME_CLASS_EXPLICIT" == "1" || "$EXPECTED_RUNTIME_CLASS" != "commodity" ]]; then
+    RESOLVED_DOCKER_RUNTIME_CLASS="$EXPECTED_RUNTIME_CLASS"
+    return 0
+  fi
+  if [[ -n "${TMPDIR_SMOKE:-}" && -f "$TMPDIR_SMOKE/pod.json" ]]; then
+    local pod_class
+    pod_class="$(jq -r '.spec.runtimeClassName // ""' "$TMPDIR_SMOKE/pod.json" 2>/dev/null || true)"
+    if [[ "$pod_class" == "standard" ]]; then
+      RESOLVED_DOCKER_RUNTIME_CLASS="standard"
+      return 0
+    fi
+  elif [[ "$SMOKE_SKIP_KUBE" == "1" ]]; then
+    local detected
+    # shellcheck disable=SC2016 # Evaluated inside the guest shell.
+    detected="$(run_cw_session_script 'if [ -z "${DOCKER_HOST:-}" ] && [ -S /run/docker.sock ]; then printf "standard\n"; else printf "commodity\n"; fi')"
+    if [[ "$detected" == "standard" ]]; then
+      RESOLVED_DOCKER_RUNTIME_CLASS="standard"
+      return 0
+    fi
+  fi
+  RESOLVED_DOCKER_RUNTIME_CLASS="$EXPECTED_RUNTIME_CLASS"
+}
+
 run_docker_smoke() {
   [[ "$SMOKE_SKIP_DOCKER" != "1" ]] || {
     log "skipping Docker guest smoke"
@@ -3488,10 +3550,17 @@ run_docker_smoke() {
   require_uint SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS "$SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS"
   require_bool01 SMOKE_DOCKER_OOM_STRESS "$SMOKE_DOCKER_OOM_STRESS"
 
-  if [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]]; then run_docker_store_core; fi
+  resolve_docker_runtime_class
+  local docker_runtime_class="$RESOLVED_DOCKER_RUNTIME_CLASS"
+  if [[ "$docker_runtime_class" != confidential ]]; then
+    run_docker_store_core "$(docker_store_expected_mode "$docker_runtime_class")"
+  fi
 
   local expected_driver=overlayfs
-  [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]] || expected_driver=vfs
+  case "$docker_runtime_class" in
+    confidential) expected_driver=vfs ;;
+    standard) expected_driver=overlay2 ;;
+  esac
   local docker_smoke_id common
   docker_smoke_id="${ENV_ID//-/}"
   docker_smoke_id="${docker_smoke_id:0:12}"
@@ -3505,6 +3574,7 @@ SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS=$SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS
 SMOKE_DOCKER_EGRESS_SMALL_URL=$(shell_quote "$SMOKE_DOCKER_EGRESS_SMALL_URL")
 SMOKE_DOCKER_EGRESS_LARGE_URL=$(shell_quote "$SMOKE_DOCKER_EGRESS_LARGE_URL")
 SMOKE_DOCKER_OOM_STRESS=$SMOKE_DOCKER_OOM_STRESS
+expected_runtime_class=$(shell_quote "$docker_runtime_class")
 expected_driver=$(shell_quote "$expected_driver")
 smoke_id=$(shell_quote "$docker_smoke_id")
 work="/tmp/codewire-runtime-smoke-\$smoke_id"
@@ -3558,12 +3628,20 @@ $body"
   run_docker_smoke_phase "preflight/build" "$(cat <<'SCRIPT'
 docker_smoke_cleanup
 mkdir -p "$work"
-test "$DOCKER_HOST" = "unix:///var/run/docker/docker.sock"
+if [ "$expected_runtime_class" = "standard" ]; then
+  test -z "${DOCKER_HOST:-}"
+  test -S /run/docker.sock
+else
+  test "$DOCKER_HOST" = "unix:///var/run/docker/docker.sock"
+fi
 docker version >/dev/null
 storage_driver="$(docker info --format "{{.Driver}}")"
 if [ "$storage_driver" != "$expected_driver" ]; then
   echo "expected guest dockerd storage driver $expected_driver, got ${storage_driver}" >&2
   exit 1
+fi
+if [ "$expected_runtime_class" = "standard" ]; then
+  test "$(docker info --format "{{.DockerRootDir}}")" = "/var/lib/docker"
 fi
 docker info --format "{{.ServerVersion}}" >/dev/null
 
@@ -4033,7 +4111,7 @@ if [ -f "$pidfile" ]; then
   rm -f "$pidfile"
 fi
 printf "app-preview-service-cleaned\n"'
-  run_cw_session_script "$stop_script" >/dev/null 2>&1 || true
+  run_cw_session_script_raw "$stop_script" >/dev/null 2>&1 || true
   [[ -z "$cleanup_failure" ]] || die "$cleanup_failure"
   [[ -z "$preview_failure" ]] || die "$preview_failure"
   if [[ "$SMOKE_ISOLATION_TIER" == "confidential" ]]; then
@@ -5588,8 +5666,8 @@ main() {
   require_bool01 SMOKE_RESIZE_GUEST "$SMOKE_RESIZE_GUEST"
   local requested_phase
   for requested_phase in "${SMOKE_ONLY_PHASES[@]}"; do
-    if [[ "$requested_phase" == docker-store && "$EXPECTED_RUNTIME_CLASS" != commodity ]]; then
-      die "docker-store lifecycle journey requires the commodity runtime"
+    if [[ "$requested_phase" == docker-store && "$EXPECTED_RUNTIME_CLASS" != commodity && "$EXPECTED_RUNTIME_CLASS" != standard ]]; then
+      die "docker-store lifecycle journey requires the commodity or standard runtime"
     fi
     if [[ "$requested_phase" == docker-store && ( -n "$SMOKE_EXISTING_ENV_ID" || "$SMOKE_KEEP_ENV" != 0 ) ]]; then
       die "docker-store lifecycle journey requires a fresh disposable environment; --existing-env and --keep are unsupported"

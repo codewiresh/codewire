@@ -375,8 +375,8 @@ async function accountHome(page: Page, slug: string): Promise<void> {
   }
   if (await card.locator("dl.cw-stat-grid").count()) {
     await expect(card.locator("dl.cw-stat-grid dt")).toHaveText(["Balance", "This month", "Running"]);
-    // Two decimals, "< €0.01" under a cent, and ∞ (named Unlimited) for an Unlimited organization (#4464).
-    const amount = /^(?:-?€\d+\.\d{2}|< €0\.01|> -€0\.01)$/;
+    // Two decimals, "< $0.01" under a cent, and ∞ (named Unlimited) for an Unlimited organization (#4464).
+    const amount = /^(?:-?\$\d+\.\d{2}|< \$0\.01|> -\$0\.01)$/;
     const balance = card.locator("dl.cw-stat-grid dd").nth(0);
     if (await balance.getAttribute("title") === "Unlimited") await expect(balance).toHaveText("∞Unlimited");
     else await expect(balance).toHaveText(amount);

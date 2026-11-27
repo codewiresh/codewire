@@ -58,13 +58,15 @@ impl SessionPlace {
         &self,
         session: &EnvironmentSessionView,
         agent: Option<NativeAgent>,
+        style: crate::output::Style,
     ) -> String {
         let what = match agent {
             Some(agent) => format!("{} in", agent.title()),
             None => "session".to_owned(),
         };
+        let sep = style.separator();
         format!(
-            "Started {what} {}/{} · {}",
+            "Started {what} {}/{}{sep}{}",
             self.environment,
             session_reference(session),
             self.location
@@ -72,9 +74,14 @@ impl SessionPlace {
     }
 
     /// `Restarted session app/coding · local VM`.
-    pub(super) fn restarted(&self, session: &EnvironmentSessionView) -> String {
+    pub(super) fn restarted(
+        &self,
+        session: &EnvironmentSessionView,
+        style: crate::output::Style,
+    ) -> String {
+        let sep = style.separator();
         format!(
-            "Restarted session {}/{} · {}",
+            "Restarted session {}/{}{sep}{}",
             self.environment,
             session_reference(session),
             self.location
@@ -96,10 +103,11 @@ impl SessionPlace {
         };
         let (placement, environment) = (self.placement, &self.environment);
         let reference = session_reference(session);
+        let sep = style.separator();
         style.paint(
             crate::output::Role::Dim,
             &format!(
-                "{ended} · Output: cw {placement}logs {environment} --session {reference} · Restart: cw {placement}restart {environment} --session {reference}"
+                "{ended}{sep}Output: cw {placement}logs {environment} --session {reference}{sep}Restart: cw {placement}restart {environment} --session {reference}"
             ),
         )
     }
@@ -111,10 +119,11 @@ impl SessionPlace {
         session: &EnvironmentSessionView,
         style: crate::output::Style,
     ) -> String {
+        let sep = style.separator();
         style.paint(
             crate::output::Role::Dim,
             &format!(
-                "Detach: Ctrl-B, then d · Reconnect: {}",
+                "Detach: Ctrl-B, then d{sep}Reconnect: {}",
                 self.reconnect(session)
             ),
         )
@@ -217,9 +226,10 @@ mod tests {
     /// (#6397).
     #[test]
     fn an_environment_on_a_host_is_its_hosts_vm_with_no_placement_flag() {
+        let unicode = crate::output::Style::new(false, crate::output::Charset::Unicode);
         let place = SessionPlace::platform("h4-env", Some("cw-hosts-h4"));
         assert_eq!(
-            place.started(&session("sh"), None),
+            place.started(&session("sh"), None, unicode),
             "Started session h4-env/sh · VM on host cw-hosts-h4"
         );
         assert_eq!(
@@ -232,12 +242,39 @@ mod tests {
         );
         let cloud = SessionPlace::platform("app", None);
         assert_eq!(
-            cloud.started(&session("sh"), None),
+            cloud.started(&session("sh"), None, unicode),
             "Started session app/sh · cloud"
         );
         assert_eq!(
             cloud.reconnect(&session("sh")),
             "cw --cloud attach app --session sh"
         );
+    }
+
+    #[test]
+    fn ascii_charset_emits_only_ascii_separators_for_session_messages() {
+        let ascii = crate::output::Style::new(false, crate::output::Charset::Ascii);
+        let cloud = SessionPlace::platform("app", None);
+        let mut s = session("sh");
+        s.exit_code = Some(1);
+        let lines = [
+            cloud.started(&s, None, ascii),
+            cloud.restarted(&s, ascii),
+            cloud.ended_hint(&s, ascii),
+            cloud.detach_hint(&s, ascii),
+        ];
+        assert_eq!(lines[0], "Started session app/sh - cloud");
+        assert_eq!(lines[1], "Restarted session app/sh - cloud");
+        assert_eq!(
+            lines[2],
+            "Exited with status 1 - Output: cw --cloud logs app --session sh - Restart: cw --cloud restart app --session sh"
+        );
+        assert_eq!(
+            lines[3],
+            "Detach: Ctrl-B, then d - Reconnect: cw --cloud attach app --session sh"
+        );
+        for line in &lines {
+            assert!(line.is_ascii(), "expected pure ASCII line, got: {line}");
+        }
     }
 }

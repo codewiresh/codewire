@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # Product CLI orchestration shared with the existing commodity smoke.
 
+docker_store_expected_mode() {
+  local runtime_class="${1:-${RESOLVED_DOCKER_RUNTIME_CLASS:-${EXPECTED_RUNTIME_CLASS:-commodity}}}"
+  case "$runtime_class" in
+    standard) printf 'standard\n' ;;
+    *) printf 'containerd\n' ;;
+  esac
+}
+
 docker_store_run_guest() {
-  local action="$1" id="$2"
+  local action="$1" id="$2" mode="${3:-$(docker_store_expected_mode)}"
   local script
   script="$(cat "$ROOT/scripts/runtime/dev/docker-store-guest.sh")
 set -eu
-docker_store_guest $(shell_quote "$action") $(shell_quote "$id") containerd"
+docker_store_guest $(shell_quote "$action") $(shell_quote "$id") $(shell_quote "$mode")"
   run_cw_session_script "$script"
 }
 
 run_docker_store_core() {
   local id="${ENV_ID//-/}"
-  docker_store_run_guest core "${id:0:20}"
+  local mode="${1:-$(docker_store_expected_mode)}"
+  docker_store_run_guest core "${id:0:20}" "$mode"
 }
 
 docker_store_wait_stopped() {

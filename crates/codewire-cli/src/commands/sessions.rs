@@ -1806,12 +1806,16 @@ async fn launch_run(
         println!("{}", serde_json::to_string_pretty(&session)?);
         return Ok(());
     }
+    let style = if args.detach {
+        caps.stdout_style()
+    } else {
+        caps.stderr_style()
+    };
     let started = match restart {
-        Some(_) => place.restarted(&session),
-        None => place.started(&session, agent),
+        Some(_) => place.restarted(&session, style),
+        None => place.started(&session, agent, style),
     };
     if args.detach {
-        let style = caps.stdout_style();
         println!("{} {started}", style.status(crate::output::Status::Done));
         println!(
             "{} {}",
@@ -1822,7 +1826,6 @@ async fn launch_run(
     }
     let interactive =
         session.pty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let style = caps.stderr_style();
     eprintln!("{} {started}", style.status(crate::output::Status::Done));
     if interactive {
         eprintln!("  {}", place.detach_hint(&session, style));
@@ -3567,15 +3570,15 @@ mod run_output_tests {
             place.reconnect(&coding),
             "cw --local attach app --session coding"
         );
+        let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
         assert_eq!(
-            place.started(&coding, Some(NativeAgent::Claude)),
+            place.started(&coding, Some(NativeAgent::Claude), plain),
             "Started Claude Code in app/coding · local VM"
         );
         assert_eq!(
-            place.started(&coding, None),
+            place.started(&coding, None, plain),
             "Started session app/coding · local VM"
         );
-        let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
         assert_eq!(
             place.detach_hint(&coding, plain),
             "Detach: Ctrl-B, then d · Reconnect: cw --local attach app --session coding"

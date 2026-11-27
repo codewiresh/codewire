@@ -5,13 +5,25 @@
 docker_store_fail() { printf 'docker-store: %s\n' "$*" >&2; exit 1; }
 
 docker_store_backend() {
-  test "${DOCKER_HOST:-}" = unix:///var/run/docker/docker.sock || docker_store_fail 'unexpected Docker endpoint'
+  case "$ds_mode" in
+    containerd)
+      test "${DOCKER_HOST:-}" = unix:///var/run/docker/docker.sock || docker_store_fail 'unexpected Docker endpoint'
+      ;;
+    standard)
+      test -z "${DOCKER_HOST:-}" || docker_store_fail 'unexpected Docker endpoint'
+      test -S /run/docker.sock || docker_store_fail 'missing guest Docker socket'
+      ;;
+    *) docker_store_fail 'invalid expected store' ;;
+  esac
   test "$(docker context show)" = default || docker_store_fail 'unexpected Docker context'
   driver=$(docker info --format '{{.Driver}}')
   case "$ds_mode:$driver" in
     containerd:overlayfs)
       snapshotter=$(docker info --format '{{range .DriverStatus}}{{if eq (index . 0) "driver-type"}}{{index . 1}}{{end}}{{end}}')
       test "$snapshotter" = io.containerd.snapshotter.v1 || docker_store_fail 'overlayfs is not the containerd image store'
+      test "$(docker info --format '{{.DockerRootDir}}')" = /var/lib/docker || docker_store_fail 'unexpected Docker data root'
+      ;;
+    standard:overlay2)
       test "$(docker info --format '{{.DockerRootDir}}')" = /var/lib/docker || docker_store_fail 'unexpected Docker data root'
       ;;
     *) docker_store_fail "expected $ds_mode store, observed $driver" ;;
@@ -126,7 +138,7 @@ docker_store_cleanup() {
 docker_store_guest() {
   action=$1; ds_id=$2; ds_mode=$3
   case "$ds_id" in ''|*[!a-z0-9]*) docker_store_fail 'invalid fixture identity' ;; esac
-  case "$ds_mode" in containerd) ;; *) docker_store_fail 'invalid expected store' ;; esac
+  case "$ds_mode" in containerd|standard) ;; *) docker_store_fail 'invalid expected store' ;; esac
   ds_base='registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb'
   ds_work="/workspace/.codewire/docker-journey-$ds_id"
   ds_image="codewire-docker-journey:$ds_id"
