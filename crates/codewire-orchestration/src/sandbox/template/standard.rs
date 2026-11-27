@@ -12,9 +12,9 @@ use codewire_daemon_proto::{
     POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_EGRESS_MODE_BROKER, POD_RUNTIME_EGRESS_MODE_ENV,
     POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV, POD_RUNTIME_IMAGE_DISK_ID_ENV,
     POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV, POD_RUNTIME_PLATFORM_PEERS_ENV,
-    POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_VCPUS_ENV,
-    POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING, POD_RUNTIME_VM_STATE_NEW,
-    POD_RUNTIME_WORKSPACE_IMAGE_ENV, POD_RUNTIME_WORKSPACE_INIT_ENV,
+    POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_UDP_PEERS_ENV,
+    POD_RUNTIME_VCPUS_ENV, POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING,
+    POD_RUNTIME_VM_STATE_NEW, POD_RUNTIME_WORKSPACE_IMAGE_ENV, POD_RUNTIME_WORKSPACE_INIT_ENV,
     POD_RUNTIME_WORKSPACE_INIT_IMAGE, POD_RUNTIME_WORKSPACE_INIT_SYSTEMD,
 };
 
@@ -298,6 +298,17 @@ pub(super) fn validate(opts: &TemplateOpts) -> anyhow::Result<()> {
             "a standard workspace reaches its platform peers by literal IPv4 address and port; {peer:?} is not one"
         );
     }
+    const MAX_UDP_PEERS: usize = 8;
+    anyhow::ensure!(
+        egress.udp_relay_peers.len() <= MAX_UDP_PEERS,
+        "a standard workspace takes at most {MAX_UDP_PEERS} UDP relay peers"
+    );
+    for peer in &egress.udp_relay_peers {
+        anyhow::ensure!(
+            codewire_egress_policy::platform_peer(peer).is_ok(),
+            "a standard workspace reaches its UDP relay peers by literal IPv4 address and port; {peer:?} is not one"
+        );
+    }
     Ok(())
 }
 
@@ -396,7 +407,7 @@ fn settings(
     runtime: &StandardRuntime,
     egress: &HostedEgressTemplate,
 ) -> Vec<Value> {
-    [
+    let mut entries = vec![
         (
             POD_RUNTIME_VCPUS_ENV,
             vcpus(opts.cpu_millicores).to_string(),
@@ -437,10 +448,14 @@ fn settings(
             POD_RUNTIME_PLATFORM_PEERS_ENV,
             platform_peers(egress).join(","),
         ),
-    ]
-    .into_iter()
-    .map(|(name, value)| json!({ "name": name, "value": value }))
-    .collect()
+    ];
+    if !egress.udp_relay_peers.is_empty() {
+        entries.push((POD_RUNTIME_UDP_PEERS_ENV, egress.udp_relay_peers.join(",")));
+    }
+    entries
+        .into_iter()
+        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .collect()
 }
 
 /// The JSON Patch operations that turn a `standard` Sandbox's rendered

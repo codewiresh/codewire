@@ -166,6 +166,49 @@ pub(super) fn parse_platform_peers(value: &str) -> Result<Vec<SocketAddrV4>, Pod
         .collect()
 }
 
+/// `CODEWIRE_POD_UDP_PEERS`: optional comma-separated literal `IPv4:port`
+/// tailnet UDP peers bridged on Pod `:31000` (#6637). Empty means the bridge
+/// stays off and `:31000` is never bound. Non-empty strings fail closed on
+/// empty tokens, special/invalid IPv4 addresses, port 0, own interface IPs,
+/// or more than [`MAX_UDP_BRIDGE_PEERS`] unique entries.
+pub(super) fn parse_udp_peers(value: &str) -> Result<Vec<SocketAddrV4>, PodRuntimeError> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let own = interface_addresses()?;
+    parse_udp_peers_with_own(value, &own)
+}
+
+pub(super) fn parse_udp_peers_with_own(
+    value: &str,
+    own: &[Ipv4Addr],
+) -> Result<Vec<SocketAddrV4>, PodRuntimeError> {
+    use codewire_daemon_proto::POD_RUNTIME_UDP_PEERS_ENV;
+    use codewire_egress_worker::session::MAX_UDP_BRIDGE_PEERS;
+
+    let invalid = || PodRuntimeError::Setting(POD_RUNTIME_UDP_PEERS_ENV);
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parsed = Vec::new();
+    for peer in value.split(',') {
+        if peer.is_empty() {
+            return Err(invalid());
+        }
+        let address = codewire_egress_policy::platform_peer(peer).map_err(|_| invalid())?;
+        if own.contains(address.ip()) {
+            return Err(invalid());
+        }
+        parsed.push(address);
+    }
+    parsed.sort();
+    parsed.dedup();
+    if parsed.len() > MAX_UDP_BRIDGE_PEERS {
+        return Err(invalid());
+    }
+    Ok(parsed)
+}
+
 /// The IPv4 addresses on this network namespace's interfaces.
 fn interface_addresses() -> io::Result<Vec<Ipv4Addr>> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();

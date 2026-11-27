@@ -304,6 +304,13 @@ HOSTED_EGRESS_BROKER_AUDIENCES = ("codewire.internal.egress.v1",)
 HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "CODEWIRE_WORKSPACE_BINDING_ADDR",
     "CODEWIRE_API_ADDR", "CODEWIRE_MESH_ADDR", "CODEWIRE_DERP_ADDR", "CODEWIRE_CLUSTER_DNS_IP",
 )
+# The VM settings a standard warm pool's workspace container may set as literals.
+STANDARD_POOL_ENVIRONMENT = (
+    "CODEWIRE_VM_VCPUS", "CODEWIRE_VM_MEMORY_MIB", "CODEWIRE_VM_STATE_DISK_MIB",
+    "CODEWIRE_VM_DOCKER_DISK_MIB", "CODEWIRE_VM_STATE", "CODEWIRE_VM_EGRESS_MODE",
+    "CODEWIRE_WORKSPACE_IMAGE", "CODEWIRE_WORKSPACE_INIT", "CODEWIRE_IMAGE_DISK_ID",
+    "CODEWIRE_IMAGE_DISK_BUILD_ID", "CODEWIRE_POD_PLATFORM_PEERS", "CODEWIRE_POD_UDP_PEERS",
+)
 # The VM classes the privileged TUN init may run under, on every target: Kind
 # adds diagnostic runtimes to runtimeClasses, never to these.
 HOSTED_EGRESS_VM_RUNTIME_CLASSES = ("commodity", "commodity-32g")
@@ -911,7 +918,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 for name, values in [("brokerEnvironment", HOSTED_EGRESS_BROKER_ENVIRONMENT),
                                      ("brokerRequiredEnvironment", HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT),
                                      ("brokerAudiences", HOSTED_EGRESS_BROKER_AUDIENCES),
-                                     ("vmRuntimeClasses", HOSTED_EGRESS_VM_RUNTIME_CLASSES)]:
+                                     ("vmRuntimeClasses", HOSTED_EGRESS_VM_RUNTIME_CLASSES),
+                                     ("standardPoolEnvironment", STANDARD_POOL_ENVIRONMENT)]:
                     found = re.search(rf"- expression: '?(\[[^\]]*\])'? name: {name} ", normalized)
                     if not found or found.group(1) != cel_list(values):
                         output.append(f"{label}: {policy_name} {name} must be exactly {cel_list(values)}: "

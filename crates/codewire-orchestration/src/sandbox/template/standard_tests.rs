@@ -42,6 +42,7 @@ fn egress() -> HostedEgressTemplate {
         gateway_addr: "10.44.0.43:443".into(),
         derp_addr: "derp.codewire-dev.sh=10.44.0.84:8443".into(),
         cluster_dns_ip: "10.44.0.10".into(),
+        udp_relay_peers: vec!["198.51.100.35:41641".into()],
     }
 }
 
@@ -210,6 +211,7 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
             "CODEWIRE_POD_PLATFORM_PEERS",
             "10.44.0.89:8089,10.44.0.87:8087,10.44.0.43:443,10.44.0.84:8443",
         ),
+        ("CODEWIRE_POD_UDP_PEERS", "198.51.100.35:41641"),
         // The daemon's own, as a Kata broker workspace gets them.
         ("CODEWIRE_DERP_ADDR", "derp.codewire-dev.sh=10.44.0.84:8443"),
         ("CODEWIRE_EGRESS_STREAM_ADDR", "10.44.0.89:8089"),
@@ -223,6 +225,32 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
     );
     // Docker is the guest's own.
     assert!(!env.contains_key("DOCKER_HOST"));
+
+    // Empty udp_relay_peers omits CODEWIRE_POD_UDP_PEERS cleanly.
+    let mut no_udp = opts();
+    no_udp
+        .hosted_egress
+        .as_mut()
+        .unwrap()
+        .udp_relay_peers
+        .clear();
+    let no_udp_env = self::env(&render_sandbox_template(NAMESPACE, &no_udp));
+    assert!(!no_udp_env.contains_key("CODEWIRE_POD_UDP_PEERS"));
+
+    // Invalid or over-cap udp_relay_peers fail template validation closed.
+    for bad in [
+        vec!["127.0.0.1:41641".to_owned()],
+        vec!["relay.example.invalid:41641".to_owned()],
+        vec!["198.51.100.35:0".to_owned()],
+        (1..=9).map(|n| format!("198.51.100.{n}:41641")).collect(),
+    ] {
+        let mut invalid = opts();
+        invalid.hosted_egress.as_mut().unwrap().udp_relay_peers = bad.clone();
+        assert!(
+            invalid.validate_standard_runtime().is_err(),
+            "must refuse {bad:?}"
+        );
+    }
 }
 
 #[test]

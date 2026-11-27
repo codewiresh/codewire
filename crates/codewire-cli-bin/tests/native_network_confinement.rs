@@ -285,6 +285,7 @@ fn product_worker_bootstrap(network_key: &NetworkKey) -> Vec<u8> {
         &BROKER_KEY,
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
+        &[],
         codewire_egress_policy::CompiledPolicy::open().digest(),
     )
     .unwrap()

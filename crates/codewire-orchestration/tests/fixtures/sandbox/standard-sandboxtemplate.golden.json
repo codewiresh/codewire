@@ -240,6 +240,10 @@
               {
                 "name": "CODEWIRE_POD_PLATFORM_PEERS",
                 "value": "10.44.0.89:8089,10.44.0.87:8087,10.44.0.43:443,10.44.0.84:8443"
+              },
+              {
+                "name": "CODEWIRE_POD_UDP_PEERS",
+                "value": "198.51.100.35:41641"
               }
             ],
             "image": "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",

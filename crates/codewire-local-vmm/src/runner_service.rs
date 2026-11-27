@@ -957,6 +957,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 cw_runtime_moved_from_generation,
                 image_disk: None,
                 network_policy,
+                udp_peers: Vec::new(),
                 intercepts,
                 credential_placeholders,
                 checkpoint,

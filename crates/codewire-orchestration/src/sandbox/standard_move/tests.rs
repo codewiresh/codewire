@@ -26,6 +26,7 @@ fn hosted_egress() -> HostedEgressTemplate {
         gateway_addr: "10.44.0.43:443".into(),
         derp_addr: "derp.example.test=10.44.0.84:8443".into(),
         cluster_dns_ip: "10.44.0.10".into(),
+        udp_relay_peers: Vec::new(),
     }
 }
 

@@ -88,8 +88,9 @@ use crate::mesh_transport::{MeshTransportError, receive_mesh_ingress_submissions
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
-    decode_worker_startup_status, encode_product_worker_bootstrap, encode_worker_bootstrap,
-    send_mesh_ingress_descriptor, send_worker_broker_descriptor, send_worker_network_descriptor,
+    WORKER_UDP_BRIDGE_READY_MESSAGE, decode_worker_startup_status, encode_product_worker_bootstrap,
+    encode_worker_bootstrap, send_mesh_ingress_descriptor, send_worker_broker_descriptor,
+    send_worker_network_descriptor, send_worker_udp_bridge_descriptor,
 };
 use crate::state::{
     MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
@@ -127,6 +128,7 @@ use disk_admission::{
 use mesh_ingress_pass::take_mesh_ingress_receiver_exit;
 mod network_worker_spawn;
 mod stage_times;
+mod udp_bridge;
 mod worker_descriptors;
 mod worker_frames;
 #[cfg(target_os = "linux")]
@@ -204,6 +206,8 @@ pub struct CreateVmRequest {
     pub image_disk: Option<ImageDiskAttachment>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
+    /// Optional literal `IPv4:port` tailnet UDP peers bridged on Pod `:31000` (#6637).
+    pub udp_peers: Vec<std::net::SocketAddrV4>,
     /// The names this boot intercepts through its TLS front door (#3999);
     /// empty, the default, intercepts nothing.
     pub intercepts: InterceptSet,
@@ -1578,6 +1582,7 @@ impl RunningVm {
                 mesh: self.request.mesh.as_ref(),
                 mesh_credential_roots,
                 policy: &self.request.network_policy,
+                udp_peers: &self.request.udp_peers,
                 // Empty, the default, binds nothing (#3999).
                 intercepts: self.request.intercepts.clone(),
                 hosted_broker_network: self.hosted_egress
@@ -2104,6 +2109,8 @@ struct NetworkStackLaunch<'a> {
     mesh_credential_roots: Option<(&'a Path, &'a Path)>,
     /// The policy the egress broker enforces and the worker binds.
     policy: &'a CompiledPolicy,
+    /// Optional literal `IPv4:port` tailnet UDP peers bridged on Pod `:31000` (#6637).
+    udp_peers: &'a [std::net::SocketAddrV4],
     /// Interception bindings (#3999); empty means off. With any, the broker
     /// gets a hand-off socket to the front door and these bindings before it
     /// is ready.
@@ -2122,6 +2129,7 @@ struct NetworkWorkerProcess {
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
     host_port_commands: Option<tokio::sync::mpsc::Sender<HostPortCommand>>,
     mesh_transport: Option<MeshTransportProcess>,
+    udp_bridge: Option<udp_bridge::HostUdpBridge>,
     egress_status: egress_status::EgressStatusCell,
 }
 
@@ -2179,6 +2187,7 @@ impl NetworkWorkerStartup {
         mut self,
         ingress_control: Option<tokio::net::UnixStream>,
         mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
+        udp_bridge: Option<udp_bridge::HostUdpBridge>,
     ) -> NetworkWorkerProcess {
         NetworkWorkerProcess {
             child: self
@@ -2197,6 +2206,7 @@ impl NetworkWorkerStartup {
             egress_status: Default::default(),
             host_port_commands: None,
             mesh_transport: None,
+            udp_bridge,
         }
     }
 }
@@ -2326,6 +2336,7 @@ async fn stop_network_worker_process_inner(
     }
     drop(worker.ingress_control.take());
     drop(worker.mesh_ingress_key.take());
+    drop(worker.udp_bridge.take());
     if worker
         .child
         .try_wait()
@@ -4808,6 +4819,7 @@ mod tests {
             checkpoint: None,
             image_disk: None,
             network_policy: CompiledPolicy::open(),
+            udp_peers: Vec::new(),
             intercepts: InterceptSet::default(),
             credential_placeholders: Default::default(),
             vm_id: Uuid::new_v4(),
@@ -5263,6 +5275,7 @@ mod tests {
             mesh_ingress_key: None,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            udp_bridge: None,
             egress_status: Default::default(),
             host_port_commands: None,
             mesh_transport: Some(MeshTransportProcess {

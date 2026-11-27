@@ -222,6 +222,7 @@ fn template_from(
             .unwrap_or_default()
     };
     let derp = link(DERP_LINK)?;
+    let udp_relay_peers = udp_relay_peers_from(&get)?;
     Ok(Some(HostedEgressTemplate {
         stream_addr: addr(link(STREAM_LINK)?),
         binding_addr: addr(link(BINDING_LINK)?),
@@ -233,7 +234,55 @@ fn template_from(
             .map(|(ip, port)| format!("{derp_host}={ip}:{port}"))
             .unwrap_or_default(),
         cluster_dns_ip: ipv4(CLUSTER_DNS_IP)?.to_string(),
+        udp_relay_peers,
     }))
+}
+
+/// Optional literal `IPv4:port` tailnet UDP relay endpoints for `standard`
+/// Pods (`CODEWIRE_POD_UDP_PEERS`, #6637), read from the runtime transport
+/// zones registry (`peer_relay.public_endpoints`) or fallback
+/// `CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS`. Empty when neither is configured.
+fn udp_relay_peers_from(get: &impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<String>> {
+    const TRANSPORT_ZONES_KEY: &str = "CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON";
+    const ADVERTISE_ADDRS_KEY: &str = "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS";
+    const MAX_UDP_RELAY_PEERS: usize = 8;
+
+    let raw_peers: Vec<String> = if let Some(zones_json) = set(get, TRANSPORT_ZONES_KEY) {
+        let catalog = crate::runtime_transport::parse_catalog(&zones_json)
+            .map_err(|error| anyhow::anyhow!("{TRANSPORT_ZONES_KEY} is invalid: {error}"))?;
+        catalog
+            .zones
+            .into_iter()
+            .filter(|zone| zone.enabled)
+            .filter_map(|zone| zone.peer_relay)
+            .flat_map(|relay| relay.public_endpoints)
+            .collect()
+    } else if let Some(advertise) = set(get, ADVERTISE_ADDRS_KEY) {
+        advertise
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        return Ok(Vec::new());
+    };
+
+    let mut parsed = Vec::with_capacity(raw_peers.len());
+    for peer in &raw_peers {
+        let address = codewire_egress_policy::platform_peer(peer).map_err(|_| {
+            anyhow::anyhow!("tailnet UDP relay peer {peer:?} must be a canonical literal IPv4:port")
+        })?;
+        parsed.push(address);
+    }
+    parsed.sort();
+    parsed.dedup();
+    anyhow::ensure!(
+        parsed.len() <= MAX_UDP_RELAY_PEERS,
+        "at most {MAX_UDP_RELAY_PEERS} tailnet UDP relay peers are allowed, found {}",
+        parsed.len()
+    );
+    Ok(parsed.into_iter().map(|addr| addr.to_string()).collect())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -410,8 +459,43 @@ mod tests {
                 gateway_addr: "10.44.0.43:443".into(),
                 derp_addr: "derp.codewire-dev.sh=10.44.0.84:8443".into(),
                 cluster_dns_ip: "10.44.0.10".into(),
+                udp_relay_peers: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn udp_relay_peers_reads_transport_zones_and_advertise_fallback_and_fails_closed() {
+        let mut from_zones = on();
+        from_zones.insert(
+            "CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON",
+            r#"{"version":1,"zones":[{"name":"z1","runtime_region":"dev-eu","peer_relay":{"public_endpoints":["203.0.113.40:41641","198.51.100.35:41641"],"allocator_url":"https://codewire-udp-relay:8097/internal/udp-relay/allocations","bind_addrs":["codewire-udp-relay.dev.svc.cluster.local:41641"]}}]}"#,
+        );
+        assert_eq!(
+            read(&from_zones).unwrap().unwrap().udp_relay_peers,
+            vec!["198.51.100.35:41641", "203.0.113.40:41641"]
+        );
+
+        let mut from_adv = on();
+        from_adv.insert(
+            "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS",
+            "198.51.100.35:41641,198.51.100.35:41641",
+        );
+        assert_eq!(
+            read(&from_adv).unwrap().unwrap().udp_relay_peers,
+            vec!["198.51.100.35:41641"]
+        );
+
+        let mut bad_loopback = on();
+        bad_loopback.insert("CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS", "127.0.0.1:41641");
+        assert!(read(&bad_loopback).is_err());
+
+        let mut bad_hostname = on();
+        bad_hostname.insert(
+            "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS",
+            "relay.example.invalid:41641",
+        );
+        assert!(read(&bad_hostname).is_err());
     }
 
     #[test]

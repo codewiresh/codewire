@@ -319,6 +319,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         &broker_key,
         &mesh_ingress_key,
         &[mesh_ingress_port],
+        &[],
         codewire_egress_policy::CompiledPolicy::open().digest(),
     )
     .unwrap();

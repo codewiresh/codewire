@@ -36,7 +36,8 @@ pub use crate::session::{
 use codewire_network_session::SelfCheckFailure;
 
 use crate::session::{
-    InboundGuestStream, NetworkSessionError, run_network_session,
+    InboundGuestStream, NetworkSessionError, UdpBridgeAttachment, run_network_session,
+    run_network_session_with_channels as run_portable_network_session_with_channels,
     run_network_session_with_ingress as run_portable_network_session_with_ingress,
 };
 #[cfg(test)]
@@ -1328,6 +1329,39 @@ where
         (codewire_network_session::SessionLimits::LOCAL, addresses),
         broker,
         inbound,
+        ready,
+    )
+    .await
+    .map_err(NetworkWorkerError::from)
+}
+
+/// [`run_host_session_with_ingress`] plus an optional host-side tailnet UDP
+/// `:31000` bridge (#6637).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_host_session_with_channels<S, B, R>(
+    stream: S,
+    key: NetworkKey,
+    vm_id: Uuid,
+    generation: u64,
+    addresses: SessionAddresses,
+    broker: Arc<B>,
+    inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    udp_bridge: Option<UdpBridgeAttachment>,
+    ready: R,
+) -> Result<(), NetworkWorkerError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    B: EgressBroker,
+    R: FnOnce() -> io::Result<()> + Send,
+{
+    run_portable_network_session_with_channels(
+        stream,
+        key,
+        (vm_id, generation),
+        (codewire_network_session::SessionLimits::LOCAL, addresses),
+        broker,
+        inbound,
+        udp_bridge,
         ready,
     )
     .await

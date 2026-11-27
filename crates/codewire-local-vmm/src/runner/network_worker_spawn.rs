@@ -36,6 +36,7 @@ pub(super) async fn spawn_network_worker_process(
                     .mesh
                     .map(|attachment| attachment.guest_ports.as_slice())
                     .unwrap_or_default(),
+                context.udp_peers,
                 context.policy.digest(),
             )
             .map(|bytes| Zeroizing::new(bytes.to_vec())),
@@ -149,6 +150,48 @@ pub(super) async fn spawn_network_worker_process(
         }
     }
 
+    let host_udp_bridge = if product_worker && !context.udp_peers.is_empty() {
+        let (runner_end, worker_end) =
+            StdUnixStream::pair().map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+        runner_end
+            .set_nonblocking(true)
+            .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+        let runner_end = tokio::net::UnixStream::from_std(runner_end)
+            .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
+        let bridge =
+            match udp_bridge::HostUdpBridge::bind_pod_port(runner_end, context.udp_peers.to_vec())
+                .await
+            {
+                Ok(bridge) => bridge,
+                Err(_) => {
+                    reap_failed_network_worker_startup(&mut startup).await?;
+                    return Err(RunnerError::NetworkWorkerBootstrap);
+                }
+            };
+        let status = pass_to_worker(
+            &mut startup,
+            &mut bootstrap,
+            vec![worker_end],
+            context.deadline,
+            send_worker_udp_bridge_descriptor,
+        )
+        .await?;
+        if status.as_slice() != WORKER_UDP_BRIDGE_READY_MESSAGE {
+            drop(bridge);
+            if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
+                decode_worker_startup_status(&status)
+            {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(RunnerError::NetworkWorkerStartup(failure));
+            }
+            reap_failed_network_worker_startup(&mut startup).await?;
+            return Err(RunnerError::NetworkWorkerBootstrap);
+        }
+        Some(bridge)
+    } else {
+        None
+    };
+
     let network = loop {
         match startup.child_mut().try_wait() {
             Ok(Some(status)) => return Err(network_worker_exit_error(status)),
@@ -209,7 +252,7 @@ pub(super) async fn spawn_network_worker_process(
         }
     }
     let ingress_control = product_worker.then_some(bootstrap);
-    Ok(startup.disarm(ingress_control, mesh_ingress_key))
+    Ok(startup.disarm(ingress_control, mesh_ingress_key, host_udp_bridge))
 }
 
 /// The worker's command and identity, and in broker mode the flag that gives

@@ -372,6 +372,10 @@ pub struct HostedEgressTemplate {
     /// The cluster DNS Service's IPv4 address (`CODEWIRE_CLUSTER_DNS_IP`),
     /// for the self-check's DNS probe; the Pod itself resolves nothing.
     pub cluster_dns_ip: String,
+    /// Explicit literal `IPv4:port` tailnet UDP relay endpoints
+    /// (`CODEWIRE_POD_UDP_PEERS`, #6637). Empty leaves the host UDP `:31000`
+    /// bridge off on `standard` Pods.
+    pub udp_relay_peers: Vec<String>,
 }
 
 /// The public gateway's proxy Pods: selected by the gateway that owns them,

@@ -299,6 +299,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         &broker_key,
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
+        &[],
         codewire_egress_policy::CompiledPolicy::open().digest(),
     )
     .unwrap();

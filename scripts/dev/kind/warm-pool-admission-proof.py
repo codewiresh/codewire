@@ -480,6 +480,15 @@ def standard_pool_cases(spool: dict, broker: dict) -> list[tuple[str, dict | Non
         ("on, standard pool: no egress mode", on, "create", mutate(spool, egress_mode(None)), EGRESS_MODE),
         ("on, standard pool: an unknown VM setting", on, "create",
          mutate(spool, lambda t: env(t).append({"name": "CODEWIRE_VM_DEBUG", "value": "1"})), ENVIRONMENT),
+        ("on, standard pool: literal UDP peers admitted", on, "create",
+         mutate(spool, lambda t: [e.__setitem__("value", "198.51.100.35:41641") for e in env(t)
+                                  if e["name"] == "CODEWIRE_POD_UDP_PEERS"]
+                or env(t).append({"name": "CODEWIRE_POD_UDP_PEERS", "value": "198.51.100.35:41641"})), None),
+        ("on, standard pool: UDP peers from a source refused", on, "create",
+         mutate(spool, lambda t: [e.pop("value", None) or e.__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}})
+                                  for e in env(t) if e["name"] == "CODEWIRE_POD_UDP_PEERS"]
+                or env(t).append({"name": "CODEWIRE_POD_UDP_PEERS", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}})),
+         ENVIRONMENT),
         ("on, standard pool: a VM setting from a source", on, "create",
          mutate(spool, lambda t: [e.pop("value") or e.__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}})
                                   for e in env(t) if e["name"] == "CODEWIRE_VM_VCPUS"]), ENVIRONMENT),

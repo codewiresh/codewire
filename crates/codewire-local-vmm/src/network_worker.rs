@@ -4,8 +4,11 @@
 
 pub use codewire_egress_worker::worker::*;
 
-use codewire_egress_worker::session::{InboundGuestStream, MAX_INBOUND_STREAM_FLOWS};
+use codewire_egress_worker::session::{
+    InboundGuestStream, MAX_INBOUND_STREAM_FLOWS, MAX_UDP_BRIDGE_PEERS, UdpBridgeAttachment,
+};
 use std::io::{self, Read as _};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -32,15 +35,47 @@ use control::run_ingress_control;
 pub(crate) use control::{LATE_STATUS_FRAME_LEN, LateStatusFrame};
 
 const WORKER_MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
+const WORKER_UDP_BRIDGE_DESCRIPTOR_MARKER: u8 = b'U';
+pub const WORKER_UDP_BRIDGE_READY_MESSAGE: &[u8] = b"CWNETW1 udp-ready\n";
 
-// B4 (#4347): host ports no longer reach the worker, so its host-port key is gone.
-const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB4\0";
-const PRODUCT_BOOTSTRAP_LEN: usize = 304;
+// B5 (#6637): carries the optional immutable tailnet UDP `:31000` peer allowlist.
+const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB5\0";
+const PRODUCT_BOOTSTRAP_LEN: usize = 354;
 const PRODUCT_POLICY_DIGEST_OFFSET: usize = 64;
 const PRODUCT_BROKER_KEY_OFFSET: usize = 96;
 const PRODUCT_MESH_INGRESS_KEY_OFFSET: usize = 128;
 const PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET: usize = 160;
 const PRODUCT_MESH_INGRESS_PORTS_OFFSET: usize = 162;
+const PRODUCT_UDP_PEER_COUNT_OFFSET: usize = 304;
+const PRODUCT_UDP_PEERS_OFFSET: usize = 306;
+const PRODUCT_UDP_PEER_BYTES: usize = 6;
+
+pub(crate) fn send_worker_udp_bridge_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
+    validate_inherited_unix_socket(stream).map_err(io::Error::other)?;
+    send_worker_descriptor(bootstrap, stream, WORKER_UDP_BRIDGE_DESCRIPTOR_MARKER)
+}
+
+fn receive_worker_udp_bridge_descriptor(bootstrap: RawFd) -> Result<OwnedFd, NetworkWorkerError> {
+    let descriptor = receive_worker_descriptor(bootstrap, WORKER_UDP_BRIDGE_DESCRIPTOR_MARKER)
+        .map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+    validate_inherited_unix_socket(descriptor.as_raw_fd())?;
+    Ok(descriptor)
+}
+
+fn validate_canonical_udp_peers(peers: &[SocketAddrV4]) -> Result<(), NetworkWorkerError> {
+    if peers.len() > MAX_UDP_BRIDGE_PEERS {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    for (index, peer) in peers.iter().enumerate() {
+        if codewire_egress_policy::platform_peer(&peer.to_string()).is_err() {
+            return Err(NetworkWorkerError::InvalidBootstrap);
+        }
+        if index > 0 && peers[index - 1] >= *peer {
+            return Err(NetworkWorkerError::InvalidBootstrap);
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn send_mesh_ingress_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
     validate_inherited_unix_socket(stream).map_err(io::Error::other)?;
@@ -68,8 +103,8 @@ pub(crate) async fn receive_mesh_ingress_descriptor(
 }
 
 /// Encode the product bootstrap containing one generation network key, one
-/// policy digest, separate non-provider ingress/broker HMAC keys, and the
-/// immutable Mesh guest-port allowlist.
+/// policy digest, separate non-provider ingress/broker HMAC keys, the
+/// immutable Mesh guest-port allowlist, and the optional tailnet UDP peer allowlist.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_product_worker_bootstrap(
     vm_id: Uuid,
@@ -78,12 +113,14 @@ pub fn encode_product_worker_bootstrap(
     broker_key: &[u8; BROKER_IPC_KEY_LEN],
     mesh_ingress_key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
     mesh_ingress_ports: &[u16],
+    udp_peers: &[SocketAddrV4],
     policy_digest: PolicyDigest,
 ) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
     if broker_key.iter().all(|byte| *byte == 0)
         || mesh_ingress_key.iter().all(|byte| *byte == 0)
         || validate_canonical_mesh_ingress_ports(mesh_ingress_ports).is_err()
+        || validate_canonical_udp_peers(udp_peers).is_err()
     {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
@@ -97,11 +134,22 @@ pub fn encode_product_worker_bootstrap(
     bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET].copy_from_slice(broker_key);
     bytes[PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET]
         .copy_from_slice(mesh_ingress_key);
+    let port_count = u16::try_from(mesh_ingress_ports.len())
+        .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
     bytes[PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET..PRODUCT_MESH_INGRESS_PORTS_OFFSET]
-        .copy_from_slice(&(mesh_ingress_ports.len() as u16).to_le_bytes());
+        .copy_from_slice(&port_count.to_le_bytes());
     for (index, port) in mesh_ingress_ports.iter().enumerate() {
         let offset = PRODUCT_MESH_INGRESS_PORTS_OFFSET + index * std::mem::size_of::<u16>();
         bytes[offset..offset + std::mem::size_of::<u16>()].copy_from_slice(&port.to_le_bytes());
+    }
+    let udp_count =
+        u16::try_from(udp_peers.len()).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
+    bytes[PRODUCT_UDP_PEER_COUNT_OFFSET..PRODUCT_UDP_PEERS_OFFSET]
+        .copy_from_slice(&udp_count.to_le_bytes());
+    for (index, peer) in udp_peers.iter().enumerate() {
+        let offset = PRODUCT_UDP_PEERS_OFFSET + index * PRODUCT_UDP_PEER_BYTES;
+        bytes[offset..offset + 4].copy_from_slice(&peer.ip().octets());
+        bytes[offset + 4..offset + 6].copy_from_slice(&peer.port().to_be_bytes());
     }
     Ok(bytes)
 }
@@ -112,12 +160,14 @@ struct ProductWorkerBootstrap {
     broker_key: BrokerIpcKey,
     mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
+    udp_peers: Vec<SocketAddrV4>,
 }
 
 struct ProductWorkerSession {
     network_key: NetworkKey,
     mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
+    udp_bridge: Option<UdpBridgeAttachment>,
     /// The guest network's /30, from the runner's own launch.
     addresses: SessionAddresses,
 }
@@ -191,12 +241,32 @@ pub async fn run_inherited_worker(
     }
     write_worker_control_message(&bootstrap, WORKER_BROKER_READY_MESSAGE)
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
+    let udp_bridge = if prepared.udp_peers.is_empty() {
+        None
+    } else {
+        let stream = receive_worker_udp_bridge_descriptor(bootstrap.as_raw_fd())
+            .and_then(transferred_tokio_unix_stream);
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
+                return Err(error);
+            }
+        };
+        write_worker_control_message(&bootstrap, WORKER_UDP_BRIDGE_READY_MESSAGE)
+            .map_err(|_| NetworkWorkerError::PreparedIo)?;
+        Some(UdpBridgeAttachment {
+            stream: Box::pin(stream),
+            allowed_peers: prepared.udp_peers,
+        })
+    };
     run_prepared_product_worker(
         bootstrap,
         ProductWorkerSession {
             network_key: prepared.network_key,
             mesh_ingress_key: prepared.mesh_ingress_key,
             mesh_ingress_ports: prepared.mesh_ingress_ports,
+            udp_bridge,
             addresses,
         },
         vm_id,
@@ -247,7 +317,7 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         generation,
         broker.late_answer_watch(),
     ));
-    let session = run_host_session_with_ingress(
+    let session = run_host_session_with_channels(
         network,
         session.network_key,
         vm_id,
@@ -255,6 +325,7 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         session.addresses,
         broker,
         Some(inbound_rx),
+        session.udp_bridge,
         move || publish_product_worker_status(&ready_status, WORKER_READY_MESSAGE),
     );
     tokio::pin!(session);
@@ -351,8 +422,36 @@ fn decode_product_worker_bootstrap(
     }
     let used_ports_end =
         PRODUCT_MESH_INGRESS_PORTS_OFFSET + port_count * std::mem::size_of::<u16>();
-    if bytes[used_ports_end..].iter().any(|byte| *byte != 0)
+    if bytes[used_ports_end..PRODUCT_UDP_PEER_COUNT_OFFSET]
+        .iter()
+        .any(|byte| *byte != 0)
         || validate_canonical_mesh_ingress_ports(&mesh_ingress_ports).is_err()
+    {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let udp_count = usize::from(u16::from_le_bytes(
+        bytes[PRODUCT_UDP_PEER_COUNT_OFFSET..PRODUCT_UDP_PEERS_OFFSET]
+            .try_into()
+            .expect("fixed UDP peer count"),
+    ));
+    if udp_count > MAX_UDP_BRIDGE_PEERS {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let mut udp_peers = Vec::with_capacity(udp_count);
+    for index in 0..udp_count {
+        let offset = PRODUCT_UDP_PEERS_OFFSET + index * PRODUCT_UDP_PEER_BYTES;
+        let ip = Ipv4Addr::new(
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        );
+        let port = u16::from_be_bytes([bytes[offset + 4], bytes[offset + 5]]);
+        udp_peers.push(SocketAddrV4::new(ip, port));
+    }
+    let used_udp_end = PRODUCT_UDP_PEERS_OFFSET + udp_count * PRODUCT_UDP_PEER_BYTES;
+    if bytes[used_udp_end..].iter().any(|byte| *byte != 0)
+        || validate_canonical_udp_peers(&udp_peers).is_err()
     {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
@@ -362,6 +461,7 @@ fn decode_product_worker_bootstrap(
         broker_key,
         mesh_ingress_key,
         mesh_ingress_ports,
+        udp_peers,
     })
 }
 
@@ -530,6 +630,10 @@ mod tests {
         let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
         let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
         let mesh_ingress_ports = [22, 3_000];
+        let udp_peers = [
+            "198.51.100.35:41641".parse().unwrap(),
+            "203.0.113.40:41641".parse().unwrap(),
+        ];
         let bytes = encode_product_worker_bootstrap(
             vm_id,
             generation,
@@ -537,6 +641,7 @@ mod tests {
             &broker_key,
             &mesh_ingress_key,
             &mesh_ingress_ports,
+            &udp_peers,
             CompiledPolicy::open().digest(),
         )
         .unwrap();
@@ -553,7 +658,31 @@ mod tests {
                 .with_bytes(|actual| assert_eq!(actual, expected));
         });
         assert_eq!(decoded.mesh_ingress_ports, mesh_ingress_ports);
+        assert_eq!(decoded.udp_peers, udp_peers);
         assert!(decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation + 1).is_err());
+
+        // Non-canonical (unsorted) UDP peers and non-zero UDP padding are refused.
+        let unsorted = [udp_peers[1], udp_peers[0]];
+        assert!(
+            encode_product_worker_bootstrap(
+                vm_id,
+                generation,
+                &network_key,
+                &broker_key,
+                &mesh_ingress_key,
+                &mesh_ingress_ports,
+                &unsorted,
+                CompiledPolicy::open().digest(),
+            )
+            .is_err()
+        );
+        let mut nonzero_udp_padding = bytes.clone();
+        nonzero_udp_padding[PRODUCT_UDP_PEERS_OFFSET + udp_peers.len() * PRODUCT_UDP_PEER_BYTES] =
+            1;
+        assert!(
+            decode_product_worker_bootstrap(nonzero_udp_padding.as_ref(), vm_id, generation)
+                .is_err()
+        );
 
         // The worker binds whichever selected policy the runner names; the
         // broker, which compiles the document, refuses a mismatch (#2537).
@@ -581,6 +710,7 @@ mod tests {
                 &[0_u8; BROKER_IPC_KEY_LEN],
                 &mesh_ingress_key,
                 &mesh_ingress_ports,
+                &[],
                 CompiledPolicy::open().digest(),
             )
             .is_err()

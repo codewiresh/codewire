@@ -1078,6 +1078,7 @@ mod linux {
             cw_runtime_moved_from_generation: None,
             image_disk: None,
             network_policy: codewire_egress_policy::CompiledPolicy::open(),
+            udp_peers: Vec::new(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             credential_placeholders: Default::default(),
             checkpoint: None,

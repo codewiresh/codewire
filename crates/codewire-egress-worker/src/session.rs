@@ -32,6 +32,12 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 mod udp;
+pub mod udp_bridge;
+
+pub use udp_bridge::{
+    MAX_UDP_BRIDGE_PAYLOAD, MAX_UDP_BRIDGE_PEERS, TAILNET_UDP_PORT, UdpBridgeAttachment,
+    read_udp_bridge_frame, write_udp_bridge_frame,
+};
 
 pub const PACKET_QUEUE: usize = 256;
 pub const MAX_INBOUND_STREAM_FLOWS: usize = 64;
@@ -216,6 +222,7 @@ where
         (SessionLimits::HOSTED, SessionAddresses::STANDARD),
         broker,
         None,
+        None,
         Some(checks),
         ready,
     )
@@ -276,6 +283,39 @@ where
         broker,
         inbound,
         None,
+        None,
+        ready,
+    )
+    .await
+}
+
+/// [`run_network_session_with_ingress`] plus an optional host-side tailnet
+/// UDP `:31000` bridge (#6637).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_network_session_with_channels<S, B, R>(
+    stream: S,
+    key: NetworkKey,
+    (vm_id, generation): (Uuid, u64),
+    (limits, addresses): (SessionLimits, SessionAddresses),
+    broker: Arc<B>,
+    inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    udp_bridge: Option<UdpBridgeAttachment>,
+    ready: R,
+) -> Result<(), NetworkSessionError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    B: EgressBroker,
+    R: FnOnce() -> io::Result<()> + Send,
+{
+    run_session(
+        stream,
+        key,
+        (vm_id, generation),
+        (limits, addresses),
+        broker,
+        inbound,
+        udp_bridge,
+        None,
         ready,
     )
     .await
@@ -289,6 +329,7 @@ async fn run_session<S, B, R>(
     (limits, addresses): (SessionLimits, SessionAddresses),
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    udp_bridge: Option<UdpBridgeAttachment>,
     hosted: Option<HostedChecks>,
     ready: R,
 ) -> Result<(), NetworkSessionError>
@@ -375,6 +416,14 @@ where
         self_check,
     );
     let writer = write_authenticated_frames(stream_write, session, bound, outbound_packets);
+    let udp_bridge = udp_bridge.and_then(|attachment| {
+        udp_bridge::UdpBridgeHandle::spawn(
+            attachment,
+            addresses.guest,
+            limits.mtu(),
+            from_stack.clone(),
+        )
+    });
     let dispatcher = dispatch_packets(
         guest_packets,
         (stack, addresses),
@@ -382,6 +431,7 @@ where
         from_stack,
         broker,
         inbound,
+        udp_bridge,
         drain,
     );
     tokio::pin!(reader, writer, dispatcher);
@@ -565,6 +615,7 @@ const DRAIN_RECHECK: Duration = Duration::from_secs(1);
 /// How long a drained session waits for its queued replies to be written.
 const DRAIN_FLUSH: Duration = Duration::from_secs(1);
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_packets<B: EgressBroker>(
     mut packets: mpsc::Receiver<Vec<u8>>,
     (stack, SessionAddresses { worker, guest }): (Netstack, SessionAddresses),
@@ -572,6 +623,7 @@ async fn dispatch_packets<B: EgressBroker>(
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
     mut inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    udp_bridge: Option<udp_bridge::UdpBridgeHandle>,
     mut drain: Option<oneshot::Receiver<()>>,
 ) -> Result<(), NetworkSessionError> {
     // One catch-all listener accepts every guest connection, whatever its
@@ -719,7 +771,12 @@ async fn dispatch_packets<B: EgressBroker>(
         }
 
         let Ok(tcp) = parse_canonical_ipv4_tcp_packet(&packet) else {
-            udp_refusals.refuse(&packet, &broker);
+            if !udp_bridge
+                .as_ref()
+                .is_some_and(|bridge| bridge.try_forward_from_guest(&packet))
+            {
+                udp_refusals.refuse(&packet, &broker);
+            }
             continue;
         };
         if tcp.source.ip() != IpAddr::V4(guest) {

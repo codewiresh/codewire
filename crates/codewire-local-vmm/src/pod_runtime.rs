@@ -127,6 +127,9 @@ pub struct PodSettings {
     pub build_id: String,
     /// The platform peers the host end may dial for the hosted daemon.
     pub platform_peers: Vec<std::net::SocketAddrV4>,
+    /// Optional explicit literal `IPv4:port` tailnet UDP peers bridged on Pod
+    /// `:31000` (#6637). Empty leaves the bridge disabled.
+    pub udp_peers: Vec<std::net::SocketAddrV4>,
     /// `CODEWIRE_VM_STATE`: whether this sandbox's state disk may be made.
     pub vm_state: VmState,
     /// `CODEWIRE_VM_EGRESS_MODE`, which orchestration renders on every
@@ -213,6 +216,10 @@ impl PodSettings {
             build_id: read("CODEWIRE_IMAGE_DISK_BUILD_ID")?,
             platform_peers: match variable("CODEWIRE_POD_PLATFORM_PEERS") {
                 Some(peers) => hosted::parse_platform_peers(&peers)?,
+                None => Vec::new(),
+            },
+            udp_peers: match variable(codewire_daemon_proto::POD_RUNTIME_UDP_PEERS_ENV) {
+                Some(peers) => hosted::parse_udp_peers(&peers)?,
                 None => Vec::new(),
             },
             vm_state: match read("CODEWIRE_VM_STATE")?.as_str() {
@@ -499,6 +506,7 @@ fn boot_request(
         // Closed at the host end in both modes, with the platform peers alone
         // open (cw-security, #5602); in broker mode `cw-egress` is one of them.
         network_policy: CompiledPolicy::locked_with_platform_peers(&settings.platform_peers)?,
+        udp_peers: settings.udp_peers.clone(),
         intercepts: InterceptSet::default(),
         credential_placeholders: Default::default(),
         checkpoint: None,
@@ -938,5 +946,82 @@ mod tests {
         assert_eq!(next_generation(root.path()).unwrap(), 2);
         fs::write(root.path().join(GENERATION_NAME), b"not a number").unwrap();
         assert!(next_generation(root.path()).is_err());
+    }
+
+    #[test]
+    fn udp_peers_parser_accepts_valid_literals_and_fails_closed_on_invalid_entries() {
+        let own = [std::net::Ipv4Addr::new(10, 92, 0, 5)];
+        // Empty string disables the bridge cleanly.
+        assert_eq!(hosted::parse_udp_peers_with_own("", &own).unwrap(), vec![]);
+        // Valid literal IPv4:port pairs are sorted and deduplicated.
+        assert_eq!(
+            hosted::parse_udp_peers_with_own(
+                "203.0.113.40:41641,198.51.100.35:41641,198.51.100.35:41641",
+                &own
+            )
+            .unwrap(),
+            vec![
+                "198.51.100.35:41641".parse().unwrap(),
+                "203.0.113.40:41641".parse().unwrap(),
+            ]
+        );
+        // Up to MAX_UDP_BRIDGE_PEERS (8) unique entries pass; 9 fail closed.
+        let eight = (1..=8)
+            .map(|n| format!("198.51.100.{n}:41641"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            hosted::parse_udp_peers_with_own(&eight, &own)
+                .unwrap()
+                .len(),
+            8
+        );
+        let nine = (1..=9)
+            .map(|n| format!("198.51.100.{n}:41641"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(hosted::parse_udp_peers_with_own(&nine, &own).is_err());
+
+        for bad in [
+            ",",
+            "198.51.100.35:41641,",
+            ",198.51.100.35:41641",
+            "198.51.100.35:41641,,203.0.113.40:41641",
+            " 198.51.100.35:41641",
+            "198.51.100.35:0",
+            "0.0.0.0:41641",
+            "127.0.0.1:41641",
+            "169.254.169.254:41641",
+            "224.0.0.1:41641",
+            "255.255.255.255:41641",
+            "[2001:db8::1]:41641",
+            "relay.example.invalid:41641",
+            "10.92.0.5:41641", // Pod's own interface address
+        ] {
+            assert!(
+                hosted::parse_udp_peers_with_own(bad, &own).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+
+        // Unset or empty in PodSettings disables the bridge; malformed fails closed.
+        let unset = PodSettings::from_environment(environment(&[])).unwrap();
+        assert!(unset.udp_peers.is_empty());
+        let empty =
+            PodSettings::from_environment(environment(&[("CODEWIRE_POD_UDP_PEERS", "")])).unwrap();
+        assert!(empty.udp_peers.is_empty());
+        let set = PodSettings::from_environment(environment(&[(
+            "CODEWIRE_POD_UDP_PEERS",
+            "198.51.100.35:41641",
+        )]))
+        .unwrap();
+        assert_eq!(set.udp_peers, vec!["198.51.100.35:41641".parse().unwrap()]);
+        assert!(
+            PodSettings::from_environment(environment(&[(
+                "CODEWIRE_POD_UDP_PEERS",
+                "127.0.0.1:41641",
+            )]))
+            .is_err()
+        );
     }
 }

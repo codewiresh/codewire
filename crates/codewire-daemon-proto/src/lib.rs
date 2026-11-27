@@ -149,6 +149,8 @@ pub const POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV: &str = "CODEWIRE_IMAGE_DISK_BUILD
 /// The platform peers the guest's daemon may reach from the Pod's address:
 /// comma-separated literal `IPv4:port` pairs, never a name.
 pub const POD_RUNTIME_PLATFORM_PEERS_ENV: &str = "CODEWIRE_POD_PLATFORM_PEERS";
+/// Explicit literal `IPv4:port` tailnet UDP peers bridged on Pod `:31000` (#6637).
+pub const POD_RUNTIME_UDP_PEERS_ENV: &str = "CODEWIRE_POD_UDP_PEERS";
 /// The Sandbox's volume, which holds the VM's disks as files.
 pub const POD_RUNTIME_STATE_MOUNT_PATH: &str = "/state";
 /// The workspace image's published disk, an image volume mounted read-only.
