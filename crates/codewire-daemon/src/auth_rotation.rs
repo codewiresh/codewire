@@ -40,7 +40,10 @@ pub(crate) struct DaemonAuth {
 }
 
 struct Current {
-    token: DaemonAuthToken,
+    /// `None` while a hosted `standard` daemon is hibernating or re-binding
+    /// after restore (`docs/dev/SANDBOX-SLEEP.md`, "After a restore", #6647):
+    /// every RPC on 7777 is refused until the new `BindWorkspace` answers.
+    token: Option<DaemonAuthToken>,
     epoch: u64,
     /// Cancelled when this epoch ends; connections accepted in it end too.
     ended: CancellationToken,
@@ -50,7 +53,7 @@ impl DaemonAuth {
     pub(crate) fn new(token: DaemonAuthToken) -> Self {
         Self {
             current: Arc::new(RwLock::new(Current {
-                token,
+                token: Some(token),
                 epoch: 0,
                 ended: CancellationToken::new(),
             })),
@@ -58,16 +61,18 @@ impl DaemonAuth {
     }
 
     /// Checks a presented token against the current one in constant time.
+    /// Refuses every request while re-binding after a hibernate restore.
     pub(crate) fn authorize(&self, presented: Option<&str>) -> Result<(), Status> {
+        let current = self.current.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(token) = current.token.as_ref() else {
+            return Err(Status::unavailable(
+                "sandbox is hibernating or re-binding after restore",
+            ));
+        };
         let Some(presented) = presented else {
             return Err(Status::unauthenticated("missing daemon auth token"));
         };
-        let current = self.current.read().unwrap_or_else(PoisonError::into_inner);
-        if !bool::from(
-            presented
-                .as_bytes()
-                .ct_eq(current.token.expose_secret().as_bytes()),
-        ) {
+        if !bool::from(presented.as_bytes().ct_eq(token.expose_secret().as_bytes())) {
             return Err(Status::unauthenticated("invalid daemon auth token"));
         }
         Ok(())
@@ -97,12 +102,57 @@ impl DaemonAuth {
         }
     }
 
+    /// Wipes the old Pod's daemon credential from memory immediately so no new
+    /// RPC on 7777 can be authorized before the VM freezes or after it thaws,
+    /// while letting the in-flight `Hibernate` response flush before
+    /// [`Self::end_pre_hibernate_connections`] closes existing streams
+    /// (`docs/dev/SANDBOX-SLEEP.md`, "After a restore", #6647).
+    pub(crate) fn begin_hosted_rebind(&self) {
+        let mut current = self.current.write().unwrap_or_else(PoisonError::into_inner);
+        current.token = None;
+    }
+
+    /// Ends every connection accepted before hibernate while keeping 7777
+    /// closed until [`Self::complete_hosted_rebind`] installs the new Pod's
+    /// credential (#6647).
+    pub(crate) fn end_pre_hibernate_connections(&self) -> u64 {
+        let (epoch, ended) = {
+            let mut current = self.current.write().unwrap_or_else(PoisonError::into_inner);
+            current.token = None;
+            current.epoch += 1;
+            let ended = std::mem::replace(&mut current.ended, CancellationToken::new());
+            (current.epoch, ended)
+        };
+        ended.cancel();
+        epoch
+    }
+
+    /// Installs the new Pod's daemon credential after a hibernate restore
+    /// re-bind (#6647). Refuses on a running daemon that still holds an active
+    /// credential ("a running daemon never re-binds", cw-security #5484).
+    pub(crate) fn complete_hosted_rebind(&self, token: DaemonAuthToken) -> Result<u64, Status> {
+        let (epoch, ended) = {
+            let mut current = self.current.write().unwrap_or_else(PoisonError::into_inner);
+            if current.token.is_some() {
+                return Err(Status::failed_precondition(
+                    "a running daemon never re-binds",
+                ));
+            }
+            current.token = Some(token);
+            current.epoch += 1;
+            let ended = std::mem::replace(&mut current.ended, CancellationToken::new());
+            (current.epoch, ended)
+        };
+        ended.cancel();
+        Ok(epoch)
+    }
+
     /// Replaces the token and ends the epoch it was admitted in, returning
     /// the new epoch.
     fn rotate(&self, token: DaemonAuthToken) -> u64 {
         let (epoch, ended) = {
             let mut current = self.current.write().unwrap_or_else(PoisonError::into_inner);
-            current.token = token;
+            current.token = Some(token);
             current.epoch += 1;
             let ended = std::mem::replace(&mut current.ended, CancellationToken::new());
             (current.epoch, ended)

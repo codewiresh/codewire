@@ -26,6 +26,7 @@ pub mod files;
 mod forward;
 #[cfg(target_os = "linux")]
 pub mod gh_config;
+pub mod hibernate;
 #[cfg(target_os = "linux")]
 pub mod host_control;
 #[cfg(unix)]

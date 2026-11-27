@@ -178,7 +178,7 @@ pub fn in_frozen_workload_process() -> bool {
 
 /// Whether this process sits in the frozen workload: the hierarchy that
 /// carries the freezer places it at or under `/workload`.
-fn in_frozen_workload(own_cgroups: &Path) -> bool {
+pub(crate) fn in_frozen_workload(own_cgroups: &Path) -> bool {
     let Ok(cgroups) = std::fs::read_to_string(own_cgroups) else {
         return false;
     };

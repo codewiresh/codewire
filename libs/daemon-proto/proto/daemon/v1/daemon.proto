@@ -41,6 +41,15 @@ service DaemonService {
   // daemon outside the workload the pause freezes.
   rpc Suspend(SuspendRequest) returns (SuspendResponse);
 
+  // A hosted standard Sandbox's hibernate (#6647, docs/dev/SANDBOX-SLEEP.md):
+  // the daemon holds closed its platform connections and credential relay
+  // epochs, asks the Pod's runtime to arm hibernate-on-SIGTERM, answers once
+  // armed, and suspends serving 7777/2222/tailnet until a restored boot
+  // completes a fresh BindWorkspace for the new Pod.
+  // UNIMPLEMENTED from a daemon that can't hibernate; FAILED_PRECONDITION from
+  // a daemon outside the frozen workload cgroup.
+  rpc Hibernate(HibernateRequest) returns (HibernateResponse);
+
   // Private host-initiated channel for material-free guest credential
   // requests and typed recipient-encrypted application projections. The host
   // authenticates with the generation daemon capability; provider values and
@@ -385,6 +394,13 @@ message SuspendRequest {}
 
 message SuspendResponse {
   // False while a suspend is already under way.
+  bool accepted = 1;
+}
+
+message HibernateRequest {}
+
+message HibernateResponse {
+  // False while a hibernate is already under way or refused by the runtime.
   bool accepted = 1;
 }
 

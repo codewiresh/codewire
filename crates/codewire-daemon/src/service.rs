@@ -60,6 +60,8 @@ pub struct DaemonServiceImpl {
     recent_log: Option<crate::recent_log::RecentLog>,
     /// A hosted daemon's suspend in a standard VM (#5529).
     suspend: Option<std::sync::Arc<crate::suspend::Suspend>>,
+    /// A hosted daemon's hibernate and post-restore re-bind in a standard VM (#6647).
+    hibernate: Option<std::sync::Arc<crate::hibernate::Hibernate>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,15 +171,26 @@ impl DaemonServiceImpl {
             workload_sockets,
             before_launch: None,
             recent_log: None,
-            // Only a hosted daemon in a standard VM installs one (#5529).
+            // Only a hosted daemon in a standard VM installs one (#5529, #6647).
             suspend: crate::suspend::installed()
                 .map(|platform| std::sync::Arc::new(crate::suspend::Suspend::new(platform))),
+            hibernate: crate::hibernate::installed()
+                .map(|platform| std::sync::Arc::new(crate::hibernate::Hibernate::new(platform))),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_suspend_for_test(mut self, suspend: crate::suspend::Suspend) -> Self {
         self.suspend = Some(std::sync::Arc::new(suspend));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_hibernate_for_test(
+        mut self,
+        hibernate: crate::hibernate::Hibernate,
+    ) -> Self {
+        self.hibernate = Some(std::sync::Arc::new(hibernate));
         self
     }
 
@@ -332,6 +345,20 @@ impl DaemonService for DaemonServiceImpl {
             .ok_or_else(|| Status::unimplemented("this daemon can't suspend"))?;
         let accepted = suspend.begin(&self.credential_bridge).await?;
         Ok(Response::new(v1::SuspendResponse { accepted }))
+    }
+
+    async fn hibernate(
+        &self,
+        request: Request<v1::HibernateRequest>,
+    ) -> Result<Response<v1::HibernateResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        let hibernate = self
+            .hibernate
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("this daemon can't hibernate"))?;
+        let accepted = hibernate.begin(&self.auth, &self.credential_bridge).await?;
+        Ok(Response::new(v1::HibernateResponse { accepted }))
     }
 
     async fn poweroff_guest(

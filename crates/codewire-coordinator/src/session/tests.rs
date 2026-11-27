@@ -1350,3 +1350,122 @@ async fn a_remote_holders_removal_over_nats_releases_its_address() {
         [squatter_id]
     );
 }
+
+/// cw-security (#5484, #6647): when a hibernated Sandbox restores in a new Pod
+/// and binds under a higher operation generation with a fresh tailnet node key,
+/// the coordinator ends the old Pod's session, drops the old node key while
+/// keeping the Sandbox's tailnet identity/address, and refuses lower-generation
+/// replays from the old Pod.
+#[tokio::test]
+async fn restored_sidecar_replaces_and_drops_old_tailnet_node_key() {
+    let peers = Arc::new(PeerRegistry::default());
+    let env_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let verifier = Arc::new(MovableVerifier {
+        generation: AtomicI64::new(1),
+    });
+
+    // Old Pod sidecar (generation 1) connects and announces its node key.
+    let (old_tx, mut old_out, old_task) = spawn_peer(
+        peers.clone(),
+        env_id,
+        PeerProof {
+            generation: 1,
+            expires_at: unix_now() + 600,
+        },
+        movable_checks(verifier.clone(), Duration::from_secs(3600)),
+    );
+    assert!(matches!(
+        next_output(&mut old_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    let old_key = node_key(Uuid::new_v4());
+    let old_disco = disco_key(Uuid::new_v4());
+    let old_node = Node {
+        key: old_key,
+        disco_key: old_disco,
+        ..sample_node(env_id, 1)
+    };
+    let expected_addresses = old_node.addresses.clone();
+    old_tx.send(SessionInput::Node(old_node)).unwrap();
+
+    // Connect a client so we observe the environment's node before and after restore.
+    let (_client_tx, mut client_out, client_task) =
+        spawn_session(peers.clone(), client_id, Some(env_id), PeerKind::Client);
+    assert!(matches!(
+        next_output(&mut client_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    let initial_nodes = expect_peer_update(next_peer_event(&mut client_out).await);
+    assert_eq!(initial_nodes.len(), 1);
+    assert_eq!(initial_nodes[0].id, env_id);
+    assert_eq!(initial_nodes[0].key, old_key);
+    assert!(peers.knows_key(&old_key));
+
+    // Restored Pod sidecar (generation 2) connects with a fresh tailnet node key
+    // and the same tailnet address.
+    verifier.generation.store(2, Ordering::SeqCst);
+    let (new_tx, mut new_out, new_task) = spawn_peer(
+        peers.clone(),
+        env_id,
+        PeerProof {
+            generation: 2,
+            expires_at: unix_now() + 600,
+        },
+        movable_checks(verifier.clone(), Duration::from_secs(3600)),
+    );
+    assert!(matches!(
+        next_output(&mut new_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    // The old Pod's session is ended immediately when the higher generation registers.
+    ends(old_task).await;
+
+    let new_key = node_key(Uuid::new_v4());
+    let new_disco = disco_key(Uuid::new_v4());
+    let new_node = Node {
+        key: new_key,
+        disco_key: new_disco,
+        addresses: expected_addresses.clone(),
+        ..sample_node(env_id, 1)
+    };
+    new_tx.send(SessionInput::Node(new_node)).unwrap();
+
+    // Client receives the restored sidecar's new node key at the same tailnet address.
+    loop {
+        match next_peer_event(&mut client_out).await {
+            SessionOutput::Peer(PeerEvent::Update(nodes))
+                if nodes.iter().any(|n| n.id == env_id && n.key == new_key) =>
+            {
+                assert_eq!(nodes[0].addresses, expected_addresses);
+                break;
+            }
+            SessionOutput::Peer(PeerEvent::Remove(_)) => {}
+            other => panic!("unexpected client event after restore: {other:?}"),
+        }
+    }
+
+    // Old node key is dropped; new node key is live.
+    assert!(!peers.knows_key(&old_key));
+    assert!(peers.knows_key(&new_key));
+
+    // A replay presenting the old Pod's lower generation (1) is refused and
+    // leaves the restored sidecar and its node key intact.
+    let (_replay_tx, mut replay_out, replay_task) = spawn_peer(
+        peers.clone(),
+        env_id,
+        PeerProof {
+            generation: 1,
+            expires_at: unix_now() + 600,
+        },
+        movable_checks(verifier.clone(), Duration::from_secs(3600)),
+    );
+    ends(replay_task).await;
+    assert!(replay_out.try_recv().is_err());
+    assert!(!peers.knows_key(&old_key));
+    assert!(peers.knows_key(&new_key));
+
+    drop(new_tx);
+    ends(new_task).await;
+    client_task.abort();
+}

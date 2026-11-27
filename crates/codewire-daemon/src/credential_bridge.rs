@@ -472,9 +472,45 @@ impl CredentialBridge {
             .get_or_insert_with(CancellationToken::new);
     }
 
+    /// Moves the credential bridge to the restored Pod's binding generation
+    /// after a hibernate restore (#6647, `docs/dev/SANDBOX-SLEEP.md`, "After a
+    /// restore"), ending any lingering epoch and refusing every old epoch
+    /// handle before allowing new epochs to open.
+    pub(crate) async fn rotate_identity_after_restore(
+        &self,
+        environment_id: uuid::Uuid,
+        environment_generation: u64,
+    ) -> Result<(), Status> {
+        if environment_id.is_nil() || environment_generation == 0 {
+            return Err(Status::invalid_argument(
+                "restored credential bridge identity is invalid",
+            ));
+        }
+        self.hold().await;
+        if let Ok(Some(shared)) = &self.inner {
+            shared
+                .rotate_identity(environment_id, environment_generation)
+                .await?;
+        }
+        self.release().await;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn owner_for_test(&self) -> &BridgeOwner {
         &self.owner
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn connect_stream_for_test<S>(
+        &self,
+        input: S,
+    ) -> Result<CredentialBridgeConnection, Status>
+    where
+        S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + Unpin + 'static,
+    {
+        self.connect_with_token_file(input, Path::new(codewire_access::CODEX_PLATFORM_TOKEN_FILE))
+            .await
     }
 
     pub(crate) async fn shutdown(&self) {

@@ -3406,6 +3406,13 @@ mod tests {
             Err(Status::unimplemented("fixture unused suspend RPC"))
         }
 
+        async fn hibernate(
+            &self,
+            _request: Request<v1::HibernateRequest>,
+        ) -> Result<Response<v1::HibernateResponse>, Status> {
+            Err(Status::unimplemented("fixture unused hibernate RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
