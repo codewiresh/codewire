@@ -20,6 +20,7 @@ pub mod drain;
 pub mod egress;
 pub mod environment_mesh;
 pub mod front_door;
+pub mod hibernate_records;
 pub mod identity;
 pub mod lease_owner;
 pub mod lifecycle;
