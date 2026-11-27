@@ -18,7 +18,8 @@ use crate::host::path::PrivateRoot;
 use crate::state::{PersistedVmState, StateDiskIdentity, StateError, VmPaths};
 
 pub(super) fn revalidate_persisted_cw_runtime_disk(
-    state_root: &PrivateRoot,
+    cw_runtime_root: &PrivateRoot,
+    baked_cw_runtime_root: bool,
     persisted: Option<&PersistedVmState>,
     request: &CreateVmRequest,
     next_catalog: Option<&AdmittedCwRuntimeDisk>,
@@ -35,15 +36,16 @@ pub(super) fn revalidate_persisted_cw_runtime_disk(
         disk.validate_metadata()?;
         return Ok(());
     }
-    revalidate_persisted_cw_runtime_attachment(state_root, disk, hosted)
+    revalidate_persisted_cw_runtime_attachment(cw_runtime_root, baked_cw_runtime_root, disk, hosted)
 }
 
 fn revalidate_persisted_cw_runtime_attachment(
-    state_root: &PrivateRoot,
+    cw_runtime_root: &PrivateRoot,
+    baked_cw_runtime_root: bool,
     disk: &AdmittedCwRuntimeDisk,
     hosted: bool,
 ) -> Result<(), RunnerError> {
-    let store = CwRuntimeStore::create(state_root)?;
+    let store = CwRuntimeStore::create(cw_runtime_root)?;
     if !hosted {
         store.revalidate_attachment(disk)?;
         return Ok(());
@@ -53,9 +55,25 @@ fn revalidate_persisted_cw_runtime_attachment(
     if admitted.path != disk.path {
         return Err(CwRuntimeError::InvalidManifest.into());
     }
+    // For on-volume PVC catalogs (`!baked_cw_runtime_root`), every on-volume
+    // file attribute including `inode` must still match across mounts. For a
+    // pre-baked catalog inside the signed `pod-runtime` container image
+    // (`baked_cw_runtime_root`), a new Pod's overlayfs (especially on another
+    // node) legitimately assigns a fresh `st_dev` and `st_ino` while
+    // `store.open_catalog` has already verified the ext4 image's full
+    // cryptographic SHA-256 and exact byte length against `manifest.disk`
+    // (#5602, #6647).
+    let identity_matches = if baked_cw_runtime_root {
+        admitted.identity.size == disk.identity.size
+            && admitted.identity.uid == disk.identity.uid
+            && admitted.identity.mode == disk.identity.mode
+            && admitted.identity.links == disk.identity.links
+    } else {
+        admitted.identity.same_file_across_mount(&disk.identity)
+    };
     if admitted.generation != disk.generation
         || admitted.manifest != disk.manifest
-        || !admitted.identity.same_file_across_mount(&disk.identity)
+        || !identity_matches
     {
         return Err(CwRuntimeError::DiskChanged.into());
     }
@@ -296,23 +314,47 @@ mod tests {
 
         // Local VMs still reject st_dev drift; hosted standard Pods accept it.
         assert!(matches!(
-            revalidate_persisted_cw_runtime_attachment(&engine, &remounted_catalog, false),
+            revalidate_persisted_cw_runtime_attachment(&engine, false, &remounted_catalog, false),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
-        revalidate_persisted_cw_runtime_attachment(&engine, &remounted_catalog, true).unwrap();
+        revalidate_persisted_cw_runtime_attachment(&engine, false, &remounted_catalog, true)
+            .unwrap();
 
         // Any on-volume attribute change or hash drift still fails closed in hosted mode.
         let mut wrong_inode = remounted_catalog.clone();
         wrong_inode.identity.inode = wrong_inode.identity.inode.wrapping_add(1);
         assert!(matches!(
-            revalidate_persisted_cw_runtime_attachment(&engine, &wrong_inode, true),
+            revalidate_persisted_cw_runtime_attachment(&engine, false, &wrong_inode, true),
+            Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
+        ));
+
+        // A pre-baked catalog in a separate container-image root accepts a new
+        // Pod's overlayfs inode/device change once `open_catalog` has verified
+        // the exact SHA-256, manifest, path, size, uid, mode, and links (#6647).
+        revalidate_persisted_cw_runtime_attachment(&engine, true, &wrong_inode, true).unwrap();
+
+        let mut wrong_size = wrong_inode.clone();
+        wrong_size.identity.size = wrong_size.identity.size.wrapping_add(1);
+        assert!(matches!(
+            revalidate_persisted_cw_runtime_attachment(&engine, true, &wrong_size, true),
+            Err(RunnerError::CwRuntime(CwRuntimeError::InvalidManifest))
+        ));
+
+        let mut wrong_uid = wrong_inode;
+        wrong_uid.identity.uid = wrong_uid.identity.uid.wrapping_add(1);
+        assert!(matches!(
+            revalidate_persisted_cw_runtime_attachment(&engine, true, &wrong_uid, true),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
 
         let mut wrong_sha = remounted_catalog;
         wrong_sha.manifest.disk.sha256 = "f".repeat(64);
         assert!(matches!(
-            revalidate_persisted_cw_runtime_attachment(&engine, &wrong_sha, true),
+            revalidate_persisted_cw_runtime_attachment(&engine, false, &wrong_sha, true),
+            Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
+        ));
+        assert!(matches!(
+            revalidate_persisted_cw_runtime_attachment(&engine, true, &wrong_sha, true),
             Err(RunnerError::CwRuntime(CwRuntimeError::DiskChanged))
         ));
     }
@@ -366,6 +408,7 @@ mod tests {
         // Hosted non-checkpoint boot with a verified next_catalog succeeds across image upgrade.
         revalidate_persisted_cw_runtime_disk(
             &engine,
+            false,
             Some(&persisted),
             &request,
             Some(&next_catalog),
@@ -377,6 +420,7 @@ mod tests {
         assert!(
             revalidate_persisted_cw_runtime_disk(
                 &engine,
+                false,
                 Some(&persisted),
                 &request,
                 Some(&next_catalog),

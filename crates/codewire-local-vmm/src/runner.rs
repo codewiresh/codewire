@@ -356,8 +356,11 @@ impl CloudHypervisorRunner {
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
         let is_hosted = hosted.is_some();
+        let baked_cw_runtime_root = self.cw_runtime_root.is_some()
+            && self.cw_runtime_root().path() != self.state_root.path();
         revalidate_persisted_cw_runtime_disk(
-            &self.state_root,
+            self.cw_runtime_root(),
+            baked_cw_runtime_root,
             persisted.as_ref(),
             &request,
             cw_runtime_disk.as_ref(),
