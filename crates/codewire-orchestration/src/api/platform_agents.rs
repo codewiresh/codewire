@@ -260,6 +260,7 @@ fn fill_resume(
     let agent = match agent {
         ManagedAgent::Codex => private::PlatformManagedAgent::Codex,
         ManagedAgent::Claude => private::PlatformManagedAgent::Claude,
+        ManagedAgent::Agy => private::PlatformManagedAgent::Agy,
     } as i32;
     let support = info
         .agents

@@ -255,6 +255,7 @@ pub(super) fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agen
     match agent {
         AgentKind::Codex => codewire_daemon::platform_managed::Agent::Codex,
         AgentKind::Claude => codewire_daemon::platform_managed::Agent::Claude,
+        AgentKind::Agy => codewire_daemon::platform_managed::Agent::Agy,
         AgentKind::Noel => unreachable!("validate_envelope refuses noel"),
     }
 }
@@ -639,11 +640,11 @@ pub(crate) async fn run_platform_agent_peer(
         binding.session_id == args.session_id && args.program == context.provider.path(),
         "platform peer binding differs"
     );
-    // Claude's arguments name its saved conversation, which the driver keeps
-    // in its state record.
+    // Claude and Antigravity arguments name their saved conversation, which
+    // the driver keeps in its state record.
     let state: Option<DriverState> = match config.agent {
         AgentKind::Codex => None,
-        AgentKind::Claude => Some(private_record(&dir.join("state.json"))?),
+        AgentKind::Claude | AgentKind::Agy => Some(private_record(&dir.join("state.json"))?),
         AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     };
     check_peer_arguments(&config, context.route, state.as_ref(), &args.arguments)?;
@@ -685,6 +686,24 @@ fn check_peer_arguments(
             ensure!(
                 native == claude_arguments(config, true, state.native_thread_established, session),
                 "platform Claude peer differs"
+            );
+        }
+        AgentKind::Agy => {
+            let state = state.context("platform Agy driver state missing")?;
+            let conversation = if state.native_thread_established {
+                let session = state
+                    .native_thread_id
+                    .as_deref()
+                    .context("platform Agy native conversation missing")?;
+                id(session)?;
+                Some(session)
+            } else {
+                None
+            };
+            // A hosted Sandbox is a Sandbox placement: auto-approve tools included.
+            ensure!(
+                native == agy_arguments(config, true, conversation),
+                "platform Agy peer differs"
             );
         }
     }

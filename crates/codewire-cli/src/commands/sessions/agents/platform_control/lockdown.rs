@@ -32,7 +32,7 @@ fn codex_provider(route: Route) -> Option<CodexProviderProjection> {
     CodexProviderProjection::for_managed_client(match route {
         Route::Codex => ManagedCredentialClient::Codex,
         Route::OpenAi => ManagedCredentialClient::OpenAi,
-        Route::Anthropic => return None,
+        Route::Anthropic | Route::Antigravity | Route::Gemini => return None,
     })
 }
 /// The private Codex configuration: the login lockdown, then the shared
@@ -61,19 +61,40 @@ fn write_config(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// configuration file in it.
 const CODEX_HOME: &str = "codex";
 const CODEX_CONFIG_FILE: &str = "config.toml";
-/// Write Codex's private home for `route`, which the home then records: its
-/// exact configuration names the route for the driver's lifetime. Claude has
-/// one route and nothing is written for it.
+/// Antigravity CLI's private route record below its driver directory: pins
+/// whether this conversation uses the Antigravity sign-in or Gemini API-key
+/// route for its entire lifetime.
+const AGY_ROUTE_DIR: &str = "agy";
+const AGY_ROUTE_FILE: &str = "route.json";
+const AGY_ANTIGRAVITY_ROUTE_BYTES: &[u8] = b"{\"route\":\"antigravity\"}\n";
+const AGY_GEMINI_ROUTE_BYTES: &[u8] = b"{\"route\":\"gemini\"}\n";
+
+/// Write Codex's private home or Antigravity's pinned route record for `route`.
+/// Claude has one route and nothing is written for it.
 pub(super) fn prepare(stage: &Path, config: &AgentConfig, route: Route) -> anyhow::Result<()> {
-    match (config.agent, codex_provider(route)) {
-        (AgentKind::Codex, Some(provider)) => {
+    match (config.agent, route, codex_provider(route)) {
+        (AgentKind::Codex, _, Some(provider)) => {
             make_directory(&stage.join(CODEX_HOME))?;
             write_config(
                 &stage.join(CODEX_HOME).join(CODEX_CONFIG_FILE),
                 codex_config(&provider).as_bytes(),
             )
         }
-        (AgentKind::Claude, None) => Ok(()),
+        (AgentKind::Claude, Route::Anthropic, None) => Ok(()),
+        (AgentKind::Agy, Route::Antigravity, None) => {
+            make_directory(&stage.join(AGY_ROUTE_DIR))?;
+            write_config(
+                &stage.join(AGY_ROUTE_DIR).join(AGY_ROUTE_FILE),
+                AGY_ANTIGRAVITY_ROUTE_BYTES,
+            )
+        }
+        (AgentKind::Agy, Route::Gemini, None) => {
+            make_directory(&stage.join(AGY_ROUTE_DIR))?;
+            write_config(
+                &stage.join(AGY_ROUTE_DIR).join(AGY_ROUTE_FILE),
+                AGY_GEMINI_ROUTE_BYTES,
+            )
+        }
         _ => anyhow::bail!("platform route serves another agent"),
     }
 }
@@ -98,11 +119,14 @@ fn codex_route(bytes: &[u8], working_dir: &str) -> anyhow::Result<Option<Route>>
     }
     Ok(None)
 }
-/// The driver's route. For Codex, admit the private home and return the route
-/// its exact configuration names; Claude's one route needs no record.
+/// The driver's route. For Codex and Antigravity, admit the private record and
+/// return the route it names; Claude's one route needs no record.
 pub(super) fn check(dir: &Path, config: &AgentConfig) -> anyhow::Result<Route> {
     if config.agent == AgentKind::Claude {
         return Ok(Route::Anthropic);
+    }
+    if config.agent == AgentKind::Agy {
+        return check_agy_route(dir);
     }
     DirectoryPin::open(&dir.join(CODEX_HOME))?.check()?;
     let path = dir.join(CODEX_HOME).join(CODEX_CONFIG_FILE);
@@ -171,10 +195,45 @@ pub(super) fn check(dir: &Path, config: &AgentConfig) -> anyhow::Result<Route> {
     );
     Ok(route)
 }
+/// Read and verify the pinned Antigravity route file without following links.
+fn check_agy_route(dir: &Path) -> anyhow::Result<Route> {
+    DirectoryPin::open(&dir.join(AGY_ROUTE_DIR))?.check()?;
+    let path = dir.join(AGY_ROUTE_DIR).join(AGY_ROUTE_FILE);
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&path)?;
+    let m = f.metadata()?;
+    ensure!(
+        m.is_file()
+            && m.uid() == euid()
+            && m.nlink() == 1
+            && m.mode() & 0o7777 == 0o600
+            && m.len() <= 256,
+        "private agy route differs"
+    );
+    let mut bytes = Vec::new();
+    (&mut f).take(257).read_to_end(&mut bytes)?;
+    let route = if bytes == AGY_ANTIGRAVITY_ROUTE_BYTES {
+        Route::Antigravity
+    } else if bytes == AGY_GEMINI_ROUTE_BYTES {
+        Route::Gemini
+    } else {
+        anyhow::bail!("private agy route differs");
+    };
+    let named = fs::symlink_metadata(path)?;
+    ensure!(
+        (m.dev(), m.ino(), m.mode(), m.len())
+            == (named.dev(), named.ino(), named.mode(), named.len()),
+        "private agy route changed"
+    );
+    Ok(route)
+}
+
 /// The lockdown variables for `route`, which the private home must name. They
 /// are set over the session environment the provider inherits and are the
 /// only variables this path adds to it: Codex's own private home, so that it
-/// never reads a login saved in the user's. Claude gets none.
+/// never reads a login saved in the user's. Claude and Antigravity get none.
 pub(super) fn environment(
     dir: &Path,
     config: &AgentConfig,
@@ -186,14 +245,22 @@ pub(super) fn environment(
             "CODEX_HOME".into(),
             dir.join(CODEX_HOME).to_string_lossy().into_owned(),
         )],
-        AgentKind::Claude => Vec::new(),
+        AgentKind::Claude | AgentKind::Agy => Vec::new(),
         AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     })
 }
 /// The fixed arguments before the driver's own. Codex gets its login lockdown
 /// and the shared provider configuration again as overrides, so the provider
-/// holds whatever its configuration file later contains. Claude gets none.
+/// holds whatever its configuration file later contains. Antigravity on the
+/// Gemini API-key route gets `--settings '{"modelProvider":"gemini"}'`. Claude
+/// and Antigravity sign-in get none.
 pub(super) fn arguments(route: Route) -> Vec<String> {
+    if route == Route::Gemini {
+        return vec![
+            "--settings".to_owned(),
+            "{\"modelProvider\":\"gemini\"}".to_owned(),
+        ];
+    }
     match codex_provider(route) {
         Some(provider) => CODEX_LOGIN_LOCKDOWN
             .iter()

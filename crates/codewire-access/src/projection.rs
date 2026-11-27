@@ -148,6 +148,7 @@ pub const NO_PROXY_NAMES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 pub enum ManagedAgent {
     Codex,
     Claude,
+    Agy,
 }
 
 /// Stock clients configured by selected profile slots, not credential auth
@@ -552,10 +553,11 @@ impl ManagedCredentialClients {
     /// The selected client a managed agent reaches its provider through, on
     /// every placement, or `None` when the selection has none for it. Codex
     /// uses the Codex slot, as Codex's own configuration does, and the OpenAI
-    /// API-key slot only without one; Claude uses the Anthropic slot. Hosted
-    /// and local VM managed agents both qualify and route by this rule, with
-    /// either a platform or a local profile; a VM's native Codex home is
-    /// configured for the client it picks.
+    /// API-key slot only without one; Claude uses the Anthropic slot; Antigravity
+    /// (`agy`) uses the Antigravity sign-in slot and falls back to the Gemini
+    /// API-key slot only without one. Hosted and local VM managed agents both
+    /// qualify and route by this rule, with either a platform or a local profile;
+    /// a VM's native Codex home is configured for the client it picks.
     pub fn managed_agent_client(self, agent: ManagedAgent) -> Option<ManagedCredentialClient> {
         match agent {
             ManagedAgent::Codex if self.contains(ManagedCredentialClient::Codex) => {
@@ -566,6 +568,12 @@ impl ManagedCredentialClients {
             }
             ManagedAgent::Claude if self.contains(ManagedCredentialClient::Anthropic) => {
                 Some(ManagedCredentialClient::Anthropic)
+            }
+            ManagedAgent::Agy if self.contains(ManagedCredentialClient::Antigravity) => {
+                Some(ManagedCredentialClient::Antigravity)
+            }
+            ManagedAgent::Agy if self.contains(ManagedCredentialClient::Gemini) => {
+                Some(ManagedCredentialClient::Gemini)
             }
             _ => None,
         }

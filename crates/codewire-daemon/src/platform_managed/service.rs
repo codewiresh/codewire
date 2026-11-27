@@ -810,7 +810,10 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
-        for agent in [Agent::Codex, Agent::Claude] {
+        for agent in [Agent::Codex, Agent::Claude, Agent::Agy] {
+            if agent == Agent::Agy && self.inner.config.interception.is_none() {
+                continue;
+            }
             if agent
                 .route(self.inner.config.managed_credential_clients)
                 .is_some()
@@ -831,7 +834,7 @@ impl PlatformManagedService for Service {
                     provider_version: pin.identity.version.clone(),
                     proxy_only_qualified: true,
                     steer: agent == Agent::Codex,
-                    interrupt: true,
+                    interrupt: matches!(agent, Agent::Codex | Agent::Claude),
                 });
             }
         }

@@ -74,6 +74,7 @@ pub(super) fn require_managed_agent_client(
         let provider = match agent {
             codewire_access::ManagedAgent::Codex => "Codex or OpenAI",
             codewire_access::ManagedAgent::Claude => "Anthropic",
+            codewire_access::ManagedAgent::Agy => "Antigravity or Gemini",
         };
         anyhow::bail!(
             "the native environment's selected credential profile has no {provider} provider"

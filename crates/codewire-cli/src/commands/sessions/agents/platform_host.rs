@@ -519,6 +519,7 @@ fn agent_name(agent: &codewire_client::EnumValue<rpc::EnvironmentAgentKind>) -> 
     match agent.as_known() {
         Some(rpc::EnvironmentAgentKind::Codex) => "codex",
         Some(rpc::EnvironmentAgentKind::Claude) => "claude",
+        Some(rpc::EnvironmentAgentKind::Agy) => "agy",
         _ => "unknown",
     }
 }
@@ -561,12 +562,14 @@ pub(super) async fn run(
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,
         Some("claude") => AgentKind::Claude,
-        _ => anyhow::bail!("managed platform conversations support --agent codex or claude"),
+        Some("agy") => AgentKind::Agy,
+        _ => anyhow::bail!("managed platform conversations support --agent codex, claude or agy"),
     };
     let (endpoint, support) = capture(&target).await?;
     let kind = match agent {
         AgentKind::Codex => rpc::EnvironmentAgentKind::Codex,
         AgentKind::Claude => rpc::EnvironmentAgentKind::Claude,
+        AgentKind::Agy => rpc::EnvironmentAgentKind::Agy,
         AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     };
     let provider = support

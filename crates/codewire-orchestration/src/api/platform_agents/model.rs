@@ -31,6 +31,7 @@ pub enum ManagedAction {
 pub enum ManagedAgent {
     Codex,
     Claude,
+    Agy,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +114,7 @@ impl ManagedMutation {
                         {
                             private::PlatformManagedAgent::Codex => ManagedAgent::Codex,
                             private::PlatformManagedAgent::Claude => ManagedAgent::Claude,
+                            private::PlatformManagedAgent::Agy => ManagedAgent::Agy,
                             _ => return Err(invalid()),
                         },
                     ),
@@ -150,6 +152,7 @@ impl ManagedMutation {
                                 {
                                     private::PlatformManagedAgent::Codex => ManagedAgent::Codex,
                                     private::PlatformManagedAgent::Claude => ManagedAgent::Claude,
+                                    private::PlatformManagedAgent::Agy => ManagedAgent::Agy,
                                     _ => return Err(invalid()),
                                 },
                             )

@@ -34,6 +34,7 @@ pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 pub enum Agent {
     Codex,
     Claude,
+    Agy,
 }
 impl TryFrom<i32> for Agent {
     type Error = Error;
@@ -41,6 +42,7 @@ impl TryFrom<i32> for Agent {
         match value {
             1 => Ok(Self::Codex),
             2 => Ok(Self::Claude),
+            3 => Ok(Self::Agy),
             _ => Err(Error::Refused),
         }
     }
@@ -50,6 +52,7 @@ impl Agent {
         match self {
             Self::Codex => 1,
             Self::Claude => 2,
+            Self::Agy => 3,
         }
     }
 
@@ -58,6 +61,7 @@ impl Agent {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Agy => "agy",
         }
     }
 
@@ -68,23 +72,24 @@ impl Agent {
         let agent = match self {
             Self::Codex => codewire_access::ManagedAgent::Codex,
             Self::Claude => codewire_access::ManagedAgent::Claude,
+            Self::Agy => codewire_access::ManagedAgent::Agy,
         };
         match selected.managed_agent_client(agent)? {
             ManagedCredentialClient::Codex => Some(Route::Codex),
             ManagedCredentialClient::OpenAi => Some(Route::OpenAi),
             ManagedCredentialClient::Anthropic => Some(Route::Anthropic),
-            ManagedCredentialClient::Ssh
-            | ManagedCredentialClient::GitHub
-            | ManagedCredentialClient::Gemini
-            | ManagedCredentialClient::Antigravity => None,
+            ManagedCredentialClient::Antigravity => Some(Route::Antigravity),
+            ManagedCredentialClient::Gemini => Some(Route::Gemini),
+            ManagedCredentialClient::Ssh | ManagedCredentialClient::GitHub => None,
         }
     }
 }
 
 /// The broker route of one managed agent, fixed when the agent is prepared.
 /// Every route is credential-free: the private home names only a loopback
-/// endpoint, and the broker adds the selected slot's credential outside the
-/// Sandbox. None of them reads Codex's delivered `~/.codex/auth.json`.
+/// endpoint or placeholder-backed front-door route, and the broker adds the
+/// selected slot's credential outside the Sandbox. None of them reads Codex's
+/// delivered `~/.codex/auth.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Route {
     /// Codex through the Codex slot's `/v1` route: the owner's ChatGPT
@@ -97,6 +102,14 @@ pub enum Route {
     /// Claude through the Anthropic slot.
     #[serde(rename = "anthropic")]
     Anthropic,
+    /// Antigravity CLI (`agy`) through the Antigravity OAuth sign-in slot
+    /// (front-door intercepted placeholder token).
+    #[serde(rename = "antigravity")]
+    Antigravity,
+    /// Antigravity CLI (`agy`) through the Gemini API-key slot
+    /// (`--settings '{"modelProvider":"gemini"}'`, front-door intercepted).
+    #[serde(rename = "gemini")]
+    Gemini,
 }
 
 impl Route {
@@ -104,6 +117,7 @@ impl Route {
         match self {
             Self::Codex | Self::OpenAi => Agent::Codex,
             Self::Anthropic => Agent::Claude,
+            Self::Antigravity | Self::Gemini => Agent::Agy,
         }
     }
 }
@@ -317,6 +331,9 @@ pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(),
             .agent
             .route(config.managed_credential_clients)
             .is_none()
+        // Both Antigravity sign-in and Gemini API key are front-door-only
+        // credentials: refuse managed `agy` launches when interception is off.
+        || (origin.agent == Agent::Agy && config.interception.is_none())
     {
         return Err(Error::Refused);
     }
@@ -720,10 +737,22 @@ mod tests {
         assert_eq!(route(Agent::Codex, &["anthropic", "github", "ssh"]), None);
         assert_eq!(route(Agent::Claude, &["anthropic"]), Some(Route::Anthropic));
         assert_eq!(route(Agent::Claude, &["codex", "openai"]), None);
+        assert_eq!(
+            route(Agent::Agy, &["antigravity"]),
+            Some(Route::Antigravity)
+        );
+        assert_eq!(route(Agent::Agy, &["gemini"]), Some(Route::Gemini));
+        assert_eq!(
+            route(Agent::Agy, &["gemini", "antigravity"]),
+            Some(Route::Antigravity)
+        );
+        assert_eq!(route(Agent::Agy, &["codex", "anthropic"]), None);
         for (route, agent, wire) in [
             (Route::Codex, Agent::Codex, "\"codex\""),
             (Route::OpenAi, Agent::Codex, "\"openai\""),
             (Route::Anthropic, Agent::Claude, "\"anthropic\""),
+            (Route::Antigravity, Agent::Agy, "\"antigravity\""),
+            (Route::Gemini, Agent::Agy, "\"gemini\""),
         ] {
             assert_eq!(route.agent(), agent);
             assert_eq!(serde_json::to_string(&route).unwrap(), wire);

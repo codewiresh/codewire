@@ -1258,18 +1258,30 @@ fn github_cli_names_do_not_change_the_reserved_set() {
 /// One rule picks a managed agent's provider client on every placement.
 #[test]
 fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_it() {
-    use ManagedCredentialClient::{Anthropic, Codex, OpenAi};
-    for (slots, codex, claude) in [
-        (&[][..], None, None),
-        (&["codex"], Some(Codex), None),
-        (&["openai"], Some(OpenAi), None),
-        (&["codex", "openai"], Some(Codex), None),
-        (&["anthropic"], None, Some(Anthropic)),
-        (&["ssh", "github"], None, None),
+    use ManagedCredentialClient::{Anthropic, Antigravity, Codex, Gemini, OpenAi};
+    for (slots, codex, claude, agy) in [
+        (&[][..], None, None, None),
+        (&["codex"], Some(Codex), None, None),
+        (&["openai"], Some(OpenAi), None, None),
+        (&["codex", "openai"], Some(Codex), None, None),
+        (&["anthropic"], None, Some(Anthropic), None),
+        (&["antigravity"], None, None, Some(Antigravity)),
+        (&["gemini"], None, None, Some(Gemini)),
+        (&["antigravity", "gemini"], None, None, Some(Antigravity)),
+        (&["ssh", "github"], None, None, None),
         (
-            &["codex", "openai", "anthropic", "ssh", "github"],
+            &[
+                "codex",
+                "openai",
+                "anthropic",
+                "antigravity",
+                "gemini",
+                "ssh",
+                "github",
+            ],
             Some(Codex),
             Some(Anthropic),
+            Some(Antigravity),
         ),
     ] {
         let selected = clients(slots);
@@ -1281,6 +1293,11 @@ fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_i
         assert_eq!(
             selected.managed_agent_client(ManagedAgent::Claude),
             claude,
+            "{slots:?}"
+        );
+        assert_eq!(
+            selected.managed_agent_client(ManagedAgent::Agy),
+            agy,
             "{slots:?}"
         );
     }

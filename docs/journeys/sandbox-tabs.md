@@ -84,30 +84,31 @@ Updated 2026-11-27. Written first; every step is **not yet observed**.
   - Level 1's viewport bounding box stays fixed while Level 2 and Level 3 open and close;
   - Level 3 does not open until an agent row in Level 2 is hovered or focused;
   - every provider mark uses its real vector icon from `icons.svg` (never generic keys or letter badges).
-- **Gotchas:** Slice 1 delivers the Agent tab shell, composer, and cascading picker; live managed agent execution and SSE token streaming for Claude Code and Codex ship in Slice 2 (`sandbox-tabs-agent-streaming`), while managed `agy` and `pi` drivers follow in later slices.
+- **Gotchas:** Slice 1 delivers the Agent tab shell, composer, and cascading picker; Slice 2 adds live managed execution and SSE token streaming for Claude Code and Codex; Slice 3 packages `agy` 1.5.18 in the workspace image (`#4341`) and adds managed `agy` streaming (`sandbox-tabs-agent-streaming`), while `pi` follows in Slice 4.
 - **Observed:** not yet observed.
 
 ## `sandbox-tabs-agent-streaming`: Live managed agent SSE streaming, tool steps, Stop, and reattach
 
 - **Entry points:** Tab Home Page → **Agent** (when `organization.agent_chat` is enabled), and Tab Home Page → **Running in this Sandbox** for existing live managed agent sessions.
 - **States to exercise:**
-  - sending a prompt for Claude Code or Codex from an empty Agent tab (centered hero transitions to a docked bottom composer with a scrollable transcript above);
+  - sending a prompt for Antigravity (`agy`), Claude Code, or Codex from an empty Agent tab (centered hero transitions to a docked bottom composer with a scrollable transcript above);
   - receiving live SSE events (`/_events/agents/{session_id}`) over `EnvironmentSessionService::AttachSession` with `turn_start`, `tool_start`, `tool_end`, `delta`, and `turn_end`;
-  - clicking **Stop** (`■`) mid-turn to send `interrupt` via `/_actions/agents/control`;
+  - clicking **Stop** (`■`) mid-turn (`interrupt` for Claude Code / Codex, `stop` for `agy`) via `/_actions/agents/control`;
   - sending a follow-up prompt after `turn_end` or steering mid-turn via `/_actions/agents/control`;
   - reattaching a running managed agent session from `Running in this Sandbox` on a Tab Home Page and verifying history replay via `Last-Event-ID`;
   - attempting to call the agent BFF routes when `organization.agent_chat` is `false` (returns `403 agent-chat-disabled`).
 - **Driving it:**
-  1. Open an Agent tab on a Sandbox whose organization has `agent_chat` enabled, select Claude Code or Codex, enter a prompt, and click Send (or press `Enter`).
+  1. Open an Agent tab on a Sandbox whose organization has `agent_chat` enabled, select Antigravity (`agy`), Claude Code, or Codex, enter a prompt, and click Send (or press `Enter`).
   2. Verify `/_actions/agents/launch` returns the managed session ID, the tab switches to `data-agent-active="true"`, and `EventSource` connects to `/_events/agents/{session_id}`.
   3. Watch a tool step stream in inside the open `<details class="cw-agent-activity">` block with its live pulse indicator, followed by token-by-token Markdown prose (headings, inline code, links, fenced code blocks with a working `Copy` button).
   4. Verify that when `turn_end` arrives, `<details class="cw-agent-activity">` auto-collapses into a compact summary (`Used N tools · X.Xs`), the **Stop** button returns to Send, and a follow-up prompt appends a new turn on the same session.
   5. Open a new Tab Home Page (`+`), verify the running agent session appears under `Running in this Sandbox`, and click it to reattach (or focus the existing tab).
-  6. While a turn is running, click **Stop** (`■`) and verify `/_actions/agents/control` posts `action: "interrupt"`.
+  6. While a turn is running, click **Stop** (`■`) and verify `/_actions/agents/control` posts `action: "interrupt"` (for Claude Code / Codex) or `action: "stop"` (for `agy`).
 - **Proof:**
   - live SSE streaming uses push-based `EnvironmentSessionService::AttachSession` over HTTP/2 with zero browser polling;
   - all rendered Markdown is constructed strictly via DOM nodes (zero `innerHTML`, zero CSP violations, only `http:`/`https:`/`mailto:` links allowed);
+  - managed `agy` sessions require front-door interception (`antigravity` sign-in or `gemini` API key route with `--settings '{"modelProvider":"gemini"}'`), keeping real Google credentials outside the Sandbox;
   - closing an Agent tab calls `EventSource.close()` so the server detaches the upstream session stream promptly;
   - every `/_fragments/agents*`, `/_actions/agents/*`, and `/_events/agents/*` route rejects organizations with `agent_chat == false` with `403`.
-- **Gotchas:** managed `agy` (Antigravity / Gemini) and `pi` execution wire up in Slices 3 and 4; selecting them in Slice 2 keeps the honest fallback notice directing the user to a Terminal tab.
+- **Gotchas:** managed `pi` execution wires up in Slice 4; selecting it keeps the honest fallback notice directing the user to a Terminal tab.
 - **Observed:** not yet observed.

@@ -109,12 +109,13 @@ for component in / /usr /usr/local "$bin_root"; do
   esac
 done
 
-for agent in codex claude gemini kimi pi amp aider; do
+for agent in codex claude gemini kimi pi amp aider agy; do
   executable="$(command -v "$agent")"
   test -n "$executable"
   resolved="$(readlink -f "$executable")"
   if [ "$mode" = mounted-home-agents ]; then
     case "$agent:$executable:$resolved" in
+      agy:/opt/codewire/agents/upgrade/agy:/opt/codewire/agents/upgrade/agy) ;;
       aider:/opt/codewire/agents/upgrade/aider:/opt/codewire/agents/upgrade/aider) ;;
       amp:/opt/codewire/agents/upgrade/amp:/opt/codewire/agents/upgrade/amp) ;;
       codex:/opt/codewire/agents/npm/bin/codex:/opt/codewire/agents/npm/lib/node_modules/*) ;;

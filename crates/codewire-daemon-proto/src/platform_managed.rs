@@ -85,6 +85,7 @@ fn agent_name(agent: v1::PlatformManagedAgent) -> Option<&'static str> {
     match agent {
         v1::PlatformManagedAgent::Codex => Some("codex"),
         v1::PlatformManagedAgent::Claude => Some("claude"),
+        v1::PlatformManagedAgent::Agy => Some("agy"),
         _ => None,
     }
 }
@@ -131,6 +132,7 @@ pub fn stale_image_clients(message: &str) -> Option<Vec<StaleImageClient>> {
         let agent = match name {
             "codex" => v1::PlatformManagedAgent::Codex,
             "claude" => v1::PlatformManagedAgent::Claude,
+            "agy" => v1::PlatformManagedAgent::Agy,
             _ => return None,
         };
         if clients.iter().any(|client| client.agent == agent)
@@ -489,6 +491,7 @@ mod tests {
             (A::Claude, "2.1.288"),
             (A::Claude, "2.1.292"),
             (A::Claude, "2.2.0-beta.1"),
+            (A::Agy, "1.5.18"),
         ] {
             assert!(launch(agent, version).is_ok(), "{agent:?} {version}");
         }

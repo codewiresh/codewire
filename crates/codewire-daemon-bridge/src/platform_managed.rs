@@ -51,7 +51,7 @@ impl DaemonClient {
             || !(4..=wire::SUPPORT_BYTES).contains(&r.support_image_size)
             || r.support_image_version.is_empty()
             || r.support_image_version.len() > 128
-            || r.agents.len() > 2
+            || r.agents.len() > 3
         {
             return Err(refused());
         }

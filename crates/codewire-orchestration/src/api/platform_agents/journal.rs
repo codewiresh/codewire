@@ -472,6 +472,7 @@ impl ManagedJournal {
                     let agent = match again.agent {
                         ManagedAgent::Codex => "codex",
                         ManagedAgent::Claude => "claude",
+                        ManagedAgent::Agy => "agy",
                     };
                     // The new Pod's row starts at the predecessor's generation
                     // and advances once when the Resume completes, as Restart.
@@ -512,6 +513,7 @@ impl ManagedJournal {
             let agent = match m.agent.ok_or_else(invalid)? {
                 ManagedAgent::Codex => "codex",
                 ManagedAgent::Claude => "claude",
+                ManagedAgent::Agy => "agy",
             };
             sqlx::query("INSERT INTO environment_platform_agent_conversations(environment_id,pod_uid,session_id,driver_id,\
                 binding_json,support_image_sha256,support_image_size,agent,launch_generation,active_request_id) \
@@ -1108,6 +1110,7 @@ async fn resume_predecessor_in(
         agent: match agent.as_str() {
             "codex" => ManagedAgent::Codex,
             "claude" => ManagedAgent::Claude,
+            "agy" => ManagedAgent::Agy,
             _ => return Err(unavailable()),
         },
     })

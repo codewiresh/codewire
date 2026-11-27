@@ -407,6 +407,12 @@ floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tool
 agents_stage="$(sed -n '/^FROM workspace-floating-tools AS workspace-agents$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 grep -qF 'PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat' \
   <<<"$agents_stage" || fail 'aider is not installed in the fresh agents stage'
+grep -qF 'install -m 0755 /tmp/antigravity /opt/codewire/agents/antigravity/agy' \
+  <<<"$agents_stage" || fail 'agy is not installed in the fresh agents stage'
+grep -qF 'ADD --checksum=sha256:a4960723ed9cf5b5ac72ed541db8df4d62741795261eb93a4681006ccb23d5ad' \
+  "$WORKSPACE_DOCKERFILE" || fail 'agy amd64 archive is not checksum-pinned'
+grep -qF 'ADD --checksum=sha256:97799abac91ba0b29b77598b62f903b866461da17680263a182fef2cb796ab0d' \
+  "$WORKSPACE_DOCKERFILE" || fail 'agy arm64 archive is not checksum-pinned'
 grep -qxF 'COPY --from=workspace-agents --chown=0:0 /opt/codewire/agents/ /opt/codewire/agents/' "$WORKSPACE_DOCKERFILE" ||
   fail 'the shipped agents do not reach the workspace once, owned by root'
 if grep -qF 'chown -R -h root:root /opt/codewire/agents' "$WORKSPACE_DOCKERFILE"; then

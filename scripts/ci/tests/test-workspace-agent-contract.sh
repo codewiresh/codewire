@@ -137,7 +137,7 @@ chmod -R go-w "$work/ssh"
 printf '#!/bin/sh\n' >"$work/agents/npm/bin/kimi"
 cp "$ROOT"/images/workspace/agent-upgrade/* "$work/agents/upgrade/"
 chmod -R go-w "$work/agents"
-for agent in codex claude gemini kimi pi amp aider; do
+for agent in codex claude gemini kimi pi amp aider agy; do
   ln -s agent "$work/bin/$agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos \

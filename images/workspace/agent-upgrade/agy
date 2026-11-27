@@ -1,0 +1,21 @@
+#!/bin/sh
+# The image's Antigravity CLI lives outside the persistent home, where its own
+# updater cannot write. Updating copies the shipped binary into the persistent
+# home (~/.local/bin/agy, which PATH prefers from then on) and runs its built-in
+# updater there. Everything else runs the shipped binary directly.
+set -eu
+shipped=/opt/codewire/agents/antigravity/agy
+native="$HOME/.local/bin/agy"
+case "${1:-}" in
+  update)
+    mkdir -p "$HOME/.local/bin"
+    if [ ! -x "$native" ]; then
+      cp "$shipped" "$native"
+      chmod 0755 "$native"
+    fi
+    exec "$native" "$@" ;;
+esac
+if [ -x "$native" ]; then
+  exec "$native" "$@"
+fi
+exec "$shipped" "$@"

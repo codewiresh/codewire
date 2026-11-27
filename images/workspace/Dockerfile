@@ -41,8 +41,15 @@ ADD --checksum=sha256:46be9914a4a6af1c3a680b11231a4b1a5bc512f4bf6f9acaf050c3f4e4
 FROM scratch AS atmos-arm64
 ADD --checksum=sha256:765226c8f8be4b586a80842b2f4c3f4cddd3b7932c9172a857a85f1b4fd01db8 \
   https://github.com/cloudposse/atmos/releases/download/v1.233.2/atmos_1.233.2_linux_arm64 /atmos
+FROM scratch AS agy-amd64
+ADD --checksum=sha256:a4960723ed9cf5b5ac72ed541db8df4d62741795261eb93a4681006ccb23d5ad \
+  https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.18/agy_cli_linux_x64.tar.gz /agy.tar.gz
+FROM scratch AS agy-arm64
+ADD --checksum=sha256:97799abac91ba0b29b77598b62f903b866461da17680263a182fef2cb796ab0d \
+  https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.18/agy_cli_linux_arm64.tar.gz /agy.tar.gz
 FROM kubectl-${TARGETARCH} AS workspace-kubectl
 FROM atmos-${TARGETARCH} AS workspace-atmos
+FROM agy-${TARGETARCH} AS workspace-agy
 
 FROM sccache-${BUILDARCH} AS build-sccache
 FROM protoc-${BUILDARCH} AS build-protoc
@@ -358,10 +365,19 @@ RUN gopls version && hcloud version && \
 FROM workspace-floating-tools AS workspace-agents
 USER root
 RUN mkdir -p /opt/codewire/agents/npm/lib /opt/codewire/agents/npm/bin \
-      /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
+      /opt/codewire/agents/pipx /opt/codewire/agents/bin /opt/codewire/agents/antigravity && \
     chown -R codewire:codewire /opt/codewire/agents
 USER codewire
 RUN PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat
+# Antigravity CLI (agy) is a standalone native binary fetched by exact SHA-256
+# above (#4341). Verify the single expected archive entry before extracting so
+# no extra files enter /opt/codewire/agents/antigravity.
+RUN --mount=type=bind,from=workspace-agy,source=/agy.tar.gz,target=/tmp/agy.tar.gz,readonly \
+    test "$(tar -tzf /tmp/agy.tar.gz)" = 'antigravity' && \
+    tar -xzf /tmp/agy.tar.gz -C /tmp antigravity && \
+    install -m 0755 /tmp/antigravity /opt/codewire/agents/antigravity/agy && \
+    rm -f /tmp/antigravity && \
+    test "$(/opt/codewire/agents/antigravity/agy --version)" = '1.5.18'
 # Seed coding agents from the exact versions accepted by the workspace image
 # contract, outside the persistent home mount. Interactive users can install
 # newer versions into their own prefix without sudo; PATH gives those versions

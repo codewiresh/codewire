@@ -32,18 +32,18 @@
     {
       id: "agy", name: "Antigravity", icon: "icon-antigravity", cmd: "agy", ready: true,
       models: [
-        { id: "gemini-4-neon", label: "Gemini 4 Neon", icon: "icon-antigravity" },
-        { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", icon: "icon-antigravity" },
-        { id: "claude-opus-5.5", label: "Opus 5.5", icon: "icon-claude" },
-        { id: "claude-sonnet-5.5", label: "Sonnet 5.5", icon: "icon-claude" },
+        { id: "gemini-4-neon-high", label: "Gemini 4 Neon", icon: "icon-antigravity" },
+        { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash", icon: "icon-antigravity" },
+        { id: "claude-opus-5-5-high", label: "Opus 5.5", icon: "icon-claude" },
+        { id: "claude-sonnet-5-5-high", label: "Sonnet 5.5", icon: "icon-claude" },
       ],
     },
     {
       id: "claude", name: "Claude Code", icon: "icon-claude", cmd: "claude", ready: true,
       models: [
-        { id: "opus-5.5", label: "Opus 5.5", icon: "icon-claude" },
-        { id: "sonnet-5.5", label: "Sonnet 5.5", icon: "icon-claude" },
-        { id: "haiku-5.5", label: "Haiku 5.5", icon: "icon-claude" },
+        { id: "claude-opus-5-5", label: "Opus 5.5", icon: "icon-claude" },
+        { id: "claude-sonnet-5-5", label: "Sonnet 5.5", icon: "icon-claude" },
+        { id: "claude-haiku-5-5", label: "Haiku 5.5", icon: "icon-claude" },
       ],
     },
     {
@@ -1456,15 +1456,23 @@
       }
 
       async function restoreExistingSession(session) {
+        const lowerName = String(session.name || "").toLowerCase();
+        const inferredAgentId = lowerName.includes("codex")
+          ? "codex"
+          : lowerName.includes("antigravity") || lowerName === "agy"
+            ? "agy"
+            : lowerName.includes("claude")
+              ? "claude"
+              : selectedAgentId;
         tab.agentSession = {
           sessionId: session.sessionId,
           driverId: session.driverId,
           launchGeneration: session.launchGeneration || 1,
-          agentId: selectedAgentId,
+          agentId: inferredAgentId,
           agentName: session.name || "Agent",
           workingDir: session.workingDir || workingDir,
-          steer: true,
-          interrupt: true,
+          steer: inferredAgentId === "codex",
+          interrupt: inferredAgentId !== "agy",
         };
         if (projectLabel) projectLabel.textContent = tab.agentSession.workingDir;
         lockSessionContext();
@@ -1739,7 +1747,7 @@
               _csrf: csrf || "",
               account_id: accountId,
               request_id: clientUuid(),
-              action: "interrupt",
+              action: tab.agentSession.interrupt ? "interrupt" : "stop",
               session_id: tab.agentSession.sessionId,
               driver_id: tab.agentSession.driverId,
               launch_generation: tab.agentSession.launchGeneration,
@@ -1787,7 +1795,7 @@
               const reason = payload?.error;
               if (note) {
                 note.textContent = reason === "unsupported-agent" || reason === "agent-not-configured"
-                  ? `${agent.name} is not enabled in this Sandbox yet. Switch to Claude Code or Codex, or open a Terminal tab.`
+                  ? `${agent.name} is not enabled in this Sandbox yet. Check that its credential is attached, switch to another agent, or open a Terminal tab.`
                   : reason === "agent-chat-disabled"
                     ? "Agent chat is not enabled for this organization."
                     : "Could not start the agent session right now. Check Sandbox readiness and try again.";
@@ -1804,7 +1812,7 @@
               agentName: agent.name,
               workingDir,
               steer: agent.id === "codex",
-              interrupt: true,
+              interrupt: agent.id !== "agy",
             };
             input.value = "";
             input.style.height = "auto";

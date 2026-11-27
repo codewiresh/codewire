@@ -22,7 +22,7 @@ const MAX_REASON_BYTES: usize = 512;
 /// A word this long that mixes letters and digits is treated as a secret.
 const MIN_OPAQUE_TOKEN_BYTES: usize = 32;
 /// Prefixes of provider keys, tokens and identifiers that are never kept.
-const SECRET_PREFIXES: [&str; 14] = [
+const SECRET_PREFIXES: [&str; 17] = [
     "sk-",
     "sk_",
     "rk-",
@@ -34,6 +34,9 @@ const SECRET_PREFIXES: [&str; 14] = [
     "github_pat_",
     "xox",
     "AKIA",
+    "AIza",
+    "ya29.",
+    "cwp1_",
     "eyJ",
     "Bearer",
     "bearer",

@@ -3318,6 +3318,8 @@ test("Agent tab streams SSE tool steps and CSP-safe Markdown, collapses activity
 
   await expect(agentPanel).toHaveAttribute("data-agent-active", "true");
   expect(launched).toHaveLength(1);
+  expect(launched[0].agent).toBe("agy");
+  expect(launched[0].model).toBe("gemini-4-neon-high");
   expect(launched[0].prompt).toBe("Run the tests and summarize");
   await expect(agentPanel.locator(".cw-agent-turn-user")).toHaveText("Run the tests and summarize");
   await expect(agentPanel.locator(".cw-agent-prose h2")).toHaveText("Done");

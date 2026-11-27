@@ -223,7 +223,7 @@ fn normalize_effort(effort: Option<&str>) -> Result<Option<String>, ()> {
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
         "default" => Ok(None),
-        "low" | "medium" | "high" | "max" => Ok(Some(lower)),
+        "low" | "medium" | "high" | "xhigh" | "max" => Ok(Some(lower)),
         _ => Err(()),
     }
 }
@@ -232,6 +232,7 @@ fn parse_agent_kind(value: &str) -> Option<EnvironmentAgentKind> {
     match value {
         "codex" => Some(EnvironmentAgentKind::Codex),
         "claude" => Some(EnvironmentAgentKind::Claude),
+        "agy" => Some(EnvironmentAgentKind::Agy),
         _ => None,
     }
 }
@@ -240,6 +241,7 @@ fn agent_kind_name(kind: i32) -> Option<&'static str> {
     match kind {
         v if v == EnvironmentAgentKind::Codex as i32 => Some("codex"),
         v if v == EnvironmentAgentKind::Claude as i32 => Some("claude"),
+        v if v == EnvironmentAgentKind::Agy as i32 => Some("agy"),
         _ => None,
     }
 }
@@ -1029,9 +1031,11 @@ mod tests {
             Some(EnvironmentAgentKind::Claude)
         );
         assert_eq!(parse_agent_kind("codex"), Some(EnvironmentAgentKind::Codex));
+        assert_eq!(parse_agent_kind("agy"), Some(EnvironmentAgentKind::Agy));
         assert_eq!(parse_agent_kind("bash"), None);
         assert_eq!(normalize_effort(Some("Default")), Ok(None));
         assert_eq!(normalize_effort(Some("High")), Ok(Some("high".into())));
+        assert_eq!(normalize_effort(Some("xhigh")), Ok(Some("xhigh".into())));
         assert!(normalize_effort(Some("turbo")).is_err());
         assert!(valid_working_dir("/workspace"));
         assert!(!valid_working_dir("relative/path"));

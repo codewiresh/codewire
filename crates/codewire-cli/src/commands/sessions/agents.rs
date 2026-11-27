@@ -112,8 +112,10 @@ fn agent_policy(sandbox: bool, agent: AgentKind) -> &'static str {
     match (sandbox, agent) {
         (false, AgentKind::Codex) => CODEX_POLICY,
         (false, AgentKind::Claude) => CLAUDE_POLICY,
+        (false, AgentKind::Agy) => AGY_POLICY,
         (true, AgentKind::Codex) => CODEX_SANDBOX_POLICY,
         (true, AgentKind::Claude) => CLAUDE_SANDBOX_POLICY,
+        (true, AgentKind::Agy) => AGY_SANDBOX_POLICY,
         (false, AgentKind::Noel) => NOEL_POLICY,
         // No launch path admits noel in a Sandbox.
         (true, AgentKind::Noel) => NOEL_HOST_ONLY,
@@ -154,10 +156,13 @@ pub(crate) const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
 /// never `max` unless asked (#2982).
 pub(crate) const CODEX_DEFAULT_EFFORT: &str = "medium";
 pub(crate) const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
+pub(crate) const AGY_DEFAULT_MODEL: &str = "gemini-4-neon-high";
 const CODEX_POLICY: &str = "trusted host execution: Codex app-server danger-full-access and approvalPolicy never; native approval requests are declined";
 const CLAUDE_POLICY: &str = "trusted host execution: installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; no permission mode is passed, so the user's own default mode decides which tools run";
+const AGY_POLICY: &str = "trusted host execution: installed Antigravity CLI (agy) with the user's ordinary settings, MCP configuration and permission rules";
 const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-full-access and approvalPolicy never, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
 const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in bypass permissions mode (--permission-mode bypassPermissions), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
+const AGY_SANDBOX_POLICY: &str = "Sandbox execution: installed Antigravity CLI (agy) with --dangerously-skip-permissions through the environment's front-door intercepted Antigravity sign-in or Gemini API-key route; no Codewire-held credential material enters the Sandbox";
 /// Managed Claude's permission mode on a Sandbox placement, a local VM or a
 /// hosted Sandbox: bypass permissions, the same default `claude` typed there
 /// gets (#5813; CLI-ORCHESTRATION.md), so a headless turn runs every tool with
@@ -181,6 +186,7 @@ enum AgentKind {
     Codex,
     Claude,
     Noel,
+    Agy,
 }
 
 impl AgentKind {
@@ -190,6 +196,7 @@ impl AgentKind {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Noel => "noel",
+            Self::Agy => "agy",
         }
     }
 
@@ -198,12 +205,13 @@ impl AgentKind {
         match self {
             Self::Codex => Some(CODEX_DEFAULT_MODEL),
             Self::Claude => Some(CLAUDE_DEFAULT_MODEL),
+            Self::Agy => Some(AGY_DEFAULT_MODEL),
             Self::Noel => None,
         }
     }
 
     /// Whether an explicit stop or restart interrupts this agent's active run
-    /// before the host daemon signals the conversation. Codex and Claude
+    /// before the host daemon signals the conversation. Codex, Claude and Agy
     /// keep their stop: the signal ends the run and its outcome is unknown.
     #[cfg(target_os = "linux")]
     fn interrupts_before_stop(self) -> bool {
@@ -214,7 +222,7 @@ impl AgentKind {
 fn agent_effort(agent: AgentKind, requested: Option<&str>) -> anyhow::Result<Option<String>> {
     let effort = match agent {
         AgentKind::Codex => Some(requested.unwrap_or(CODEX_DEFAULT_EFFORT)),
-        AgentKind::Claude | AgentKind::Noel => requested,
+        AgentKind::Claude | AgentKind::Noel | AgentKind::Agy => requested,
     };
     if let Some(effort) = effort {
         validate_token("effort", effort)?;
@@ -222,6 +230,10 @@ fn agent_effort(agent: AgentKind, requested: Option<&str>) -> anyhow::Result<Opt
             && !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
         {
             anyhow::bail!("Claude --effort supports low, medium, high, xhigh or max");
+        }
+        if agent == AgentKind::Agy && !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+        {
+            anyhow::bail!("Antigravity --effort supports low, medium, high, xhigh or max");
         }
         // noel takes the level as `--thinking`; it has no ultra.
         if agent == AgentKind::Noel
@@ -1337,6 +1349,7 @@ pub(super) async fn handle_agent_run_command(
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,
         Some("claude") => AgentKind::Claude,
+        Some("agy") => AgentKind::Agy,
         Some("noel") => AgentKind::Noel,
         Some("kimi") => anyhow::bail!(
             "Kimi managed conversations are not qualified yet: its ACP adapter has not passed Codewire qualification. Use --agent codex or --agent claude"
@@ -2676,6 +2689,32 @@ fn claude_arguments(
     arguments.into_iter().map(str::to_owned).collect()
 }
 
+/// The arguments one managed Antigravity CLI (`agy`) peer starts with:
+/// bidirectional `stream-json` stdio, the model, optional effort, saved
+/// conversation on resume, and `--dangerously-skip-permissions` on Sandbox
+/// placements only. Route-specific `--settings` (for Gemini API key) is
+/// prepended by `lockdown::arguments`.
+fn agy_arguments(config: &AgentConfig, sandbox: bool, conversation: Option<&str>) -> Vec<String> {
+    let mut arguments = vec![
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--model",
+        config.model.as_str(),
+    ];
+    if let Some(effort) = &config.effort {
+        arguments.extend(["--effort", effort.as_str()]);
+    }
+    if let Some(conversation) = conversation {
+        arguments.extend(["--conversation", conversation]);
+    }
+    if sandbox {
+        arguments.push("--dangerously-skip-permissions");
+    }
+    arguments.into_iter().map(str::to_owned).collect()
+}
+
 /// `value` as a TOML basic string, which is also a quoted TOML key.
 fn toml_basic_string(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
@@ -3428,6 +3467,7 @@ impl Driver {
                 "codex",
             ),
             AgentKind::Claude => self.spawn_claude(),
+            AgentKind::Agy => self.spawn_agy(),
             AgentKind::Noel => self.spawn_noel(),
         }
     }
@@ -3436,6 +3476,7 @@ impl Driver {
         match self.config.agent {
             AgentKind::Codex => self.initialize_codex(peer).await,
             AgentKind::Claude => self.initialize_claude(peer).await,
+            AgentKind::Agy => self.initialize_agy(),
             AgentKind::Noel => self.initialize_noel(peer).await,
         }
     }
@@ -3736,6 +3777,37 @@ impl Driver {
         Ok(())
     }
 
+    fn spawn_agy(&mut self) -> anyhow::Result<Peer> {
+        let conversation = self
+            .state
+            .native_thread_established
+            .then_some(self.state.native_thread_id.as_deref())
+            .flatten();
+        let arguments = agy_arguments(&self.config, self.environment.sandbox(), conversation);
+        Peer::spawn(
+            &self.config.program,
+            &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
+            &self.config.working_dir,
+            self,
+            "agy",
+        )
+    }
+
+    fn initialize_agy(&mut self) -> anyhow::Result<()> {
+        // `agy --input-format stream-json --output-format stream-json` rejects
+        // `control_request` lines and emits its `init` event once the first
+        // user prompt arrives, so startup records honest capabilities without
+        // blocking for a probe response.
+        self.state.capabilities = AgentCapabilities {
+            steer: false,
+            interrupt: false,
+            resume: false,
+            note: "Antigravity CLI stream-json has no qualified mid-turn steering or control interrupt".into(),
+        };
+        self.persist_state()?;
+        Ok(())
+    }
+
     async fn start_next(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
         if self.stopping {
             return Ok(());
@@ -3796,6 +3868,13 @@ impl Driver {
                         "session_id": self.state.native_thread_id,
                         "parent_tool_use_id": null,
                         "message": {"role": "user", "content": text},
+                    }))
+                    .await?;
+                }
+                AgentKind::Agy => {
+                    peer.send(&json!({
+                        "event": "user",
+                        "message": {"content": text},
                     }))
                     .await?;
                 }
@@ -3973,7 +4052,7 @@ impl Driver {
                 self.persist_state()?;
             }
             Decision::Steer(expected) => match agent {
-                AgentKind::Codex | AgentKind::Claude => {
+                AgentKind::Codex | AgentKind::Claude | AgentKind::Agy => {
                     let thread = self.thread_id()?;
                     self.pending
                         .insert(peer.next_id, Pending::Steer(record.id.clone()));
@@ -4007,6 +4086,14 @@ impl Driver {
                     peer.send(&json!({"type": "control_request", "request_id": request_id, "request": {"subtype": "interrupt"}}))
                         .await?;
                 }
+                AgentKind::Agy => {
+                    update_message(&self.dir, &record.id, |r| {
+                        r.fail(
+                            MessageState::Error,
+                            "interrupt is not supported for Antigravity CLI stream-json",
+                        );
+                    })?;
+                }
                 AgentKind::Noel => self.interrupt_noel(peer, &record, turn).await?,
             },
         }
@@ -4017,6 +4104,7 @@ impl Driver {
         match self.config.agent {
             AgentKind::Codex => self.on_codex(peer, value).await,
             AgentKind::Claude => self.on_claude(peer, value).await,
+            AgentKind::Agy => self.on_agy(value).await,
             AgentKind::Noel => self.on_noel(peer, value).await,
         }
     }
@@ -4549,6 +4637,147 @@ impl Driver {
             _ => {}
         }
         Ok(())
+    }
+
+    fn record_agy_conversation(&mut self, conversation_id: &str) -> anyhow::Result<()> {
+        if conversation_id.is_empty() {
+            return Ok(());
+        }
+        validate_token("Antigravity conversation ID", conversation_id)?;
+        if conversation_id.starts_with('-') {
+            anyhow::bail!("the Antigravity conversation ID cannot start with '-'");
+        }
+        match self.state.native_thread_id.as_deref() {
+            Some(existing) if existing != conversation_id => {
+                anyhow::bail!(
+                    "Antigravity reported a different conversation ID; the saved conversation was not replaced"
+                );
+            }
+            Some(_) => {
+                if !self.state.native_thread_established {
+                    self.state.native_thread_established = true;
+                    self.persist_state()?;
+                }
+            }
+            None => {
+                self.state.native_thread_id = Some(conversation_id.to_owned());
+                self.state.native_thread_established = true;
+                self.persist_state()?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_agy(&mut self, value: Value) -> anyhow::Result<()> {
+        if let Some(conversation_id) = value.get("conversation_id").and_then(Value::as_str) {
+            self.record_agy_conversation(conversation_id)?;
+        }
+        match value
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "init" => Ok(()),
+            "step_update" => {
+                if let Some(conversation_id) = value
+                    .pointer("/step_update/conversation_id")
+                    .and_then(Value::as_str)
+                {
+                    self.record_agy_conversation(conversation_id)?;
+                }
+                let Some(event) = stream_events::agy_step_update(&value) else {
+                    return Ok(());
+                };
+                match event {
+                    stream_events::AgyStreamEvent::UserInput => {
+                        let acknowledged = match self.active.as_mut() {
+                            Some(active) if !active.acknowledged => {
+                                active.acknowledged = true;
+                                Some(active.message_id.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(message_id) = acknowledged {
+                            update_message(&self.dir, &message_id, |r| {
+                                r.native_acknowledged = true
+                            })?;
+                        }
+                    }
+                    stream_events::AgyStreamEvent::Delta(delta) => {
+                        if let Some(active) = self.active.as_mut() {
+                            stream_events::emit_delta(&active.message_id, &delta);
+                            active.texts.push(delta);
+                        }
+                    }
+                    stream_events::AgyStreamEvent::ToolStart { id, kind, label } => {
+                        log(format!("tool {label}"));
+                        if let Some(active) = self.active.as_ref() {
+                            stream_events::emit_tool_start(&active.message_id, &id, kind, &label);
+                        }
+                    }
+                    stream_events::AgyStreamEvent::ToolEnd {
+                        id,
+                        kind,
+                        label,
+                        ok,
+                        summary,
+                    } => {
+                        log(format!("tool {label}"));
+                        if let Some(active) = self.active.as_ref() {
+                            stream_events::emit_tool_start(&active.message_id, &id, kind, &label);
+                            stream_events::emit_tool_end(&active.message_id, &id, ok, &summary);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            "result" => {
+                let result = value.get("result").unwrap_or(&value);
+                if let Some(conversation_id) = result.get("conversation_id").and_then(Value::as_str)
+                {
+                    self.record_agy_conversation(conversation_id)?;
+                }
+                let Some(active) = self.active.as_ref() else {
+                    log("ignored an Antigravity result without an active turn");
+                    return Ok(());
+                };
+                let status_str = result
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ERROR");
+                let response = result
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                if active.texts.is_empty()
+                    && let Some(final_response) = response
+                {
+                    stream_events::emit_delta(&active.message_id, final_response);
+                }
+                let text = response
+                    .map(str::to_owned)
+                    .or_else(|| (!active.texts.is_empty()).then(|| active.texts.concat()));
+                let usage = json!({
+                    "usage": result.get("usage"),
+                    "duration_seconds": result.get("duration_seconds"),
+                    "num_turns": result.get("num_turns"),
+                });
+                let (status, error) = match status_str {
+                    "SUCCESS" => (TurnStatus::Completed, None),
+                    "INTERRUPTED" | "CANCELED" => (TurnStatus::Interrupted, None),
+                    _ => {
+                        let detail = result
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or("Antigravity turn failed");
+                        (TurnStatus::Failed, Some(turn_failure::sanitize(detail)))
+                    }
+                };
+                self.finish_turn(status, text, error, Some(usage)).await
+            }
+            _ => Ok(()),
+        }
     }
 
     async fn finish_turn(
@@ -5639,6 +5868,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn agy_launch_uses_dangerously_skip_permissions_on_sandbox_placements_only() {
+        let mut config = claude_config(Some("high"));
+        config.agent = AgentKind::Agy;
+        config.model = "gemini-4-neon-high".into();
+        let host = agy_arguments(&config, false, None);
+        assert_eq!(
+            host,
+            [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--model",
+                "gemini-4-neon-high",
+                "--effort",
+                "high",
+            ]
+        );
+        let sandbox = agy_arguments(&config, true, None);
+        assert_eq!(sandbox[..host.len()], host[..]);
+        assert_eq!(sandbox[host.len()..], ["--dangerously-skip-permissions"]);
+        let resumed = agy_arguments(&config, true, Some("9ec58bfd-4d67-4f5e-83a5-9d907e9c6b1f"));
+        assert_eq!(
+            resumed,
+            [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--model",
+                "gemini-4-neon-high",
+                "--effort",
+                "high",
+                "--conversation",
+                "9ec58bfd-4d67-4f5e-83a5-9d907e9c6b1f",
+                "--dangerously-skip-permissions",
+            ]
+        );
+        assert_eq!(agent_effort(AgentKind::Agy, None).unwrap(), None);
+        assert_eq!(
+            agent_effort(AgentKind::Agy, Some("xhigh")).unwrap(),
+            Some("xhigh".into())
+        );
+        assert!(agent_effort(AgentKind::Agy, Some("ultra")).is_err());
     }
 
     #[test]

@@ -34,6 +34,24 @@ pub(super) enum ClaudeStreamEvent {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AgyStreamEvent {
+    UserInput,
+    Delta(String),
+    ToolStart {
+        id: String,
+        kind: &'static str,
+        label: String,
+    },
+    ToolEnd {
+        id: String,
+        kind: &'static str,
+        label: String,
+        ok: bool,
+        summary: String,
+    },
+}
+
 fn truncate_str(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
@@ -288,6 +306,105 @@ pub(super) fn claude_assistant_tools(value: &Value) -> Vec<(String, &'static str
         .collect()
 }
 
+/// Maps an Antigravity CLI (`agy --output-format stream-json`) `step_update`
+/// event to a structured live delta or tool lifecycle event.
+pub(super) fn agy_step_update(value: &Value) -> Option<AgyStreamEvent> {
+    let step = value.get("step_update").unwrap_or(value);
+    let step_type = step.get("step_type").and_then(Value::as_str)?;
+    let state = step
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("ACTIVE");
+    let step_index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+    match step_type {
+        "user_input" => Some(AgyStreamEvent::UserInput),
+        "agent_response" => {
+            let delta = step
+                .get("text_delta")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            Some(AgyStreamEvent::Delta(delta.to_owned()))
+        }
+        "tool" => {
+            let id = format!("step-{step_index}");
+            let tool_info = step.get("tool_info");
+            let name = step
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .or_else(|| tool_info?.get("name")?.as_str())
+                .unwrap_or("tool");
+            let params = tool_info.and_then(|info| info.get("parameters"));
+            let detail = [
+                "CommandLine",
+                "command",
+                "Path",
+                "path",
+                "file_path",
+                "Query",
+                "query",
+                "Pattern",
+                "pattern",
+                "Url",
+                "url",
+                "toolSummary",
+                "description",
+            ]
+            .iter()
+            .find_map(|key| params?.get(key)?.as_str());
+            let label = match detail {
+                Some(detail) => format!("{name}: {}", preview(detail)),
+                None => name.to_owned(),
+            };
+            let kind = classify_tool_kind(name);
+            if state == "DONE" {
+                let error = tool_info.and_then(|info| info.get("error"));
+                let ok = error.is_none();
+                let summary = error
+                    .and_then(|err| err.get("message").and_then(Value::as_str))
+                    .map(preview)
+                    .unwrap_or_else(|| label.clone());
+                Some(AgyStreamEvent::ToolEnd {
+                    id,
+                    kind,
+                    label,
+                    ok,
+                    summary,
+                })
+            } else {
+                Some(AgyStreamEvent::ToolStart { id, kind, label })
+            }
+        }
+        _ if step.get("subagent_info").is_some() => {
+            let id = format!("step-{step_index}");
+            let role = step
+                .pointer("/subagent_info/subagents/0/role")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    step.pointer("/subagent_info/subagents/0/type_name")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("subagent");
+            let label = format!("Subagent: {}", preview(role));
+            if state == "DONE" {
+                Some(AgyStreamEvent::ToolEnd {
+                    id,
+                    kind: "tool",
+                    label: label.clone(),
+                    ok: true,
+                    summary: label,
+                })
+            } else {
+                Some(AgyStreamEvent::ToolStart {
+                    id,
+                    kind: "tool",
+                    label,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
 fn classify_tool_kind(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.contains("bash")
@@ -386,6 +503,59 @@ mod tests {
         assert_eq!(
             claude_assistant_tools(&assistant),
             vec![("toolu_123".into(), "run", "Bash: cargo test -p web".into())]
+        );
+    }
+
+    #[test]
+    fn parses_agy_step_updates() {
+        let user_step = json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "9ec58bfd-4d67-4f5e-83a5-9d907e9c6b1f",
+                "step_index": 0,
+                "state": "DONE",
+                "step_type": "user_input"
+            }
+        });
+        assert_eq!(agy_step_update(&user_step), Some(AgyStreamEvent::UserInput));
+
+        let delta = json!({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 2,
+                "state": "ACTIVE",
+                "step_type": "agent_response",
+                "text_delta": "Hello from agy"
+            }
+        });
+        assert_eq!(
+            agy_step_update(&delta),
+            Some(AgyStreamEvent::Delta("Hello from agy".into()))
+        );
+
+        let tool_done = json!({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 4,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": { "CommandLine": "cargo test" },
+                    "output": "ok\n"
+                }
+            }
+        });
+        assert_eq!(
+            agy_step_update(&tool_done),
+            Some(AgyStreamEvent::ToolEnd {
+                id: "step-4".into(),
+                kind: "run",
+                label: "run_command: cargo test".into(),
+                ok: true,
+                summary: "run_command: cargo test".into(),
+            })
         );
     }
 

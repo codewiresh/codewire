@@ -19,6 +19,7 @@ pub(super) fn stale_image_text(stale: &[native::StaleImageClient]) -> String {
     fn product(agent: private::PlatformManagedAgent) -> &'static str {
         match agent {
             private::PlatformManagedAgent::Claude => "Claude Code",
+            private::PlatformManagedAgent::Agy => "Antigravity CLI",
             _ => "Codex",
         }
     }
@@ -139,6 +140,7 @@ pub(super) fn agent(
     match value {
         proto::EnvironmentAgentKind::Codex => Ok(private::PlatformManagedAgent::Codex),
         proto::EnvironmentAgentKind::Claude => Ok(private::PlatformManagedAgent::Claude),
+        proto::EnvironmentAgentKind::Agy => Ok(private::PlatformManagedAgent::Agy),
         proto::EnvironmentAgentKind::Noel => Err(AppError::Precondition(NOEL_REFUSAL.into())),
         _ => Err(invalid()),
     }
@@ -147,6 +149,7 @@ pub(super) fn public_agent(value: i32) -> AppResult<proto::EnvironmentAgentKind>
     match private::PlatformManagedAgent::try_from(value) {
         Ok(private::PlatformManagedAgent::Codex) => Ok(proto::EnvironmentAgentKind::Codex),
         Ok(private::PlatformManagedAgent::Claude) => Ok(proto::EnvironmentAgentKind::Claude),
+        Ok(private::PlatformManagedAgent::Agy) => Ok(proto::EnvironmentAgentKind::Agy),
         _ => Err(unavailable()),
     }
 }
@@ -407,6 +410,7 @@ mod tests {
     fn an_unknown_agent_kind_stays_invalid() {
         launch(proto::EnvironmentAgentKind::Claude.into())
             .expect("the same Claude launch is valid");
+        launch(proto::EnvironmentAgentKind::Agy.into()).expect("the same Agy launch is valid");
         match launch(buffa::EnumValue::Unknown(99)) {
             Err(AppError::BadRequest(reason)) => {
                 assert_eq!(reason, "platform agent request metadata is invalid")
