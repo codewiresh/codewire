@@ -78,8 +78,9 @@ record of the resume. Nothing the guest says moves a second between rates.
 A session opens and ends from the Sandbox object, never from its Pod or
 VM. So the charge ends when the product stops or deletes the Sandbox, not
 when its Pod or VM finally goes. Only a `standard` Sandbox's split between
-running and paused comes from its runtime's Pod log ("A suspended
-stretch").
+running and `paused` ("A suspended stretch") and its transition into a
+`hibernated` stretch ("A hibernated stretch") come from its runtime's Pod
+log.
 
 | `end_reason` | What happened | `ended_at` |
 | --- | --- | --- |
@@ -105,9 +106,10 @@ through its last observation, so a Sandbox whose observations stop is never
 charged past them; a closed one is drawn through its end. An organization
 on the Unlimited card is never charged.
 
-A stopped Sandbox has no open session and draws nothing, its kept disk
-included. A start opens a new session. A paused session draws only its
-disk, at the storage rate ("A suspended stretch").
+A plain stopped Sandbox has no open session and draws nothing, its kept
+disk included. A start opens a new session. A `paused` or `hibernated`
+session draws only its allocated disk, at the storage rate ("A suspended
+stretch", "A hibernated stretch").
 
 ## Prices
 

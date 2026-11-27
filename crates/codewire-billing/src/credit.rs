@@ -139,7 +139,7 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
         r#"SELECT id, cpu_millicores, memory_mib, disk_gib,
                   COALESCE(credit_drawn_through, started_at),
                   LEAST(COALESCE(ended_at, last_observed_at), $2),
-                  rate_kind = 'paused'
+                  rate_kind IN ('paused', 'hibernated')
            FROM sandbox_running_sessions
            WHERE organization_id = $1
              AND (ended_at IS NULL OR credit_drawn_through IS NULL
@@ -1265,6 +1265,59 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(undrawn, 0, "the paused session is drawn through too");
+
+        // Its hours count its disk and no vCPU or memory.
+        let (cpu, memory, disk) = crate::metering::aggregate_monthly_usage(
+            &pool,
+            &fixture.organization_id,
+            Utc::now() - chrono::Duration::days(1),
+            "standard",
+        )
+        .await
+        .unwrap();
+        let near = |value: f64, wanted: f64| (value - wanted).abs() < 0.01;
+        assert!(
+            near(cpu, 2.0) && near(memory, 8.0) && near(disk, 20.0),
+            "{cpu} {memory} {disk}"
+        );
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_a_hibernated_session_draws_only_its_disk_at_the_storage_rate() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        session(&pool, &fixture, "running", "1 hour", None).await;
+        session(&pool, &fixture, "hibernated", "1 hour", None).await;
+        sqlx::query("UPDATE sandbox_running_sessions SET rate_kind = 'hibernated' WHERE id = $1")
+            .bind(format!("{}-hibernated", fixture.organization_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rate: i64 = sqlx::query_scalar(
+            "SELECT parked_storage_nano_eur_per_gib_hour FROM billing_rate_cards \
+             WHERE rate_card = 'regular'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let drawn = draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+        // An hour running + an hour hibernated at 10 GiB (only disk at parked storage rate).
+        assert_eq!(drawn, 201_270_000 + 10 * rate);
+        let undrawn: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sandbox_running_sessions WHERE organization_id = $1 \
+             AND credit_drawn_through IS DISTINCT FROM last_observed_at",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(undrawn, 0, "the hibernated session is drawn through too");
 
         // Its hours count its disk and no vCPU or memory.
         let (cpu, memory, disk) = crate::metering::aggregate_monthly_usage(

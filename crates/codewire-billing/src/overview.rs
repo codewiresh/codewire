@@ -611,11 +611,11 @@ async fn session_usage_sums(
                       ($1::timestamptz + interval '1 month') AS end_at
            ),
            bounded AS (
-               -- A paused stretch keeps its disk and uses no vCPU or
-               -- memory (#5529).
-               SELECT CASE WHEN s.rate_kind = 'paused' THEN 0 ELSE s.cpu_millicores END
+               -- A paused or hibernated stretch keeps its disk and uses no vCPU
+               -- or memory (#5529, #6647).
+               SELECT CASE WHEN s.rate_kind IN ('paused', 'hibernated') THEN 0 ELSE s.cpu_millicores END
                           AS cpu_millicores,
-                      CASE WHEN s.rate_kind = 'paused' THEN 0 ELSE s.memory_mib END
+                      CASE WHEN s.rate_kind IN ('paused', 'hibernated') THEN 0 ELSE s.memory_mib END
                           AS memory_mib,
                       s.disk_gib,
                       GREATEST(s.started_at, p.start_at) AS bill_start,

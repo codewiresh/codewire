@@ -105,7 +105,7 @@ pub async fn sandbox_costs(
                SELECT s.environment_id,
                       COALESCE(e.name, s.runtime_name, s.environment_id) AS name,
                       s.cpu_millicores, s.memory_mib, s.disk_gib,
-                      s.rate_kind = 'paused' AS paused,
+                      s.rate_kind IN ('paused', 'hibernated') AS paused,
                       GREATEST(s.started_at, $2) AS bill_start,
                       LEAST(COALESCE(s.ended_at, s.last_observed_at), $3,
                             $2 + interval '1 month') AS bill_end
@@ -197,7 +197,7 @@ pub async fn hourly_costs(
            ),
            bounded AS (
                SELECT h.hour, s.cpu_millicores, s.memory_mib, s.disk_gib,
-                      s.rate_kind = 'paused' AS paused,
+                      s.rate_kind IN ('paused', 'hibernated') AS paused,
                       GREATEST(s.started_at, h.hour) AS bill_start,
                       LEAST(COALESCE(s.ended_at, s.last_observed_at), $3,
                             h.hour + interval '1 hour') AS bill_end
