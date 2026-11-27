@@ -236,6 +236,66 @@ fn only_the_freezers_hierarchy_at_or_under_workload_counts() {
     assert!(!read(""));
 }
 
+#[cfg(unix)]
+#[test]
+fn virtualized_freezer_root_queries_sleep_relay_and_fails_closed() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cgroups_root = own_cgroups("/");
+    let cgroups_outside = own_cgroups("/kubepods/burstable/pod");
+    let cgroups_v2_only = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(cgroups_v2_only.path(), "0::/init.scope\n").unwrap();
+
+    // Missing relay socket fails closed.
+    let missing = dir.path().join("missing.sock");
+    assert!(!in_frozen_workload_with_relay(
+        cgroups_root.path(),
+        &missing
+    ));
+
+    // Helper serving one response and asserting the exact `check-frozen\n` wire frame.
+    let serve_once = |sock: &Path, reply: &'static [u8]| {
+        let listener = UnixListener::bind(sock).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut got = [0_u8; 13];
+            stream.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"check-frozen\n");
+            stream.write_all(reply).unwrap();
+            stream.flush().unwrap();
+        })
+    };
+
+    // Relay answers `ok\n` -> accepted for virtualized `freezer:/`.
+    let ok_sock = dir.path().join("ok.sock");
+    let handle = serve_once(&ok_sock, b"ok\n");
+    assert!(in_frozen_workload_with_relay(cgroups_root.path(), &ok_sock));
+    handle.join().unwrap();
+
+    // Relay answers `no\n` -> refused.
+    let no_sock = dir.path().join("no.sock");
+    let handle = serve_once(&no_sock, b"no\n");
+    assert!(!in_frozen_workload_with_relay(
+        cgroups_root.path(),
+        &no_sock
+    ));
+    handle.join().unwrap();
+
+    // Non-root freezer paths and cgroup-v2-only files never even consult the relay.
+    let never_sock = dir.path().join("never.sock");
+    let _listener = UnixListener::bind(&never_sock).unwrap();
+    assert!(!in_frozen_workload_with_relay(
+        cgroups_outside.path(),
+        &never_sock
+    ));
+    assert!(!in_frozen_workload_with_relay(
+        cgroups_v2_only.path(),
+        &never_sock
+    ));
+}
+
 const TOKEN: &str = "suspend-test-daemon-token";
 
 fn suspend_request(

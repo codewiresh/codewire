@@ -35,6 +35,16 @@ pub const QUIET_TICKS: u32 = 30;
 const OWN_CGROUPS: &str = "/proc/self/cgroup";
 /// The cgroup the runtime's freeze stops (the guest's `workload`).
 const FROZEN_WORKLOAD: &str = "/workload";
+/// Guest init's sleep-control Unix-socket relay inside a hosted `standard`
+/// container (`codewire_vmm_guest_probe::hosted_control::HOSTED_SLEEP_CONTROL_SOCKET_PATH`).
+#[cfg(any(target_os = "linux", test))]
+const HOSTED_SLEEP_RELAY_SOCKET: &str = "/run/codewire-hosted/sleep/control.sock";
+#[cfg(any(target_os = "linux", test))]
+const HOSTED_CHECK_FROZEN_REQUEST: &[u8] = b"check-frozen\n";
+#[cfg(any(target_os = "linux", test))]
+const HOSTED_CHECK_FROZEN_ACCEPTED: &[u8] = b"ok\n";
+#[cfg(any(target_os = "linux", test))]
+const HOSTED_CHECK_FROZEN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub type Pending<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -178,25 +188,111 @@ pub fn in_frozen_workload_process() -> bool {
 
 /// Whether this process sits in the frozen workload: the hierarchy that
 /// carries the freezer places it at or under `/workload`.
+///
+/// Under `CODEWIRE_WORKSPACE_INIT=systemd`, container PID 1 calls
+/// `unshare(CLONE_NEWCGROUP)` while inside cgroup v1 `/workload/workspace`,
+/// which virtualizes `/proc/self/cgroup`'s freezer path to `/`. When the
+/// freezer line reads `/` on Linux, fall back to asking guest init's
+/// sleep-control relay (`HOSTED_SLEEP_RELAY_SOCKET`) via `check-frozen\n`;
+/// guest init runs in the root cgroup namespace and checks our `SO_PEERCRED`
+/// PID against `/proc/<pid>/cgroup`. Any missing socket, refusal, or error
+/// fails closed (`false`).
 pub(crate) fn in_frozen_workload(own_cgroups: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        in_frozen_workload_with_relay(own_cgroups, Path::new(HOSTED_SLEEP_RELAY_SOCKET))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        in_frozen_workload_direct(own_cgroups) == FreezerPathMatch::InWorkload
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreezerPathMatch {
+    InWorkload,
+    VirtualizedRoot,
+    Outside,
+}
+
+fn in_frozen_workload_direct(own_cgroups: &Path) -> FreezerPathMatch {
     let Ok(cgroups) = std::fs::read_to_string(own_cgroups) else {
-        return false;
+        return FreezerPathMatch::Outside;
     };
-    cgroups.lines().any(|line| {
+    let mut saw_root = false;
+    for line in cgroups.lines() {
         let mut fields = line.splitn(3, ':');
         let (Some(_), Some(controllers), Some(path)) =
             (fields.next(), fields.next(), fields.next())
         else {
-            return false;
+            continue;
         };
-        controllers
+        if !controllers
             .split(',')
             .any(|controller| controller == "freezer")
-            && (path == FROZEN_WORKLOAD
-                || path
-                    .strip_prefix(FROZEN_WORKLOAD)
-                    .is_some_and(|rest| rest.starts_with('/')))
-    })
+        {
+            continue;
+        }
+        if path == FROZEN_WORKLOAD
+            || path
+                .strip_prefix(FROZEN_WORKLOAD)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return FreezerPathMatch::InWorkload;
+        }
+        if path == "/" {
+            saw_root = true;
+        }
+    }
+    if saw_root {
+        FreezerPathMatch::VirtualizedRoot
+    } else {
+        FreezerPathMatch::Outside
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn in_frozen_workload_with_relay(own_cgroups: &Path, relay_socket: &Path) -> bool {
+    match in_frozen_workload_direct(own_cgroups) {
+        FreezerPathMatch::InWorkload => true,
+        FreezerPathMatch::VirtualizedRoot => query_sleep_relay_frozen(relay_socket),
+        FreezerPathMatch::Outside => false,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn query_sleep_relay_frozen(relay_socket: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+
+        let Ok(mut stream) = UnixStream::connect(relay_socket) else {
+            return false;
+        };
+        if stream
+            .set_read_timeout(Some(HOSTED_CHECK_FROZEN_TIMEOUT))
+            .is_err()
+            || stream
+                .set_write_timeout(Some(HOSTED_CHECK_FROZEN_TIMEOUT))
+                .is_err()
+        {
+            return false;
+        }
+        if stream.write_all(HOSTED_CHECK_FROZEN_REQUEST).is_err() || stream.flush().is_err() {
+            return false;
+        }
+        let mut answer = [0_u8; 3];
+        if stream.read_exact(&mut answer).is_err() {
+            return false;
+        }
+        answer == HOSTED_CHECK_FROZEN_ACCEPTED
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = relay_socket;
+        false
+    }
 }
 
 #[cfg(test)]

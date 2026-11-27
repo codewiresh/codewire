@@ -66,6 +66,13 @@ pub const HOSTED_HIBERNATE_REQUEST: &[u8; 10] = b"hibernate\n";
 /// (`docs/dev/SANDBOX-SLEEP.md`, "After a restore", #6647), telling
 /// `pod-runtime` to open Pod ports `7777`/`2222` and delete the memory file.
 pub const HOSTED_REBIND_COMPLETE_REQUEST: &[u8; 10] = b"rebind-ok\n";
+/// Local query handled by guest init's sleep-control relay (`sleep_relay`) to
+/// check whether the connecting peer process sits inside the root-namespace
+/// `/workload` freezer cgroup via `SO_PEERCRED` + `/proc/<pid>/cgroup`
+/// (#5638, #6647). Needed when `CODEWIRE_WORKSPACE_INIT=systemd` unshares a
+/// cgroup namespace and virtualizes the container's `/proc/self/cgroup`
+/// freezer path to `/`. Never forwarded to the host vsock listener.
+pub const HOSTED_CHECK_FROZEN_REQUEST: &[u8; 13] = b"check-frozen\n";
 pub const HOSTED_SUSPEND_ACCEPTED: &[u8; 3] = b"ok\n";
 pub const HOSTED_SUSPEND_REFUSED: &[u8; 3] = b"no\n";
 /// Container-side Unix socket where guest init relays fixed sleep-control
