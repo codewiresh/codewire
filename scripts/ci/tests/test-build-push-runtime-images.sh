@@ -55,6 +55,12 @@ if [ "${1:-}" = login ]; then
 fi
 if [ "${1:-} ${2:-} ${3:-}" = 'buildx imagetools inspect' ]; then
   reference="${!#}"
+  if [ "${4:-}" = '--format' ] && [ "${5:-}" = '{{json .Image}}' ]; then
+    revision="${FAKE_REVISION:-0123456789abcdef0123456789abcdef01234567}"
+    printf '{"config":{"Labels":{"dev.codewire.build.profile":"%s","dev.codewire.promotable":"true","org.opencontainers.image.revision":"%s"}}}\n' \
+      "${FAKE_PROFILE:-runtime}" "$revision"
+    exit 0
+  fi
   if [ -n "${FAKE_BASELINE_SHA:-}" ] && [[ "$reference" == *":$FAKE_BASELINE_SHA" ]]; then
     family="$(basename "${reference%:*}")"
     if [ "${FAKE_MISSING_BASELINE_IMAGE:-}" = "$family" ]; then
@@ -649,6 +655,16 @@ run_group workspace-disk "$disk_output" "$work/disk-docker.log" "$work/disk-buil
   fail "the workspace disk was not built alone from its Dockerfile and context: $(cat "$disk_context_log")"
 grep -Eq '^workspace-disk_candidate_ref=registry\.example\.invalid/codewire/workspace-disk@sha256:[0-9a-f]{64}$' "$disk_output" ||
   fail 'the workspace-disk group omitted its exact candidate output'
+if grep -Fq 'pull ' "$work/disk-docker.log"; then
+  fail 'the workspace-disk group pulled the multi-GiB disk image into local DinD instead of inspecting its OCI config remotely'
+fi
+grep -Fq 'buildx imagetools inspect --format {{json .Image}} registry.example.invalid/codewire/workspace-disk@sha256:' "$work/disk-docker.log" ||
+  fail 'the workspace-disk group did not verify its pushed OCI config labels in Harbor'
+if run_group workspace-disk "$work/disk-bad-label-output" "$work/disk-bad-label-docker.log" "$work/disk-bad-label-build.log" 58 \
+    FAKE_PROFILE=debug \
+    CODEWIRE_WORKSPACE_DISK_CONTEXT="$fixture/.workspace-disk-context" >/dev/null 2>&1; then
+  fail 'the workspace-disk group accepted a remote image with a non-runtime profile label'
+fi
 for context in '' "$outside" "$fixture/.missing-context"; do
   : >"$work/disk-refused-build.log"
   if run_group workspace-disk "$work/disk-refused-output" "$work/disk-refused-docker.log" "$work/disk-refused-build.log" 57 \

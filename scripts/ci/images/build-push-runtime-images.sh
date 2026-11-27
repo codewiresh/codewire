@@ -222,6 +222,21 @@ candidate_has_release_identity() {
   [ "$profile" = runtime ] && [ "$promotable" = true ] && [ "$revision" = "$expected_revision" ]
 }
 
+# Prove a pushed candidate's release identity directly from its immutable OCI
+# config in Harbor without pulling its layers into local DinD (workspace-disk's
+# ~6.5 GiB /image.raw layer would otherwise fill the light runner's disk).
+remote_candidate_has_release_identity() {
+  local reference="$1" expected_revision="$2" config_json profile promotable revision
+  if ! config_json="$(DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
+      --format '{{json .Image}}' "$reference")"; then
+    return 1
+  fi
+  profile="$(jq -r '.config.Labels["dev.codewire.build.profile"] // empty' <<<"$config_json")"
+  promotable="$(jq -r '.config.Labels["dev.codewire.promotable"] // empty' <<<"$config_json")"
+  revision="$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' <<<"$config_json")"
+  [ "$profile" = runtime ] && [ "$promotable" = true ] && [ "$revision" = "$expected_revision" ]
+}
+
 # Resolve the previous deploy's exact candidate for one certified-unaffected
 # family, prove its local release identity, and pin the new source tag to the
 # same immutable digest so the shared Bake transaction never rebuilds it. Any
@@ -307,13 +322,22 @@ build_one() {
     exit 1
   fi
 
-  # Harbor is the protected candidate boundary. Pull the immutable manifest
-  # back by digest and check its selected local platform image. The publishing
-  # job takes these digests, so nothing needs a local name for the image.
-  DOCKER_CONFIG="$docker_config" docker pull "$candidate_ref" >/dev/null
-  if ! candidate_has_release_identity "$candidate_ref" "$GITHUB_SHA"; then
-    echo "Runtime candidate $image_name did not preserve its exact release identity locally" >&2
-    exit 1
+  # Harbor is the protected candidate boundary. For workspace-disk, inspect the
+  # immutable pushed OCI config in Harbor directly so its ~6.5 GiB /image.raw
+  # layer is never pulled and unpacked into the light runner's local DinD. For
+  # other families, pull the immutable manifest back by digest and check its
+  # selected local platform image.
+  if [ "$image_name" = workspace-disk ]; then
+    if ! remote_candidate_has_release_identity "$candidate_ref" "$GITHUB_SHA"; then
+      echo "Runtime candidate $image_name did not preserve its exact release identity in Harbor" >&2
+      exit 1
+    fi
+  else
+    DOCKER_CONFIG="$docker_config" docker pull "$candidate_ref" >/dev/null
+    if ! candidate_has_release_identity "$candidate_ref" "$GITHUB_SHA"; then
+      echo "Runtime candidate $image_name did not preserve its exact release identity locally" >&2
+      exit 1
+    fi
   fi
   printf '%s_candidate_ref=%s\n' "$image_name" "$candidate_ref" >>"$GITHUB_OUTPUT"
   printf '%s_built_from=%s\n' "$image_name" "$GITHUB_SHA" >>"$GITHUB_OUTPUT"

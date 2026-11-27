@@ -989,14 +989,18 @@ jobs:
           path: .local-runtime/disk-received
 
       # The context sits inside this checkout, so the disk's provenance names
-      # this commit as every runtime image's does.
+      # this commit as every runtime image's does. Remove the received tarball
+      # right after unpacking so the light runner does not hold two ~6.5 GiB
+      # copies during the BuildKit upload.
       - name: Check and unpack the disk
         env:
           DISK_SHA256: ${{ needs.build-workspace-disk.outputs.disk_sha256 }}
         run: |
+          set -euo pipefail
           python3 -I scripts/ci/images/workspace-disk-inputs.py unpack-disk \
             --tar "$GITHUB_WORKSPACE/.local-runtime/disk-received/disk.tar" --sha256 "$DISK_SHA256" \
             --output "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context"
+          rm -rf -- "$GITHUB_WORKSPACE/.local-runtime/disk-received"
 
       - name: Build and push the workspace disk
         id: build
@@ -1017,6 +1021,10 @@ jobs:
             --dir "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context")"
           echo "SANDBOX_STANDARD_IMAGE_DISK=$line"
           printf 'SANDBOX_STANDARD_IMAGE_DISK=`%s`\n' "$line" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove unpacked workspace disk files
+        if: ${{ always() }}
+        run: rm -rf -- "$GITHUB_WORKSPACE/.local-runtime/disk-received" "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context"
 
   # Signs only the digest this run's push reported, after main CI's verdict
   # for this exact commit, as sign-pod-runtime-image does: family
