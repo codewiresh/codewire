@@ -306,6 +306,10 @@ class TransportTestCase(unittest.TestCase):
                 restart_cause="runtime_replaced",
                 idle_suspend_seconds=900,
                 suspended_at=created_at,
+                idle_hibernate_seconds=21_600,
+                hibernated_at=created_at,
+                hibernate_reason="idle",
+                hibernate_fallback_reason="damaged-memory-file",
                 preset_name="Python",
                 network="net_1",
                 ports=[
@@ -363,6 +367,10 @@ class TransportTestCase(unittest.TestCase):
                 "idle_stop_seconds": 0,
                 "idle_suspend_seconds": 900,
                 "suspended_at": "2026-01-01T00:00:00Z",
+                "idle_hibernate_seconds": 21_600,
+                "hibernated_at": "2026-01-01T00:00:00Z",
+                "hibernate_reason": "idle",
+                "hibernate_fallback_reason": "damaged-memory-file",
                 "ports": [
                     {
                         "id": "port_1",

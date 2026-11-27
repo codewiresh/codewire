@@ -116,6 +116,14 @@ export interface EnvironmentData {
   idle_suspend_seconds?: number | null;
   /** When its daemon acknowledged a suspend; absent while not suspended. Its state stays `running`. */
   suspended_at?: string | null;
+  /** Seconds with no activity after which a `standard` environment hibernates to its encrypted volume; 0 is off. */
+  idle_hibernate_seconds?: number | null;
+  /** When a `standard` environment finished hibernating; absent while not hibernated. Its stored state is `stopped`. */
+  hibernated_at?: string | null;
+  /** Why it hibernated: `idle` or `user`. */
+  hibernate_reason?: string | null;
+  /** Set when a start of a hibernated environment had to fall back to a cold disk boot. */
+  hibernate_fallback_reason?: string | null;
   isolation_tier: IsolationTier;
   memory_mb: number;
   name?: string | null;

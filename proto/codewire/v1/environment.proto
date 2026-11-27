@@ -51,6 +51,13 @@ service EnvironmentService {
   // Changes how long a `standard` environment may have no activity before
   // its VM pauses inside its Pod. It never pauses, wakes or stops it.
   rpc SetEnvironmentIdleSuspend(SetEnvironmentIdleSuspendRequest) returns (SetEnvironmentIdleSuspendResponse);
+  // Changes how long a `standard` environment may have no activity before
+  // its VM hibernates to its encrypted volume. It never wakes, stops or
+  // hibernates it.
+  rpc SetEnvironmentIdleHibernate(SetEnvironmentIdleHibernateRequest) returns (SetEnvironmentIdleHibernateResponse);
+  // Hibernates a running or suspended `standard` environment now, saving its
+  // VM memory to its encrypted volume and releasing its Pod.
+  rpc HibernateEnvironment(HibernateEnvironmentRequest) returns (HibernateEnvironmentResponse);
   // Saves, replaces or removes the startup script every start of the
   // environment runs. Only its creator may, while it is running or stopped;
   // a running environment keeps running and runs the new script at its next
@@ -211,6 +218,19 @@ message Environment {
   // isn't suspended. A suspended environment's state stays RUNNING, and any
   // use wakes it.
   google.protobuf.Timestamp suspended_at = 47;
+  // Seconds with no activity after which a `standard` environment hibernates
+  // to its encrypted volume (#6647). 0 is off; otherwise 300 to 604800.
+  int32 idle_hibernate_seconds = 48;
+  // When a `standard` environment finished hibernating to its volume (#6647).
+  // Absent while it isn't hibernated. Its stored state is STOPPED, and
+  // starting or accessing it restores the VM.
+  google.protobuf.Timestamp hibernated_at = 49;
+  // Why it hibernated, set with hibernated_at: idle or user. Empty otherwise.
+  string hibernate_reason = 50;
+  // Set when a start of a hibernated environment had to fall back to a clean
+  // cold disk boot (processes lost, files kept); cleared on the next start or
+  // stop. Empty otherwise.
+  string hibernate_fallback_reason = 51;
 }
 
 // The host an environment runs on, as it is now.
@@ -320,6 +340,11 @@ message CreateEnvironmentRequest {
   // Absent: a fork takes its snapshot's timeout, and any other create is off.
   // Refused on any other runtime profile.
   optional int32 idle_suspend_seconds = 37;
+  // Hibernate a `standard` environment's VM to its encrypted volume after this
+  // many seconds with no activity (#6647): 0 is off, otherwise 300 to 604800.
+  // Absent: a fork takes its snapshot's timeout, and any other create is off.
+  // Refused on any other runtime profile, or when <= idle_suspend_seconds.
+  optional int32 idle_hibernate_seconds = 38;
 }
 
 // An environment's placement (#3609). Exactly one field is set.
@@ -601,6 +626,24 @@ message SetEnvironmentIdleSuspendRequest {
   int32 idle_suspend_seconds = 3;
 }
 message SetEnvironmentIdleSuspendResponse {
+  string status = 1;
+}
+
+message SetEnvironmentIdleHibernateRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // 0 never hibernates it; otherwise 300 to 604800.
+  int32 idle_hibernate_seconds = 3;
+}
+message SetEnvironmentIdleHibernateResponse {
+  string status = 1;
+}
+
+message HibernateEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+message HibernateEnvironmentResponse {
   string status = 1;
 }
 

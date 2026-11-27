@@ -637,6 +637,15 @@ pub trait RuntimeObservations: Send + Sync {
         runtime: &RuntimeFacts,
     ) -> anyhow::Result<()>;
 
+    /// Sets or clears `CODEWIRE_VM_RESTORE_GENERATION` on a `standard`
+    /// Sandbox's pod template (#6647). No-op on non-`standard` Sandboxes.
+    async fn set_vm_restore_generation(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        generation: Option<u64>,
+    ) -> anyhow::Result<()>;
+
     /// Delete exactly this incarnation, only while it holds this UID (§5.6).
     async fn delete_refused_member(
         &self,

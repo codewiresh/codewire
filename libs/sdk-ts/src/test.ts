@@ -874,6 +874,17 @@ async function runTests() {
   assert(suspended.suspended_at === "2026-11-22T12:00:00Z", "a suspend keeps when it was acknowledged");
   assert(suspended.state === "running", "a suspended environment stays running");
   assert(convertedEnvironment.suspended_at === undefined, "an environment that is not suspended reports no suspend");
+  const hibernated = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_hibernated", EnvironmentState.STOPPED),
+    idleHibernateSeconds: 21_600,
+    hibernatedAt: { seconds: 1_795_348_800n, nanos: 0 },
+    hibernateReason: "idle",
+    hibernateFallbackReason: "damaged-memory-file",
+  }));
+  assert(hibernated.idle_hibernate_seconds === 21_600, "an idle hibernate is retained");
+  assert(hibernated.hibernated_at === "2026-11-22T12:00:00Z", "hibernate timestamp is retained");
+  assert(hibernated.hibernate_reason === "idle", "hibernate reason is retained");
+  assert(hibernated.hibernate_fallback_reason === "damaged-memory-file", "hibernate fallback reason is retained");
   const placed = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_placed", EnvironmentState.RUNNING),
     host: { id: "host-1", name: "build-box" },
@@ -1731,7 +1742,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 207;
+  const expectedAssertions = 211;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

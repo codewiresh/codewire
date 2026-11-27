@@ -169,9 +169,10 @@ fn a_standard_workspace_mounts_only_its_claim_its_image_disk_its_tokens_and_root
     assert_eq!(mounts["/codewire/run"]["name"], "codewire-run");
     // No TUN: the VM has no network device.
     assert!(!template.to_string().contains("egress-devnet"));
-    // The claim is a filesystem: the VM's disks are files on it.
+    // The claim is a filesystem: the VM's disks are files on it, plus unbilled
+    // hibernate memory headroom (20 GiB disk + 5 GiB for 4096 MiB RAM = 25Gi).
     let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
-    assert_eq!(claim["resources"]["requests"]["storage"], "20Gi");
+    assert_eq!(claim["resources"]["requests"]["storage"], "25Gi");
     assert!(claim.get("volumeMode").is_none());
 }
 
@@ -606,4 +607,113 @@ fn the_state_and_docker_disks_never_outgrow_the_room_the_volume_has() {
     // An odd room gives the state disk the extra MiB.
     assert_eq!(disks_mib(10) % 2, 1);
     assert_eq!(state_disk_mib(10), docker_disk_mib(10) + 1);
+}
+
+#[test]
+fn standard_pvc_includes_unbilled_hibernate_memory_headroom_and_runtime_digest() {
+    let rendered = render_sandbox_template(NAMESPACE, &opts());
+    let env_map = env(&rendered);
+    let expected_digest = RUNTIME_IMAGE.rsplit_once('@').unwrap().1;
+    assert_eq!(
+        env_map
+            .get("CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST")
+            .and_then(Value::as_str),
+        Some(expected_digest)
+    );
+    // opts() has 20 GiB disk and 4096 MiB memory -> 5 GiB unbilled headroom -> 25Gi PVC.
+    let storage = rendered
+        .pointer("/spec/volumeClaimTemplates/0/spec/resources/requests/storage")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(storage, "25Gi");
+    // Billed disk annotation stays at the user's 20 GiB.
+    let billed = rendered
+        .pointer("/spec/podTemplate/metadata/annotations/codewire.sh~1disk-gib")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(billed, "20");
+}
+
+#[test]
+fn commodity_profile_gets_zero_hibernate_memory_headroom_even_with_standard_isolation_tier() {
+    // Regression (#6667): environments.isolation_tier is "standard" on both
+    // commodity and standard-profile Sandboxes; PVC headroom must key strictly
+    // on runtime_profile so commodity Sandboxes never get extra PVC GiB.
+    assert_eq!(
+        crate::sandbox::template::workspace_pvc_target_gib("commodity", 20, 4096),
+        20
+    );
+    assert_eq!(
+        crate::sandbox::template::workspace_pvc_target_gib("confidential", 20, 4096),
+        20
+    );
+    assert_eq!(
+        crate::sandbox::template::workspace_pvc_target_gib("standard", 20, 4096),
+        25
+    );
+}
+
+#[test]
+fn vm_restore_generation_patches_adds_replaces_and_removes_cleanly() {
+    let mut sb = sandbox(&render_sandbox_template(NAMESPACE, &opts()));
+    // Absent -> None is a no-op.
+    assert!(vm_restore_generation(&sb, None).unwrap().is_empty());
+
+    // Add generation 5.
+    let add_ops = vm_restore_generation(&sb, Some(5)).unwrap();
+    assert_eq!(
+        add_ops,
+        vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": "sandbox-uid"}),
+            json!({
+                "op": "add",
+                "path": "/spec/podTemplate/spec/containers/0/env/-",
+                "value": { "name": "CODEWIRE_VM_RESTORE_GENERATION", "value": "5" },
+            }),
+        ]
+    );
+    sb.pointer_mut("/spec/podTemplate/spec/containers/0/env")
+        .and_then(Value::as_array_mut)
+        .unwrap()
+        .push(json!({ "name": "CODEWIRE_VM_RESTORE_GENERATION", "value": "5" }));
+    let entry = workspace(&sb)["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|e| e["name"] == "CODEWIRE_VM_RESTORE_GENERATION")
+        .unwrap();
+    let path = format!("/spec/podTemplate/spec/containers/0/env/{entry}");
+    assert_eq!(env(&sb)["CODEWIRE_VM_RESTORE_GENERATION"], "5");
+
+    // Same generation is a no-op.
+    assert!(vm_restore_generation(&sb, Some(5)).unwrap().is_empty());
+
+    // Replace with generation 9.
+    let replace_ops = vm_restore_generation(&sb, Some(9)).unwrap();
+    assert_eq!(
+        replace_ops,
+        vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": "sandbox-uid"}),
+            json!({"op": "test", "path": format!("{path}/name"), "value": "CODEWIRE_VM_RESTORE_GENERATION"}),
+            json!({"op": "replace", "path": format!("{path}/value"), "value": "9"}),
+        ]
+    );
+    *sb.pointer_mut(&format!("{path}/value")).unwrap() = json!("9");
+    assert_eq!(env(&sb)["CODEWIRE_VM_RESTORE_GENERATION"], "9");
+
+    // Remove generation.
+    let remove_ops = vm_restore_generation(&sb, None).unwrap();
+    assert_eq!(
+        remove_ops,
+        vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": "sandbox-uid"}),
+            json!({"op": "test", "path": format!("{path}/name"), "value": "CODEWIRE_VM_RESTORE_GENERATION"}),
+            json!({"op": "remove", "path": path}),
+        ]
+    );
+    sb.pointer_mut("/spec/podTemplate/spec/containers/0/env")
+        .and_then(Value::as_array_mut)
+        .unwrap()
+        .remove(entry);
+    assert!(!env(&sb).contains_key("CODEWIRE_VM_RESTORE_GENERATION"));
 }

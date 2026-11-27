@@ -36,6 +36,10 @@ pub(super) fn proto_environment(
         idle_stop_enforced: Some(idle_stop.is_on()),
         idle_suspend_seconds: environment.idle_suspend_seconds,
         suspended_at: optional_timestamp(environment.suspended_at)?,
+        idle_hibernate_seconds: environment.idle_hibernate_seconds,
+        hibernated_at: optional_timestamp(environment.hibernated_at)?,
+        hibernate_reason: environment.hibernate_reason.unwrap_or_default(),
+        hibernate_fallback_reason: environment.hibernate_fallback_reason.unwrap_or_default(),
         restarted_at: optional_timestamp(environment.restarted_at)?,
         restart_cause: environment.restart_cause.unwrap_or_default(),
         host: environment

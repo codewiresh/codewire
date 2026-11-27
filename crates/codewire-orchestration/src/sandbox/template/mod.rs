@@ -31,6 +31,7 @@ mod naming;
 mod network;
 mod runtime_policy;
 mod standard;
+pub(crate) use standard::workspace_pvc_target_gib;
 mod workspace;
 mod workspace_flush;
 
@@ -59,7 +60,9 @@ pub use runtime_policy::{
     validate_managed_runtime_profile,
 };
 pub(crate) use runtime_policy::{dind_image, docker_data_size_gib};
-pub(crate) use standard::{KVM_DEVICE_RESOURCE, vm_state_existing};
+pub(crate) use standard::{
+    KVM_DEVICE_RESOURCE, standard_pvc_gib, vm_restore_generation, vm_state_existing,
+};
 pub use standard::{
     STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime, runtime_profile_of,
 };
@@ -144,7 +147,7 @@ pub const KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH: &str = "/dev/codewire-workspa
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
 const HOME_ROOT: &str = "/home/codewire";
 const WORKSPACE_ANNOTATION_KEY: &str = "codewire.sh/workspace";
-const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
+pub(crate) const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
 /// The Pod annotation Cilium's bandwidth manager enforces as an egress rate.
 pub const EGRESS_BANDWIDTH_ANNOTATION_KEY: &str = "kubernetes.io/egress-bandwidth";
 /// The egress rate cap on every workspace Pod (`SANDBOX_EGRESS_BANDWIDTH`), as

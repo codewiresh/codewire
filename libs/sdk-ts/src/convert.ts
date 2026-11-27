@@ -755,6 +755,10 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     idle_stop_enforced: value.idleStopEnforced,
     idle_stop_seconds: value.idleStopSeconds,
     idle_suspend_seconds: value.idleSuspendSeconds,
+    idle_hibernate_seconds: value.idleHibernateSeconds,
+    hibernated_at: timestampString(value.hibernatedAt),
+    hibernate_reason: optionalString(value.hibernateReason),
+    hibernate_fallback_reason: optionalString(value.hibernateFallbackReason),
     isolation_tier: mapIsolationTier(value.isolationTier),
     memory_mb: value.memoryMb,
     name: optionalString(value.name),
@@ -1240,7 +1244,7 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"], [19, "network"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"], [38, "network_policy"], [39, "stop_reason"], [40, "idle_stop_seconds"], [41, "idle_stop_enforced"], [43, "restarted_at"], [44, "restart_cause"], [45, "host"], [46, "idle_suspend_seconds"], [47, "suspended_at"],
+    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"], [38, "network_policy"], [39, "stop_reason"], [40, "idle_stop_seconds"], [41, "idle_stop_enforced"], [43, "restarted_at"], [44, "restart_cause"], [45, "host"], [46, "idle_suspend_seconds"], [47, "suspended_at"], [48, "idle_hibernate_seconds"], [49, "hibernated_at"], [50, "hibernate_reason"], [51, "hibernate_fallback_reason"],
   ]));
   assertDescriptorCoverage("environment host", EnvironmentHostSchema.fields, new Map([
     [1, "id"], [2, "name"],
@@ -1249,7 +1253,7 @@ export function assertRuntimeConverterCoverage(): void {
     // The SDK always names its organization by org_id, so this stays unset.
     // It offers no placement on a host, which is a preview (#3609), and sends
     // no request ID, so placement (34) and request_id (35) stay unset too.
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"], [33, "network_policy"], [34, "placement"], [35, "request_id"], [36, "idle_stop_seconds"], [37, "idle_suspend_seconds"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"], [33, "network_policy"], [34, "placement"], [35, "request_id"], [36, "idle_stop_seconds"], [37, "idle_suspend_seconds"], [38, "idle_hibernate_seconds"],
   ]));
   assertDescriptorCoverage("network policy", NetworkPolicySchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "name"], [4, "revision"], [5, "current_revision"], [6, "rules"], [7, "digest"], [8, "created_at"], [9, "created_by"],

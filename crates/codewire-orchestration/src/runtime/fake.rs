@@ -408,6 +408,15 @@ impl RuntimeObservations for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
+    async fn set_vm_restore_generation(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _generation: Option<u64>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn delete_refused_member(
         &self,
         _placement: &Placement,

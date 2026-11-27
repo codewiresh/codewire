@@ -10,8 +10,9 @@ use serde_json::{Map, Value, json};
 
 use codewire_daemon_proto::{
     POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_EGRESS_MODE_BROKER, POD_RUNTIME_EGRESS_MODE_ENV,
-    POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV, POD_RUNTIME_IMAGE_DISK_ID_ENV,
-    POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV, POD_RUNTIME_PLATFORM_PEERS_ENV,
+    POD_RUNTIME_IMAGE_DIGEST_ENV, POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
+    POD_RUNTIME_IMAGE_DISK_ID_ENV, POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV,
+    POD_RUNTIME_PLATFORM_PEERS_ENV, POD_RUNTIME_RESTORE_GENERATION_ENV,
     POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_UDP_PEERS_ENV,
     POD_RUNTIME_VCPUS_ENV, POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING,
     POD_RUNTIME_VM_STATE_NEW, POD_RUNTIME_WORKSPACE_IMAGE_ENV, POD_RUNTIME_WORKSPACE_INIT_ENV,
@@ -227,6 +228,31 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Unbilled PVC headroom (in GiB) reserved on a `standard` Sandbox's thin-LVM
+/// volume for the hibernate memory image and device state (#6647,
+/// `docs/dev/SANDBOX-SLEEP.md`, "Volume space"). Never counted in `disk_gib`
+/// billing and never given to the guest's state/Docker sparse disks.
+pub(crate) fn hibernate_memory_headroom_gib(memory_mib: i64) -> i64 {
+    memory_mib.max(0).saturating_add(512).saturating_add(1_023) / 1_024
+}
+
+/// Total PVC storage request (in GiB) for a `standard` Sandbox: the user's
+/// billed `disk_gib` plus unbilled [`hibernate_memory_headroom_gib`].
+pub(crate) fn standard_pvc_gib(disk_gib: i64, memory_mib: i64) -> i64 {
+    disk_gib.saturating_add(hibernate_memory_headroom_gib(memory_mib))
+}
+
+/// Physical PVC storage request (in GiB) for a Sandbox of `runtime_profile`:
+/// `standard` reserves unbilled hibernate memory headroom on top of `disk_gb`;
+/// other profiles (`commodity`, `confidential`) request `disk_gb` directly (#6647).
+pub(crate) fn workspace_pvc_target_gib(runtime_profile: &str, disk_gb: i32, memory_mb: i32) -> i32 {
+    if runtime_profile == super::RUNTIME_PROFILE_STANDARD {
+        i32::try_from(standard_pvc_gib(i64::from(disk_gb), i64::from(memory_mb))).unwrap_or(disk_gb)
+    } else {
+        disk_gb
+    }
 }
 
 /// The room in MiB the VM's state and Docker disks share on a volume of
@@ -465,12 +491,88 @@ fn settings(
         entries.push((POD_RUNTIME_UDP_PEERS_ENV, egress.udp_relay_peers.join(",")));
     }
     if let Some(digest) = runtime.runtime_image_digest() {
-        entries.push(("CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", digest.to_owned()));
+        entries.push((POD_RUNTIME_IMAGE_DIGEST_ENV, digest.to_owned()));
     }
     entries
         .into_iter()
         .map(|(name, value)| json!({ "name": name, "value": value }))
         .collect()
+}
+
+/// JSON Patch operations that set or clear [`POD_RUNTIME_RESTORE_GENERATION_ENV`]
+/// on a `standard` Sandbox's `workspace` container env (#6647), fenced by
+/// `test`s of the Sandbox's UID and any replaced/removed entry. Returns an
+/// empty list for non-`standard` Sandboxes or when the env already matches.
+pub(crate) fn vm_restore_generation(
+    sandbox: &Value,
+    generation: Option<u64>,
+) -> anyhow::Result<Vec<Value>> {
+    let spec = "/spec/podTemplate/spec";
+    if sandbox
+        .pointer(&format!("{spec}/runtimeClassName"))
+        .and_then(Value::as_str)
+        != Some(RUNTIME_CLASS_STANDARD)
+    {
+        return Ok(Vec::new());
+    }
+    let uid = sandbox
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("the standard Sandbox has no UID"))?;
+    let containers = sandbox
+        .pointer(&format!("{spec}/containers"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (index, workspace) = containers
+        .iter()
+        .enumerate()
+        .find(|(_, container)| container["name"] == "workspace")
+        .ok_or_else(|| anyhow::anyhow!("the standard Sandbox has no workspace container"))?;
+    let env_list = workspace["env"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("the standard Sandbox's workspace has no env array"))?;
+    let existing = env_list
+        .iter()
+        .enumerate()
+        .find(|(_, variable)| variable["name"] == POD_RUNTIME_RESTORE_GENERATION_ENV)
+        .map(|(entry, variable)| (entry, variable.get("value").and_then(Value::as_str)));
+
+    match (generation, existing) {
+        (None, None) => Ok(Vec::new()),
+        (None, Some((entry, _))) => {
+            let path = format!("{spec}/containers/{index}/env/{entry}");
+            Ok(vec![
+                json!({"op": "test", "path": "/metadata/uid", "value": uid}),
+                json!({"op": "test", "path": format!("{path}/name"), "value": POD_RUNTIME_RESTORE_GENERATION_ENV}),
+                json!({"op": "remove", "path": path}),
+            ])
+        }
+        (Some(gen_value), Some((entry, current))) => {
+            let desired = gen_value.to_string();
+            if current == Some(desired.as_str()) {
+                return Ok(Vec::new());
+            }
+            let path = format!("{spec}/containers/{index}/env/{entry}");
+            Ok(vec![
+                json!({"op": "test", "path": "/metadata/uid", "value": uid}),
+                json!({"op": "test", "path": format!("{path}/name"), "value": POD_RUNTIME_RESTORE_GENERATION_ENV}),
+                json!({"op": "replace", "path": format!("{path}/value"), "value": desired}),
+            ])
+        }
+        (Some(gen_value), None) => Ok(vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": uid}),
+            json!({
+                "op": "add",
+                "path": format!("{spec}/containers/{index}/env/-"),
+                "value": {
+                    "name": POD_RUNTIME_RESTORE_GENERATION_ENV,
+                    "value": gen_value.to_string(),
+                },
+            }),
+        ]),
+    }
 }
 
 /// The JSON Patch operations that turn a `standard` Sandbox's rendered

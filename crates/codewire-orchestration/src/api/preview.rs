@@ -40,6 +40,8 @@ struct PreviewTarget {
     env_id: String,
     access: String,
     created_by: String,
+    state: String,
+    hibernated: bool,
     pod_ip: String,
     /// The Pod's namespace, which names its daemon's Service.
     namespace: String,
@@ -140,12 +142,31 @@ async fn preview_proxy_middleware(
         );
     }
 
-    let platform_bearer =
+    let (platform_bearer, authenticated_user) =
         match authorize_request(&state, &method, &uri, &headers, &host, &host_match, &target).await
         {
-            Ok(platform_bearer) => platform_bearer,
+            Ok(result) => result,
             Err(response) => return response,
         };
+
+    // Signed-in preview visits wake a hibernated Sandbox on access (#6647,
+    // `docs/dev/SANDBOX-SLEEP.md`, "Restoring a hibernated Sandbox"). Public
+    // unauthenticated visits never start a hibernated Sandbox.
+    let target = if target.state != "running" {
+        match wake_hibernated_preview_target(
+            &state,
+            &host_match,
+            &target,
+            authenticated_user.as_ref(),
+        )
+        .await
+        {
+            Ok(ready) => ready,
+            Err(response) => return response,
+        }
+    } else {
+        target
+    };
 
     proxy_to_preview_target(
         &state,
@@ -160,9 +181,71 @@ async fn preview_proxy_middleware(
     .await
 }
 
+/// Starts a hibernated Sandbox for a signed-in authorized preview visitor and
+/// waits briefly for its Pod to become reachable. Refuses unauthenticated
+/// visitors so public URLs cannot wake hibernated compute without a session.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+async fn wake_hibernated_preview_target(
+    state: &ApiState,
+    host_match: &PreviewHostMatch,
+    target: &PreviewTarget,
+    authenticated_user: Option<&codewire_server_core::auth::AuthUser>,
+) -> Result<PreviewTarget, Response> {
+    if !target.hibernated {
+        return Err(preview_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "environment is not running",
+        ));
+    }
+    let Some(user) = authenticated_user else {
+        return Err(preview_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "environment is hibernated",
+        ));
+    };
+    if let Err(err) =
+        super::environments::start_environment_core(state, user, &host_match.org_id, &target.env_id)
+            .await
+    {
+        // Another concurrent request may already have transitioned the
+        // environment out of `stopped`; only treat genuine refusals as errors.
+        let already_starting = matches!(
+            &err,
+            codewire_server_core::AppError::Coded { code, .. } if *code == "invalid_state"
+        );
+        if !already_starting {
+            return Err(preview_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "failed to restore hibernated environment",
+            ));
+        }
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        if let Ok(refreshed) = resolve_preview_target(&state.pool, host_match).await
+            && refreshed.state == "running"
+            && !refreshed.pod_ip.trim().is_empty()
+        {
+            return Ok(refreshed);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let mut response = preview_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "environment is restoring from hibernate; retry shortly",
+            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            return Err(response);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 /// The proxy's decision on who may make this request, before it reaches the
 /// workload. A private or confidential preview authenticates and authorizes
-/// its caller; a public one has no caller to check. `Ok(true)` when the proxy
+/// its caller; a public one has no caller to check. Returns `(platform_bearer,
+/// authenticated_user)` where `platform_bearer` is true when the proxy
 /// authenticated with the request's Bearer credential, which then stops here
 /// instead of reaching the workload; `Err` is the refusal.
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
@@ -174,7 +257,7 @@ async fn authorize_request(
     host: &str,
     host_match: &PreviewHostMatch,
     target: &PreviewTarget,
-) -> Result<bool, Response> {
+) -> Result<(bool, Option<codewire_server_core::auth::AuthUser>), Response> {
     if target.access == "public" && target.isolation_tier != "confidential" {
         // A public preview has no caller to check, so once its organization's
         // deletion starts every request to it is refused (#3586).
@@ -185,7 +268,7 @@ async fn authorize_request(
                 headers,
             ));
         }
-        return Ok(false);
+        return Ok((false, None));
     }
     let mut platform_bearer = false;
     if browser::service_worker_script(headers) {
@@ -261,7 +344,7 @@ async fn authorize_request(
         target,
     )
     .await?;
-    Ok(platform_bearer)
+    Ok((platform_bearer, Some(user)))
 }
 
 /// A request on a preview host that names no preview, as the API router gets
@@ -454,6 +537,7 @@ async fn resolve_preview_target(
     let rows = sqlx::query(
         r#"SELECT ep.id AS port_id, ep.port, e.id,
                   ep.access, e.created_by, e.state, e.isolation_tier,
+                  e.hibernated_at IS NOT NULL AS hibernated,
                   COALESCE(b.pod_ip, '') AS pod_ip,
                   COALESCE(b.namespace, '') AS namespace,
                   o.deletion_state = 'active' AS org_admits_streams
@@ -484,7 +568,10 @@ async fn resolve_preview_target(
     let state_text: String = row
         .try_get("state")
         .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
-    if state_text != "running" {
+    let hibernated: bool = row
+        .try_get("hibernated")
+        .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
+    if state_text != "running" && !(state_text == "stopped" && hibernated) {
         return Err(preview_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "environment is not running",
@@ -494,7 +581,7 @@ async fn resolve_preview_target(
     let pod_ip: String = row
         .try_get("pod_ip")
         .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
-    if pod_ip.trim().is_empty() {
+    if state_text == "running" && pod_ip.trim().is_empty() {
         return Err(preview_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "sandbox backend unavailable",
@@ -517,6 +604,8 @@ async fn resolve_preview_target(
         created_by: row
             .try_get("created_by")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
+        state: state_text,
+        hibernated,
         pod_ip,
         namespace: row
             .try_get("namespace")

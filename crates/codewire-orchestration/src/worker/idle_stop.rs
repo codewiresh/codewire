@@ -108,6 +108,7 @@ pub(crate) async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Er
            FROM environments e
            JOIN sandbox_environment_backend b ON b.environment_id = e.id
            WHERE e.idle_stop_seconds > 0
+             AND NOT (e.runtime_profile = 'standard' AND e.idle_hibernate_seconds > 0)
              AND e.desired_state = 'started' AND e.state = 'running'
              AND COALESCE(e.last_activity_at, e.started_at, e.created_at)
                  < NOW() - make_interval(secs => e.idle_stop_seconds)

@@ -63,6 +63,19 @@ pub struct Environment {
     /// When its daemon acknowledged a suspend; its state stays running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+    /// Seconds with no activity after which a `standard` Sandbox hibernates
+    /// to its encrypted volume, 0 for off (#6647).
+    pub idle_hibernate_seconds: i32,
+    /// When a `standard` Sandbox finished hibernating; its state is stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernated_at: Option<String>,
+    /// Why it hibernated: idle or user (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernate_reason: Option<String>,
+    /// Set when a start of a hibernated Sandbox fell back to a cold disk boot;
+    /// cleared on the next start or stop (#6647).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hibernate_fallback_reason: Option<String>,
     /// When a running Sandbox was running again after a restart nobody
     /// asked for, and why (#5997); cleared by the next start or stop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,6 +206,7 @@ pub(crate) const ENV_SELECT_COLS: &str = concat!(
     COALESCE(b.setup_complete, e.runtime_backend = 'host') AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
     e.ttl_seconds, e.shutdown_at, e.idle_stop_seconds, e.idle_suspend_seconds, e.suspended_at,
+    e.idle_hibernate_seconds, e.hibernated_at, e.hibernate_reason, e.hibernate_fallback_reason,
     e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier,
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
@@ -251,6 +265,13 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
             row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("suspended_at")?
                 .map(|at| at.naive_utc()),
         ),
+        idle_hibernate_seconds: row.try_get("idle_hibernate_seconds")?,
+        hibernated_at: format_time_opt(
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("hibernated_at")?
+                .map(|at| at.naive_utc()),
+        ),
+        hibernate_reason: row.try_get("hibernate_reason")?,
+        hibernate_fallback_reason: row.try_get("hibernate_fallback_reason")?,
         // TIMESTAMPTZ, unlike the older timestamps.
         restarted_at: format_time_opt(
             row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("restarted_at")?
@@ -1222,6 +1243,19 @@ pub(crate) async fn stop_environment_core(
     run_environment_runtime_mutation(&state.pool, org_id, env_id, async move {
         let state = &owned_state;
         let result: AppResult<StatusResponse> = async {
+            if env.state == "stopped" {
+                let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());
+                let cleared = lifecycle.clear_hibernate(&env.id).await.map_err(|_| {
+                    coded(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "failed to clear hibernated state",
+                    )
+                })?;
+                if cleared {
+                    return Ok(StatusResponse { status: "stopped" });
+                }
+            }
             if env.state != "running" {
                 return Err(coded(
                     StatusCode::BAD_REQUEST,
@@ -1412,9 +1446,15 @@ pub(crate) async fn extend_environment_ttl_core(
 }
 
 mod admission;
+mod idle_hibernate;
 mod idle_suspend;
 mod start;
 
+pub(crate) use idle_hibernate::{
+    hibernate_environment_core, require_standard_for_idle_hibernate,
+    set_environment_idle_hibernate_core, validate_idle_hibernate_after_suspend,
+    validate_idle_hibernate_seconds,
+};
 pub(crate) use idle_suspend::{
     require_standard_for_idle_suspend, set_environment_idle_suspend_core,
     validate_idle_suspend_seconds,
@@ -1703,6 +1743,10 @@ mod tests {
             idle_stop_seconds: 0,
             idle_suspend_seconds: 0,
             suspended_at: None,
+            idle_hibernate_seconds: 0,
+            hibernated_at: None,
+            hibernate_reason: None,
+            hibernate_fallback_reason: None,
             restarted_at: None,
             restart_cause: None,
             host: None,

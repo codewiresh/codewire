@@ -432,7 +432,7 @@
           ],
           "resources": {
             "requests": {
-              "storage": "20Gi"
+              "storage": "25Gi"
             }
           },
           "storageClassName": "example-workspace-class"

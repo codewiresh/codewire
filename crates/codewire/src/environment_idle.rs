@@ -25,4 +25,26 @@ impl CodewireClient {
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
     }
+
+    pub async fn set_environment_idle_hibernate(
+        &self,
+        request: SetEnvironmentIdleHibernateRequest,
+    ) -> Result<SetEnvironmentIdleHibernateResponse, ClientError> {
+        self.environments
+            .set_environment_idle_hibernate_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn hibernate_environment(
+        &self,
+        request: HibernateEnvironmentRequest,
+    ) -> Result<HibernateEnvironmentResponse, ClientError> {
+        self.environments
+            .hibernate_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
 }

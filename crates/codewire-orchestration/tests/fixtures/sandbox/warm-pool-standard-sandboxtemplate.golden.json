@@ -462,7 +462,7 @@
           ],
           "resources": {
             "requests": {
-              "storage": "10Gi"
+              "storage": "15Gi"
             }
           },
           "storageClassName": "linstor-local"

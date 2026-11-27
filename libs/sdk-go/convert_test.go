@@ -409,6 +409,26 @@ func TestEnvironmentIdleSuspendRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentIdleHibernateRoundTrips(t *testing.T) {
+	hibernated, err := fromProtoEnvironment(&codewirev1.Environment{
+		State:                   codewirev1.EnvironmentState_ENVIRONMENT_STATE_STOPPED,
+		IdleHibernateSeconds:    21_600,
+		HibernatedAt:            &timestamppb.Timestamp{Seconds: 1_795_348_800},
+		HibernateReason:         "idle",
+		HibernateFallbackReason: "damaged-memory-file",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hibernated.IdleHibernateSeconds != 21_600 ||
+		valueOrEmpty(hibernated.HibernatedAt) != "2026-11-22T12:00:00Z" ||
+		valueOrEmpty(hibernated.HibernateReason) != "idle" ||
+		valueOrEmpty(hibernated.HibernateFallbackReason) != "damaged-memory-file" ||
+		hibernated.State != "stopped" {
+		t.Fatalf("hibernate changed: %+v", hibernated)
+	}
+}
+
 func TestEnvironmentHostRoundTrips(t *testing.T) {
 	placed, err := fromProtoEnvironment(&codewirev1.Environment{
 		Host: &codewirev1.EnvironmentHost{Id: "host-1", Name: "build-box"},

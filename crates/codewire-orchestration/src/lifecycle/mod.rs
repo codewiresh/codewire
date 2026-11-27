@@ -186,6 +186,21 @@ pub trait LifecycleStore {
         env_id: &str,
         idle_suspend_seconds: i32,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn set_idle_hibernate(
+        &self,
+        env_id: &str,
+        idle_hibernate_seconds: i32,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn request_hibernate(
+        &self,
+        env_id: &str,
+        org_id: &str,
+        stop_reason: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn clear_hibernate(
+        &self,
+        env_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
 /// What a start asks of its organization's environment quota: the limits,
@@ -603,6 +618,40 @@ impl<S: LifecycleStore> Service<S> {
             .set_idle_suspend(env_id, seconds)
             .await
             .map_err(|e| anyhow::anyhow!("set idle suspend: {e:#}"))
+    }
+
+    /// Records the environment's own idle hibernate (#6647); false when it is
+    /// destroyed or gone.
+    pub async fn set_idle_hibernate(&self, env_id: &str, seconds: i32) -> anyhow::Result<bool> {
+        self.store
+            .set_idle_hibernate(env_id, seconds)
+            .await
+            .map_err(|e| anyhow::anyhow!("set idle hibernate: {e:#}"))
+    }
+
+    /// Transitions a running `standard` environment to desired_state='stopped'
+    /// with a hibernate stop reason (`hibernate_user` or `hibernate_idle`) so
+    /// the serialized Temporal stop handler performs the hibernate handoff.
+    pub async fn request_hibernate(
+        &self,
+        env_id: &str,
+        org_id: &str,
+        stop_reason: &str,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .request_hibernate(env_id, org_id, stop_reason)
+            .await
+            .map_err(|e| anyhow::anyhow!("request hibernate: {e:#}"))
+    }
+
+    /// Clears the hibernated mark and metadata on a stopped environment (e.g.
+    /// when `cw stop` discards its hibernate state). Returns true if a
+    /// hibernated mark was cleared.
+    pub async fn clear_hibernate(&self, env_id: &str) -> anyhow::Result<bool> {
+        self.store
+            .clear_hibernate(env_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("clear hibernate: {e:#}"))
     }
 
     /// Mirrors `PrepareStop`: Ok(true) → proceed with the stop.
@@ -1480,6 +1529,64 @@ impl LifecycleStore for PgLifecycleStore {
         };
         Ok(self.exec_logged(env_id, query, entry).await? > 0)
     }
+
+    async fn set_idle_hibernate(&self, env_id: &str, seconds: i32) -> anyhow::Result<bool> {
+        let query = sqlx::query(
+            r#"UPDATE environments SET idle_hibernate_seconds = $1
+               WHERE id = $2 AND state NOT IN ('destroyed', 'destroying')"#,
+        )
+        .bind(seconds)
+        .bind(env_id);
+        let entry = LogEntry {
+            phase: "lifecycle_intent",
+            status: "completed",
+            message: format!("idle hibernate set to {seconds}s"),
+            metadata: serde_json::json!({ "kind": "idle_hibernate", "idle_hibernate_seconds": seconds }),
+        };
+        Ok(self.exec_logged(env_id, query, entry).await? > 0)
+    }
+
+    async fn request_hibernate(
+        &self,
+        env_id: &str,
+        org_id: &str,
+        stop_reason: &str,
+    ) -> anyhow::Result<bool> {
+        let query = sqlx::query(
+            r#"UPDATE environments
+                  SET desired_state = 'stopped', stop_reason = $3,
+                      state_changed_at = NOW()
+                WHERE id = $1 AND org_id = $2
+                  AND state = 'running' AND desired_state = 'started'"#,
+        )
+        .bind(env_id)
+        .bind(org_id)
+        .bind(stop_reason);
+        let entry = LogEntry {
+            phase: "lifecycle_intent",
+            status: "completed",
+            message: format!("hibernate requested ({stop_reason})"),
+            metadata: serde_json::json!({ "kind": "hibernate", "stop_reason": stop_reason }),
+        };
+        Ok(self.exec_logged(env_id, query, entry).await? > 0)
+    }
+
+    async fn clear_hibernate(&self, env_id: &str) -> anyhow::Result<bool> {
+        let query = sqlx::query(
+            r#"UPDATE environments
+                  SET hibernated_at = NULL, hibernate_reason = NULL,
+                      hibernate_record = NULL, hibernate_fallback_reason = NULL
+                WHERE id = $1 AND state = 'stopped' AND hibernated_at IS NOT NULL"#,
+        )
+        .bind(env_id);
+        let entry = LogEntry {
+            phase: "lifecycle_intent",
+            status: "completed",
+            message: "hibernated state cleared".into(),
+            metadata: serde_json::json!({ "kind": "clear_hibernate" }),
+        };
+        Ok(self.exec_logged(env_id, query, entry).await? > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1622,6 +1729,15 @@ mod tests {
             Ok(true)
         }
         async fn set_idle_suspend(&self, _: &str, _: i32) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn set_idle_hibernate(&self, _: &str, _: i32) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn request_hibernate(&self, _: &str, _: &str, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn clear_hibernate(&self, _: &str) -> anyhow::Result<bool> {
             Ok(true)
         }
     }

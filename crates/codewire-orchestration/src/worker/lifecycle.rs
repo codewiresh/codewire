@@ -4,6 +4,8 @@
 //! `Create` action runs create + setup inline (D3: the env-setup NATS
 //! publish is retired, so the recovery path chains setup itself).
 
+mod hibernate;
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -340,6 +342,21 @@ pub async fn handle_environment_stop(
     // Scale the sandbox down to 0 replicas (keeps the claim/sandbox, deletes pod).
     let runtime = ctx.require_runtime()?;
     let claim = workspace_claim(&env, &backend);
+    let stored_hibernate = hibernate::load_hibernate_state(&ctx.pool, env_id)
+        .await
+        .ok();
+    let armed_hibernate = hibernate::arm_pre_stop_hibernate(
+        ctx,
+        runtime,
+        &env.runtime_profile,
+        &backend.namespace,
+        env_id,
+        &backend.pod_name,
+        stored_hibernate
+            .as_ref()
+            .and_then(|s| s.stop_reason.as_deref()),
+    )
+    .await;
     let previous = authority
         .run_while_authoritative_for_states(
             STOP_MUTATION_STATES,
@@ -353,12 +370,34 @@ pub async fn handle_environment_stop(
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
         return Err(anyhow::anyhow!("set replicas 0: {e:#}"));
     }
-    authority
-        .run_while_authoritative_for_states(
-            STOP_MUTATION_STATES,
-            runtime.wait_scaled_down(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
-        )
-        .await?;
+    let scaled_down_token = tokio_util::sync::CancellationToken::new();
+    let (scale_down_result, hibernated_outcome) = tokio::join!(
+        async {
+            let result = authority
+                .run_while_authoritative_for_states(
+                    STOP_MUTATION_STATES,
+                    runtime.wait_scaled_down(&claim, &backend.pod_name, &previous, DELETED_TIMEOUT),
+                )
+                .await;
+            scaled_down_token.cancel();
+            result
+        },
+        async {
+            if let Some(armed) = armed_hibernate.as_ref() {
+                hibernate::observe_hibernate_during_scale_down(
+                    runtime,
+                    &claim.placement,
+                    env_id,
+                    armed,
+                    scaled_down_token.clone(),
+                )
+                .await
+            } else {
+                None
+            }
+        }
+    );
+    scale_down_result?;
     // Design §10: the Pod is observed absent, so its binding is released. A
     // later start binds the new Pod UID.
     release_workspace_binding(ctx.require_runtime()?, authority, STOP_MUTATION_STATES).await?;
@@ -400,6 +439,15 @@ pub async fn handle_environment_stop(
     if let Err(e) = svc.mark_stopped(env_id).await {
         authority.ensure().await?;
         tracing::warn!(environment_id = env_id, error = %e, "environment.stop: mark stopped failed");
+    }
+    if let Some((reason, record)) = hibernated_outcome
+        && let Err(error) = hibernate::mark_hibernated(authority, env_id, reason, &record).await
+    {
+        tracing::warn!(
+            environment_id = env_id,
+            error = %error,
+            "environment.stop: mark hibernated failed"
+        );
     }
     let _ = authority
         .execute_for_states(
@@ -530,6 +578,27 @@ pub(super) async fn restart_workspace_bootstrap(
     authority: &ActivityAuthority,
     states: &[&str],
 ) -> anyhow::Result<()> {
+    restart_workspace_bootstrap_with_restore(
+        ctx,
+        env,
+        backend,
+        intent,
+        authority,
+        states,
+        &hibernate::StartRestorePlan::ColdStart,
+    )
+    .await
+}
+
+async fn restart_workspace_bootstrap_with_restore(
+    ctx: &WorkerContext,
+    env: &super::env_data::EnvironmentRow,
+    backend: &super::env_data::BackendRow,
+    intent: &crate::runtime::RenderingIntent,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    restore_plan: &hibernate::StartRestorePlan,
+) -> anyhow::Result<()> {
     let runtime = ctx.require_runtime()?;
     let claim = workspace_claim(env, backend);
     // A Sandbox made before hosted egress moves to it in the bootstrap
@@ -573,6 +642,20 @@ pub(super) async fn restart_workspace_bootstrap(
     // §10, amended). The post-ready reconcile repeats this idempotently.
     authority
         .run_external_mutation(states, runtime.reconcile_identity(&claim))
+        .await?;
+    let restore_generation = match restore_plan {
+        hibernate::StartRestorePlan::Restore { restore_generation } => Some(restore_generation),
+        _ => None,
+    };
+    authority
+        .run_external_mutation(
+            states,
+            runtime.set_vm_restore_generation(
+                &claim.placement,
+                &env.id,
+                restore_generation.copied(),
+            ),
+        )
         .await?;
     run_template_mutation(
         authority,
@@ -648,6 +731,12 @@ pub async fn handle_environment_start(
     authority.ensure().await?;
 
     let mut env = load_environment(&ctx.pool, env_id).await?;
+    let restore_plan = match hibernate::load_hibernate_state(&ctx.pool, env_id).await {
+        Ok(stored) => {
+            hibernate::plan_start_restore(&env.runtime_profile, &stored, chrono::Utc::now())
+        }
+        Err(_) => hibernate::StartRestorePlan::ColdStart,
+    };
 
     if env.state != "stopped" && env.state != "error" {
         tracing::info!(
@@ -745,13 +834,14 @@ pub async fn handle_environment_start(
         confidential_storage_manifest_uri.unwrap_or_default();
     if let Err(error) = await_reconcile_or_cancel(
         &activity_ctx,
-        restart_workspace_bootstrap(
+        restart_workspace_bootstrap_with_restore(
             ctx,
             &env,
             &backend,
             &intent,
             authority,
             START_MUTATION_STATES,
+            &restore_plan,
         ),
     )
     .await
@@ -940,6 +1030,18 @@ pub async fn handle_environment_start(
     if let Err(e) = svc.mark_started(env_id).await {
         authority.ensure().await?;
         tracing::warn!(environment_id = env_id, error = %e, "environment.start: mark started failed");
+    }
+    if env.runtime_profile == crate::sandbox::template::RUNTIME_PROFILE_STANDARD {
+        hibernate::finalize_start_restore(
+            runtime,
+            authority,
+            &["running"],
+            &placement,
+            env_id,
+            &pod.name,
+            &restore_plan,
+        )
+        .await;
     }
 
     // The resumed Pod is a new incarnation with its own start marks, read

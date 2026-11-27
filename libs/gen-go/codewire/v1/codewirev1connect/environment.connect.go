@@ -84,6 +84,12 @@ const (
 	// EnvironmentServiceSetEnvironmentIdleSuspendProcedure is the fully-qualified name of the
 	// EnvironmentService's SetEnvironmentIdleSuspend RPC.
 	EnvironmentServiceSetEnvironmentIdleSuspendProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleSuspend"
+	// EnvironmentServiceSetEnvironmentIdleHibernateProcedure is the fully-qualified name of the
+	// EnvironmentService's SetEnvironmentIdleHibernate RPC.
+	EnvironmentServiceSetEnvironmentIdleHibernateProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleHibernate"
+	// EnvironmentServiceHibernateEnvironmentProcedure is the fully-qualified name of the
+	// EnvironmentService's HibernateEnvironment RPC.
+	EnvironmentServiceHibernateEnvironmentProcedure = "/codewire.v1.EnvironmentService/HibernateEnvironment"
 	// EnvironmentServiceSetEnvironmentStartupScriptProcedure is the fully-qualified name of the
 	// EnvironmentService's SetEnvironmentStartupScript RPC.
 	EnvironmentServiceSetEnvironmentStartupScriptProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentStartupScript"
@@ -152,6 +158,13 @@ type EnvironmentServiceClient interface {
 	// Changes how long a `standard` environment may have no activity before
 	// its VM pauses inside its Pod. It never pauses, wakes or stops it.
 	SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error)
+	// Changes how long a `standard` environment may have no activity before
+	// its VM hibernates to its encrypted volume. It never wakes, stops or
+	// hibernates it.
+	SetEnvironmentIdleHibernate(context.Context, *connect.Request[v1.SetEnvironmentIdleHibernateRequest]) (*connect.Response[v1.SetEnvironmentIdleHibernateResponse], error)
+	// Hibernates a running or suspended `standard` environment now, saving its
+	// VM memory to its encrypted volume and releasing its Pod.
+	HibernateEnvironment(context.Context, *connect.Request[v1.HibernateEnvironmentRequest]) (*connect.Response[v1.HibernateEnvironmentResponse], error)
 	// Saves, replaces or removes the startup script every start of the
 	// environment runs. Only its creator may, while it is running or stopped;
 	// a running environment keeps running and runs the new script at its next
@@ -294,6 +307,18 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleSuspend")),
 			connect.WithClientOptions(opts...),
 		),
+		setEnvironmentIdleHibernate: connect.NewClient[v1.SetEnvironmentIdleHibernateRequest, v1.SetEnvironmentIdleHibernateResponse](
+			httpClient,
+			baseURL+EnvironmentServiceSetEnvironmentIdleHibernateProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleHibernate")),
+			connect.WithClientOptions(opts...),
+		),
+		hibernateEnvironment: connect.NewClient[v1.HibernateEnvironmentRequest, v1.HibernateEnvironmentResponse](
+			httpClient,
+			baseURL+EnvironmentServiceHibernateEnvironmentProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("HibernateEnvironment")),
+			connect.WithClientOptions(opts...),
+		),
 		setEnvironmentStartupScript: connect.NewClient[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse](
 			httpClient,
 			baseURL+EnvironmentServiceSetEnvironmentStartupScriptProcedure,
@@ -394,6 +419,8 @@ type environmentServiceClient struct {
 	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
 	setEnvironmentIdleStop        *connect.Client[v1.SetEnvironmentIdleStopRequest, v1.SetEnvironmentIdleStopResponse]
 	setEnvironmentIdleSuspend     *connect.Client[v1.SetEnvironmentIdleSuspendRequest, v1.SetEnvironmentIdleSuspendResponse]
+	setEnvironmentIdleHibernate   *connect.Client[v1.SetEnvironmentIdleHibernateRequest, v1.SetEnvironmentIdleHibernateResponse]
+	hibernateEnvironment          *connect.Client[v1.HibernateEnvironmentRequest, v1.HibernateEnvironmentResponse]
 	setEnvironmentStartupScript   *connect.Client[v1.SetEnvironmentStartupScriptRequest, v1.SetEnvironmentStartupScriptResponse]
 	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
 	getEnvironmentHostKey         *connect.Client[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse]
@@ -493,6 +520,16 @@ func (c *environmentServiceClient) SetEnvironmentIdleSuspend(ctx context.Context
 	return c.setEnvironmentIdleSuspend.CallUnary(ctx, req)
 }
 
+// SetEnvironmentIdleHibernate calls codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate.
+func (c *environmentServiceClient) SetEnvironmentIdleHibernate(ctx context.Context, req *connect.Request[v1.SetEnvironmentIdleHibernateRequest]) (*connect.Response[v1.SetEnvironmentIdleHibernateResponse], error) {
+	return c.setEnvironmentIdleHibernate.CallUnary(ctx, req)
+}
+
+// HibernateEnvironment calls codewire.v1.EnvironmentService.HibernateEnvironment.
+func (c *environmentServiceClient) HibernateEnvironment(ctx context.Context, req *connect.Request[v1.HibernateEnvironmentRequest]) (*connect.Response[v1.HibernateEnvironmentResponse], error) {
+	return c.hibernateEnvironment.CallUnary(ctx, req)
+}
+
 // SetEnvironmentStartupScript calls codewire.v1.EnvironmentService.SetEnvironmentStartupScript.
 func (c *environmentServiceClient) SetEnvironmentStartupScript(ctx context.Context, req *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {
 	return c.setEnvironmentStartupScript.CallUnary(ctx, req)
@@ -583,6 +620,13 @@ type EnvironmentServiceHandler interface {
 	// Changes how long a `standard` environment may have no activity before
 	// its VM pauses inside its Pod. It never pauses, wakes or stops it.
 	SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error)
+	// Changes how long a `standard` environment may have no activity before
+	// its VM hibernates to its encrypted volume. It never wakes, stops or
+	// hibernates it.
+	SetEnvironmentIdleHibernate(context.Context, *connect.Request[v1.SetEnvironmentIdleHibernateRequest]) (*connect.Response[v1.SetEnvironmentIdleHibernateResponse], error)
+	// Hibernates a running or suspended `standard` environment now, saving its
+	// VM memory to its encrypted volume and releasing its Pod.
+	HibernateEnvironment(context.Context, *connect.Request[v1.HibernateEnvironmentRequest]) (*connect.Response[v1.HibernateEnvironmentResponse], error)
 	// Saves, replaces or removes the startup script every start of the
 	// environment runs. Only its creator may, while it is running or stopped;
 	// a running environment keeps running and runs the new script at its next
@@ -721,6 +765,18 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleSuspend")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceSetEnvironmentIdleHibernateHandler := connect.NewUnaryHandler(
+		EnvironmentServiceSetEnvironmentIdleHibernateProcedure,
+		svc.SetEnvironmentIdleHibernate,
+		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleHibernate")),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceHibernateEnvironmentHandler := connect.NewUnaryHandler(
+		EnvironmentServiceHibernateEnvironmentProcedure,
+		svc.HibernateEnvironment,
+		connect.WithSchema(environmentServiceMethods.ByName("HibernateEnvironment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceSetEnvironmentStartupScriptHandler := connect.NewUnaryHandler(
 		EnvironmentServiceSetEnvironmentStartupScriptProcedure,
 		svc.SetEnvironmentStartupScript,
@@ -835,6 +891,10 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceSetEnvironmentIdleStopHandler.ServeHTTP(w, r)
 		case EnvironmentServiceSetEnvironmentIdleSuspendProcedure:
 			environmentServiceSetEnvironmentIdleSuspendHandler.ServeHTTP(w, r)
+		case EnvironmentServiceSetEnvironmentIdleHibernateProcedure:
+			environmentServiceSetEnvironmentIdleHibernateHandler.ServeHTTP(w, r)
+		case EnvironmentServiceHibernateEnvironmentProcedure:
+			environmentServiceHibernateEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceSetEnvironmentStartupScriptProcedure:
 			environmentServiceSetEnvironmentStartupScriptHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentTrustReportProcedure:
@@ -934,6 +994,14 @@ func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleStop(context.Con
 
 func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleSuspend(context.Context, *connect.Request[v1.SetEnvironmentIdleSuspendRequest]) (*connect.Response[v1.SetEnvironmentIdleSuspendResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleHibernate(context.Context, *connect.Request[v1.SetEnvironmentIdleHibernateRequest]) (*connect.Response[v1.SetEnvironmentIdleHibernateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) HibernateEnvironment(context.Context, *connect.Request[v1.HibernateEnvironmentRequest]) (*connect.Response[v1.HibernateEnvironmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.HibernateEnvironment is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) SetEnvironmentStartupScript(context.Context, *connect.Request[v1.SetEnvironmentStartupScriptRequest]) (*connect.Response[v1.SetEnvironmentStartupScriptResponse], error) {

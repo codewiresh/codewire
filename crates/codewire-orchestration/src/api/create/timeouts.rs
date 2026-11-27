@@ -1,10 +1,12 @@
-//! A create's idle stop (#3384) and idle suspend (#5529): checked before
-//! anything is written, then resolved against its snapshot's.
+//! A create's idle stop (#3384), idle suspend (#5529) and idle hibernate
+//! (#6647): checked before anything is written, then resolved against its
+//! snapshot's.
 
 use super::*;
 
-/// Refuses a timeout out of range, or an idle suspend on a Sandbox whose
-/// recorded runtime profile isn't `standard`.
+/// Refuses a timeout out of range, an idle suspend or hibernate on a Sandbox
+/// whose recorded runtime profile isn't `standard`, or an idle hibernate that
+/// isn't strictly greater than idle suspend when both are set explicitly.
 pub(super) fn validate(body: &CreateEnvironmentBody, runtime_profile: &str) -> AppResult<()> {
     if let Some(idle_stop_seconds) = body.idle_stop_seconds {
         super::super::environments::validate_idle_stop_seconds(idle_stop_seconds)?;
@@ -13,61 +15,90 @@ pub(super) fn validate(body: &CreateEnvironmentBody, runtime_profile: &str) -> A
         super::super::environments::validate_idle_suspend_seconds(seconds)?;
         super::super::environments::require_standard_for_idle_suspend(runtime_profile, seconds)?;
     }
+    if let Some(seconds) = body.idle_hibernate_seconds {
+        super::super::environments::validate_idle_hibernate_seconds(seconds)?;
+        super::super::environments::require_standard_for_idle_hibernate(runtime_profile, seconds)?;
+    }
+    super::super::environments::validate_idle_hibernate_after_suspend(
+        body.idle_suspend_seconds.unwrap_or(0),
+        body.idle_hibernate_seconds.unwrap_or(0),
+    )?;
     Ok(())
 }
 
 /// The create's own, else its snapshot's, else off (owner, 2026-11-19: "not
-/// on by default"). A snapshot's suspend carries only onto a fork that can
-/// suspend.
+/// on by default"). A snapshot's suspend or hibernate carries only onto a fork
+/// that runs on `standard`, and cross-field ordering (`idle_hibernate >
+/// idle_suspend`) is checked on the resolved pair.
 pub(super) fn resolve(
     body: &CreateEnvironmentBody,
     snapshot: SnapshotTimeouts,
     runtime_profile: &str,
-) -> (i32, i32) {
+) -> AppResult<(i32, i32, i32)> {
     let idle_stop = body
         .idle_stop_seconds
         .or(snapshot.idle_stop_seconds)
         .unwrap_or(0);
+    let is_standard = runtime_profile == crate::sandbox::template::RUNTIME_PROFILE_STANDARD;
     let idle_suspend = body.idle_suspend_seconds.unwrap_or_else(|| {
         snapshot
             .idle_suspend_seconds
-            .filter(|_| runtime_profile == crate::sandbox::template::RUNTIME_PROFILE_STANDARD)
+            .filter(|_| is_standard)
             .unwrap_or(0)
     });
-    (idle_stop, idle_suspend)
+    let idle_hibernate = body.idle_hibernate_seconds.unwrap_or_else(|| {
+        snapshot
+            .idle_hibernate_seconds
+            .filter(|_| is_standard)
+            .unwrap_or(0)
+    });
+    super::super::environments::validate_idle_hibernate_after_suspend(
+        idle_suspend,
+        idle_hibernate,
+    )?;
+    Ok((idle_stop, idle_suspend, idle_hibernate))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn snapshot(idle_stop: Option<i32>, idle_suspend: Option<i32>) -> SnapshotTimeouts {
+    fn snapshot(
+        idle_stop: Option<i32>,
+        idle_suspend: Option<i32>,
+        idle_hibernate: Option<i32>,
+    ) -> SnapshotTimeouts {
         SnapshotTimeouts {
             idle_stop_seconds: idle_stop,
             idle_suspend_seconds: idle_suspend,
+            idle_hibernate_seconds: idle_hibernate,
         }
     }
 
     #[test]
-    fn a_fork_takes_its_snapshots_suspend_only_onto_standard() {
+    fn a_fork_takes_its_snapshots_suspend_and_hibernate_only_onto_standard() {
         let body = CreateEnvironmentBody::default();
-        let from = snapshot(Some(21_600), Some(900));
-        assert_eq!(resolve(&body, from, "standard"), (21_600, 900));
-        assert_eq!(resolve(&body, from, "commodity"), (21_600, 0));
+        let from = snapshot(Some(21_600), Some(900), Some(21_600));
         assert_eq!(
-            resolve(&body, SnapshotTimeouts::default(), "standard"),
-            (0, 0)
+            resolve(&body, from, "standard").unwrap(),
+            (21_600, 900, 21_600)
+        );
+        assert_eq!(resolve(&body, from, "commodity").unwrap(), (21_600, 0, 0));
+        assert_eq!(
+            resolve(&body, SnapshotTimeouts::default(), "standard").unwrap(),
+            (0, 0, 0)
         );
         let own = CreateEnvironmentBody {
             idle_stop_seconds: Some(0),
             idle_suspend_seconds: Some(1800),
+            idle_hibernate_seconds: Some(7200),
             ..Default::default()
         };
-        assert_eq!(resolve(&own, from, "standard"), (0, 1800));
+        assert_eq!(resolve(&own, from, "standard").unwrap(), (0, 1800, 7200));
     }
 
     #[test]
-    fn a_timeout_off_standard_is_refused_and_off_is_not() {
+    fn a_timeout_off_standard_or_inverted_hibernate_is_refused() {
         let suspend = |seconds| CreateEnvironmentBody {
             idle_suspend_seconds: Some(seconds),
             ..Default::default()
@@ -76,5 +107,21 @@ mod tests {
         assert!(validate(&suspend(900), "commodity").is_err());
         assert!(validate(&suspend(0), "commodity").is_ok());
         assert!(validate(&suspend(60), "standard").is_err());
+
+        let hibernate = |seconds| CreateEnvironmentBody {
+            idle_hibernate_seconds: Some(seconds),
+            ..Default::default()
+        };
+        assert!(validate(&hibernate(21_600), "standard").is_ok());
+        assert!(validate(&hibernate(21_600), "commodity").is_err());
+        assert!(validate(&hibernate(0), "commodity").is_ok());
+        assert!(validate(&hibernate(60), "standard").is_err());
+
+        let inverted = CreateEnvironmentBody {
+            idle_suspend_seconds: Some(3600),
+            idle_hibernate_seconds: Some(3600),
+            ..Default::default()
+        };
+        assert!(validate(&inverted, "standard").is_err());
     }
 }

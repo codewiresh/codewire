@@ -306,14 +306,27 @@ impl SandboxClient {
         if cpu_millicores <= 0 || memory_mb <= 0 || disk_gb <= 0 {
             anyhow::bail!("resize resources must be greater than zero");
         }
-        let storage = format!("{disk_gb}Gi");
-
         let sandbox_name = self.bound_sandbox_name(env_id).await?;
         let sandboxes = self.sandboxes();
         let mut sandbox = sandboxes
             .get(&sandbox_name)
             .await
             .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
+        let is_standard = sandbox
+            .data
+            .pointer("/spec/podTemplate/spec/runtimeClassName")
+            .and_then(Value::as_str)
+            == Some(crate::sandbox::template::RUNTIME_CLASS_STANDARD);
+        let storage_gib = if is_standard {
+            crate::sandbox::template::workspace_pvc_target_gib(
+                crate::sandbox::template::RUNTIME_PROFILE_STANDARD,
+                disk_gb,
+                memory_mb,
+            )
+        } else {
+            disk_gb
+        };
+        let storage = format!("{storage_gib}Gi");
         let compute = WorkspaceCompute::new(
             cpu_millicores,
             memory_mb,

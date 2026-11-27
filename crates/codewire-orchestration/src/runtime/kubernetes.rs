@@ -597,6 +597,17 @@ impl RuntimeObservations for KubernetesDriver {
             .await
     }
 
+    async fn set_vm_restore_generation(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        generation: Option<u64>,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .set_vm_restore_generation(environment_id, generation)
+            .await
+    }
+
     async fn delete_refused_member(
         &self,
         placement: &Placement,

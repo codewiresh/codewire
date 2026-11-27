@@ -50,14 +50,14 @@ pub(crate) async fn set_environment_idle_suspend_core(
     require_org_member(&state.pool, user, org_id).await?;
     require_environment_access(&state.pool, user, env_id, org_id, "owner", "access denied").await?;
     validate_idle_suspend_seconds(seconds)?;
-    let profile: Option<String> = sqlx::query_scalar(
-        "SELECT runtime_profile FROM environments WHERE id = $1 AND org_id = $2",
+    let row: Option<(String, i32)> = sqlx::query_as(
+        "SELECT runtime_profile, idle_hibernate_seconds FROM environments WHERE id = $1 AND org_id = $2",
     )
     .bind(env_id)
     .bind(org_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some(profile) = profile else {
+    let Some((profile, idle_hibernate_seconds)) = row else {
         return Err(coded(
             StatusCode::BAD_REQUEST,
             "invalid_state",
@@ -65,6 +65,7 @@ pub(crate) async fn set_environment_idle_suspend_core(
         ));
     };
     require_standard_for_idle_suspend(&profile, seconds)?;
+    super::idle_hibernate::validate_idle_hibernate_after_suspend(seconds, idle_hibernate_seconds)?;
 
     run_organization_database_mutation(&state.pool, org_id, async {
         let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());

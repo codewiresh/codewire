@@ -392,8 +392,9 @@ pub(crate) fn classify_execution_mode(
     ))
 }
 
-/// state, type, namespace, cpu, memory, disk, claim name, claim UID, PVC UID.
+/// state, type, runtime_profile, namespace, cpu, memory, disk, claim name, claim UID, PVC UID.
 type ResizePlanRow = (
+    String,
     String,
     String,
     Option<String>,
@@ -412,7 +413,7 @@ async fn build_resize_plan(
     params: &PlanEnvironmentResizeParams,
 ) -> AppResult<EnvironmentResizePlan> {
     let row: Option<ResizePlanRow> = sqlx::query_as(
-        "SELECT state, type, b.namespace, e.cpu_millicores, e.memory_mb, e.disk_gb,
+        "SELECT state, type, e.runtime_profile, b.namespace, e.cpu_millicores, e.memory_mb, e.disk_gb,
                 b.sandbox_claim_name, b.sandbox_claim_uid, b.workspace_pvc_uid
            FROM environments e
            LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
@@ -425,6 +426,7 @@ async fn build_resize_plan(
     let Some((
         environment_state,
         env_type,
+        runtime_profile,
         namespace,
         cpu_millicores,
         memory_mb,
@@ -482,9 +484,22 @@ async fn build_resize_plan(
     }
     refuse_disk_growth_over_limit(previous.disk_gb, params.desired_resources.disk_gb)?;
 
+    let previous_pvc_gb = crate::sandbox::template::workspace_pvc_target_gib(
+        &runtime_profile,
+        previous.disk_gb,
+        previous.memory_mb,
+    );
+    let desired_pvc_gb = crate::sandbox::template::workspace_pvc_target_gib(
+        &runtime_profile,
+        params.desired_resources.disk_gb,
+        params.desired_resources.memory_mb,
+    )
+    .max(previous_pvc_gb);
+    let pvc_grows = desired_pvc_gb > previous_pvc_gb;
     let compute_changed = params.desired_resources.cpu_millicores != previous.cpu_millicores
         || params.desired_resources.memory_mb != previous.memory_mb;
     let needs_runtime = params.desired_resources.disk_gb > previous.disk_gb
+        || pvc_grows
         || (environment_state == "running" && compute_changed);
     let target = if needs_runtime {
         let runtime = state.runtime.as_deref().ok_or_else(|| {
@@ -507,7 +522,7 @@ async fn build_resize_plan(
         None
     };
 
-    let storage = if params.desired_resources.disk_gb > previous.disk_gb {
+    let storage = if params.desired_resources.disk_gb > previous.disk_gb || pvc_grows {
         // The shared resolver: the recorded Claim and PVC UIDs, never a name.
         let volume = VolumeRef {
             claim_name: claim_name.unwrap_or_default(),
@@ -517,7 +532,7 @@ async fn build_resize_plan(
         let (runtime, placement) = target.as_ref().expect("runtime required for disk growth");
         Some(
             runtime
-                .check_volume_growth(placement, &volume, params.desired_resources.disk_gb)
+                .check_volume_growth(placement, &volume, desired_pvc_gb)
                 .await
                 .map_err(|error| {
                     coded(

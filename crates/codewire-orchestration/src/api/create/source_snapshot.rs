@@ -89,6 +89,7 @@ struct SourceSnapshotRow {
     size_bytes: Option<i64>,
     idle_stop_seconds: Option<i32>,
     idle_suspend_seconds: Option<i32>,
+    idle_hibernate_seconds: Option<i32>,
 }
 
 /// The source's timeouts when it was captured, which a fork takes unless its
@@ -97,6 +98,7 @@ struct SourceSnapshotRow {
 pub(crate) struct SnapshotTimeouts {
     pub(crate) idle_stop_seconds: Option<i32>,
     pub(crate) idle_suspend_seconds: Option<i32>,
+    pub(crate) idle_hibernate_seconds: Option<i32>,
 }
 
 pub(crate) async fn admit_source_snapshot(
@@ -107,7 +109,7 @@ pub(crate) async fn admit_source_snapshot(
     disk_gib: i32,
 ) -> AppResult<SnapshotTimeouts> {
     let row: Option<SourceSnapshotRow> = sqlx::query_as(
-        "SELECT state, size_bytes, idle_stop_seconds, idle_suspend_seconds FROM hosted_snapshots
+        "SELECT state, size_bytes, idle_stop_seconds, idle_suspend_seconds, idle_hibernate_seconds FROM hosted_snapshots
           WHERE id = $1 AND org_id = $2 AND created_by = $3
           FOR SHARE",
     )
@@ -121,6 +123,7 @@ pub(crate) async fn admit_source_snapshot(
         size_bytes,
         idle_stop_seconds,
         idle_suspend_seconds,
+        idle_hibernate_seconds,
     }) = row
     else {
         return Err(coded(
@@ -153,5 +156,6 @@ pub(crate) async fn admit_source_snapshot(
     Ok(SnapshotTimeouts {
         idle_stop_seconds,
         idle_suspend_seconds,
+        idle_hibernate_seconds,
     })
 }

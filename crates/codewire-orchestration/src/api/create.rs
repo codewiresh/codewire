@@ -67,6 +67,10 @@ pub struct CreateEnvironmentBody {
     /// Its own idle suspend in seconds, 0 for off; `None` takes its
     /// snapshot's, else off (#5529). Refused off `standard`.
     pub idle_suspend_seconds: Option<i32>,
+    /// Its own idle hibernate in seconds, 0 for off; `None` takes its
+    /// snapshot's, else off (#6647). Refused off `standard`, or when
+    /// `<= idle_suspend_seconds`.
+    pub idle_hibernate_seconds: Option<i32>,
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,
     pub expected_profile_revision: Option<u64>,
@@ -864,10 +868,10 @@ async fn insert_environment(
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
                  runtime_backend, host_id, create_request_id, idle_stop_seconds,
-                 systemd_workspace, runtime_profile, idle_suspend_seconds)
+                 systemd_workspace, runtime_profile, idle_suspend_seconds, idle_hibernate_seconds)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                 $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -912,8 +916,8 @@ async fn insert_environment(
         }
         None => SnapshotTimeouts::default(),
     };
-    let (idle_stop_seconds, idle_suspend_seconds) =
-        timeouts::resolve(p.body, snapshot, &p.runtime.profile);
+    let (idle_stop_seconds, idle_suspend_seconds, idle_hibernate_seconds) =
+        timeouts::resolve(p.body, snapshot, &p.runtime.profile)?;
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(&p.user.user_id)
@@ -935,6 +939,7 @@ async fn insert_environment(
         .bind(p.runtime.systemd_workspace)
         .bind(&p.runtime.profile)
         .bind(idle_suspend_seconds)
+        .bind(idle_hibernate_seconds)
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;

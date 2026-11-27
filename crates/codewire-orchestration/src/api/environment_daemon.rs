@@ -52,11 +52,13 @@ mod session_mutation;
 mod suspended;
 
 pub(crate) use activity::{DaemonActivity, environment_daemon_activity_for_worker};
+mod hibernate;
 mod suspend;
 pub(crate) use app_ports::push_environment_app_ports;
 #[cfg(test)]
 use app_ports::send_app_ports;
 pub(crate) use desktop::environment_desktop_daemon_core;
+pub(crate) use hibernate::{DaemonHibernate, environment_daemon_hibernate_for_worker};
 use session_client::session_client_for_target;
 #[cfg(test)]
 pub(crate) use session_mutation::setup_admits_sessions;

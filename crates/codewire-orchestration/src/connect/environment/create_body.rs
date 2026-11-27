@@ -30,6 +30,7 @@ pub(super) fn create_body(
         ttl_seconds: request.ttl_seconds,
         idle_stop_seconds: request.idle_stop_seconds,
         idle_suspend_seconds: request.idle_suspend_seconds,
+        idle_hibernate_seconds: request.idle_hibernate_seconds,
         isolation_tier: match request.isolation_tier.as_known() {
             Some(proto::IsolationTier::Unspecified) | Some(proto::IsolationTier::Standard) => {
                 String::new()

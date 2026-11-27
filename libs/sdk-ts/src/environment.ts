@@ -55,6 +55,10 @@ export class Environment implements EnvironmentData {
   readonly idle_stop_seconds: number;
   readonly idle_suspend_seconds: number;
   readonly suspended_at: string | undefined;
+  readonly idle_hibernate_seconds: number;
+  readonly hibernated_at: string | undefined;
+  readonly hibernate_reason: string | undefined;
+  readonly hibernate_fallback_reason: string | undefined;
   readonly error_reason: string | undefined;
   readonly isolation_tier: IsolationTier;
   readonly protected: boolean;
@@ -109,6 +113,10 @@ export class Environment implements EnvironmentData {
     this.idle_stop_seconds = data.idle_stop_seconds ?? 0;
     this.idle_suspend_seconds = data.idle_suspend_seconds ?? 0;
     this.suspended_at = data.suspended_at ?? undefined;
+    this.idle_hibernate_seconds = data.idle_hibernate_seconds ?? 0;
+    this.hibernated_at = data.hibernated_at ?? undefined;
+    this.hibernate_reason = data.hibernate_reason ?? undefined;
+    this.hibernate_fallback_reason = data.hibernate_fallback_reason ?? undefined;
     this.error_reason = data.error_reason ?? undefined;
     this.isolation_tier = data.isolation_tier;
     this.protected = data.protected;

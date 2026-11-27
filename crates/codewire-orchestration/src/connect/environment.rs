@@ -47,7 +47,8 @@ use crate::api::environment_startup_script::set_environment_startup_script_core;
 use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
-    get_environment_core, list_environments_core, protect_environment_core, require_org_member,
+    get_environment_core, hibernate_environment_core, list_environments_core,
+    protect_environment_core, require_org_member, set_environment_idle_hibernate_core,
     set_environment_idle_stop_core, set_environment_idle_suspend_core, start_environment_core,
     stop_environment_core, unprotect_environment_core,
 };
@@ -575,6 +576,45 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         })
     }
 
+    async fn set_environment_idle_hibernate(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SetEnvironmentIdleHibernateRequest>,
+    ) -> ServiceResult<proto::SetEnvironmentIdleHibernateResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = set_environment_idle_hibernate_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            request.idle_hibernate_seconds,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::SetEnvironmentIdleHibernateResponse {
+            status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn hibernate_environment(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::HibernateEnvironmentRequest>,
+    ) -> ServiceResult<proto::HibernateEnvironmentResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result =
+            hibernate_environment_core(&self.state, &user, request.org_id, request.environment_id)
+                .await
+                .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::HibernateEnvironmentResponse {
+            status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
     async fn set_environment_startup_script(
         &self,
         ctx: RequestContext,
@@ -1056,6 +1096,7 @@ fn proto_create_request(
         ttl_seconds: body.ttl_seconds,
         idle_stop_seconds: body.idle_stop_seconds,
         idle_suspend_seconds: body.idle_suspend_seconds,
+        idle_hibernate_seconds: body.idle_hibernate_seconds,
         isolation_tier: match body.isolation_tier.as_str() {
             "confidential" => proto::IsolationTier::Confidential,
             "" | "standard" => proto::IsolationTier::Standard,

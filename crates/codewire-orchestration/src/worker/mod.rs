@@ -29,6 +29,7 @@ pub mod environment_auth;
 pub mod fencing_evidence;
 pub(crate) mod host_lifecycle;
 pub mod identity_mints;
+pub(crate) mod idle_hibernate;
 pub mod idle_stop;
 #[cfg(test)]
 mod idle_stop_database_tests;

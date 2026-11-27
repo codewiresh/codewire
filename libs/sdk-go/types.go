@@ -145,6 +145,17 @@ type EnvironmentData struct {
 	// SuspendedAt is when its daemon acknowledged a suspend; nil while not
 	// suspended. A suspended environment's state stays running.
 	SuspendedAt *string `json:"suspended_at,omitempty"`
+	// IdleHibernateSeconds is how long a standard environment may have no
+	// activity before it hibernates to its encrypted volume; 0 never.
+	IdleHibernateSeconds int64 `json:"idle_hibernate_seconds"`
+	// HibernatedAt is when a standard environment finished hibernating; nil
+	// while not hibernated. Its stored state is stopped.
+	HibernatedAt *string `json:"hibernated_at,omitempty"`
+	// HibernateReason says why it hibernated: idle or user.
+	HibernateReason *string `json:"hibernate_reason,omitempty"`
+	// HibernateFallbackReason is set when a start of a hibernated environment
+	// had to fall back to a cold disk boot; cleared on the next start or stop.
+	HibernateFallbackReason *string `json:"hibernate_fallback_reason,omitempty"`
 	// RestartedAt is when a running Sandbox was running again after a restart
 	// nobody asked for (#5997); nil otherwise. The next start or stop clears it.
 	RestartedAt *string `json:"restarted_at,omitempty"`
@@ -225,7 +236,11 @@ type CreateEnvironmentBody struct {
 	// IdleSuspendSeconds pauses a standard sandbox's VM inside its Pod after
 	// this many seconds with no activity: 0 never does, otherwise 300 to
 	// 604800. Nil takes the source snapshot's, otherwise off.
-	IdleSuspendSeconds         *int64      `json:"idle_suspend_seconds,omitempty"`
+	IdleSuspendSeconds *int64 `json:"idle_suspend_seconds,omitempty"`
+	// IdleHibernateSeconds hibernates a standard sandbox to its encrypted
+	// volume after this many seconds with no activity: 0 never does, otherwise
+	// 300 to 604800. Nil takes the source snapshot's, otherwise off.
+	IdleHibernateSeconds *int64 `json:"idle_hibernate_seconds,omitempty"`
 	IsolationTier              *string     `json:"isolation_tier,omitempty"`
 	ProjectSpec                ProjectSpec `json:"project_spec"`
 	ExpectedProfileRevision    *uint64     `json:"expected_profile_revision,omitempty"`

@@ -248,11 +248,18 @@ async fn complete_resize(
     authority
         .lock_transaction_for_states(&mut tx, RESIZE_MUTATION_STATES)
         .await?;
+    let compute_changed = operation.desired_resources.cpu_millicores
+        != operation.last_applied_resources.cpu_millicores
+        || operation.desired_resources.memory_mb != operation.last_applied_resources.memory_mb;
+    let clear_hibernate = operation.previous_state == "stopped" && compute_changed;
     sqlx::query(
         "UPDATE environments
             SET cpu_millicores = $1, memory_mb = $2, disk_gb = $3,
                 state = $4, desired_state = $5, state_changed_at = NOW(),
-                error_reason = NULL
+                error_reason = NULL,
+                hibernated_at = CASE WHEN $7 THEN NULL ELSE hibernated_at END,
+                hibernate_reason = CASE WHEN $7 THEN NULL ELSE hibernate_reason END,
+                hibernate_record = CASE WHEN $7 THEN NULL ELSE hibernate_record END
           WHERE id = $6",
     )
     .bind(operation.desired_resources.cpu_millicores)
@@ -261,6 +268,7 @@ async fn complete_resize(
     .bind(&operation.previous_state)
     .bind(&operation.previous_desired_state)
     .bind(&operation.environment_id)
+    .bind(clear_hibernate)
     .execute(&mut *tx)
     .await?;
     if let (Some(pod_name), Some(pod_ip)) = (pod_name, pod_ip) {
@@ -399,16 +407,31 @@ pub async fn handle_environment_resize(
         )
         .await?;
 
+    let runtime_profile: String =
+        sqlx::query_scalar("SELECT runtime_profile FROM environments WHERE id = $1")
+            .bind(environment_id)
+            .fetch_optional(&ctx.pool)
+            .await?
+            .unwrap_or_default();
+    let previous_pvc_gb = crate::sandbox::template::workspace_pvc_target_gib(
+        &runtime_profile,
+        operation.last_applied_resources.disk_gb,
+        operation.last_applied_resources.memory_mb,
+    );
+    let desired_pvc_gb = crate::sandbox::template::workspace_pvc_target_gib(
+        &runtime_profile,
+        operation.desired_resources.disk_gb,
+        operation.desired_resources.memory_mb,
+    )
+    .max(previous_pvc_gb);
     let mut storage_needs_post_restart_wait = false;
-    if operation.desired_resources.disk_gb != operation.last_applied_resources.disk_gb {
+    if operation.desired_resources.disk_gb != operation.last_applied_resources.disk_gb
+        || desired_pvc_gb > previous_pvc_gb
+    {
         authority
             .run_external_mutation(
                 RESIZE_MUTATION_STATES,
-                runtime.grow_volume(
-                    &placement,
-                    &workspace_pvc_anchor(&backend),
-                    operation.desired_resources.disk_gb,
-                ),
+                runtime.grow_volume(&placement, &workspace_pvc_anchor(&backend), desired_pvc_gb),
             )
             .await?;
         if operation.previous_state == "running" {
@@ -418,7 +441,7 @@ pub async fn handle_environment_resize(
                     runtime.wait_volume_growth(
                         &placement,
                         &workspace_pvc_anchor(&backend),
-                        operation.desired_resources.disk_gb,
+                        desired_pvc_gb,
                         STORAGE_RESIZE_TIMEOUT,
                     ),
                 )
@@ -525,7 +548,7 @@ pub async fn handle_environment_resize(
                 runtime.wait_volume_capacity(
                     &placement,
                     &workspace_pvc_anchor(&backend),
-                    operation.desired_resources.disk_gb,
+                    desired_pvc_gb,
                     STORAGE_RESIZE_TIMEOUT,
                 ),
             )

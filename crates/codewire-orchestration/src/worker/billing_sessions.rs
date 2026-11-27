@@ -653,6 +653,119 @@ async fn run_cycle(pool: &PgPool, runtime: &dyn RuntimeDriver, namespace: &str) 
             tracing::error!(session_id = row.id, runtime_uid = row.runtime_uid, error = %e, "billing-session: recover missing session");
         }
     }
+
+    reconcile_hibernated_sessions(pool, namespace, chrono::Utc::now()).await;
+}
+
+/// Reconciles `rate_kind = 'hibernated'` billing sessions for `standard`
+/// Sandboxes whose Pod is gone and whose host-observed `hibernated_at` mark is
+/// set (#6647, `docs/dev/BILLING.md`, "A hibernated stretch"). Uses
+/// `runtime_type = 'sandbox_hibernate'` so hibernated storage sessions never
+/// collide with live Sandbox CR sessions (`runtime_type = 'sandbox'`).
+async fn reconcile_hibernated_sessions(
+    pool: &PgPool,
+    namespace: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    #[derive(sqlx::FromRow)]
+    struct HibernatedEnv {
+        id: String,
+        org_id: String,
+        isolation_tier: String,
+        disk_gb: i32,
+        hibernated_at: chrono::DateTime<chrono::Utc>,
+        namespace: String,
+    }
+    let hibernated: Vec<HibernatedEnv> = match sqlx::query_as(
+        r#"SELECT e.id, e.org_id, e.isolation_tier, e.disk_gb, e.hibernated_at, b.namespace
+             FROM environments e
+             JOIN sandbox_environment_backend b ON b.environment_id = e.id
+            WHERE e.runtime_profile = 'standard'
+              AND e.state = 'stopped'
+              AND e.hibernated_at IS NOT NULL
+              AND ($1 = '' OR b.namespace = $1)"#,
+    )
+    .bind(namespace)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(%error, "billing-session: list hibernated sandboxes");
+            return;
+        }
+    };
+
+    let mut active_uids = std::collections::HashSet::with_capacity(hibernated.len());
+    for env in hibernated {
+        let uid = format!("hib:{}:{}", env.id, env.hibernated_at.timestamp_millis());
+        active_uids.insert(uid.clone());
+        let started_at = env.hibernated_at.min(now);
+        if let Err(error) = sqlx::query(
+            r#"INSERT INTO sandbox_running_sessions (
+                   environment_id, organization_id, runtime_type, runtime_uid, runtime_name,
+                   runtime_namespace, cpu_millicores, memory_mib, disk_gib, runtime_class,
+                   runtime_tier, started_at, last_observed_at, updated_at, rate_kind
+               )
+               VALUES ($1, $2, 'sandbox_hibernate', $3, $4, $5, 0, 0, $6, 'standard', $7, $8, $9, $9, 'hibernated')
+               ON CONFLICT (runtime_type, runtime_uid) WHERE ended_at IS NULL
+               DO UPDATE SET
+                   disk_gib = EXCLUDED.disk_gib,
+                   last_observed_at = GREATEST(sandbox_running_sessions.last_observed_at, EXCLUDED.last_observed_at),
+                   updated_at = EXCLUDED.updated_at"#,
+        )
+        .bind(&env.id)
+        .bind(&env.org_id)
+        .bind(&uid)
+        .bind(format!("hibernate-{}", env.id))
+        .bind(&env.namespace)
+        .bind(env.disk_gb)
+        .bind(&env.isolation_tier)
+        .bind(started_at)
+        .bind(now)
+        .execute(pool)
+        .await
+        {
+            tracing::error!(environment_id = env.id, %error, "billing-session: upsert hibernated session");
+        }
+    }
+
+    let open_hibernated: Vec<(String, String)> = match sqlx::query_as(
+        r#"SELECT id, runtime_uid
+             FROM sandbox_running_sessions
+            WHERE runtime_type = 'sandbox_hibernate'
+              AND ended_at IS NULL
+              AND ($1 = '' OR runtime_namespace = $1)"#,
+    )
+    .bind(namespace)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(%error, "billing-session: list open hibernated sessions");
+            return;
+        }
+    };
+    for (session_id, runtime_uid) in open_hibernated {
+        if active_uids.contains(&runtime_uid) {
+            continue;
+        }
+        if let Err(error) = sqlx::query(
+            r#"UPDATE sandbox_running_sessions
+                  SET ended_at = GREATEST(last_observed_at, $2),
+                      end_reason = 'hibernate_ended',
+                      updated_at = NOW()
+                WHERE id = $1 AND ended_at IS NULL"#,
+        )
+        .bind(&session_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        {
+            tracing::error!(session_id, %error, "billing-session: close ended hibernated session");
+        }
+    }
 }
 
 /// Leader-gated poll loop. Mirrors `StartSandboxController`'s guards (no

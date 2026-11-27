@@ -320,6 +320,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     super::systemd_stop::stop_refused_systemd_workspaces(ctx).await;
     super::idle_stop::stop_idle_environments(ctx).await;
     super::idle_suspend::suspend_idle_environments(ctx).await;
+    super::idle_hibernate::hibernate_idle_environments(ctx).await;
     super::identity_mints::delete_expired_identity_mints(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;

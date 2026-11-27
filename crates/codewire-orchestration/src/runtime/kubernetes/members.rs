@@ -107,6 +107,10 @@ fn declared_resources(sb: &Value) -> Resources {
         }
     }
 
+    let is_standard = spec
+        .and_then(|s| s.get("runtimeClassName"))
+        .and_then(Value::as_str)
+        == Some(RUNTIME_CLASS_STANDARD);
     if let Some(pvcs) = sb
         .pointer("/spec/volumeClaimTemplates")
         .and_then(Value::as_array)
@@ -116,7 +120,13 @@ fn declared_resources(sb: &Value) -> Resources {
                 .pointer("/spec/resources/requests/storage")
                 .and_then(Value::as_str)
             {
-                out.disk_gib += (parse_quantity_bytes(storage) >> 30) as i32;
+                let mut gib = (parse_quantity_bytes(storage) >> 30) as i32;
+                if is_standard
+                    && pvc.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
+                {
+                    gib = standard_billed_disk_gib(sb, gib);
+                }
+                out.disk_gib += gib;
             }
         }
     }
@@ -157,8 +167,27 @@ fn workspace_billed_millicores(pod_spec: Option<&Value>, workspace: &Value) -> O
         .map(parse_quantity_millicores)
 }
 
+/// A `standard` Sandbox's PVC includes unbilled headroom for its hibernate
+/// memory image (#6647). `codewire.sh/disk-gib` records the user's allocated
+/// disk; clamp the workspace PVC's billed `disk_gib` to it when present.
+fn standard_billed_disk_gib(sb: &Value, raw_pvc_gib: i32) -> i32 {
+    sb.pointer("/spec/podTemplate/metadata/annotations")
+        .and_then(Value::as_object)
+        .and_then(|annotations| {
+            annotations.get(crate::sandbox::template::WORKSPACE_DISK_GIB_ANNOTATION_KEY)
+        })
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|gib| *gib > 0)
+        .map_or(raw_pvc_gib, |annotated| raw_pvc_gib.min(annotated))
+}
+
 fn workspace_declared_resources(sb: &Value) -> Resources {
     let mut out = Resources::default();
+    let is_standard = sb
+        .pointer("/spec/podTemplate/spec/runtimeClassName")
+        .and_then(Value::as_str)
+        == Some(RUNTIME_CLASS_STANDARD);
     if let Some(workspace) = sb
         .pointer("/spec/podTemplate/spec/containers")
         .and_then(Value::as_array)
@@ -181,7 +210,7 @@ fn workspace_declared_resources(sb: &Value) -> Resources {
             out.memory_mib = (parse_quantity_bytes(memory) >> 20) as i32;
         }
     }
-    out.disk_gib = sb
+    let raw_disk_gib = sb
         .pointer("/spec/volumeClaimTemplates")
         .and_then(Value::as_array)
         .and_then(|claims| {
@@ -193,6 +222,11 @@ fn workspace_declared_resources(sb: &Value) -> Resources {
         .and_then(Value::as_str)
         .map(|storage| (parse_quantity_bytes(storage) >> 30) as i32)
         .unwrap_or_default();
+    out.disk_gib = if is_standard {
+        standard_billed_disk_gib(sb, raw_disk_gib)
+    } else {
+        raw_disk_gib
+    };
     out
 }
 
@@ -706,5 +740,35 @@ mod tests {
         }
         assert!(!terminal_ready_reason("SandboxNotReady"));
         assert!(!terminal_ready_reason(""));
+    }
+
+    #[test]
+    fn standard_unbilled_hibernate_memory_headroom_is_excluded_from_billing() {
+        let sb = json!({
+            "spec": {
+                "podTemplate": {
+                    "metadata": {
+                        "annotations": {
+                            "codewire.sh/disk-gib": "20",
+                        },
+                    },
+                    "spec": {
+                        "runtimeClassName": "standard",
+                        "containers": [
+                            { "name": "workspace", "resources": {
+                                "requests": { "cpu": "2000m", "memory": "4096Mi" },
+                                "limits": { "cpu": "2250m", "memory": "4352Mi" },
+                            } },
+                        ],
+                    },
+                },
+                "volumeClaimTemplates": [
+                    { "metadata": { "name": "workspace" },
+                      "spec": { "resources": { "requests": { "storage": "25Gi" } } } },
+                ],
+            },
+        });
+        assert_eq!(declared_resources(&sb).disk_gib, 20);
+        assert_eq!(workspace_declared_resources(&sb).disk_gib, 20);
     }
 }

@@ -27,7 +27,9 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     37: "error_code", 38: "network_policy", 39: "stop_reason",
     40: "idle_stop_seconds", 41: "idle_stop_enforced", 43: "restarted_at",
     44: "restart_cause", 45: "host", 46: "idle_suspend_seconds",
-    47: "suspended_at",
+    47: "suspended_at", 48: "idle_hibernate_seconds",
+    49: "hibernated_at", 50: "hibernate_reason",
+    51: "hibernate_fallback_reason",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
@@ -42,9 +44,10 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     34: "placement", 35: "request_id",
     # The SDK sets no idle stop yet (#3384), so a create from it is off.
     36: "idle_stop_seconds",
-    # Nor an idle suspend (#5529): a create from it takes its source
-    # snapshot's, otherwise off.
+    # Nor an idle suspend (#5529) or idle hibernate (#6647): a create from it
+    # takes its source snapshot's, otherwise off.
     37: "idle_suspend_seconds",
+    38: "idle_hibernate_seconds",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {
@@ -162,6 +165,11 @@ def environment_to_dict(message: Message) -> dict[str, Any]:
     # Absent unless it restarted on its own, with restarted_at (#5997).
     if not value.get("restart_cause"):
         value.pop("restart_cause", None)
+    # Absent unless hibernated or after a hibernate restore fallback (#6647).
+    if not value.get("hibernate_reason"):
+        value.pop("hibernate_reason", None)
+    if not value.get("hibernate_fallback_reason"):
+        value.pop("hibernate_fallback_reason", None)
     # Absent while the deployment's platform network policies are off.
     value.pop("network_policy", None)
     if message.HasField("network_policy"):

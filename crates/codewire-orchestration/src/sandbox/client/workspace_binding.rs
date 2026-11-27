@@ -280,6 +280,39 @@ impl SandboxClient {
             .map_err(|error| anyhow::anyhow!("mark Sandbox {name} existing: {error}"))?;
         Ok(())
     }
+
+    /// Sets or clears `CODEWIRE_VM_RESTORE_GENERATION` on a `standard`
+    /// Sandbox's workspace container env (#6647). No-op for non-`standard`
+    /// Sandboxes or when the env already matches.
+    pub async fn set_vm_restore_generation(
+        &self,
+        environment_id: &str,
+        generation: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let Some(claim) = self.get_sandbox_claim(environment_id).await? else {
+            return Ok(());
+        };
+        let Some(name) = claim
+            .data
+            .pointer("/status/sandbox/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            return Ok(());
+        };
+        let sandbox = self.sandboxes().get(name).await?;
+        let raw = serde_json::to_value(&sandbox)?;
+        let operations = crate::sandbox::template::vm_restore_generation(&raw, generation)?;
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
+        self.sandboxes()
+            .patch(name, &PatchParams::default(), &patch)
+            .await
+            .map_err(|error| anyhow::anyhow!("set Sandbox {name} restore generation: {error}"))?;
+        Ok(())
+    }
 }
 
 /// The Claim is the recorded one, live, and names its bound Sandbox.

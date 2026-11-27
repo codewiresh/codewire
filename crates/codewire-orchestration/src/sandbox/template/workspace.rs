@@ -399,10 +399,15 @@ pub(super) fn build_template_spec(opts: &TemplateOpts, pod_spec: Value) -> Value
         } else {
             "ReadWriteOnce"
         };
+        let claim_gib = if runtime_spec.profile == super::RUNTIME_PROFILE_STANDARD {
+            super::standard_pvc_gib(opts.disk_gib, opts.memory_mib)
+        } else {
+            opts.disk_gib
+        };
         let mut claim_spec = json!({
             "accessModes": [access_mode],
             "storageClassName": storage_class,
-            "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
+            "resources": { "requests": { "storage": format!("{claim_gib}Gi") } },
         });
         // Confidential's device is opened by CoCo's storage handler; a
         // commodity one by the guest's `mount-workspace` (#3718).
