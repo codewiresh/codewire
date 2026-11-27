@@ -42,10 +42,10 @@ FROM scratch AS atmos-arm64
 ADD --checksum=sha256:765226c8f8be4b586a80842b2f4c3f4cddd3b7932c9172a857a85f1b4fd01db8 \
   https://github.com/cloudposse/atmos/releases/download/v1.233.2/atmos_1.233.2_linux_arm64 /atmos
 FROM scratch AS agy-amd64
-ADD --checksum=sha256:a4960723ed9cf5b5ac72ed541db8df4d62741795261eb93a4681006ccb23d5ad \
+ADD --checksum=sha256:a4960723ed9cf5b5ac72ed541db8df4d62741795261eb93a4681006ccb23d5ad --chmod=0644 \
   https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.18/agy_cli_linux_x64.tar.gz /agy.tar.gz
 FROM scratch AS agy-arm64
-ADD --checksum=sha256:97799abac91ba0b29b77598b62f903b866461da17680263a182fef2cb796ab0d \
+ADD --checksum=sha256:97799abac91ba0b29b77598b62f903b866461da17680263a182fef2cb796ab0d --chmod=0644 \
   https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.18/agy_cli_linux_arm64.tar.gz /agy.tar.gz
 FROM kubectl-${TARGETARCH} AS workspace-kubectl
 FROM atmos-${TARGETARCH} AS workspace-atmos
