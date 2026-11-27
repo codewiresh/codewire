@@ -200,6 +200,16 @@ pub struct HostedChecks {
     pub drain: oneshot::Receiver<()>,
 }
 
+/// The netstack's limits for a session's link: a hosted Sandbox's 65,000-byte
+/// MTU needs larger windows than a local VM's 1,500 (#6638).
+fn netstack_limits(limits: SessionLimits) -> NetstackLimits {
+    if limits == SessionLimits::HOSTED {
+        NetstackLimits::HOSTED
+    } else {
+        NetstackLimits::LOCAL
+    }
+}
+
 /// One cw-egress stream's session (#4000): identified by its Pod's UID, with
 /// generation 1, [`SessionLimits::HOSTED`] and no ingress.
 pub async fn run_hosted_network_session<S, B, R>(
@@ -342,7 +352,7 @@ where
     // Build the fixed-size engine before beginning the guest handshake. Once
     // the guest acknowledges the hello, no setup work remains that could
     // consume the guest's bounded authentication window.
-    let stack_limits = NetstackLimits::default();
+    let stack_limits = netstack_limits(limits);
     let (to_stack, stack_packets) = mpsc::channel(PACKET_QUEUE);
     let (from_stack, outbound_packets) = mpsc::channel(PACKET_QUEUE);
     let stack = Netstack::with_config_and_limits(
@@ -926,6 +936,15 @@ mod tests {
     use tokio::sync::Semaphore;
 
     use super::*;
+
+    #[test]
+    fn a_hosted_session_gets_the_hosted_netstack() {
+        assert_eq!(
+            netstack_limits(SessionLimits::HOSTED),
+            NetstackLimits::HOSTED
+        );
+        assert_eq!(netstack_limits(SessionLimits::LOCAL), NetstackLimits::LOCAL);
+    }
 
     mod addresses;
     mod hosted;

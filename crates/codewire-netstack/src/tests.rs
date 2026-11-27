@@ -1799,3 +1799,217 @@ async fn parallel_streams_through_a_small_packet_queue_lose_no_packet() {
         "a segment was sent twice, so the device dropped a packet"
     );
 }
+
+/// A hosted Sandbox's netstack in cw-egress, sized for its 65,000-byte link
+/// and bounded for memory every pair on a node shares (#6638); a local VM's is
+/// unchanged.
+#[test]
+fn hosted_and_local_limits_are_pinned_with_their_worst_case_memory() {
+    let local = NetstackLimits {
+        max_listeners: 64,
+        max_connections: 256,
+        socket_buffer_bytes: 64 * 1024,
+        command_queue: 64,
+        accept_queue: 16,
+        stream_send_queue: 8,
+        stream_receive_queue: 8,
+        stream_chunk_bytes: 8 * 1024,
+        max_queued_packets: 256,
+        max_packets_per_wake: 64,
+        tcp_idle_timeout: Duration::from_secs(120),
+        tcp_keep_alive: Duration::from_secs(30),
+    };
+    assert_eq!(NetstackLimits::LOCAL, local);
+    assert_eq!(NetstackLimits::default(), local);
+    assert_eq!(
+        NetstackLimits::HOSTED,
+        NetstackLimits {
+            max_connections: 128,
+            socket_buffer_bytes: 256 * 1024,
+            ..local
+        }
+    );
+    const MIB: usize = 1024 * 1024;
+    assert_eq!(
+        NetstackLimits::LOCAL.worst_case_connection_bytes(),
+        64 * MIB
+    );
+    assert_eq!(
+        NetstackLimits::HOSTED.worst_case_connection_bytes(),
+        80 * MIB
+    );
+}
+
+/// Each TCP header the wire carried one way: its scaled window and options,
+/// and the largest payload.
+#[derive(Default)]
+struct TcpRecord {
+    syn_ack: Option<(Option<u8>, Option<u16>)>,
+    largest_window: usize,
+    largest_payload: usize,
+}
+
+fn tcp_recording_link(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
+) -> Arc<Mutex<TcpRecord>> {
+    let record = Arc::new(Mutex::new(TcpRecord::default()));
+    let recorded = record.clone();
+    tokio::spawn(async move {
+        let mut shift = 0;
+        while let Some(packet) = rx.recv().await {
+            if let Some(tcp) = Ipv6Packet::new_checked(&packet[..])
+                .ok()
+                .filter(|ip| ip.next_header() == IpProtocol::Tcp)
+                .and_then(|ip| {
+                    let (src, dst) = (
+                        IpAddress::Ipv6(ip.src_addr()),
+                        IpAddress::Ipv6(ip.dst_addr()),
+                    );
+                    let tcp = TcpPacket::new_checked(ip.payload()).ok()?;
+                    let repr = smoltcp::wire::TcpRepr::parse(
+                        &tcp,
+                        &src,
+                        &dst,
+                        &smoltcp::phy::ChecksumCapabilities::ignored(),
+                    )
+                    .ok()?;
+                    Some((
+                        repr.control,
+                        repr.ack_number.is_some(),
+                        repr.window_scale,
+                        repr.max_seg_size,
+                        repr.window_len,
+                        repr.payload.len(),
+                    ))
+                })
+            {
+                let (control, ack, scale, mss, window, payload) = tcp;
+                let mut record = recorded.lock().unwrap();
+                if control == smoltcp::wire::TcpControl::Syn && ack {
+                    record.syn_ack = Some((scale, mss));
+                    shift = scale.unwrap_or(0);
+                } else {
+                    record.largest_window = record.largest_window.max(usize::from(window) << shift);
+                }
+                record.largest_payload = record.largest_payload.max(payload);
+            }
+            if tx.send(packet).await.is_err() {
+                return;
+            }
+        }
+    });
+    record
+}
+
+/// Over a hosted link's 65,000-byte MTU, the hosted netstack offers a scaled
+/// window past 64 KiB and the peer's full segment size, so a bulk upload keeps
+/// several full-sized segments in flight. With 64 KiB buffers the window
+/// stopped at 64 KiB, two segments, and a Linux guest halved its segment size
+/// to fit (#6638).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_netstack_windows_several_full_sized_segments() {
+    const MTU: usize = 65_000;
+    // IPv6 and TCP headers.
+    const MSS: usize = MTU - 40 - 20;
+    let (guest_out, upload_in) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (upload_out, worker_in) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (worker_out, download_in) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (download_out, guest_in) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let guest_sent = tcp_recording_link(upload_in, upload_out);
+    let worker_sent = tcp_recording_link(download_in, download_out);
+    let config = |local_ip| NetstackConfig {
+        local_ip,
+        prefix_len: PREFIX,
+        mtu: MTU,
+        verify_rx_checksums: true,
+        accept_any_ip: false,
+        default_gateway: None,
+    };
+    let limits = NetstackLimits::HOSTED;
+    let guest =
+        Netstack::with_config_and_limits(config(IpAddr::V6(A_IP)), limits, guest_in, guest_out)
+            .expect("guest netstack");
+    let worker =
+        Netstack::with_config_and_limits(config(IpAddr::V6(B_IP)), limits, worker_in, worker_out)
+            .expect("worker netstack");
+    let mut listener = worker.bind(7201).await.expect("worker listener");
+    let mut client = tokio::time::timeout(
+        Duration::from_secs(5),
+        guest.connect(SocketAddr::new(IpAddr::V6(B_IP), 7201)),
+    )
+    .await
+    .expect("connect did not hang")
+    .expect("connect");
+    let mut server = accept_one(&mut listener).await;
+
+    const BYTES: usize = 8 * 1024 * 1024;
+    let upload = tokio::spawn(async move {
+        client.write_all(&vec![7u8; BYTES]).await.expect("upload");
+        client.shutdown().await.expect("upload shutdown");
+        client
+    });
+    let mut received = Vec::with_capacity(BYTES);
+    tokio::time::timeout(Duration::from_secs(60), server.read_to_end(&mut received))
+        .await
+        .expect("the upload did not stall")
+        .expect("worker read");
+    assert_eq!(received.len(), BYTES);
+    drop(upload.await.expect("upload task"));
+
+    let record = worker_sent.lock().unwrap();
+    let (scale, mss) = record.syn_ack.expect("the worker answered the SYN");
+    assert!(
+        scale.is_some_and(|scale| scale >= 2),
+        "a window past 64 KiB needs a scale: {scale:?}"
+    );
+    assert_eq!(mss.map(usize::from), Some(MSS));
+    assert!(
+        record.largest_window >= 3 * MSS,
+        "the worker's window must hold several full segments: {}",
+        record.largest_window
+    );
+    assert_eq!(
+        guest_sent.lock().unwrap().largest_payload,
+        MSS,
+        "the upload's segments are full-sized"
+    );
+}
+
+/// The hosted connection cap holds: the connection past it is never surfaced,
+/// and one closing frees its place (#6638).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hosted_connection_cap_refuses_the_connection_past_it() {
+    let cap = NetstackLimits::HOSTED.max_connections;
+    let (guest, worker) = wired_pair_with_limits(NetstackLimits::LOCAL, NetstackLimits::HOSTED);
+    let mut listener = worker.bind(7301).await.expect("worker listener");
+    let destination = SocketAddr::new(IpAddr::V6(B_IP), 7301);
+    let mut open = Vec::with_capacity(cap);
+    for _ in 0..cap {
+        let client = tokio::time::timeout(Duration::from_secs(5), guest.connect(destination))
+            .await
+            .expect("connect did not hang")
+            .expect("connect");
+        open.push((client, accept_one(&mut listener).await));
+    }
+    let excess = guest
+        .connect(destination)
+        .await
+        .expect("the excess dial starts");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err(),
+        "the worker must not surface connection {} past its cap of {cap}",
+        cap + 1
+    );
+    drop(excess);
+    drop(open.pop());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let replacement = tokio::time::timeout(Duration::from_secs(5), guest.connect(destination))
+        .await
+        .expect("connect did not hang")
+        .expect("replacement connect");
+    let replacement_server = accept_one(&mut listener).await;
+    drop((replacement, replacement_server, open));
+}

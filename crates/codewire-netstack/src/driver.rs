@@ -47,6 +47,11 @@ fn tcp_socket(limits: &NetstackLimits) -> tcp::Socket<'static> {
     // would only add the peer's delayed-ACK wait (40 ms for a Linux guest) to
     // every small write that follows an unacknowledged one.
     socket.set_nagle_enabled(false);
+    // The peer is the guest's own TCP stack. A delayed ACK only stalls a
+    // sender whose window holds one segment: smoltcp acknowledges at once
+    // only past one full segment of the guest's size, so each such segment
+    // waited the full 10 ms (#6638).
+    socket.set_ack_delay(None);
     socket
 }
 
@@ -1045,5 +1050,12 @@ mod socket_tests {
     fn relayed_sockets_send_small_writes_without_nagle() {
         let socket = tcp_socket(&NetstackLimits::default());
         assert!(!socket.nagle_enabled());
+    }
+
+    #[test]
+    fn relayed_sockets_acknowledge_without_delay() {
+        for limits in [NetstackLimits::LOCAL, NetstackLimits::HOSTED] {
+            assert_eq!(tcp_socket(&limits).ack_delay(), None);
+        }
     }
 }

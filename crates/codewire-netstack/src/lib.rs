@@ -113,22 +113,52 @@ pub struct NetstackLimits {
     pub tcp_keep_alive: Duration,
 }
 
+impl NetstackLimits {
+    /// A local VM's netstack. At its 1,500-byte MTU, a 64 KiB socket buffer
+    /// windows 44 segments.
+    pub const LOCAL: Self = Self {
+        max_listeners: 64,
+        max_connections: 256,
+        socket_buffer_bytes: 64 * 1024,
+        command_queue: 64,
+        accept_queue: 16,
+        stream_send_queue: 8,
+        stream_receive_queue: 8,
+        stream_chunk_bytes: 8 * 1024,
+        max_queued_packets: 256,
+        max_packets_per_wake: 64,
+        tcp_idle_timeout: Duration::from_secs(120),
+        tcp_keep_alive: Duration::from_secs(30),
+    };
+
+    /// A hosted Sandbox's netstack in cw-egress (#6638). Its link MTU is
+    /// 65,000, so a 64 KiB buffer windows two segments at most, and the
+    /// guest halves its segment size to fit: uploads and downloads stopped at
+    /// one 64 KiB window per round trip to the guest. 256 KiB windows four
+    /// full-sized segments. The connection cap keeps a guest that fills every
+    /// buffer of every connection at [`Self::worst_case_connection_bytes`],
+    /// 80 MiB, near the local figure, because every pair on a node shares
+    /// cw-egress's memory.
+    pub const HOSTED: Self = Self {
+        max_connections: 128,
+        socket_buffer_bytes: 256 * 1024,
+        ..Self::LOCAL
+    };
+
+    /// The most memory this netstack's TCP connections can hold: every
+    /// connection at the cap with both socket buffers and both stream queues
+    /// full. Every TCP socket, the catch-all's unaccepted ones included,
+    /// counts against `max_connections`.
+    pub const fn worst_case_connection_bytes(&self) -> usize {
+        self.max_connections
+            * (2 * self.socket_buffer_bytes
+                + (self.stream_send_queue + self.stream_receive_queue) * self.stream_chunk_bytes)
+    }
+}
+
 impl Default for NetstackLimits {
     fn default() -> Self {
-        Self {
-            max_listeners: 64,
-            max_connections: 256,
-            socket_buffer_bytes: 64 * 1024,
-            command_queue: 64,
-            accept_queue: 16,
-            stream_send_queue: 8,
-            stream_receive_queue: 8,
-            stream_chunk_bytes: 8 * 1024,
-            max_queued_packets: 256,
-            max_packets_per_wake: 64,
-            tcp_idle_timeout: Duration::from_secs(120),
-            tcp_keep_alive: Duration::from_secs(30),
-        }
+        Self::LOCAL
     }
 }
 
