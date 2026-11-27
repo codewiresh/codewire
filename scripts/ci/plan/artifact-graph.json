@@ -475,9 +475,11 @@
       "inputs": [
         "crates/codewire-workspace-image/src/pin.rs",
         "deployments/k8s/orchestration/pod-runtime-image.digest",
+        "deployments/k8s/orchestration/workspace-systemd-image.digest",
         "images/workspace-disk/**",
         "scripts/ci/images/workspace-disk.sh",
         "scripts/ci/images/workspace-disk-inputs.py",
+        "scripts/ci/images/workspace-disk-source.py",
         "scripts/ci/images/workspace-image-pin.py",
         "scripts/ci/images/workspace-disk-image-tag.sh",
         "scripts/ci/images/egress-image-tag.sh",

@@ -787,13 +787,15 @@ last_step="$(awk '/^      - name: /{name=$0} END{print name}' <<<"$disk_build_jo
   grep -A1 -F "$last_step" <<<"$disk_build_job" | grep -Fq 'if: ${{ always() }}' ||
   fail 'the KVM job does not remove its work directory last, failure included'
 grep -Fq -- '--sha256 "$INPUTS_SHA256"' <<<"$disk_build_job" &&
-  grep -Fq 'INPUTS_SHA256: ${{ needs.prepare-workspace-disk-inputs.outputs.inputs_sha256 }}' <<<"$disk_build_job" ||
-  fail 'the KVM job does not check its inputs against the sha256 the inputs job reported'
+  grep -Fq 'INPUTS_SHA256: ${{ needs.prepare-workspace-disk-inputs.outputs.inputs_sha256 }}' <<<"$disk_build_job" &&
+  grep -Fq 'scripts/ci/images/workspace-disk-source.py show public-image' <<<"$disk_build_job" ||
+  fail 'the KVM job does not check its inputs against the sha256 the inputs job reported or resolve its source via workspace-disk-source.py'
 grep -Fq 'DISK_SHA256: ${{ needs.build-workspace-disk.outputs.disk_sha256 }}' <<<"$disk_publish_job" &&
   grep -Fq 'workspace-disk-inputs.py unpack-disk' <<<"$disk_publish_job" &&
   grep -Fq -- '--sha256 "$DISK_SHA256"' <<<"$disk_publish_job" &&
+  grep -Fq 'scripts/ci/images/workspace-disk-source.py show harbor-image' <<<"$disk_publish_job" &&
   grep -Fq 'run: scripts/ci/images/build-push-runtime-images.sh workspace-disk' <<<"$disk_publish_job" ||
-  fail 'the workspace disk is pushed without checking the sha256 the KVM job reported'
+  fail 'the workspace disk is pushed without checking the sha256 the KVM job reported or naming its source via workspace-disk-source.py'
 git -C "$ROOT" check-ignore -q .local-runtime/workspace-disk-context/image.raw ||
   fail 'the workspace disk context path is not ignored, so a protected build would refuse it'
 grep -Fq "if: \${{ steps.verdict.outputs.verified == 'true' }}" <<<"$disk_sign_job" &&

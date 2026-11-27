@@ -2567,8 +2567,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/pod-runtime-context.py|\
       scripts/ci/images/workspace-disk.sh|\
       scripts/ci/images/workspace-disk-inputs.py|\
+      scripts/ci/images/workspace-disk-source.py|\
       scripts/ci/tests/test-pod-runtime-context.py|\
       scripts/ci/tests/test-workspace-disk-inputs.py|\
+      scripts/ci/tests/test-workspace-disk-source.py|\
       scripts/ci/tests/test-cw-image-context.py|\
       scripts/ci/tests/test-cw-runtime-source.py|\
       scripts/ci/tests/test-cw-image-consumer.py|\

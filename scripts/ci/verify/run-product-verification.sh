@@ -949,6 +949,8 @@ run_ci_script_tests() {
   python3 -I -B scripts/ci/tests/test-proto-breaking-base.py ResolverTests
   python3 -I -B scripts/ci/tests/test-pod-runtime-context.py
   python3 -I -B scripts/ci/tests/test-workspace-disk-inputs.py
+  python3 -I -B scripts/ci/tests/test-workspace-disk-source.py
+  python3 -I scripts/ci/images/workspace-disk-source.py check
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-transport-local-vmm-checks.sh

@@ -527,9 +527,14 @@ image it pins.
   the runtime signing key, so no other identity gains it. They run only on
   main's own events, never a pull request's or another branch's. Like
   pod-runtime, the disk is keyed by a planner fingerprint, of the pinned
-  workspace images (`crates/codewire-workspace-image/src/pin.rs`) and the
-  disk's build inputs. The jobs are skipped when a signed disk already
-  carries that fingerprint's `fp-` tag.
+  workspace images (`crates/codewire-workspace-image/src/pin.rs` and
+  `deployments/k8s/orchestration/workspace-systemd-image.digest`, resolved by
+  `scripts/ci/images/workspace-disk-source.py`) and the disk's build inputs.
+  When `workspace-systemd-image.digest` holds a `sha256:` digest, the disk is
+  built from `ghcr.io/codewiresh/workspace-systemd@<digest>` and its `line`
+  names `codewire/workspace-systemd@<digest>`; when `unpinned`, it builds from
+  the canonical `workspace` pin. The jobs are skipped when a signed disk
+  already carries that fingerprint's `fp-` tag.
 - **Inputs, prepared on the trusted light runner.** A job there compiles
   `codewire-local-vmm-smoke` and takes the runtime from the signed pod-runtime
   image that the source pins (`deployments/k8s/orchestration/pod-runtime-image.digest`),

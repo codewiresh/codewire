@@ -927,8 +927,8 @@ jobs:
       - name: Build the disk of the pinned workspace image
         run: |
           set -euo pipefail
-          image="$(python3 -I scripts/ci/images/workspace-image-pin.py show public-image)"
-          [[ "${image##*@}" == "$(python3 -I scripts/ci/images/workspace-image-pin.py show digest)" ]] || {
+          image="$(python3 -I scripts/ci/images/workspace-disk-source.py show public-image)"
+          [[ "${image##*@}" == "$(python3 -I scripts/ci/images/workspace-disk-source.py show digest)" ]] || {
             echo "::error::the pinned public workspace image is not the pinned digest" >&2
             exit 1
           }
@@ -1013,7 +1013,7 @@ jobs:
         run: |
           set -euo pipefail
           line="$(scripts/ci/images/workspace-disk.sh line --disk "$DISK_REF" \
-            --image "$(python3 -I scripts/ci/images/workspace-image-pin.py show harbor-image)" \
+            --image "$(python3 -I scripts/ci/images/workspace-disk-source.py show harbor-image)" \
             --dir "$GITHUB_WORKSPACE/.local-runtime/workspace-disk-context")"
           echo "SANDBOX_STANDARD_IMAGE_DISK=$line"
           printf 'SANDBOX_STANDARD_IMAGE_DISK=`%s`\n' "$line" >>"$GITHUB_STEP_SUMMARY"
