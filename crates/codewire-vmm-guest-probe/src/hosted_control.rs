@@ -60,38 +60,50 @@ pub const HOSTED_LOG_MAX_LINE: usize = 4_096;
 /// to be paused: nothing it sends resumes it.
 pub const HOSTED_SUSPEND_VSOCK_PORT: u32 = 7_784;
 pub const HOSTED_SUSPEND_REQUEST: &[u8; 8] = b"suspend\n";
+/// Arms hibernate-on-SIGTERM in `pod-runtime` (`docs/dev/SANDBOX-SLEEP.md`, #6647).
+pub const HOSTED_HIBERNATE_REQUEST: &[u8; 10] = b"hibernate\n";
+/// Sent by a restored hosted daemon after its new `BindWorkspace` succeeds
+/// (`docs/dev/SANDBOX-SLEEP.md`, "After a restore", #6647), telling
+/// `pod-runtime` to open Pod ports `7777`/`2222` and delete the memory file.
+pub const HOSTED_REBIND_COMPLETE_REQUEST: &[u8; 10] = b"rebind-ok\n";
 pub const HOSTED_SUSPEND_ACCEPTED: &[u8; 3] = b"ok\n";
 pub const HOSTED_SUSPEND_REFUSED: &[u8; 3] = b"no\n";
 /// Container-side Unix socket where guest init relays fixed sleep-control
 /// requests to the host's [`HOSTED_SUSPEND_VSOCK_PORT`], so nothing inside the
 /// workspace container needs `AF_VSOCK` (#5638).
 pub const HOSTED_SLEEP_CONTROL_SOCKET_PATH: &str = "/run/codewire-hosted/sleep/control.sock";
-/// How long either side waits for the other's part of a suspend request.
+/// Longest request line accepted on [`HOSTED_SUSPEND_VSOCK_PORT`].
+pub const HOSTED_SLEEP_MAX_REQUEST_LEN: usize = 16;
+/// How long either side waits for the other's part of a sleep control request.
 pub const HOSTED_SUSPEND_EXCHANGE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The guest's side of a suspend: asks the Pod's runtime (through guest init's
-/// Unix-socket relay at [`HOSTED_SLEEP_CONTROL_SOCKET_PATH`]) to pause this
-/// VM, and returns whether it accepted. On `true` the VM pauses straight after
-/// the answer; the caller has already closed the connections whose far end
-/// sends periodic traffic, so that traffic can't wake it.
+/// The guest's side of a sleep control request: sends a fixed command through
+/// guest init's Unix-socket relay at [`HOSTED_SLEEP_CONTROL_SOCKET_PATH`].
 ///
 /// If the relay socket does not exist (`NotFound`), falls back to dialing
 /// [`HOSTED_SUSPEND_VSOCK_PORT`] directly so an updated `cw` runtime asset
 /// continues to work inside an older `pod-runtime` VM during rollout; on any
 /// `pod-runtime` with the relay, `AF_VSOCK` is blocked by container seccomp.
 #[cfg(target_os = "linux")]
-pub async fn request_suspend() -> std::io::Result<bool> {
-    match request_suspend_at(std::path::Path::new(HOSTED_SLEEP_CONTROL_SOCKET_PATH)).await {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => request_suspend_vsock().await,
+async fn send_sleep_request(request: &[u8]) -> std::io::Result<bool> {
+    match request_sleep_at(
+        std::path::Path::new(HOSTED_SLEEP_CONTROL_SOCKET_PATH),
+        request,
+    )
+    .await
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            request_sleep_vsock(request).await
+        }
         other => other,
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn request_suspend_at(socket_path: &std::path::Path) -> std::io::Result<bool> {
+async fn request_sleep_at(socket_path: &std::path::Path, request: &[u8]) -> std::io::Result<bool> {
     let exchange = async {
         let relay = tokio::net::UnixStream::connect(socket_path).await?;
-        exchange_suspend(relay).await
+        exchange_sleep_request(relay, request).await
     };
     tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, exchange)
         .await
@@ -99,14 +111,14 @@ async fn request_suspend_at(socket_path: &std::path::Path) -> std::io::Result<bo
 }
 
 #[cfg(target_os = "linux")]
-async fn request_suspend_vsock() -> std::io::Result<bool> {
+async fn request_sleep_vsock(request: &[u8]) -> std::io::Result<bool> {
     let exchange = async {
         let host = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(
             tokio_vsock::VMADDR_CID_HOST,
             HOSTED_SUSPEND_VSOCK_PORT,
         ))
         .await?;
-        exchange_suspend(host).await
+        exchange_sleep_request(host, request).await
     };
     tokio::time::timeout(HOSTED_SUSPEND_EXCHANGE, exchange)
         .await
@@ -114,16 +126,45 @@ async fn request_suspend_vsock() -> std::io::Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-async fn exchange_suspend<S>(mut stream: S) -> std::io::Result<bool>
+async fn exchange_sleep_request<S>(mut stream: S, request: &[u8]) -> std::io::Result<bool>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    stream.write_all(HOSTED_SUSPEND_REQUEST).await?;
+    stream.write_all(request).await?;
     stream.flush().await?;
     let mut answer = [0_u8; 3];
     stream.read_exact(&mut answer).await?;
     Ok(&answer == HOSTED_SUSPEND_ACCEPTED)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+async fn request_suspend_at(socket_path: &std::path::Path) -> std::io::Result<bool> {
+    request_sleep_at(socket_path, HOSTED_SUSPEND_REQUEST).await
+}
+
+/// The guest's side of a suspend: asks the Pod's runtime (through guest init's
+/// Unix-socket relay at [`HOSTED_SLEEP_CONTROL_SOCKET_PATH`]) to pause this
+/// VM, and returns whether it accepted. On `true` the VM pauses straight after
+/// the answer; the caller has already closed the connections whose far end
+/// sends periodic traffic, so that traffic can't wake it.
+#[cfg(target_os = "linux")]
+pub async fn request_suspend() -> std::io::Result<bool> {
+    send_sleep_request(HOSTED_SUSPEND_REQUEST).await
+}
+
+/// Asks the Pod's runtime to arm hibernate on the next SIGTERM (#6647).
+#[cfg(target_os = "linux")]
+pub async fn request_hibernate() -> std::io::Result<bool> {
+    send_sleep_request(HOSTED_HIBERNATE_REQUEST).await
+}
+
+/// Tells the Pod's runtime that a restored hosted daemon has finished its new
+/// `BindWorkspace`, so Pod ports `7777`/`2222` may open and the hibernate
+/// memory file may be deleted (#6647).
+#[cfg(target_os = "linux")]
+pub async fn notify_rebind_complete() -> std::io::Result<bool> {
+    send_sleep_request(HOSTED_REBIND_COMPLETE_REQUEST).await
 }
 
 /// Joins two streams byte for byte until both directions have ended, or
@@ -417,13 +458,27 @@ pub fn decode_hello(bytes: &[u8]) -> Result<[u8; HOSTED_CHALLENGE_LEN], HostedCo
     Ok(challenge)
 }
 
-/// The two things the host sends.
+/// The messages the host sends over the authenticated hosted control channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostedMessage {
-    /// Once per boot, before the workload starts.
+    /// Once per initial boot, before the workload starts.
     Settings(HostedSettings),
-    /// At boot after the settings, and again after each rotation.
+    /// At boot after the settings, after restore settings, and on token rotation.
     Tokens(HostedTokens),
+    /// Once per hibernate restore, after `CheckpointAction::Resume` rotated
+    /// the boot identity and before `CheckpointAction::Thaw` (#6647). Refused
+    /// on a running boot.
+    RestoreSettings(HostedSettings),
+}
+
+/// Written by guest PID 1 to [`codewire_daemon_proto::HOSTED_DAEMON_RESTORE_SETTINGS_FILE`]
+/// before thawing a restored `standard` workload (#6647), carrying the new
+/// Pod's environment settings so the restored daemon re-binds as the new Pod.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreSettingsFile {
+    pub restore_generation: u64,
+    pub environment: BTreeMap<String, String>,
 }
 
 /// The hosted daemon's settings, read afresh from the Pod at every boot.
@@ -523,6 +578,7 @@ impl HostedMessage {
         match self {
             Self::Settings(_) => 1,
             Self::Tokens(_) => 2,
+            Self::RestoreSettings(_) => 3,
         }
     }
 
@@ -533,7 +589,7 @@ impl HostedMessage {
         challenge: &[u8; HOSTED_CHALLENGE_LEN],
     ) -> Result<Vec<u8>, HostedControlError> {
         let payload = match self {
-            Self::Settings(settings) => {
+            Self::Settings(settings) | Self::RestoreSettings(settings) => {
                 settings.validate()?;
                 serde_json::to_vec(settings)
             }
@@ -609,10 +665,13 @@ impl HostedMessage {
             2 => Self::Tokens(
                 serde_json::from_slice(payload).map_err(|_| HostedControlError::InvalidContent)?,
             ),
+            3 => Self::RestoreSettings(
+                serde_json::from_slice(payload).map_err(|_| HostedControlError::InvalidContent)?,
+            ),
             _ => return Err(HostedControlError::InvalidFraming),
         };
         match &message {
-            Self::Settings(settings) => settings.validate()?,
+            Self::Settings(settings) | Self::RestoreSettings(settings) => settings.validate()?,
             Self::Tokens(tokens) => tokens.validate()?,
         }
         Ok(message)
@@ -758,6 +817,7 @@ mod tests {
         for message in [
             HostedMessage::Settings(settings()),
             HostedMessage::Tokens(tokens()),
+            HostedMessage::RestoreSettings(settings()),
         ] {
             let frame = message.encode(&key(1), &challenge).unwrap();
             assert_eq!(

@@ -151,6 +151,12 @@ pub const POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV: &str = "CODEWIRE_IMAGE_DISK_BUILD
 pub const POD_RUNTIME_PLATFORM_PEERS_ENV: &str = "CODEWIRE_POD_PLATFORM_PEERS";
 /// Explicit literal `IPv4:port` tailnet UDP peers bridged on Pod `:31000` (#6637).
 pub const POD_RUNTIME_UDP_PEERS_ENV: &str = "CODEWIRE_POD_UDP_PEERS";
+/// The hibernate restore generation orchestration expects this `standard` Pod
+/// to restore once (`docs/dev/SANDBOX-SLEEP.md`, #6647). Unset on a cold boot.
+pub const POD_RUNTIME_RESTORE_GENERATION_ENV: &str = "CODEWIRE_VM_RESTORE_GENERATION";
+/// The digest of the `standard` runtime image rendered on this Pod (#6647),
+/// recorded beside a hibernate memory image and checked before restore.
+pub const POD_RUNTIME_IMAGE_DIGEST_ENV: &str = "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST";
 /// The Sandbox's volume, which holds the VM's disks as files.
 pub const POD_RUNTIME_STATE_MOUNT_PATH: &str = "/state";
 /// The workspace image's published disk, an image volume mounted read-only.
@@ -248,6 +254,17 @@ pub const HOSTED_DAEMON_READY_FILE: &str = "/codewire/run/daemon/ready";
 /// Owner-read-only (0400) copy of a bound daemon's credential, read by the
 /// fixed-purpose hosted exec instead of its inherited environment.
 pub const HOSTED_DAEMON_CREDENTIAL_FILE: &str = "/codewire/run/daemon/credential";
+/// Root-owned read-only mount holding the restored Pod's settings for a
+/// `standard` Sandbox after hibernate (`docs/dev/SANDBOX-SLEEP.md`, "After a
+/// restore", #6647). Mounted `ro,nosuid,nodev,noexec` so the workspace
+/// container can never forge, tamper with, or obstruct it.
+pub const HOSTED_DAEMON_RESTORE_SETTINGS_MOUNT_PATH: &str = "/run/codewire-hosted/restore";
+/// Written atomically (0400) by guest PID 1 inside
+/// [`HOSTED_DAEMON_RESTORE_SETTINGS_MOUNT_PATH`] before thawing a restored
+/// `standard` Sandbox (#6647): carries the new Pod's `restore_generation` and
+/// environment map (`CODEWIRE_POD_UID`, platform peers) so the restored daemon
+/// re-binds as the new Pod before serving.
+pub const HOSTED_DAEMON_RESTORE_SETTINGS_FILE: &str = "/run/codewire-hosted/restore/settings.json";
 /// Workspace access is ready: the daemon is bound, its SSH server listens on
 /// [`WORKSPACE_SSH_PORT`] and its host key is recorded. Tailnet comes up
 /// after, asynchronously, and is not part of this marker.

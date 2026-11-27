@@ -230,14 +230,16 @@ fn act(request: CheckpointRequest) -> CheckpointReply {
     let workload = WorkloadCgroup::at(Path::new(super::CGROUP_HIERARCHY_PATH));
     let result = match request.action {
         CheckpointAction::Freeze => workload.freeze(FREEZE_TIMEOUT).map(drop),
-        CheckpointAction::Thaw => thaw_stepping_clock(
-            request.host_time_ns,
-            |host_time_ns| step_clock(host_time_ns, max_skew()),
-            || workload.thaw(THAW_TIMEOUT),
-        )
-        .map(|clock| {
-            reply.clock_skew_ms = clock.skew_ms;
-            reply.clock_not_stepped = clock.not_stepped;
+        CheckpointAction::Thaw => super::hosted::admit_thaw().and_then(|()| {
+            thaw_stepping_clock(
+                request.host_time_ns,
+                |host_time_ns| step_clock(host_time_ns, max_skew()),
+                || workload.thaw(THAW_TIMEOUT),
+            )
+            .map(|clock| {
+                reply.clock_skew_ms = clock.skew_ms;
+                reply.clock_not_stepped = clock.not_stepped;
+            })
         }),
         CheckpointAction::Resume => match resume(&request) {
             Ok(Some((report, skew_ms))) => {
@@ -286,6 +288,13 @@ fn resume(request: &CheckpointRequest) -> Result<Option<(ResumeReport, i64)>> {
     let skew_ms = step_clock(request.host_time_ns, max_skew())?;
 
     let fork = request.vm_id != current.0;
+    // Lock a hosted guest into a non-thawable restoring phase BEFORE rotating
+    // IDENTITY, so any failure below (egress trust, rekey, or prepare_restore)
+    // fails closed and never allows a subsequent Thaw under the new key (#6647).
+    if super::hosted::active() {
+        super::hosted::begin_restore()
+            .context("lock the hosted workspace before rotating boot identity")?;
+    }
     {
         let mut identity = IDENTITY
             .get()
@@ -307,6 +316,10 @@ fn resume(request: &CheckpointRequest) -> Result<Option<(ResumeReport, i64)>> {
     let mut removed_logins = false;
     for (name, pid) in [(DAEMON_ACK, daemon), (NETWORK_ACK, network)] {
         removed_logins |= rekey(name, pid, request.vm_id, request.generation)?;
+    }
+    if super::hosted::active() {
+        super::hosted::prepare_restore(request.generation)
+            .context("prepare the hosted workspace for restore")?;
     }
     Ok(Some((
         ResumeReport {
