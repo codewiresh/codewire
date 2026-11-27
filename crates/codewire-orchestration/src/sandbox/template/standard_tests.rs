@@ -717,3 +717,50 @@ fn vm_restore_generation_patches_adds_replaces_and_removes_cleanly() {
         .remove(entry);
     assert!(!env(&sb).contains_key("CODEWIRE_VM_RESTORE_GENERATION"));
 }
+
+#[test]
+fn default_workspace_image_uses_the_standard_systemd_disk_only_when_standard_boots_systemd() {
+    use crate::sandbox::runtime_images::RuntimeImages;
+    use crate::sandbox::template::{
+        RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_STANDARD, default_workspace_image,
+    };
+
+    const SYSTEMD_REPOSITORY: &str = "registry.example.invalid/codewire/workspace-systemd";
+    const SYSTEMD_IMAGE: &str = "registry.example.invalid/codewire/workspace-systemd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CANONICAL: &str = "registry.example.invalid/codewire/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let images = RuntimeImages::example()
+        .with_systemd_workspace_repository(SYSTEMD_REPOSITORY)
+        .unwrap();
+    let systemd_rt = StandardRuntime::parse(
+        RUNTIME_IMAGE,
+        &format!("{IMAGE_DISK} {IMAGE_DISK_ID} {BUILD_ID} {SYSTEMD_IMAGE}"),
+    )
+    .unwrap()
+    .unwrap()
+    .with_systemd_repository(&images);
+    let plain_rt = runtime();
+
+    assert!(systemd_rt.boots_systemd());
+    assert_eq!(systemd_rt.workspace_image(), SYSTEMD_IMAGE);
+    assert!(!plain_rt.boots_systemd());
+
+    // `standard` with a systemd disk defaults to the disk's systemd image.
+    assert_eq!(
+        default_workspace_image(RUNTIME_PROFILE_STANDARD, Some(&systemd_rt), CANONICAL),
+        SYSTEMD_IMAGE
+    );
+    // `commodity`, no runtime, or a plain disk keep the canonical image.
+    assert_eq!(
+        default_workspace_image(RUNTIME_PROFILE_COMMODITY, Some(&systemd_rt), CANONICAL),
+        CANONICAL
+    );
+    assert_eq!(
+        default_workspace_image(RUNTIME_PROFILE_STANDARD, Some(&plain_rt), CANONICAL),
+        CANONICAL
+    );
+    assert_eq!(
+        default_workspace_image(RUNTIME_PROFILE_STANDARD, None, CANONICAL),
+        CANONICAL
+    );
+}

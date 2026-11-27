@@ -64,7 +64,8 @@ pub(crate) use standard::{
     KVM_DEVICE_RESOURCE, standard_pvc_gib, vm_restore_generation, vm_state_existing,
 };
 pub use standard::{
-    STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime, runtime_profile_of,
+    STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime, default_workspace_image,
+    runtime_profile_of,
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;

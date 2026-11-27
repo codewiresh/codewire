@@ -137,6 +137,17 @@ impl StandardRuntime {
         }
     }
 
+    /// The workspace image this disk was built from, by digest.
+    pub fn workspace_image(&self) -> &str {
+        &self.workspace_image
+    }
+
+    /// Whether this disk boots systemd as its container's first process
+    /// ([`Self::with_systemd_repository`]).
+    pub fn boots_systemd(&self) -> bool {
+        self.boots_systemd
+    }
+
     /// The runtime image the Pod's one container runs, by digest.
     pub fn runtime_image(&self) -> &str {
         &self.runtime_image
@@ -205,6 +216,24 @@ pub fn runtime_profile_of<'a>(
         return super::RUNTIME_PROFILE_COMMODITY;
     }
     deployment_profile
+}
+
+/// The workspace image a `standard`-profile create or warm pool uses by
+/// default: the `standard` disk's systemd workspace image when `profile` is
+/// `standard` and the disk boots systemd, otherwise `canonical`
+/// (`docs/dev/SYSTEMD-WORKSPACE.md`, "On the `standard` profile").
+pub fn default_workspace_image<'a>(
+    profile: &str,
+    runtime: Option<&'a StandardRuntime>,
+    canonical: &'a str,
+) -> &'a str {
+    if profile.trim() == super::RUNTIME_PROFILE_STANDARD
+        && let Some(runtime) = runtime
+        && runtime.boots_systemd()
+    {
+        return runtime.workspace_image();
+    }
+    canonical
 }
 
 fn image_disk_error() -> String {

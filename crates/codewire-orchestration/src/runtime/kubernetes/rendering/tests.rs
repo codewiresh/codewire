@@ -591,6 +591,71 @@ fn a_standard_record_never_adopts_a_commodity_pool_member() {
         revision(&standard_claim(RUNTIME_PROFILE_COMMODITY)),
         revision(&standard_member)
     );
+
+    // When the `standard` disk boots systemd, a `standard` warm pool holds
+    // systemd members of that disk's image and matches an adopting
+    // `standard` systemd create's template spec one-for-one.
+    let systemd_repo = "registry.example.invalid/codewire/workspace-systemd";
+    let systemd_image = "registry.example.invalid/codewire/workspace-systemd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let images = crate::sandbox::runtime_images::RuntimeImages::example()
+        .with_systemd_workspace_repository(systemd_repo)
+        .unwrap();
+    let systemd_runtime = crate::sandbox::template::StandardRuntime::parse(
+        "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        &format!(
+            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+             3333333333333333333333333333333333333333333333333333333333333333 \
+             44444444444444444444444444444444 \
+             {systemd_image}"
+        ),
+    )
+    .unwrap()
+    .map(|rt| rt.with_systemd_repository(&images));
+    let systemd_pool = KubernetesRenderConfig {
+        runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        warm_pool_runtime_profile: String::new(),
+        standard_runtime: systemd_runtime.clone(),
+        ..standard_pool.clone()
+    };
+    let systemd_member = systemd_pool.pool(shape).unwrap();
+    assert_eq!(systemd_member.image, systemd_image);
+    assert_eq!(
+        systemd_member.runtime_profile_spec().runtime_class_name,
+        "standard"
+    );
+    assert_eq!(
+        systemd_member
+            .standard_runtime
+            .as_ref()
+            .unwrap()
+            .workspace_init(),
+        "systemd"
+    );
+    let member_template =
+        crate::sandbox::template::render_sandbox_template("cw-sandboxes", &systemd_member);
+    assert_eq!(
+        crate::worker::workspace_binding::checks::pool_member_isolated(
+            &{
+                let mut spec = member_template["spec"]["podTemplate"]["spec"].clone();
+                spec["volumes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "name": "workspace",
+                        "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
+                    }));
+                spec
+            },
+            &systemd_member,
+        ),
+        Ok(())
+    );
+    let systemd_adopter = systemd_pool.shape(
+        systemd_image,
+        &systemd_pool.runtime_spec(Isolation::Standard),
+        shape,
+    );
+    assert_eq!(revision(&systemd_adopter), revision(&systemd_member));
 }
 
 #[test]

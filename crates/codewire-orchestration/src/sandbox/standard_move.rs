@@ -30,6 +30,18 @@ pub fn available(cfg: &SandboxWorkerCfg) -> Option<&StandardRuntime> {
         .filter(|_| cfg.hosted_egress.create().is_some())
 }
 
+/// The profile a standard-tier create wants before checking whether the
+/// `standard` disk boots its image: `standard` when the organization is
+/// moved and the deployment makes it available, otherwise the deployment's
+/// own profile.
+pub fn wanted_profile(cfg: &SandboxWorkerCfg, organization_moved: bool) -> &str {
+    if organization_moved && available(cfg).is_some() {
+        RUNTIME_PROFILE_STANDARD
+    } else {
+        cfg.runtime_profile.trim()
+    }
+}
+
 /// The profile a create records, decided once: `confidential` on the
 /// confidential tier; `standard` when the organization is moved and the
 /// deployment makes it available; otherwise the deployment's own profile.
@@ -44,11 +56,7 @@ pub fn create_profile<'a>(
     if isolation_tier == RUNTIME_PROFILE_CONFIDENTIAL {
         return RUNTIME_PROFILE_CONFIDENTIAL;
     }
-    let wanted = if organization_moved && available(cfg).is_some() {
-        RUNTIME_PROFILE_STANDARD
-    } else {
-        cfg.runtime_profile.trim()
-    };
+    let wanted = wanted_profile(cfg, organization_moved);
     runtime_profile_of(wanted, cfg.standard_runtime.as_ref(), image)
 }
 

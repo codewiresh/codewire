@@ -872,3 +872,55 @@ async fn each_pool_answer_routes_under_its_label() {
         assert_eq!(decided, expected, "{state:?}");
     }
 }
+
+#[test]
+fn a_standard_systemd_pool_routes_the_systemd_disk_image_and_not_plain_workspace() {
+    use crate::sandbox::runtime_images::RuntimeImages;
+    use crate::sandbox::template::{RUNTIME_PROFILE_STANDARD, StandardRuntime};
+
+    const SYSTEMD_REPO: &str = "registry.example.invalid/codewire/workspace-systemd";
+    const SYSTEMD_IMAGE: &str = "registry.example.invalid/codewire/workspace-systemd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let images = RuntimeImages::example()
+        .with_systemd_workspace_repository(SYSTEMD_REPO)
+        .unwrap();
+    let systemd_rt = StandardRuntime::parse(
+        "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        &format!(
+            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+             3333333333333333333333333333333333333333333333333333333333333333 \
+             44444444444444444444444444444444 \
+             {SYSTEMD_IMAGE}"
+        ),
+    )
+    .unwrap()
+    .map(|rt| rt.with_systemd_repository(&images));
+
+    let cfg = SandboxWorkerCfg {
+        runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        standard_runtime: systemd_rt,
+        ..dev_cfg(SHAPES)
+    };
+    let small = environment(1000, 4096, 10);
+
+    // Creates of the disk's systemd image match the warm pool.
+    assert!(
+        pool_candidate(
+            &cfg,
+            &small,
+            SYSTEMD_IMAGE,
+            &opts(&cfg, &small, SYSTEMD_IMAGE)
+        )
+        .is_ok()
+    );
+    // Plain canonical workspace creates go cold (they fall back to commodity).
+    assert_eq!(
+        pool_candidate(
+            &cfg,
+            &small,
+            canonical_workspace_runtime_image(),
+            &opts(&cfg, &small, canonical_workspace_runtime_image()),
+        )
+        .err(),
+        Some(ColdReason::Image)
+    );
+}

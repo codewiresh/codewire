@@ -497,6 +497,36 @@ pub(super) struct RecordedRuntime {
     pub(super) profile: String,
 }
 
+/// Resolve the normalized image a create stores: on a hosted, non-fork,
+/// standard-tier create whose wanted profile is `standard` over a systemd
+/// disk, the canonical default workspace image resolves to that disk's
+/// systemd workspace image (`docs/dev/SYSTEMD-WORKSPACE.md`, "On the
+/// `standard` profile").
+pub(crate) fn resolve_create_workspace_image(
+    image_ref: &str,
+    cfg: &SandboxWorkerCfg,
+    isolation_tier: &str,
+    placed_on_host: bool,
+    from_snapshot: bool,
+    organization_moved: bool,
+) -> String {
+    let normalized = normalize_image_ref(image_ref);
+    if isolation_tier == "standard"
+        && !placed_on_host
+        && !from_snapshot
+        && crate::sandbox::is_canonical_workspace_runtime_image(&normalized)
+    {
+        let wanted = crate::sandbox::standard_move::wanted_profile(cfg, organization_moved);
+        return crate::sandbox::template::default_workspace_image(
+            wanted,
+            cfg.standard_runtime.as_ref(),
+            &normalized,
+        )
+        .to_owned();
+    }
+    normalized
+}
+
 /// The profile the create records, under its organization's move onto
 /// `standard`, and whether it makes a systemd workspace on it, admitted
 /// ([`crate::sandbox::systemd_workspace::admit_create`]).
@@ -504,10 +534,20 @@ async fn admit_runtime_create(
     state: &ApiState,
     user: &AuthUser,
     org_id: &str,
-    body: &CreateEnvironmentBody,
+    body: &mut CreateEnvironmentBody,
     isolation_tier: &str,
 ) -> AppResult<RecordedRuntime> {
     let moved = crate::sandbox::standard_move::organization_moved(&state.pool, org_id).await?;
+    if !body.project_spec.image.is_empty() {
+        body.project_spec.image = resolve_create_workspace_image(
+            &body.project_spec.image,
+            &state.sandbox_cfg,
+            isolation_tier,
+            body.placement_host.is_some(),
+            body.source_snapshot_id.is_some(),
+            moved,
+        );
+    }
     let image = &body.project_spec.image;
     let profile = crate::sandbox::standard_move::create_profile(
         &state.sandbox_cfg,
@@ -1285,10 +1325,8 @@ pub(crate) async fn create_environment_core(
     )
     .await?;
     apply_project_spec_defaults(&mut body)?;
-    if !body.project_spec.image.is_empty() {
-        body.project_spec.image = normalize_image_ref(&body.project_spec.image);
-    }
-    let runtime = admit_runtime_create(state, user, org_id, &body, isolation_tier).await?;
+    let had_image = !body.project_spec.image.is_empty();
+    let mut runtime = admit_runtime_create(state, user, org_id, &mut body, isolation_tier).await?;
 
     take_create_limits(pool, &user.user_id).await?;
 
@@ -1322,6 +1360,11 @@ pub(crate) async fn create_environment_core(
         let result: AppResult<Environment> = async {
             let preset =
                 resolve_create_defaults(pool, user, org_id, &mut body, isolation_tier).await?;
+            if !had_image && !body.project_spec.image.is_empty() {
+                runtime =
+                    admit_runtime_create(state, user, org_id, &mut body, isolation_tier).await?;
+                timeouts::validate(&body, &runtime.profile)?;
+            }
             body.project_spec.validate().map_err(invalid_project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
@@ -2534,6 +2577,147 @@ credentials: {profile: user/work}
         assert!(!crate::sandbox::is_canonical_workspace_runtime_image(
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4"
         ));
+    }
+
+    #[test]
+    fn standard_systemd_disk_becomes_the_default_workspace_image_for_standard_creates() {
+        use crate::sandbox::runtime_images::RuntimeImages;
+        use crate::sandbox::template::{
+            RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_STANDARD, StandardRuntime,
+        };
+
+        const SYSTEMD_REPO: &str = "registry.example.invalid/codewire/workspace-systemd";
+        const SYSTEMD_IMAGE: &str = "registry.example.invalid/codewire/workspace-systemd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let images = RuntimeImages::example()
+            .with_systemd_workspace_repository(SYSTEMD_REPO)
+            .unwrap();
+        let systemd_rt = StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            &format!(
+                "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+                 3333333333333333333333333333333333333333333333333333333333333333 \
+                 44444444444444444444444444444444 \
+                 {SYSTEMD_IMAGE}"
+            ),
+        )
+        .unwrap()
+        .map(|rt| rt.with_systemd_repository(&images));
+        let standard_cfg = SandboxWorkerCfg {
+            runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+            standard_runtime: systemd_rt.clone(),
+            ..SandboxWorkerCfg::default()
+        };
+        let canonical = crate::sandbox::canonical_workspace_runtime_image();
+
+        // Default / canonical workspace creates resolve to the systemd disk image.
+        for input in [
+            "workspace",
+            crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            canonical,
+        ] {
+            assert_eq!(
+                resolve_create_workspace_image(
+                    input,
+                    &standard_cfg,
+                    "standard",
+                    false,
+                    false,
+                    false
+                ),
+                SYSTEMD_IMAGE
+            );
+        }
+        // Custom images, confidential, host placement, and snapshot forks never rewrite.
+        assert_eq!(
+            resolve_create_workspace_image(
+                "python:3.12",
+                &standard_cfg,
+                "standard",
+                false,
+                false,
+                false
+            ),
+            "python:3.12"
+        );
+        assert_eq!(
+            resolve_create_workspace_image(
+                canonical,
+                &standard_cfg,
+                "confidential",
+                false,
+                false,
+                false
+            ),
+            canonical
+        );
+        assert_eq!(
+            resolve_create_workspace_image(
+                canonical,
+                &standard_cfg,
+                "standard",
+                true,
+                false,
+                false
+            ),
+            canonical
+        );
+        assert_eq!(
+            resolve_create_workspace_image(
+                canonical,
+                &standard_cfg,
+                "standard",
+                false,
+                true,
+                false
+            ),
+            canonical
+        );
+        // On a `commodity` deployment, only a moved org (with hosted egress on) resolves to systemd.
+        let mut commodity_cfg = SandboxWorkerCfg {
+            runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
+            standard_runtime: systemd_rt,
+            ..SandboxWorkerCfg::default()
+        };
+        assert_eq!(
+            resolve_create_workspace_image(
+                canonical,
+                &commodity_cfg,
+                "standard",
+                false,
+                false,
+                false
+            ),
+            canonical
+        );
+        commodity_cfg.hosted_egress = crate::egress::own_mode::HostedEgress::on(
+            crate::sandbox::template::HostedEgressTemplate {
+                stream_addr: "198.51.100.10:8089".into(),
+                binding_addr: "198.51.100.11:8443".into(),
+                fence_revision: "1".into(),
+                gateway: crate::sandbox::template::GatewayPeer {
+                    namespace: "envoy-gateway-system".into(),
+                    gateway_name: "codewire".into(),
+                    gateway_namespace: "codewire".into(),
+                    port: 443,
+                },
+                derp_tls_port: 443,
+                gateway_addr: "198.51.100.12:443".into(),
+                derp_addr: "derp.example.invalid=198.51.100.13:443".into(),
+                cluster_dns_ip: "198.51.100.53".into(),
+                udp_relay_peers: Vec::new(),
+            },
+        );
+        assert_eq!(
+            resolve_create_workspace_image(
+                canonical,
+                &commodity_cfg,
+                "standard",
+                false,
+                false,
+                true
+            ),
+            SYSTEMD_IMAGE
+        );
     }
 
     #[test]

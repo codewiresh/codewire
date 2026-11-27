@@ -453,11 +453,15 @@ impl KubernetesRenderConfig {
             "confidential workspaces are never pooled"
         );
         // A pool member must render exactly as the environment that adopts
-        // it: the canonical image's own runtime, as `environment` picks it.
-        // On a `standard` pool whose disk does not boot that image the
-        // environment goes to `commodity`, so no member would ever be
+        // it: the default workspace image's own runtime, as `environment`
+        // picks it. On a `standard` pool whose disk does not boot that image
+        // the environment goes to `commodity`, so no member would ever be
         // adopted (#5602).
-        let image = canonical_workspace_runtime_image();
+        let image = crate::sandbox::template::default_workspace_image(
+            &configured.profile,
+            self.standard_runtime.as_ref(),
+            canonical_workspace_runtime_image(),
+        );
         let runtime_spec = self.pool_image_runtime_spec(&configured, image);
         anyhow::ensure!(
             runtime_spec.profile == configured.profile,

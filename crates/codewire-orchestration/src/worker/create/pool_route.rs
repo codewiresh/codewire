@@ -109,7 +109,17 @@ pub(crate) fn pool_candidate(
     if env.source_snapshot_id.is_some() {
         return Err(ColdReason::SourceSnapshot);
     }
-    if image_ref.trim() != canonical_workspace_runtime_image() {
+    let pool_profile = if cfg.warm_pool_runtime_profile.trim().is_empty() {
+        cfg.runtime_profile.as_str()
+    } else {
+        cfg.warm_pool_runtime_profile.as_str()
+    };
+    let pooled_image = crate::sandbox::template::default_workspace_image(
+        pool_profile,
+        cfg.standard_runtime.as_ref(),
+        canonical_workspace_runtime_image(),
+    );
+    if image_ref.trim() != pooled_image {
         return Err(ColdReason::Image);
     }
     if env.dedicated_cpu && cfg.cpu_sharing_ratio != CpuSharingRatio::NONE {
