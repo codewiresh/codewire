@@ -40,8 +40,7 @@ use crate::api::environment_resize::{
 use crate::api::environment_setup_retry::retry_environment_setup_core;
 use crate::api::environment_sources::{
     EnvironmentSourceSelection, EnvironmentSourcesUpdate, EnvironmentSourcesUpdateOutcome,
-    UpdateEnvironmentSourcesBody, confirmed_with, refuse_user_token_personal_secrets,
-    update_environment_sources_core,
+    UpdateEnvironmentSourcesBody, refuse_user_token_confirmation, update_environment_sources_core,
 };
 use crate::api::environment_startup_script::set_environment_startup_script_core;
 use crate::api::environments::{
@@ -139,14 +138,16 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<proto::CreateEnvironmentResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
-        let credential = auth_context(&ctx)?;
-        refuse_user_token_personal_secrets(credential, request.confirm_personal_secrets)
-            .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        refuse_user_token_confirmation(
+            auth_context(&ctx)?,
+            request.confirm_personal_credentials,
+            request.confirm_personal_secrets,
+        )
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
         let org_id = create_organization(&self.state.pool, &user, &request)
             .await
             .map_err(|error| environment_rpc_error(&error, &ctx))?;
-        let mut body = create_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
-        body.confirmed_with = confirmed_with(credential);
+        let body = create_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
         let environment = create_environment_core(&self.state, &user, &org_id, body)
             .await
             .map_err(|error| environment_rpc_error(&error, &ctx))?;
@@ -293,14 +294,16 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<proto::UpdateEnvironmentSourcesResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
-        let credential = auth_context(&ctx)?;
-        refuse_user_token_personal_secrets(credential, request.confirm_personal_secrets)
-            .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        refuse_user_token_confirmation(
+            auth_context(&ctx)?,
+            request.confirm_personal_credentials,
+            request.confirm_personal_secrets,
+        )
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
         let organization = request.org_id.clone();
         let environment = request.environment_id.clone();
-        let mut body =
+        let body =
             source_update_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
-        body.confirmed_with = confirmed_with(credential);
         let result =
             update_environment_sources_core(&self.state, &user, &organization, &environment, body)
                 .await
@@ -891,7 +894,6 @@ fn source_update_body(
         allow_restart: request.allow_restart,
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
-        confirmed_with: Default::default(),
     })
 }
 

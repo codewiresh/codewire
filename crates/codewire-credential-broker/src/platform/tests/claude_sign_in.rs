@@ -7,7 +7,6 @@
 use bytes::Bytes;
 use codewire_daemon_proto::codewire::bridge::v1::{CredentialBridgeRequest, CredentialHttpHeader};
 use codewire_platform_credentials::CredentialRegistration;
-use codewire_platform_credentials::PersonalConfirmation;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use zeroize::Zeroizing;
 
@@ -174,7 +173,7 @@ async fn bind_sign_in(f: &Fixture, material: &ProtectedValue) -> Result<Credenti
                 profile_id: changed.id.clone(),
                 profile_revision: changed.revision,
             },
-            &PersonalConfirmation::SignIn(context.user_id.clone()),
+            Some(&context.user_id),
         )
         .await?;
     Ok(sign_in)
@@ -535,7 +534,7 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
                                 profile_id: changed.id.clone(),
                                 profile_revision: changed.revision,
                             },
-                            &PersonalConfirmation::SignIn(context.user_id.clone()),
+                            Some(&context.user_id),
                         )
                         .await?;
                     let (_pool, adapter) = hosted(&f).await?;
@@ -669,33 +668,6 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
         f.finish(result).await?;
     }
     Ok(())
-}
-
-/// A binding its creator confirmed with a user token never gets the Claude
-/// login, a direct delivery exception (#5688).
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn a_user_token_binding_never_gets_the_claude_login() -> Result<()> {
-    let f = Fixture::create_for_bridge().await?;
-    let result = async {
-        bind_sign_in(&f, &sign_in_material("fresh", 7_200, 60, None)).await?;
-        // The same binding, confirmed with a sign-in, gets the login.
-        let (_pool, adapter) = hosted(&f).await?;
-        drop(adapter.lease_claude_login(Uuid::new_v4()).await?);
-        f.authority
-            .change(|session| session.direct_delivery = false);
-        let (_pool, adapter) = hosted(&f).await?;
-        ensure!(
-            matches!(
-                adapter.lease_claude_login(Uuid::new_v4()).await,
-                Err(BrokerLeaseError::Denied)
-            ),
-            "a user token's binding gets no Claude login"
-        );
-        Ok(())
-    }
-    .await;
-    f.finish(result).await
 }
 
 /// A sign-in with less than thirty minutes left is refreshed once through the

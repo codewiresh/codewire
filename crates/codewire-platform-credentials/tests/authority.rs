@@ -17,9 +17,9 @@ use codewire_access::{
     Withheld, WithheldReason, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    CredentialMetadataReader, CredentialRecord, OAuthRefreshState, PersonalConfirmation,
-    PlatformAccessProfileStore, PlatformCredentialError as CredentialError,
-    PlatformCredentialStore, PlatformProfileError as ProfileError,
+    CredentialMetadataReader, CredentialRecord, OAuthRefreshState, PlatformAccessProfileStore,
+    PlatformCredentialError as CredentialError, PlatformCredentialStore,
+    PlatformProfileError as ProfileError,
 };
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -183,7 +183,7 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
             .create_binding(
                 &context,
                 binding(&context, &profile),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         // Metadata management stays orchestration-owned. A new current revision
@@ -456,7 +456,7 @@ async fn lock_helpers_preserve_exact_owner_and_environment_scope() -> Result<()>
                 .create_binding(
                     &context,
                     binding(&context, &user_profile),
-                    &PersonalConfirmation::SignIn(context.user_id.clone()),
+                    Some(&context.user_id),
                 )
                 .await?;
             ensure!(runtime.evaluate_grants(&context).await?.grants.len() == 1);
@@ -659,7 +659,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
         let context = environment(&db, &user, &org, "fenced-env", &record.metadata.id).await?;
         let manager = profiles(&db.pool);
         let profile = manager.create(&user, name("fenced"), entries(&record.metadata.id)).await?;
-        manager.create_binding(&context, binding(&context, &profile), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        manager.create_binding(&context, binding(&context, &profile), Some(&context.user_id)).await?;
         let alternate = manager.create(&user, name("alternate"), BTreeMap::new()).await?;
         for change in ["environment", "binding", "profile"] {
             let mut holder = pool.begin().await?;
@@ -697,7 +697,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
                     }
                     "binding" => {
                         profiles(&writer).replace_binding(&write_context,
-                            &binding(&write_context, &write_profile), binding(&write_context, &write_alternate), &PersonalConfirmation::SignIn(write_context.user_id.clone())).await?;
+                            &binding(&write_context, &write_profile), binding(&write_context, &write_alternate), Some(&write_context.user_id)).await?;
                     }
                     "profile" => {
                         profiles(&writer).update(&write_owner, &write_profile.id, 1, BTreeMap::new()).await?;
@@ -718,7 +718,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
                     .bind(context.environment_id.as_str()).execute(&db.pool).await?;
             } else if change == "binding" {
                 ensure!(profiles(&pool).evaluate_grants(&context).await?.grants.is_empty());
-                manager.replace_binding(&context, &binding(&context, &alternate), binding(&context, &profile), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+                manager.replace_binding(&context, &binding(&context, &alternate), binding(&context, &profile), Some(&context.user_id)).await?;
             }
         }
         // The still-pinned revision is not replaced by a metadata edit.
@@ -744,7 +744,7 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
         let manager = profiles(&db.pool);
         let personal = manager.create(&user, name("personal"), entries(&credential.metadata.id)).await?;
         let shared = manager.create(&org, name("shared"), BTreeMap::new()).await?;
-        manager.create_binding(&context, binding(&context, &personal), &PersonalConfirmation::SignIn(user.id().clone())).await?;
+        manager.create_binding(&context, binding(&context, &personal), Some(user.id())).await?;
         let (broker, _) = db.broker_pool().await?;
         let reader = PgPoolOptions::new().max_connections(1)
             .connect_with(broker.connect_options().as_ref().clone()).await?;
@@ -755,7 +755,7 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
                 // Each case starts from the personal binding and its one grant.
                 sqlx::query("DELETE FROM public.platform_environment_access_bindings WHERE environment_id=$1")
                     .bind(context.environment_id.as_str()).execute(&db.pool).await?;
-                manager.create_binding(&context, binding(&context, &personal), &PersonalConfirmation::SignIn(user.id().clone())).await?;
+                manager.create_binding(&context, binding(&context, &personal), Some(user.id())).await?;
                 ensure!(profiles(&reader).evaluate_grants(&context).await?.grants.len() == 1);
                 let mut writer = db.pool.begin().await?;
                 let holder: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
@@ -799,7 +799,7 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
                         let (metadata, revision, _) = observed?;
                         let metadata = metadata.context("binding metadata")?;
                         ensure!(metadata.binding == binding(&context, &shared));
-                        ensure!(metadata.personal_confirmation == PersonalConfirmation::None);
+                        ensure!(metadata.personal_owner_confirmed_by.is_none());
                         if let Some(revision) = revision {
                             ensure!(revision? == shared, "{reading}");
                         }
@@ -992,11 +992,7 @@ async fn each_grant_evaluation_takes_a_fixed_number_of_statement_round_trips() -
                     .create_binding(
                         &context,
                         binding(&context, profile),
-                        &if confirmation {
-                            PersonalConfirmation::SignIn(context.user_id.clone())
-                        } else {
-                            PersonalConfirmation::None
-                        },
+                        confirmation.then_some(&context.user_id),
                     )
                     .await?;
             }
@@ -1107,7 +1103,7 @@ async fn environment_fence_denies_each_condition_alone_and_stops_at_the_first() 
             .create_binding(
                 &context,
                 binding(&context, &profile),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         let runtime = profiles(&pool);
@@ -1290,7 +1286,7 @@ async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Res
             )
             .await?;
         let bound = binding(&context, &profile);
-        manager.create_binding(&context, bound.clone(), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        manager.create_binding(&context, bound.clone(), Some(&context.user_id)).await?;
         let runtime = profiles(&pool);
         let slots = |grants: &codewire_access::AvailableGrants| {
             grants.grants.iter().map(|grant| grant.capability_slot.to_string()).collect::<BTreeSet<_>>()
@@ -1300,7 +1296,7 @@ async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Res
         // Runtime authority's two profile reads, together.
         let (metadata, revision) =
             runtime.get_binding_metadata_and_revision(&context, &user).await?;
-        ensure!(metadata.binding == bound && metadata.personal_confirmation == PersonalConfirmation::SignIn(user.id().clone()));
+        ensure!(metadata.binding == bound && metadata.personal_owner_confirmed_by.as_ref() == Some(user.id()));
         ensure!(revision? == runtime.get_revision(&user, &profile.id, profile.revision).await?);
         // The bound profile belongs to the user, so the organization's
         // revision read alone finds nothing; the binding read still succeeds.
@@ -1368,7 +1364,7 @@ async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Res
             runtime.get_binding_metadata_and_revision(&context, &user).await.err()
                 == Some(ProfileError::NotFound)
         );
-        manager.create_binding(&context, bound.clone(), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        manager.create_binding(&context, bound.clone(), Some(&context.user_id)).await?;
         ensure!(slots(&runtime.evaluate_grants(&context).await?) == all);
         // The credential locks run in ID order. When the first is no longer
         // the owner's, the second is never locked, so a writer holding it does

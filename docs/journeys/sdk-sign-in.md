@@ -99,8 +99,6 @@ Updated 2026-11-26. `user-token` and `user-token-bind` observed on Dev, except t
     the Sandbox, and the agent works through the proxy; the same profile
     bound from a `cw login` sign-in still gets its direct delivery;
   - the confirmation left out: refused before anything is created;
-  - personal application secrets confirmed with a user token: refused
-    before anything is created (`user_token_not_allowed`), naming a sign-in;
   - an API key asked for a profile: refused before anything is created,
     naming the user token.
 - **Driving it:** no command yet (#5687). The run-agent example with

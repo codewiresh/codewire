@@ -215,7 +215,6 @@ fn session() -> PlatformRuntimeSession {
         pod("workspace"),
         context(),
         Owner::User(context().user_id),
-        true,
         unix_now().unwrap() + 3_600,
     )
     .unwrap()
@@ -326,7 +325,7 @@ impl Fixture {
                 BTreeMap::from([(CapabilitySlot::codex(), record.metadata.id.clone())])).await?;
             manager.create_binding(&context, EnvironmentAccessBinding {
                 environment_id: context.environment_id.clone(), profile_id: profile.id.clone(), profile_revision: profile.revision,
-            }, &codewire_platform_credentials::PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+            }, Some(&context.user_id)).await?;
             let mut session = session();
             session.context = context.clone();
             let authority = Arc::new(SyntheticAuthority::new(session));
@@ -506,9 +505,7 @@ impl Fixture {
                 &context,
                 &previous,
                 selected.clone(),
-                &codewire_platform_credentials::PersonalConfirmation::SignIn(
-                    context.user_id.clone(),
-                ),
+                Some(&context.user_id),
             )
             .await?;
         Ok(selected)
@@ -565,9 +562,7 @@ impl Fixture {
                     profile_id: changed.id,
                     profile_revision: changed.revision,
                 },
-                &codewire_platform_credentials::PersonalConfirmation::SignIn(
-                    self.context.user_id.clone(),
-                ),
+                Some(&self.context.user_id),
             )
             .await?;
         Ok(())

@@ -974,10 +974,9 @@ it into [Signing in from the environment](#signing-in-from-the-environment).
 **What runs now (#5688):** the IdP issues user tokens, the product API
 admits them, and `cw auth token` asks for one through the token exchange, as
 below. Against a server from before the exchange, the command says that the
-server doesn't issue user tokens yet. A create or source update made with a
-user token binds the person's own profile without direct delivery, as
-"Credential profiles" below says. It never confirms personal application
-secrets (`user_token_not_allowed`).
+server doesn't issue user tokens yet. Binding a profile with one is not yet
+shipped, so until it is, a create or source update that gives the personal
+confirmation with a user token is refused (`user_token_not_allowed`).
 - **Settings → API keys → User tokens** lists them and revokes one, through
   the routes below.
 - **Settings' routes:** `GET /api/auth/user-tokens?account_id=…` lists the
@@ -1049,8 +1048,9 @@ sign-in for that command, as `CODEWIRE_API_KEY` does today.
   OAuth token's does under
   [Account access revocation](#account-access-revocation).
 - **What it can't do:** make API keys, change sign-in methods or second
-  factors, delete the account, or confirm personal application secrets. It
-  is refused for those by its kind.
+  factors, or delete the account. It is refused for those by its kind.
+  Until the binding below ships, it also can't give the personal
+  confirmation.
 - **Audit:** each one issued writes a row naming its parent sign-in, and so
   does each revocation. Neither names the token. The SDKs never log it and
   remove it from errors.
@@ -1062,11 +1062,7 @@ with a user token gets none of the direct delivery exceptions
 its credentials stay behind the proxy. A user token is made to be copied
 into environment variables and `.env` files, and can live forever, so a
 leaked one must never put a real Codex or Claude login into a Sandbox. Direct
-delivery stays for `cw`'s own sign-in and the dashboard. The server runs
-this now (#5688): the binding records a user token's confirmation apart from
-a sign-in's
-([SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md#who-may-bind-a-personal-profile)).
-Not yet shipped: an SDK binds one in a single call:
+delivery stays for `cw`'s own sign-in and the dashboard. An SDK binds one in a single call:
 the program names the profile and states the confirmation, and the SDK reads
 the profile's revision itself. Before creating anything, the SDK refuses an
 API key asked for a profile, or a missing confirmation, and names the user

@@ -36,8 +36,6 @@ fn update(replacement: EnvironmentSourceSelection) -> UpdateEnvironmentSourcesBo
         allow_restart: false,
         confirm_personal_credentials: false,
         confirm_personal_secrets: false,
-        // These model a sign-in, which keeps direct delivery.
-        confirmed_with: codewire_platform_credentials::ConfirmedWith::SignIn,
     }
 }
 
@@ -137,8 +135,6 @@ async fn pending_create_publishes_canonical_sources_profile_and_creator_acl_atom
             expected_profile_revision: Some(1),
             confirm_personal_credentials: true,
             confirm_personal_secrets: true,
-            // A sign-in's create, which keeps direct delivery.
-            confirmed_with: codewire_platform_credentials::ConfirmedWith::SignIn,
             ..Default::default()
         };
         for (confirm_secrets, confirm_credentials, revision) in [(false,true,1), (true,false,1), (true,true,2)] {

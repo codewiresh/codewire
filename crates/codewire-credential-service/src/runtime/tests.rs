@@ -652,7 +652,7 @@ async fn refresh_fixture(
                 profile_id: profile.id,
                 profile_revision: profile.revision,
             },
-            &codewire_platform_credentials::PersonalConfirmation::SignIn(context.user_id.clone()),
+            Some(&context.user_id),
         )
         .await?;
     let pod = |name: &str| PlatformPodIdentity {
@@ -665,7 +665,6 @@ async fn refresh_fixture(
         pod("workspace"),
         context.clone(),
         owner,
-        true,
         unix_now()? + 3600,
     )?;
     Ok((

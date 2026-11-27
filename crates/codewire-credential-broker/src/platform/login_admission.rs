@@ -29,9 +29,6 @@ pub(super) type DeliveryPredicate =
 ///   the profile owner to that owner only for their personal profile
 ///   (credential-service `delegation/authority.rs`). These facts are part of
 ///   `same_binding`, so every authority check rechecks them;
-/// - the creator confirmed the binding with a sign-in, never a user token
-///   (`direct_delivery`, #5688). An owner-local delegation is the owner's own
-///   OAuth sign-in, which a user token never reaches;
 /// - the Codex grant comes from that profile and carries the dedicated
 ///   `codex-login` permission, which this lease requested;
 /// - the credential is the creator's own Active OpenAI OAuth login on the
@@ -55,7 +52,6 @@ pub(super) fn codex_login_admissible(
             slot: CapabilitySlot::codex(),
             provider: "openai",
             kind: CredentialAuthKind::OAuth,
-            direct: true,
         },
     )
 }
@@ -78,7 +74,6 @@ pub(super) fn claude_login_admissible(
             slot: CapabilitySlot::anthropic(),
             provider: "anthropic",
             kind: CredentialAuthKind::ClaudeSignIn,
-            direct: true,
         },
     )
 }
@@ -98,8 +93,6 @@ pub(super) fn antigravity_login_admissible(
             slot: CapabilitySlot::antigravity(),
             provider: "google",
             kind: CredentialAuthKind::OAuth,
-            // Placeholder-only: nothing is delivered.
-            direct: false,
         },
     )
 }
@@ -110,9 +103,6 @@ struct PersonalLogin {
     slot: CapabilitySlot,
     provider: &'static str,
     kind: CredentialAuthKind,
-    /// A listed direct delivery exception, which only a binding its creator
-    /// confirmed with a sign-in admits.
-    direct: bool,
 }
 
 fn personal_login_admissible(
@@ -137,7 +127,6 @@ fn personal_login_admissible(
     if session.context.placement != placement
         || session.credential_owner != creator
         || !session.context.allow_personal_credentials
-        || login.direct && !session.direct_delivery
     {
         return Err(BrokerLeaseError::Denied);
     }

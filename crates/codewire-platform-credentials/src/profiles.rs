@@ -73,69 +73,7 @@ const PROFILE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformBindingMetadata {
     pub binding: EnvironmentAccessBinding,
-    pub personal_confirmation: PersonalConfirmation,
-}
-
-/// The credential a caller confirmed a personal selection with (#5688). The
-/// default is a user token's, which admits no direct delivery, so a caller
-/// that never says which credential confirmed gets none.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ConfirmedWith {
-    /// A browser session or a `cw login` sign-in.
-    SignIn,
-    /// A user token from `cw auth token`.
-    #[default]
-    UserToken,
-}
-
-/// A binding's personal confirmation: none for an organization profile, or
-/// the personal profile's owner, with the credential they confirmed it with.
-/// Only a sign-in's confirmation admits the direct delivery exceptions
-/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Who may bind a personal profile").
-/// Stored in two columns, at most one set, so a binary that reads only
-/// `personal_owner_confirmed_by` finds no confirmation on a user token's.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PersonalConfirmation {
-    None,
-    SignIn(OwnerId),
-    UserToken(OwnerId),
-}
-
-impl PersonalConfirmation {
-    pub fn by(credential: ConfirmedWith, owner: OwnerId) -> Self {
-        match credential {
-            ConfirmedWith::SignIn => Self::SignIn(owner),
-            ConfirmedWith::UserToken => Self::UserToken(owner),
-        }
-    }
-
-    /// The confirming owner, whichever credential confirmed.
-    pub fn owner(&self) -> Option<&OwnerId> {
-        match self {
-            Self::None => None,
-            Self::SignIn(owner) | Self::UserToken(owner) => Some(owner),
-        }
-    }
-
-    /// `personal_owner_confirmed_by` and `personal_owner_confirmed_by_user_token`.
-    fn columns(&self) -> (Option<&str>, Option<&str>) {
-        match self {
-            Self::None => (None, None),
-            Self::SignIn(owner) => (Some(owner.as_str()), None),
-            Self::UserToken(owner) => (None, Some(owner.as_str())),
-        }
-    }
-
-    /// The stored columns; both set is a corrupt row, never either one.
-    fn from_columns(sign_in: Option<String>, user_token: Option<String>) -> Result<Self, Error> {
-        let owner = |id: String| OwnerId::parse(id).map_err(|_| Error::CorruptRecord);
-        match (sign_in, user_token) {
-            (None, None) => Ok(Self::None),
-            (Some(id), None) => Ok(Self::SignIn(owner(id)?)),
-            (None, Some(id)) => Ok(Self::UserToken(owner(id)?)),
-            (Some(_), Some(_)) => Err(Error::CorruptRecord),
-        }
-    }
+    pub personal_owner_confirmed_by: Option<OwnerId>,
 }
 
 /// Profile authority with no KEK provider or protected-material read path.
@@ -556,7 +494,7 @@ impl PlatformAccessProfileStore {
                 validate_personal_confirmation(
                     context,
                     &bound.profile,
-                    &bound.binding.personal_confirmation,
+                    bound.binding.personal_owner_confirmed_by.as_ref(),
                 )?;
                 let credentials = lock_profile_credentials(&mut tx, &bound.profile).await?;
                 derive_available_grants(
@@ -653,13 +591,8 @@ impl PlatformAccessProfileStore {
         if !found {
             return Err(Error::NotFound);
         }
-        // The owner-OAuth delegation is a sign-in: a user token never reaches it.
-        let confirmation = personal_owner_confirmation
-            .map_or(PersonalConfirmation::None, |owner| {
-                PersonalConfirmation::SignIn(owner.clone())
-            });
         let (profile, credentials) = self
-            .bound_profile(tx, context, binding, &confirmation)
+            .bound_profile(tx, context, binding, personal_owner_confirmation)
             .await?;
         // A lifecycle-broken credential withholds only its own capability (#4909).
         derive_available_grants(
@@ -682,10 +615,10 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
         binding: &EnvironmentAccessBinding,
-        personal_confirmation: &PersonalConfirmation,
+        personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<AvailableGrants, Error> {
         let (profile, credentials) = self
-            .bound_profile(tx, context, binding, personal_confirmation)
+            .bound_profile(tx, context, binding, personal_owner_confirmation)
             .await?;
         derive_available_grants(
             context,
@@ -705,33 +638,30 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
         binding: &EnvironmentAccessBinding,
-        personal_confirmation: &PersonalConfirmation,
+        personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<(AccessProfile, BTreeMap<CredentialId, CredentialMetadata>), Error> {
         let profile = profile_for_context(tx, context, binding).await?;
-        validate_personal_confirmation(context, &profile, personal_confirmation)?;
+        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
         let credentials = load_credentials(tx, &profile).await?;
         Ok((profile, credentials))
     }
 }
 
-/// A personal profile is confirmed by its owner, the context's user, with
-/// either credential; an organization profile is never confirmed.
 fn validate_personal_confirmation(
     context: &GrantContext,
     profile: &AccessProfile,
-    confirmation: &PersonalConfirmation,
+    confirmation: Option<&OwnerId>,
 ) -> Result<(), Error> {
     match &profile.owner {
         Owner::User(owner)
             if context.allow_personal_credentials
                 && owner == &context.user_id
-                && confirmation.owner() == Some(owner) =>
+                && confirmation == Some(owner) =>
         {
             Ok(())
         }
         Owner::Organization(owner)
-            if context.organization_id.as_ref() == Some(owner)
-                && *confirmation == PersonalConfirmation::None =>
+            if context.organization_id.as_ref() == Some(owner) && confirmation.is_none() =>
         {
             Ok(())
         }
@@ -1073,17 +1003,16 @@ async fn load_binding(
     tx: &mut Transaction<'_, Postgres>,
     context: &GrantContext,
 ) -> Result<PlatformBindingMetadata, Error> {
-    let row: Option<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT profile_id,profile_revision,personal_owner_confirmed_by, \
-         personal_owner_confirmed_by_user_token FROM platform_environment_access_bindings \
+    let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
          WHERE environment_id=$1",
     )
     .bind(context.environment_id.as_str())
     .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)?;
-    let (id, revision, confirmed_by, confirmed_by_user_token) = row.ok_or(Error::NotFound)?;
-    binding_metadata(context, id, revision, confirmed_by, confirmed_by_user_token)
+    let (id, revision, confirmed_by) = row.ok_or(Error::NotFound)?;
+    binding_metadata(context, id, revision, confirmed_by)
 }
 
 fn binding_metadata(
@@ -1091,7 +1020,6 @@ fn binding_metadata(
     id: String,
     revision: i64,
     confirmed_by: Option<String>,
-    confirmed_by_user_token: Option<String>,
 ) -> Result<PlatformBindingMetadata, Error> {
     Ok(PlatformBindingMetadata {
         binding: EnvironmentAccessBinding {
@@ -1099,10 +1027,9 @@ fn binding_metadata(
             profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
             profile_revision: positive(revision)?,
         },
-        personal_confirmation: PersonalConfirmation::from_columns(
-            confirmed_by,
-            confirmed_by_user_token,
-        )?,
+        personal_owner_confirmed_by: confirmed_by
+            .map(|id| OwnerId::parse(id).map_err(|_| Error::CorruptRecord))
+            .transpose()?,
     })
 }
 

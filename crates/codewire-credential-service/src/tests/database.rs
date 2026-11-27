@@ -155,7 +155,7 @@ impl Fixture {
                 BTreeMap::from([(CapabilitySlot::codex(),credential)])).await?;
             manager.create_binding(&context,EnvironmentAccessBinding {
                 environment_id:context.environment_id.clone(),profile_id:profile.id.clone(),profile_revision:profile.revision,
-            },&codewire_platform_credentials::PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+            },Some(&context.user_id)).await?;
             selected.profile_id=Some(profile.id.to_string());
             sqlx::query("UPDATE environments SET project_spec=jsonb_set(project_spec,'{credentials}',$2) WHERE id=$1")
                 .bind(&selected.environment_id)
@@ -179,7 +179,7 @@ impl Fixture {
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
                 "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",
-                "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by,personal_owner_confirmed_by_user_token) ON public.platform_environment_access_bindings",
+                "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) ON public.platform_environment_access_bindings",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text)",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text)",
@@ -245,9 +245,7 @@ impl Fixture {
                     profile_id: profile.id.clone(),
                     profile_revision: profile.revision,
                 },
-                &codewire_platform_credentials::PersonalConfirmation::SignIn(
-                    self.context.user_id.clone(),
-                ),
+                Some(&self.context.user_id),
             )
             .await?;
         sqlx::query("UPDATE environments SET project_spec=jsonb_set(project_spec,'{credentials}',$2) WHERE id=$1")

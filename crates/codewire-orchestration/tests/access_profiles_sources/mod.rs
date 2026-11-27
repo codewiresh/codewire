@@ -16,42 +16,6 @@ async fn stopped(h: &Harness) -> Result<()> {
     Ok(())
 }
 
-/// A selection a user token confirmed (#5688) binds the creator's profile with
-/// the user token's confirmation, which the sign-in column never holds, so its
-/// delivery gets none of the direct delivery exceptions.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn a_user_tokens_confirmation_binds_apart_from_a_sign_ins() -> Result<()> {
-    let h = Harness::create().await?;
-    let result = async {
-        stopped(&h).await?;
-        let profile = h.rpc.create("user-token-binding", CREDENTIAL).await?;
-        let mut request = source_replacement(Default::default(), source_binding(&profile));
-        request.confirmed_with = codewire_platform_credentials::ConfirmedWith::UserToken;
-        admit_sources(&h.db, &source_actor(ALICE), ENV, &request).await?;
-        let confirmed: (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT personal_owner_confirmed_by, personal_owner_confirmed_by_user_token \
-             FROM platform_environment_access_bindings WHERE environment_id=$1",
-        )
-        .bind(ENV)
-        .fetch_one(&h.db)
-        .await?;
-        ensure!(confirmed == (None, Some(ALICE.into())), "{confirmed:?}");
-        let metadata = h
-            .rpc
-            .ok(
-                "GetEnvironmentAccessProfile",
-                Auth::Cookie,
-                json!({"environmentId":ENV}),
-            )
-            .await?;
-        ensure!(metadata["personalCredentialsConfirmed"] == true);
-        Ok(())
-    }
-    .await;
-    h.finish(result).await
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn source_binding_requires_exact_consent_creator_member_and_active_generation() -> Result<()>

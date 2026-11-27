@@ -77,7 +77,6 @@ pub(crate) fn scope() -> Scope {
         profile_id: Some(Uuid::new_v4().to_string()),
         profile_revision: Some(1),
         confirmed_by: Some("synthetic-creator".into()),
-        confirmed_by_user_token: None,
         profile_user: Some("synthetic-creator".into()),
         profile_organization: None,
     }

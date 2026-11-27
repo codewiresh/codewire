@@ -48,7 +48,6 @@ fn decision() -> Decision {
             authorized_credentials: Default::default(),
         },
         Owner::User(owner()),
-        true,
         unix_now().unwrap() + 3_600,
     )
     .unwrap();

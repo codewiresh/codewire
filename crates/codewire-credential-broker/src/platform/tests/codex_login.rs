@@ -42,7 +42,7 @@ async fn select(f: &Fixture, entries: BTreeMap<CapabilitySlot, CredentialId>) ->
                 profile_id: changed.id,
                 profile_revision: changed.revision,
             },
-            &codewire_platform_credentials::PersonalConfirmation::SignIn(f.context.user_id.clone()),
+            Some(&f.context.user_id),
         )
         .await?;
     f.authority
@@ -370,32 +370,6 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
         f.finish(result).await?;
     }
     Ok(())
-}
-
-/// A binding its creator confirmed with a user token keeps its proxied grant
-/// and never gets the Codex login, a direct delivery exception (#5688).
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn a_user_token_binding_keeps_its_proxied_grant_but_not_the_codex_login() -> Result<()> {
-    let f = Fixture::create_for_bridge().await?;
-    let result = async {
-        // The same binding, confirmed with a sign-in, gets the login.
-        drop(login(&f.adapter).await?);
-        let mut session = current_session(&f);
-        session.direct_delivery = false;
-        let adapter = connect(&f, session, builtin_provider_catalog()).await?;
-        ensure!(
-            lease(&adapter).await.is_ok(),
-            "the proxied grant is admitted"
-        );
-        ensure!(
-            matches!(login(&adapter).await, Err(BrokerLeaseError::Denied)),
-            "a user token's binding gets no Codex login"
-        );
-        Ok(())
-    }
-    .await;
-    f.finish(result).await
 }
 
 /// Synthetic OpenAI token endpoint and ChatGPT Responses route. Each refresh

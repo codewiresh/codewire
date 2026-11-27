@@ -278,11 +278,9 @@ impl AccessProfileService for ProfileConnectService {
             self.profiles.get_binding(&user, request.environment_id),
         )
         .await?;
-        // Either credential's confirmation; only a sign-in's admits direct
-        // delivery, which this read doesn't report.
         let confirmed = metadata
-            .personal_confirmation
-            .owner()
+            .personal_owner_confirmed_by
+            .as_ref()
             .is_some_and(|owner| owner.as_str() == user.user_id);
         connectrpc::Response::ok(GetEnvironmentAccessProfileResponse {
             binding: Some(proto_binding(metadata.binding)).into(),

@@ -55,10 +55,7 @@ pub use material_cache::{
     EpochMaterialCache, MATERIAL_REUSE_TTL, MAX_REUSED_MATERIAL_BYTES, MAX_REUSED_MATERIALS,
 };
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
-pub use profiles::{
-    ConfirmedWith, PersonalConfirmation, PlatformAccessProfileStore, PlatformBindingMetadata,
-    PlatformProfileError,
-};
+pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
     OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
     PreparedOAuthRefresh, PreparedOAuthRefreshResult, RATE_LIMIT_WAIT_SECONDS, RevocationFence,

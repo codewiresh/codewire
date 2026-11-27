@@ -1888,36 +1888,24 @@ profile's current revision per request (local passages to follow).
 ### Who may bind a personal profile
 
 Selecting a personal credential profile, or personal application secrets, at
-create or update needs the person's own credential and the explicit personal
-confirmation:
-- **A sign-in**, a browser session or a `cw login` OAuth token, may confirm
-  both. Its binding admits the
-  [direct delivery exceptions](#direct-delivery-exceptions).
-- **A user token** from `cw auth token`, for a program acting as the person
-  (#5688), confirms a personal profile with the same confirmation.
-  - The binding records that a user token confirmed it, in
-    `personal_owner_confirmed_by_user_token` and never
-    `personal_owner_confirmed_by`. It gets none of the direct delivery
-    exceptions: its credentials stay behind the proxy, with only
-    placeholders inside.
-  - Each rebind records its own caller's confirmation. A sign-in that rebinds
-    the selection gives it direct delivery, and a user token that rebinds it
-    takes that away.
-  - A server from before this rule reads only the sign-in column, so it
-    finds no confirmation on a user token's binding and denies its personal
-    grants.
-  - A user token never confirms personal application secrets
-    (`user_token_not_allowed`). They reach the workload as values, so only a
-    sign-in may allow them.
-- **Every API key** is refused (`require_account_credential`), and `cw` skips
-  profiles when it signs in with one. A program signed in with an API key
-  gets no managed credential.
+create or update needs the person's own sign-in: a browser session or a
+`cw login` OAuth token, with the explicit personal confirmation. Every API key
+is refused (`require_account_credential`), and `cw` skips profiles when it
+signs in with one. A program signed in with an API key gets no managed
+credential. A user token is refused when it gives the personal confirmation
+(`user_token_not_allowed`), until the rule below ships.
 
-**Approved, not yet shipped** (owner, 2026-11-21; #5687, #5688): an API key's
-refusal names the user token as the way, under the rules in
-[AUTH-POLICY.md](AUTH-POLICY.md#user-tokens-and-the-cli-approved-not-yet-shipped).
-Organization-owned credentials for keys are #5685. The change that ships it
-rewrites the list above.
+**Approved, not yet shipped** (owner, 2026-11-21; #5687, #5688). The rules
+are in [AUTH-POLICY.md](AUTH-POLICY.md#user-tokens-and-the-cli-approved-not-yet-shipped):
+- **A program acting as a person** uses a user token from `cw auth token`.
+  It binds that person's profiles as a `cw login` sign-in does, with the
+  same confirmation. A binding it made gets none of the
+  [direct delivery exceptions](#direct-delivery-exceptions): its credentials
+  stay behind the proxy, with only placeholders inside.
+- **An API key** still binds no personal profile, and the refusal names the
+  user token. Organization-owned credentials for keys are #5685.
+
+The change that ships each point rewrites the first paragraph above.
 
 ## Runtime boundaries
 
@@ -4087,8 +4075,8 @@ is a hosted Sandbox, or a local VM whose platform delegation is authenticated
 by the creator's own OAuth login (`sub` equals the VM's pinned creator; never
 a `cw_` API key) and selected a profile; its Codex selection comes from the
 creator's own profile (for a hosted Sandbox, one whose personal-owner consent
-the creator confirmed with a sign-in, never a user token (#5688); for a local
-VM, the creator's personal platform profile); the Codex grant carries its
+the creator confirmed; for a local VM, the creator's personal platform
+profile); the Codex grant carries its
 dedicated `codex-login` permission; and the credential is the creator's own
 Active ChatGPT (OAuth) login, not an API key and not one that needs Reconnect.
 Organizations never hold OAuth logins. The broker checks this around every
@@ -4107,8 +4095,7 @@ The broker delivers the Claude login under the same conditions, with the
 Anthropic slot in place of the Codex slot: a hosted Sandbox, or the creator's
 own local VM through its platform delegation as above; an Anthropic selection
 from the creator's own personal platform profile (for a hosted Sandbox, one
-whose personal-owner consent the creator confirmed with a sign-in) or, for a
-local VM, from
+whose personal-owner consent the creator confirmed) or, for a local VM, from
 its selected local profile as for Codex (#4714); the Anthropic grant's
 dedicated `claude-login` permission;
 and the creator's own Active Claude sign-in, never an Anthropic API key, a

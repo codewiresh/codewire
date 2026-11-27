@@ -17,8 +17,8 @@ use codewire_access::{
     builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    CredentialRegistration, PersonalConfirmation, PlatformAccessProfileStore,
-    PlatformCredentialError as CredentialError, PlatformProfileError as Error,
+    CredentialRegistration, PlatformAccessProfileStore, PlatformCredentialError as CredentialError,
+    PlatformProfileError as Error,
 };
 use codewire_server_core::org_deletion::begin_organization_deletion;
 use support::*;
@@ -56,13 +56,13 @@ async fn pending_binding_admission_is_metadata_only_atomic_and_cannot_derive_run
         let mut tx = profiles.begin_transaction().await?;
         ensure!(profiles.resolve_in(&mut tx, &user, &name("pending")).await? == profile);
         ensure!(profiles.get_in(&mut tx, &user, &profile.id, Some(1)).await? == profile);
-        ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), &PersonalConfirmation::None).await == Err(Error::UnsupportedEntry));
+        ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), None).await == Err(Error::UnsupportedEntry));
         tx.rollback().await?;
 
         // A caller failure after the binding write must roll back every composed
         // write; the helper neither commits nor creates a separate generation.
         let mut tx = profiles.begin_transaction().await?;
-        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await?;
+        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await?;
         sqlx::query("INSERT INTO environment_access(environment_id,user_id,permission,granted_by) VALUES ($1,$2,'owner',$2)")
             .bind(context.environment_id.as_str()).bind(user.id().as_str()).execute(&mut *tx).await?;
         tx.rollback().await?;
@@ -71,14 +71,14 @@ async fn pending_binding_admission_is_metadata_only_atomic_and_cannot_derive_run
         ensure!(counts == (0,0));
 
         let mut tx = profiles.begin_transaction().await?;
-        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await?;
+        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await?;
         tx.commit().await?;
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::InvalidInput));
-        ensure!(profiles.create_binding(&context, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&context, selected.clone(), Some(user.id())).await == Err(Error::InvalidInput));
         let mut future = context.clone(); future.environment_generation = 1;
         ensure!(profiles.evaluate_grants(&future).await == Err(Error::StaleEnvironment));
         let mut tx = profiles.begin_transaction().await?;
-        ensure!(profiles.create_pending_binding_in(&mut tx, &future, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_pending_binding_in(&mut tx, &future, selected.clone(), Some(user.id())).await == Err(Error::InvalidInput));
         tx.rollback().await?;
         sqlx::query("UPDATE environments SET environment_operation_generation=1 WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
@@ -116,7 +116,7 @@ async fn pending_binding_rechecks_credential_policy_owner_and_exact_pending_stat
             sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
                 .bind(record.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
             let mut tx = profiles.begin_transaction().await?;
-            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await? == selected);
+            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await? == selected);
             tx.rollback().await?;
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL WHERE id=$1")
@@ -127,14 +127,14 @@ async fn pending_binding_rechecks_credential_policy_owner_and_exact_pending_stat
             { let mut changed = context.clone(); changed.user_id = stranger.id().clone(); (changed, Error::NotFound) },
         ] {
             let mut tx = profiles.begin_transaction().await?;
-            ensure!(profiles.create_pending_binding_in(&mut tx, &changed, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await == Err(expected));
+            ensure!(profiles.create_pending_binding_in(&mut tx, &changed, selected.clone(), Some(user.id())).await == Err(expected));
             tx.rollback().await?;
         }
         for (state, desired) in [("running","started"), ("stopped","stopped"), ("pending","destroyed")] {
             sqlx::query("UPDATE environments SET state=$2,desired_state=$3 WHERE id=$1")
                 .bind(context.environment_id.as_str()).bind(state).bind(desired).execute(&db.pool).await?;
             let mut tx = profiles.begin_transaction().await?;
-            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await == Err(Error::StaleEnvironment));
+            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await == Err(Error::StaleEnvironment));
             tx.rollback().await?;
         }
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_environment_access_bindings").fetch_one(&db.pool).await?;
@@ -346,7 +346,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
             .create_binding(
                 &context,
                 binding(&context, &original),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         let (left, right) = tokio::join!(
@@ -380,7 +380,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
                 &context,
                 &selected,
                 replacement.clone(),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         ensure!(profiles.get_binding(&context).await? == replacement);
@@ -399,7 +399,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
                     &context,
                     &selected,
                     selected.clone(),
-                    &PersonalConfirmation::SignIn(context.user_id.clone())
+                    Some(&context.user_id)
                 )
                 .await
                 == Err(Error::StaleBinding)
@@ -408,11 +408,7 @@ async fn concurrent_profile_cas_preserves_immutable_bound_revision_until_explici
         profiles.delete_binding(&context, &replacement).await?;
         // An explicit old revision selection is supported, never an implicit rebind.
         profiles
-            .create_binding(
-                &context,
-                selected.clone(),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
-            )
+            .create_binding(&context, selected.clone(), Some(&context.user_id))
             .await?;
         ensure!(profiles.evaluate_grants(&context).await?.grants == old_grants);
         let generations: (i64, i64) = sqlx::query_as(
@@ -448,30 +444,30 @@ async fn binding_requires_exact_authorized_scope_operation_and_running_runtime()
         let selected = binding(&context, &profile);
         let mut bad = context.clone();
         bad.user_id = other_user.id().clone();
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::NotFound));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::NotFound));
         bad = context.clone(); bad.organization_id = Some(other_org.id().clone());
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::NotFound));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::NotFound));
         bad = context.clone(); bad.environment_generation = 6;
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::StaleEnvironment));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::StaleEnvironment));
         bad.environment_generation = 0;
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));
         bad = context.clone(); bad.placement = GrantPlacement::Local;
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));
         bad = context.clone(); bad.organization_id = None;
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));
         bad = context.clone(); bad.authorized_credentials.clear();
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::UnsupportedEntry));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::UnsupportedEntry));
         bad = context.clone(); bad.allow_personal_credentials = false;
-        ensure!(profiles.create_binding(&bad, selected.clone(), &PersonalConfirmation::SignIn(bad.user_id.clone())).await == Err(Error::UnsupportedEntry));
+        ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::UnsupportedEntry));
         let mut wrong_binding = selected.clone();
         wrong_binding.environment_id = EnvironmentId::parse("other-environment")?;
-        ensure!(profiles.create_binding(&context, wrong_binding, &PersonalConfirmation::SignIn(context.user_id.clone())).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&context, wrong_binding, Some(&context.user_id)).await == Err(Error::InvalidInput));
         let foreign_profile = profiles.create(&other_org, name("foreign"), BTreeMap::new()).await?;
-        ensure!(profiles.create_binding(&context, binding(&context, &foreign_profile), &PersonalConfirmation::SignIn(context.user_id.clone())).await == Err(Error::NotFound));
+        ensure!(profiles.create_binding(&context, binding(&context, &foreign_profile), Some(&context.user_id)).await == Err(Error::NotFound));
         // Configuration is allowed while stopped, but cannot authorize runtime use.
         sqlx::query("UPDATE environments SET state='stopped',desired_state='stopped' WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
-        profiles.create_binding(&context, selected.clone(), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        profiles.create_binding(&context, selected.clone(), Some(&context.user_id)).await?;
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::StaleEnvironment));
         sqlx::query("UPDATE environments SET state='running',desired_state='started',environment_operation_generation=8 WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
@@ -482,7 +478,7 @@ async fn binding_requires_exact_authorized_scope_operation_and_running_runtime()
         sqlx::query("UPDATE environments SET desired_state='destroyed' WHERE id=$1")
             .bind(context.environment_id.as_str()).execute(&db.pool).await?;
         ensure!(profiles.evaluate_grants(&current).await == Err(Error::StaleEnvironment));
-        ensure!(profiles.replace_binding(&current, &selected, selected.clone(), &PersonalConfirmation::SignIn(current.user_id.clone())).await == Err(Error::StaleEnvironment));
+        ensure!(profiles.replace_binding(&current, &selected, selected.clone(), Some(&current.user_id)).await == Err(Error::StaleEnvironment));
         ensure!(profiles.get_binding(&current).await == Err(Error::StaleEnvironment));
         Ok(())
     }.await;
@@ -504,19 +500,19 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
         let profile = profiles.create(&org, name("work"), entries(&credential.metadata.id)).await?;
         let empty_a = profiles.create(&org, name("empty-a"), BTreeMap::new()).await?;
         let empty_b = profiles.create(&org, name("empty-b"), BTreeMap::new()).await?;
-        let selected = profiles.create_binding(&context, binding(&context, &profile), &PersonalConfirmation::None).await?;
-        ensure!(profiles.create_binding(&context, selected.clone(), &PersonalConfirmation::None).await == Err(Error::AlreadyExists));
+        let selected = profiles.create_binding(&context, binding(&context, &profile), None).await?;
+        ensure!(profiles.create_binding(&context, selected.clone(), None).await == Err(Error::AlreadyExists));
         let initial = profiles.evaluate_grants(&context).await?.grants;
         ensure!(initial.len() == 1 && initial[0].credential_revocation_generation == 1);
         let (left, right) = tokio::join!(
-            profiles.replace_binding(&context, &selected, binding(&context, &empty_a), &PersonalConfirmation::None),
-            profiles.replace_binding(&context, &selected, binding(&context, &empty_b), &PersonalConfirmation::None),
+            profiles.replace_binding(&context, &selected, binding(&context, &empty_a), None),
+            profiles.replace_binding(&context, &selected, binding(&context, &empty_b), None),
         );
         let winner = match (left, right) {
             (Ok(binding), Err(Error::StaleBinding)) | (Err(Error::StaleBinding), Ok(binding)) => binding,
             _ => anyhow::bail!("binding CAS did not have exactly one winner"),
         };
-        profiles.replace_binding(&context, &winner, selected.clone(), &PersonalConfirmation::None).await?;
+        profiles.replace_binding(&context, &winner, selected.clone(), None).await?;
         let no_catalog = PlatformAccessProfileStore::new(db.pool.clone(), ProviderCatalog::default());
         ensure!(no_catalog.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
         let mut unauthorized = context.clone(); unauthorized.authorized_credentials = BTreeSet::new();
@@ -539,7 +535,7 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
                     credential: credential.metadata.id.clone(),
                     reason,
                 })]));
-            ensure!(profiles.replace_binding(&context, &selected, selected.clone(), &PersonalConfirmation::None).await? == selected);
+            ensure!(profiles.replace_binding(&context, &selected, selected.clone(), None).await? == selected);
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL,revocation_generation=2 WHERE id=$1")
             .bind(credential.metadata.id.as_str()).execute(&db.pool).await?;
@@ -590,7 +586,7 @@ async fn credential_deletion_fences_current_and_bound_revisions_but_not_unused_h
             .create_binding(
                 &context,
                 binding(&context, &profile),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         let revoked = store
@@ -620,20 +616,12 @@ async fn credential_deletion_fences_current_and_bound_revisions_but_not_unused_h
         ensure!(profiles.get_revision(&user, &profile.id, 1).await? == profile);
         ensure!(
             profiles
-                .create_binding(
-                    &context,
-                    selected,
-                    &PersonalConfirmation::SignIn(context.user_id.clone())
-                )
+                .create_binding(&context, selected, Some(&context.user_id))
                 .await
                 == Err(Error::NotFound)
         );
         profiles
-            .create_binding(
-                &context,
-                binding(&context, &empty),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
-            )
+            .create_binding(&context, binding(&context, &empty), Some(&context.user_id))
             .await?;
         ensure!(profiles.evaluate_grants(&context).await?.grants.is_empty());
         profiles
@@ -737,12 +725,12 @@ async fn profile_authority_role_cannot_read_material_or_call_a_provider() -> Res
         let default = authority.create(&user, name("default"), BTreeMap::new()).await?;
         let original = authority.create(&user, name("work"), entries(&credential.metadata.id)).await?;
         ensure!(authority.default_profile(&user).await? == Some(default.id.clone()));
-        let selected = authority.create_binding(&context, binding(&context, &original), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        let selected = authority.create_binding(&context, binding(&context, &original), Some(&context.user_id)).await?;
         ensure!(authority.evaluate_grants(&context).await?.grants.len() == 1);
         ensure!(authority.get(&user, &original.id).await? == original);
         let empty = authority.update(&user, &original.id, 1, BTreeMap::new()).await?;
         ensure!(authority.get_revision(&user, &original.id, 1).await? == original);
-        authority.replace_binding(&context, &selected, binding(&context, &empty), &PersonalConfirmation::SignIn(context.user_id.clone())).await?;
+        authority.replace_binding(&context, &selected, binding(&context, &empty), Some(&context.user_id)).await?;
         authority.delete_binding(&context, &binding(&context, &empty)).await?;
         authority.delete(&user, &original.id, 2).await?;
         for sql in [
@@ -792,15 +780,11 @@ async fn owner_and_environment_deletion_cascade_profile_history_without_cross_sc
             .create_binding(
                 &personal_context,
                 binding(&personal_context, &personal),
-                &PersonalConfirmation::SignIn(personal_context.user_id.clone()),
+                Some(&personal_context.user_id),
             )
             .await?;
         profiles
-            .create_binding(
-                &shared_context,
-                binding(&shared_context, &shared),
-                &PersonalConfirmation::None,
-            )
+            .create_binding(&shared_context, binding(&shared_context, &shared), None)
             .await?;
         let denied = sqlx::query("DELETE FROM platform_access_profiles WHERE id=$1")
             .bind(shared.id.as_str())
@@ -870,12 +854,8 @@ async fn personal_binding_requires_explicit_owner_confirmation_and_current_polic
         let profile = profiles.create(&user, name("work"), entries(&record.metadata.id)).await?;
         let selected = binding(&context, &profile);
         // Enrollment and the existing allow-personal policy are not consent.
-        for confirmation in [
-            PersonalConfirmation::None,
-            PersonalConfirmation::SignIn(other.id().clone()),
-            PersonalConfirmation::UserToken(other.id().clone()),
-        ] {
-            ensure!(profiles.create_binding(&context, selected.clone(), &confirmation).await == Err(Error::UnsupportedEntry));
+        for confirmation in [None, Some(other.id())] {
+            ensure!(profiles.create_binding(&context, selected.clone(), confirmation).await == Err(Error::UnsupportedEntry));
             ensure!(profiles.get_binding_metadata(&context).await == Err(Error::NotFound));
         }
         // A valid profile can be inspected/cleared without retroactively granting
@@ -883,19 +863,19 @@ async fn personal_binding_requires_explicit_owner_confirmation_and_current_polic
         sqlx::query("INSERT INTO platform_environment_access_bindings(environment_id,profile_id,profile_revision) VALUES ($1,$2,$3)")
             .bind(context.environment_id.as_str()).bind(profile.id.as_str()).bind(1_i64).execute(&db.pool).await?;
         let metadata = profiles.get_binding_metadata(&context).await?;
-        ensure!(metadata.binding == selected && metadata.personal_confirmation == PersonalConfirmation::None);
+        ensure!(metadata.binding == selected && metadata.personal_owner_confirmed_by.is_none());
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
         sqlx::query("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by=$2 WHERE environment_id=$1")
             .bind(context.environment_id.as_str()).bind(other.id().as_str()).execute(&db.pool).await?;
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
-        profiles.replace_binding(&context, &selected, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await?;
+        profiles.replace_binding(&context, &selected, selected.clone(), Some(user.id())).await?;
         let metadata = profiles.get_binding_metadata(&context).await?;
-        ensure!(metadata.personal_confirmation == PersonalConfirmation::SignIn(user.id().clone()));
+        ensure!(metadata.personal_owner_confirmed_by.as_ref() == Some(user.id()));
         ensure!(profiles.evaluate_grants(&context).await?.grants.len() == 1);
         let mut denied = context.clone();
         denied.allow_personal_credentials = false;
         ensure!(profiles.evaluate_grants(&denied).await == Err(Error::UnsupportedEntry));
-        ensure!(profiles.replace_binding(&denied, &selected, selected.clone(), &PersonalConfirmation::SignIn(user.id().clone())).await == Err(Error::UnsupportedEntry));
+        ensure!(profiles.replace_binding(&denied, &selected, selected.clone(), Some(user.id())).await == Err(Error::UnsupportedEntry));
         denied = context.clone();
         denied.authorized_credentials.clear();
         ensure!(profiles.evaluate_grants(&denied).await == Err(Error::UnsupportedEntry));
@@ -923,11 +903,7 @@ async fn personal_confirmation_is_exact_to_each_rebind_and_disappears_on_clear()
             .create(&org, name("shared"), BTreeMap::new())
             .await?;
         let selected = profiles
-            .create_binding(
-                &context,
-                binding(&context, &personal),
-                &PersonalConfirmation::SignIn(user.id().clone()),
-            )
+            .create_binding(&context, binding(&context, &personal), Some(user.id()))
             .await?;
         let old_metadata = profiles.get_binding_metadata(&context).await?;
         let next = profiles
@@ -937,12 +913,7 @@ async fn personal_confirmation_is_exact_to_each_rebind_and_disappears_on_clear()
         for replacement in [selected.clone(), binding(&context, &next)] {
             ensure!(
                 profiles
-                    .replace_binding(
-                        &context,
-                        &selected,
-                        replacement,
-                        &PersonalConfirmation::None
-                    )
+                    .replace_binding(&context, &selected, replacement, None)
                     .await
                     == Err(Error::UnsupportedEntry)
             );
@@ -953,17 +924,12 @@ async fn personal_confirmation_is_exact_to_each_rebind_and_disappears_on_clear()
                 &context,
                 &selected,
                 binding(&context, &next),
-                &PersonalConfirmation::SignIn(user.id().clone()),
+                Some(user.id()),
             )
             .await?;
         ensure!(
             profiles
-                .replace_binding(
-                    &context,
-                    &selected,
-                    selected.clone(),
-                    &PersonalConfirmation::SignIn(user.id().clone())
-                )
+                .replace_binding(&context, &selected, selected.clone(), Some(user.id()))
                 .await
                 == Err(Error::StaleBinding)
         );
@@ -971,53 +937,30 @@ async fn personal_confirmation_is_exact_to_each_rebind_and_disappears_on_clear()
         // Organization access cannot inherit or manufacture personal consent.
         ensure!(
             profiles
-                .replace_binding(
-                    &context,
-                    &current,
-                    shared_binding.clone(),
-                    &PersonalConfirmation::SignIn(user.id().clone())
-                )
+                .replace_binding(&context, &current, shared_binding.clone(), Some(user.id()))
                 .await
                 == Err(Error::UnsupportedEntry)
         );
         profiles
-            .replace_binding(
-                &context,
-                &current,
-                shared_binding.clone(),
-                &PersonalConfirmation::None,
-            )
+            .replace_binding(&context, &current, shared_binding.clone(), None)
             .await?;
         let shared_metadata = profiles.get_binding_metadata(&context).await?;
         ensure!(
             shared_metadata.binding == shared_binding
-                && shared_metadata.personal_confirmation == PersonalConfirmation::None
+                && shared_metadata.personal_owner_confirmed_by.is_none()
         );
         ensure!(
             profiles
-                .replace_binding(
-                    &context,
-                    &shared_binding,
-                    selected.clone(),
-                    &PersonalConfirmation::None
-                )
+                .replace_binding(&context, &shared_binding, selected.clone(), None)
                 .await
                 == Err(Error::UnsupportedEntry)
         );
         profiles
-            .replace_binding(
-                &context,
-                &shared_binding,
-                selected.clone(),
-                &PersonalConfirmation::SignIn(user.id().clone()),
-            )
+            .replace_binding(&context, &shared_binding, selected.clone(), Some(user.id()))
             .await?;
         profiles.delete_binding(&context, &selected).await?;
         ensure!(
-            profiles
-                .create_binding(&context, selected, &PersonalConfirmation::None)
-                .await
-                == Err(Error::UnsupportedEntry)
+            profiles.create_binding(&context, selected, None).await == Err(Error::UnsupportedEntry)
         );
         ensure!(profiles.get_binding_metadata(&context).await == Err(Error::NotFound));
         let generation: i64 = sqlx::query_scalar(
@@ -1027,99 +970,6 @@ async fn personal_confirmation_is_exact_to_each_rebind_and_disappears_on_clear()
         .fetch_one(&db.pool)
         .await?;
         ensure!(generation == 7);
-        Ok(())
-    }
-    .await;
-    db.finish(result).await
-}
-
-/// A user token's confirmation (#5688) is stored apart from a sign-in's, and
-/// each rebind writes its own caller's, never the earlier one's: a sign-in
-/// after a user token takes the binding back, and the reverse gives it up. A
-/// row holding both is corrupt and admits nothing.
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn each_rebind_records_its_own_credentials_confirmation() -> Result<()> {
-    let db = TestDatabase::create().await?;
-    let result = async {
-        let user = db.user("user-token-user").await?;
-        let org = db.organization("user-token-org").await?;
-        let context = environment(&db, &user, &org, "user-token-env", &[]).await?;
-        let profiles = profiles(&db);
-        let personal = profiles
-            .create(&user, name("personal"), BTreeMap::new())
-            .await?;
-        let stored = async || -> Result<(Option<String>, Option<String>)> {
-            Ok(sqlx::query_as(
-                "SELECT personal_owner_confirmed_by, personal_owner_confirmed_by_user_token \
-                 FROM platform_environment_access_bindings WHERE environment_id=$1",
-            )
-            .bind(context.environment_id.as_str())
-            .fetch_one(&db.pool)
-            .await?)
-        };
-        let owner = Some(user.id().as_str().to_owned());
-        let selected = profiles
-            .create_binding(
-                &context,
-                binding(&context, &personal),
-                &PersonalConfirmation::UserToken(user.id().clone()),
-            )
-            .await?;
-        ensure!(stored().await? == (None, owner.clone()));
-        ensure!(
-            profiles
-                .get_binding_metadata(&context)
-                .await?
-                .personal_confirmation
-                == PersonalConfirmation::UserToken(user.id().clone())
-        );
-        for (confirmation, columns) in [
-            (
-                PersonalConfirmation::SignIn(user.id().clone()),
-                (owner.clone(), None),
-            ),
-            (
-                PersonalConfirmation::UserToken(user.id().clone()),
-                (None, owner.clone()),
-            ),
-        ] {
-            profiles
-                .replace_binding(&context, &selected, selected.clone(), &confirmation)
-                .await?;
-            ensure!(stored().await? == columns, "{confirmation:?}");
-            ensure!(
-                profiles
-                    .get_binding_metadata(&context)
-                    .await?
-                    .personal_confirmation
-                    == confirmation
-            );
-        }
-        // Both set: the check refuses the write, and a row past it is corrupt.
-        ensure!(
-            sqlx::query(
-                "UPDATE platform_environment_access_bindings \
-                 SET personal_owner_confirmed_by=personal_owner_confirmed_by_user_token",
-            )
-            .execute(&db.pool)
-            .await
-            .is_err()
-        );
-        sqlx::query(
-            "ALTER TABLE platform_environment_access_bindings \
-             DROP CONSTRAINT platform_env_access_bindings_one_personal_confirmation",
-        )
-        .execute(&db.pool)
-        .await?;
-        sqlx::query(
-            "UPDATE platform_environment_access_bindings \
-             SET personal_owner_confirmed_by=personal_owner_confirmed_by_user_token",
-        )
-        .execute(&db.pool)
-        .await?;
-        ensure!(profiles.get_binding_metadata(&context).await == Err(Error::CorruptRecord));
-        ensure!(profiles.evaluate_grants(&context).await == Err(Error::CorruptRecord));
         Ok(())
     }
     .await;
@@ -1234,7 +1084,7 @@ async fn rename_relabels_the_profile_without_a_revision_or_rebinding() -> Result
             .create_binding(
                 &context,
                 binding(&context, &original),
-                &PersonalConfirmation::SignIn(context.user_id.clone()),
+                Some(&context.user_id),
             )
             .await?;
         let grants = profiles.evaluate_grants(&context).await?.grants;
@@ -1402,7 +1252,7 @@ async fn no_organization_profile_selects_binds_or_admits_an_organization_oauth_c
                 == Err(Error::UnsupportedEntry)
         );
         let selected = profiles
-            .create_binding(&context, binding(&context, &profile), &PersonalConfirmation::None)
+            .create_binding(&context, binding(&context, &profile), None)
             .await?;
         ensure!(profiles.evaluate_grants(&context).await?.grants.len() == 1);
 
@@ -1419,7 +1269,7 @@ async fn no_organization_profile_selects_binds_or_admits_an_organization_oauth_c
         ensure!(profiles.evaluate_grants(&context).await == Err(Error::UnsupportedEntry));
         ensure!(
             profiles
-                .replace_binding(&context, &selected, selected.clone(), &PersonalConfirmation::None)
+                .replace_binding(&context, &selected, selected.clone(), None)
                 .await
                 == Err(Error::UnsupportedEntry)
         );
@@ -1438,7 +1288,7 @@ async fn no_organization_profile_selects_binds_or_admits_an_organization_oauth_c
         let mut tx = profiles.begin_transaction().await?;
         ensure!(
             profiles
-                .create_pending_binding_in(&mut tx, &pending, selected.clone(), &PersonalConfirmation::None)
+                .create_pending_binding_in(&mut tx, &pending, selected.clone(), None)
                 .await
                 == Err(Error::UnsupportedEntry)
         );
