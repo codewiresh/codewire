@@ -151,7 +151,7 @@ pub const EGRESS_BANDWIDTH_ANNOTATION_KEY: &str = "kubernetes.io/egress-bandwidt
 /// a decimal count of bits per second with an optional `K`, `M` or `G`
 /// suffix. A cluster without an enforcing CNI ignores the annotation.
 pub const EGRESS_BANDWIDTH_ENV: &str = "SANDBOX_EGRESS_BANDWIDTH";
-pub const DEFAULT_EGRESS_BANDWIDTH: &str = "100M";
+pub const DEFAULT_EGRESS_BANDWIDTH: &str = "250M";
 
 /// [`EGRESS_BANDWIDTH_ENV`], or [`DEFAULT_EGRESS_BANDWIDTH`] when unset or
 /// empty. Anything else than digits with an optional `K`, `M` or `G` suffix,

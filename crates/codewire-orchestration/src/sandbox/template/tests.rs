@@ -1244,10 +1244,10 @@ mod tests {
     }
 
     #[test]
-    fn egress_bandwidth_defaults_to_100m_and_refuses_malformed_values() {
-        assert_eq!(sandbox_egress_bandwidth(None).unwrap(), "100M");
-        assert_eq!(sandbox_egress_bandwidth(Some("")).unwrap(), "100M");
-        assert_eq!(sandbox_egress_bandwidth(Some(" ")).unwrap(), "100M");
+    fn egress_bandwidth_defaults_to_250m_and_refuses_malformed_values() {
+        assert_eq!(sandbox_egress_bandwidth(None).unwrap(), "250M");
+        assert_eq!(sandbox_egress_bandwidth(Some("")).unwrap(), "250M");
+        assert_eq!(sandbox_egress_bandwidth(Some(" ")).unwrap(), "250M");
         for accepted in ["100M", "1G", "500K", "250000000", " 50M "] {
             assert_eq!(
                 sandbox_egress_bandwidth(Some(accepted)).unwrap(),
